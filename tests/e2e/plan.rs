@@ -1,9 +1,8 @@
-//! Ported from `test_plan_e2e`, `test_single_node_plan_e2e`, and
-//! `test_scheduling_e2e`.
-//!
 //! What a plan file may say, what it may not, and the order the engine starts
 //! what it says. A plan is external input, so every refusal here happens before
 //! any provider time is spent.
+//!
+//! Ported from `test_plan_e2e`, `test_single_node_plan_e2e`, and `test_scheduling_e2e`.
 
 use crate::harness::{agent, human, plan_of, World, QUEUED, REFUSED};
 use serde_json::json;
@@ -18,6 +17,44 @@ fn settle(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
         !world.events_of(name, "round-finished").is_empty()
     });
     name.to_string()
+}
+
+#[test]
+fn a_cross_dag_dependency_is_accepted_and_gates_only_the_node_that_names_it() {
+    let world = World::new("plan-crossdag");
+    let mut consumer = agent("consume", &[]);
+    // A reference into another run's DAG. It names no node of *this* graph, so
+    // the dangling-dependency refusal must not fire on it — and it is not
+    // satisfied either, so the node that names it cannot start.
+    consumer["deps"] = json!(["run:upstream#build"]);
+    let run = settle(
+        &world,
+        "crossdag",
+        vec![agent("independent", &[]), consumer],
+    );
+
+    let result = world.run_json(&run, "round-01/result.json");
+    let node = |id: &str| {
+        result["nodes"]
+            .as_array()
+            .expect("nodes")
+            .iter()
+            .find(|node| node["id"] == id)
+            .unwrap_or_else(|| panic!("{id} is missing from {result}"))
+            .clone()
+    };
+    // The plan was accepted: a run exists and the unrelated node ran in it.
+    assert_eq!(node("independent")["status"], "done", "{result}");
+    // An upstream this run cannot see leaves its consumer blocked rather than
+    // failing it — the upstream may still arrive — and nothing dispatched it.
+    assert_eq!(node("consume")["status"], "blocked", "{result}");
+    assert!(
+        world
+            .events_of(&run, "node-dispatched")
+            .iter()
+            .all(|event| event["labels"]["node"] != "consume"),
+        "a node gated by an unresolved upstream was dispatched anyway"
+    );
 }
 
 #[test]

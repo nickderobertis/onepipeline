@@ -1,9 +1,9 @@
-//! Ported from the lifecycle-node composition halves of `test_lifecycle_e2e`.
-//!
 //! A lifecycle node is this crate composing a `onevcs` session with the
 //! dispatches that work in it. The branch, the worktree, the gate, and the
 //! publication are all the sibling's; the DAG, the rounds, and the pr-author
 //! composition are this one's.
+//!
+//! Ported from the lifecycle-node composition halves of `test_lifecycle_e2e`.
 
 use crate::harness::{lifecycle, plan_of, World};
 use serde_json::json;

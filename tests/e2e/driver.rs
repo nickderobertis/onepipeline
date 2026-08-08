@@ -1,10 +1,7 @@
-//! Ported from `test_orchestrate_launch_e2e`, `test_attach_settles_e2e`,
-//! `test_run_ownership_e2e`, `test_round_ownership_e2e`,
-//! `test_run_adoption_e2e`, `test_relaunch_seed_e2e`, and the driver-liveness
-//! half of `test_liveness_e2e`.
-//!
 //! Who launched a run, who may stop it, what happens when its driver dies, and
 //! when an attach returns.
+//!
+//! Ported from `test_orchestrate_launch_e2e`, `test_attach_settles_e2e`, `test_run_ownership_e2e`, `test_round_ownership_e2e`, `test_run_adoption_e2e`, `test_relaunch_seed_e2e`, and the driver-liveness half of `test_liveness_e2e`.
 
 use crate::harness::{agent, human, plan_of, World, NOTHING_DRIVING, REFUSED};
 use serde_json::json;
@@ -112,6 +109,32 @@ fn an_attach_returns_exit_three_when_nothing_is_driving_the_run() {
         .run(&["start", &path.to_string_lossy(), "--attach"])
         .exited(NOTHING_DRIVING)
         .out_has("\"settlement\":\"unattended\"");
+}
+
+#[test]
+fn a_live_driver_that_has_stopped_writing_reads_as_parked_rather_than_dead() {
+    let world = World::new("driver-parked");
+    // The driver is alive and holding, so its pid proves nothing about
+    // progress — which is the whole distinction `PARKED` exists to draw.
+    world.script("driver.wait", "hold");
+    let run = start_detached(&world, "quiet", vec![agent("build", &[])]);
+
+    world.until("the run to be reported parked", |world| {
+        let mut status = world.cmd(&["status", &run]);
+        // A second of silence is enough to call it: what is under test is the
+        // verdict, not the threshold.
+        status.env("ONEPIPELINE_PARKED_AFTER_SECONDS", "1");
+        let out = status.output().expect("the binary runs");
+        String::from_utf8_lossy(&out.stdout).contains("PARKED")
+    });
+
+    // Parked is not dead: the ledger is intact and the way back is the same.
+    let mut parked = world.cmd(&["status", &run]);
+    parked.env("ONEPIPELINE_PARKED_AFTER_SECONDS", "1");
+    let rendered = String::from_utf8_lossy(&parked.output().expect("runs").stdout).to_string();
+    assert!(!rendered.contains("DRIVER DEAD"), "{rendered}");
+    assert!(rendered.contains("adopt"), "{rendered}");
+    world.release("driver.go");
 }
 
 #[test]

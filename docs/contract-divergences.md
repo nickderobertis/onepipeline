@@ -102,12 +102,17 @@ evaluator needs one.
 The field stays a `String` on the type rather than becoming a `u64`, because the
 contract fixes the *wire* syntax and a parsed field would make the type unable to
 round-trip what a rules file wrote. `bytes_of` accepts exactly the units the
-contract spells — `B`, `KiB`, `MiB`, `GiB`, `TiB`, and a bare byte count — and
-answers `None` for anything else rather than guessing, which resolves toward
-"has capacity" the way every other unreadable input does.
+contract spells — `B`, `KiB`, `MiB`, `GiB`, `TiB`, and a bare byte count.
 
-The proposal for the planner is to state that unit list in the contract, since a
-rules file naming `2GB` today is silently treated as "no limit".
+A unit outside that list is **refused when the rules file loads**, naming the
+executor and the list. Read leniently it would mean *no limit at all*, so the one
+file written to keep dispatches off an exhausted host would be the file that
+removed the bound — and a rules file is external input, which this crate
+validates at its boundary rather than at the first dispatch.
+
+The proposal for the planner is to state that unit list in the contract, so a
+rules file naming `2GB` is refused against a documented vocabulary rather than
+against this implementation's reading of the one example.
 
 ## 6. `onepipeline`'s own event kinds are not enumerated
 

@@ -1,9 +1,9 @@
-//! Ported from `test_boundary_retry_e2e`.
-//!
 //! A dispatch that produced *nothing* and failed is asked again. An attempt that
 //! answered has already answered, whatever its exit status, so only the silent
 //! one is retried — and every retry reaches the run's own record rather than
 //! only a log.
+//!
+//! Ported from `test_boundary_retry_e2e`.
 
 use crate::harness::{agent, plan_of, World};
 

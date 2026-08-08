@@ -188,6 +188,22 @@ impl ExecutorRules {
                 "a rules file needs at least one executor".into(),
             ));
         }
+        for entry in &self.executors {
+            // A limit nobody can read resolves toward "has capacity", so a
+            // `2GB` typo would silently mean *no limit at all* — the executor
+            // it was written to protect would take every dispatch on a host
+            // that has run out of memory. A rules file is external input, so
+            // it fails here, by name, rather than at the first dispatch.
+            if let Some(limit) = &entry.min_free_mem {
+                if bytes_of(limit).is_none() {
+                    return Err(Error::Invalid(format!(
+                        "executor '{}' sets min_free_mem '{limit}', which is not a size: \
+                         write a byte count or one of B, KiB, MiB, GiB, TiB",
+                        entry.name
+                    )));
+                }
+            }
+        }
         for rule in &self.rules {
             if !self.executors.iter().any(|e| e.name == rule.use_executor) {
                 return Err(Error::Invalid(format!(
@@ -302,12 +318,56 @@ mod tests {
             "under min_free_mem"
         );
 
-        // An unreadable limit resolves toward having capacity.
+        // Defence in depth: `validate` refuses such a file at load, so this is
+        // only reachable for an entry built in process. It still resolves
+        // toward having capacity rather than stalling a healthy host.
         let vague = ExecutorEntry {
             min_free_mem: Some("some".into()),
             ..entry
         };
         assert!(vague.has_capacity(&report(4, 2.0, 1)));
+    }
+
+    /// The limit exists to keep dispatches off a host that has run out of
+    /// memory. A unit this crate cannot read used to mean *no limit at all*, so
+    /// the one file written to enforce the bound was the one that removed it.
+    #[test]
+    fn a_memory_limit_in_a_unit_this_build_cannot_read_is_refused_by_name() {
+        let unreadable = ExecutorRules {
+            executors: vec![ExecutorEntry {
+                name: "local".into(),
+                kind: ExecutorKind::Local,
+                max_load1: None,
+                // Decimal `GB`, not binary `GiB` — the plausible typo.
+                min_free_mem: Some("2GB".into()),
+            }],
+            rules: vec![Rule {
+                when: None,
+                use_executor: "local".into(),
+            }],
+        };
+        let refused = unreadable.validate().expect_err("an unreadable unit");
+        let said = refused.to_string();
+        assert!(said.contains("min_free_mem"), "{said}");
+        assert!(said.contains("2GB"), "{said}");
+        assert!(
+            said.contains("GiB"),
+            "the refusal did not say what to write: {said}"
+        );
+
+        // Every unit the contract spells still loads.
+        for good in ["2GiB", "512MiB", "1024", "2048B", "1KiB", "1TiB"] {
+            let entry = ExecutorEntry {
+                min_free_mem: Some(good.to_string()),
+                ..unreadable.executors[0].clone()
+            };
+            ExecutorRules {
+                executors: vec![entry],
+                ..unreadable.clone()
+            }
+            .validate()
+            .unwrap_or_else(|e| panic!("{good} was refused: {e}"));
+        }
     }
 
     #[test]

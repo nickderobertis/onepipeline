@@ -1,9 +1,9 @@
-//! Ported from `test_channel_e2e`.
-//!
 //! The planner-facing channel: reading a surface, answering it, raising one, and
 //! the pacemaker reset that consumption triggers. **Rendering is not reading** —
 //! `monitor` shows a pending surface without consuming it, and `next` is the
 //! only consumer.
+//!
+//! Ported from `test_channel_e2e`.
 
 use crate::harness::{agent, human, plan_of, World, REFUSED};
 

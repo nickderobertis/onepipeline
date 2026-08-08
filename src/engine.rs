@@ -348,7 +348,7 @@ fn converge(
             // A node that is neither settled nor startable is gated by
             // something only an edit or an attestation can clear, and both
             // arrive through the channel.
-            if !has_startable(&statuses) {
+            if !any_node_can_still_move(&statuses) {
                 break;
             }
         }
@@ -391,7 +391,12 @@ fn converge(
     Ok(graph::state_of(&state.statuses()))
 }
 
-fn has_startable(statuses: &BTreeMap<String, NodeStatus>) -> bool {
+/// Whether any node could still change state without an edit or an attestation.
+///
+/// A node that is `ready` has not started yet and one that is `running` has not
+/// finished; either way the loop has something to wait for. Everything else is
+/// settled or gated by something only the channel delivers.
+fn any_node_can_still_move(statuses: &BTreeMap<String, NodeStatus>) -> bool {
     statuses
         .values()
         .any(|status| matches!(status, NodeStatus::Ready | NodeStatus::Running))
@@ -653,16 +658,32 @@ fn execute_direct(
     attempt(executor, &node.id, "worker", cancel, tx, &request).settlement
 }
 
+/// How far one attempt got.
+///
+/// Ordered, and deliberately one value rather than two flags: an attempt that
+/// spoke without starting is not a state, and a retry decision made from two
+/// independent bools has to keep proving that it never happens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Reached {
+    /// The dispatch could not be started at all. Nothing about this failure is
+    /// the agent's, so asking again unchanged spends the next budget the same
+    /// way.
+    NotStarted,
+    /// It ran and recorded nothing. This is the one case a retry exists for:
+    /// the failure carries no work to lose.
+    Silence,
+    /// It recorded something. An attempt that answered has already answered,
+    /// whatever its exit status.
+    Speech,
+}
+
 /// One dispatch, drained: how it settled, and what it left behind.
 pub(crate) struct Drained {
     /// How the node settled on this attempt.
     pub settlement: Settlement,
-    /// Whether the dispatch recorded anything at all. An attempt that answered
-    /// has already answered, whatever its exit status.
-    pub spoke: bool,
-    /// Whether the dispatch started at all. One that never did failed for a
-    /// reason that has nothing to do with the agent.
-    pub started: bool,
+    /// How far the attempt got, which is what decides whether asking again
+    /// could produce a different answer.
+    pub reached: Reached,
     /// The `onevcs` session it left open, when its workspace was one.
     pub session: Option<String>,
     /// The branch that session has checked out.
@@ -688,8 +709,7 @@ pub(crate) fn attempt(
     let mut backoff = Duration::from_secs(boundary_backoff_seconds());
     let mut last = Drained {
         settlement: failed(node, "infrastructure-failure"),
-        spoke: false,
-        started: false,
+        reached: Reached::NotStarted,
         session: None,
         branch: None,
     };
@@ -706,13 +726,14 @@ pub(crate) fn attempt(
                     // next budget the same way.
                     ..failed(node, "infrastructure-failure")
                 },
-                spoke: false,
-                started: false,
+                reached: Reached::NotStarted,
                 session: None,
                 branch: None,
             },
         };
-        if drained.settlement.status != NodeStatus::Failed || drained.spoke || cancel.is_cancelled()
+        if drained.settlement.status != NodeStatus::Failed
+            || drained.reached == Reached::Speech
+            || cancel.is_cancelled()
         {
             return drained;
         }
@@ -723,7 +744,7 @@ pub(crate) fn attempt(
             // this one unchanged spends the next budget the same way — and
             // apart from a dispatch that never started, which failed for a
             // reason that has nothing to do with the agent.
-            if last.started {
+            if last.reached != Reached::NotStarted {
                 last.settlement = Settlement {
                     detail: last.settlement.detail.clone(),
                     ..failed(node, "no-agent-progress")
@@ -806,8 +827,11 @@ pub(crate) fn drain(
     };
     Drained {
         settlement,
-        spoke,
-        started: true,
+        reached: if spoke {
+            Reached::Speech
+        } else {
+            Reached::Silence
+        },
         session,
         branch,
     }

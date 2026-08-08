@@ -36,6 +36,15 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         Ok(graph) => graph,
         Err(refusal) => return refusal,
     };
+    // The real CLI requires both, so a caller that stopped sending either would
+    // otherwise go unnoticed here and fail only against the sibling itself.
+    let Some(task) = fake::flag(args, "--task") else {
+        return fake::refuse("oneagentgraph run requires --task");
+    };
+    if fake::flag(args, "--output").as_deref() != Some("json") {
+        return fake::refuse("oneagentgraph run requires --output json");
+    }
+
     // The dag-scope graph is the driver: its orchestrator member is what runs
     // the engine verbs. Acting that out is how a test exercises `start` end to
     // end rather than only the launch.
@@ -81,12 +90,13 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         }
     }
 
-    emit(
-        args,
-        &node,
-        step.as_deref(),
-        &fake::flag(args, "--task").unwrap_or_default(),
-    );
+    // A line from a build whose envelope shape this one cannot read. It is
+    // emitted *before* the good one, so a reader that stopped at it would lose
+    // the turn that follows.
+    if dir.join(format!("{key}.unreadable")).exists() {
+        println!("{{\"from\":\"a newer oneagentgraph\"}}");
+    }
+    emit(args, &node, step.as_deref(), &task);
 
     if let Some(code) = fake::node_script(dir, &key, "fail") {
         eprintln!("the node failed its gate");

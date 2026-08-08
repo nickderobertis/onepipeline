@@ -223,7 +223,7 @@ fn the_executor_rules_example_selects_the_shipped_local_executor() {
 }
 
 #[test]
-fn a_rules_file_the_grammar_refuses_never_starts_a_run() {
+fn a_rules_file_the_grammar_refuses_dispatches_nothing() {
     let world = World::new("shipped-badrules");
     let rules = world.root.join("bad-executors.yaml");
     std::fs::write(
@@ -246,5 +246,47 @@ fn a_rules_file_the_grammar_refuses_never_starts_a_run() {
                 .iter()
                 .all(|event| event["kind"] != "node-dispatched"),
         "a rules file naming an undeclared executor still dispatched: {output:?}"
+    );
+}
+
+#[test]
+fn a_memory_limit_in_a_unit_the_grammar_cannot_read_dispatches_nothing() {
+    let world = World::new("shipped-badunit");
+    let rules = world.root.join("bad-unit-executors.yaml");
+    // Decimal `GB` rather than binary `GiB`. Read leniently this means *no
+    // limit*, so the one file written to keep dispatches off an exhausted host
+    // would be the file that removed the bound.
+    std::fs::write(
+        &rules,
+        "executors: [{name: local, type: local, min_free_mem: 2GB}]\nrules: [{use: local}]\n",
+    )
+    .expect("the rules are written");
+    let plan = world.plan(
+        "badunit",
+        &crate::harness::plan_of("badunit", vec![crate::harness::agent("build", &[])]),
+    );
+    let mut command = world.cmd(&["start", &plan.to_string_lossy(), "--attach"]);
+    command.env("ONEPIPELINE_EXECUTOR_RULES", &rules);
+    command.output().expect("the binary runs");
+    assert!(
+        world
+            .journal("badunit")
+            .iter()
+            .all(|event| event["kind"] != "node-dispatched"),
+        "a rules file with an unreadable limit still dispatched"
+    );
+
+    // The round refuses by name. Asked directly, because the driver that runs
+    // this verb during `start` owns its own stderr — the orchestrator member is
+    // what reads this refusal, and this is the command it runs.
+    let mut round = world.cmd(&["round", "run", "badunit"]);
+    round.env("ONEPIPELINE_EXECUTOR_RULES", &rules);
+    let refused = round.output().expect("the binary runs");
+    let said = String::from_utf8_lossy(&refused.stderr).to_string();
+    assert!(!refused.status.success(), "the round ran anyway: {said}");
+    assert!(said.contains("min_free_mem"), "{said}");
+    assert!(
+        said.contains("GiB"),
+        "the refusal did not say what to write instead: {said}"
     );
 }

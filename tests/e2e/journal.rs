@@ -1,8 +1,8 @@
-//! Ported from `test_journal_sequence_e2e` and `test_plan_of_record_e2e`.
-//!
 //! The journal is the run's authoritative record, and **the plan of record is
 //! the graph the round executed** — not the launch file, which every live edit
 //! the reconciler committed is absent from.
+//!
+//! Ported from `test_journal_sequence_e2e` and `test_plan_of_record_e2e`.
 
 use crate::harness::{agent, human, plan_of, World};
 use serde_json::json;
@@ -87,6 +87,41 @@ fn a_line_this_build_cannot_read_is_skipped_rather_than_ending_the_read() {
     world.run(&["monitor", "future"]).exited(0);
     world.run(&["results", "future"]).exited(0);
     world.run(&["telemetry", "future"]).exited(0);
+
+    // The transition is the one reader that cannot shrug: a record it cannot
+    // read might have been an authoritative graph mutation, so it says so and
+    // derives from the launch record rather than from a graph it knows is
+    // incomplete.
+    world
+        .run(&["round", "next", "future"])
+        .exited(0)
+        .err_has("cannot read")
+        .err_has("launch record");
+}
+
+#[test]
+fn a_dispatch_line_this_build_cannot_read_is_skipped_and_the_turn_after_it_is_not() {
+    let world = World::new("journal-badline");
+    // The sibling emits a line from a newer build *before* its real turn, so a
+    // reader that stopped at the first unreadable one would lose the turn that
+    // follows — and with it the node's own evidence.
+    world.script("build.unreadable", "");
+    let path = world.plan("badline", &plan_of("badline", vec![agent("build", &[])]));
+    let started = world.run(&["start", &path.to_string_lossy(), "--attach"]);
+    started.exited(0).err_has("skipped");
+
+    assert!(
+        world
+            .journal("badline")
+            .iter()
+            .any(|event| event["source"] == "agentgraph" && event["labels"]["node"] == "build"),
+        "the turn after the unreadable line never reached the merged store"
+    );
+    assert_eq!(
+        world.run_json("badline", "round-01/result.json")["state"],
+        "complete",
+        "an unreadable sibling line failed the node it belonged to"
+    );
 }
 
 #[test]

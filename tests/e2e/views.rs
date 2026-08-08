@@ -1,10 +1,8 @@
-//! Ported from `test_monitor_e2e`, `test_monitor_run_plan_e2e`,
-//! `test_goals_e2e`, `test_run_views_by_id_e2e`, `test_live_dispatch_views_e2e`,
-//! and `test_telemetry_e2e`.
-//!
 //! The read-only views. They render from the merged three-stream event store,
 //! take no lock a writer needs, and never call a node running once the ledger
 //! has recorded it settled.
+//!
+//! Ported from `test_monitor_e2e`, `test_monitor_run_plan_e2e`, `test_goals_e2e`, `test_run_views_by_id_e2e`, `test_live_dispatch_views_e2e`, and `test_telemetry_e2e`.
 
 use crate::harness::{agent, human, lifecycle, plan_of, World};
 

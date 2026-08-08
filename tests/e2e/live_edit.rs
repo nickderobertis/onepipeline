@@ -1,5 +1,3 @@
-//! Ported from `test_live_edit_e2e`.
-//!
 //! The version-1 edit envelope: all nine ops, each op's required fields, its
 //! refusal cases, and the exit codes the contract assigns — `0` applied, `1`
 //! accepted-not-yet-reconciled, `2` refused or malformed.
@@ -7,8 +5,10 @@
 //! Every edit is **applied or rejected with a reason**, and edits require a live
 //! round: a bare `complete` verdict stays legal at a round boundary, and a
 //! structural edit does not.
+//!
+//! Ported from `test_live_edit_e2e`.
 
-use crate::harness::{agent, human, plan_of, World, REFUSED};
+use crate::harness::{agent, human, lifecycle, plan_of, World, REFUSED};
 use serde_json::{json, Value};
 
 /// Start a run whose nodes are held open, so edits land against a live round.
@@ -260,7 +260,7 @@ fn a_retry_may_name_only_one_branch() {
 }
 
 #[test]
-fn drop_states_its_dependents_fate_and_refuses_the_last_publication_anchor() {
+fn drop_requires_a_dependents_fate_and_detach_keeps_them() {
     let world = World::new("edit-drop");
     let run = live(
         &world,
@@ -312,6 +312,34 @@ fn drop_states_its_dependents_fate_and_refuses_the_last_publication_anchor() {
         ids.contains(&"dependent"),
         "detach removed the dependent too"
     );
+}
+
+#[test]
+fn drop_refuses_to_remove_the_last_unresolved_publication_anchor() {
+    let world = World::new("edit-anchor");
+    // Two lifecycle nodes on one repository: the second is stacked on the
+    // first, so the first is what carries both of them to publication.
+    let mut stacked = lifecycle("stacked", &["anchor"]);
+    stacked["id"] = json!("stacked");
+    let run = live(
+        &world,
+        "anchored",
+        vec![agent("slow", &[]), lifecycle("anchor", &[]), stacked],
+        &["slow", "anchor"],
+    );
+
+    // Dropping it would leave work for that repository with nothing left to
+    // publish it — the stack would build on a branch that never lands.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([{"op": "drop", "id": "anchor", "dependents": "detach"}])),
+        )
+        .exited(REFUSED)
+        .err_has("publication anchor");
+
+    world.release("slow.go");
+    world.release("anchor.go");
 }
 
 #[test]
@@ -504,12 +532,12 @@ fn edits_accepted_but_not_reconciled_in_time_are_reported_queued() {
     // verdict the wait has to expire first.
     let mut command = world.cmd(&["reply", &run]);
     command.env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "1");
-    let queued = world.run_file(&run, "channel/commands-cursor.json");
+    let cursor = world.run_file(&run, "channel/commands-cursor.json");
     // llmlint: ignore-block[tests_mirror_real_usage] advancing the reconciler's cursor
     // past this reply is how a reader-starved queue is arranged on purpose. The exit-1
     // verdict exists for a reconciler that did not get to the command in time, and there
     // is no invocation a planner can type that guarantees that timing.
-    std::fs::write(&queued, "99").expect("the cursor is advanced");
+    std::fs::write(&cursor, "99").expect("the cursor is advanced");
 
     // llmlint: ignore-end[tests_mirror_real_usage]
     let reply = world.run_with_stdin_timeout(
