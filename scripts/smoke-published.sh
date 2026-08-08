@@ -88,15 +88,17 @@ done
 # harness that installed a deliberately broken binary to drive each one would be a second
 # thing to keep in sync with the first. Revisit if this script grows logic of its own.
 code=0
-onepipeline next smoke-run >/dev/null 2>&1 || code=$?
+# Keep stderr: the refusal itself is what the passing branch expects to be there,
+# and on any other exit it is the only account of what went wrong.
+refusal="$(onepipeline next smoke-run 2>&1 >/dev/null)" || code=$?
 case "$code" in
   70) ;;
   0) fail "'next' exited 0 without reading anything" \
        "an interface-only build must refuse; a caller reads exit 0 as a surface it consumed" ;;
   1|2|3) fail "'next' exited $code, a code the contract already assigns" \
        "the interface-only refusal must not be readable as applied, queued, refused, or undriven" ;;
-  *) fail "'next' exited $code, which is neither the interface-only refusal (70) nor a code the contract assigns" \
-       "run 'onepipeline next smoke-run' by hand to see what the installed binary is doing" ;;
+  *) fail "'next' exited $code, which is neither the interface-only refusal (70) nor a code the contract assigns: ${refusal:-it printed nothing}" \
+       "fix what that error names, or reinstall the binary if it cannot start at all" ;;
 esac
 # llmlint: ignore-end[changed_behavior_has_e2e]
 
