@@ -3,13 +3,8 @@
   "$schema": "../node_modules/nx/schemas/project-schema.json",
   "projectType": "library",
   "sourceRoot": "npm/onepipeline-cli",
-  "tags": [
-    "scope:packaging",
-    "lang:js"
-  ],
-  "implicitDependencies": [
-    "onepipeline"
-  ],
+  "tags": ["scope:packaging", "lang:js"],
+  "implicitDependencies": ["onepipeline"],
   "targets": {
     "bootstrap": {
       "executor": "nx:noop"
@@ -38,11 +33,7 @@
     },
     "check": {
       "executor": "nx:noop",
-      "dependsOn": [
-        "format-check",
-        "lint",
-        "test"
-      ]
+      "dependsOn": ["format-check", "lint", "test"]
     }
   }
 }
