@@ -1,0 +1,15 @@
+# Every test in the `e2e` binary drives a tree of real processes — the
+# `onepipeline` binary, the two sibling doubles it runs as subprocesses, and the
+# round owner one of those starts. Its true concurrency is therefore process
+# trees, not threads, and letting nextest run one per core oversubscribes the
+# machine badly enough that a test times out waiting for work that is merely
+# queued behind other tests' work.
+#
+# The cap is a statement about what these tests *are*, not a way to make a slow
+# test pass: each one still runs in under a second on an idle host.
+[test-groups]
+e2e = { max-threads = 4 }
+
+[[profile.default.overrides]]
+filter = 'binary(e2e)'
+test-group = 'e2e'

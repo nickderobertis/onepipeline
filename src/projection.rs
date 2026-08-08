@@ -188,9 +188,10 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
                         state.attestations.insert(node.clone());
                         state.recorded.insert(node.clone(), NodeStatus::Done);
                     }
-                    Operation::CompletionRequested { reason } => {
-                        state.completion_requests.push(reason.clone());
-                    }
+                    // A completion request is recorded as its own event by
+                    // whichever side took it, so folding it here too would
+                    // count one request twice.
+                    Operation::CompletionRequested { .. } => {}
                     Operation::RetryRequested { node, .. } => {
                         // The superseded node stays in the executed graph,
                         // cancelled, so the transition removes it exactly as an

@@ -9,20 +9,24 @@
 //! owns the DAG, the rounds, the planner channel, and the
 //! [executor seam](executor) that decides *where* a dispatch runs.
 //!
-//! # Interface-only
+//! # The surface, and what is behind it
 //!
-//! This crate is at the **interface-only** stage of its build-out. Every item
-//! below is the surface named by [`docs/contract.md`](../../../docs/contract.md)
-//! — the approved contract, committed verbatim — and **none of it is
-//! implemented**. There are no method bodies beyond derives, trivial field
-//! constructors, and serde defaults, and the binary's subcommands parse per the
-//! contract and then refuse with a `NOT IMPLEMENTED` error and exit code
-//! [`error::EXIT_NOT_IMPLEMENTED`].
+//! Every public item here is named by
+//! [`docs/contract.md`](../../../docs/contract.md) — the approved contract,
+//! committed verbatim — and the engine implementing it is private, so a
+//! consumer can only reach what the contract promised.
+//! `tests/contract.rs` drives the fixtures out of that document through these
+//! types, so the two cannot drift.
 //!
-//! Consequently these types are useful for one thing today: reading and writing
-//! the contract's wire shapes. `tests/contract.rs` drives the fixtures out of
-//! `docs/contract.md` through them, so the document and this surface cannot
-//! drift.
+//! A run's durable state is one directory: the plan it was launched with, the
+//! merged event store every view reads, the round ledger, and the channel's
+//! transport. The engine verbs are that ledger's **single writer**, guarded by
+//! the run's ownership lock; everything else reads.
+//!
+//! Composition is by subprocess. The agents come from `oneagentgraph` and the
+//! clones, gates, and change requests from `onevcs`, each reached through its
+//! own CLI — so a build of either that still refuses will make the dispatches
+//! this crate starts refuse too.
 //!
 //! Where the contract names a sibling type that sibling does not export, the
 //! code compiles against the type that does exist and the divergence is recorded

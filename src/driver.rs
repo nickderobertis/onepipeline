@@ -603,12 +603,16 @@ fn submit(paths: &RunPaths, envelope: &Reply) -> Result<i32> {
     }
 
     // Edits require a live round: replying with one when no round is executing
-    // is refused with that reason, while a bare `complete` verdict stays legal
-    // at a round boundary.
+    // is refused with that reason. Two commands are not edits and stay legal at
+    // a round boundary — a bare `complete` verdict, and an `attest`, which
+    // records that a person did something rather than mutating the graph.
+    // Refusing an attestation at a boundary would strand every human-gated run:
+    // its round has settled, and no later round can open until the action is
+    // recorded.
     let structural = envelope
         .commands
         .iter()
-        .any(|command| !matches!(command, Command::Complete { .. }));
+        .any(|command| !matches!(command, Command::Complete { .. } | Command::Attest { .. }));
     if structural && !view.state.round_open {
         return Err(Error::Refused(format!(
             "run '{}' has no round executing, and an edit needs a live round to apply to",
@@ -625,21 +629,34 @@ fn submit(paths: &RunPaths, envelope: &Reply) -> Result<i32> {
         edits::compile(&mut projected, &frontier, command)?;
     }
 
-    let id = channel.submit(&envelope.commands)?;
-    if !structural {
-        // A bare `complete` is journalled for audit whether or not a round is
-        // executing, so a boundary verdict is never lost to a closed round.
+    // With a round executing, the reconciler is the single writer and the
+    // command goes to its durable queue. Without one there is no other writer,
+    // so the boundary-legal commands are recorded here under the ownership lock.
+    if !view.state.round_open {
+        let lock = ledger::OwnershipLock::acquire(paths, "reply")?;
         let mut journal = Journal::open(paths);
         for command in &envelope.commands {
-            if let Command::Complete { reason } = command {
-                journal.emit(
+            match command {
+                Command::Complete { reason } => journal.emit(
                     journal::COMPLETION_REQUESTED,
                     journal::labels(&paths.run, Some(view.state.round), None),
                     journal::payload(&[("reason", json!(reason))]),
-                )?;
+                )?,
+                Command::Attest { reference } => journal.emit(
+                    journal::HUMAN_ATTESTED,
+                    journal::labels(&paths.run, Some(view.state.round), Some(reference)),
+                    journal::payload(&[("ref", json!(reference))]),
+                )?,
+                _ => {}
             }
         }
+        lock.release();
+        channel.answer(envelope)?;
+        println!("{}", json!({"reply": 0, "state": "applied"}));
+        return Ok(EXIT_SUCCESS);
     }
+
+    let id = channel.submit(&envelope.commands)?;
 
     let deadline = Instant::now() + Duration::from_secs(reply_timeout_seconds());
     while Instant::now() < deadline {
@@ -655,17 +672,9 @@ fn submit(paths: &RunPaths, envelope: &Reply) -> Result<i32> {
                     .unwrap_or_else(|| "the reconciler rejected the edit".into()),
             ));
         }
-        if !structural {
-            break;
-        }
         std::thread::sleep(ATTACH_POLL);
     }
 
-    if !structural {
-        channel.answer(envelope)?;
-        println!("{}", json!({"reply": id, "state": "delivered"}));
-        return Ok(EXIT_SUCCESS);
-    }
     // Accepted and durable, but not reconciled within the timeout: they remain
     // queued, and this is not an instruction to resend.
     println!("{}", json!({"reply": id, "state": "queued"}));

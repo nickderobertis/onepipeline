@@ -8,7 +8,7 @@
 //!
 //! This module is the schema and how a plan file is *read*. Whether the graph it
 //! describes is legal — its shape rules, its references, and its acyclicity —
-//! belongs to [`crate::graph`], which validates every plan this loader returns.
+//! belongs to the graph module, which validates every plan this loader returns.
 
 // llmlint: ignore-file[invalid_states_unrepresentable] a [`Node`] is one flat mapping
 // with optional fields rather than an enum over direct/lifecycle/human, because

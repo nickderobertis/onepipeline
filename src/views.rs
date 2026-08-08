@@ -709,7 +709,9 @@ mod tests {
         assert!(stream.contains("agent:oneagentgraph-1"), "{stream}");
         assert!(stream.contains("vcs:onevcs-tok"), "{stream}");
         assert!(stream.contains("graph:build"), "{stream}");
-        assert!(stream.contains("-- round-01"), "{stream}");
+        // A round transition has no node, so it has no typed id: it reaches the
+        // reader as run state, naming the run it belongs to.
+        assert!(stream.contains("-- demo  round-01"), "{stream}");
 
         let views = vec![view];
         assert!(status(&views).contains("build: running"));

@@ -46,14 +46,31 @@ code uses. This looks like a naming difference rather than a design one.
 ## 3. `DispatchOutcome` has no specified fields
 
 The contract names `DispatchOutcome` as `DispatchHandle::wait`'s success value
-but says nothing about what it carries. It is compiled as an empty
-`#[non_exhaustive]` struct rather than guessing at fields, because inventing them
-would be exactly the interface drift the interface-only rule forbids.
+but says nothing about what it carries.
 
-A caller today learns nothing from a settled dispatch except that it settled;
-everything else is in the relayed event stream. If that is the intent, the type
-is fine as it stands. If `wait` is meant to summarise — an exit status, the
-node's settled status, the branch it left behind — the contract needs to say so.
+It carries four fields, each one a thing a caller **cannot** recover from the
+relayed event stream:
+
+```rust
+pub struct DispatchOutcome {
+    pub succeeded: bool,
+    pub detail: String,
+    pub session: Option<String>,
+    pub branch: Option<String>,
+}
+```
+
+`succeeded` and `detail` are the settlement itself — a stream of turns does not
+say whether the dispatch ended well, and a node has to settle `done` or
+`failed`. `session` and `branch` follow from the contract's own statement that
+`WorkspaceSpec::VcsSession` means *the machine running the dispatch opens the
+session there*: the caller never opened it, so publication has no token unless
+the outcome hands one back.
+
+The struct is `#[non_exhaustive]`, so naming more fields later is additive. The
+proposal for the planner is to state these four in the contract, or to say
+instead that `wait` reports settlement only and that a session token reaches the
+caller some other way.
 
 ## 4. The rules grammar spells one predicate but describes two families
 

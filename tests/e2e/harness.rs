@@ -164,7 +164,7 @@ impl World {
 
     /// Wait until a predicate holds, or fail with what was seen instead.
     pub fn until(&self, what: &str, mut ready: impl FnMut(&Self) -> bool) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
         while std::time::Instant::now() < deadline {
             if ready(self) {
                 return;
@@ -310,11 +310,56 @@ pub fn binary() -> PathBuf {
 }
 
 /// One of the sibling doubles, beside the binary cargo built.
+///
+/// The doubles live in a separate workspace member so they can never ship, and
+/// a package-scoped build — `cargo llvm-cov` runs one — does not build another
+/// member's binaries. So the fixture builds itself, into the same target
+/// directory the binary under test came from. Cargo's own lock serialises the
+/// handful of test processes that race to do it first.
 pub fn double(name: &str) -> PathBuf {
-    binary()
+    let debug = binary()
         .parent()
         .expect("the binary is in a directory")
-        .join(format!("{name}{}", std::env::consts::EXE_SUFFIX))
+        .to_path_buf();
+    let path = debug.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+    if path.is_file() {
+        return path;
+    }
+    // Every test runs in its own process, so without a token they would all
+    // start a cargo of their own and queue on its target-directory lock. One
+    // wins the token and builds; the rest wait for the file it produces.
+    let token = debug.join("onepipeline-doubles.building");
+    let ours = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&token)
+        .is_ok();
+    if ours {
+        let target = debug
+            .parent()
+            .expect("the profile directory is inside a target directory");
+        let built = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+            .args(["build", "--offline", "--package", "onepipeline-testfakes"])
+            .arg("--target-dir")
+            .arg(target)
+            .current_dir(repo_file("."))
+            .output()
+            .expect("cargo builds the subprocess doubles");
+        assert!(
+            path.is_file(),
+            "the {name} double was not built: {}",
+            String::from_utf8_lossy(&built.stderr)
+        );
+        return path;
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+    while std::time::Instant::now() < deadline {
+        if path.is_file() {
+            return path;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("the {name} double never appeared at {}", path.display());
 }
 
 /// A file shipped in the repository.

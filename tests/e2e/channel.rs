@@ -280,3 +280,180 @@ fn attesting_something_that_is_not_a_ready_human_action_is_refused_by_name() {
         .err_has("not a ready, waiting human action");
     world.release("build.go");
 }
+
+#[test]
+fn the_channel_server_relays_a_boundary_frame_and_writes_back_the_verdict() {
+    use std::io::{BufRead, BufReader, Write};
+
+    let world = World::new("channel-serve");
+    world.script("build.wait", "hold");
+    let run = running(&world, "served", vec![agent("build", &[])]);
+
+    // This is the orchestrator member's judge side: it reads the frame the
+    // orchestrator emits at a round boundary, relays it to the planner, and
+    // writes the answer back into the conversation.
+    let mut serving = world
+        .cmd(&["channel", "serve", &run])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the channel server starts");
+
+    let mut stdin = serving.stdin.take().expect("stdin is piped");
+    writeln!(
+        stdin,
+        r#"{{"kind":"blocker","message":"Node build failed its gate; retry?","blocking":true,"node":"build"}}"#
+    )
+    .expect("the frame is written");
+    stdin.flush().expect("flushed");
+
+    world.until("the frame to reach the planner", |world| {
+        world
+            .events_of(&run, "planner-surface-queued")
+            .iter()
+            .any(|event| event["payload"]["kind"] == "blocker")
+    });
+
+    // A blocking surface is what `runs` and `status` report as awaiting a
+    // decision once it is consumed.
+    world
+        .run(&["next", &run])
+        .exited(0)
+        .out_has("failed its gate");
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("waiting for planner decision");
+
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            r#"{"completion":true,"reason":"the run is finished"}"#,
+        )
+        .exited(0);
+
+    // The verdict is written back on stdout, as the conversation's next turn.
+    let stdout = serving.stdout.take().expect("stdout is piped");
+    let verdict = BufReader::new(stdout)
+        .lines()
+        .map_while(std::result::Result::ok)
+        .find(|line| line.contains("completion"))
+        .expect("the server wrote a verdict");
+    assert!(verdict.contains("true"), "{verdict}");
+    assert!(verdict.contains("the run is finished"), "{verdict}");
+
+    drop(stdin);
+    world.release("build.go");
+    let _ = serving.wait();
+}
+
+#[test]
+fn the_channel_server_synthesizes_a_continuing_verdict_when_nobody_answers() {
+    use std::io::Write;
+
+    let world = World::new("channel-serve-timeout");
+    world.script("build.wait", "hold");
+    let run = running(&world, "unanswered", vec![agent("build", &[])]);
+
+    let mut command = world.cmd(&["channel", "serve", &run]);
+    command.env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "1");
+    let mut serving = command
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the channel server starts");
+    let mut stdin = serving.stdin.take().expect("stdin is piped");
+    writeln!(stdin, r#"{{"kind":"blocker","message":"anyone there?"}}"#).expect("written");
+    stdin.flush().expect("flushed");
+    drop(stdin);
+
+    let output = serving.wait_with_output().expect("the server exits");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Wedging the orchestrator on a planner who is away would be worse than
+    // continuing, so the timeout is answered rather than left open.
+    assert!(stdout.contains("\"completion\":false"), "{stdout}");
+    assert!(stdout.contains("timed out"), "{stdout}");
+    world.release("build.go");
+}
+
+#[test]
+fn the_channel_server_refuses_a_frame_it_cannot_read() {
+    use std::io::Write;
+
+    let world = World::new("channel-serve-bad");
+    world.script("build.wait", "hold");
+    let run = running(&world, "badframe", vec![agent("build", &[])]);
+
+    let mut serving = world
+        .cmd(&["channel", "serve", &run])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the channel server starts");
+    let mut stdin = serving.stdin.take().expect("stdin is piped");
+    writeln!(stdin, "this is not a frame").expect("written");
+    stdin.flush().expect("flushed");
+    drop(stdin);
+
+    let output = serving.wait_with_output().expect("the server exits");
+    assert_eq!(output.status.code(), Some(REFUSED));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("bad frame"),
+        "{output:?}"
+    );
+    world.release("build.go");
+}
+
+#[test]
+fn a_human_action_is_attested_at_a_round_boundary_and_the_next_round_opens() {
+    let world = World::new("channel-boundary-attest");
+    world.script("driver.wait", "hold");
+    let path = world.plan(
+        "gatedrun",
+        &plan_of(
+            "gatedrun",
+            vec![human("approve", &[]), agent("ship", &["approve"])],
+        ),
+    );
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+    world.run(&["round", "run", "gatedrun"]).exited(1);
+
+    // The round has settled: nothing is executing, and no later round can open
+    // until a person's action is recorded. An attestation is not a graph edit,
+    // so it is legal here — refusing it would strand the run.
+    let result = world.run_json("gatedrun", "round-01/result.json");
+    assert_eq!(result["state"], "waiting", "{result}");
+    world
+        .run_with_stdin(
+            &["reply", "gatedrun"],
+            r#"{"version":1,"commands":[{"op":"add","node":{"id":"late","persona":"e","task":"t"}}]}"#,
+        )
+        .exited(REFUSED)
+        .err_has("no round executing");
+
+    world.run(&["attest", "gatedrun", "approve"]).exited(0);
+    assert_eq!(world.events_of("gatedrun", "human-attested").len(), 1);
+
+    // With the action recorded, the dependent becomes eligible and the
+    // transition opens the round that runs it.
+    let transitioned = world.run(&["round", "next", "gatedrun"]);
+    transitioned.exited(0).out_has("\"continuing\"");
+    assert_eq!(transitioned.json()["next_round"], 2);
+
+    world.run(&["round", "run", "gatedrun"]).exited(0);
+    let second = world.run_json("gatedrun", "round-02/result.json");
+    assert_eq!(second["state"], "complete", "{second}");
+    let ids: Vec<&str> = second["nodes"]
+        .as_array()
+        .expect("nodes")
+        .iter()
+        .filter_map(|node| node["id"].as_str())
+        .collect();
+    assert_eq!(ids, vec!["ship"], "the attested human was carried forward");
+    world.release("driver.go");
+}

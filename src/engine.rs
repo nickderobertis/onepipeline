@@ -242,11 +242,6 @@ fn converge(
     loop {
         reconcile_edits(paths, journal, state, &channel, &mut in_flight)?;
 
-        let statuses = state.statuses();
-        if graph::is_terminal(&statuses) && in_flight.is_empty() {
-            break;
-        }
-
         if !budget_spent && started.elapsed() > budget {
             budget_spent = true;
             // Cooperatively cancel in flight work and surface a blocking
@@ -281,6 +276,11 @@ fn converge(
             )?;
         }
 
+        // Start what became actionable *before* asking whether the round is
+        // over. A ready human action derives as `waiting`, which is a settled
+        // status — so a check that ran first would call the round terminal and
+        // leave that settlement unrecorded, with nothing for a later `attest`
+        // to validate against.
         if !budget_spent {
             start_ready(paths, journal, state, round, &rules, &tx, &mut in_flight)?;
         }
@@ -289,13 +289,13 @@ fn converge(
             // Nothing is running and nothing became ready, so no further
             // message can arrive: the graph is as converged as it will get.
             let statuses = state.statuses();
-            if graph::is_terminal(&statuses) {
+            if graph::is_terminal(&statuses) || budget_spent {
                 break;
             }
             // A node that is neither settled nor startable is gated by
             // something only an edit or an attestation can clear, and both
             // arrive through the channel.
-            if !budget_spent && !has_startable(&statuses) {
+            if !has_startable(&statuses) {
                 break;
             }
         }
@@ -379,6 +379,25 @@ fn reconcile_edits(
                             ("operations", json!(operations)),
                         ]),
                     )?;
+                    // Two of the compiled operations are facts about the run
+                    // rather than mutations of its graph, and a reader looking
+                    // for either should not have to know whether a round was
+                    // live when it arrived. Each gets its own kind here too.
+                    for operation in &operations {
+                        match operation {
+                            edits::Operation::CompletionRequested { reason } => journal.emit(
+                                journal::COMPLETION_REQUESTED,
+                                journal::labels(&paths.run, Some(state.round), None),
+                                journal::payload(&[("reason", json!(reason))]),
+                            )?,
+                            edits::Operation::HumanAttested { node } => journal.emit(
+                                journal::HUMAN_ATTESTED,
+                                journal::labels(&paths.run, Some(state.round), Some(node)),
+                                journal::payload(&[("ref", json!(node))]),
+                            )?,
+                            _ => {}
+                        }
+                    }
                     *state = projection::fold(&journal::read(&paths.journal()));
                 }
                 Err(error) => {

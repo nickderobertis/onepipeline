@@ -311,3 +311,86 @@ fn a_round_that_settles_unfinished_exits_one_rather_than_zero() {
     // status off: a failed graph is unfinished, not an error.
     world.run(&["round", "run", "exit"]).exited(QUEUED);
 }
+
+#[test]
+fn a_worker_that_goes_quiet_is_surfaced_without_blocking_the_round() {
+    let world = World::new("plan-quiet");
+    world.script("slow.wait", "hold");
+    let path = world.plan(
+        "quiet",
+        &plan_of("quiet", vec![agent("slow", &[]), agent("busy", &[])]),
+    );
+    let mut command = world.cmd(&["start", &path.to_string_lossy(), "--detach"]);
+    command.env("ONEPIPELINE_STALL_AFTER_SECONDS", "1");
+    command.output().expect("the binary runs");
+
+    world.until("the quiet worker to be reported", |world| {
+        !world.events_of("quiet", "quiet-worker").is_empty()
+    });
+    let reported = world.events_of("quiet", "quiet-worker");
+    assert_eq!(reported[0]["labels"]["node"], "slow");
+    assert_eq!(reported[0]["payload"]["threshold_seconds"], 1);
+    assert_eq!(reported[0]["payload"]["persona"], "engineer");
+
+    // A stall is evidence rather than a verdict, so the surface is
+    // non-blocking: the round's other workers are not stopped to ask.
+    let surfaced = world
+        .events_of("quiet", "planner-surface-queued")
+        .into_iter()
+        .find(|event| event["payload"]["kind"] == "quiet-worker")
+        .expect("the stall was surfaced");
+    assert_eq!(surfaced["payload"]["blocking"], false);
+    assert!(surfaced["payload"]["message"]
+        .as_str()
+        .expect("a message")
+        .contains("nothing recorded since it was dispatched"));
+
+    // A node is reported once per quiet stretch, not once per pass.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert_eq!(world.events_of("quiet", "quiet-worker").len(), 1);
+
+    world.release("slow.go");
+    world.until("the run to settle", |world| {
+        !world.events_of("quiet", "round-finished").is_empty()
+    });
+}
+
+#[test]
+fn a_round_that_outlives_its_budget_cancels_its_workers_and_asks_the_planner() {
+    let world = World::new("plan-budget");
+    world.script("slow.wait", "hold");
+    let path = world.plan("budgeted", &plan_of("budgeted", vec![agent("slow", &[])]));
+    world
+        .run(&[
+            "start",
+            &path.to_string_lossy(),
+            "--detach",
+            "--round-budget",
+            "1",
+        ])
+        .exited(0);
+
+    world.until("the budget to be spent", |world| {
+        !world
+            .events_of("budgeted", "round-budget-exceeded")
+            .is_empty()
+    });
+    let exceeded = world.events_of("budgeted", "round-budget-exceeded");
+    assert_eq!(exceeded[0]["payload"]["budget_seconds"], 1);
+
+    // Blocking, so a wedged dispatch layer cannot leave the planner silent.
+    let surfaced = world
+        .events_of("budgeted", "planner-surface-queued")
+        .into_iter()
+        .find(|event| event["payload"]["kind"] == "round-budget")
+        .expect("the spent budget was surfaced");
+    assert_eq!(surfaced["payload"]["blocking"], true);
+
+    world.release("slow.go");
+    world.until("the round to finish", |world| {
+        !world.events_of("budgeted", "round-finished").is_empty()
+    });
+    // The in-flight work was cancelled cooperatively rather than killed.
+    let result = world.run_json("budgeted", "round-01/result.json");
+    assert_eq!(result["nodes"][0]["status"], "cancelled", "{result}");
+}

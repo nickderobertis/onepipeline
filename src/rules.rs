@@ -5,8 +5,8 @@
 //! where the node dispatches; a rule with no `when` is the fallback.
 //!
 //! The grammar is what makes a dispatch-server or Kubernetes executor a config
-//! change rather than a code change: [`select`] evaluates the same ordered
-//! predicates whatever executors are declared.
+//! change rather than a code change: [`ExecutorRules::select`] evaluates the same
+//! ordered predicates whatever executors are declared.
 
 // llmlint: ignore-file[invalid_states_unrepresentable] `min_free_mem` stays the `2GiB`
 // string the contract's example spells — the wire syntax is the contract's, and
@@ -106,7 +106,7 @@ pub fn bytes_of(text: &str) -> Option<u64> {
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
 pub enum ExecutorKind {
-    /// [`LocalExecutor`](crate::executor::LocalExecutor) — the only kind v1
+    /// [`crate::executor::LocalExecutor`] — the only kind v1
     /// ships.
     Local,
 }
