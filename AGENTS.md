@@ -34,22 +34,11 @@ never a unilateral edit.
 and drives them through the public types, so the doc and the types cannot drift.
 Adding a contract type without extending that test leaves the doc unproven.
 
-Where the contract names a sibling type that sibling does not export, the
-divergence is recorded in [`docs/contract-divergences.md`](docs/contract-divergences.md)
-and the code compiles against the type that **does** exist. Resolve such a
-conflict by amending that file and reporting it — never by inventing a local
-stand-in for a type the contract says belongs to a sibling.
-
-### Interface-only
-
-The crate implements the contract's surface and nothing behind it. Every command
-parses and then refuses with `NOT IMPLEMENTED` and **exit code 70**: a caller
-wired in early must fail visibly rather than read an empty stream as a run that
-settled, and anything published makes that promise and no other. The low exit
-codes are unavailable for it — the contract spends `0`/`1`/`2` on `reply`'s
-applied/queued/refused verdicts and `3` on "nothing is driving the run" — so the
-refusal uses `EX_SOFTWARE`. Hold that promise until the implementation lands;
-`scripts/smoke-published.sh` asserts it.
+The crate implements that surface and **nothing behind it**: every command
+parses and then refuses, so anything published makes that promise and no other.
+[`src/AGENTS.md`](src/AGENTS.md) holds the rules that stage imposes, and
+[`docs/contract-divergences.md`](docs/contract-divergences.md) records every
+place the contract could not be compiled exactly as written.
 
 ## Stack and composition
 
@@ -96,19 +85,6 @@ consuming `project.json` — an undeclared one silently drops that project out o
   and where they come from; the values live in the platform secret store.
 
 When a journey lands, its real e2e lands with it.
-
-## The sibling crates
-
-`oneagentgraph` and `onevcs` are consumed as **git dependencies pinned by
-revision**, each carrying the `version` it will publish under so the dependency
-is not a wildcard and the requirement is already release-shaped. Releasing this
-crate is then deleting the two `git`/`rev` pairs.
-
-**Do not publish this crate to crates.io before both siblings are there** — the
-version requirements would resolve to nothing and the published crate would not
-build. Cargo will not stop you: the `version` is what makes `cargo publish`
-willing. The guard is that `release.yml`'s `publish-crate` job self-activates on
-`CARGO_REGISTRY_TOKEN`, so leave that secret unset until the siblings publish.
 
 ## Commits, releases, and merging
 

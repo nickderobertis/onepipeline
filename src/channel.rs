@@ -9,6 +9,16 @@
 //! applied-or-rejected-with-reason promise is the reconciler's, and the
 //! reconciler is what this stage does not implement.
 
+// llmlint: ignore-file[invalid_states_unrepresentable] every node id, dependency
+// reference, and human-action reference here is a `String` because a `NodeId`/`NodeRef`
+// newtype is a public item `docs/contract.md` does not name, and minting one is the
+// interface drift the interface-only stage forbids (see src/AGENTS.md). `version` and
+// `completion` stay independent optionals for the same reason: the contract's envelope is
+// "legacy verdicts *plus* a version-1 command list", so a reply may legally carry either,
+// both, or a version this build does not know — and collapsing that into one enum would
+// reject envelopes the protocol accepts. Narrow all of it when the reconciler lands with
+// a graph to validate references against.
+
 // llmlint: ignore-file[boundary_inputs_validated] a reply is external input and its
 // *structural* boundary is enforced here — an unknown `op`, a missing required field, or
 // an unknown key is rejected by serde and asserted in `tests/contract.rs`. The *semantic*

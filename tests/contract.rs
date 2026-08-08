@@ -113,10 +113,6 @@ fn assert_contract_names(what: &str, names: &[&str]) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// The executor rules grammar
-// ---------------------------------------------------------------------------
-
 #[test]
 fn the_contracts_rules_example_parses_and_round_trips() {
     let yaml = fenced_block("yaml");
@@ -185,10 +181,6 @@ fn the_shipped_rules_example_is_the_contracts_own() {
         "the shipped executor-rules example must be the contract's own"
     );
 }
-
-// ---------------------------------------------------------------------------
-// The executor seam
-// ---------------------------------------------------------------------------
 
 #[test]
 fn the_dispatch_request_carries_every_field_the_contract_declares() {
@@ -312,10 +304,6 @@ fn the_contract_declares_the_seams_traits_and_methods() {
         );
     }
 }
-
-// ---------------------------------------------------------------------------
-// The plan schema
-// ---------------------------------------------------------------------------
 
 /// A plan exercising every node shape the contract names.
 fn every_node_shape() -> Value {
@@ -512,10 +500,6 @@ fn the_shipped_example_plans_parse() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// The channel
-// ---------------------------------------------------------------------------
-
 /// The ops the contract lists, in the order it lists them.
 const OPS: &[&str] = &[
     "add", "drop", "reparent", "retry", "cancel", "requeue", "attest", "complete", "context",
@@ -662,10 +646,6 @@ fn the_reply_exit_codes_are_the_ones_the_contract_assigns() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// The merged event stream
-// ---------------------------------------------------------------------------
-
 #[test]
 fn an_envelope_round_trips_through_the_merged_streams_shape() {
     let wire = json!({
@@ -753,10 +733,6 @@ fn a_relayed_envelope_keeps_its_producers_own_kind() {
     assert_eq!(envelope.kind, EventKind("gate-finished".into()));
     assert_eq!(serde_json::to_value(&envelope).expect("serializes"), wire);
 }
-
-// ---------------------------------------------------------------------------
-// The CLI surface
-// ---------------------------------------------------------------------------
 
 #[test]
 fn the_driver_contracts_invocation_parses_exactly_as_written() {
@@ -885,10 +861,6 @@ fn a_command_outside_the_surface_is_refused() {
         .expect_err("the surface is exactly what the contract names");
 }
 
-// ---------------------------------------------------------------------------
-// The shipped content
-// ---------------------------------------------------------------------------
-
 #[test]
 fn the_dag_scope_graph_is_an_orchestrator_plus_a_resettable_check_in() {
     assert!(CONTRACT
@@ -989,10 +961,6 @@ fn the_pr_author_never_blocks_publication() {
         "the persona itself says the dispatch is not on the publication path"
     );
 }
-
-// ---------------------------------------------------------------------------
-// Divergences
-// ---------------------------------------------------------------------------
 
 #[test]
 fn every_recorded_divergence_names_a_type_the_contract_actually_declares() {

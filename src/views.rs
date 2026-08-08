@@ -8,6 +8,13 @@
 //!
 //! Nothing here reads a ledger, probes a process, or renders anything.
 
+// llmlint: ignore-block[names_match_behavior] `Parked` reads as a deliberate idle, and
+// for a *node* it is one — but this is the *run* liveness verdict, and `PARKED` is the
+// word `docs/contract.md` fixes for it ("DRIVER DEAD vs PARKED vs UNDRIVEN"). Renaming it
+// would make this crate's views disagree with the contract and with the operators who
+// already read that word off them; the collision is exactly what the doc comment below
+// exists to disarm. Raise it with the planner who owns the contract, not here.
+
 /// Whether a run is being driven, and if not, why not.
 ///
 /// The three are deliberately distinct. A run whose *driver* died is not lost —
@@ -32,3 +39,4 @@ pub enum DriverLiveness {
     /// own `cancel` produces.
     Undriven,
 }
+// llmlint: ignore-end[names_match_behavior]

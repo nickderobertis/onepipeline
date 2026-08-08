@@ -80,10 +80,13 @@ done
 code=0
 onepipeline next smoke-run >/dev/null 2>&1 || code=$?
 case "$code" in
+  70) ;;
   0) fail "'next' exited 0 without reading anything" \
        "an interface-only build must refuse; a caller reads exit 0 as a surface it consumed" ;;
   1|2|3) fail "'next' exited $code, a code the contract already assigns" \
        "the interface-only refusal must not be readable as applied, queued, refused, or undriven" ;;
+  *) fail "'next' exited $code, which is neither the interface-only refusal (70) nor a code the contract assigns" \
+       "run 'onepipeline next smoke-run' by hand to see what the installed binary is doing" ;;
 esac
 
 echo "$label: surface smoke test passed${expect_version:+ for $expect_version}"

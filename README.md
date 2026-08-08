@@ -88,9 +88,9 @@ just check       # the deterministic gate
 just gate        # check + the diff-scoped llmlint tier
 ```
 
-`just --list` is the full command surface. [`AGENTS.md`](AGENTS.md) holds the
-durable instructions, and [`docs/contract-divergences.md`](docs/contract-divergences.md)
-records every place the code could not compile the contract exactly as written.
+`just --list` is the full command surface.
+[`docs/contract-divergences.md`](docs/contract-divergences.md) records every place
+the code could not compile the contract exactly as written.
 
 ## License
 

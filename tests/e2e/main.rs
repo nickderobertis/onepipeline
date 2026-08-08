@@ -97,6 +97,36 @@ fn every_command_parses_and_then_refuses_loudly() {
     }
 }
 
+/// Every optional flag and positional the contract names, beyond the minimal
+/// invocations in [`COMMANDS`]. Each is a form a user can type, so each is
+/// driven through the binary rather than only through the parser.
+const OPTIONAL_FORMS: &[(&str, &[&str])] = &[
+    ("start --attach", &["start", "plan.json", "--attach"]),
+    ("start --detach", &["start", "plan.json", "--detach"]),
+    ("stop --force", &["stop", "run-1", "--force"]),
+    ("runs --mine", &["runs", "--mine"]),
+    ("status RUN", &["status", "run-1"]),
+    ("goals RUN", &["goals", "run-1"]),
+    ("telemetry RUN", &["telemetry", "run-1"]),
+    (
+        "telemetry RUN --breakdown",
+        &["telemetry", "run-1", "--breakdown"],
+    ),
+];
+
+#[test]
+fn every_optional_form_the_contract_names_reaches_the_binary() {
+    for (name, args) in OPTIONAL_FORMS {
+        let assert = onepipeline().args(*args).assert().code(NOT_IMPLEMENTED);
+        let stderr =
+            String::from_utf8(assert.get_output().stderr.clone()).expect("stderr is UTF-8");
+        assert!(
+            stderr.contains("NOT IMPLEMENTED"),
+            "`{name}` did not reach the refusal:\n{stderr}"
+        );
+    }
+}
+
 #[test]
 fn the_refusal_names_the_subcommand_the_user_typed() {
     for (typed, args) in [
