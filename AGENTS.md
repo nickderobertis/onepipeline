@@ -100,9 +100,15 @@ When a journey lands, its real e2e lands with it.
 ## The sibling crates
 
 `oneagentgraph` and `onevcs` are consumed as **git dependencies pinned by
-revision** until either publishes to crates.io. A `git` dependency cannot be
-published to crates.io, so the pin is also the release blocker: swap both to
-version requirements in the same change that first releases this crate.
+revision**, each carrying the `version` it will publish under so the dependency
+is not a wildcard and the requirement is already release-shaped. Releasing this
+crate is then deleting the two `git`/`rev` pairs.
+
+**Do not publish this crate to crates.io before both siblings are there** — the
+version requirements would resolve to nothing and the published crate would not
+build. Cargo will not stop you: the `version` is what makes `cargo publish`
+willing. The guard is that `release.yml`'s `publish-crate` job self-activates on
+`CARGO_REGISTRY_TOKEN`, so leave that secret unset until the siblings publish.
 
 ## Commits, releases, and merging
 

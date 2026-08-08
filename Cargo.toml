@@ -59,12 +59,16 @@ thiserror = "2"
 # The siblings this crate composes. Dependency direction is one-way —
 # onepipeline -> {oneagentgraph, onevcs} — and neither may depend back.
 #
-# Pinned by revision rather than by version because neither has reached
-# crates.io yet. A `git` dependency cannot be published, so these pins are also
-# this crate's release blocker: swap both to version requirements in the change
-# that first releases it (AGENTS.md, "The sibling crates").
-oneagentgraph = { git = "https://github.com/nickderobertis/oneagentgraph.git", rev = "e88f70aabf3f60ae380c26228de640f1e5af2441" }
-onevcs = { git = "https://github.com/nickderobertis/onevcs.git", rev = "131bad3ee4d6ee95754d909d8b460f2da4258b63" }
+# Resolved from git by revision, because neither has reached crates.io yet. Each
+# also carries the `version` it will be published under, for two reasons: the
+# dependency is then not a wildcard, so `cargo deny`'s ban on those stays on
+# unweakened; and the requirement is already the one a published crate needs, so
+# releasing this crate is deleting two `git`/`rev` pairs rather than rewriting
+# the manifest. Until then the `rev` is what cargo actually resolves — and this
+# crate must not be published before the siblings are (AGENTS.md, "The sibling
+# crates").
+oneagentgraph = { version = "0.1", git = "https://github.com/nickderobertis/oneagentgraph.git", rev = "e88f70aabf3f60ae380c26228de640f1e5af2441" }
+onevcs = { version = "0.1", git = "https://github.com/nickderobertis/onevcs.git", rev = "131bad3ee4d6ee95754d909d8b460f2da4258b63" }
 
 [dev-dependencies]
 assert_cmd = "2"

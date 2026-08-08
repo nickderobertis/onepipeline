@@ -35,3 +35,10 @@ skip-tree = []
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# The two sibling repositories this crate composes, and only those. An
+# unrecognised git source still fails, so a dependency cannot quietly arrive
+# from somewhere nobody reviewed.
+allow-git = [
+    "https://github.com/nickderobertis/oneagentgraph",
+    "https://github.com/nickderobertis/onevcs",
+]
