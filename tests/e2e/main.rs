@@ -103,6 +103,14 @@ fn every_command_parses_and_then_refuses_loudly() {
 const OPTIONAL_FORMS: &[(&str, &[&str])] = &[
     ("start --attach", &["start", "plan.json", "--attach"]),
     ("start --detach", &["start", "plan.json", "--detach"]),
+    (
+        "start --round-budget",
+        &["start", "plan.json", "--round-budget", "14400"],
+    ),
+    (
+        "start --heartbeat-interval",
+        &["start", "plan.json", "--heartbeat-interval", "1800"],
+    ),
     ("stop --force", &["stop", "run-1", "--force"]),
     ("runs --mine", &["runs", "--mine"]),
     ("status RUN", &["status", "run-1"]),
@@ -171,6 +179,10 @@ fn a_missing_required_argument_is_a_usage_error() {
         vec!["attest", "run-1"],
         vec!["surface", "run-1", "--kind", "check-in"],
         vec!["round"],
+        // Both budgets are seconds, so a non-numeric value is rejected before
+        // anything is launched rather than silently defaulted.
+        vec!["start", "plan.json", "--round-budget", "forever"],
+        vec!["start", "plan.json", "--heartbeat-interval", "half-hourly"],
     ] {
         onepipeline().args(&args).assert().code(USAGE_ERROR);
     }
