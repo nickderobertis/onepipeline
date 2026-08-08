@@ -52,7 +52,17 @@ place the contract could not be compiled exactly as written.
   there is no second asset-naming contract to drift. The GitHub Release archives
   are attached for manual download only. asdf / direnv — the committed
   `rust-toolchain.toml`, `Cargo.lock`, and `package-lock.json` already pin the
-  workspace. A benchmark tier — nothing here is a hot path yet.
+  workspace. A benchmark tier — nothing here is a hot path yet. A `typecheck`
+  target — `cargo clippy --all-targets -D warnings` *is* the crate's type check
+  and already runs in `lint`, and the packaging project is three JavaScript files
+  with no type system; a separate target would re-compile the tree to learn
+  nothing new. An ESLint `enforce-module-boundaries` rule for the project tags —
+  the two projects share no imports (one is a Rust crate, the other a launcher
+  that `exec`s its binary), so it would mean adding ESLint to a repo whose JS is
+  linted by Biome, purely to enforce a boundary nothing can cross. A third Nx
+  project for the PyPI wheel — maturin builds it from this same crate, so it is a
+  second packaging of one deliverable rather than a second deliverable; CI's
+  `wheel` job proves it end to end.
 
 ## Command surface
 

@@ -12,7 +12,7 @@
 # rather than Nx's whole task log. The log is preserved rather than discarded:
 # `.logs/nx.log` is a path both messages name, which a reader can `tail -f` while
 # the run is still going and still read after it exits.
-# `ONEAGENTGRAPH_NX_SHOW_OUTPUT=1` streams instead, for the callers that read
+# `ONEPIPELINE_NX_SHOW_OUTPUT=1` streams instead, for the callers that read
 # Nx's stdout (`nx show projects --json`).
 #
 # Nx orchestrates targets; it is never a runtime dependency of the scripts it
@@ -57,7 +57,7 @@ NX_BIN="node_modules/.bin/nx"
 # Streaming mode: hand Nx's own streams straight through, untouched. The callers
 # that ask for this parse stdout, so nothing may be added to it — not even a
 # summary line.
-if [ "${ONEAGENTGRAPH_NX_SHOW_OUTPUT:-}" = "1" ]; then
+if [ "${ONEPIPELINE_NX_SHOW_OUTPUT:-}" = "1" ]; then
   exec "$NX_BIN" "$@"
 fi
 

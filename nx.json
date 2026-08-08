@@ -33,6 +33,12 @@
     "bootstrap": {
       "cache": false
     },
+    "build": {
+      "cache": true,
+      "inputs": [
+        "default"
+      ]
+    },
     "format": {
       "cache": false
     },

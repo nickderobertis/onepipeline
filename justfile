@@ -81,6 +81,13 @@ gate base="origin/main": check
 nx *ARGS:
     @bash scripts/nx.sh {{ARGS}}
 
+# Every project's build. The Rust crate compiles its binary, library, and test
+# targets; the packaging project assembles the npm launcher the same way a
+# release does. Nothing here publishes.
+# Build every project's artifact.
+build:
+    @bash scripts/nx.sh run-many -t build
+
 # Verify formatting without modifying files.
 fmt-check:
     @bash scripts/nx.sh run-many -t format-check
@@ -104,6 +111,11 @@ doc:
 # Verify the crate's formatting without modifying files.
 _crate-fmt-check:
     @cargo fmt --all -- --check || { echo "formatting drift above — run 'just format'" >&2; exit 1; }
+
+# Warnings are errors here too: a build the gate would reject is not a build.
+# Compile the crate's binary, library, and test targets.
+_crate-build:
+    @RUSTFLAGS="-D warnings" cargo build --locked --all-targets --quiet
 
 # Format the crate in place.
 _crate-format:

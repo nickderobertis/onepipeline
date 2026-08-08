@@ -35,7 +35,7 @@ cd "$ROOT" || {
 # base branch, so scoping against it would find nothing changed and skip every
 # check. There is no base there, and no base means run everything.
 base_branch() {
-  local ref="${ONEAGENTGRAPH_NX_BASE_REF:-${GITHUB_BASE_REF:-}}"
+  local ref="${ONEPIPELINE_NX_BASE_REF:-${GITHUB_BASE_REF:-}}"
   if [ -z "$ref" ]; then
     if [ -n "${CI:-}" ]; then
       echo "nx-affected: no base branch — this is not a pull-request build" >&2
@@ -78,7 +78,7 @@ case "${1:-}" in
     exit 0
   fi
   # Read for Nx's answer, so the wrapper must not fold it into a summary line.
-  if ! projects="$(ONEAGENTGRAPH_NX_SHOW_OUTPUT=1 bash scripts/nx.sh show projects --affected --base="$base" --head=HEAD --json)"; then
+  if ! projects="$(ONEPIPELINE_NX_SHOW_OUTPUT=1 bash scripts/nx.sh show projects --affected --base="$base" --head=HEAD --json)"; then
     echo "nx-affected: Nx could not list the affected projects — treating '$project' as affected" >&2
     printf 'true\n'
     exit 0
