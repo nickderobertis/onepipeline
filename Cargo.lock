@@ -374,6 +374,7 @@ version = "0.1.0"
 dependencies = [
  "assert_cmd",
  "clap",
+ "libc",
  "oneagentgraph",
  "onevcs",
  "predicates",
@@ -381,6 +382,7 @@ dependencies = [
  "serde_json",
  "serde_norway",
  "thiserror",
+ "windows-sys",
 ]
 
 [[package]]

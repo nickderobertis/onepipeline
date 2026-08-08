@@ -39,4 +39,31 @@ pub mod plan;
 pub mod rules;
 pub mod views;
 
+// The engine behind the contract's surface. These modules are private on
+// purpose: `docs/contract.md` names the plan schema, the channel, the executor
+// seam, the rules grammar, and the views, and a public item it does not name is
+// a promise this crate did not make. The binary reaches them through
+// [`run`](crate::run).
+mod agentgraph;
+mod driver;
+mod edits;
+mod engine;
+mod graph;
+mod journal;
+mod ledger;
+mod lifecycle;
+mod projection;
+mod sys;
+mod telemetry;
+mod vcs;
+
 pub use error::{Error, Result};
+
+/// Execute one parsed command line.
+///
+/// The binary is this function plus argument parsing and an exit code, so every
+/// journey a user can reach is reachable from a test that drives the same
+/// entry point the binary does.
+pub fn run(cli: cli::Cli) -> Result<i32> {
+    driver::dispatch(cli)
+}

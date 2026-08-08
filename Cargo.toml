@@ -62,6 +62,19 @@ thiserror = "2"
 oneagentgraph = { version = "0.1", git = "https://github.com/nickderobertis/oneagentgraph.git", rev = "e88f70aabf3f60ae380c26228de640f1e5af2441" }
 onevcs = { version = "0.1", git = "https://github.com/nickderobertis/onevcs.git", rev = "131bad3ee4d6ee95754d909d8b460f2da4258b63" }
 
+# Process liveness is the one host fact this crate cannot get from `std` on the
+# MSRV floor, and every `DRIVER DEAD` / `PARKED` verdict rests on it. Both are
+# already in the dependency graph transitively; naming them here makes the
+# platform call explicit rather than incidental.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_System_Threading",
+] }
+
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"
