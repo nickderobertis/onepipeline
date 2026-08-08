@@ -14,10 +14,14 @@
 // crate can start a process that says no. Revisit each seam as its sibling implements
 // it — the doubles are scripted per test and swapping one out is an env var.
 
-// llmlint: ignore-file[dead_code_is_deleted] a shared harness is used a piece at a time:
-// every helper is exercised by some journey, and none by all of them. Deleting the ones a
-// single test file happens not to reach would make the next journey re-add them.
-#![allow(dead_code)]
+// A shared harness is used a piece at a time: every helper below is exercised by some
+// journey, and none by all of them. Rust judges that per test binary, so without this the
+// unused-code warning fires on whatever the current selection happens not to reach.
+#![allow(
+    dead_code,
+    reason = "shared test scaffolding: each helper is used by some journey, and the \
+              unused-code check cannot see across the ones that do not"
+)]
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -322,30 +326,23 @@ pub fn binary() -> PathBuf {
 
 /// One of the sibling doubles, beside the binary cargo built.
 ///
-/// The doubles live in a separate workspace member so they can never ship, and
-/// a package-scoped build — `cargo llvm-cov` runs one — does not build another
-/// member's binaries. So the fixture builds itself, into the same target
-/// directory the binary under test came from. Cargo's own lock serialises the
-/// handful of test processes that race to do it first.
+/// The doubles live in a separate workspace member so they can never ship, and a
+/// package-scoped build — `cargo llvm-cov` runs one — does not build another
+/// member's binaries. So the fixture builds itself.
+///
+/// Cargo is the freshness check, not the file's existence: a double whose source
+/// changed has to be rebuilt, and a harness that stopped at "the binary is
+/// there" would silently run last week's fixture against this week's test. The
+/// build happens once per process; `.config/nextest.toml` bounds how many run at
+/// a time, and cargo's own lock serialises those.
 pub fn double(name: &str) -> PathBuf {
+    static BUILT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+
     let debug = binary()
         .parent()
         .expect("the binary is in a directory")
         .to_path_buf();
-    let path = debug.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
-    if path.is_file() {
-        return path;
-    }
-    // Every test runs in its own process, so without a token they would all
-    // start a cargo of their own and queue on its target-directory lock. One
-    // wins the token and builds; the rest wait for the file it produces.
-    let token = debug.join("onepipeline-doubles.building");
-    let ours = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&token)
-        .is_ok();
-    if ours {
+    BUILT.get_or_init(|| {
         let target = debug
             .parent()
             .expect("the profile directory is inside a target directory");
@@ -357,20 +354,18 @@ pub fn double(name: &str) -> PathBuf {
             .output()
             .expect("cargo builds the subprocess doubles");
         assert!(
-            path.is_file(),
-            "the {name} double was not built: {}",
+            built.status.success(),
+            "the subprocess doubles did not build: {}",
             String::from_utf8_lossy(&built.stderr)
         );
-        return path;
-    }
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
-    while std::time::Instant::now() < deadline {
-        if path.is_file() {
-            return path;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-    panic!("the {name} double never appeared at {}", path.display());
+    });
+    let path = debug.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+    assert!(
+        path.is_file(),
+        "the {name} double is missing from {}",
+        debug.display()
+    );
+    path
 }
 
 /// A file shipped in the repository.

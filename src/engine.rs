@@ -460,11 +460,6 @@ fn cancelled_by(command: &Command) -> Vec<String> {
 }
 
 /// Start every node whose dependencies have settled, bounded by `concurrency`.
-// llmlint: ignore[modern_domain_modeling] the arguments are the reconcile loop's own
-// borrowed state — the ledger, its single writer, the folded run, the round, the rules,
-// the dispatch channel, and the in-flight map. Bundling them into a struct would mean
-// holding a `&mut` to the whole loop across a call that already needs three independent
-// mutable borrows out of it.
 #[allow(
     clippy::too_many_arguments,
     reason = "the reconcile loop's borrowed state, which cannot be bundled without \
