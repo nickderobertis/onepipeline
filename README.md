@@ -1,0 +1,97 @@
+# onepipeline
+
+Execute a task DAG over [`oneagentgraph`](https://github.com/nickderobertis/oneagentgraph)
+and [`onevcs`](https://github.com/nickderobertis/onevcs), merging their event
+streams into one.
+
+`onepipeline` is the composition layer. It owns the plan — a dependency graph
+mixing direct agent nodes, repository lifecycle nodes, and explicit human actions
+— schedules it in rounds, dispatches each node through a pluggable **executor
+seam**, and keeps a live channel open to the planner supervising the run. The
+agents come from `oneagentgraph`; the clones, worktrees, gates, and change
+requests come from `onevcs`. Dependency direction is one-way: neither sibling
+depends on this crate.
+
+> **This build implements none of it.** `onepipeline` is at the *interface-only*
+> stage: the public types, traits, config schemas, and CLI surface are the
+> approved contract in [`docs/contract.md`](docs/contract.md), compiled, and
+> every command parses and then refuses with exit code `70`. Nothing runs yet.
+
+## Install
+
+```bash
+pip install onepipeline-cli      # prebuilt binary, no Rust toolchain
+npm install -g onepipeline-cli   # the same binary, via npm
+cargo install onepipeline        # from crates.io, compiled locally
+```
+
+To install a revision that has not been released yet — which today is every
+revision, since the crate depends on its siblings by git and a git dependency
+cannot be published — build it from the repository:
+
+```bash
+cargo install --git https://github.com/nickderobertis/onepipeline --locked
+```
+
+Prebuilt archives for Linux (x86-64, arm64), macOS (Intel, Apple silicon), and
+Windows (x86-64) are attached to every release, with `sha256` checksums.
+
+## What it does
+
+```bash
+onepipeline start plan.json --round-budget 14400 --heartbeat-interval 1800
+```
+
+`start` launches the run's **dag-scope agent graph** — a shipped default of an
+`orchestrator` member driving the engine, and a resettable-cron `check-in` member
+that surfaces a status when nobody has reported one for a while. Attached, it
+returns when the run settles; exit `3` means nothing is driving the run, and
+`onepipeline adopt RUN` attaches a fresh driver to the intact ledger.
+
+The planner supervises over the channel:
+
+```bash
+onepipeline next run-1                                   # read the next surface
+onepipeline reply run-1 <<<'{"version":1,"commands":[    # edit the live graph
+  {"op":"retry","id":"failed","node":{"id":"retry","task":"..."}}]}'
+onepipeline attest run-1 design-approval                 # complete a human action
+```
+
+Every edit is applied or rejected with a reason: `reply` exits `0` when the
+reconciler applied it, `1` when it is queued but not yet reconciled, and `2` when
+it was refused.
+
+Read-only views — `runs`, `status`, `host`, `monitor`, `results`, `goals`,
+`telemetry` — report unread surfaces, driver liveness, and provider health
+without touching a run.
+
+## Where a dispatch runs
+
+The [executor seam](docs/contract.md) decides. v1 ships the local executor only;
+the trait and the rules grammar are shaped so a dispatch-server or Kubernetes
+executor is a config change rather than a code change.
+
+```yaml
+executors:
+  - {name: local, type: local, max_load1: 8.0, min_free_mem: 2GiB}
+rules:
+  - when: {executor_has_capacity: local}
+    use: local
+  - use: local
+```
+
+## Development
+
+```bash
+just bootstrap   # from a clean clone
+just check       # the deterministic gate
+just gate        # check + the diff-scoped llmlint tier
+```
+
+`just --list` is the full command surface. [`AGENTS.md`](AGENTS.md) holds the
+durable instructions, and [`docs/contract-divergences.md`](docs/contract-divergences.md)
+records every place the code could not compile the contract exactly as written.
+
+## License
+
+MIT.

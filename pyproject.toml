@@ -18,12 +18,12 @@ build-backend = "maturin"
 
 [project]
 name = "onepipeline-cli"
-description = "Compose agents into a graph over oneharness/onejudge and merge their outputs into one event stream."
+description = "Execute a task DAG over oneagentgraph and onevcs, merging their event streams into one."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [{ name = "Nick DeRobertis" }]
-keywords = ["agents", "orchestration", "cli", "ndjson", "llm"]
+keywords = ["orchestration", "dag", "agents", "cli", "ndjson"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",

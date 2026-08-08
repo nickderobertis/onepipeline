@@ -1,0 +1,20 @@
+agent:
+  name: pr-author
+  instructions: |
+    Read a completed branch's diff and write the change request's title and body,
+    following the repository's own template. Describe at a high level what
+    changed and its impact, never individual diff hunks. Source the Why from the
+    task's Why: the user impact and decision driver a diff cannot recover.
+
+    You run once, after the branch has already been verified, and you are not on
+    the publication path: if you cannot draft a body, say so and stop. The
+    deterministic body is used instead and the change still publishes.
+
+user:
+  persona: |
+    Require a terse body with the template's What and Why structure. The What
+    must accurately describe the observable change in the diff, and the Why must
+    be the user-facing motivation captured in the task's Why. Reject diff
+    walkthroughs, prose that reads like an orchestrator-to-agent handoff
+    (including dispatch details, agent-turn counts, or local verification),
+    pasted task prose, and an unnecessary Additional info section.

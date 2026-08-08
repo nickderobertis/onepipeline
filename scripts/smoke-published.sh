@@ -64,7 +64,7 @@ if [ -n "$expect_version" ] && [ "$reported" != "onepipeline $expect_version" ];
 fi
 
 help="$(onepipeline --help | tr -d '\r')"
-for command in run validate trigger reset-timer cancel history health smoke persona; do
+for command in start adopt round channel next reply surface attest stop runs status host monitor results goals telemetry; do
   case "$help" in
     *"$command"*) ;;
     *) fail "'--help' does not list the '$command' command" \
@@ -73,13 +73,17 @@ for command in run validate trigger reset-timer cancel history health smoke pers
 done
 
 # The refusal is part of the shipped contract while the crate is interface-only:
-# a build that silently succeeded here would report an unimplemented run as a
-# graph that settled.
+# a build that silently succeeded here would report an unimplemented run as one
+# that settled. It must also refuse with a code the contract has not already
+# spent — 0 applied, 1 queued, 2 refused, 3 nothing is driving the run — or a
+# caller reads the refusal as one of those answers.
 code=0
-onepipeline run graph.yaml >/dev/null 2>&1 || code=$?
-if [ "$code" -eq 0 ]; then
-  fail "'run' exited 0 without running anything" \
-    "an interface-only build must refuse; a caller reads exit 0 as a settled graph"
-fi
+onepipeline next smoke-run >/dev/null 2>&1 || code=$?
+case "$code" in
+  0) fail "'next' exited 0 without reading anything" \
+       "an interface-only build must refuse; a caller reads exit 0 as a surface it consumed" ;;
+  1|2|3) fail "'next' exited $code, a code the contract already assigns" \
+       "the interface-only refusal must not be readable as applied, queued, refused, or undriven" ;;
+esac
 
 echo "$label: surface smoke test passed${expect_version:+ for $expect_version}"

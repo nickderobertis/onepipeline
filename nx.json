@@ -9,7 +9,10 @@
       "{workspaceRoot}/package-lock.json",
       "{workspaceRoot}/justfile"
     ],
-    "default": ["{projectRoot}/**/*", "sharedGlobals"],
+    "default": [
+      "{projectRoot}/**/*",
+      "sharedGlobals"
+    ],
     "crateSource": [
       "{workspaceRoot}/src/**/*",
       "{workspaceRoot}/tests/**/*",
@@ -19,19 +22,51 @@
       "{workspaceRoot}/rust-toolchain.toml",
       "{workspaceRoot}/clippy.toml",
       "{workspaceRoot}/rustfmt.toml",
+      "{workspaceRoot}/docs/contract-divergences.md",
+      "{workspaceRoot}/personas/**/*",
+      "{workspaceRoot}/graphs/**/*",
+      "{workspaceRoot}/examples/**/*",
       "sharedGlobals"
     ]
   },
   "targetDefaults": {
-    "bootstrap": { "cache": false },
-    "format": { "cache": false },
-    "format-check": { "cache": true, "inputs": ["default"] },
-    "lint": { "cache": true, "inputs": ["default"] },
-    "test": { "cache": true, "inputs": ["default"] },
-    "doc": { "cache": true, "inputs": ["default"] },
+    "bootstrap": {
+      "cache": false
+    },
+    "format": {
+      "cache": false
+    },
+    "format-check": {
+      "cache": true,
+      "inputs": [
+        "default"
+      ]
+    },
+    "lint": {
+      "cache": true,
+      "inputs": [
+        "default"
+      ]
+    },
+    "test": {
+      "cache": true,
+      "inputs": [
+        "default"
+      ]
+    },
+    "doc": {
+      "cache": true,
+      "inputs": [
+        "default"
+      ]
+    },
     "check": {
       "cache": false,
-      "dependsOn": ["format-check", "lint", "test"]
+      "dependsOn": [
+        "format-check",
+        "lint",
+        "test"
+      ]
     }
   }
 }

@@ -1,0 +1,29 @@
+# The dag-scope agent graph `onepipeline start` launches: the orchestrator that
+# drives the run, and the pacemaker that surfaces a status when nobody has
+# reported one for a while.
+#
+# The two `*_config` paths are the operator's own onejudge and oneharness
+# configs — this graph names them, it does not ship them, exactly as the
+# oneagentgraph contract's own example does.
+version: 1
+name: dag-scope
+members:
+  orchestrator:
+    kind: onejudge
+    base_config: ./onejudge.base.yaml
+    persona: ../personas/orchestrator.yaml
+    agent:
+      oneharness_config: ./oneharness.orchestrator.toml
+    # The judge side is this crate's own channel server, so the planner replies
+    # to the orchestrator through the same conversation the orchestrator runs
+    # in. The driver substitutes the run id.
+    judge:
+      command: ["onepipeline", "channel", "serve", "${ONEPIPELINE_RUN_ID}"]
+    mode: bypass
+  check-in:
+    kind: oneharness
+    oneharness_config: ./oneharness.orchestrator.toml
+    persona: ../personas/check-in.yaml
+    # Resettable: every planner-visible surface restarts this clock, so a run
+    # that is already reporting does not also get a pacemaker surface.
+    schedule: {every: 1800, resettable: true}

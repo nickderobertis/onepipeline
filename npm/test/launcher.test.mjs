@@ -156,10 +156,10 @@ describe("the npm distribution", () => {
     const project = mkdtempSync(join(work, "app-"));
     installInto(project, [launcherTgz, platformTgz]);
 
-    // The interface-only refusal exits 3; a launcher that collapsed every
+    // The interface-only refusal exits 70; a launcher that collapsed every
     // failure to 1 would hide the contract's own codes from a caller.
-    const refused = launch(project, ["run", "graph.yaml"]);
-    assert.equal(refused.code, 3, refused.stderr);
+    const refused = launch(project, ["next", "run-1"]);
+    assert.equal(refused.code, 70, refused.stderr);
     assert.match(refused.stderr, /NOT IMPLEMENTED/);
   });
 

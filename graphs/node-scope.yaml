@@ -1,0 +1,18 @@
+# The default node-scope agent graph: one worker, supervised by one judge. A
+# plan node overrides it with `agent_graph`.
+#
+# The three `*_config` paths are the operator's own onejudge and oneharness
+# configs — this graph names them, it does not ship them.
+version: 1
+name: node-scope
+members:
+  worker:
+    kind: onejudge
+    base_config: ./onejudge.base.yaml
+    # The persona and the task both come from the node being dispatched, so
+    # neither is pinned here.
+    agent:
+      oneharness_config: ./oneharness.toml
+    judge:
+      oneharness_config: ./oneharness.judge.toml
+    mode: bypass

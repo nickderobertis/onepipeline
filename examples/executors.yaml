@@ -1,0 +1,10 @@
+# Where a node's dispatch runs. Rules are ordered: the first whose `when` holds
+# decides, and a rule with no `when` is the fallback. v1 ships the local executor
+# only, so both rules here name it — the grammar is what makes a dispatch-server
+# or Kubernetes executor a config change rather than a code change.
+executors:
+  - {name: local, type: local, max_load1: 8.0, min_free_mem: 2GiB}
+rules:
+  - when: {executor_has_capacity: local}
+    use: local
+  - use: local

@@ -1,13 +1,13 @@
 {
   "name": "onepipeline-cli",
   "version": "0.0.0-managed",
-  "description": "Compose agents into a graph over oneharness/onejudge and merge their outputs into one event stream.",
+  "description": "Execute a task DAG over oneagentgraph and onevcs, merging their event streams into one.",
   "keywords": [
-    "agents",
     "orchestration",
+    "dag",
+    "agents",
     "cli",
-    "ndjson",
-    "llm"
+    "ndjson"
   ],
   "homepage": "https://github.com/nickderobertis/onepipeline",
   "bugs": "https://github.com/nickderobertis/onepipeline/issues",

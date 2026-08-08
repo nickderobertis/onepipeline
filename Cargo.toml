@@ -1,0 +1,81 @@
+[workspace]
+# One member today — the crate at the root. Declared explicitly so a second
+# crate (a future engine, a test-support crate) joins the graph by being listed
+# here rather than by changing what `--workspace` means.
+members = ["."]
+resolver = "2"
+
+[package]
+name = "onepipeline"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+description = "Execute a task DAG over oneagentgraph and onevcs, merging their event streams into one."
+license = "MIT"
+repository = "https://github.com/nickderobertis/onepipeline"
+homepage = "https://github.com/nickderobertis/onepipeline"
+readme = "README.md"
+keywords = ["orchestration", "dag", "agents", "cli", "ndjson"]
+categories = ["command-line-utilities", "development-tools"]
+# What a consumer receives: the sources, the manifest, the readme, the licence,
+# the contract the API is written against — `tests/contract.rs` reads
+# `docs/contract.md`, so shipping the code without it would ship a crate whose
+# own test cannot run — and the shipped content the contract names. Excludes the
+# CLAUDE.md/AGENTS.md symlink (registries reject symlinks), CI config, and the
+# packaging scaffolding.
+include = [
+  "src/**/*.rs",
+  "tests/**/*.rs",
+  "Cargo.toml",
+  "README.md",
+  "LICENSE",
+  "/docs/contract.md",
+  "/personas/**",
+  "/graphs/**",
+  "/examples/**",
+]
+
+[[bin]]
+name = "onepipeline"
+path = "src/main.rs"
+
+[lib]
+name = "onepipeline"
+path = "src/lib.rs"
+
+[dependencies]
+clap = { version = "4.6", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+# `preserve_order` keeps JSON object keys in insertion order, so a re-serialized
+# envelope or reply carries its payload's fields in the order they arrived —
+# what the contract's deterministic rendering promise needs.
+serde_json = { version = "1", features = ["preserve_order"] }
+# Plan files are JSON; the executor-rules file and the agent-graph configs are
+# YAML. serde_norway is the maintained fork of the deprecated serde_yaml, and is
+# the same reader the sibling crates use.
+serde_norway = "0.9"
+thiserror = "2"
+
+# The siblings this crate composes. Dependency direction is one-way —
+# onepipeline -> {oneagentgraph, onevcs} — and neither may depend back.
+#
+# Pinned by revision rather than by version because neither has reached
+# crates.io yet. A `git` dependency cannot be published, so these pins are also
+# this crate's release blocker: swap both to version requirements in the change
+# that first releases it (AGENTS.md, "The sibling crates").
+oneagentgraph = { git = "https://github.com/nickderobertis/oneagentgraph.git", rev = "e88f70aabf3f60ae380c26228de640f1e5af2441" }
+onevcs = { git = "https://github.com/nickderobertis/onevcs.git", rev = "131bad3ee4d6ee95754d909d8b460f2da4258b63" }
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+
+[[test]]
+name = "e2e"
+path = "tests/e2e/main.rs"
+
+# A CLI binary: optimize for a small, fast-starting artifact.
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1
