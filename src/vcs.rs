@@ -168,6 +168,54 @@ pub fn events(token: &str) -> Vec<Envelope> {
         .collect()
 }
 
+/// The envelope that records a session opening, for the merged stream.
+///
+/// It carries `Source::Vcs` because `onevcs` is what opened the session: the
+/// merge is an interleaving of three streams, and a lifecycle node's branch
+/// belongs to that one.
+pub fn session_opened_event(session: &OpenSession, labels: &crate::event::Labels) -> Envelope {
+    Envelope {
+        v: crate::event::ENVELOPE_VERSION,
+        ts: crate::sys::now_rfc3339(),
+        stream: format!("onevcs-{}", session.token),
+        seq: 0,
+        source: crate::event::Source::Vcs,
+        kind: crate::event::EventKind("session-opened".into()),
+        labels: labels.clone(),
+        payload: crate::journal::payload(&[
+            ("token", serde_json::json!(session.token)),
+            ("branch", serde_json::json!(session.branch)),
+            ("base", serde_json::json!(session.base)),
+            ("worktree", serde_json::json!(session.worktree)),
+        ]),
+        artifacts: Vec::new(),
+    }
+}
+
+/// The envelope that records a publication, for the merged stream.
+pub fn published_event(
+    published: &Published,
+    branch: &str,
+    labels: &crate::event::Labels,
+) -> Envelope {
+    Envelope {
+        v: crate::event::ENVELOPE_VERSION,
+        ts: crate::sys::now_rfc3339(),
+        stream: format!("onevcs-{branch}"),
+        seq: 1,
+        source: crate::event::Source::Vcs,
+        kind: crate::event::EventKind("published".into()),
+        labels: labels.clone(),
+        payload: crate::journal::payload(&[
+            ("branch", serde_json::json!(branch)),
+            ("url", serde_json::json!(published.url)),
+            ("id", serde_json::json!(published.id)),
+            ("outcome", serde_json::json!(published.outcome)),
+        ]),
+        artifacts: Vec::new(),
+    }
+}
+
 /// The session a lifecycle node asks for.
 pub fn request_for(node: &crate::plan::Node) -> Option<SessionRequest> {
     Some(SessionRequest {

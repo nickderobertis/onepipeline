@@ -110,9 +110,11 @@ pub fn fold(events: &[Envelope]) -> RunState {
 }
 
 fn fold_one(state: &mut RunState, event: &Envelope) {
-    state.last_write_at = Some(millis_of(&event.ts).unwrap_or(0).max(
-        state.last_write_at.unwrap_or(0),
-    ));
+    state.last_write_at = Some(
+        millis_of(&event.ts)
+            .unwrap_or(0)
+            .max(state.last_write_at.unwrap_or(0)),
+    );
     if event.source != Source::Pipeline {
         // A relayed envelope is evidence the run is working, and nothing else:
         // a sibling library does not decide this crate's graph state.
@@ -152,7 +154,9 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
             }
         }
         journal::NODE_SETTLED => {
-            let Some(node) = &event.labels.node else { return };
+            let Some(node) = &event.labels.node else {
+                return;
+            };
             let status = payload
                 .get("status")
                 .and_then(Value::as_str)
@@ -352,7 +356,10 @@ mod tests {
                 journal::NODE_SETTLED,
                 3,
                 Some("build"),
-                &[("status", json!("failed")), ("outcome", json!("gate-failed"))],
+                &[
+                    ("status", json!("failed")),
+                    ("outcome", json!("gate-failed")),
+                ],
             ),
             pipeline(
                 journal::EDIT_COMMITTED,
@@ -379,7 +386,10 @@ mod tests {
         assert!(state.strict);
         assert_eq!(state.round, 1);
         assert!(state.round_open);
-        assert!(state.graph.contains("build-2"), "the replacement is not in the plan of record");
+        assert!(
+            state.graph.contains("build-2"),
+            "the replacement is not in the plan of record"
+        );
         assert_eq!(state.recorded["build"], NodeStatus::Cancelled);
         assert_eq!(state.outcomes["build"], "gate-failed");
         assert!(state.dispatched_at.contains_key("build"));
@@ -422,7 +432,10 @@ mod tests {
         let state = fold(&events);
         assert_eq!(state.round, 2);
         assert!(state.round_open);
-        assert!(state.recorded.is_empty(), "round 1's frontier leaked into round 2");
+        assert!(
+            state.recorded.is_empty(),
+            "round 1's frontier leaked into round 2"
+        );
     }
 
     #[test]
@@ -437,14 +450,24 @@ mod tests {
             pipeline(journal::RUN_STARTED, 0, None, &[("plan", json!(plan))]),
             pipeline(journal::PLANNER_SURFACE_QUEUED, 1, None, &[]),
             pipeline(journal::PLANNER_SURFACED, 2, None, &[]),
-            pipeline(journal::HUMAN_ATTESTED, 3, None, &[("ref", json!("approve"))]),
+            pipeline(
+                journal::HUMAN_ATTESTED,
+                3,
+                None,
+                &[("ref", json!("approve"))],
+            ),
             pipeline(
                 journal::COMPLETION_REQUESTED,
                 4,
                 None,
                 &[("reason", json!("verified"))],
             ),
-            pipeline(journal::UPSTREAM_MODIFIED, 5, None, &[("ref", json!("run:o#n"))]),
+            pipeline(
+                journal::UPSTREAM_MODIFIED,
+                5,
+                None,
+                &[("ref", json!("run:o#n"))],
+            ),
             pipeline(journal::RUN_STOPPED, 6, None, &[]),
         ];
         let state = fold(&events);
@@ -462,7 +485,12 @@ mod tests {
     #[test]
     fn a_relayed_sibling_envelope_is_evidence_of_work_and_nothing_more() {
         let plan = plan_of_nodes(vec![agent("build", &[])]);
-        let mut relayed = pipeline(journal::NODE_SETTLED, 1, Some("build"), &[("status", json!("done"))]);
+        let mut relayed = pipeline(
+            journal::NODE_SETTLED,
+            1,
+            Some("build"),
+            &[("status", json!("done"))],
+        );
         relayed.source = Source::Agentgraph;
         let state = fold(&[
             pipeline(journal::RUN_STARTED, 0, None, &[("plan", json!(plan))]),
@@ -484,7 +512,9 @@ mod tests {
             None,
             &[(
                 "operations",
-                json!([Operation::NodeParked { node: "sweep".into() }]),
+                json!([Operation::NodeParked {
+                    node: "sweep".into()
+                }]),
             )],
         );
         let state = fold(&[

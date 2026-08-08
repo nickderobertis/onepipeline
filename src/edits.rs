@@ -120,7 +120,11 @@ pub struct Frontier {
 /// The graph is mutated in place only on success: a command that fails
 /// validation leaves it exactly as it was, so a rejected edit in the middle of
 /// an envelope cannot half-apply.
-pub fn compile(graph: &mut Graph, frontier: &Frontier, command: &Command) -> Result<Vec<Operation>> {
+pub fn compile(
+    graph: &mut Graph,
+    frontier: &Frontier,
+    command: &Command,
+) -> Result<Vec<Operation>> {
     // Validate against a copy, so a refusal partway through a multi-edge
     // mutation cannot leave the caller's graph in a state nothing submitted.
     let mut candidate = graph.clone();
@@ -134,7 +138,7 @@ pub fn compile(graph: &mut Graph, frontier: &Frontier, command: &Command) -> Res
             concurrency: candidate.concurrency,
             tasks: Vec::new(),
         });
-        graph::validate(&plan).map_err(|e| Error::Refused(e.to_string()))?;
+        graph::validate_edited(&plan).map_err(|e| Error::Refused(e.to_string()))?;
     }
     *graph = candidate;
     Ok(operations)
@@ -453,8 +457,8 @@ fn compile_requeue(
         }
     }
 
-    let mut merged = serde_json::to_value(&node)
-        .map_err(|e| refuse(format!("requeue: node '{id}': {e}")))?;
+    let mut merged =
+        serde_json::to_value(&node).map_err(|e| refuse(format!("requeue: node '{id}': {e}")))?;
     if let (Some(object), Some(amend)) = (merged.as_object_mut(), amend) {
         for (key, value) in amend {
             object.insert(key.clone(), value.clone());
@@ -483,7 +487,9 @@ fn compile_attest(frontier: &Frontier, reference: &str) -> Result<Vec<Operation>
         )));
     }
     if frontier.attestations.contains(reference) {
-        return Err(refuse(format!("attest: '{reference}' was already attested")));
+        return Err(refuse(format!(
+            "attest: '{reference}' was already attested"
+        )));
     }
     Ok(vec![Operation::HumanAttested {
         node: reference.to_string(),
@@ -631,14 +637,21 @@ mod tests {
         .expect("the add is legal");
         assert!(graph.contains("b"));
         assert!(matches!(operations[0], Operation::NodeAdded { .. }));
-        assert!(matches!(&operations[1], Operation::EdgeAdded { from, to } if from == "a" && to == "b"));
+        assert!(
+            matches!(&operations[1], Operation::EdgeAdded { from, to } if from == "a" && to == "b")
+        );
     }
 
     #[test]
     fn add_refuses_a_duplicate_id_an_invalid_node_and_a_dangling_dependency() {
         let mut graph = graph_of(vec![agent("a", &[])]);
         let refusals = [
-            (Command::Add { node: agent("a", &[]) }, "already exists"),
+            (
+                Command::Add {
+                    node: agent("a", &[]),
+                },
+                "already exists",
+            ),
             (
                 Command::Add {
                     node: Node {
@@ -728,7 +741,11 @@ mod tests {
 
     #[test]
     fn drop_detaches_or_recursively_removes_and_must_state_which() {
-        let mut graph = graph_of(vec![agent("a", &[]), agent("b", &["a"]), agent("c", &["b"])]);
+        let mut graph = graph_of(vec![
+            agent("a", &[]),
+            agent("b", &["a"]),
+            agent("c", &["b"]),
+        ]);
         compile(
             &mut graph,
             &Frontier::default(),
@@ -742,7 +759,11 @@ mod tests {
         assert!(graph.get("b").expect("b").deps.is_empty());
         assert!(graph.contains("c"));
 
-        let mut graph = graph_of(vec![agent("a", &[]), agent("b", &["a"]), agent("c", &["b"])]);
+        let mut graph = graph_of(vec![
+            agent("a", &[]),
+            agent("b", &["a"]),
+            agent("c", &["b"]),
+        ]);
         compile(
             &mut graph,
             &Frontier::default(),
@@ -761,7 +782,10 @@ mod tests {
             repo: Some("owner/repo".into()),
             ..agent(id, deps)
         };
-        let mut graph = graph_of(vec![lifecycle("anchor", &[]), lifecycle("stacked", &["anchor"])]);
+        let mut graph = graph_of(vec![
+            lifecycle("anchor", &[]),
+            lifecycle("stacked", &["anchor"]),
+        ]);
         let message = compile(
             &mut graph,
             &Frontier::default(),
@@ -805,7 +829,10 @@ mod tests {
         )
         .unwrap_err()
         .to_string();
-        assert!(message.contains("not running, failed, or cancelled"), "{message}");
+        assert!(
+            message.contains("not running, failed, or cancelled"),
+            "{message}"
+        );
 
         let operations = compile(
             &mut graph,
@@ -922,13 +949,21 @@ mod tests {
     #[test]
     fn cancel_parks_a_pending_or_running_node_and_nothing_else() {
         let mut graph = graph_of(vec![agent("sweep", &[])]);
-        compile(&mut graph, &Frontier::default(), &Command::Cancel { id: "sweep".into() })
-            .expect("a pending node parks");
+        compile(
+            &mut graph,
+            &Frontier::default(),
+            &Command::Cancel { id: "sweep".into() },
+        )
+        .expect("a pending node parks");
         assert!(graph.get("sweep").expect("sweep").parked);
 
-        let message = compile(&mut graph, &Frontier::default(), &Command::Cancel { id: "sweep".into() })
-            .unwrap_err()
-            .to_string();
+        let message = compile(
+            &mut graph,
+            &Frontier::default(),
+            &Command::Cancel { id: "sweep".into() },
+        )
+        .unwrap_err()
+        .to_string();
         assert!(message.contains("already parked"), "{message}");
 
         let mut graph = graph_of(vec![agent("done", &[])]);
@@ -944,7 +979,9 @@ mod tests {
         assert!(compile(
             &mut graph,
             &Frontier::default(),
-            &Command::Cancel { id: "nowhere".into() }
+            &Command::Cancel {
+                id: "nowhere".into()
+            }
         )
         .unwrap_err()
         .to_string()
@@ -1019,7 +1056,10 @@ mod tests {
         assert!(compile(
             &mut graph,
             &Frontier::default(),
-            &Command::Requeue { id: "live".into(), amend: None }
+            &Command::Requeue {
+                id: "live".into(),
+                amend: None
+            }
         )
         .unwrap_err()
         .to_string()
@@ -1027,7 +1067,10 @@ mod tests {
         assert!(compile(
             &mut graph,
             &Frontier::default(),
-            &Command::Requeue { id: "nowhere".into(), amend: None }
+            &Command::Requeue {
+                id: "nowhere".into(),
+                amend: None
+            }
         )
         .unwrap_err()
         .to_string()
@@ -1064,7 +1107,9 @@ mod tests {
         assert!(compile(
             &mut graph,
             &Frontier::default(),
-            &Command::Attest { reference: "approve".into() }
+            &Command::Attest {
+                reference: "approve".into()
+            }
         )
         .unwrap_err()
         .to_string()
@@ -1085,7 +1130,9 @@ mod tests {
         assert!(compile(
             &mut graph,
             &already,
-            &Command::Attest { reference: "approve".into() }
+            &Command::Attest {
+                reference: "approve".into()
+            }
         )
         .unwrap_err()
         .to_string()
@@ -1215,7 +1262,9 @@ mod tests {
                 from: "a".into(),
                 to: "gone".into(),
             },
-            Operation::NodeParked { node: "gone".into() },
+            Operation::NodeParked {
+                node: "gone".into(),
+            },
             Operation::NodeRequeued {
                 node: "gone".into(),
                 amend: None,
@@ -1224,7 +1273,9 @@ mod tests {
                 node: "gone".into(),
                 note: "n".into(),
             },
-            Operation::HumanAttested { node: "gone".into() },
+            Operation::HumanAttested {
+                node: "gone".into(),
+            },
             Operation::CompletionRequested { reason: "r".into() },
         ] {
             apply(&mut graph, &operation);

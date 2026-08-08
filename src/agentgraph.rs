@@ -26,9 +26,6 @@ pub const DEFAULT_BINARY: &str = "oneagentgraph";
 /// The environment variable the dag-scope graph substitutes the run id into.
 pub const RUN_ID_ENV: &str = "ONEPIPELINE_RUN_ID";
 
-/// The member of the shipped dag-scope graph that drives the run.
-pub const ORCHESTRATOR_MEMBER: &str = "orchestrator";
-
 /// The member of the shipped dag-scope graph that paces planner updates.
 pub const CHECK_IN_MEMBER: &str = "check-in";
 
@@ -149,26 +146,19 @@ impl GraphRun {
         })
     }
 
-    /// Ask the graph to stop.
-    pub fn cancel(&mut self, kill: bool) {
-        if kill {
-            let _ = self.child.kill();
-        } else {
-            // Cooperative cancellation is the sibling's own verb: it gives the
-            // member a chance to preserve its work, which killing the process
-            // does not.
-            let _ = Command::new(binary())
-                .arg("cancel")
-                .arg(self.child.id().to_string())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
-        }
-    }
-
     /// The started process's id, for the ledger's record of what is running.
     pub fn pid(&self) -> u32 {
         self.child.id()
+    }
+
+    /// Whether the graph process has ended, reaping it if it has.
+    ///
+    /// Reaping is the point. A child nobody waits on stays a zombie, and a
+    /// zombie answers a liveness probe as alive — so an attach that never
+    /// collected its driver would report a run as driven long after nothing
+    /// was driving it.
+    pub fn has_exited(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(Some(_)))
     }
 }
 
@@ -207,23 +197,6 @@ pub fn reset_timer(run: &str, member: &str) -> Result<()> {
     Err(sibling(format!(
         "reset-timer {run} {member} exited {}: {}",
         output.status.code().unwrap_or(-1),
-        String::from_utf8_lossy(&output.stderr).trim()
-    )))
-}
-
-/// Check a graph config without running it.
-pub fn validate(graph: &str) -> Result<()> {
-    let output = Command::new(binary())
-        .arg("validate")
-        .arg(graph)
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| sibling(format!("cannot start `{} validate`: {e}", binary())))?;
-    if output.status.success() {
-        return Ok(());
-    }
-    Err(sibling(format!(
-        "{graph} is not a valid graph: {}",
         String::from_utf8_lossy(&output.stderr).trim()
     )))
 }

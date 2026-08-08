@@ -152,12 +152,17 @@ pub struct Graph {
 }
 
 impl Graph {
+    /// An empty graph that will dispatch at most `concurrency` nodes at once.
+    pub fn with_concurrency(concurrency: u32) -> Self {
+        Self {
+            concurrency,
+            ..Self::default()
+        }
+    }
+
     /// The graph a plan describes.
     pub fn from_plan(plan: &Plan) -> Self {
-        let mut graph = Self {
-            concurrency: plan.concurrency,
-            ..Self::default()
-        };
+        let mut graph = Self::with_concurrency(plan.concurrency);
         for node in &plan.tasks {
             graph.insert(node.clone());
         }
@@ -248,6 +253,19 @@ pub fn is_cross_dag(reference: &str) -> bool {
 /// External input is validated here, at its trust boundary, so an unsatisfiable
 /// graph is refused before any provider time is spent on it.
 pub fn validate(plan: &Plan) -> Result<()> {
+    if plan.tasks.is_empty() {
+        return Err(Error::Invalid("a plan needs at least one node".into()));
+    }
+    validate_edited(plan)
+}
+
+/// Check a graph an edit produced.
+///
+/// Every rule [`validate`] applies except one: an edit may legally empty the
+/// graph. A `drop` that removes the last node leaves a run with nothing left to
+/// do, which is a settled run rather than a malformed plan — refusing it would
+/// make the planner unable to abandon a graph it started.
+pub fn validate_edited(plan: &Plan) -> Result<()> {
     if plan.schema_version != crate::plan::PLAN_SCHEMA_VERSION {
         return Err(Error::Invalid(format!(
             "plan schema_version {} is not {}",
@@ -257,9 +275,6 @@ pub fn validate(plan: &Plan) -> Result<()> {
     }
     if plan.concurrency == 0 {
         return Err(Error::Invalid("concurrency must be at least 1".into()));
-    }
-    if plan.tasks.is_empty() {
-        return Err(Error::Invalid("a plan needs at least one node".into()));
     }
     if let Some(goal) = &plan.goal {
         if goal.text.trim().is_empty() {
@@ -281,7 +296,10 @@ pub fn validate(plan: &Plan) -> Result<()> {
     for node in &plan.tasks {
         for dep in &node.deps {
             if dep == &node.id {
-                return Err(Error::Invalid(format!("node '{}' depends on itself", node.id)));
+                return Err(Error::Invalid(format!(
+                    "node '{}' depends on itself",
+                    node.id
+                )));
             }
             if is_cross_dag(dep) {
                 continue;
@@ -307,19 +325,25 @@ pub fn validate_node(node: &Node) -> Result<()> {
 
     if node.kind == NodeKind::Human {
         if node.id.contains(STEP_SEPARATOR) {
-            return Err(named("a human id cannot contain '/', which addresses a step"));
+            return Err(named(
+                "a human id cannot contain '/', which addresses a step",
+            ));
         }
         if node.task.as_ref().is_none_or(|t| t.trim().is_empty()) {
             return Err(named("a human node needs task prose"));
         }
         if node.persona.is_some() || node.done_when.is_some() {
-            return Err(named("a human node has no dispatch, so no persona or done_when"));
+            return Err(named(
+                "a human node has no dispatch, so no persona or done_when",
+            ));
         }
         if node.repo.is_some() || node.steps.is_some() || node.expects_no_diff {
             return Err(named("a human node has no execution fields"));
         }
         if node.context.is_some() {
-            return Err(named("a planner note is addressed to a dispatch, and a human node has none"));
+            return Err(named(
+                "a planner note is addressed to a dispatch, and a human node has none",
+            ));
         }
         return Ok(());
     }
@@ -352,7 +376,9 @@ pub fn validate_node(node: &Node) -> Result<()> {
         }
         (Some(_), Some(steps)) => {
             if node.persona.is_some() || node.task.is_some() {
-                return Err(named("a node with steps takes its persona and task from them"));
+                return Err(named(
+                    "a node with steps takes its persona and task from them",
+                ));
             }
             validate_steps(node, steps)
         }
@@ -527,7 +553,9 @@ pub fn derive(
 
     // Anything still unresolved has a dependency that has not settled.
     for node in graph.iter() {
-        statuses.entry(node.id.clone()).or_insert(NodeStatus::Pending);
+        statuses
+            .entry(node.id.clone())
+            .or_insert(NodeStatus::Pending);
     }
     statuses
 }
@@ -847,23 +875,38 @@ mod tests {
     fn the_plan_envelope_itself_is_validated() {
         let mut plan = plan_of(vec![agent("a", &[])]);
         plan.schema_version = 99;
-        assert!(validate(&plan).unwrap_err().to_string().contains("schema_version"));
+        assert!(validate(&plan)
+            .unwrap_err()
+            .to_string()
+            .contains("schema_version"));
 
         let mut plan = plan_of(vec![agent("a", &[])]);
         plan.concurrency = 0;
-        assert!(validate(&plan).unwrap_err().to_string().contains("concurrency"));
+        assert!(validate(&plan)
+            .unwrap_err()
+            .to_string()
+            .contains("concurrency"));
 
         let mut plan = plan_of(vec![]);
         plan.tasks = vec![];
-        assert!(validate(&plan).unwrap_err().to_string().contains("at least one node"));
+        assert!(validate(&plan)
+            .unwrap_err()
+            .to_string()
+            .contains("at least one node"));
 
         let mut plan = plan_of(vec![agent("a", &[]), agent("a", &[])]);
         plan.tasks[1].id = "a".into();
-        assert!(validate(&plan).unwrap_err().to_string().contains("duplicate"));
+        assert!(validate(&plan)
+            .unwrap_err()
+            .to_string()
+            .contains("duplicate"));
 
         let mut plan = plan_of(vec![agent("a", &[])]);
         plan.goal = Some(Goal { text: "  ".into() });
-        assert!(validate(&plan).unwrap_err().to_string().contains("non-empty text"));
+        assert!(validate(&plan)
+            .unwrap_err()
+            .to_string()
+            .contains("non-empty text"));
     }
 
     #[test]
@@ -926,7 +969,10 @@ mod tests {
     fn a_recorded_gate_is_discarded_and_re_derived() {
         // The journal recorded `blocked` while a human waited. The human has
         // since been attested, so the same node must re-derive to ready.
-        let graph = Graph::from_plan(&plan_of(vec![human("approve", &[]), agent("ship", &["approve"])]));
+        let graph = Graph::from_plan(&plan_of(vec![
+            human("approve", &[]),
+            agent("ship", &["approve"]),
+        ]));
         let mut recorded = BTreeMap::new();
         recorded.insert("ship".to_string(), NodeStatus::Blocked);
         recorded.insert("approve".to_string(), NodeStatus::Done);
@@ -996,9 +1042,6 @@ mod tests {
             assert_eq!(NodeStatus::parse(status.as_str()), Some(status));
         }
         assert_eq!(NodeStatus::parse("invented"), None);
-        assert!(!NodeStatus::Done.is_dispatchable());
-        assert!(!NodeStatus::Parked.is_dispatchable());
-        assert!(NodeStatus::Failed.is_dispatchable());
     }
 
     #[test]

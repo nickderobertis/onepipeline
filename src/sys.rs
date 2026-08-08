@@ -134,7 +134,8 @@ fn platform_process_may_be_live(pid: u32) -> bool {
         // A pid that never existed is rejected as an invalid parameter; every
         // other failure (a permission refusal, most of all) leaves the question
         // open, so it resolves toward live.
-        return std::io::Error::last_os_error().raw_os_error() != Some(ERROR_INVALID_PARAMETER as i32);
+        return std::io::Error::last_os_error().raw_os_error()
+            != Some(ERROR_INVALID_PARAMETER as i32);
     }
     let mut code: u32 = 0;
     // SAFETY: `handle` is a live handle and `code` is a `u32` this frame owns.
@@ -180,6 +181,27 @@ pub fn session_digest(session: &str) -> String {
     format!("{:08x}", (hash >> 32) as u32)
 }
 
+/// A pid this host can prove is gone.
+///
+/// Every `DRIVER DEAD` test needs one, and a pid picked out of the air is not
+/// one: the kernel may have reused it. This spawns a real process and reaps it,
+/// so the absence is proved rather than assumed. The child is this test binary
+/// asked only to list its tests, which is portable and returns immediately.
+#[cfg(test)]
+pub(crate) fn reaped_pid() -> u32 {
+    let mut child = std::process::Command::new(
+        std::env::current_exe().expect("the test binary knows its own path"),
+    )
+    .args(["--list", "--format", "terse"])
+    .stdout(std::process::Stdio::null())
+    .stderr(std::process::Stdio::null())
+    .spawn()
+    .expect("the test binary starts");
+    let pid = child.id();
+    child.wait().expect("it exits");
+    pid
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,7 +215,7 @@ mod tests {
     fn a_known_instant_renders_with_its_milliseconds() {
         // 2026-08-08T13:29:45.678Z
         assert_eq!(
-            rfc3339_from_millis(1_786_296_585_678),
+            rfc3339_from_millis(1_786_195_785_678),
             "2026-08-08T13:29:45.678Z"
         );
     }
@@ -222,13 +244,7 @@ mod tests {
 
     #[test]
     fn a_reaped_process_is_proved_gone() {
-        let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_onepipeline"))
-            .arg("--version")
-            .stdout(std::process::Stdio::null())
-            .spawn()
-            .expect("the binary starts");
-        let dead = child.id();
-        child.wait().expect("it exits");
+        let dead = reaped_pid();
         assert!(!process_may_be_live(dead), "pid {dead} was reaped");
     }
 

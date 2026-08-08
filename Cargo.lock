@@ -376,6 +376,7 @@ dependencies = [
  "clap",
  "libc",
  "oneagentgraph",
+ "onepipeline-testfakes",
  "onevcs",
  "predicates",
  "serde",
@@ -383,6 +384,13 @@ dependencies = [
  "serde_norway",
  "thiserror",
  "windows-sys",
+]
+
+[[package]]
+name = "onepipeline-testfakes"
+version = "0.0.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]

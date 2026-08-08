@@ -153,16 +153,22 @@ pub enum CancelMode {
 /// How a dispatch settled.
 ///
 /// `docs/contract.md` names this as `wait`'s success value but specifies no
-/// fields for it. It carries the one thing a caller cannot recover from the
-/// event stream — whether the dispatch succeeded — and the divergence is
+/// fields for it. What it carries is everything a caller cannot recover from
+/// the relayed event stream: whether the dispatch succeeded, and — because the
+/// machine running the dispatch is the one that opened the session — the
+/// session it left open for its node to publish. The divergence is
 /// [recorded for the planner](../../../docs/contract-divergences.md).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
 pub struct DispatchOutcome {
     /// Whether the dispatch completed successfully.
     pub succeeded: bool,
     /// What it said when it did not.
     pub detail: String,
+    /// The `onevcs` session token, when the workspace was a session.
+    pub session: Option<String>,
+    /// The branch that session has checked out.
+    pub branch: Option<String>,
 }
 
 /// The executor that runs a dispatch on this machine.
@@ -203,23 +209,23 @@ impl Executor for LocalExecutor {
 
     fn dispatch(&self, req: DispatchRequest) -> Result<Box<dyn DispatchHandle>> {
         // `WorkspaceSpec::VcsSession` means the machine running the dispatch
-        // opens the session *there*. This is that machine, so the session is
-        // already open and its worktree is the directory to run in — the
-        // lifecycle composes the two rather than shipping a checkout.
-        let dir = match &req.workspace {
-            WorkspaceSpec::Path(path) => Some(path.clone()),
-            WorkspaceSpec::VcsSession(_) => None,
+        // opens the session *there* — the clone, worktree, and branch are cut
+        // where the work happens rather than shipped to it. This executor is
+        // that machine, so it opens the session itself and runs in the worktree
+        // `onevcs` hands back.
+        let (dir, session) = match &req.workspace {
+            WorkspaceSpec::Path(path) => (path.clone(), None),
+            WorkspaceSpec::VcsSession(request) => {
+                let session = crate::vcs::session_open(request)?;
+                (session.worktree.clone(), Some(session))
+            }
         };
-        let run = GraphRun::start(
-            &req.graph.0,
-            &req.task,
-            dir.as_deref(),
-            &req.labels,
-            &[],
-        )?;
+        let run = GraphRun::start(&req.graph.0, &req.task, Some(&dir), &req.labels, &[])?;
         Ok(Box::new(LocalDispatch {
             run,
             cancel: req.cancel,
+            labels: req.labels,
+            session,
         }))
     }
 }
@@ -229,11 +235,22 @@ impl Executor for LocalExecutor {
 struct LocalDispatch {
     run: GraphRun,
     cancel: CancellationToken,
+    labels: Labels,
+    session: Option<crate::vcs::OpenSession>,
 }
 
 impl DispatchHandle for LocalDispatch {
     fn events(&mut self) -> EventStream {
-        self.run.events()
+        let opened = self.session.as_ref().map(|session| {
+            // The opened session is `onevcs`'s own contribution to the merged
+            // stream: without it a lifecycle node's branch would appear in the
+            // ledger with nothing saying where it came from.
+            Ok(crate::vcs::session_opened_event(session, &self.labels))
+        });
+        match opened {
+            Some(event) => Box::new(std::iter::once(event).chain(self.run.events())),
+            None => self.run.events(),
+        }
     }
 
     fn wait(&mut self) -> Result<DispatchOutcome> {
@@ -241,6 +258,8 @@ impl DispatchHandle for LocalDispatch {
         Ok(DispatchOutcome {
             succeeded: settled.succeeded(),
             detail: settled.stderr.trim().to_string(),
+            session: self.session.as_ref().map(|s| s.token.clone()),
+            branch: self.session.as_ref().map(|s| s.branch.clone()),
         })
     }
 
@@ -309,7 +328,10 @@ mod tests {
     #[test]
     fn the_capacity_probe_reports_finite_numbers_on_any_host() {
         let report = LocalExecutor.capacity();
-        assert!(report.load1.is_finite() && report.load1 >= 0.0, "{report:?}");
+        assert!(
+            report.load1.is_finite() && report.load1 >= 0.0,
+            "{report:?}"
+        );
         assert!(report.mem_free_bytes > 0, "{report:?}");
     }
 
@@ -319,7 +341,10 @@ mod tests {
         let observer = token.clone();
         assert!(!observer.is_cancelled());
         token.cancel();
-        assert!(observer.is_cancelled(), "the signal did not reach the dispatch");
+        assert!(
+            observer.is_cancelled(),
+            "the signal did not reach the dispatch"
+        );
         assert_eq!(token, observer);
         assert_ne!(CancellationToken::new(), observer);
     }

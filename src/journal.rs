@@ -175,7 +175,11 @@ pub fn merge_order(events: &mut [Envelope]) {
 }
 
 /// The payload of a `node-settled` event, as the projection folds it.
-pub fn settled_payload(status: &str, outcome: Option<&str>, detail: Option<&str>) -> Map<String, Value> {
+pub fn settled_payload(
+    status: &str,
+    outcome: Option<&str>,
+    detail: Option<&str>,
+) -> Map<String, Value> {
     let mut fields = vec![("status", json!(status))];
     if let Some(outcome) = outcome {
         fields.push(("outcome", json!(outcome)));
@@ -233,8 +237,7 @@ mod tests {
         journal
             .emit(RUN_STARTED, labels("demo", None, None), payload(&[]))
             .expect("appended");
-        ledger::append_line(&paths.journal(), r#"{"v":99,"from":"the future"}"#)
-            .expect("appended");
+        ledger::append_line(&paths.journal(), r#"{"v":99,"from":"the future"}"#).expect("appended");
 
         assert_eq!(read(&paths.journal()).len(), 1, "the future line was read");
         assert!(has_unreadable_lines(&paths.journal()));
@@ -288,10 +291,7 @@ mod tests {
             event("2026-08-08T00:00:00.000Z", "a", 9),
         ];
         merge_order(&mut events);
-        let seen: Vec<(String, u64)> = events
-            .iter()
-            .map(|e| (e.stream.clone(), e.seq))
-            .collect();
+        let seen: Vec<(String, u64)> = events.iter().map(|e| (e.stream.clone(), e.seq)).collect();
         assert_eq!(
             seen,
             vec![

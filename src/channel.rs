@@ -289,7 +289,9 @@ impl ChannelState {
         surface.id = queue.next_id;
         queue.next_id += 1;
         if surface.source == source::CHECK_IN {
-            queue.waiting.retain(|existing| existing.source != source::CHECK_IN);
+            queue
+                .waiting
+                .retain(|existing| existing.source != source::CHECK_IN);
         }
         queue.waiting.push(surface.clone());
         self.write_queue(&queue)?;

@@ -13,10 +13,10 @@
 # runs this every week on every OS, for both registries, and anything it had to
 # install first would be a second thing that can rot.
 #
-# While the crate is interface-only, the promise a published artifact makes is
-# its *surface*: it reports its version, prints the documented command list, and
-# refuses to pretend it ran a graph. Extend the assertions here as behavior
-# lands — this file is what a release proves.
+# The promise a published artifact makes: it reports its version, prints the
+# documented command list, and answers a real command against a real ledger with
+# the code the contract assigns. Extend the assertions here as behavior lands —
+# this file is what a release proves.
 set -euo pipefail
 
 expect_version=""
@@ -76,11 +76,10 @@ for command in start adopt round channel next reply surface attest stop runs sta
   esac
 done
 
-# The refusal is part of the shipped contract while the crate is interface-only:
-# a build that silently succeeded here would report an unimplemented run as one
-# that settled. It must also refuse with a code the contract has not already
-# spent — 0 applied, 1 queued, 2 refused, 3 nothing is driving the run — or a
-# caller reads the refusal as one of those answers.
+# Reading a run nobody recorded is the smallest command that reaches the ledger,
+# and its answer is fixed: exit 2, naming the run. A build that exited 0 here
+# would be reporting a surface it never read, and one that exited 3 would be
+# sending a planner to intervene in a run that does not exist.
 # llmlint: ignore-block[changed_behavior_has_e2e] this script *is* the release's own
 # end-to-end test — CI's `install` job and both post-publish verify jobs run this exact
 # file against a real installed binary on every platform, which exercises the passing
@@ -92,12 +91,18 @@ code=0
 # and on any other exit it is the only account of what went wrong.
 refusal="$(onepipeline next smoke-run 2>&1 >/dev/null)" || code=$?
 case "$code" in
-  70) ;;
+  2)
+    case "$refusal" in
+      *smoke-run*) ;;
+      *) fail "'next' refused without naming the run it could not find: ${refusal:-it printed nothing}" \
+           "the refusal has to name the run and the root it searched, or a caller cannot tell a typo from an outage" ;;
+    esac
+    ;;
   0) fail "'next' exited 0 without reading anything" \
-       "an interface-only build must refuse; a caller reads exit 0 as a surface it consumed" ;;
-  1|2|3) fail "'next' exited $code, a code the contract already assigns" \
-       "the interface-only refusal must not be readable as applied, queued, refused, or undriven" ;;
-  *) fail "'next' exited $code, which is neither the interface-only refusal (70) nor a code the contract assigns: ${refusal:-it printed nothing}" \
+       "a caller reads exit 0 as a surface it consumed; a run nobody recorded has none" ;;
+  3) fail "'next' exited 3 for a run that does not exist" \
+       "exit 3 sends a planner to intervene in a live run; an unknown run is a refusal (2)" ;;
+  *) fail "'next' exited $code, which is not the refusal the contract assigns: ${refusal:-it printed nothing}" \
        "fix what that error names, or reinstall the binary if it cannot start at all" ;;
 esac
 # llmlint: ignore-end[changed_behavior_has_e2e]

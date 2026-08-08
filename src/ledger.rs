@@ -306,7 +306,11 @@ impl OwnershipLock {
         let body = serde_json::to_string(&record)
             .map_err(|e| Error::Invalid(format!("{}: {e}", path.display())))?;
 
-        match fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
             Ok(mut file) => {
                 use std::io::Write;
                 file.write_all(body.as_bytes()).map_err(|e| Error::Ledger {
@@ -321,8 +325,7 @@ impl OwnershipLock {
                     // A holder on this host that this host can prove is gone
                     // leaves a lock nothing will release. Reclaim it.
                     Some(held)
-                        if held.host == sys::hostname()
-                            && !sys::process_may_be_live(held.pid) =>
+                        if held.host == sys::hostname() && !sys::process_may_be_live(held.pid) =>
                     {
                         write_atomic(&path, body.as_bytes())?;
                         Ok(Self { path, held: true })
@@ -406,13 +409,7 @@ mod tests {
         let paths = RunPaths::under(&root, "demo");
         paths.create().expect("the run directory");
 
-        let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_onepipeline"))
-            .arg("--version")
-            .stdout(std::process::Stdio::null())
-            .spawn()
-            .expect("the binary starts");
-        let dead = child.id();
-        child.wait().expect("it exits");
+        let dead = sys::reaped_pid();
 
         write_json(
             &paths.lock(),

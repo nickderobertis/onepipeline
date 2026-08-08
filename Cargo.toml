@@ -1,8 +1,9 @@
 [workspace]
-# One member today — the crate at the root. Declared explicitly so a second
-# crate (a future engine, a test-support crate) joins the graph by being listed
-# here rather than by changing what `--workspace` means.
-members = ["."]
+# The crate at the root, plus the test-support crate whose binaries stand in for
+# the two siblings at their subprocess boundary. Members are listed explicitly so
+# a new one joins the graph deliberately rather than by changing what
+# `--workspace` means.
+members = [".", "crates/testfakes"]
 resolver = "2"
 
 [package]
@@ -78,6 +79,9 @@ windows-sys = { version = "0.61", features = [
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"
+# The subprocess doubles for the two siblings, so `cargo test` builds them
+# beside the binary the e2e suite drives.
+onepipeline-testfakes = { path = "crates/testfakes" }
 
 [[test]]
 name = "e2e"

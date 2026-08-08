@@ -98,7 +98,7 @@ pub fn bytes_of(text: &str) -> Option<u64> {
         _ => return None,
     };
     let bytes = number * scale as f64;
-    (bytes.is_finite() && bytes >= 0.0).then(|| bytes as u64)
+    (bytes.is_finite() && bytes >= 0.0).then_some(bytes as u64)
 }
 
 /// Which executor implementation an [`ExecutorEntry`] names.
@@ -184,7 +184,9 @@ impl ExecutorRules {
     /// which reads as a scheduling bug rather than the typo it is.
     pub fn validate(&self) -> Result<()> {
         if self.executors.is_empty() {
-            return Err(Error::Invalid("a rules file needs at least one executor".into()));
+            return Err(Error::Invalid(
+                "a rules file needs at least one executor".into(),
+            ));
         }
         for rule in &self.rules {
             if !self.executors.iter().any(|e| e.name == rule.use_executor) {
@@ -214,7 +216,11 @@ impl ExecutorRules {
     /// A node's own `executor` wins outright: naming one is the planner deciding
     /// where the work runs. Otherwise the rules are ordered — the first whose
     /// `when` holds decides, and a rule with no `when` is the fallback.
-    pub fn select(&self, pinned: Option<&str>, report: &dyn Fn(&str) -> CapacityReport) -> Result<String> {
+    pub fn select(
+        &self,
+        pinned: Option<&str>,
+        report: &dyn Fn(&str) -> CapacityReport,
+    ) -> Result<String> {
         if let Some(pinned) = pinned {
             if !self.executors.iter().any(|e| e.name == pinned) {
                 return Err(Error::Invalid(format!(
@@ -287,8 +293,14 @@ mod tests {
         };
         assert!(entry.has_capacity(&report(4, 2.0, 8 << 30)));
         assert!(!entry.has_capacity(&report(0, 2.0, 8 << 30)), "no slots");
-        assert!(!entry.has_capacity(&report(4, 9.0, 8 << 30)), "over max_load1");
-        assert!(!entry.has_capacity(&report(4, 2.0, 1 << 30)), "under min_free_mem");
+        assert!(
+            !entry.has_capacity(&report(4, 9.0, 8 << 30)),
+            "over max_load1"
+        );
+        assert!(
+            !entry.has_capacity(&report(4, 2.0, 1 << 30)),
+            "under min_free_mem"
+        );
 
         // An unreadable limit resolves toward having capacity.
         let vague = ExecutorEntry {
@@ -328,7 +340,9 @@ mod tests {
                 },
             ],
         };
-        rules.validate().expect("both rules name declared executors");
+        rules
+            .validate()
+            .expect("both rules name declared executors");
 
         let idle = |_: &str| report(4, 0.5, u64::MAX);
         assert_eq!(rules.select(None, &idle).expect("a rule matched"), "fast");
@@ -342,7 +356,10 @@ mod tests {
         let rules = ExecutorRules::shipped_default();
         let idle = |_: &str| report(4, 0.0, u64::MAX);
         assert_eq!(rules.select(Some("local"), &idle).expect("pinned"), "local");
-        let message = rules.select(Some("kubernetes"), &idle).unwrap_err().to_string();
+        let message = rules
+            .select(Some("kubernetes"), &idle)
+            .unwrap_err()
+            .to_string();
         assert!(message.contains("kubernetes"), "{message}");
     }
 
@@ -390,7 +407,11 @@ mod tests {
             executors: vec![],
             rules: vec![],
         };
-        assert!(empty.validate().unwrap_err().to_string().contains("at least one"));
+        assert!(empty
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("at least one"));
     }
 
     #[test]
@@ -434,8 +455,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("onepipeline-rules-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("a scratch directory");
         let path = dir.join("executors.yaml");
-        std::fs::write(&path, "executors: [{name: local, type: local, typo: 1}]\nrules: []\n")
-            .expect("written");
+        std::fs::write(
+            &path,
+            "executors: [{name: local, type: local, typo: 1}]\nrules: []\n",
+        )
+        .expect("written");
         let message = ExecutorRules::load(&path).unwrap_err().to_string();
         assert!(message.contains("typo"), "{message}");
         std::fs::remove_dir_all(&dir).ok();

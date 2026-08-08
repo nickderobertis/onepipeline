@@ -107,7 +107,10 @@ impl Node {
     /// section stating that it reports observed state and adds no acceptance
     /// criteria — so a worker cannot read one as a new bar to clear.
     pub fn rendered_task(&self) -> String {
-        render_task(self.task.as_deref().unwrap_or_default(), self.context.as_deref())
+        render_task(
+            self.task.as_deref().unwrap_or_default(),
+            self.context.as_deref(),
+        )
     }
 }
 
@@ -297,7 +300,8 @@ mod tests {
     use super::*;
 
     fn scratch(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("onepipeline-plan-{name}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("onepipeline-plan-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("a scratch root");
         dir
@@ -316,10 +320,17 @@ mod tests {
         .expect("written");
         let plan = Plan::load(&path).expect("a JSON plan loads");
         assert!(
-            plan.tasks[0].task.as_deref().expect("task").starts_with('\u{1f600}'),
+            plan.tasks[0]
+                .task
+                .as_deref()
+                .expect("task")
+                .starts_with('\u{1f600}'),
             "the surrogate pair did not survive as one character"
         );
-        assert_eq!(plan.concurrency, 4, "the default concurrency was not applied");
+        assert_eq!(
+            plan.concurrency, 4,
+            "the default concurrency was not applied"
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -329,7 +340,10 @@ mod tests {
         let path = root.join("list.plan.json");
         std::fs::write(&path, "[1, 2, 3]").expect("written");
         let message = Plan::load(&path).unwrap_err().to_string();
-        assert!(message.contains("must be a JSON mapping, got list"), "{message}");
+        assert!(
+            message.contains("must be a JSON mapping, got list"),
+            "{message}"
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -378,13 +392,21 @@ mod tests {
 
         let mixed = Plan::load(&root.join("mixed-graph.plan.json")).expect("mixed-graph loads");
         assert_eq!(mixed.concurrency, 3);
-        let docs = mixed.tasks.iter().find(|n| n.id == "docs").expect("the docs node");
+        let docs = mixed
+            .tasks
+            .iter()
+            .find(|n| n.id == "docs")
+            .expect("the docs node");
         assert_eq!(
             docs.agent_graph.as_ref().map(|r| r.0.as_str()),
             Some("./graphs/node-scope.yaml"),
             "the example does not reference the shipped node-scope config"
         );
-        let service = mixed.tasks.iter().find(|n| n.id == "service").expect("the service node");
+        let service = mixed
+            .tasks
+            .iter()
+            .find(|n| n.id == "service")
+            .expect("the service node");
         assert_eq!(service.executor.as_deref(), Some("local"));
         assert_eq!(service.steps.as_ref().map(Vec::len), Some(2));
     }
@@ -401,8 +423,14 @@ mod tests {
         let rendered = node.rendered_task();
         assert!(rendered.starts_with("## What\nship it"), "{rendered}");
         assert!(rendered.contains(PLANNER_CONTEXT_HEADING), "{rendered}");
-        assert!(rendered.contains("adds no acceptance criteria"), "{rendered}");
-        assert!(rendered.contains("the fixture moved to tests/data"), "{rendered}");
+        assert!(
+            rendered.contains("adds no acceptance criteria"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("the fixture moved to tests/data"),
+            "{rendered}"
+        );
     }
 
     #[test]
@@ -439,8 +467,17 @@ mod tests {
         let source = r#"{"schema_version":1,"tasks":[{"id":"a","persona":"e","task":"t"}]}"#;
         let plan: Plan = serde_json::from_str(source).expect("it parses");
         let written = serde_json::to_string(&plan).expect("it serialises");
-        assert!(!written.contains("\"kind\""), "{written} grew a default kind");
-        assert!(!written.contains("\"deps\""), "{written} grew an empty deps");
-        assert!(!written.contains("\"parked\""), "{written} grew a false parked");
+        assert!(
+            !written.contains("\"kind\""),
+            "{written} grew a default kind"
+        );
+        assert!(
+            !written.contains("\"deps\""),
+            "{written} grew an empty deps"
+        );
+        assert!(
+            !written.contains("\"parked\""),
+            "{written} grew a false parked"
+        );
     }
 }

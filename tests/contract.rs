@@ -18,9 +18,7 @@ use onepipeline::channel::{Command as Edit, Dependents, Reply, SurfaceKind};
 use onepipeline::cli::{
     Cli, Command, DEFAULT_HEARTBEAT_INTERVAL_SECONDS, DEFAULT_ROUND_BUDGET_SECONDS,
 };
-use onepipeline::error::{
-    EXIT_NOTHING_DRIVING, EXIT_NOT_IMPLEMENTED, EXIT_QUEUED, EXIT_REFUSED, EXIT_SUCCESS,
-};
+use onepipeline::error::{EXIT_NOTHING_DRIVING, EXIT_QUEUED, EXIT_REFUSED, EXIT_SUCCESS};
 use onepipeline::event::{
     ArtifactId, ArtifactRef, Envelope, EventKind, Labels, Source, ENVELOPE_VERSION,
 };
@@ -201,7 +199,7 @@ fn the_dispatch_request_carries_every_field_the_contract_declares() {
             base: None,
             execution_checkout: None,
         }),
-        cancel: CancellationToken,
+        cancel: CancellationToken::new(),
     };
 
     assert_contract_names(
@@ -244,14 +242,17 @@ fn the_local_executor_is_the_one_v1_ships_and_takes_both_workspaces() {
 }
 
 #[test]
-fn the_local_executors_capacity_claims_nothing_it_has_not_measured() {
-    // Interface-only: nothing probes the host yet, so the report must not let a
-    // rules file select this executor on numbers nobody measured.
+fn the_local_executors_capacity_reports_the_three_numbers_the_contract_names() {
+    // A rules file selects on these, so each has to be a number a predicate can
+    // compare. Every unreadable input resolves toward "has capacity" rather than
+    // toward a zero that would stall a healthy host.
     let report = LocalExecutor.capacity();
-    assert_eq!(report, CapacityReport::default());
-    assert_eq!(report.slots_free, 0);
-    assert_eq!(report.load1, 0.0);
-    assert_eq!(report.mem_free_bytes, 0);
+    assert!(
+        report.load1.is_finite() && report.load1 >= 0.0,
+        "{report:?}"
+    );
+    assert!(report.mem_free_bytes > 0, "{report:?}");
+    assert_ne!(report, CapacityReport::default(), "nothing was probed");
     assert_contract_names(
         "CapacityReport field",
         &["slots_free", "load1", "mem_free_bytes"],
@@ -259,7 +260,11 @@ fn the_local_executors_capacity_claims_nothing_it_has_not_measured() {
 }
 
 #[test]
-fn dispatching_refuses_rather_than_pretending_to_run() {
+fn dispatching_goes_through_the_oneagentgraph_seam_and_says_so_when_it_cannot() {
+    // The seam is a subprocess boundary: this crate composes `oneagentgraph`
+    // rather than reimplementing it. Pointed at an executable that does not
+    // exist, the failure names that sibling instead of reading as a node the
+    // agent failed.
     // `Box<dyn DispatchHandle>` is not `Debug`, so the success arm is destructured
     // rather than unwrapped.
     let Err(err) = LocalExecutor.dispatch(DispatchRequest {
@@ -267,13 +272,14 @@ fn dispatching_refuses_rather_than_pretending_to_run() {
         task: "anything".into(),
         labels: Labels::default(),
         workspace: WorkspaceSpec::Path(PathBuf::from(".")),
-        cancel: CancellationToken,
+        cancel: CancellationToken::new(),
     }) else {
-        panic!("nothing is implemented behind the seam, so dispatch cannot succeed");
+        panic!("no `oneagentgraph` is installed here, so the dispatch cannot start");
     };
+    let message = err.to_string();
     assert!(
-        err.to_string().contains("NOT IMPLEMENTED"),
-        "the refusal is loud: {err}"
+        message.contains("oneagentgraph"),
+        "the seam is unnamed: {message}"
     );
 }
 
@@ -666,15 +672,18 @@ fn the_reply_exit_codes_are_the_ones_the_contract_assigns() {
     assert!(CONTRACT.contains("exit 3 = nothing is driving the run"));
     assert_eq!(EXIT_NOTHING_DRIVING, 3);
 
-    // The interface-only refusal must not collide with any of them.
-    for spent in [
+    // Each code means one thing: a caller that reads the status must not have
+    // to guess which of two verdicts it got.
+    let spent = [
         EXIT_SUCCESS,
         EXIT_QUEUED,
         EXIT_REFUSED,
         EXIT_NOTHING_DRIVING,
-    ] {
-        assert_ne!(EXIT_NOT_IMPLEMENTED, spent);
-    }
+    ];
+    let mut unique = spent.to_vec();
+    unique.sort_unstable();
+    unique.dedup();
+    assert_eq!(unique.len(), spent.len(), "two verdicts share an exit code");
 }
 
 #[test]
@@ -1054,10 +1063,6 @@ fn the_readmes_interface_claims_match_the_code_they_describe() {
     // Wrapped prose, so match on its words rather than its line breaks.
     let readme = raw.split_whitespace().collect::<Vec<_>>().join(" ");
 
-    assert!(
-        readme.contains(&format!("exit code `{EXIT_NOT_IMPLEMENTED}`")),
-        "the README states a different interface-only exit code than the crate uses"
-    );
     assert!(
         readme.contains(&format!(
             "exit `{EXIT_NOTHING_DRIVING}` means nothing is driving"
