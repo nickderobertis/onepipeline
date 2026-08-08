@@ -74,7 +74,6 @@ pub enum Dependents {
 /// unchanged.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "lowercase", deny_unknown_fields)]
-#[non_exhaustive]
 pub enum Command {
     /// Add a new node. Its `deps`, if any, must name graph nodes or valid
     /// cross-DAG references.

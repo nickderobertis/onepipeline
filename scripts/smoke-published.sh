@@ -62,7 +62,7 @@ reported="$(onepipeline --version 2>&1 | tr -d '\r')" || fail \
   "the installed binary cannot start — check the platform package the install selected"
 if [ -n "$expect_version" ] && [ "$reported" != "onepipeline $expect_version" ]; then
   fail "reports '$reported', not 'onepipeline $expect_version'" \
-    "the install resolved a different version than the one just published"
+    "the install resolved a different version — wait for the registry to serve $expect_version, then reinstall pinned: 'pip install onepipeline-cli==$expect_version' or 'npm install -g onepipeline-cli@$expect_version'"
 fi
 
 help="$(onepipeline --help 2>&1 | tr -d '\r')" || fail \
@@ -72,7 +72,7 @@ for command in start adopt round channel next reply surface attest stop runs sta
   case "$help" in
     *"$command"*) ;;
     *) fail "'--help' does not list the '$command' command" \
-         "the installed binary does not carry the documented command surface" ;;
+         "the installed binary predates that command — reinstall the version under test, or drop '$command' from this list if the contract no longer names it" ;;
   esac
 done
 
@@ -81,6 +81,12 @@ done
 # that settled. It must also refuse with a code the contract has not already
 # spent — 0 applied, 1 queued, 2 refused, 3 nothing is driving the run — or a
 # caller reads the refusal as one of those answers.
+# llmlint: ignore-block[changed_behavior_has_e2e] this script *is* the release's own
+# end-to-end test — CI's `install` job and both post-publish verify jobs run this exact
+# file against a real installed binary on every platform, which exercises the passing
+# branch below continuously. Its failure branches are diagnostics for that run, and a
+# harness that installed a deliberately broken binary to drive each one would be a second
+# thing to keep in sync with the first. Revisit if this script grows logic of its own.
 code=0
 onepipeline next smoke-run >/dev/null 2>&1 || code=$?
 case "$code" in
@@ -92,5 +98,6 @@ case "$code" in
   *) fail "'next' exited $code, which is neither the interface-only refusal (70) nor a code the contract assigns" \
        "run 'onepipeline next smoke-run' by hand to see what the installed binary is doing" ;;
 esac
+# llmlint: ignore-end[changed_behavior_has_e2e]
 
 echo "$label: surface smoke test passed${expect_version:+ for $expect_version}"

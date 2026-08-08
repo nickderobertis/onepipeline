@@ -12,7 +12,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use oneagentgraph::config::{ConfigRef, GraphConfig, JudgeSide, Member};
 use onepipeline::channel::{Command as Edit, Dependents, Reply, SurfaceKind};
 use onepipeline::cli::{
@@ -500,6 +500,26 @@ fn the_shipped_example_plans_parse() {
     }
 }
 
+/// The `op` a [`Edit`] serializes as.
+///
+/// The match has no wildcard, so a tenth variant stops this suite compiling
+/// until the contract, [`OPS`], and the round-trip below all name it. That is
+/// the half of "exactly the ops this crate accepts" a hand-written list cannot
+/// prove.
+fn op_of(command: &Edit) -> &'static str {
+    match command {
+        Edit::Add { .. } => "add",
+        Edit::Drop { .. } => "drop",
+        Edit::Reparent { .. } => "reparent",
+        Edit::Retry { .. } => "retry",
+        Edit::Cancel { .. } => "cancel",
+        Edit::Requeue { .. } => "requeue",
+        Edit::Attest { .. } => "attest",
+        Edit::Complete { .. } => "complete",
+        Edit::Context { .. } => "context",
+    }
+}
+
 /// The ops the contract lists, in the order it lists them.
 const OPS: &[&str] = &[
     "add", "drop", "reparent", "retry", "cancel", "requeue", "attest", "complete", "context",
@@ -513,6 +533,12 @@ fn the_contract_lists_exactly_the_ops_this_crate_accepts() {
         "the contract's op list moved; update OPS with it"
     );
     assert_eq!(OPS.len(), 9);
+
+    assert_eq!(
+        op_of(&Edit::Cancel { id: "x".into() }),
+        "cancel",
+        "the exhaustive match above is what proves the variant set, and it runs"
+    );
 }
 
 #[test]
@@ -555,6 +581,11 @@ fn every_op_deserializes_with_the_fields_the_protocol_requires() {
     for (op, value) in &envelopes {
         let edit: Edit = serde_json::from_value(value.clone())
             .unwrap_or_else(|e| panic!("`{op}` deserializes: {e}"));
+        assert_eq!(
+            &op_of(&edit),
+            op,
+            "`{op}` deserialized into another variant"
+        );
         let again = serde_json::to_value(&edit).expect("serializes");
         assert_eq!(&again, value, "`{op}` round-trips unchanged");
     }
@@ -980,6 +1011,95 @@ fn every_recorded_divergence_names_a_type_the_contract_actually_declares() {
         assert!(
             divergences.contains(named),
             "`{named}` diverges from the contract but is not recorded"
+        );
+    }
+}
+
+#[test]
+fn the_smoke_scripts_command_list_is_the_binarys_whole_surface() {
+    // The published-artifact smoke checks `--help` against a hand-written word
+    // list. Without this gate a command added to the contract could be missing
+    // from every published binary and the smoke would still pass.
+    let script = std::fs::read_to_string(repo_root().join("scripts/smoke-published.sh"))
+        .expect("the smoke script ships");
+    let listed = script
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("for command in ")?
+                .strip_suffix("; do")
+        })
+        .expect("the smoke script iterates a `for command in ...; do` list")
+        .split_whitespace()
+        .map(str::to_string)
+        .collect::<BTreeSet<String>>();
+
+    let surface = Cli::command()
+        .get_subcommands()
+        .map(|sub| sub.get_name().to_string())
+        .collect::<BTreeSet<String>>();
+
+    assert_eq!(
+        listed, surface,
+        "scripts/smoke-published.sh checks a different command set than the CLI offers"
+    );
+}
+
+#[test]
+fn the_readmes_interface_claims_match_the_code_they_describe() {
+    // The README restates numbers that live in the code. Each copy is gated
+    // here, so a change to the code fails the suite instead of leaving the
+    // README quietly wrong.
+    let raw = std::fs::read_to_string(repo_root().join("README.md")).expect("the README ships");
+    // Wrapped prose, so match on its words rather than its line breaks.
+    let readme = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    assert!(
+        readme.contains(&format!("exit code `{EXIT_NOT_IMPLEMENTED}`")),
+        "the README states a different interface-only exit code than the crate uses"
+    );
+    assert!(
+        readme.contains(&format!(
+            "exit `{EXIT_NOTHING_DRIVING}` means nothing is driving"
+        )),
+        "the README states a different code for an undriven run than the crate uses"
+    );
+    assert!(
+        readme.contains(&format!(
+            "exits `{EXIT_SUCCESS}` when the reconciler applied it, `{EXIT_QUEUED}` when it is queued"
+        )) && readme.contains(&format!("and `{EXIT_REFUSED}` when")),
+        "the README's reply exit-code mapping no longer matches the crate's constants"
+    );
+
+    // Every view the README lists is a command the binary actually offers.
+    let surface = Cli::command()
+        .get_subcommands()
+        .map(|sub| sub.get_name().to_string())
+        .collect::<BTreeSet<String>>();
+    let views = readme
+        .split_once("Read-only views")
+        .expect("the README has a read-only views paragraph")
+        .1
+        .split_once("without touching a run")
+        .expect("that paragraph ends where the README says it does")
+        .0
+        .to_string();
+    for view in [
+        "runs",
+        "status",
+        "host",
+        "monitor",
+        "results",
+        "goals",
+        "telemetry",
+    ] {
+        assert!(
+            views.contains(&format!("`{view}`")),
+            "the README's view list omits `{view}`"
+        );
+        assert!(
+            surface.contains(view),
+            "`{view}` is not a command the binary offers"
         );
     }
 }

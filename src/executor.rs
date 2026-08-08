@@ -15,6 +15,18 @@
 //!
 //! Nothing here dispatches, probes capacity, relays a stream, waits, or cancels.
 
+// llmlint: ignore-file[invalid_states_unrepresentable] every shape in this module is the
+// one `docs/contract.md` declares in its own Rust block, character for character, and
+// narrowing any of them is the interface drift the interface-only stage forbids (see
+// src/AGENTS.md). That covers `Executor::name -> &str` (an `ExecutorName` newtype is a
+// public item the contract does not name; the rules file validates the name against the
+// declared executors, and that validator does not exist yet), `Capabilities.vcs_sessions:
+// bool` (written as `{ vcs_sessions: bool, ... }`, and an executor either accepts
+// `WorkspaceSpec::VcsSession` or it does not), and `CapacityReport.load1: f64` (written
+// as `{ slots_free, load1, mem_free_bytes }`, where rejecting a negative or NaN load is
+// the probe's job and the probe is what this stage does not implement). Revisit each with
+// the executor implementation rather than widening this directive.
+
 use std::path::PathBuf;
 
 use oneagentgraph::config::ConfigRef;
@@ -143,12 +155,16 @@ impl Executor for LocalExecutor {
         Capabilities { vcs_sessions: true }
     }
 
+    // llmlint: ignore-block[names_match_behavior] `capacity` is the method name
+    // `docs/contract.md` gives this trait method, so it cannot be renamed to describe the
+    // interface-only body, and the body cannot probe the host — that is the
+    // implementation the stage forbids (see src/AGENTS.md). Zeros are the deliberate
+    // answer rather than a guess: nothing may select this executor on numbers nobody
+    // measured. Both the name and the body converge when the probe lands.
     fn capacity(&self) -> CapacityReport {
-        // Nothing is probed yet, and a report that guessed would let the rules
-        // file select an executor on numbers nobody measured. Zero free slots is
-        // the honest interface-only answer; the probe lands with the dispatch.
         CapacityReport::default()
     }
+    // llmlint: ignore-end[names_match_behavior]
 
     fn dispatch(&self, _req: DispatchRequest) -> Result<Box<dyn DispatchHandle>> {
         Err(Error::NotImplemented("LocalExecutor::dispatch"))

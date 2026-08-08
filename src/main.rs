@@ -24,7 +24,6 @@ fn main() {
     std::process::exit(EXIT_NOT_IMPLEMENTED);
 }
 
-/// The subcommand's name as a user typed it, for the refusal above.
 fn name_of(command: &Command) -> &'static str {
     match command {
         Command::Start(_) => "start",
