@@ -12,6 +12,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use serde::{Deserialize, Serialize};
+
 use crate::error::{Error, Result};
 use crate::plan::{Node, NodeKind, Plan, Step};
 
@@ -26,7 +28,8 @@ pub const CROSS_DAG_PREFIX: &str = "run:";
 /// The settled statuses are recorded in the journal; [`Blocked`](Self::Blocked)
 /// and [`Skipped`](Self::Skipped) are derived on every read and never written as
 /// a node's own settlement.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum NodeStatus {
     /// Not yet eligible, and nothing prevents it becoming so.
     Pending,
@@ -110,7 +113,8 @@ impl NodeStatus {
 }
 
 /// How a whole graph settled.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum GraphState {
     /// Every node is `done`.
     Complete,
@@ -667,6 +671,50 @@ pub fn unblocks(graph: &Graph, id: &str) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::plan::{Goal, PLAN_SCHEMA_VERSION};
+
+    /// The journal writes these words through `as_str` and the round ledger
+    /// writes them through serde. Two spellings of one vocabulary is exactly how
+    /// a projection quietly stops recognising what the ledger recorded, so the
+    /// two are held equal here rather than by eye.
+    #[test]
+    fn a_status_serialises_as_the_word_it_is_written_and_read_as() {
+        for status in [
+            NodeStatus::Pending,
+            NodeStatus::Ready,
+            NodeStatus::Running,
+            NodeStatus::Waiting,
+            NodeStatus::Blocked,
+            NodeStatus::Parked,
+            NodeStatus::Cancelled,
+            NodeStatus::Done,
+            NodeStatus::Failed,
+            NodeStatus::Skipped,
+        ] {
+            let json = serde_json::to_string(&status).expect("a status serialises");
+            assert_eq!(json, format!("\"{}\"", status.as_str()));
+            assert_eq!(NodeStatus::parse(status.as_str()), Some(status));
+            assert_eq!(
+                serde_json::from_str::<NodeStatus>(&json).expect("it reads back"),
+                status
+            );
+        }
+    }
+
+    #[test]
+    fn a_graph_state_serialises_as_the_word_it_is_rendered_as() {
+        for state in [
+            GraphState::Complete,
+            GraphState::Waiting,
+            GraphState::Failed,
+        ] {
+            let json = serde_json::to_string(&state).expect("a state serialises");
+            assert_eq!(json, format!("\"{}\"", state.as_str()));
+            assert_eq!(
+                serde_json::from_str::<GraphState>(&json).expect("it reads back"),
+                state
+            );
+        }
+    }
 
     fn agent(id: &str, deps: &[&str]) -> Node {
         Node {

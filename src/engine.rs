@@ -78,19 +78,64 @@ const BOUNDARY_BACKOFF_CEILING: Duration = Duration::from_secs(120);
 const POLL: Duration = Duration::from_millis(25);
 
 /// One round's recorded result.
+///
+/// `ok` is on the wire but not on the type: it is `state == complete` and
+/// nothing else, so storing it would let a result claim a failed round
+/// succeeded. It is derived on the way out and re-derived on the way in, which
+/// is also what makes a hand-edited result file impossible to disagree with
+/// itself.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(into = "RoundResultWire", from = "RoundResultWire")]
 pub struct RoundResult {
     /// The run.
     pub run_id: String,
     /// The round within it.
     pub round: u64,
     /// How the graph settled.
-    pub state: String,
-    /// True only for `complete`.
-    pub ok: bool,
+    pub state: GraphState,
     /// Every node's settled status, in the order the plan wrote them.
     pub nodes: Vec<NodeResult>,
+}
+
+impl RoundResult {
+    /// True only for `complete`, as the recorded result renders it.
+    pub fn ok(&self) -> bool {
+        self.state == GraphState::Complete
+    }
+}
+
+/// The shape a round result is written and read as.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RoundResultWire {
+    run_id: String,
+    round: u64,
+    state: GraphState,
+    ok: bool,
+    nodes: Vec<NodeResult>,
+}
+
+impl From<RoundResult> for RoundResultWire {
+    fn from(result: RoundResult) -> Self {
+        Self {
+            ok: result.ok(),
+            run_id: result.run_id,
+            round: result.round,
+            state: result.state,
+            nodes: result.nodes,
+        }
+    }
+}
+
+impl From<RoundResultWire> for RoundResult {
+    fn from(wire: RoundResultWire) -> Self {
+        Self {
+            run_id: wire.run_id,
+            round: wire.round,
+            state: wire.state,
+            nodes: wire.nodes,
+        }
+    }
 }
 
 /// One node's settlement, with its own evidence.
@@ -100,7 +145,7 @@ pub struct NodeResult {
     /// The node.
     pub id: String,
     /// How it settled.
-    pub status: String,
+    pub status: NodeStatus,
     /// The named outcome, when it had one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<String>,
@@ -980,7 +1025,7 @@ fn record_result(
                 .unwrap_or(NodeStatus::Pending);
             NodeResult {
                 id: node.id.clone(),
-                status: status.as_str().to_string(),
+                status,
                 outcome: state.outcomes.get(&node.id).cloned(),
                 action: (status == NodeStatus::Waiting)
                     .then(|| node.task.clone())
@@ -1004,15 +1049,14 @@ fn record_result(
     let result = RoundResult {
         run_id: paths.run.clone(),
         round,
-        state: settled.as_str().to_string(),
-        ok: settled == GraphState::Complete,
+        state: settled,
         nodes,
     };
     ledger::write_json(&paths.round_result(round), &result)?;
     journal.emit(
         journal::ROUND_FINISHED,
         journal::labels(&paths.run, Some(round), None),
-        journal::payload(&[("state", json!(result.state)), ("ok", json!(result.ok))]),
+        journal::payload(&[("state", json!(result.state)), ("ok", json!(result.ok()))]),
     )?;
     Ok(result)
 }

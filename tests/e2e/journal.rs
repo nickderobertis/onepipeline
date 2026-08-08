@@ -69,12 +69,20 @@ fn a_line_this_build_cannot_read_is_skipped_rather_than_ending_the_read() {
         .run(&["start", &path.to_string_lossy(), "--attach"])
         .exited(0);
 
+    // llmlint: ignore-block[tests_mirror_real_usage] the case under test is a store this
+    // build did not write: a record left by a *newer* onepipeline, whose envelope shape
+    // this one cannot read. No command on this build's surface can produce one — a line a
+    // sibling emits that this build cannot parse is skipped at the relay and never
+    // reaches the store — so writing it is the only way to reach the reader's skip path,
+    // and that path is what keeps one unreadable record from ending every view of the run.
+    //
     // A record written by a newer schema still claims its sequence number, and
     // a reader skips it rather than failing the round it is observing.
     let journal = world.run_file("future", "events.jsonl");
     let mut text = std::fs::read_to_string(&journal).expect("the journal reads");
     text.push_str("{\"v\":99,\"from\":\"a newer build\"}\n");
     std::fs::write(&journal, text).expect("the journal is written");
+    // llmlint: ignore-end[tests_mirror_real_usage]
 
     world.run(&["monitor", "future"]).exited(0);
     world.run(&["results", "future"]).exited(0);

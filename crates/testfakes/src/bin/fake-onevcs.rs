@@ -21,13 +21,20 @@ fn main() -> ExitCode {
         (Some("session"), Some("close")) => ExitCode::SUCCESS,
         (Some("publish"), _) => publish(&args, &dir),
         (Some("events"), _) => events(&args, &dir),
-        _ => ExitCode::SUCCESS,
+        (Some("session"), Some(other)) => {
+            fake::refuse(&format!("unknown onevcs session command '{other}'"))
+        }
+        (Some(other), _) => fake::refuse(&format!("unknown onevcs command '{other}'")),
+        (None, _) => fake::refuse("onevcs takes a command"),
     }
 }
 
 /// `onevcs session open REPO [--branch B] [--base C] [--execution-checkout A]`
 fn open(args: &[String], dir: &std::path::Path) -> ExitCode {
-    let repo = args.get(2).cloned().unwrap_or_default();
+    let repo = match fake::required(args, 2, "REPO") {
+        Ok(repo) => repo,
+        Err(refusal) => return refusal,
+    };
     if dir.join("session-open.fail").exists() {
         eprintln!("no registered identity for {repo}");
         return ExitCode::from(2);
@@ -57,7 +64,10 @@ fn open(args: &[String], dir: &std::path::Path) -> ExitCode {
 
 /// `onevcs publish TOKEN [--policy P] [--title T]`
 fn publish(args: &[String], dir: &std::path::Path) -> ExitCode {
-    let token = args.get(1).cloned().unwrap_or_default();
+    let token = match fake::required(args, 1, "TOKEN") {
+        Ok(token) => token,
+        Err(refusal) => return refusal,
+    };
     if dir.join("publish.fail").exists() {
         eprintln!("the merge-path gate rejected the branch");
         return ExitCode::from(1);
@@ -80,7 +90,10 @@ fn publish(args: &[String], dir: &std::path::Path) -> ExitCode {
 
 /// `onevcs events TOKEN` — the session's own stream, for the merge.
 fn events(args: &[String], dir: &std::path::Path) -> ExitCode {
-    let token = args.get(1).cloned().unwrap_or_default();
+    let token = match fake::required(args, 1, "TOKEN") {
+        Ok(token) => token,
+        Err(refusal) => return refusal,
+    };
     if dir.join("events.fail").exists() {
         eprintln!("no such session {token}");
         return ExitCode::from(2);

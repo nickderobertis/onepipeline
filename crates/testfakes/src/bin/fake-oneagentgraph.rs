@@ -25,13 +25,17 @@ fn main() -> ExitCode {
             println!("fake-provider: 1 identity bound, 0% utilized");
             ExitCode::SUCCESS
         }
-        _ => ExitCode::SUCCESS,
+        Some(other) => fake::refuse(&format!("unknown oneagentgraph command '{other}'")),
+        None => fake::refuse("oneagentgraph takes a command"),
     }
 }
 
 /// `oneagentgraph run GRAPH --task T --output json [--label k=v]...`
 fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
-    let graph = args.get(1).cloned().unwrap_or_default();
+    let graph = match fake::required(args, 1, "GRAPH") {
+        Ok(graph) => graph,
+        Err(refusal) => return refusal,
+    };
     // The dag-scope graph is the driver: its orchestrator member is what runs
     // the engine verbs. Acting that out is how a test exercises `start` end to
     // end rather than only the launch.

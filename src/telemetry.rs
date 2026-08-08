@@ -51,20 +51,50 @@ pub struct RunTelemetry {
 #[serde(deny_unknown_fields)]
 pub struct Bucket {
     /// What the run was doing.
-    pub name: String,
+    pub name: BucketName,
     /// For how long, in milliseconds.
     pub ms: u64,
 }
 
-/// The bucket for wall time with at least one dispatch in flight.
-pub const DISPATCHING: &str = "dispatching";
-/// The bucket for wall time waiting on a planner decision.
-pub const AWAITING_PLANNER: &str = "awaiting-planner";
-/// The bucket for wall time waiting on a person.
-pub const AWAITING_HUMAN: &str = "awaiting-human";
-/// The bucket for everything else the run's own clock covers — scheduling,
-/// round transitions, and the gaps between them.
-pub const ORCHESTRATING: &str = "orchestrating";
+/// What a run's wall clock is spent on.
+///
+/// Closed on purpose: the buckets sum *exactly* to the wall clock, and that
+/// invariant only holds while every millisecond has one of a known set of homes.
+/// A bucket named by a free string could be added without anything noticing that
+/// the parts no longer add up to the whole.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BucketName {
+    /// Wall time with at least one dispatch in flight.
+    Dispatching,
+    /// Wall time waiting on a planner decision.
+    AwaitingPlanner,
+    /// Wall time waiting on a person.
+    AwaitingHuman,
+    /// Everything else the run's own clock covers — scheduling, round
+    /// transitions, and the gaps between them.
+    Orchestrating,
+}
+
+impl BucketName {
+    /// Every bucket, in the order the breakdown renders them.
+    pub const ALL: [Self; 4] = [
+        Self::Dispatching,
+        Self::AwaitingPlanner,
+        Self::AwaitingHuman,
+        Self::Orchestrating,
+    ];
+
+    /// The word this bucket is written and rendered as.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Dispatching => "dispatching",
+            Self::AwaitingPlanner => "awaiting-planner",
+            Self::AwaitingHuman => "awaiting-human",
+            Self::Orchestrating => "orchestrating",
+        }
+    }
+}
 
 /// Aggregate one run's telemetry from its merged event store.
 pub fn of_run(run: &str, events: &[Envelope]) -> RunTelemetry {
@@ -81,7 +111,7 @@ pub fn of_run(run: &str, events: &[Envelope]) -> RunTelemetry {
     // Walk the timeline once, attributing each span between consecutive events
     // to whatever the run was doing across it. Every millisecond of the wall
     // clock lands in exactly one bucket, which is what makes the sum exact.
-    let mut totals: BTreeMap<&str, u64> = BTreeMap::new();
+    let mut totals: BTreeMap<BucketName, u64> = BTreeMap::new();
     let mut in_flight: u64 = 0;
     let mut awaiting_planner = false;
     let mut awaiting_human: u64 = 0;
@@ -91,13 +121,13 @@ pub fn of_run(run: &str, events: &[Envelope]) -> RunTelemetry {
         let span = ms.saturating_sub(previous);
         if span > 0 {
             let bucket = if in_flight > 0 {
-                DISPATCHING
+                BucketName::Dispatching
             } else if awaiting_planner {
-                AWAITING_PLANNER
+                BucketName::AwaitingPlanner
             } else if awaiting_human > 0 {
-                AWAITING_HUMAN
+                BucketName::AwaitingHuman
             } else {
-                ORCHESTRATING
+                BucketName::Orchestrating
             };
             *totals.entry(bucket).or_insert(0) += span;
         }
@@ -137,11 +167,11 @@ pub fn of_run(run: &str, events: &[Envelope]) -> RunTelemetry {
         }
     }
 
-    let mut buckets: Vec<Bucket> = [DISPATCHING, AWAITING_PLANNER, AWAITING_HUMAN, ORCHESTRATING]
+    let mut buckets: Vec<Bucket> = BucketName::ALL
         .into_iter()
         .map(|name| Bucket {
-            name: name.to_string(),
-            ms: totals.get(name).copied().unwrap_or(0),
+            name,
+            ms: totals.get(&name).copied().unwrap_or(0),
         })
         .collect();
 
@@ -150,10 +180,16 @@ pub fn of_run(run: &str, events: &[Envelope]) -> RunTelemetry {
     // parts still add up to the whole.
     let counted: u64 = buckets.iter().map(|bucket| bucket.ms).sum();
     if let Some(residue) = wall_ms.checked_sub(counted) {
-        if let Some(bucket) = buckets.iter_mut().find(|b| b.name == ORCHESTRATING) {
+        if let Some(bucket) = buckets
+            .iter_mut()
+            .find(|b| b.name == BucketName::Orchestrating)
+        {
             bucket.ms += residue;
         }
-    } else if let Some(bucket) = buckets.iter_mut().find(|b| b.name == ORCHESTRATING) {
+    } else if let Some(bucket) = buckets
+        .iter_mut()
+        .find(|b| b.name == BucketName::Orchestrating)
+    {
         bucket.ms = bucket.ms.saturating_sub(counted - wall_ms);
     }
 
@@ -191,7 +227,7 @@ pub fn render_breakdown(telemetry: &RunTelemetry) -> String {
             .unwrap_or(0);
         out.push_str(&format!(
             "  {:<18} {:>10}  {share:>3}%\n",
-            bucket.name,
+            bucket.name.as_str(),
             duration(bucket.ms)
         ));
     }
@@ -282,16 +318,16 @@ mod tests {
         let summed: u64 = telemetry.buckets.iter().map(|b| b.ms).sum();
         assert_eq!(summed, telemetry.wall_ms, "{:?}", telemetry.buckets);
 
-        let bucket = |name: &str| {
+        let bucket = |name: BucketName| {
             telemetry
                 .buckets
                 .iter()
                 .find(|b| b.name == name)
-                .expect(name)
+                .unwrap_or_else(|| panic!("a {} bucket", name.as_str()))
                 .ms
         };
-        assert_eq!(bucket(DISPATCHING), 60_000);
-        assert_eq!(bucket(ORCHESTRATING), 40_000);
+        assert_eq!(bucket(BucketName::Dispatching), 60_000);
+        assert_eq!(bucket(BucketName::Orchestrating), 40_000);
         assert_eq!(telemetry.dispatches, 1);
         assert_eq!(telemetry.settled_done, 1);
     }
@@ -321,16 +357,16 @@ mod tests {
             at(90, journal::PLANNER_REPLIED, None, &[]),
         ];
         let telemetry = of_run("demo", &events);
-        let bucket = |name: &str| {
+        let bucket = |name: BucketName| {
             telemetry
                 .buckets
                 .iter()
                 .find(|b| b.name == name)
-                .expect(name)
+                .unwrap_or_else(|| panic!("a {} bucket", name.as_str()))
                 .ms
         };
-        assert_eq!(bucket(AWAITING_HUMAN), 30_000);
-        assert_eq!(bucket(AWAITING_PLANNER), 40_000);
+        assert_eq!(bucket(BucketName::AwaitingHuman), 30_000);
+        assert_eq!(bucket(BucketName::AwaitingPlanner), 40_000);
         assert_eq!(
             telemetry.buckets.iter().map(|b| b.ms).sum::<u64>(),
             telemetry.wall_ms
@@ -353,7 +389,7 @@ mod tests {
         let awaiting = telemetry
             .buckets
             .iter()
-            .find(|b| b.name == AWAITING_PLANNER)
+            .find(|b| b.name == BucketName::AwaitingPlanner)
             .expect("the bucket")
             .ms;
         assert_eq!(awaiting, 0, "a heartbeat parked the run");
@@ -365,6 +401,21 @@ mod tests {
         assert_eq!(telemetry.wall_ms, 0);
         assert_eq!(telemetry.buckets.iter().map(|b| b.ms).sum::<u64>(), 0);
         assert!(render_breakdown(&telemetry).contains("WALL 0s"));
+    }
+
+    /// The breakdown renders one spelling and the telemetry document writes
+    /// another, and an operator reading `telemetry --breakdown` against the JSON
+    /// has to see the same words in both.
+    #[test]
+    fn a_bucket_serialises_as_the_word_the_breakdown_renders() {
+        for name in BucketName::ALL {
+            let json = serde_json::to_string(&name).expect("a bucket name serialises");
+            assert_eq!(json, format!("\"{}\"", name.as_str()));
+            assert_eq!(
+                serde_json::from_str::<BucketName>(&json).expect("it reads back"),
+                name
+            );
+        }
     }
 
     #[test]
@@ -398,8 +449,12 @@ mod tests {
             ),
         ];
         let rendered = render_breakdown(&of_run("demo", &events));
-        for name in [DISPATCHING, AWAITING_PLANNER, AWAITING_HUMAN, ORCHESTRATING] {
-            assert!(rendered.contains(name), "{rendered} omits {name}");
+        for name in BucketName::ALL {
+            assert!(
+                rendered.contains(name.as_str()),
+                "{rendered} omits {}",
+                name.as_str()
+            );
         }
         assert!(rendered.contains('%'), "{rendered}");
     }

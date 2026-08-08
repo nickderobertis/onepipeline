@@ -35,6 +35,32 @@ pub fn fail(message: &str) -> ! {
     std::process::exit(78);
 }
 
+/// The exit code a double answers a command line it does not speak with.
+pub const USAGE: u8 = 64;
+
+/// Refuse a command line this double does not speak.
+///
+/// A double that succeeds on anything is a weak oracle: the crate under test
+/// could reach the sibling with a verb the real one has never had, or leave a
+/// required argument off, and the suite would go green on it. The real CLIs
+/// refuse both, so these do too.
+pub fn refuse(message: &str) -> std::process::ExitCode {
+    eprintln!("{message}");
+    std::process::ExitCode::from(USAGE)
+}
+
+/// A required positional argument, or a refusal naming what was missing.
+pub fn required(
+    args: &[String],
+    at: usize,
+    name: &str,
+) -> std::result::Result<String, std::process::ExitCode> {
+    args.get(at)
+        .filter(|value| !value.is_empty())
+        .cloned()
+        .ok_or_else(|| refuse(&format!("missing required argument {name}")))
+}
+
 /// Record one invocation, so a test can assert on what it was asked for.
 pub fn record(dir: &Path, tool: &str, args: &[String]) {
     let line = serde_json::json!({"tool": tool, "args": args}).to_string();

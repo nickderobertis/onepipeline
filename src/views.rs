@@ -6,7 +6,10 @@
 //! time is named here as a type rather than left to prose: whether a run is
 //! being driven, and if not, how it stopped being driven.
 //!
-//! Nothing here reads a ledger, probes a process, or renders anything.
+//! Everything here **reads**. A view opens a run's ledger and its merged event
+//! store, probes the recorded driver, and renders — and writes nothing back, so
+//! rendering a run never counts as supervising it. Consuming a surface is the
+//! channel's job, not a view's.
 
 // llmlint: ignore-block[names_match_behavior] `Parked` reads as a deliberate idle, and
 // for a *node* it is one — but this is the *run* liveness verdict, and `PARKED` is the
