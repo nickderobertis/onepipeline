@@ -56,17 +56,9 @@ serde_json = { version = "1", features = ["preserve_order"] }
 serde_norway = "0.9"
 thiserror = "2"
 
-# The siblings this crate composes. Dependency direction is one-way —
-# onepipeline -> {oneagentgraph, onevcs} — and neither may depend back.
-#
-# Resolved from git by revision, because neither has reached crates.io yet. Each
-# also carries the `version` it will be published under, for two reasons: the
-# dependency is then not a wildcard, so `cargo deny`'s ban on those stays on
-# unweakened; and the requirement is already the one a published crate needs, so
-# releasing this crate is deleting two `git`/`rev` pairs rather than rewriting
-# the manifest. Until then the `rev` is what cargo actually resolves — and this
-# crate must not be published before the siblings are (AGENTS.md, "The sibling
-# crates").
+# The siblings this crate composes. Each carries a `version` as well as its
+# `git`/`rev` so it is not a wildcard dependency; the `rev` is what cargo
+# resolves until that version is on crates.io. See src/AGENTS.md.
 oneagentgraph = { version = "0.1", git = "https://github.com/nickderobertis/oneagentgraph.git", rev = "e88f70aabf3f60ae380c26228de640f1e5af2441" }
 onevcs = { version = "0.1", git = "https://github.com/nickderobertis/onevcs.git", rev = "131bad3ee4d6ee95754d909d8b460f2da4258b63" }
 

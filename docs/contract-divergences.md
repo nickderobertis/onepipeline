@@ -1,7 +1,7 @@
 # Where the code and the contract diverge
 
-[`contract.md`](contract.md) is committed **verbatim as approved** and is never
-edited to match the code. Where it cannot be compiled exactly as written, the
+The contract is committed **verbatim as approved** and is never edited to match
+the code. Where it cannot be compiled exactly as written, the
 code takes the nearest thing that does exist, and the divergence is recorded
 here as a proposal for the planner who owns the contract. Nothing on this list is
 resolved unilaterally.
