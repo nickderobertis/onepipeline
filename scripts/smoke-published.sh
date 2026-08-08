@@ -57,13 +57,17 @@ command -v onepipeline >/dev/null 2>&1 || fail "no 'onepipeline' on PATH" \
 
 # Windows ships the same bytes with CRLF once anything touches them, so strip CR
 # rather than let a line ending decide the verdict.
-reported="$(onepipeline --version | tr -d '\r')"
+reported="$(onepipeline --version 2>&1 | tr -d '\r')" || fail \
+  "'--version' did not run: $reported" \
+  "the installed binary cannot start — check the platform package the install selected"
 if [ -n "$expect_version" ] && [ "$reported" != "onepipeline $expect_version" ]; then
   fail "reports '$reported', not 'onepipeline $expect_version'" \
     "the install resolved a different version than the one just published"
 fi
 
-help="$(onepipeline --help | tr -d '\r')"
+help="$(onepipeline --help 2>&1 | tr -d '\r')" || fail \
+  "'--help' did not run: $help" \
+  "the installed binary cannot print its own surface — reinstall it and re-run"
 for command in start adopt round channel next reply surface attest stop runs status host monitor results goals telemetry; do
   case "$help" in
     *"$command"*) ;;

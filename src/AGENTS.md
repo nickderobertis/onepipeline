@@ -38,9 +38,8 @@ is deliberate: the seam is where the cross-repo wiring is proven at compile time
 Do not re-declare a sibling's vocabulary here, and do not add a dependency in the
 other direction.
 
-Where the contract names a sibling type by a name that sibling does not export,
-`docs/contract-divergences.md` records what is used instead. Extend that file
-rather than inventing a local stand-in.
+Never invent a local stand-in for a sibling type the contract names: record the
+divergence instead.
 
 Both are resolved from git by revision, each carrying the `version` it will
 publish under, so the dependency is not a wildcard and the requirement is already
