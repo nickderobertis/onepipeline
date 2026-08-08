@@ -49,6 +49,12 @@ would not build. Cargo will not stop you; the guard is that `release.yml`'s
 `publish-crate` job self-activates on `CARGO_REGISTRY_TOKEN`, so leave that
 secret unset until the siblings publish.
 
+## Deliberately absent
+
+There is no `typecheck` target. `cargo clippy --all-targets -- -D warnings`
+*is* this crate's type check and already runs as `lint`, so a separate target
+would re-compile the tree to learn nothing new.
+
 ## Tests
 
 `tests/contract.rs` reads `docs/contract.md` itself, so a type added here without

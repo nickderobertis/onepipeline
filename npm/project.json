@@ -3,13 +3,8 @@
   "$schema": "../node_modules/nx/schemas/project-schema.json",
   "projectType": "library",
   "sourceRoot": "npm/onepipeline-cli",
-  "tags": [
-    "scope:packaging",
-    "lang:js"
-  ],
-  "implicitDependencies": [
-    "onepipeline"
-  ],
+  "tags": ["scope:packaging", "lang:js"],
+  "implicitDependencies": ["onepipeline"],
   "targets": {
     "bootstrap": {
       "executor": "nx:noop"
@@ -22,9 +17,7 @@
         "{workspaceRoot}/Cargo.toml",
         "sharedGlobals"
       ],
-      "outputs": [
-        "{workspaceRoot}/dist/npm"
-      ]
+      "outputs": ["{workspaceRoot}/dist/npm"]
     },
     "format": {
       "command": "node node_modules/@biomejs/biome/bin/biome format --write npm scripts"
@@ -40,6 +33,9 @@
       "inputs": [
         "{projectRoot}/**/*",
         "{workspaceRoot}/scripts/npm-build.mjs",
+        "{workspaceRoot}/scripts/nx.sh",
+        "{workspaceRoot}/scripts/nx-affected.sh",
+        "{workspaceRoot}/project.json",
         "{workspaceRoot}/.github/workflows/release.yml",
         "{workspaceRoot}/src/**/*",
         "{workspaceRoot}/Cargo.toml",
@@ -50,11 +46,7 @@
     },
     "check": {
       "executor": "nx:noop",
-      "dependsOn": [
-        "format-check",
-        "lint",
-        "test"
-      ]
+      "dependsOn": ["format-check", "lint", "test"]
     }
   }
 }
