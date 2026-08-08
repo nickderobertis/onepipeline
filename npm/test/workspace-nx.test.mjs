@@ -153,12 +153,17 @@ describe("the affected-selection base override", () => {
     assert.match(result.stdout.trim(), /^(true|false)$/);
   });
 
-  it("resolves the same base the unset default does", () => {
-    // The documented default is `main`, so naming it explicitly may not change
-    // the verdict — a drift here means the override reaches a different base
-    // than the one the script falls back to.
-    const overridden = run(AFFECTS, { ONEPIPELINE_NX_BASE_REF: "main" });
-    const defaulted = run(AFFECTS, { GITHUB_BASE_REF: "" });
+  it("resolves the same base a local run falls back to", () => {
+    // `CI` is cleared on both runs because the fallback is branch-specific: only
+    // a local run defaults to `main`, and a CI run with no base fails closed
+    // instead (covered below). Comparing across that boundary would compare two
+    // different documented behaviours.
+    const overridden = run(AFFECTS, {
+      CI: "",
+      GITHUB_BASE_REF: "",
+      ONEPIPELINE_NX_BASE_REF: "main",
+    });
+    const defaulted = run(AFFECTS, { CI: "", GITHUB_BASE_REF: "" });
     assert.equal(overridden.status, 0, overridden.stderr);
     assert.equal(defaulted.status, 0, defaulted.stderr);
     assert.equal(overridden.stdout.trim(), defaulted.stdout.trim());
@@ -171,6 +176,18 @@ describe("the affected-selection base override", () => {
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stdout.trim(), "true");
     assert.match(result.stderr, /'not a branch!' is not a usable branch name/);
+    assert.match(result.stderr, /treating 'onepipeline' as affected/);
+  });
+
+  it("fails closed on a CI build that has no base at all", () => {
+    // A push build is *on* the base branch, so there is nothing to scope
+    // against. Defaulting to `main` there would find nothing changed and skip
+    // every check, which is why this branch refuses the default rather than
+    // taking it.
+    const result = run(AFFECTS, { CI: "true", GITHUB_BASE_REF: "" });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout.trim(), "true");
+    assert.match(result.stderr, /this is not a pull-request build/);
     assert.match(result.stderr, /treating 'onepipeline' as affected/);
   });
 });
