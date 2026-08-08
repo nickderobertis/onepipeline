@@ -258,14 +258,45 @@ fn plan_of(payload: &serde_json::Map<String, Value>) -> Option<Plan> {
 /// carrying no timing evidence.
 pub fn millis_of(ts: &str) -> Option<u64> {
     let bytes = ts.as_bytes();
-    if bytes.len() != 24 || bytes[23] != b'Z' {
+    // `YYYY-MM-DDThh:mm:ss.sssZ` exactly: every separator in its own place, and
+    // every other position a digit. Without the separator check a string that
+    // merely *starts* like a timestamp parses, and `str::parse` would take a
+    // signed field like `+12` as well — either way a stranger's malformed clock
+    // becomes this run's timing evidence.
+    if bytes.len() != 24 {
         return None;
     }
-    let field = |from: usize, to: usize| ts.get(from..to)?.parse::<i64>().ok();
+    for (at, separator) in [
+        (4, b'-'),
+        (7, b'-'),
+        (10, b'T'),
+        (13, b':'),
+        (16, b':'),
+        (19, b'.'),
+        (23, b'Z'),
+    ] {
+        if bytes[at] != separator {
+            return None;
+        }
+    }
+    let field = |from: usize, to: usize| -> Option<i64> {
+        let text = ts.get(from..to)?;
+        if !text.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        text.parse().ok()
+    };
     let (year, month, day) = (field(0, 4)?, field(5, 7)?, field(8, 10)?);
     let (hour, minute, second) = (field(11, 13)?, field(14, 16)?, field(17, 19)?);
+    // Three digits, so the millisecond field cannot leave its own range.
     let ms = field(20, 23)?;
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+    if !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || minute > 59
+        // 60 is a leap second, which is a time a sibling may legitimately render.
+        || second > 60
+    {
         return None;
     }
     let days = days_from_civil(year, month, day);
@@ -340,6 +371,29 @@ mod tests {
         assert_eq!(millis_of("2026-13-08T13:29:45.678Z"), None);
         assert_eq!(millis_of("2026-08-00T13:29:45.678Z"), None);
         assert_eq!(millis_of("20x6-08-08T13:29:45.678Z"), None);
+    }
+
+    /// A timestamp is a *stranger's* clock — the two sibling libraries render
+    /// it — and it is what the whole telemetry timeline is computed from. One
+    /// that reads as a plausible number without being a time would put a run's
+    /// wall clock somewhere in the wrong century, silently.
+    #[test]
+    fn a_timestamp_shaped_string_that_is_not_a_time_carries_no_timing_evidence() {
+        // Right length, wrong separators: a stranger's format that merely
+        // starts like this one.
+        assert_eq!(millis_of("2026-08-08 13:29:45.678Z"), None);
+        assert_eq!(millis_of("2026/08/08T13:29:45.678Z"), None);
+        assert_eq!(millis_of("2026-08-08T13-29-45.678Z"), None);
+        assert_eq!(millis_of("2026-08-08T13:29:45,678Z"), None);
+        // Signed fields, which an integer parse would otherwise take.
+        assert_eq!(millis_of("2026-08-08T+3:29:45.678Z"), None);
+        assert_eq!(millis_of("+026-08-08T13:29:45.678Z"), None);
+        // Out of range, digit by digit.
+        assert_eq!(millis_of("2026-08-08T24:29:45.678Z"), None);
+        assert_eq!(millis_of("2026-08-08T13:60:45.678Z"), None);
+        assert_eq!(millis_of("2026-08-08T13:29:61.678Z"), None);
+        // A leap second is a real time, and is read as one.
+        assert!(millis_of("2026-08-08T23:59:60.000Z").is_some());
     }
 
     #[test]
