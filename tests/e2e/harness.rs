@@ -1,11 +1,22 @@
 //! The scaffolding every journey here shares.
 //!
-//! Each test gets its own runs root, its own scripted doubles for the two
-//! sibling CLIs, and its own launching session. Nothing is stubbed inside the
-//! code under test: `onepipeline` is driven as a subprocess and reaches
-//! `oneagentgraph` and `onevcs` as subprocesses, exactly as it does in
-//! production.
+//! Each test gets its own runs root, its own launching session, and its own
+//! scripted **doubles** for the two sibling CLIs. Be clear about what that
+//! means: `oneagentgraph` and `onevcs` are substituted. Nothing *inside*
+//! `onepipeline` is — it is driven as a compiled subprocess, and it reaches the
+//! doubles the same way it reaches the real thing, by executing a program and
+//! reading its stdout.
 
+// llmlint: ignore-file[e2e_not_mocked] the two siblings are substituted at their
+// subprocess boundary, and there is no alternative: both crates are at their own
+// interface-only stage, so the real `oneagentgraph run` and `onevcs session open`
+// refuse every invocation with exit 70. A suite built on them would prove that this
+// crate can start a process that says no. Revisit each seam as its sibling implements
+// it — the doubles are scripted per test and swapping one out is an env var.
+
+// llmlint: ignore-file[dead_code_is_deleted] a shared harness is used a piece at a time:
+// every helper is exercised by some journey, and none by all of them. Deleting the ones a
+// single test file happens not to reach would make the next journey re-add them.
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};

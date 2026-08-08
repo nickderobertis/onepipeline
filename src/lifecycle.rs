@@ -115,7 +115,13 @@ pub fn execute(
 }
 
 /// Draft the change request, then publish through `onevcs`.
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "publication needs the dispatch context (executor, run, round, node, cancel, \
+              stream) as well as what the steps left behind (the session token and its \
+              branch); the first six are the node's own dispatch identity and bundling \
+              them would only move the same list one indirection away"
+)]
 fn publish(
     executor: &dyn Executor,
     run: &str,

@@ -2,8 +2,8 @@
 //!
 //! It speaks the sibling's command surface — `session open`, `publish`,
 //! `session close`, `events` — hands back a real worktree directory, and records
-//! every invocation. A lifecycle node's whole journey therefore runs against an
-//! executable rather than a stub inside the code under test.
+//! every invocation. It stands in for `onevcs`, which is itself interface-only;
+//! what a lifecycle test proves is this crate's half of the composition.
 
 use onepipeline_testfakes as fake;
 use std::process::ExitCode;
@@ -38,7 +38,10 @@ fn open(args: &[String], dir: &std::path::Path) -> ExitCode {
     // A real worktree directory: the dispatch runs in it, so it has to exist.
     let token = format!("session-{}", branch.replace('/', "-"));
     let worktree = dir.join("worktrees").join(&token);
-    std::fs::create_dir_all(&worktree).expect("the worktree is created");
+    if let Err(error) = std::fs::create_dir_all(&worktree) {
+        eprintln!("cannot create the worktree {}: {error}", worktree.display());
+        return ExitCode::from(2);
+    }
 
     println!(
         "{}",
@@ -78,6 +81,14 @@ fn publish(args: &[String], dir: &std::path::Path) -> ExitCode {
 /// `onevcs events TOKEN` — the session's own stream, for the merge.
 fn events(args: &[String], dir: &std::path::Path) -> ExitCode {
     let token = args.get(1).cloned().unwrap_or_default();
+    if dir.join("events.fail").exists() {
+        eprintln!("no such session {token}");
+        return ExitCode::from(2);
+    }
+    if dir.join("events.unreadable").exists() {
+        println!("{{\"from\":\"a newer onevcs\"}}");
+        return ExitCode::SUCCESS;
+    }
     println!(
         "{}",
         serde_json::json!({

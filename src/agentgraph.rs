@@ -118,7 +118,13 @@ impl GraphRun {
                 .lines()
                 .map_while(std::result::Result::ok)
                 .filter(|line| !line.trim().is_empty())
-                .filter_map(|line| serde_json::from_str::<Envelope>(&line).ok())
+                .filter_map(|line| match serde_json::from_str::<Envelope>(&line) {
+                    Ok(envelope) => Some(envelope),
+                    Err(_) => {
+                        crate::vcs::report_skipped("oneagentgraph", 1);
+                        None
+                    }
+                })
                 .map(Ok),
         )
     }

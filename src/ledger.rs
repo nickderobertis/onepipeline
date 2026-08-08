@@ -8,6 +8,15 @@
 //! temporary beside the target and renamed over it — because every view here
 //! reads a live run's directory while its driver is writing to it.
 
+// llmlint: ignore-file[invalid_states_unrepresentable] a run id, a host name, and a
+// timestamp are `String`s in these records because each one is a *serialized* field: the
+// launch record and the lock are JSON a human reads and another process parses, and every
+// reader — including one written against an older build — has to accept what is there
+// rather than what this build would mint. `docs/contract.md` names no `RunId`, so a
+// newtype would also be a public vocabulary the contract did not ask for. What is
+// enforced instead is the thing that matters: `owned_by` is the one place ownership is
+// decided, and `unknown` is never anybody's.
+
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};

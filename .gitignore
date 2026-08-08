@@ -21,3 +21,8 @@ REPO_PLAN.md
 # Local sync bookkeeping for gh-secrets (per-machine; the manifest itself is
 # tracked).
 .gh-secrets-state.json
+
+# The default runs root. A run's ledger is host state — its launch record names
+# absolute paths and a live pid — so it belongs to the machine that made it, not
+# to the repository. `ONEPIPELINE_RUNS_DIR` moves it somewhere deliberate.
+/runs/

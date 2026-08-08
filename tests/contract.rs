@@ -1054,6 +1054,71 @@ fn the_smoke_scripts_command_list_is_the_binarys_whole_surface() {
     );
 }
 
+/// The `name: Type` pairs a struct in `src/executor.rs` declares.
+///
+/// Read out of the source rather than reflected off the type, because a
+/// `#[non_exhaustive]` struct cannot be built field-by-field from outside the
+/// crate — which is exactly the property that would otherwise catch the drift.
+fn declared_fields(struct_name: &str) -> Vec<String> {
+    let source = std::fs::read_to_string(repo_root().join("src/executor.rs"))
+        .expect("the executor seam ships");
+    let body = source
+        .split_once(&format!("pub struct {struct_name} {{"))
+        .expect("the struct is declared")
+        .1
+        .split_once("\n}")
+        .expect("the struct is closed")
+        .0;
+    body.lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("pub ") && line.ends_with(','))
+        .map(|line| {
+            line.trim_start_matches("pub ")
+                .trim_end_matches(',')
+                .to_string()
+        })
+        .collect()
+}
+
+/// The divergences document restates two things that live in the code. Each copy
+/// is gated here, so a change to the code fails this suite instead of leaving
+/// the document quietly wrong.
+#[test]
+fn the_divergence_record_matches_the_code_it_describes() {
+    let raw = std::fs::read_to_string(repo_root().join("docs/contract-divergences.md"))
+        .expect("the divergence record ships");
+    let doc = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    // Divergence 3 spells `DispatchOutcome`'s fields, which the contract leaves
+    // unspecified. The type is `#[non_exhaustive]`, so a struct literal here
+    // cannot be the gate; its declaration is read instead, and every field it
+    // declares must appear in the record.
+    let declared = declared_fields("DispatchOutcome");
+    assert!(!declared.is_empty(), "DispatchOutcome declares no fields");
+    for field in &declared {
+        assert!(
+            doc.contains(field.as_str()),
+            "the divergence record does not spell `{field}`, which DispatchOutcome declares"
+        );
+    }
+
+    // Divergence 5 names the units the rules parser accepts.
+    for unit in ["KiB", "MiB", "GiB", "TiB"] {
+        assert!(
+            onepipeline::rules::bytes_of(&format!("1{unit}")).is_some(),
+            "the rules parser does not accept {unit}, which the record says it does"
+        );
+        assert!(
+            doc.contains(unit),
+            "the divergence record does not name the {unit} unit the parser accepts"
+        );
+    }
+    assert!(
+        onepipeline::rules::bytes_of("2GB").is_none(),
+        "the record says `2GB` is treated as no limit; the parser accepted it"
+    );
+}
+
 #[test]
 fn the_readmes_interface_claims_match_the_code_they_describe() {
     // The README restates numbers that live in the code. Each copy is gated

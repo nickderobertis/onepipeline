@@ -293,3 +293,42 @@ fn a_lifecycle_node_carries_the_pins_the_plan_states_into_its_session() {
         "the merge policy did not reach onevcs: {published:?}"
     );
 }
+
+#[test]
+fn a_session_stream_that_cannot_be_read_is_reported_and_does_not_fail_the_node() {
+    let world = World::new("lifecycle-noevents");
+    world.script("events.fail", "");
+    let run = settle(&world, "silentstream", vec![lifecycle("service", &[])]);
+
+    // The evidence is missing, not the result: the node published and settled.
+    let result = world.run_json(&run, "round-01/result.json");
+    assert_eq!(result["state"], "complete", "{result}");
+    assert!(
+        !world
+            .journal(&run)
+            .iter()
+            .any(|event| event["kind"] == "verification-finished"),
+        "the unreadable stream still contributed events"
+    );
+}
+
+#[test]
+fn a_session_line_this_build_cannot_read_is_skipped_and_counted() {
+    let world = World::new("lifecycle-futureline");
+    world.script("events.unreadable", "");
+    let run = settle(&world, "futurestream", vec![lifecycle("service", &[])]);
+
+    // A sibling emitting a shape this build does not know must not stop the
+    // node, and must not vanish silently either.
+    assert_eq!(
+        world.run_json(&run, "round-01/result.json")["state"],
+        "complete"
+    );
+    assert!(
+        world
+            .journal(&run)
+            .iter()
+            .any(|event| event["source"] == "vcs" && event["kind"] == "published"),
+        "the publication still reached the merged store"
+    );
+}

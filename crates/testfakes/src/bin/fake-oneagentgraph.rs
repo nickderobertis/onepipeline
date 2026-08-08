@@ -2,9 +2,9 @@
 //!
 //! It speaks the sibling's command surface — `run`, `reset-timer`, `health` —
 //! emits envelope NDJSON on stdout, and records every invocation so a test can
-//! assert on what `onepipeline` actually asked for. Standing in for the sibling
-//! at the subprocess boundary is what makes the composition testable without
-//! mocking the seam under test.
+//! assert on what `onepipeline` actually asked for. It is a stand-in for
+//! `oneagentgraph`, which is itself interface-only and refuses everything; the
+//! composition on this side of the boundary is what the tests exercise.
 
 use onepipeline_testfakes as fake;
 use std::process::ExitCode;
@@ -16,6 +16,10 @@ fn main() -> ExitCode {
 
     match args.first().map(String::as_str) {
         Some("run") => run(&args, &dir),
+        Some("reset-timer") if dir.join("reset-timer.fail").exists() => {
+            eprintln!("no resettable schedule named that member");
+            ExitCode::from(2)
+        }
         Some("reset-timer") => ExitCode::SUCCESS,
         Some("health") => {
             println!("fake-provider: 1 identity bound, 0% utilized");
@@ -146,8 +150,10 @@ fn drafted_title(task: &str) -> Option<String> {
 /// is exercised through the same commands a real orchestrator would use.
 fn drive(dir: &std::path::Path) -> ExitCode {
     let run = std::env::var("ONEPIPELINE_RUN_ID").unwrap_or_default();
-    let binary = std::env::var("ONEPIPELINE_FAKE_DRIVER_BIN")
-        .expect("the test names the onepipeline binary the orchestrator drives with");
+    let binary = match std::env::var("ONEPIPELINE_FAKE_DRIVER_BIN") {
+        Ok(binary) if !binary.is_empty() => binary,
+        _ => fake::fail("ONEPIPELINE_FAKE_DRIVER_BIN is unset: nothing to drive the run with"),
+    };
     if dir.join("driver.wait").exists() {
         fake::wait_for(&dir.join("driver.go"));
     }

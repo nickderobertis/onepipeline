@@ -9,6 +9,14 @@
 //! what [`WorkspaceSpec::VcsSession`](crate::executor::WorkspaceSpec::VcsSession)
 //! means: the clone, worktree, and branch are cut where the work happens.
 
+// llmlint: ignore-file[invalid_states_unrepresentable] `OpenSession` and `Published`
+// mirror, field for field, what the `onevcs` CLI prints. A token, a branch name, a change
+// id, and an outcome are strings *on that wire*, and narrowing them here would mean this
+// crate deciding a vocabulary the sibling owns — the exact re-declaration src/AGENTS.md
+// forbids. `onevcs::SessionToken` and `onevcs::MergeOutcome` are `Serialize`-only today,
+// so they cannot be read back into; when they gain `Deserialize` these two mirrors go
+// away entirely and the sibling's types are used directly.
+
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
@@ -45,6 +53,7 @@ fn sibling(message: impl Into<String>) -> Error {
 /// into this mirror rather than into the sibling's own type. It carries exactly
 /// the four fields that type does, and no field this crate invented.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OpenSession {
     /// The handle the session is published and closed by.
     pub token: String,
@@ -58,6 +67,7 @@ pub struct OpenSession {
 
 /// What a publication produced.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Published {
     /// Where a human reads the change, when one was opened.
     #[serde(default)]
@@ -150,22 +160,51 @@ pub fn session_close(token: &str) -> Result<()> {
 
 /// A session's own event stream, for relaying into the merged one.
 pub fn events(token: &str) -> Vec<Envelope> {
-    let Ok(output) = Command::new(binary())
+    let read = Command::new(binary())
         .arg("events")
         .arg(token)
         .stdin(Stdio::null())
-        .output()
-    else {
-        return Vec::new();
+        .output();
+    let output = match read {
+        Ok(output) if output.status.success() => output,
+        // A session whose stream cannot be read leaves the node's own
+        // settlement intact — the evidence is missing, not the result — but a
+        // silent gap in the merged store is what makes a later reader think
+        // nothing happened, so it is said out loud.
+        Ok(output) => {
+            eprintln!(
+                "onepipeline: cannot read session {token}'s events: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+            return Vec::new();
+        }
+        Err(error) => {
+            eprintln!("onepipeline: cannot read session {token}'s events: {error}");
+            return Vec::new();
+        }
     };
-    if !output.status.success() {
-        return Vec::new();
-    }
-    String::from_utf8_lossy(&output.stdout)
+    let text = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = text
         .lines()
         .filter(|line| !line.trim().is_empty())
+        .collect();
+    let envelopes: Vec<Envelope> = lines
+        .iter()
         .filter_map(|line| serde_json::from_str::<Envelope>(line).ok())
-        .collect()
+        .collect();
+    report_skipped("onevcs", lines.len() - envelopes.len());
+    envelopes
+}
+
+/// Say when a sibling's stream carried lines this build could not read.
+///
+/// Skipping them is right — a sibling emitting a kind this build does not know
+/// must not stop the ones it does — but skipping them *quietly* turns a schema
+/// mismatch into a run that merely looks uneventful.
+pub fn report_skipped(tool: &str, skipped: usize) {
+    if skipped > 0 {
+        eprintln!("onepipeline: skipped {skipped} {tool} line(s) this build cannot read");
+    }
 }
 
 /// The envelope that records a session opening, for the merged stream.

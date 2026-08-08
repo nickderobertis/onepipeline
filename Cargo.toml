@@ -76,12 +76,12 @@ windows-sys = { version = "0.61", features = [
   "Win32_System_Threading",
 ] }
 
-[dev-dependencies]
-assert_cmd = "2"
-predicates = "3"
-# The subprocess doubles for the two siblings, so `cargo test` builds them
-# beside the binary the e2e suite drives.
-onepipeline-testfakes = { path = "crates/testfakes" }
+# No dev-dependencies. The e2e suite drives the compiled binary as a subprocess
+# with `std::process` and reads what it wrote, so it needs no command-assertion
+# crate — `tests/e2e/harness.rs` is the whole of it. The subprocess doubles for
+# the two siblings are a workspace member rather than a dependency: a dev-dep
+# would build that crate's *library*, and what the suite needs is its binaries,
+# which the harness builds on demand.
 
 [[test]]
 name = "e2e"

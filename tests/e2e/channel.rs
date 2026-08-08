@@ -457,3 +457,64 @@ fn a_human_action_is_attested_at_a_round_boundary_and_the_next_round_opens() {
     assert_eq!(ids, vec!["ship"], "the attested human was carried forward");
     world.release("driver.go");
 }
+
+#[test]
+fn a_read_survives_a_pacemaker_it_could_not_reset_and_says_so() {
+    let world = World::new("channel-reset-fails");
+    world.script("build.wait", "hold");
+    world.script("reset-timer.fail", "");
+    let run = running(&world, "unresettable", vec![agent("build", &[])]);
+    world
+        .run(&["surface", &run, "--kind", "check-in", "--message", "steady"])
+        .exited(0);
+
+    // The planner has the surface either way, so a sibling that cannot reset
+    // the clock is reported rather than allowed to fail the read.
+    let read = world.run(&["next", &run]);
+    read.exited(0).out_has("steady");
+    read.err_has("could not reset the check-in pacemaker");
+    assert_eq!(world.events_of(&run, "planner-surfaced").len(), 1);
+    world.release("build.go");
+}
+
+#[test]
+fn the_channel_server_refuses_a_frame_missing_what_a_surface_needs() {
+    use std::io::Write;
+
+    let world = World::new("channel-frame-schema");
+    world.script("build.wait", "hold");
+    let run = running(&world, "strictframe", vec![agent("build", &[])]);
+
+    // A frame is external input, so it has a schema: a missing `message` or an
+    // unknown key is refused by name rather than defaulted into a surface the
+    // planner then has to interpret.
+    for frame in [
+        r#"{"kind":"blocker"}"#,
+        r#"{"message":"no kind"}"#,
+        r#"{"kind":"blocker","message":"m","urgency":"high"}"#,
+    ] {
+        let mut serving = world
+            .cmd(&["channel", "serve", &run])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("the channel server starts");
+        let mut stdin = serving.stdin.take().expect("stdin is piped");
+        writeln!(stdin, "{frame}").expect("written");
+        stdin.flush().expect("flushed");
+        drop(stdin);
+
+        let output = serving.wait_with_output().expect("the server exits");
+        assert_eq!(output.status.code(), Some(REFUSED), "{frame} was accepted");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("bad frame"),
+            "{frame}: {output:?}"
+        );
+    }
+    assert!(
+        world.events_of(&run, "planner-surface-queued").is_empty(),
+        "a refused frame still reached the planner"
+    );
+    world.release("build.go");
+}

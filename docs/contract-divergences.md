@@ -72,6 +72,9 @@ proposal for the planner is to state these four in the contract, or to say
 instead that `wait` reports settlement only and that a session token reaches the
 caller some other way.
 
+`tests/contract.rs` gates this list against the type, so the prose above cannot
+drift from what `DispatchOutcome` actually carries.
+
 ## 4. The rules grammar spells one predicate but describes two families
 
 The contract calls the rules "ordered predicates over capacity **and node
@@ -93,9 +96,18 @@ conditions in one `when` conjoin.
 ## 5. `min_free_mem: 2GiB` is carried as its string
 
 `ExecutorEntry::min_free_mem` is a `String`, holding `2GiB` as the contract's
-example writes it. Turning a binary-prefixed size into a byte count is a parser,
-and this stage implements none. The field narrows to a byte count when the
-evaluator lands; the wire syntax does not change.
+example writes it, and `rules::bytes_of` reads it as a byte count where the
+evaluator needs one.
+
+The field stays a `String` on the type rather than becoming a `u64`, because the
+contract fixes the *wire* syntax and a parsed field would make the type unable to
+round-trip what a rules file wrote. `bytes_of` accepts exactly the units the
+contract spells — `B`, `KiB`, `MiB`, `GiB`, `TiB`, and a bare byte count — and
+answers `None` for anything else rather than guessing, which resolves toward
+"has capacity" the way every other unreadable input does.
+
+The proposal for the planner is to state that unit list in the contract, since a
+rules file naming `2GB` today is silently treated as "no limit".
 
 ## 6. `onepipeline`'s own event kinds are not enumerated
 

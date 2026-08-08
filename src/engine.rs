@@ -122,6 +122,13 @@ pub struct NodeResult {
 }
 
 /// How one node settled, as its dispatch reports it.
+///
+// llmlint: ignore-block[invalid_states_unrepresentable] `outcome`, `branch`, and
+// `change_url` are optional strings because they are exactly what goes into the journal
+// payload, and the journal is read by builds other than this one. An outcome enum here
+// would make a record written by a newer build unreadable by an older one, which is the
+// failure the schema-skipping rule elsewhere in this crate exists to prevent. `status` is
+// the part that *is* narrowed, because scheduling depends on it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settlement {
     /// The node.
@@ -137,6 +144,7 @@ pub struct Settlement {
     /// Where a human reads the change it published.
     pub change_url: Option<String>,
 }
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 impl Settlement {
     /// A node that settled without a dispatch.
@@ -452,7 +460,16 @@ fn cancelled_by(command: &Command) -> Vec<String> {
 }
 
 /// Start every node whose dependencies have settled, bounded by `concurrency`.
-#[allow(clippy::too_many_arguments)]
+// llmlint: ignore[modern_domain_modeling] the arguments are the reconcile loop's own
+// borrowed state — the ledger, its single writer, the folded run, the round, the rules,
+// the dispatch channel, and the in-flight map. Bundling them into a struct would mean
+// holding a `&mut` to the whole loop across a call that already needs three independent
+// mutable borrows out of it.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the reconcile loop's borrowed state, which cannot be bundled without \
+              taking one mutable borrow where three independent ones are needed"
+)]
 fn start_ready(
     paths: &RunPaths,
     journal: &mut Journal,

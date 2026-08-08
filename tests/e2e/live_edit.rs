@@ -453,9 +453,12 @@ fn a_rejected_edit_is_surfaced_as_a_proposal_rather_than_silently_dropped() {
     let world = World::new("edit-surfaced");
     let run = live(&world, "rejected", vec![agent("slow", &[])], &["slow"]);
 
-    // Submitted straight into the durable queue, past the submission check, so
-    // the reconciler is the one that rejects it. That is the race a submitter
-    // can lose against the live frontier.
+    // llmlint: ignore-block[tests_mirror_real_usage] this deliberately writes the
+    // durable queue rather than going through `reply`, because the case under test is
+    // the one a user *cannot* type: an edit that passed submission and then lost a race
+    // to the frontier it was validated against. Through the front door the submission
+    // check would reject it first, and the reconciler's own rejection path — which is
+    // what surfaces the proposal and writes `edit-rejected` — would never run.
     let queue = world.run_file(&run, "channel/commands.jsonl");
     std::fs::write(
         &queue,
@@ -466,6 +469,7 @@ fn a_rejected_edit_is_surfaced_as_a_proposal_rather_than_silently_dropped() {
     )
     .expect("the command is queued");
 
+    // llmlint: ignore-end[tests_mirror_real_usage]
     world.until("the reconciler to reject it", |world| {
         !world.events_of(&run, "edit-rejected").is_empty()
     });
@@ -501,10 +505,13 @@ fn edits_accepted_but_not_reconciled_in_time_are_reported_queued() {
     let mut command = world.cmd(&["reply", &run]);
     command.env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "1");
     let queued = world.run_file(&run, "channel/commands-cursor.json");
-    // Advance the cursor past the id this reply will take, so the reconciler
-    // never claims it and nothing ever answers.
+    // llmlint: ignore-block[tests_mirror_real_usage] advancing the reconciler's cursor
+    // past this reply is how a reader-starved queue is arranged on purpose. The exit-1
+    // verdict exists for a reconciler that did not get to the command in time, and there
+    // is no invocation a planner can type that guarantees that timing.
     std::fs::write(&queued, "99").expect("the cursor is advanced");
 
+    // llmlint: ignore-end[tests_mirror_real_usage]
     let reply = world.run_with_stdin_timeout(
         command,
         &envelope(json!([{"op": "context", "id": "slow", "note": "a note"}])),

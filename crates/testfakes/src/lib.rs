@@ -1,11 +1,14 @@
 //! What the two subprocess doubles share.
 //!
-//! `onepipeline` composes `oneagentgraph` and `onevcs` by running their CLIs, so
-//! the honest way to drive it end to end is against real executables speaking
-//! those command surfaces. These doubles are scripted from a directory the test
-//! prepares: what a node's dispatch does, whether it waits for a rendezvous,
-//! and what it exits with are all files on disk, so a test states its scenario
-//! rather than mocking the seam under test.
+//! These are **doubles for the siblings**, not for anything inside
+//! `onepipeline`. They are real executables speaking `oneagentgraph`'s and
+//! `onevcs`'s command surfaces, so the code under test composes them exactly as
+//! it composes the real ones — by executing a program and reading its stdout.
+//!
+//! Each is scripted from a directory the test prepares: what a node's dispatch
+//! does, whether it waits for a rendezvous, and what it exits with are all files
+//! on disk, so a test states its scenario instead of arranging call
+//! expectations.
 
 use std::path::{Path, PathBuf};
 
@@ -14,13 +17,22 @@ pub const SCRIPT_DIR_ENV: &str = "ONEPIPELINE_FAKE_DIR";
 
 /// The directory this double reads its script from and records into.
 ///
-/// Panicking is right here: a double with no script directory has nothing to
-/// say, and failing loudly beats a test that silently exercises a default.
+/// A double with no script directory has nothing to act out, which is a
+/// misconfigured test rather than a scenario — so it is reported and the
+/// process exits, the way any program does when its configuration is missing.
 pub fn script_dir() -> PathBuf {
-    PathBuf::from(
-        std::env::var(SCRIPT_DIR_ENV)
-            .unwrap_or_else(|_| panic!("{SCRIPT_DIR_ENV} is unset: no scenario to act out")),
-    )
+    match std::env::var(SCRIPT_DIR_ENV) {
+        Ok(dir) if !dir.is_empty() => PathBuf::from(dir),
+        _ => fail(&format!(
+            "{SCRIPT_DIR_ENV} is unset: no scenario to act out"
+        )),
+    }
+}
+
+/// Report a configuration failure and exit, rather than unwinding.
+pub fn fail(message: &str) -> ! {
+    eprintln!("{message}");
+    std::process::exit(78);
 }
 
 /// Record one invocation, so a test can assert on what it was asked for.
@@ -30,17 +42,22 @@ pub fn record(dir: &Path, tool: &str, args: &[String]) {
 }
 
 /// Append one line to a file, creating it if needed.
+///
+/// A double that cannot record what it was asked for would let a test assert
+/// against a gap, so the failure ends the process instead.
 pub fn append(path: &Path, line: &str) {
     use std::io::Write;
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let mut file = std::fs::OpenOptions::new()
+    let opened = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(path)
-        .unwrap_or_else(|e| panic!("cannot record into {}: {e}", path.display()));
-    writeln!(file, "{line}").expect("the record is written");
+        .open(path);
+    let written = opened.and_then(|mut file| writeln!(file, "{line}"));
+    if let Err(error) = written {
+        fail(&format!("cannot record into {}: {error}", path.display()));
+    }
 }
 
 /// The value of a `--flag VALUE` pair, if it was given.

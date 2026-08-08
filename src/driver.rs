@@ -284,9 +284,13 @@ fn attach(paths: &RunPaths, launched: Option<&mut agentgraph::GraphRun>) -> Resu
         }
 
         let view = RunView::open(paths)?;
+        // The stream is progress for a person; the settlement below is the one
+        // record a caller parses. Keeping them on separate descriptors is what
+        // lets a script read `stdout` as JSON while a terminal still follows
+        // the run.
         let lines: Vec<String> = views::monitor(&view).lines().map(str::to_string).collect();
         for line in lines.iter().skip(reported) {
-            println!("{line}");
+            eprintln!("{line}");
         }
         reported = lines.len();
 
@@ -705,32 +709,18 @@ fn serve(args: &RunArgs) -> Result<i32> {
         if line.trim().is_empty() {
             continue;
         }
-        let frame: serde_json::Value = serde_json::from_str(line.trim())
+        let frame: BoundaryFrame = serde_json::from_str(line.trim())
             .map_err(|e| Error::Refused(format!("the orchestrator emitted a bad frame: {e}")))?;
         let view = RunView::open(&paths)?;
         let queued = channel.push(Surface {
             id: 0,
-            kind: frame
-                .get("kind")
-                .and_then(|v| v.as_str())
-                .unwrap_or("blocker")
-                .to_string(),
-            message: frame
-                .get("message")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string(),
+            kind: frame.kind,
+            message: frame.message,
             source: crate::channel::source::PROPOSAL.to_string(),
-            blocking: frame
-                .get("blocking")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true),
+            blocking: frame.blocking,
             round: view.state.round,
             queued_at: sys::now_millis(),
-            workstream: frame
-                .get("node")
-                .and_then(|v| v.as_str())
-                .map(str::to_string),
+            workstream: frame.node,
         })?;
         let mut journal = Journal::open(&paths);
         journal.emit(
@@ -759,6 +749,32 @@ fn serve(args: &RunArgs) -> Result<i32> {
         }
     }
     Ok(EXIT_SUCCESS)
+}
+
+/// What the orchestrator emits at a round boundary.
+///
+/// External input, so it has a schema: an unknown key or a missing `kind` or
+/// `message` is refused by name rather than defaulted into a surface the
+/// planner then has to interpret.
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BoundaryFrame {
+    /// What the surface is asking about, in the orchestrator persona's own
+    /// boundary vocabulary.
+    kind: String,
+    /// Its text.
+    message: String,
+    /// Whether the orchestrator is waiting on the answer. A boundary frame is
+    /// blocking unless it says otherwise; a worker's advice is not.
+    #[serde(default = "blocking_by_default")]
+    blocking: bool,
+    /// The node that provoked it, when one did.
+    #[serde(default)]
+    node: Option<String>,
+}
+
+fn blocking_by_default() -> bool {
+    true
 }
 
 fn wait_for_reply(channel: &ChannelState) -> Result<Reply> {
