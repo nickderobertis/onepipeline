@@ -42,12 +42,22 @@ const nxJson = JSON.parse(readFileSync(join(root, "nx.json"), "utf8"));
  * `spawnSync` rather than `execFileSync` because every case below asserts on a
  * specific exit code — including the ones that fail closed — and a throw would
  * lose the streams that say why.
+ *
+ * The child inherits this process's environment, so a case whose subject is an
+ * *unset* variable needs a way to say so: an `undefined` value here deletes the
+ * name instead of passing it through. Without that, such a case asserts about
+ * whichever shell launched the gate rather than about the script — a run with
+ * `ONEPIPELINE_NX_SHOW_OUTPUT` already exported failed here for that reason.
  */
 function run(args, env = {}) {
+  const inherited = { ...process.env, ...env };
+  for (const [name, value] of Object.entries(env)) {
+    if (value === undefined) delete inherited[name];
+  }
   const result = spawnSync("bash", args, {
     cwd: root,
     encoding: "utf8",
-    env: { ...process.env, ...env },
+    env: inherited,
   });
   assert.equal(result.error, undefined, `could not run ${args.join(" ")}`);
   return result;
@@ -106,7 +116,9 @@ describe("the streaming switch", () => {
   });
 
   it("summarises instead when it is unset", () => {
-    const result = run(["scripts/nx.sh", "show", "projects", "--json"]);
+    const result = run(["scripts/nx.sh", "show", "projects", "--json"], {
+      ONEPIPELINE_NX_SHOW_OUTPUT: undefined,
+    });
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /^nx: requested targets succeeded/);
     assert.throws(
