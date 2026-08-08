@@ -1,0 +1,36 @@
+{
+  "name": "onepipeline-cli",
+  "version": "0.0.0-managed",
+  "description": "Compose agents into a graph over oneharness/onejudge and merge their outputs into one event stream.",
+  "keywords": [
+    "agents",
+    "orchestration",
+    "cli",
+    "ndjson",
+    "llm"
+  ],
+  "homepage": "https://github.com/nickderobertis/onepipeline",
+  "bugs": "https://github.com/nickderobertis/onepipeline/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nickderobertis/onepipeline.git"
+  },
+  "license": "MIT",
+  "author": "Nick DeRobertis",
+  "bin": {
+    "onepipeline": "bin/onepipeline.js"
+  },
+  "files": [
+    "bin/onepipeline.js"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "optionalDependencies": {
+    "onepipeline-cli-linux-x64": "0.0.0-managed",
+    "onepipeline-cli-linux-arm64": "0.0.0-managed",
+    "onepipeline-cli-darwin-x64": "0.0.0-managed",
+    "onepipeline-cli-darwin-arm64": "0.0.0-managed",
+    "onepipeline-cli-win32-x64": "0.0.0-managed"
+  }
+}
