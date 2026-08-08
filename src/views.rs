@@ -421,10 +421,24 @@ pub fn results(view: &RunView) -> String {
         if let Some(outcome) = view.state.outcomes.get(&node.id) {
             out.push_str(&format!(" ({outcome})"));
         }
-        if status == NodeStatus::Parked {
-            if let Some(branch) = &node.branch {
-                out.push_str(&format!(" — preserved on {branch}"));
-            }
+        // What the dispatch reported, before what the plan asked for: an
+        // unpinned lifecycle node's branch is named by the sibling that cut it,
+        // so the plan does not know it and a reader looking for the work would
+        // find nothing.
+        let branch = view
+            .state
+            .branches
+            .get(&node.id)
+            .or(node.branch.as_ref())
+            .cloned();
+        if let (NodeStatus::Parked | NodeStatus::Failed | NodeStatus::Cancelled, Some(branch)) =
+            (status, &branch)
+        {
+            out.push_str(&format!(" — preserved on {branch}"));
+        }
+        // The one piece of evidence a person actually opens.
+        if let Some(url) = view.state.change_urls.get(&node.id) {
+            out.push_str(&format!(" — {url}"));
         }
         out.push('\n');
         if status == NodeStatus::Waiting {

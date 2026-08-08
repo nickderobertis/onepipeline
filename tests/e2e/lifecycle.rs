@@ -256,6 +256,78 @@ fn a_publication_that_its_gate_rejects_settles_the_node_failed_by_name() {
 }
 
 #[test]
+fn a_node_whose_publication_failed_continues_the_branch_it_preserved() {
+    let world = World::new("lifecycle-preserved");
+    // The steps ran and only the merge path refused, so the work is real, it is
+    // on that branch, and nothing else points at it.
+    world.script("publish.fail", "");
+    let run = settle(&world, "preserved", vec![lifecycle("service", &[])]);
+
+    let result = world.run_json(&run, "round-01/result.json");
+    assert_eq!(result["nodes"][0]["status"], "failed", "{result}");
+    let preserved = result["nodes"][0]["branch"]
+        .as_str()
+        .expect("the failed node named the branch it left behind")
+        .to_string();
+
+    world.run(&["round", "next", &run]).exited(0);
+
+    // Carried forward *pinned*. A continuation that cut a fresh branch would
+    // redo work that is already committed and leave the preserved branch for a
+    // person to find — the failure a planner otherwise catches by hand-writing
+    // the pin, or pays for twice by missing it.
+    let next = world.run_json(&run, "round-02/plan.json");
+    let node = &next["tasks"][0];
+    assert_eq!(node["id"], "service", "{next}");
+    assert_eq!(node["resume"]["branch"], json!(preserved), "{next}");
+    // The pin and the resume agree, which is the same invariant `retry` holds.
+    assert_eq!(node["branch"], json!(preserved), "{next}");
+}
+
+#[test]
+fn a_published_node_reports_where_a_human_reads_the_change_it_opened() {
+    let world = World::new("lifecycle-evidence");
+    let run = settle(&world, "evidence", vec![lifecycle("service", &[])]);
+
+    // The URL the sibling handed back is the one piece of evidence a person
+    // actually opens, and until it reaches the run's own record it lives only
+    // inside a journal payload nobody reads by hand.
+    let published = world.run_json(&run, "round-01/result.json")["nodes"][0]["change_url"]
+        .as_str()
+        .expect("the published node recorded where its change is")
+        .to_string();
+    assert!(published.contains("/changes/"), "{published}");
+
+    world.run(&["results", &run]).exited(0).out_has(&published);
+}
+
+#[test]
+fn an_explicit_pin_the_planner_wrote_wins_over_a_branch_a_dispatch_preserved() {
+    let world = World::new("lifecycle-pin-wins");
+    world.script("publish.fail", "");
+    let mut node = lifecycle("service", &[]);
+    node["branch"] = json!("feature/the-planner-said-so");
+    let run = settle(&world, "pinwins", vec![node]);
+
+    world.run(&["round", "next", &run]).exited(0);
+
+    // Naming a branch is a decision somebody made. The next round keeps it, and
+    // carries no `resume` pointing somewhere else — the two disagreeing is the
+    // state `retry` already refuses to construct.
+    let next = world.run_json(&run, "round-02/plan.json");
+    let node = &next["tasks"][0];
+    assert_eq!(
+        node["branch"],
+        json!("feature/the-planner-said-so"),
+        "{next}"
+    );
+    assert_eq!(
+        node["resume"]["branch"],
+        json!("feature/the-planner-said-so")
+    );
+}
+
+#[test]
 fn a_lifecycle_node_carries_the_pins_the_plan_states_into_its_session() {
     let world = World::new("lifecycle-pins");
     let mut node = lifecycle("service", &[]);

@@ -1040,8 +1040,15 @@ fn record_result(
                 } else {
                     Vec::new()
                 },
-                branch: node.branch.clone(),
-                change_url: None,
+                // What the dispatch reported, falling back to what the plan
+                // pinned: an unpinned lifecycle node's branch is named by the
+                // sibling that cut it, so the plan cannot be the only source.
+                branch: state
+                    .branches
+                    .get(&node.id)
+                    .cloned()
+                    .or_else(|| node.branch.clone()),
+                change_url: state.change_urls.get(&node.id).cloned(),
             }
         })
         .collect();
@@ -1234,9 +1241,51 @@ pub(crate) fn derive_next(state: &RunState) -> Graph {
         // Context follows a node id, and the set is replaced rather than
         // appended: a note reports state observed while one attempt ran.
         node.context = state.notes_this_round.get(&node.id).cloned();
+        let settled = statuses.get(&node.id).copied();
+        carry_preserved_branch(&mut node, state, settled);
         next.insert(node);
     }
     next
+}
+
+/// Statuses whose work is still on the branch the round left behind.
+///
+/// A node that settled one of these ran, committed, and stopped — so the branch
+/// holds work, and the next round has to continue it rather than cut a fresh one
+/// beside it. `done` never reaches here (it falls out of the transition), and
+/// `waiting` and `skipped` never dispatched, so there is nothing to preserve.
+fn preserves_its_branch(status: Option<NodeStatus>) -> bool {
+    matches!(
+        status,
+        Some(NodeStatus::Failed | NodeStatus::Cancelled | NodeStatus::Parked)
+    )
+}
+
+/// Pin a carried node to the branch its last attempt left behind.
+///
+/// Without this the continuation cuts a fresh branch beside committed work
+/// nothing points at any more: the publication that failed is retried against an
+/// empty tree, and the branch that holds the work is left for a person to find.
+///
+/// A `branch` the *planner* wrote wins outright — naming one is a decision
+/// somebody made after reading the result — and the `resume` follows it rather
+/// than pointing somewhere else, which is the same agreement `retry` refuses to
+/// break.
+fn carry_preserved_branch(node: &mut Node, state: &RunState, status: Option<NodeStatus>) {
+    if !preserves_its_branch(status) {
+        return;
+    }
+    let Some(preserved) = state.branches.get(&node.id) else {
+        return;
+    };
+    let branch = node.branch.clone().unwrap_or_else(|| preserved.clone());
+    node.resume = Some(crate::plan::Resume {
+        // The checkpoint is the sibling's to name; this crate records the branch
+        // it was told about and nothing it was not.
+        checkpoint: node.resume.as_ref().and_then(|r| r.checkpoint.clone()),
+        branch: branch.clone(),
+    });
+    node.branch = Some(branch);
 }
 
 #[cfg(test)]

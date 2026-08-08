@@ -120,3 +120,35 @@ and an enum here would reject a kind a sibling already produces.
 It narrows to an enum once the contract names this library's kinds. Until then
 the structural boundary still holds — `v`, `ts`, `stream`, `seq`, `source`, and
 `labels` are all typed, and `source` rejects anything but the three libraries.
+
+## 7. `resume` cannot say how much of a preserved branch survives
+
+The plan schema is "v7 node shapes unchanged", and `resume` is one of them. The
+shape compiled here is the two fields a continuation cannot do without:
+
+```rust
+pub struct Resume {
+    pub branch: String,
+    pub checkpoint: Option<String>,
+}
+```
+
+`ai-orchestrator`'s own `Resume` carries four more — `completed_steps`, `mode`,
+`base_branch`, and `pr_base` — and one of them decides real behaviour. Its
+lifecycle splits the preserved branch by *what the merge path refused*
+(`orchestrator/lifecycle.py`, `REJECTED_CONTENT_OUTCOMES`): a gate that rejected
+the **content** clears `completed_steps`, because republishing the identical tree
+would be refused identically, while a publication that failed for any other
+reason keeps them and re-runs only what is left.
+
+This crate carries the branch forward — a node that settled `failed`,
+`cancelled`, or `parked` resumes the branch its attempt left behind, and a
+planner's explicit `branch` wins over it — but it cannot express that split,
+so a continuation re-runs every step. That is the safe direction (work is
+repeated, never skipped or lost) and it is the only direction the committed
+shape allows.
+
+The proposal for the planner is whether `resume` should name the steps a
+continuation may keep, and if so whether the content/non-content distinction
+belongs in this crate's fold or in `onevcs`, which is the library that knows what
+its merge path refused.

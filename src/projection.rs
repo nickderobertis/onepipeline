@@ -36,6 +36,14 @@ pub struct RunState {
     pub recorded: BTreeMap<String, NodeStatus>,
     /// Each settled node's outcome, when it recorded one.
     pub outcomes: BTreeMap<String, String>,
+    /// The branch each settled node left behind, as its dispatch reported it.
+    ///
+    /// Not the same thing as the branch a node's *plan* pins: this is what the
+    /// work actually landed on, which for an unpinned node the sibling named,
+    /// and it is the only record of where preserved work is.
+    pub branches: BTreeMap<String, String>,
+    /// Where a human reads the change each published node opened.
+    pub change_urls: BTreeMap<String, String>,
     /// When each node was dispatched, in epoch milliseconds.
     pub dispatched_at: BTreeMap<String, u64>,
     /// When each node settled, in epoch milliseconds.
@@ -166,6 +174,15 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
             }
             if let Some(outcome) = payload.get("outcome").and_then(Value::as_str) {
                 state.outcomes.insert(node.clone(), outcome.to_string());
+            }
+            // What the dispatch left behind, which nothing else records: the
+            // round result is derived from this fold, and a later round's
+            // continuation has no other way to find the branch the work is on.
+            if let Some(branch) = payload.get("branch").and_then(Value::as_str) {
+                state.branches.insert(node.clone(), branch.to_string());
+            }
+            if let Some(url) = payload.get("change_url").and_then(Value::as_str) {
+                state.change_urls.insert(node.clone(), url.to_string());
             }
             if let Some(ts) = millis_of(&event.ts) {
                 state.settled_at.insert(node.clone(), ts);
