@@ -44,6 +44,10 @@ pub const DEFAULT_DAG_GRAPH: &str = "graphs/dag-scope.yaml";
 /// How often an attach re-reads the run to see whether it has settled.
 const ATTACH_POLL: Duration = Duration::from_millis(50);
 
+/// How long an attach collects a departed driver's last envelopes before
+/// settling without them.
+const DRAIN_GRACE: Duration = Duration::from_secs(2);
+
 /// Execute one parsed command line.
 pub fn dispatch(cli: Cli) -> Result<i32> {
     use crate::cli::Command as Verb;
@@ -150,7 +154,9 @@ fn start(args: &StartArgs) -> Result<i32> {
         // Replaced below by the graph process's own pid. What drives the run
         // is that process, not this one: `--detach` returns immediately, so a
         // record naming this pid would read as a dead driver the moment it did.
-        pid: 0,
+        // Until that process exists, this one is what is driving the run, and
+        // the record has to say so — see `launch_graph`'s ordering.
+        pid: sys::pid(),
         host: sys::hostname(),
         started_at: sys::now_rfc3339(),
         round_budget: args.round_budget,
@@ -170,6 +176,14 @@ fn start(args: &StartArgs) -> Result<i32> {
         ]),
     )?;
 
+    // The record is durable *before* the process that reads it exists. The
+    // driver's first act is `onepipeline round run`, which opens the launch
+    // record, so a driver that wins the race against its own launcher dies on a
+    // file nobody had written yet — and the run then sits at `run-started`
+    // with nothing driving it. Writing it twice is the price of that ordering:
+    // the first record names this process, which is what drives the run until
+    // the graph process it starts takes over.
+    ledger::write_json(&paths.launch(), &record)?;
     let mut launched = launch_graph(&paths, &record)?;
     record.pid = launched.pid();
     ledger::write_json(&paths.launch(), &record)?;
@@ -283,6 +297,33 @@ fn attach(paths: &RunPaths, launched: Option<&mut agentgraph::GraphRun>) -> Resu
             journal.relay(&envelope)?;
         }
 
+        // Asked *before* the state is read, so the two cannot disagree in the
+        // one direction that matters. A driver this process started and then
+        // collected is proof that nothing is driving the run any more —
+        // stronger than probing its pid, which a zombie would answer as alive.
+        // Reading the state afterwards means the state is at least as new as
+        // that proof, so a run its driver finished and exited on settles as the
+        // `complete` it is rather than as an `unattended` this loop merely
+        // looked at too early.
+        let driver_gone = driver
+            .as_deref_mut()
+            .is_some_and(agentgraph::GraphRun::has_exited);
+        if driver_gone {
+            // Its last envelopes are still in flight between the relay thread
+            // and this one. Collecting them before the settlement is what makes
+            // the merged store the whole of what the driver said, rather than
+            // whatever happened to have arrived. Bounded, because a grandchild
+            // that inherited the pipe can hold it open past its parent's exit.
+            let deadline = std::time::Instant::now() + DRAIN_GRACE;
+            while std::time::Instant::now() < deadline {
+                match rx.recv_timeout(ATTACH_POLL) {
+                    Ok(envelope) => journal.relay(&envelope)?,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            }
+        }
+
         let view = RunView::open(paths)?;
         // The stream is progress for a person; the settlement below is the one
         // record a caller parses. Keeping them on separate descriptors is what
@@ -294,12 +335,6 @@ fn attach(paths: &RunPaths, launched: Option<&mut agentgraph::GraphRun>) -> Resu
         }
         reported = lines.len();
 
-        // A driver this process started and then collected is proof that
-        // nothing is driving the run any more — stronger than probing its pid,
-        // which a zombie would answer as alive.
-        let driver_gone = driver
-            .as_deref_mut()
-            .is_some_and(agentgraph::GraphRun::has_exited);
         if let Some(settlement) = settlement_of(&view, driver_gone) {
             println!(
                 "{}",

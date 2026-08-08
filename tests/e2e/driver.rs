@@ -62,6 +62,36 @@ fn start_launches_the_shipped_dag_scope_graph_and_records_how_to_relaunch_it() {
 }
 
 #[test]
+fn the_launch_record_is_written_before_the_driver_that_reads_it_is_started() {
+    let world = World::new("driver-ordering");
+    // The driver is held at its first instruction, *after* it has recorded what
+    // the ledger held. Holding it there is what makes this about the launcher's
+    // ordering and nothing else: whatever the driver does next cannot be the
+    // reason the record is there.
+    world.script("driver.wait", "hold");
+    let path = world.plan("ordered", &plan_of("ordered", vec![agent("build", &[])]));
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+
+    world.until("the driver to read the run's ledger", |world| {
+        !world.driver_saw().is_empty()
+    });
+    // A driver that wins the race against its own launcher dies on a file
+    // nobody wrote, and the run then sits at `run-started` with nothing driving
+    // it — which reads as a mysteriously hung run rather than as the ordering
+    // bug it is.
+    let saw = world.driver_saw();
+    assert_eq!(saw[0]["run"], "ordered");
+    assert_eq!(
+        saw[0]["launch_record"],
+        json!(true),
+        "the driver was started before its launch record existed: {saw:?}"
+    );
+    world.release("driver.go");
+}
+
+#[test]
 fn an_attached_start_returns_when_the_graph_completes() {
     let world = World::new("driver-attach");
     let path = world.plan("attached", &plan_of("attached", vec![agent("build", &[])]));

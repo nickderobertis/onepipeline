@@ -186,12 +186,35 @@ impl World {
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        panic!("timed out waiting for {what}");
+        panic!(
+            "timed out waiting for {what}; the runs root held:\n{}",
+            self.dump()
+        );
+    }
+
+    /// Every run's journal, as the kinds it recorded. What a timeout needs to
+    /// say *why* it timed out — the alternative is a bare deadline with no
+    /// evidence, which is a whole debugging session per flake.
+    fn dump(&self) -> String {
+        let mut out = String::new();
+        let Ok(entries) = std::fs::read_dir(&self.runs) else {
+            return "  (no runs root)".into();
+        };
+        for entry in entries.flatten() {
+            let run = entry.file_name().to_string_lossy().to_string();
+            out.push_str(&format!("  {run}: {:?}\n", self.kinds(&run)));
+        }
+        out
     }
 
     /// Everything the doubles were asked for, in order.
     pub fn invocations(&self) -> Vec<Value> {
         read_jsonl(&self.fakes.join("invocations.jsonl"))
+    }
+
+    /// What each driver the launcher started found waiting for it, in order.
+    pub fn driver_saw(&self) -> Vec<Value> {
+        read_jsonl(&self.fakes.join("driver-saw.jsonl"))
     }
 
     /// Whether a double was asked for a command whose arguments contain each of

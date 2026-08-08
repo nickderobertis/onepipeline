@@ -154,6 +154,20 @@ fn drive(dir: &std::path::Path) -> ExitCode {
         Ok(binary) if !binary.is_empty() => binary,
         _ => fake::fail("ONEPIPELINE_FAKE_DRIVER_BIN is unset: nothing to drive the run with"),
     };
+    // The first thing a real orchestrator member does is read the run's ledger,
+    // so the first thing this one records is whether that ledger was there to
+    // be read. A launcher that started its driver before writing the launch
+    // record leaves this `false` — and the driver then dies on a file its own
+    // launcher had not written yet, with the run stuck at `run-started`.
+    fake::append(
+        &dir.join("driver-saw.jsonl"),
+        &serde_json::json!({
+            "run": run,
+            "launch_record": launch_record(&run).is_some_and(|path| path.is_file()),
+        })
+        .to_string(),
+    );
+
     if dir.join("driver.wait").exists() {
         fake::wait_for(&dir.join("driver.go"));
     }
@@ -188,4 +202,14 @@ fn drive(dir: &std::path::Path) -> ExitCode {
         }
     }
     ExitCode::SUCCESS
+}
+
+/// The launch record of the run this driver was started for.
+///
+/// Resolved from the same two variables the launcher hands every driver, so the
+/// probe above reads exactly the file `onepipeline round run` opens first.
+fn launch_record(run: &str) -> Option<std::path::PathBuf> {
+    let root = std::env::var("ONEPIPELINE_RUNS_DIR").ok()?;
+    (!root.is_empty() && !run.is_empty())
+        .then(|| std::path::PathBuf::from(root).join(run).join("launch.json"))
 }
