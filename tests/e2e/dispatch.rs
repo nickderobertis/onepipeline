@@ -72,6 +72,22 @@ fn a_plan_dispatches_through_the_real_oneagentgraph_and_its_members_run() {
         "the node's own task never reached a member: {launches:?}"
     );
 
+    // The envelope the handshake spent is still in the stream. Learning that the
+    // graph started means reading its first line, and that line is the event
+    // saying the driver began — read to settle the launch and then replayed at
+    // the head, not consumed by it. Swallowed, a run's own record would begin
+    // with the driver already working and nothing saying it ever started.
+    assert!(
+        world
+            .journal(&run)
+            .iter()
+            .any(|event| event["source"] == "agentgraph"
+                && event["kind"] == "graph-started"
+                && event["labels"]["node"].is_null()),
+        "the driver's own start never reached the merged store: {}",
+        world.dump()
+    );
+
     // And each of them worked: a turn is what the sibling reports when the
     // member it launched produced something, so a graph that only *started* a
     // member does not get one.
