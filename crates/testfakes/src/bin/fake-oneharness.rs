@@ -75,7 +75,7 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         } else {
             Outcome::DoneWhenMet
         };
-    report(dir, &prompt, &cwd, outcome);
+    report(outcome);
     match outcome {
         Outcome::DoneWhenMet => ExitCode::SUCCESS,
         Outcome::TurnFailed => ExitCode::from(1),
@@ -103,7 +103,7 @@ impl Outcome {
 }
 
 /// The two lines a member is settled on: what the turn did, then its report.
-fn report(dir: &std::path::Path, prompt: &str, cwd: &str, outcome: Outcome) {
+fn report(outcome: Outcome) {
     println!(
         "{}",
         serde_json::json!({
@@ -111,13 +111,6 @@ fn report(dir: &std::path::Path, prompt: &str, cwd: &str, outcome: Outcome) {
             "turn": 1,
             "event": {"kind": "tool_call", "name": "bash", "input": {"command": "echo the turn ran"}},
         })
-    );
-    // Recorded as well as streamed: `oneagentgraph` renders the turn into its
-    // own envelopes, so the prompt and the directory the turn was given are only
-    // assertable from this side of the boundary.
-    fake::append(
-        &dir.join("turns.jsonl"),
-        &serde_json::json!({"prompt": prompt, "cwd": cwd, "outcome": outcome.reason()}).to_string(),
     );
     println!(
         "{}",

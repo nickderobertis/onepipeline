@@ -8,12 +8,19 @@
 //! standing in is the paid model turn, replaced at that library's own
 //! `ONEAGENTGRAPH_ONEHARNESS_BIN` override.
 
-// llmlint: ignore-file[e2e_not_mocked] the one substitution here is the paid model turn,
-// at `oneagentgraph`'s own documented binary override — the single genuinely external
-// thing a gate cannot run for free. Real `onepipeline` dispatches, real `oneagentgraph`
-// resolves the graph and supervises the member, and nothing between them is stubbed.
-
 use crate::harness::{agent, human, plan_of, World};
+use serde_json::Value;
+
+/// The prose a `member-started` says its member was launched with.
+///
+/// `oneagentgraph` publishes the whole argv it prepared, so the task a member
+/// was actually given is in the run's own merged store rather than only in the
+/// process it was passed to.
+fn prompt_of(event: &Value) -> Option<String> {
+    let args = event["payload"]["args"].as_array()?;
+    let at = args.iter().position(|arg| arg == "--prompt")?;
+    args.get(at + 1)?.as_str().map(str::to_string)
+}
 
 /// A whole run, dispatched through the real sibling: the plan is launched, its
 /// driver is a real graph run, the node's dispatch is another, and a member runs
@@ -35,30 +42,38 @@ fn a_plan_dispatches_through_the_real_oneagentgraph_and_its_members_run() {
         .expect("the launch named its run")
         .to_string();
 
-    // llmlint: ignore-block[tests_mirror_real_usage] what this crate delivers *is* the
-    // command line it composes for its sibling: a dispatch that reached `oneagentgraph`
-    // with the wrong labels is refused by that CLI and never reaches a view, which is
-    // exactly how it went unnoticed. The invocation record is the double's account of a
-    // real subprocess execution — the evidence a server-side test takes from the request
-    // it received — and every assertion on it here sits beside one on the run's own
-    // settled state.
-    // A member really ran, twice: the orchestrator that drove the run, and the
-    // worker the node was dispatched to. Each was given the prose its own graph
-    // was launched with.
-    let prompts: Vec<String> = world
-        .turns()
+    // Two members really ran, and the run's own record is where that is
+    // readable: `oneagentgraph` publishes the launch it prepared for each — the
+    // program, its arguments, and the prose it was given — into the stream this
+    // crate merges. Nothing here is asserted from anywhere a user could not look.
+    let launches: Vec<String> = world
+        .journal(&run)
         .iter()
-        .filter_map(|turn| turn["prompt"].as_str().map(str::to_string))
+        .filter(|event| event["kind"] == "member-started")
+        .filter_map(prompt_of)
         .collect();
     assert!(
-        prompts.iter().any(|p| p.contains("onepipeline round run")),
-        "no member drove the run: {prompts:?}"
+        launches
+            .iter()
+            .any(|task| task.contains("onepipeline round run")),
+        "no member was launched to drive the run: {launches:?}"
     );
     assert!(
-        prompts.iter().any(|p| p.contains("Do build.")),
-        "the node's own task never reached a member: {prompts:?}"
+        launches.iter().any(|task| task.contains("Do build.")),
+        "the node's own task never reached a member: {launches:?}"
     );
-    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    // And each of them worked: a turn is what the sibling reports when the
+    // member it launched produced something, so a graph that only *started* a
+    // member does not get one.
+    assert!(
+        world
+            .journal(&run)
+            .iter()
+            .any(|event| event["kind"] == "turn-activity"),
+        "no member reported a turn: {}",
+        world.dump()
+    );
 
     // And the node settled on what that member did.
     assert_eq!(

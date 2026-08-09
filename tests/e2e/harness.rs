@@ -224,11 +224,6 @@ impl World {
         }
     }
 
-    /// Every turn the paid-harness double was asked for, in order.
-    pub fn turns(&self) -> Vec<Value> {
-        read_jsonl(&self.fakes.join("turns.jsonl"))
-    }
-
     /// Run an already-configured command to completion.
     ///
     /// For a journey that needs one environment override — a timeout it is

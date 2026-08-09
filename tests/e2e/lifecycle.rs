@@ -198,14 +198,6 @@ fn the_pr_author_dispatch_drafts_the_title_and_never_blocks_publication() {
     let world = World::new("lifecycle-pr-author");
     let run = settle(&world, "authored", vec![lifecycle("service", &[])]);
 
-    // llmlint: ignore-block[tests_mirror_real_usage] what this crate delivers *is* the
-    // command line it composes for its sibling: a dispatch that reached `oneagentgraph`
-    // with the wrong labels is refused by that CLI and never reaches a view, which is
-    // exactly how it went unnoticed. The invocation record is the double's account of a
-    // real subprocess execution — the evidence a server-side test takes from the request
-    // it received — and every assertion on it here sits beside one on the run's own
-    // settled state.
-    // One post-verification dispatch, under the `pr-author` persona.
     assert!(
         world.was_invoked(
             "oneagentgraph",
@@ -214,7 +206,6 @@ fn the_pr_author_dispatch_drafts_the_title_and_never_blocks_publication() {
         "no pr-author dispatch: {:?}",
         world.invocations()
     );
-    // llmlint: ignore-end[tests_mirror_real_usage]
 
     let drafted = std::fs::read_to_string(world.fakes.join("published.jsonl"))
         .expect("the publication was recorded");
@@ -241,13 +232,6 @@ fn a_planner_supplied_title_wins_over_the_drafting_dispatch() {
         published.contains("fix: the planner named this"),
         "the planner's title was overwritten: {published}"
     );
-    // llmlint: ignore-block[tests_mirror_real_usage] what this crate delivers *is* the
-    // command line it composes for its sibling: a dispatch that reached `oneagentgraph`
-    // with the wrong labels is refused by that CLI and never reaches a view, which is
-    // exactly how it went unnoticed. The invocation record is the double's account of a
-    // real subprocess execution — the evidence a server-side test takes from the request
-    // it received — and every assertion on it here sits beside one on the run's own
-    // settled state.
     assert!(
         !world.was_invoked(
             "oneagentgraph",
@@ -255,7 +239,6 @@ fn a_planner_supplied_title_wins_over_the_drafting_dispatch() {
         ),
         "a title the planner set still spent a drafting dispatch"
     );
-    // llmlint: ignore-end[tests_mirror_real_usage]
 }
 
 #[test]
@@ -409,13 +392,6 @@ fn a_step_dispatches_under_its_own_agent_graph_before_its_nodes() {
     });
     settle(&world, "stepgraphs", vec![node]);
 
-    // llmlint: ignore-block[tests_mirror_real_usage] what this crate delivers *is* the
-    // command line it composes for its sibling: a dispatch that reached `oneagentgraph`
-    // with the wrong labels is refused by that CLI and never reaches a view, which is
-    // exactly how it went unnoticed. The invocation record is the double's account of a
-    // real subprocess execution — the evidence a server-side test takes from the request
-    // it received — and every assertion on it here sits beside one on the run's own
-    // settled state.
     let by_step: Vec<(String, String)> = world
         .invocations()
         .iter()
@@ -431,7 +407,6 @@ fn a_step_dispatches_under_its_own_agent_graph_before_its_nodes() {
             Some((step, graph))
         })
         .collect();
-    // llmlint: ignore-end[tests_mirror_real_usage]
 
     let graph_of = |step: &str| {
         by_step
@@ -531,14 +506,6 @@ fn a_session_line_this_build_cannot_read_is_skipped_and_counted() {
     );
 }
 
-// llmlint: ignore-block[tests_mirror_real_usage] what this crate delivers *is* the
-// command line it composes for its sibling: a dispatch that reached `oneagentgraph`
-// with the wrong labels is refused by that CLI and never reaches a view, which is
-// exactly how it went unnoticed. The invocation record is the double's account of a
-// real subprocess execution — the evidence a server-side test takes from the request
-// it received — and every assertion on it here sits beside one on the run's own
-// settled state.
-/// Every `oneagentgraph run` dispatch, as `(round, step)`.
 fn steps_dispatched(world: &World) -> Vec<(String, String)> {
     world
         .invocations()
@@ -560,7 +527,6 @@ fn steps_dispatched(world: &World) -> Vec<(String, String)> {
         })
         .collect()
 }
-// llmlint: ignore-end[tests_mirror_real_usage]
 
 #[test]
 fn a_continuation_skips_the_steps_the_preserved_branch_already_carries() {

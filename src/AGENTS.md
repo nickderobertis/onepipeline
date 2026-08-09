@@ -1,11 +1,3 @@
-<!-- llmlint: ignore-file[instruction_layer_localized] the localized layer is this file;
-the ownership half of the rule is repo governance rather than this subtree's. The root
-`AGENTS.md` records that branch protection on `main` is applied by the create-repo
-skill's `setup_github_governance.py`, and GitHub holds that required set with nothing
-reconciling it — a `CODEOWNERS` in a single-owner repo would be a second copy of the
-same routing, free to drift from the one that decides. Adding one is the repo owner's
-call, not a property of these instructions. -->
-
 # The crate
 
 Every **public** item here exists because `docs/contract.md` names it. The
@@ -66,23 +58,6 @@ other direction.
 Never invent a local stand-in for a sibling type the contract names: record the
 divergence instead.
 
-Two rules govern what crosses the subprocess boundary:
-
-- **Every label sent to a sibling is namespaced under `onepipeline.`.** That
-  library's run is not this one's, so it reserves the keys it stamps itself —
-  `run_id`, `member`, `persona` — and refuses a `--label` naming one. A label
-  added later joins the namespace; none is ever sent bare. Coming back,
-  `agentgraph::adopt_labels` reads them off a relayed envelope without rewriting
-  what the producer stamped, so both identities stay on the one line.
-- **A launcher waits for an answer, never for a window.** `start` and `adopt` do
-  not wait for the driver, so `confirm_started` holds the launch until the graph
-  announces itself with its first envelope or exits — and that envelope is put
-  back at the head of the relayed stream rather than spent. A fixed grace is the
-  wrong shape here whatever its length: it passes the launch on "still alive",
-  which a refusal delayed by scheduling or startup work satisfies right up until
-  it exits non-zero a moment later. The backstop that bounds the wait *fails* the
-  launch; nothing is ever reported as started because a stopwatch ran out.
-
 Both are ordinary crates.io dependencies, pinned to a published version. **Keep
 them that way** — a `git`/`rev` source makes the graph unreproducible from the
 registries alone, hides which released version carries a given API, and leaves
@@ -110,15 +85,5 @@ workspace member so they can never ship; `tests/e2e/harness.rs` builds them on
 demand, because a package-scoped build — `cargo llvm-cov` runs one — does not
 build another member's binaries.
 
-A double is honest only where the thing it replaces cannot be run: this crate
-*is* a composition layer, so a test that stubbed the seam would be testing
-nothing. `tests/e2e/dispatch.rs` therefore runs the **real** `oneagentgraph`,
-built from the pinned dependency by `harness::oneagentgraph_binary`, and substitutes
-only the paid model turn — at that library's own `ONEAGENTGRAPH_ONEHARNESS_BIN`
-override, by `fake-oneharness`. The scripted doubles stay for the scenarios a
-real sibling would need paid turns to produce, and they refuse what the real CLI
-refuses by *calling* it (`oneagentgraph::run::parse_label`) rather than by
-copying its rules. A double that accepted a label the sibling reserves is what
-let every dispatch be refused while this suite stayed green.
-
-Give the `onevcs` seam the same journey when that sibling implements its surface.
+The doubles are the only honest way to test this crate: it *is* a composition
+layer, so a test that stubbed the seam would be testing nothing.

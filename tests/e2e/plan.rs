@@ -63,14 +63,6 @@ fn a_cross_dag_dependency_is_accepted_and_gates_only_the_node_that_names_it() {
     );
 }
 
-// llmlint: ignore-block[tests_mirror_real_usage] what this crate delivers *is* the
-// command line it composes for its sibling: a dispatch that reached `oneagentgraph`
-// with the wrong labels is refused by that CLI and never reaches a view, which is
-// exactly how it went unnoticed. The invocation record is the double's account of a
-// real subprocess execution — the evidence a server-side test takes from the request
-// it received — and every assertion on it here sits beside one on the run's own
-// settled state.
-/// The graph a dispatch was launched with, for each node the doubles saw.
 fn graphs_dispatched(world: &World) -> Vec<(String, String)> {
     world
         .invocations()
@@ -90,7 +82,6 @@ fn graphs_dispatched(world: &World) -> Vec<(String, String)> {
         })
         .collect()
 }
-// llmlint: ignore-end[tests_mirror_real_usage]
 
 #[test]
 fn a_node_dispatches_under_the_agent_graph_it_names() {
@@ -175,20 +166,10 @@ fn a_single_node_plan_runs_to_completion_and_records_its_evidence() {
     assert_eq!(result["nodes"][0]["id"], "build");
     assert_eq!(result["nodes"][0]["status"], "done");
 
-    // llmlint: ignore-block[tests_mirror_real_usage] what this crate delivers *is* the
-    // command line it composes for its sibling: a dispatch that reached `oneagentgraph`
-    // with the wrong labels is refused by that CLI and never reaches a view, which is
-    // exactly how it went unnoticed. The invocation record is the double's account of a
-    // real subprocess execution — the evidence a server-side test takes from the request
-    // it received — and every assertion on it here sits beside one on the run's own
-    // settled state.
-    // The dispatch really went through the `oneagentgraph` seam, with the
-    // reserved labels stamped on it.
     assert!(world.was_invoked(
         "oneagentgraph",
         &["run", "--label", "onepipeline.node=build"]
     ));
-    // llmlint: ignore-end[tests_mirror_real_usage]
 
     let kinds = world.kinds(&run);
     for expected in [
@@ -296,20 +277,10 @@ fn a_ready_human_action_waits_and_blocks_what_it_unblocks() {
     assert_eq!(node("approve")["unblocks"], json!(["ship"]));
     assert_eq!(node("ship")["status"], "blocked");
     assert_eq!(node("ship")["blocked_by"], json!(["approve"]));
-    // llmlint: ignore-block[tests_mirror_real_usage] what this crate delivers *is* the
-    // command line it composes for its sibling: a dispatch that reached `oneagentgraph`
-    // with the wrong labels is refused by that CLI and never reaches a view, which is
-    // exactly how it went unnoticed. The invocation record is the double's account of a
-    // real subprocess execution — the evidence a server-side test takes from the request
-    // it received — and every assertion on it here sits beside one on the run's own
-    // settled state.
-    // The harness never guesses that a person acted, so nothing was dispatched
-    // for the human node.
     assert!(!world.was_invoked(
         "oneagentgraph",
         &["run", "--label", "onepipeline.node=approve"]
     ));
-    // llmlint: ignore-end[tests_mirror_real_usage]
 }
 
 #[test]
@@ -328,13 +299,6 @@ fn an_expects_no_diff_node_settles_without_spending_a_dispatch() {
     let result = world.run_json(&run, "round-01/result.json");
     assert_eq!(result["nodes"][0]["status"], "done");
     assert_eq!(result["nodes"][0]["outcome"], "no-changes");
-    // llmlint: ignore-block[tests_mirror_real_usage] what this crate delivers *is* the
-    // command line it composes for its sibling: a dispatch that reached `oneagentgraph`
-    // with the wrong labels is refused by that CLI and never reaches a view, which is
-    // exactly how it went unnoticed. The invocation record is the double's account of a
-    // real subprocess execution — the evidence a server-side test takes from the request
-    // it received — and every assertion on it here sits beside one on the run's own
-    // settled state.
     assert!(
         !world.was_invoked(
             "oneagentgraph",
@@ -342,7 +306,6 @@ fn an_expects_no_diff_node_settles_without_spending_a_dispatch() {
         ),
         "an expects_no_diff node spent a dispatch"
     );
-    // llmlint: ignore-end[tests_mirror_real_usage]
 }
 
 #[test]
