@@ -69,17 +69,43 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     // The turn itself. The orchestrator member's prompt names the engine verbs
     // it is to drive the run with, so this turn drives them — the same work the
     // `oneagentgraph` double does when it is standing in for the whole sibling.
-    let outcome =
-        if prompt.contains("onepipeline round run") && fake::drive(dir) != ExitCode::SUCCESS {
-            Outcome::TurnFailed
-        } else {
-            Outcome::DoneWhenMet
-        };
+    let driving = prompt.contains("onepipeline round run");
+    let outcome = if driving && fake::drive(dir) != ExitCode::SUCCESS {
+        Outcome::TurnFailed
+    } else {
+        Outcome::DoneWhenMet
+    };
+    tool_event(1, "echo the turn ran");
+    // A worker turn that reports again after a hold: what a live readout of a
+    // running dispatch is read against. The first event proves the stream
+    // arrives; a second, released while the node is still in flight, proves the
+    // readout *advances*. The driver's own turn is left alone — it is the
+    // member running the engine verbs, not the one being watched.
+    if !driving && dir.join("turn.hold").exists() {
+        fake::wait_for(&dir.join("turn.go"));
+        tool_event(2, "cargo llvm-cov --workspace");
+        // Held again, so the node is *still in flight* when the second reading
+        // is taken: a readout that only advances as the dispatch ends proves
+        // nothing about supervising a live one.
+        fake::wait_for(&dir.join("turn.settle"));
+    }
     report(outcome);
     match outcome {
         Outcome::DoneWhenMet => ExitCode::SUCCESS,
         Outcome::TurnFailed => ExitCode::from(1),
     }
+}
+
+/// One streamed tool event, in the shape onejudge's `docs/streaming.md` fixes.
+fn tool_event(index: u64, command: &str) {
+    println!(
+        "{}",
+        serde_json::json!({
+            "type": "event",
+            "turn": index,
+            "event": {"kind": "tool_call", "name": "bash", "input": {"command": command}},
+        })
+    );
 }
 
 /// How the turn ended, in the vocabulary a report names it with.
@@ -102,16 +128,8 @@ impl Outcome {
     }
 }
 
-/// The two lines a member is settled on: what the turn did, then its report.
+/// The terminal line a member is settled on: the turn's report.
 fn report(outcome: Outcome) {
-    println!(
-        "{}",
-        serde_json::json!({
-            "type": "event",
-            "turn": 1,
-            "event": {"kind": "tool_call", "name": "bash", "input": {"command": "echo the turn ran"}},
-        })
-    );
     println!(
         "{}",
         serde_json::json!({

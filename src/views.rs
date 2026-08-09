@@ -308,26 +308,24 @@ pub fn status(views: &[RunView]) -> String {
             if *node_status != NodeStatus::Running {
                 continue;
             }
-            // A node the ledger records as running that no live dispatch is
-            // driving is `UNDRIVEN`. Deliberately not `parked`: that word means
-            // the opposite here — a node the planner idled with `cancel`.
-            let driving = view.events.iter().any(|event| {
-                event.source == Source::Agentgraph && event.labels.node.as_deref() == Some(id)
-            });
             let age = view
                 .state
                 .dispatched_at
                 .get(id)
                 .map(|at| sys::now_millis().saturating_sub(*at));
             out.push_str(&format!(
-                "  {id}: running for {}{}\n",
+                "  {id}: running for {}",
                 crate::telemetry::duration(age.unwrap_or(0)),
-                if driving {
-                    String::new()
-                } else {
-                    format!(" — {}", DriverLiveness::Undriven.as_str())
-                }
             ));
+            match view.state.activity.get(id) {
+                // A node the ledger records as running that no live dispatch is
+                // driving is `UNDRIVEN`. Deliberately not `parked`: that word
+                // means the opposite here — a node the planner idled with
+                // `cancel`.
+                None => out.push_str(&format!(" — {}", DriverLiveness::Undriven.as_str())),
+                Some(activity) => out.push_str(&format!(" — {}", working(activity))),
+            }
+            out.push('\n');
         }
         if let Some(health) = crate::agentgraph::health() {
             out.push_str(&format!("  providers: {health}\n"));
@@ -337,6 +335,32 @@ pub fn status(views: &[RunView]) -> String {
         out.push_str("no runs recorded\n");
     }
     out
+}
+
+/// What one in-flight dispatch is doing now, on the line that reports it.
+///
+/// Three facts, because one alone misleads: what it last did, how much it has
+/// done, and how long ago. A dispatch that has recorded plenty and nothing
+/// recently is the wedged one; a first turn that has run for twenty minutes and
+/// is still recording is healthy, and has twice been reported dead for want of
+/// this line.
+fn working(activity: &crate::projection::NodeActivity) -> String {
+    let counted = format!(
+        "{} event(s), {} ago",
+        activity.events,
+        crate::telemetry::duration(
+            activity
+                .last_at
+                .map_or(0, |at| sys::now_millis().saturating_sub(at))
+        )
+    );
+    match &activity.doing {
+        Some(doing) => format!("now {doing} ({counted})"),
+        // Absent rather than guessed: the dispatch has recorded something and
+        // has not named a tool, so the count and the age are the whole of what
+        // this line can claim.
+        None => counted,
+    }
 }
 
 /// `onepipeline host` — every live dispatch on this host, across every planner.
@@ -797,6 +821,68 @@ mod tests {
         let rendered = status(std::slice::from_ref(&view));
         assert!(rendered.contains("UNDRIVEN"), "{rendered}");
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// What the line says while a node is in flight, which is the whole of what
+    /// an operator has to decide between cancel, retry, and wait on.
+    #[test]
+    fn a_live_dispatch_reports_what_it_is_doing_now_with_a_count_and_an_age() {
+        let root = scratch("activity");
+        let mut turn = relayed(
+            EventKind("turn-activity".into()),
+            Source::Agentgraph,
+            Some("build"),
+            &[
+                ("kind", json!("tool_call")),
+                ("name", json!("Bash")),
+                ("detail", json!("cargo llvm-cov --workspace")),
+            ],
+        );
+        turn.stream = "oneagentgraph-1".into();
+        write_run(
+            &root,
+            "demo",
+            sys::pid(),
+            &[
+                event(
+                    crate::journal::PipelineKind::RunStarted,
+                    None,
+                    &[("plan", json!(plan()))],
+                ),
+                event(
+                    crate::journal::PipelineKind::NodeDispatched,
+                    Some("build"),
+                    &[],
+                ),
+                turn,
+            ],
+        );
+        let view = RunView::open(&RunPaths::under(&root, "demo")).expect("the run reads");
+        let rendered = status(std::slice::from_ref(&view));
+        assert!(
+            rendered.contains("now Bash cargo llvm-cov --workspace"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("1 event(s)"), "{rendered}");
+        assert!(rendered.contains("ago"), "{rendered}");
+        assert!(
+            !rendered.contains(DriverLiveness::Undriven.as_str()),
+            "a dispatch that is recording was reported as driving nothing: {rendered}"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A dispatch that has recorded something without naming a tool claims the
+    /// count and the age and nothing more.
+    #[test]
+    fn a_dispatch_that_has_named_no_tool_reports_its_count_rather_than_a_guess() {
+        let rendered = working(&crate::projection::NodeActivity {
+            doing: None,
+            events: 3,
+            last_at: Some(sys::now_millis()),
+        });
+        assert_eq!(rendered, "3 event(s), 0s ago");
+        assert!(!rendered.contains("now"), "{rendered}");
     }
 
     #[test]

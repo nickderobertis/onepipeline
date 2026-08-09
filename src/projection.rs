@@ -101,7 +101,39 @@ pub struct RunState {
     /// plan rather than appending to it, which is what stops a node
     /// accumulating instructions.
     pub notes_this_round: BTreeMap<String, String>,
+    /// What each node's dispatch is doing *now*, from the relayed stream.
+    ///
+    /// The one question no event of this crate's own can answer: a
+    /// `node-dispatched` says a dispatch started and nothing after it, so a node
+    /// in flight for half an hour reads the same whether it is working or
+    /// wedged. The siblings say the rest, and this is where it is read.
+    /// Per-round, like [`recorded`](Self::recorded): a count carried across a
+    /// round boundary would describe an attempt that is over.
+    pub activity: BTreeMap<String, NodeActivity>,
 }
+
+/// What one node's dispatch has recorded, and what it last said it was doing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NodeActivity {
+    /// The tool the last `turn-activity` named, with its bounded detail.
+    ///
+    /// `None` until one arrives, and never a stand-in for one: a dispatch that
+    /// has recorded something without naming a tool is not a dispatch doing
+    /// "nothing", and reporting it as one is the misreading this whole readout
+    /// exists to prevent.
+    pub doing: Option<String>,
+    /// How many envelopes this node's dispatch has recorded.
+    pub events: u64,
+    /// When the last of them arrived, in epoch milliseconds.
+    pub last_at: Option<u64>,
+}
+
+/// The kind `oneagentgraph` reports a bounded tool summary as.
+///
+/// A wire string rather than one of [`journal::PipelineKind`]'s: it is the
+/// sibling's vocabulary, and this crate reads that half of the merged store
+/// without closing it.
+const TURN_ACTIVITY: &str = "turn-activity";
 
 impl RunState {
     /// The frontier an edit is judged against.
@@ -146,8 +178,10 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
             .max(state.last_write_at.unwrap_or(0)),
     );
     if event.source != Source::Pipeline {
-        // A relayed envelope is evidence the run is working, and nothing else:
-        // a sibling library does not decide this crate's graph state.
+        // A relayed envelope does not decide this crate's graph state — a
+        // sibling library does not settle a node — but it is the only evidence
+        // of what the node it belongs to is doing while it runs.
+        fold_activity(state, event);
         return;
     }
     let payload = &event.payload;
@@ -167,6 +201,7 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
             state.recorded.clear();
             state.outcomes.clear();
             state.notes_this_round.clear();
+            state.activity.clear();
             if let Some(plan) = plan_of(payload) {
                 state.graph = Graph::from_plan(&plan);
                 if state.plan.is_none() {
@@ -310,6 +345,41 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
             }
         }
         _ => {}
+    }
+}
+
+/// Fold one relayed envelope into the node's live activity.
+///
+/// Every relayed envelope counts — a dispatch that is fetching, gating, or
+/// publishing is working just as much as one mid-turn — and only a
+/// `turn-activity` names a tool, because that is the only kind carrying one.
+fn fold_activity(state: &mut RunState, event: &Envelope) {
+    let Some(node) = event.labels.node.as_deref() else {
+        return;
+    };
+    let activity = state.activity.entry(node.to_string()).or_default();
+    activity.events += 1;
+    activity.last_at = millis_of(&event.ts).or(activity.last_at);
+    if event.kind.0 != TURN_ACTIVITY {
+        return;
+    }
+    let text = |key: &str| {
+        event
+            .payload
+            .get(key)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+    };
+    // The producer's own two fields, joined the way its own renderer joins
+    // them. An activity naming neither leaves the last one that did standing
+    // rather than blanking the line: the dispatch is still doing what it said.
+    let summary = [text("name"), text("detail")]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if !summary.is_empty() {
+        activity.doing = Some(summary);
     }
 }
 
@@ -696,6 +766,85 @@ mod tests {
             "a sibling's envelope decided this crate's graph state"
         );
         assert!(state.last_write_at.is_some());
+        assert_eq!(state.activity["build"].events, 1);
+    }
+
+    /// The readout an operator decides between cancel, retry, and wait on. A
+    /// node in flight for half an hour reads identically to a wedged one
+    /// without it, and a healthy node has been reported dead on exactly that.
+    #[test]
+    fn a_relayed_turn_activity_says_what_the_node_is_doing_now() {
+        let plan = plan_of_nodes(vec![agent("build", &[])]);
+        let activity = |seq: u64, name: &str, detail: &str| {
+            let mut event = pipeline(
+                journal::PipelineKind::NodeDispatched,
+                seq,
+                Some("build"),
+                &[("name", json!(name)), ("detail", json!(detail))],
+            );
+            event.source = Source::Agentgraph;
+            event.kind = crate::event::EventKind(TURN_ACTIVITY.into());
+            event
+        };
+        let state = fold(&[
+            pipeline(
+                journal::PipelineKind::RunStarted,
+                0,
+                None,
+                &[("plan", json!(plan))],
+            ),
+            pipeline(journal::PipelineKind::NodeDispatched, 1, Some("build"), &[]),
+            activity(2, "Bash", "cargo llvm-cov --workspace"),
+            activity(3, "Read", "src/engine.rs"),
+        ]);
+
+        let seen = &state.activity["build"];
+        assert_eq!(seen.doing.as_deref(), Some("Read src/engine.rs"));
+        assert_eq!(
+            seen.events, 2,
+            "the node-dispatched was counted as activity"
+        );
+        assert_eq!(seen.last_at, millis_of(&activity(3, "Read", "x").ts));
+    }
+
+    /// A tool the producer named nothing for leaves the last thing it *did*
+    /// name standing: a blanked line reads as a dispatch that stopped working.
+    #[test]
+    fn an_activity_naming_no_tool_does_not_erase_the_one_before_it() {
+        let mut nameless = pipeline(journal::PipelineKind::NodeDispatched, 3, Some("build"), &[]);
+        nameless.source = Source::Agentgraph;
+        nameless.kind = crate::event::EventKind(TURN_ACTIVITY.into());
+        let mut named = nameless.clone();
+        named.seq = 2;
+        named.payload = payload(&[("name", json!("Bash")), ("detail", json!("just check"))]);
+
+        let state = fold(&[named, nameless]);
+        assert_eq!(
+            state.activity["build"].doing.as_deref(),
+            Some("Bash just check")
+        );
+        assert_eq!(state.activity["build"].events, 2);
+    }
+
+    #[test]
+    fn a_new_round_starts_the_activity_count_over() {
+        let plan = plan_of_nodes(vec![agent("build", &[])]);
+        let mut relayed = pipeline(journal::PipelineKind::NodeDispatched, 1, Some("build"), &[]);
+        relayed.source = Source::Agentgraph;
+        relayed.kind = crate::event::EventKind(TURN_ACTIVITY.into());
+        let mut second = pipeline(
+            journal::PipelineKind::RoundStarted,
+            2,
+            None,
+            &[("plan", json!(plan))],
+        );
+        second.labels.round = Some(2);
+
+        let state = fold(&[relayed, second]);
+        assert!(
+            state.activity.is_empty(),
+            "a finished attempt's activity was carried into the next round"
+        );
     }
 
     #[test]
