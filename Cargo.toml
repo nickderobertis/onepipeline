@@ -57,11 +57,11 @@ serde_json = { version = "1", features = ["preserve_order"] }
 serde_norway = "0.9"
 thiserror = "2"
 
-# The siblings this crate composes. Each carries a `version` as well as its
-# `git`/`rev` so it is not a wildcard dependency; the `rev` is what cargo
-# resolves until that version is on crates.io. See src/AGENTS.md.
-oneagentgraph = { version = "0.1", git = "https://github.com/nickderobertis/oneagentgraph.git", rev = "e88f70aabf3f60ae380c26228de640f1e5af2441" }
-onevcs = { version = "0.1", git = "https://github.com/nickderobertis/onevcs.git", rev = "131bad3ee4d6ee95754d909d8b460f2da4258b63" }
+# The siblings this crate composes. Both are on crates.io, so they resolve from
+# the registry like any other dependency — no git source, so a clone of this repo
+# builds from the registries alone.
+oneagentgraph = "0.1.1"
+onevcs = "0.1.1"
 
 # Process liveness is the one host fact this crate cannot get from `std` on the
 # MSRV floor, and every `DRIVER DEAD` / `PARKED` verdict rests on it. Both are
