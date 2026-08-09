@@ -1,30 +1,33 @@
-//! The planner channel's wire shapes.
+//! The planner channel: the wire shapes, and the durable queue behind them.
 //!
 //! A reply is one JSON envelope: a legacy verdict, a version-1 list of graph
 //! edits, or both. The edits' required fields and validation semantics are
 //! `ai-orchestrator`'s live-edit protocol exactly, per `docs/contract.md`.
 //!
-//! These types are the wire shape and nothing else. Nothing here validates an
-//! edit against a live frontier, queues it, reconciles it, or answers it — the
-//! applied-or-rejected-with-reason promise is the reconciler's, and the
-//! reconciler is what this stage does not implement.
+//! `ChannelState` is the transport: it queues surfaces and replies, hands each
+//! out once, and records what a submitted command list was answered with. It
+//! does not *judge* an edit — whether a target exists, is in the right state,
+//! and leaves an acyclic graph is a question about the live frontier, and the
+//! reconciler in `edits` is what asks it. This file's promise is that nothing
+//! queued is lost and nothing is delivered twice.
 
 // llmlint: ignore-file[invalid_states_unrepresentable] every node id, dependency
 // reference, and human-action reference here is a `String` because a `NodeId`/`NodeRef`
-// newtype is a public item `docs/contract.md` does not name, and minting one is the
-// interface drift the interface-only stage forbids (see src/AGENTS.md). `version` and
-// `completion` stay independent optionals for the same reason: the contract's envelope is
-// "legacy verdicts *plus* a version-1 command list", so a reply may legally carry either,
-// both, or a version this build does not know — and collapsing that into one enum would
-// reject envelopes the protocol accepts. Narrow all of it when the reconciler lands with
-// a graph to validate references against.
+// newtype is a public item `docs/contract.md` does not name, and minting one is interface
+// drift — a published promise the contract never made (see src/AGENTS.md). `version` and
+// `completion` stay independent optionals for a different reason: the contract's envelope
+// is "legacy verdicts *plus* a version-1 command list", so a reply may legally carry
+// either, both, or a version this build does not know — and collapsing that into one enum
+// would reject envelopes the protocol accepts. The references are narrowed where they are
+// judged, against the graph `edits` reconciles them into.
 
 // llmlint: ignore-file[boundary_inputs_validated] a reply is external input and its
 // *structural* boundary is enforced here — an unknown `op`, a missing required field, or
 // an unknown key is rejected by serde and asserted in `tests/contract.rs`. The *semantic*
 // validation the contract specifies (the target exists, is in the right state, and the
-// resulting graph is still acyclic) is a judgement against the live frontier, which is
-// the reconciler's and does not exist yet (see AGENTS.md).
+// resulting graph is still acyclic) is a judgement against the live frontier, so it is
+// made in `edits`, where that frontier is, and its verdict comes back through the command
+// outcomes this file records.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};

@@ -37,8 +37,10 @@ Adding a contract type without extending that test leaves the doc unproven.
 The crate implements that surface and **nothing beyond it**: the engine behind
 it is private, so anything published promises what the contract says and no
 more. [`docs/contract-divergences.md`](docs/contract-divergences.md) records
-every place the contract could not be compiled exactly as written, each one a
-proposal rather than a decision.
+every place the contract could not be compiled exactly as written, and what the
+planner who owns the contract ruled on each. That file is the status; do not
+restate it anywhere, here included. A new divergence goes there as a proposal
+and is never resolved unilaterally.
 
 ## Stack and composition
 

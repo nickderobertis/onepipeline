@@ -126,8 +126,12 @@ pub fn node_script(dir: &Path, node: &str, suffix: &str) -> Option<String> {
 /// while it does something else — issue a live edit, kill a driver, read a
 /// surface.
 ///
-/// Bounded, so a test that never releases the rendezvous fails as a timeout
-/// rather than hanging the suite.
+/// Bounded, and the bound **ends this process**. Returning instead would let a
+/// hold nobody released continue as though it had been: the dispatch completes,
+/// the node settles, the run settles, and the test fails several steps later on
+/// something that reads like a real defect — a reply refused because the run it
+/// named had settled. That disguise cost this suite two rounds of diagnosis, so
+/// an expired rendezvous now says so and takes the dispatch with it.
 pub fn wait_for(path: &Path) {
     let deadline =
         std::time::Instant::now() + std::time::Duration::from_secs(rendezvous_timeout_seconds());
@@ -137,14 +141,28 @@ pub fn wait_for(path: &Path) {
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    eprintln!("rendezvous {} never appeared", path.display());
+    fail(&format!(
+        "rendezvous {} never appeared: nothing released this dispatch",
+        path.display()
+    ));
 }
 
+/// How long a hold waits before it gives up.
+///
+/// A scripted value that is not a positive number of seconds is refused rather
+/// than defaulted: `0` would make every hold expire before it began, which is
+/// the silent opposite of what a test asking for one means.
 fn rendezvous_timeout_seconds() -> u64 {
-    std::env::var("ONEPIPELINE_FAKE_RENDEZVOUS_SECONDS")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(30)
+    match std::env::var("ONEPIPELINE_FAKE_RENDEZVOUS_SECONDS") {
+        Err(_) => 30,
+        Ok(value) => match value.trim().parse() {
+            Ok(seconds) if seconds > 0 => seconds,
+            _ => fail(&format!(
+                "ONEPIPELINE_FAKE_RENDEZVOUS_SECONDS holds {value:?}, \
+                 which is not a positive number of seconds"
+            )),
+        },
+    }
 }
 
 /// An RFC 3339 millisecond UTC timestamp, in the envelope's one format.
