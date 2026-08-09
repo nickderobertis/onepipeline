@@ -122,14 +122,14 @@ fn platform_process_may_be_live(pid: u32) -> bool {
 
 #[cfg(windows)]
 fn platform_process_may_be_live(pid: u32) -> bool {
-    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER};
+    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, WAIT_OBJECT_0};
     use windows_sys::Win32::System::Threading::{
-        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, STILL_ACTIVE,
+        OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
     };
 
     // SAFETY: `OpenProcess` returns a null handle on failure and a handle this
     // function closes on success; no borrowed memory crosses the boundary.
-    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
     if handle.is_null() {
         // A pid that never existed is rejected as an invalid parameter; every
         // other failure (a permission refusal, most of all) leaves the question
@@ -137,12 +137,19 @@ fn platform_process_may_be_live(pid: u32) -> bool {
         return std::io::Error::last_os_error().raw_os_error()
             != Some(ERROR_INVALID_PARAMETER as i32);
     }
-    let mut code: u32 = 0;
-    // SAFETY: `handle` is a live handle and `code` is a `u32` this frame owns.
-    let ok = unsafe { GetExitCodeProcess(handle, &mut code) };
+    // A process handle becomes signalled when — and only when — the process has
+    // terminated, so a zero-millisecond wait is the whole question. Asked this
+    // way rather than through `GetExitCodeProcess`, whose "still running" answer
+    // is the sentinel `STILL_ACTIVE`, which is also the exit code `259` of a
+    // process that has genuinely exited.
+    //
+    // SAFETY: `handle` is a live handle and a zero timeout returns immediately.
+    let waited = unsafe { WaitForSingleObject(handle, 0) };
     // SAFETY: the handle came from `OpenProcess` above and is closed once.
     unsafe { CloseHandle(handle) };
-    ok == 0 || code == STILL_ACTIVE as u32
+    // `WAIT_OBJECT_0` is the one proof of absence: `WAIT_TIMEOUT` is a process
+    // still running, and `WAIT_FAILED` is a question this host cannot answer.
+    waited != WAIT_OBJECT_0
 }
 
 /// The session that launched a run, as the harness's environment reports it.
