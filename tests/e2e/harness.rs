@@ -391,6 +391,30 @@ impl World {
             .collect()
     }
 
+    /// Wait for the planner surface of one kind, and answer with it.
+    ///
+    /// The engine journals the fact a surface is *about* — a spent budget, a
+    /// worker gone quiet — and then raises the surface, as two appends. A test
+    /// that waited on the fact and went straight to the surface would be reading
+    /// between them whenever the host put the two far enough apart, and would
+    /// fail having never waited for the thing it asserts. Waiting on the surface
+    /// is what closes that window; the fact is already there once it is, because
+    /// it is written first.
+    pub fn surfaced(&self, run: &str, kind: &str) -> Value {
+        self.until(&format!("the {kind} surface"), |world| {
+            world.surface_of(run, kind).is_some()
+        });
+        self.surface_of(run, kind)
+            .expect("the surface was just seen")
+    }
+
+    /// The planner surface of one kind, if it has been raised.
+    fn surface_of(&self, run: &str, kind: &str) -> Option<Value> {
+        self.events_of(run, "planner-surface-queued")
+            .into_iter()
+            .find(|event| event["payload"]["kind"] == kind)
+    }
+
     /// The events of one kind.
     pub fn events_of(&self, run: &str, kind: &str) -> Vec<Value> {
         self.journal(run)

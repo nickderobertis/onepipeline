@@ -462,26 +462,20 @@ fn a_worker_that_goes_quiet_is_surfaced_without_blocking_the_round() {
     command.env("ONEPIPELINE_STALL_AFTER_SECONDS", "1");
     command.output().expect("the binary runs");
 
-    world.until("the quiet worker to be reported", |world| {
-        !world.events_of("quiet", "quiet-worker").is_empty()
-    });
-    let reported = world.events_of("quiet", "quiet-worker");
-    assert_eq!(reported[0]["labels"]["node"], "slow");
-    assert_eq!(reported[0]["payload"]["threshold_seconds"], 1);
-    assert_eq!(reported[0]["payload"]["persona"], "engineer");
-
     // A stall is evidence rather than a verdict, so the surface is
     // non-blocking: the round's other workers are not stopped to ask.
-    let surfaced = world
-        .events_of("quiet", "planner-surface-queued")
-        .into_iter()
-        .find(|event| event["payload"]["kind"] == "quiet-worker")
-        .expect("the stall was surfaced");
+    let surfaced = world.surfaced("quiet", "quiet-worker");
     assert_eq!(surfaced["payload"]["blocking"], false);
     assert!(surfaced["payload"]["message"]
         .as_str()
         .expect("a message")
         .contains("nothing recorded since it was dispatched"));
+
+    // Written before the surface was raised, so it is there once the surface is.
+    let reported = world.events_of("quiet", "quiet-worker");
+    assert_eq!(reported[0]["labels"]["node"], "slow");
+    assert_eq!(reported[0]["payload"]["threshold_seconds"], 1);
+    assert_eq!(reported[0]["payload"]["persona"], "engineer");
 
     // A node is reported once per quiet stretch, not once per pass.
     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -508,21 +502,13 @@ fn a_round_that_outlives_its_budget_cancels_its_workers_and_asks_the_planner() {
         ])
         .exited(0);
 
-    world.until("the budget to be spent", |world| {
-        !world
-            .events_of("budgeted", "round-budget-exceeded")
-            .is_empty()
-    });
+    // Blocking, so a wedged dispatch layer cannot leave the planner silent.
+    let surfaced = world.surfaced("budgeted", "round-budget");
+    assert_eq!(surfaced["payload"]["blocking"], true);
+
+    // Written before the surface was raised, so it is there once the surface is.
     let exceeded = world.events_of("budgeted", "round-budget-exceeded");
     assert_eq!(exceeded[0]["payload"]["budget_seconds"], 1);
-
-    // Blocking, so a wedged dispatch layer cannot leave the planner silent.
-    let surfaced = world
-        .events_of("budgeted", "planner-surface-queued")
-        .into_iter()
-        .find(|event| event["payload"]["kind"] == "round-budget")
-        .expect("the spent budget was surfaced");
-    assert_eq!(surfaced["payload"]["blocking"], true);
 
     world.release("slow.go");
     world.until("the round to finish", |world| {
