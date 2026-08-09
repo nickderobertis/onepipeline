@@ -6,9 +6,17 @@ code takes the nearest thing that does exist, and the divergence is recorded
 here as a proposal for the planner who owns the contract. Nothing on this list is
 resolved unilaterally.
 
-## 1. `ResolvedGraphRef` is not a type `oneagentgraph` exports
+Every entry below has since been **ruled on by the planner who owns the
+contract**, and `docs/contract.md` was amended to carry each ruling. The entries
+stay for the record: each states what diverged, what was ruled, and where the
+amended contract now says it.
 
-The contract's `DispatchRequest` declares:
+## 1. `ResolvedGraphRef` is not a type `oneagentgraph` exports — RESOLVED
+
+**Ruling: accept `ConfigRef`; the contract names it. No new type in
+`oneagentgraph`.**
+
+The contract's `DispatchRequest` declared:
 
 ```rust
 pub graph: ResolvedGraphRef,   // content-addressed node-scope agent-graph config (oneagentgraph type)
@@ -21,15 +29,17 @@ recorded content-addressed in the run record so replay never depends on the URL
 staying stable." `ConfigRef` is what the code uses, in `DispatchRequest::graph`
 and in a plan node's `agent_graph`.
 
-The two names may describe two things: a `ConfigRef` is the *reference* a config
-is written as, and a `ResolvedGraphRef` reads as the *result* of resolving one —
-the fetched content plus its digest. If that distinction is intended, it is
-`oneagentgraph`'s type to add and this crate's to consume; the planner decides
-which repository grows it.
+The proposal asked whether a `ResolvedGraphRef` — the fetched content plus its
+digest, as distinct from the *reference* a config is written as — was intended
+as a second type. It was not: the contract's seam sketch now declares
+`pub graph: ConfigRef`, and neither repository grows another type for it.
 
-## 2. `SessionSpec` is not a type `onevcs` exports
+## 2. `SessionSpec` is not a type `onevcs` exports — RESOLVED
 
-The contract's `WorkspaceSpec` declares:
+**Ruling: accept `SessionRequest`; the caller asks, the executing machine
+opens.**
+
+The contract's `WorkspaceSpec` declared:
 
 ```rust
 pub workspace: WorkspaceSpec,  // Path(PathBuf) | VcsSession(SessionSpec: onevcs type)
@@ -41,12 +51,16 @@ pub workspace: WorkspaceSpec,  // Path(PathBuf) | VcsSession(SessionSpec: onevcs
 `WorkspaceSpec::VcsSession` carries, since the contract says the machine running
 the dispatch is the one that opens the session. (`onevcs::Session` is the *opened*
 session, which the dispatching machine never holds.) `SessionRequest` is what the
-code uses. This looks like a naming difference rather than a design one.
+code uses, and what the amended contract names; the surrounding sentence now says
+the request carries the ask and never an opened session.
 
-## 3. `DispatchOutcome` has no specified fields
+## 3. `DispatchOutcome` has no specified fields — RESOLVED
 
-The contract names `DispatchOutcome` as `DispatchHandle::wait`'s success value
-but says nothing about what it carries.
+**Ruling: accept the four fields and state them; keep the struct
+`#[non_exhaustive]`, and keep `tests/contract.rs` gating the prose.**
+
+The contract named `DispatchOutcome` as `DispatchHandle::wait`'s success value
+but said nothing about what it carries.
 
 It carries four fields, each one a thing a caller **cannot** recover from the
 relayed event stream:
@@ -67,18 +81,17 @@ say whether the dispatch ended well, and a node has to settle `done` or
 session there*: the caller never opened it, so publication has no token unless
 the outcome hands one back.
 
-The struct is `#[non_exhaustive]`, so naming more fields later is additive. The
-proposal for the planner is to state these four in the contract, or to say
-instead that `wait` reports settlement only and that a session token reaches the
-caller some other way.
+The contract's seam sketch now declares all four under `#[non_exhaustive]`, so
+naming more later stays additive. `tests/contract.rs` reads the struct's
+declaration and gates it against both documents, so neither can drift from what
+`DispatchOutcome` actually carries.
 
-`tests/contract.rs` gates this list against the type, so the prose above cannot
-drift from what `DispatchOutcome` actually carries.
+## 4. The rules grammar spells one predicate but describes two families — RESOLVED
 
-## 4. The rules grammar spells one predicate but describes two families
+**Ruling: state both predicate families explicitly, and what each matches on.**
 
-The contract calls the rules "ordered predicates over capacity **and node
-labels**", and its example spells exactly one:
+The contract called the rules "ordered predicates over capacity **and node
+labels**", and its example spelled exactly one:
 
 ```yaml
 rules:
@@ -86,14 +99,22 @@ rules:
     use: local
 ```
 
-`when` is a *mapping*, so `Predicate` is compiled as a struct with that one
-required field rather than as a one-variant enum — which also makes a second
-condition a second field, read as "all of these hold". The label predicates are
-not invented here: their key names and matching semantics (equality? glob? a
-mapping of label to pattern?) are the contract's to settle, as is whether several
-conditions in one `when` conjoin.
+`when` is a *mapping*, so `Predicate` is compiled as a struct rather than a
+one-variant enum — which also makes a second condition a second field, read as
+"all of these hold". The label family's key name and matching semantics were the
+contract's to settle, and it has settled them: `node_label: {KEY: VALUE, ...}`
+matches the node's own reserved labels (`run_id`, `round`, `node`, `persona`) by
+exact string equality, never a glob or a pattern; several conditions in one
+`when` conjoin; and a `when` naming neither family — or naming `step`, which no
+executor choice can see, because the choice is made once per node before any step
+runs — is refused at load rather than left as a rule that silently never fires. `Predicate` carries both fields,
+and the shipped default rules are unchanged — the capacity family alone is what
+a single-executor host needs.
 
-## 5. `min_free_mem: 2GiB` is carried as its string
+## 5. `min_free_mem: 2GiB` is carried as its string — RESOLVED
+
+**Ruling: accept `String` plus a validated unit list; the contract states the
+units. Refusing an unknown unit at load is correct.**
 
 `ExecutorEntry::min_free_mem` is a `String`, holding `2GiB` as the contract's
 example writes it, and `rules::bytes_of` reads it as a byte count where the
@@ -102,34 +123,42 @@ evaluator needs one.
 The field stays a `String` on the type rather than becoming a `u64`, because the
 contract fixes the *wire* syntax and a parsed field would make the type unable to
 round-trip what a rules file wrote. `bytes_of` accepts exactly the units the
-contract spells — `B`, `KiB`, `MiB`, `GiB`, `TiB`, and a bare byte count.
+contract now spells — `B`, `KiB`, `MiB`, `GiB`, `TiB`, and a bare byte count.
 
 A unit outside that list is **refused when the rules file loads**, naming the
 executor and the list. Read leniently it would mean *no limit at all*, so the one
 file written to keep dispatches off an exhausted host would be the file that
 removed the bound — and a rules file is external input, which this crate
-validates at its boundary rather than at the first dispatch.
+validates at its boundary rather than at the first dispatch. The contract now
+states both the unit list and the refusal, so a rules file naming `2GB` is
+refused against a documented vocabulary rather than against this
+implementation's reading of the one example.
 
-The proposal for the planner is to state that unit list in the contract, so a
-rules file naming `2GB` is refused against a documented vocabulary rather than
-against this implementation's reading of the one example.
+## 6. `onepipeline`'s own event kinds are not enumerated — RESOLVED
 
-## 6. `onepipeline`'s own event kinds are not enumerated
+**Ruling: enumerate them, and narrow the type to an enum. Cross-source kinds stay
+strings.**
 
-The contract fixes the merged stream as "envelope NDJSON" and names the three
-sources it merges, but enumerates no event kinds for this library — unlike the
-sibling contracts, which each enumerate their own. `EventKind` is therefore the
-wire string: this crate both relays another library's kinds and emits its own,
-and an enum here would reject a kind a sibling already produces.
+The contract fixed the merged stream as "envelope NDJSON" and named the three
+sources it merges, but enumerated no event kinds for this library — unlike the
+sibling contracts, which each enumerate their own. `EventKind` was therefore the
+wire string for everything this crate wrote as well as everything it relayed.
 
-It narrows to an enum once the contract names this library's kinds. Until then
-the structural boundary still holds — `v`, `ts`, `stream`, `seq`, `source`, and
-`labels` are all typed, and `source` rejects anything but the three libraries.
+The contract now lists this library's nineteen kinds, and
+[`event::PipelineKind`](../src/event.rs) is the enum of exactly those:
+`Journal::emit` takes one, so a kind this crate emits cannot be a typo, and every
+reader folds through `PipelineKind::from_wire`. A **relayed** envelope keeps its
+producer's kind as `EventKind`'s wire string, because an enum there would reject
+a kind a newer sibling already produces.
 
-## 7. `resume` cannot say how much of a preserved branch survives
+## 7. `resume` cannot say how much of a preserved branch survives — RESOLVED
+
+**Ruling: accept the proposal. `resume` names the completed steps a preserved
+branch carries, and a checkpoint must be a commit reachable on the remote.**
 
 The plan schema is "v7 node shapes unchanged", and `resume` is one of them. The
-shape compiled here is the two fields a continuation cannot do without:
+shape originally compiled here was the two fields a continuation cannot do
+without:
 
 ```rust
 pub struct Resume {
@@ -146,29 +175,29 @@ the **content** clears `completed_steps`, because republishing the identical tre
 would be refused identically, while a publication that failed for any other
 reason keeps them and re-runs only what is left.
 
-This crate carries the branch forward — a node that settled `failed`,
-`cancelled`, or `parked` resumes the branch its attempt left behind, and a
-planner's explicit `branch` wins over it — but it cannot express that split,
-so a continuation re-runs every step. That is the safe direction (work is
-repeated, never skipped or lost) and it is the only direction the committed
-shape allows.
+`Resume` now carries `completed_steps`, and a continuation skips exactly the
+steps it names. An absent or empty list re-runs the whole workstream, which is
+the safe direction: work is repeated, never skipped or lost. The contract also
+now states what a `checkpoint` is — a commit reachable on the remote, because the
+machine that continues a node is not the machine that made it. The
+content/non-content split that decides *when* `completed_steps` is cleared stays
+with the library that knows what its merge path refused, which is `onevcs`; this
+crate carries forward what the round it folded actually finished.
 
-The proposal for the planner is whether `resume` should name the steps a
-continuation may keep, and if so whether the content/non-content distinction
-belongs in this crate's fold or in `onevcs`, which is the library that knows what
-its merge path refused.
+## 8. Cross-DAG edges are named by the schema and nowhere else — RESOLVED
 
-## 8. Cross-DAG edges are named by the schema and nowhere else
+**Ruling: adopt `ai-orchestrator`'s semantics and state them, including
+blocked-not-failed and reported-not-rerun.**
 
-The contract names the feature once, in the plan-schema sentence: "cross-DAG
-`run:<id>#<node>` refs". That fixes the *syntax* and nothing else. It does not
+The contract named the feature once, in the plan-schema sentence: "cross-DAG
+`run:<id>#<node>` refs". That fixed the *syntax* and nothing else. It did not
 say what resolves an edge, what an unresolvable one does, or what either records
 — and an edge that is only syntax is inert, because a reference nothing resolves
 blocks its consumer for ever.
 
 The semantics implemented are `ai-orchestrator`'s, which
 `docs/orchestration.md` states and which this crate's task named as the source
-being preserved:
+being preserved. The contract now states all four:
 
 - An edge resolves by reading the referenced run's ledger. Only a `node-settled`
   of `done` satisfies it; an unknown run, a node that has not settled, and one
@@ -186,8 +215,4 @@ being preserved:
 - `last_seq` is the count of records in the upstream's merged store. A run is
   written by several processes, so no single stream's `seq` describes it.
 
-Both kinds are wire strings, which divergence 6 already covers. The proposal for
-the planner is to state the four rules above in the contract — most of all
-*blocked-not-failed* and *reported-not-rerun*, which are the two a different
-implementation would most plausibly get wrong, and which no consumer of this
-crate can discover from the schema sentence alone.
+Both kinds are `onepipeline`'s own, and divergence 6 now enumerates them.

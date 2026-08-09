@@ -108,6 +108,129 @@ pub struct Labels {
     pub extra: Map<String, Value>,
 }
 
+/// Every event kind this library emits, and exactly those.
+///
+/// Enumerated because they are `onepipeline`'s own vocabulary: a kind this crate
+/// writes cannot be a typo, and a reader folds a closed set rather than matching
+/// strings. The kinds a *sibling* produces stay [`EventKind`]'s wire string —
+/// this crate relays those unchanged, and an enum there would reject a kind a
+/// newer sibling already emits. `docs/contract.md` lists exactly these.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[non_exhaustive]
+pub enum PipelineKind {
+    /// The run was launched.
+    RunStarted,
+    /// A round began executing.
+    RoundStarted,
+    /// A round stopped executing, with the state it settled in.
+    RoundFinished,
+    /// A node's dispatch was started.
+    NodeDispatched,
+    /// A node reached a terminal status for this round.
+    NodeSettled,
+    /// A live edit was accepted and applied to the desired graph.
+    EditCommitted,
+    /// A live edit was refused, with the reason its submitter was told.
+    EditRejected,
+    /// A surface was *sent*. Delivery is a separate fact.
+    PlannerSurfaceQueued,
+    /// A surface was *consumed* by the planner. This is what resets the pacemaker.
+    PlannerSurfaced,
+    /// The planner answered a consumed surface.
+    PlannerReplied,
+    /// A human action was attested.
+    HumanAttested,
+    /// A fresh driver was attached to an intact ledger.
+    DriverAdopted,
+    /// The run was ended by `stop`.
+    RunStopped,
+    /// An in-flight dispatch recorded nothing past the stall threshold.
+    QuietWorker,
+    /// A round exceeded its budget and cooperatively cancelled its workers.
+    RoundBudgetExceeded,
+    /// A request a round boundary depends on was retried.
+    BoundaryRetried,
+    /// A cross-DAG edge resolved, with how far its upstream had got when it did.
+    CrossDagSatisfied,
+    /// A cross-DAG upstream advanced after its consumer recorded it.
+    UpstreamModified,
+    /// The planner requested completion, independently of graph mutation.
+    CompletionRequested,
+}
+
+impl PipelineKind {
+    /// The kind as it appears on the wire.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RunStarted => "run-started",
+            Self::RoundStarted => "round-started",
+            Self::RoundFinished => "round-finished",
+            Self::NodeDispatched => "node-dispatched",
+            Self::NodeSettled => "node-settled",
+            Self::EditCommitted => "edit-committed",
+            Self::EditRejected => "edit-rejected",
+            Self::PlannerSurfaceQueued => "planner-surface-queued",
+            Self::PlannerSurfaced => "planner-surfaced",
+            Self::PlannerReplied => "planner-replied",
+            Self::HumanAttested => "human-attested",
+            Self::DriverAdopted => "driver-adopted",
+            Self::RunStopped => "run-stopped",
+            Self::QuietWorker => "quiet-worker",
+            Self::RoundBudgetExceeded => "round-budget-exceeded",
+            Self::BoundaryRetried => "boundary-retried",
+            Self::CrossDagSatisfied => "cross-dag-satisfied",
+            Self::UpstreamModified => "upstream-modified",
+            Self::CompletionRequested => "completion-requested",
+        }
+    }
+
+    /// The kind an envelope carries, when it is one of this library's own.
+    ///
+    /// `None` for anything else, which is every kind a sibling produced: the
+    /// merged store holds all three vocabularies and only this one is closed.
+    pub fn from_wire(kind: &EventKind) -> Option<Self> {
+        PIPELINE_KINDS
+            .iter()
+            .copied()
+            .find(|candidate| candidate.as_str() == kind.0)
+    }
+}
+
+impl std::fmt::Display for PipelineKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl From<PipelineKind> for EventKind {
+    fn from(kind: PipelineKind) -> Self {
+        Self(kind.as_str().to_string())
+    }
+}
+
+/// Every kind, for the lookup above and for the contract's own list.
+pub const PIPELINE_KINDS: &[PipelineKind] = &[
+    PipelineKind::RunStarted,
+    PipelineKind::RoundStarted,
+    PipelineKind::RoundFinished,
+    PipelineKind::NodeDispatched,
+    PipelineKind::NodeSettled,
+    PipelineKind::EditCommitted,
+    PipelineKind::EditRejected,
+    PipelineKind::PlannerSurfaceQueued,
+    PipelineKind::PlannerSurfaced,
+    PipelineKind::PlannerReplied,
+    PipelineKind::HumanAttested,
+    PipelineKind::DriverAdopted,
+    PipelineKind::RunStopped,
+    PipelineKind::QuietWorker,
+    PipelineKind::RoundBudgetExceeded,
+    PipelineKind::BoundaryRetried,
+    PipelineKind::CrossDagSatisfied,
+    PipelineKind::UpstreamModified,
+    PipelineKind::CompletionRequested,
+];
+
 /// A reference to evidence stored beside the stream rather than inside it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactRef {

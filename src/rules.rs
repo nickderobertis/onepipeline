@@ -10,16 +10,18 @@
 
 // llmlint: ignore-file[invalid_states_unrepresentable] `min_free_mem` stays the `2GiB`
 // string the contract's example spells — the wire syntax is the contract's, and
-// [`bytes_of`] is where it becomes a byte count — and `Predicate` names only
-// `executor_has_capacity`, the one predicate the contract spells, because inventing the
-// label predicates it alludes to would be interface drift. Both are recorded in
-// docs/contract-divergences.md.
+// [`bytes_of`] is where it becomes a byte count. `Predicate`'s two families are both
+// optional fields rather than an enum because the contract makes `when` a *mapping* whose
+// conditions conjoin; "neither is set" is refused at load instead. Divergences 4 and 5 in
+// docs/contract-divergences.md record both rulings.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::event::Labels;
 use crate::executor::{CapacityReport, Executor, LocalExecutor};
 
 /// The executor-rules file.
@@ -126,15 +128,59 @@ pub struct Rule {
 /// What a [`Rule`] tests.
 ///
 /// A mapping, as the contract's `when: {executor_has_capacity: local}` writes
-/// it. The contract spells exactly one condition; the label predicates it
-/// alludes to would join this mapping as further fields, and are not invented
-/// here.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// it, holding the contract's two predicate families. Several conditions in one
+/// mapping **conjoin**: all of them hold or the rule does not fire. A mapping
+/// naming neither family is refused when the file loads — read as an always-true
+/// rule it would shadow every rule after it, which is never what someone who
+/// wrote a `when` at all meant.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Predicate {
     /// The named executor is within the limits its [`ExecutorEntry`] declares.
-    pub executor_has_capacity: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executor_has_capacity: Option<String>,
+    /// The node's own labels carry each of these, by exact string equality.
+    ///
+    /// Exact rather than glob: a rules file decides where work runs, and a
+    /// pattern language is a second thing to get wrong at the one boundary that
+    /// must not silently match the wrong host.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub node_label: BTreeMap<String, String>,
 }
+
+impl Predicate {
+    /// Whether this predicate names nothing at all.
+    fn is_empty(&self) -> bool {
+        self.executor_has_capacity.is_none() && self.node_label.is_empty()
+    }
+
+    /// Whether the node's labels carry every pair this predicate names.
+    fn labels_match(&self, labels: &Labels) -> bool {
+        self.node_label
+            .iter()
+            .all(|(key, value)| label_of(labels, key).is_some_and(|actual| &actual == value))
+    }
+}
+
+/// One reserved label, as a string a rules file can be written against.
+fn label_of(labels: &Labels, key: &str) -> Option<String> {
+    match key {
+        "run_id" => labels.run_id.clone(),
+        "round" => labels.round.map(|round| round.to_string()),
+        "node" => labels.node.clone(),
+        "persona" => labels.persona.clone(),
+        _ => None,
+    }
+}
+
+/// The reserved label keys a `node_label` predicate may name.
+///
+/// `step` is deliberately absent: an executor is chosen once per node, before
+/// any of its steps run, so a rule testing `step` could never hold. Refusing it
+/// at load says that; accepting it would leave a rule that silently never fires.
+/// A free-form extra is absent for the same reason it is free-form — no plan
+/// schema declares it, so nothing could be validated against.
+pub const SELECTABLE_LABELS: &[&str] = &["run_id", "round", "node", "persona"];
 
 impl ExecutorRules {
     /// The rules a run uses when it is pointed at no file.
@@ -154,7 +200,8 @@ impl ExecutorRules {
             rules: vec![
                 Rule {
                     when: Some(Predicate {
-                        executor_has_capacity: "local".into(),
+                        executor_has_capacity: Some("local".into()),
+                        ..Predicate::default()
                     }),
                     use_executor: "local".into(),
                 },
@@ -212,15 +259,30 @@ impl ExecutorRules {
                 )));
             }
             if let Some(when) = &rule.when {
-                if !self
-                    .executors
-                    .iter()
-                    .any(|e| e.name == when.executor_has_capacity)
-                {
-                    return Err(Error::Invalid(format!(
-                        "rule tests executor '{}', which is not declared",
-                        when.executor_has_capacity
-                    )));
+                if when.is_empty() {
+                    return Err(Error::Invalid(
+                        "a rule's `when` names no condition: write \
+                         `executor_has_capacity`, `node_label`, or no `when` at all"
+                            .into(),
+                    ));
+                }
+                if let Some(tested) = &when.executor_has_capacity {
+                    if !self.executors.iter().any(|e| &e.name == tested) {
+                        return Err(Error::Invalid(format!(
+                            "rule tests executor '{tested}', which is not declared"
+                        )));
+                    }
+                }
+                // A label nothing can ever carry is a typo, not a rule that
+                // happens never to fire: it would silently shadow the fallback's
+                // job of explaining where the work went.
+                for key in when.node_label.keys() {
+                    if !SELECTABLE_LABELS.contains(&key.as_str()) {
+                        return Err(Error::Invalid(format!(
+                            "rule tests node label '{key}', which is not one of {}",
+                            SELECTABLE_LABELS.join(", ")
+                        )));
+                    }
                 }
             }
         }
@@ -232,9 +294,12 @@ impl ExecutorRules {
     /// A node's own `executor` wins outright: naming one is the planner deciding
     /// where the work runs. Otherwise the rules are ordered — the first whose
     /// `when` holds decides, and a rule with no `when` is the fallback.
+    /// `labels` are the node's own, which is the granularity the choice is made
+    /// at: one executor per node, before any of its steps run.
     pub fn select(
         &self,
         pinned: Option<&str>,
+        labels: &Labels,
         report: &dyn Fn(&str) -> CapacityReport,
     ) -> Result<String> {
         if let Some(pinned) = pinned {
@@ -248,11 +313,15 @@ impl ExecutorRules {
         for rule in &self.rules {
             let holds = match &rule.when {
                 None => true,
-                Some(when) => self
-                    .executors
-                    .iter()
-                    .find(|e| e.name == when.executor_has_capacity)
-                    .is_some_and(|entry| entry.has_capacity(&report(&entry.name))),
+                Some(when) => {
+                    let capacity = when.executor_has_capacity.as_ref().is_none_or(|tested| {
+                        self.executors
+                            .iter()
+                            .find(|e| &e.name == tested)
+                            .is_some_and(|entry| entry.has_capacity(&report(&entry.name)))
+                    });
+                    capacity && when.labels_match(labels)
+                }
             };
             if holds {
                 return Ok(rule.use_executor.clone());
@@ -390,7 +459,8 @@ mod tests {
             rules: vec![
                 Rule {
                     when: Some(Predicate {
-                        executor_has_capacity: "fast".into(),
+                        executor_has_capacity: Some("fast".into()),
+                        ..Predicate::default()
                     }),
                     use_executor: "fast".into(),
                 },
@@ -405,19 +475,169 @@ mod tests {
             .expect("both rules name declared executors");
 
         let idle = |_: &str| report(4, 0.5, u64::MAX);
-        assert_eq!(rules.select(None, &idle).expect("a rule matched"), "fast");
+        assert_eq!(
+            rules
+                .select(None, &Labels::default(), &idle)
+                .expect("a rule matched"),
+            "fast"
+        );
 
         let busy = |_: &str| report(4, 9.0, u64::MAX);
-        assert_eq!(rules.select(None, &busy).expect("the fallback"), "slow");
+        assert_eq!(
+            rules
+                .select(None, &Labels::default(), &busy)
+                .expect("the fallback"),
+            "slow"
+        );
+    }
+
+    /// The rules a label-routing file writes: reviewers to one executor,
+    /// everything else to the other.
+    fn by_persona() -> ExecutorRules {
+        ExecutorRules {
+            executors: vec![
+                ExecutorEntry {
+                    name: "review-pool".into(),
+                    kind: ExecutorKind::Local,
+                    max_load1: None,
+                    min_free_mem: None,
+                },
+                ExecutorEntry {
+                    name: "local".into(),
+                    kind: ExecutorKind::Local,
+                    max_load1: None,
+                    min_free_mem: None,
+                },
+            ],
+            rules: vec![
+                Rule {
+                    when: Some(Predicate {
+                        executor_has_capacity: Some("review-pool".into()),
+                        node_label: BTreeMap::from([("persona".into(), "reviewer".into())]),
+                    }),
+                    use_executor: "review-pool".into(),
+                },
+                Rule {
+                    when: None,
+                    use_executor: "local".into(),
+                },
+            ],
+        }
+    }
+
+    fn labelled(node: &str, persona: &str) -> Labels {
+        Labels {
+            run_id: Some("demo".into()),
+            round: Some(2),
+            node: Some(node.into()),
+            persona: Some(persona.into()),
+            ..Labels::default()
+        }
+    }
+
+    #[test]
+    fn a_node_label_predicate_matches_the_nodes_own_labels_exactly() {
+        let rules = by_persona();
+        rules.validate().expect("both families are legal");
+        let idle = |_: &str| report(4, 0.0, u64::MAX);
+
+        assert_eq!(
+            rules
+                .select(None, &labelled("audit", "reviewer"), &idle)
+                .expect("the label rule holds"),
+            "review-pool"
+        );
+        // Exact, not a prefix or a glob: `reviewer-2` is a different persona.
+        assert_eq!(
+            rules
+                .select(None, &labelled("audit", "reviewer-2"), &idle)
+                .expect("the fallback"),
+            "local"
+        );
+        // A label the node does not carry at all cannot match.
+        assert_eq!(
+            rules
+                .select(None, &Labels::default(), &idle)
+                .expect("the fallback"),
+            "local"
+        );
+    }
+
+    #[test]
+    fn the_conditions_in_one_when_conjoin() {
+        let mut rules = by_persona();
+        // The label holds; the capacity half does not, so the rule does not fire.
+        let exhausted = |_: &str| report(0, 0.0, u64::MAX);
+        assert_eq!(
+            rules
+                .select(None, &labelled("audit", "reviewer"), &exhausted)
+                .expect("the fallback"),
+            "local"
+        );
+
+        // And the other way round: capacity holds, the label does not.
+        rules.rules[0].when = Some(Predicate {
+            executor_has_capacity: Some("review-pool".into()),
+            node_label: BTreeMap::from([("node".into(), "audit".into())]),
+        });
+        let idle = |_: &str| report(4, 0.0, u64::MAX);
+        assert_eq!(
+            rules
+                .select(None, &labelled("build", "reviewer"), &idle)
+                .expect("the fallback"),
+            "local"
+        );
+    }
+
+    #[test]
+    fn a_when_that_names_nothing_or_names_a_label_that_is_not_one_is_refused() {
+        let mut rules = by_persona();
+        rules.rules[0].when = Some(Predicate::default());
+        let message = rules.validate().unwrap_err().to_string();
+        assert!(message.contains("names no condition"), "{message}");
+
+        let mut rules = by_persona();
+        rules.rules[0].when = Some(Predicate {
+            executor_has_capacity: None,
+            node_label: BTreeMap::from([("presona".into(), "reviewer".into())]),
+        });
+        let message = rules.validate().unwrap_err().to_string();
+        assert!(message.contains("presona"), "{message}");
+    }
+
+    #[test]
+    fn a_label_predicate_round_trips_through_the_rules_file_syntax() {
+        let yaml = "executors:\n  - {name: local, type: local}\nrules:\n  \
+                    - when: {node_label: {persona: reviewer}}\n    use: local\n  \
+                    - use: local\n";
+        let rules: ExecutorRules = serde_norway::from_str(yaml).expect("it parses");
+        rules.validate().expect("it validates");
+        assert_eq!(
+            rules.rules[0]
+                .when
+                .as_ref()
+                .expect("a predicate")
+                .node_label,
+            BTreeMap::from([("persona".to_string(), "reviewer".to_string())])
+        );
+        let again: ExecutorRules =
+            serde_norway::from_str(&serde_norway::to_string(&rules).expect("serializes"))
+                .expect("re-parses");
+        assert_eq!(again, rules);
     }
 
     #[test]
     fn a_node_that_pins_an_executor_gets_it_or_is_refused_by_name() {
         let rules = ExecutorRules::shipped_default();
         let idle = |_: &str| report(4, 0.0, u64::MAX);
-        assert_eq!(rules.select(Some("local"), &idle).expect("pinned"), "local");
+        assert_eq!(
+            rules
+                .select(Some("local"), &Labels::default(), &idle)
+                .expect("pinned"),
+            "local"
+        );
         let message = rules
-            .select(Some("kubernetes"), &idle)
+            .select(Some("kubernetes"), &Labels::default(), &idle)
             .unwrap_err()
             .to_string();
         assert!(message.contains("kubernetes"), "{message}");
@@ -452,7 +672,8 @@ mod tests {
             }],
             rules: vec![Rule {
                 when: Some(Predicate {
-                    executor_has_capacity: "elsewhere".into(),
+                    executor_has_capacity: Some("elsewhere".into()),
+                    ..Predicate::default()
                 }),
                 use_executor: "local".into(),
             }],
@@ -485,13 +706,17 @@ mod tests {
             }],
             rules: vec![Rule {
                 when: Some(Predicate {
-                    executor_has_capacity: "local".into(),
+                    executor_has_capacity: Some("local".into()),
+                    ..Predicate::default()
                 }),
                 use_executor: "local".into(),
             }],
         };
         let busy = |_: &str| report(4, 5.0, u64::MAX);
-        let message = rules.select(None, &busy).unwrap_err().to_string();
+        let message = rules
+            .select(None, &Labels::default(), &busy)
+            .unwrap_err()
+            .to_string();
         assert!(message.contains("nothing can dispatch"), "{message}");
     }
 
@@ -504,7 +729,12 @@ mod tests {
         assert_eq!(rules.rules.len(), 2);
 
         let idle = |_: &str| report(4, 0.0, u64::MAX);
-        assert_eq!(rules.select(None, &idle).expect("a rule matched"), "local");
+        assert_eq!(
+            rules
+                .select(None, &Labels::default(), &idle)
+                .expect("a rule matched"),
+            "local"
+        );
     }
 
     #[test]

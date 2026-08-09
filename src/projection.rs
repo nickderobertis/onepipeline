@@ -44,6 +44,11 @@ pub struct RunState {
     pub branches: BTreeMap<String, String>,
     /// Where a human reads the change each published node opened.
     pub change_urls: BTreeMap<String, String>,
+    /// The declared steps each node's attempt finished.
+    ///
+    /// What a continuation may skip, and the only record of it: a step is not a
+    /// node, so nothing else in the journal says one finished.
+    pub completed_steps: BTreeMap<String, Vec<String>>,
     /// When each node was dispatched, in epoch milliseconds.
     pub dispatched_at: BTreeMap<String, u64>,
     /// When each node settled, in epoch milliseconds.
@@ -146,14 +151,14 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
         return;
     }
     let payload = &event.payload;
-    match event.kind.0.as_str() {
-        journal::RUN_STARTED => {
+    match journal::PipelineKind::from_wire(&event.kind) {
+        Some(journal::PipelineKind::RunStarted) => {
             if let Some(plan) = plan_of(payload) {
                 state.graph = Graph::from_plan(&plan);
                 state.plan = Some(plan);
             }
         }
-        journal::ROUND_STARTED => {
+        Some(journal::PipelineKind::RoundStarted) => {
             state.round = event.labels.round.unwrap_or(state.round + 1);
             state.round_open = true;
             // A round's recorded statuses are its own: the previous round's
@@ -169,8 +174,8 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
                 }
             }
         }
-        journal::ROUND_FINISHED => state.round_open = false,
-        journal::NODE_DISPATCHED => {
+        Some(journal::PipelineKind::RoundFinished) => state.round_open = false,
+        Some(journal::PipelineKind::NodeDispatched) => {
             if let Some(node) = &event.labels.node {
                 state.recorded.insert(node.clone(), NodeStatus::Running);
                 if let Some(ts) = millis_of(&event.ts) {
@@ -178,7 +183,7 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
                 }
             }
         }
-        journal::NODE_SETTLED => {
+        Some(journal::PipelineKind::NodeSettled) => {
             let Some(node) = &event.labels.node else {
                 return;
             };
@@ -198,6 +203,16 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
             if let Some(branch) = payload.get("branch").and_then(Value::as_str) {
                 state.branches.insert(node.clone(), branch.to_string());
             }
+            if let Some(steps) = payload.get("completed_steps").and_then(Value::as_array) {
+                state.completed_steps.insert(
+                    node.clone(),
+                    steps
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect(),
+                );
+            }
             if let Some(url) = payload.get("change_url").and_then(Value::as_str) {
                 state.change_urls.insert(node.clone(), url.to_string());
             }
@@ -205,7 +220,7 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
                 state.settled_at.insert(node.clone(), ts);
             }
         }
-        journal::EDIT_COMMITTED => {
+        Some(journal::PipelineKind::EditCommitted) => {
             let operations = payload
                 .get("operations")
                 .and_then(|value| serde_json::from_value::<Vec<Operation>>(value.clone()).ok());
@@ -245,7 +260,7 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
                 }
             }
         }
-        journal::HUMAN_ATTESTED => {
+        Some(journal::PipelineKind::HumanAttested) => {
             if let Some(reference) = payload.get("ref").and_then(Value::as_str) {
                 state.attestations.insert(reference.to_string());
                 state
@@ -253,21 +268,21 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
                     .insert(reference.to_string(), NodeStatus::Done);
             }
         }
-        journal::COMPLETION_REQUESTED => {
+        Some(journal::PipelineKind::CompletionRequested) => {
             if let Some(reason) = payload.get("reason").and_then(Value::as_str) {
                 state.completion_requests.push(reason.to_string());
             }
         }
-        journal::PLANNER_SURFACE_QUEUED => state.surfaces_queued += 1,
-        journal::PLANNER_SURFACED => {
+        Some(journal::PipelineKind::PlannerSurfaceQueued) => state.surfaces_queued += 1,
+        Some(journal::PipelineKind::PlannerSurfaced) => {
             state.surfaces_read += 1;
             state.last_surface_at = millis_of(&event.ts);
         }
-        journal::RUN_STOPPED => {
+        Some(journal::PipelineKind::RunStopped) => {
             state.stopped = true;
             state.round_open = false;
         }
-        journal::CROSS_DAG_SATISFIED => {
+        Some(journal::PipelineKind::CrossDagSatisfied) => {
             if let (Some(dependency), Some(last)) = (
                 payload.get("dependency").and_then(Value::as_str),
                 payload.get("last_seq").and_then(Value::as_u64),
@@ -281,7 +296,7 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
                     .or_insert(last);
             }
         }
-        journal::UPSTREAM_MODIFIED => {
+        Some(journal::PipelineKind::UpstreamModified) => {
             if let Some(dependency) = payload.get("dependency").and_then(Value::as_str) {
                 *state
                     .cross_dag_watches
@@ -386,7 +401,7 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::{EventKind, Labels, ENVELOPE_VERSION};
+    use crate::event::{Labels, ENVELOPE_VERSION};
     use crate::journal::{labels, payload};
     use crate::plan::{Node, PLAN_SCHEMA_VERSION};
     use serde_json::json;
@@ -411,14 +426,19 @@ mod tests {
         }
     }
 
-    fn pipeline(kind: &str, seq: u64, node: Option<&str>, fields: &[(&str, Value)]) -> Envelope {
+    fn pipeline(
+        kind: journal::PipelineKind,
+        seq: u64,
+        node: Option<&str>,
+        fields: &[(&str, Value)],
+    ) -> Envelope {
         Envelope {
             v: ENVELOPE_VERSION,
             ts: crate::sys::rfc3339_from_millis(1_786_000_000_000 + seq * 1_000),
             stream: "s".into(),
             seq,
             source: Source::Pipeline,
-            kind: EventKind(kind.into()),
+            kind: kind.into(),
             labels: Labels {
                 node: node.map(str::to_string),
                 ..labels("demo", Some(1), None)
@@ -484,11 +504,21 @@ mod tests {
             retry_of: Some("build".into()),
         };
         let events = vec![
-            pipeline(journal::RUN_STARTED, 0, None, &[("plan", json!(plan))]),
-            pipeline(journal::ROUND_STARTED, 1, None, &[("plan", json!(plan))]),
-            pipeline(journal::NODE_DISPATCHED, 2, Some("build"), &[]),
             pipeline(
-                journal::NODE_SETTLED,
+                journal::PipelineKind::RunStarted,
+                0,
+                None,
+                &[("plan", json!(plan))],
+            ),
+            pipeline(
+                journal::PipelineKind::RoundStarted,
+                1,
+                None,
+                &[("plan", json!(plan))],
+            ),
+            pipeline(journal::PipelineKind::NodeDispatched, 2, Some("build"), &[]),
+            pipeline(
+                journal::PipelineKind::NodeSettled,
                 3,
                 Some("build"),
                 &[
@@ -497,7 +527,7 @@ mod tests {
                 ],
             ),
             pipeline(
-                journal::EDIT_COMMITTED,
+                journal::PipelineKind::EditCommitted,
                 4,
                 None,
                 &[
@@ -535,9 +565,14 @@ mod tests {
     fn an_edit_whose_operations_cannot_be_folded_ends_strict_replay() {
         let plan = plan_of_nodes(vec![agent("build", &[])]);
         let events = vec![
-            pipeline(journal::RUN_STARTED, 0, None, &[("plan", json!(plan))]),
             pipeline(
-                journal::EDIT_COMMITTED,
+                journal::PipelineKind::RunStarted,
+                0,
+                None,
+                &[("plan", json!(plan))],
+            ),
+            pipeline(
+                journal::PipelineKind::EditCommitted,
                 1,
                 None,
                 &[("operations", json!([{"kind": "from-the-future"}]))],
@@ -550,18 +585,33 @@ mod tests {
     #[test]
     fn a_new_round_clears_the_previous_rounds_frontier() {
         let plan = plan_of_nodes(vec![agent("build", &[])]);
-        let mut second = pipeline(journal::ROUND_STARTED, 3, None, &[("plan", json!(plan))]);
+        let mut second = pipeline(
+            journal::PipelineKind::RoundStarted,
+            3,
+            None,
+            &[("plan", json!(plan))],
+        );
         second.labels.round = Some(2);
         let events = vec![
-            pipeline(journal::RUN_STARTED, 0, None, &[("plan", json!(plan))]),
-            pipeline(journal::ROUND_STARTED, 1, None, &[("plan", json!(plan))]),
             pipeline(
-                journal::NODE_SETTLED,
+                journal::PipelineKind::RunStarted,
+                0,
+                None,
+                &[("plan", json!(plan))],
+            ),
+            pipeline(
+                journal::PipelineKind::RoundStarted,
+                1,
+                None,
+                &[("plan", json!(plan))],
+            ),
+            pipeline(
+                journal::PipelineKind::NodeSettled,
                 2,
                 Some("build"),
                 &[("status", json!("failed"))],
             ),
-            pipeline(journal::ROUND_FINISHED, 4, None, &[]),
+            pipeline(journal::PipelineKind::RoundFinished, 4, None, &[]),
             second,
         ];
         let state = fold(&events);
@@ -582,28 +632,33 @@ mod tests {
             ..Node::default()
         }]);
         let events = vec![
-            pipeline(journal::RUN_STARTED, 0, None, &[("plan", json!(plan))]),
-            pipeline(journal::PLANNER_SURFACE_QUEUED, 1, None, &[]),
-            pipeline(journal::PLANNER_SURFACED, 2, None, &[]),
             pipeline(
-                journal::HUMAN_ATTESTED,
+                journal::PipelineKind::RunStarted,
+                0,
+                None,
+                &[("plan", json!(plan))],
+            ),
+            pipeline(journal::PipelineKind::PlannerSurfaceQueued, 1, None, &[]),
+            pipeline(journal::PipelineKind::PlannerSurfaced, 2, None, &[]),
+            pipeline(
+                journal::PipelineKind::HumanAttested,
                 3,
                 None,
                 &[("ref", json!("approve"))],
             ),
             pipeline(
-                journal::COMPLETION_REQUESTED,
+                journal::PipelineKind::CompletionRequested,
                 4,
                 None,
                 &[("reason", json!("verified"))],
             ),
             pipeline(
-                journal::UPSTREAM_MODIFIED,
+                journal::PipelineKind::UpstreamModified,
                 5,
                 Some("consumer"),
                 &[("dependency", json!("run:o#n"))],
             ),
-            pipeline(journal::RUN_STOPPED, 6, None, &[]),
+            pipeline(journal::PipelineKind::RunStopped, 6, None, &[]),
         ];
         let state = fold(&events);
         assert_eq!(state.surfaces_queued, 1);
@@ -621,14 +676,19 @@ mod tests {
     fn a_relayed_sibling_envelope_is_evidence_of_work_and_nothing_more() {
         let plan = plan_of_nodes(vec![agent("build", &[])]);
         let mut relayed = pipeline(
-            journal::NODE_SETTLED,
+            journal::PipelineKind::NodeSettled,
             1,
             Some("build"),
             &[("status", json!("done"))],
         );
         relayed.source = Source::Agentgraph;
         let state = fold(&[
-            pipeline(journal::RUN_STARTED, 0, None, &[("plan", json!(plan))]),
+            pipeline(
+                journal::PipelineKind::RunStarted,
+                0,
+                None,
+                &[("plan", json!(plan))],
+            ),
             relayed,
         ]);
         assert!(
@@ -642,7 +702,7 @@ mod tests {
     fn parking_and_requeueing_move_the_node_in_and_out_of_the_frontier() {
         let plan = plan_of_nodes(vec![agent("sweep", &[])]);
         let park = pipeline(
-            journal::EDIT_COMMITTED,
+            journal::PipelineKind::EditCommitted,
             1,
             None,
             &[(
@@ -653,14 +713,19 @@ mod tests {
             )],
         );
         let state = fold(&[
-            pipeline(journal::RUN_STARTED, 0, None, &[("plan", json!(plan))]),
+            pipeline(
+                journal::PipelineKind::RunStarted,
+                0,
+                None,
+                &[("plan", json!(plan))],
+            ),
             park.clone(),
         ]);
         assert_eq!(state.recorded["sweep"], NodeStatus::Parked);
         assert!(state.graph.get("sweep").expect("sweep").parked);
 
         let requeue = pipeline(
-            journal::EDIT_COMMITTED,
+            journal::PipelineKind::EditCommitted,
             2,
             None,
             &[(
@@ -672,7 +737,12 @@ mod tests {
             )],
         );
         let state = fold(&[
-            pipeline(journal::RUN_STARTED, 0, None, &[("plan", json!(plan))]),
+            pipeline(
+                journal::PipelineKind::RunStarted,
+                0,
+                None,
+                &[("plan", json!(plan))],
+            ),
             park,
             requeue,
         ]);
@@ -684,9 +754,14 @@ mod tests {
     fn the_frontier_and_derived_statuses_come_off_the_same_fold() {
         let plan = plan_of_nodes(vec![agent("build", &[]), agent("ship", &["build"])]);
         let state = fold(&[
-            pipeline(journal::RUN_STARTED, 0, None, &[("plan", json!(plan))]),
             pipeline(
-                journal::NODE_SETTLED,
+                journal::PipelineKind::RunStarted,
+                0,
+                None,
+                &[("plan", json!(plan))],
+            ),
+            pipeline(
+                journal::PipelineKind::NodeSettled,
                 1,
                 Some("build"),
                 &[("status", json!("done"))],

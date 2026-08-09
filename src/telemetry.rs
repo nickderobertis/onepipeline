@@ -136,9 +136,9 @@ pub fn of_run(run: &str, events: &[Envelope]) -> RunTelemetry {
         if event.source != Source::Pipeline {
             continue;
         }
-        match event.kind.0.as_str() {
-            journal::NODE_DISPATCHED => in_flight += 1,
-            journal::NODE_SETTLED => {
+        match journal::PipelineKind::from_wire(&event.kind) {
+            Some(journal::PipelineKind::NodeDispatched) => in_flight += 1,
+            Some(journal::PipelineKind::NodeSettled) => {
                 let status = event
                     .payload
                     .get("status")
@@ -154,15 +154,17 @@ pub fn of_run(run: &str, events: &[Envelope]) -> RunTelemetry {
                     awaiting_human += 1;
                 }
             }
-            journal::HUMAN_ATTESTED => awaiting_human = awaiting_human.saturating_sub(1),
-            journal::PLANNER_SURFACED => {
+            Some(journal::PipelineKind::HumanAttested) => {
+                awaiting_human = awaiting_human.saturating_sub(1)
+            }
+            Some(journal::PipelineKind::PlannerSurfaced) => {
                 awaiting_planner = event
                     .payload
                     .get("blocking")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
             }
-            journal::PLANNER_REPLIED => awaiting_planner = false,
+            Some(journal::PipelineKind::PlannerReplied) => awaiting_planner = false,
             _ => {}
         }
     }
@@ -257,13 +259,13 @@ pub fn duration(ms: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::{EventKind, Labels, ENVELOPE_VERSION};
+    use crate::event::{Labels, ENVELOPE_VERSION};
     use crate::plan::{Node, Plan, PLAN_SCHEMA_VERSION};
     use serde_json::json;
 
     fn at(
         seconds: u64,
-        kind: &str,
+        kind: journal::PipelineKind,
         node: Option<&str>,
         fields: &[(&str, serde_json::Value)],
     ) -> Envelope {
@@ -273,7 +275,7 @@ mod tests {
             stream: "s".into(),
             seq: seconds,
             source: Source::Pipeline,
-            kind: EventKind(kind.into()),
+            kind: kind.into(),
             labels: Labels {
                 run_id: Some("demo".into()),
                 round: Some(1),
@@ -303,15 +305,25 @@ mod tests {
     #[test]
     fn the_buckets_sum_exactly_to_the_wall_clock() {
         let events = vec![
-            at(0, journal::RUN_STARTED, None, &[("plan", json!(plan()))]),
-            at(10, journal::NODE_DISPATCHED, Some("build"), &[]),
+            at(
+                0,
+                journal::PipelineKind::RunStarted,
+                None,
+                &[("plan", json!(plan()))],
+            ),
+            at(
+                10,
+                journal::PipelineKind::NodeDispatched,
+                Some("build"),
+                &[],
+            ),
             at(
                 70,
-                journal::NODE_SETTLED,
+                journal::PipelineKind::NodeSettled,
                 Some("build"),
                 &[("status", json!("done"))],
             ),
-            at(100, journal::ROUND_FINISHED, None, &[]),
+            at(100, journal::PipelineKind::RoundFinished, None, &[]),
         ];
         let telemetry = of_run("demo", &events);
         assert_eq!(telemetry.wall_ms, 100_000);
@@ -335,26 +347,31 @@ mod tests {
     #[test]
     fn waiting_on_a_person_and_on_the_planner_are_different_buckets() {
         let events = vec![
-            at(0, journal::RUN_STARTED, None, &[("plan", json!(plan()))]),
+            at(
+                0,
+                journal::PipelineKind::RunStarted,
+                None,
+                &[("plan", json!(plan()))],
+            ),
             at(
                 10,
-                journal::NODE_SETTLED,
+                journal::PipelineKind::NodeSettled,
                 Some("approve"),
                 &[("status", json!("waiting"))],
             ),
             at(
                 40,
-                journal::HUMAN_ATTESTED,
+                journal::PipelineKind::HumanAttested,
                 None,
                 &[("ref", json!("approve"))],
             ),
             at(
                 50,
-                journal::PLANNER_SURFACED,
+                journal::PipelineKind::PlannerSurfaced,
                 None,
                 &[("blocking", json!(true))],
             ),
-            at(90, journal::PLANNER_REPLIED, None, &[]),
+            at(90, journal::PipelineKind::PlannerReplied, None, &[]),
         ];
         let telemetry = of_run("demo", &events);
         let bucket = |name: BucketName| {
@@ -376,14 +393,19 @@ mod tests {
     #[test]
     fn a_non_blocking_surface_does_not_park_the_run_on_the_planner() {
         let events = vec![
-            at(0, journal::RUN_STARTED, None, &[("plan", json!(plan()))]),
+            at(
+                0,
+                journal::PipelineKind::RunStarted,
+                None,
+                &[("plan", json!(plan()))],
+            ),
             at(
                 10,
-                journal::PLANNER_SURFACED,
+                journal::PipelineKind::PlannerSurfaced,
                 None,
                 &[("blocking", json!(false))],
             ),
-            at(50, journal::ROUND_FINISHED, None, &[]),
+            at(50, journal::PipelineKind::RoundFinished, None, &[]),
         ];
         let telemetry = of_run("demo", &events);
         let awaiting = telemetry
@@ -421,9 +443,19 @@ mod tests {
     #[test]
     fn a_clock_that_moved_backwards_still_leaves_the_buckets_summing_to_wall() {
         let mut events = vec![
-            at(0, journal::RUN_STARTED, None, &[("plan", json!(plan()))]),
-            at(60, journal::NODE_DISPATCHED, Some("build"), &[]),
-            at(30, journal::ROUND_FINISHED, None, &[]),
+            at(
+                0,
+                journal::PipelineKind::RunStarted,
+                None,
+                &[("plan", json!(plan()))],
+            ),
+            at(
+                60,
+                journal::PipelineKind::NodeDispatched,
+                Some("build"),
+                &[],
+            ),
+            at(30, journal::PipelineKind::RoundFinished, None, &[]),
         ];
         // Deliberately out of order: the wall clock is first-to-last as read.
         events.reverse();
@@ -439,11 +471,21 @@ mod tests {
     #[test]
     fn the_breakdown_names_every_bucket_and_its_share() {
         let events = vec![
-            at(0, journal::RUN_STARTED, None, &[("plan", json!(plan()))]),
-            at(10, journal::NODE_DISPATCHED, Some("build"), &[]),
+            at(
+                0,
+                journal::PipelineKind::RunStarted,
+                None,
+                &[("plan", json!(plan()))],
+            ),
+            at(
+                10,
+                journal::PipelineKind::NodeDispatched,
+                Some("build"),
+                &[],
+            ),
             at(
                 20,
-                journal::NODE_SETTLED,
+                journal::PipelineKind::NodeSettled,
                 Some("build"),
                 &[("status", json!("done"))],
             ),

@@ -296,3 +296,99 @@ fn a_memory_limit_in_a_unit_the_grammar_cannot_read_dispatches_nothing() {
         "the refusal did not say what to write instead: {said}"
     );
 }
+
+/// A rules file whose only rule tests a node label, with no fallback. The
+/// absence of a fallback is what makes the selection observable through the
+/// binary: a node the label rule does not match has nowhere to dispatch, and the
+/// round says so by name.
+fn label_routed_rules(world: &World, persona: &str) -> std::path::PathBuf {
+    let rules = world.root.join(format!("label-{persona}-executors.yaml"));
+    std::fs::write(
+        &rules,
+        format!(
+            "executors: [{{name: local, type: local}}]\n\
+             rules: [{{when: {{node_label: {{persona: {persona}}}}}, use: local}}]\n"
+        ),
+    )
+    .expect("the rules are written");
+    rules
+}
+
+#[test]
+fn a_node_label_rule_routes_the_node_it_names_and_only_that_node() {
+    let world = World::new("shipped-labelrule");
+    let rules = label_routed_rules(&world, "engineer");
+    // `agent` builds an `engineer` node, which is the persona the rule names.
+    let plan = world.plan(
+        "labelled",
+        &crate::harness::plan_of("labelled", vec![crate::harness::agent("build", &[])]),
+    );
+    let mut command = world.cmd(&["start", &plan.to_string_lossy(), "--attach"]);
+    command.env("ONEPIPELINE_EXECUTOR_RULES", &rules);
+    let output = command.output().expect("the binary runs");
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    world.until("the run to settle", |world| {
+        !world.events_of("labelled", "round-finished").is_empty()
+    });
+    assert_eq!(
+        world.run_json("labelled", "round-01/result.json")["state"],
+        "complete"
+    );
+
+    // The same plan against a rule naming a persona this node does not carry has
+    // nowhere to dispatch, and the round refuses rather than picking somewhere.
+    let world = World::new("shipped-labelrule-miss");
+    let elsewhere = label_routed_rules(&world, "reviewer");
+    let said = refused_round(&world, "unlabelled", &elsewhere);
+    assert!(said.contains("nothing can dispatch"), "{said}");
+}
+
+/// Launch a one-node run whose driver is held, run its round from here, and
+/// return what that round said.
+///
+/// The round is run from the test rather than from the driver because the
+/// orchestrator member runs it as a subprocess of a subprocess, so its refusal
+/// reaches no descriptor a test can read. Holding the driver at its rendezvous
+/// is what keeps this the run's single writer.
+fn refused_round(world: &World, name: &str, rules: &std::path::Path) -> String {
+    world.script("driver.wait", "hold");
+    let plan = world.plan(
+        name,
+        &crate::harness::plan_of(name, vec![crate::harness::agent("build", &[])]),
+    );
+    world
+        .cmd(&["start", &plan.to_string_lossy(), "--detach"])
+        .env("ONEPIPELINE_EXECUTOR_RULES", rules)
+        .output()
+        .expect("the binary runs");
+    let mut round = world.cmd(&["round", "run", name]);
+    round.env("ONEPIPELINE_EXECUTOR_RULES", rules);
+    let refused = round.output().expect("the binary runs");
+    let said = String::from_utf8_lossy(&refused.stderr).to_string();
+    world.release("driver.go");
+    assert!(
+        !refused.status.success(),
+        "the round dispatched anyway: {said}"
+    );
+    said
+}
+
+#[test]
+fn a_rule_testing_a_label_that_is_not_selectable_is_refused_by_name() {
+    let world = World::new("shipped-badlabel");
+    let rules = world.root.join("bad-label-executors.yaml");
+    // `step` is a real reserved label, and still not one an executor rule can
+    // test: the choice is made once per node, before any step runs.
+    std::fs::write(
+        &rules,
+        "executors: [{name: local, type: local}]\n\
+         rules: [{when: {node_label: {step: implement}}, use: local}, {use: local}]\n",
+    )
+    .expect("the rules are written");
+    let said = refused_round(&world, "badlabel", &rules);
+    assert!(said.contains("step"), "{said}");
+    assert!(
+        said.contains("persona"),
+        "the refusal did not name what a rule may test instead: {said}"
+    );
+}

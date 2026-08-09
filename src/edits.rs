@@ -907,6 +907,7 @@ mod tests {
             resume: Some(Resume {
                 branch: "preserved".into(),
                 checkpoint: None,
+                completed_steps: Vec::new(),
             }),
             ..agent("build-2", &[])
         };
@@ -928,6 +929,7 @@ mod tests {
             resume: Some(Resume {
                 branch: "preserved".into(),
                 checkpoint: Some("abc123".into()),
+                completed_steps: Vec::new(),
             }),
             ..agent("build-3", &[])
         };

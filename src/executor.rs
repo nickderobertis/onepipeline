@@ -9,10 +9,11 @@
 //! Two of the request's fields are a sibling library's types, so this seam is
 //! also where the cross-repo wiring is proven at compile time: the agent-graph
 //! config comes from `oneagentgraph` and the repository session from `onevcs`.
-//! The contract names those types `ResolvedGraphRef` and `SessionSpec`; neither
-//! sibling exports a type by that name, and
+//! The contract first named those types `ResolvedGraphRef` and `SessionSpec`,
+//! which neither sibling exports; it now names `ConfigRef` and `SessionRequest`,
+//! which they do. Divergences 1 and 2 in
 //! [`docs/contract-divergences.md`](../../../docs/contract-divergences.md)
-//! records what is used instead and why.
+//! record the ruling.
 
 // llmlint: ignore-file[invalid_states_unrepresentable] every shape in this module is the
 // one `docs/contract.md` declares in its own Rust block, character for character, and
@@ -152,12 +153,12 @@ pub enum CancelMode {
 
 /// How a dispatch settled.
 ///
-/// `docs/contract.md` names this as `wait`'s success value but specifies no
-/// fields for it. What it carries is everything a caller cannot recover from
-/// the relayed event stream: whether the dispatch succeeded, and — because the
-/// machine running the dispatch is the one that opened the session — the
-/// session it left open for its node to publish. The divergence is
-/// [recorded for the planner](../../../docs/contract-divergences.md).
+/// Everything a caller cannot recover from the relayed event stream: whether the
+/// dispatch succeeded, and — because the machine running the dispatch is the one
+/// that opened the session — the session it left open for its node to publish.
+/// `docs/contract.md` declares these four; divergence 3 in
+/// [the divergence record](../../../docs/contract-divergences.md) is the ruling
+/// that put them there, and `#[non_exhaustive]` keeps a fifth additive.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
 pub struct DispatchOutcome {

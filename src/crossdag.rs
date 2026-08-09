@@ -111,7 +111,10 @@ fn settled_status(root: &Path, reference: &Reference) -> Option<NodeStatus> {
     ledger::read_lines(&paths.journal())
         .iter()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter(|event| event.get("kind").and_then(Value::as_str) == Some(journal::NODE_SETTLED))
+        .filter(|event| {
+            event.get("kind").and_then(Value::as_str)
+                == Some(journal::PipelineKind::NodeSettled.as_str())
+        })
         .filter(|event| {
             event
                 .get("labels")
@@ -221,7 +224,7 @@ impl Observer {
                     // node to belong to in a stream every view reads by node.
                     if let Some(first) = consumers.first() {
                         journal.emit(
-                            journal::CROSS_DAG_SATISFIED,
+                            journal::PipelineKind::CrossDagSatisfied,
                             journal::labels(&paths.run, Some(round), Some(first)),
                             journal::payload(&[
                                 ("dependency", json!(dependency)),
@@ -244,7 +247,7 @@ impl Observer {
                 // it was done, and whether it should be done again is the
                 // planner's call.
                 journal.emit(
-                    journal::UPSTREAM_MODIFIED,
+                    journal::PipelineKind::UpstreamModified,
                     journal::labels(&paths.run, Some(round), Some(&consumer)),
                     journal::payload(&[
                         ("dependency", json!(dependency)),

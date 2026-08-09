@@ -291,8 +291,19 @@ pub struct Resume {
     /// The preserved branch to continue on.
     pub branch: String,
     /// The commit on it the continuation starts from.
+    ///
+    /// A commit **reachable on the remote**: the machine that continues a node
+    /// is not the machine that made it, so a local-only revision names nothing
+    /// the continuation can fetch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint: Option<String>,
+    /// The steps that branch already carries, which the continuation skips.
+    ///
+    /// Empty — or absent — re-runs the whole workstream. That is the safe
+    /// direction: work is repeated, never skipped or lost, and only a step this
+    /// crate watched finish is ever named here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub completed_steps: Vec<String>,
 }
 
 #[cfg(test)]

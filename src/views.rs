@@ -567,14 +567,34 @@ mod tests {
         paths
     }
 
-    fn event(kind: &str, node: Option<&str>, fields: &[(&str, serde_json::Value)]) -> Envelope {
+    fn event(
+        kind: crate::journal::PipelineKind,
+        node: Option<&str>,
+        fields: &[(&str, serde_json::Value)],
+    ) -> Envelope {
+        relayed(
+            EventKind(kind.as_str().into()),
+            Source::Pipeline,
+            node,
+            fields,
+        )
+    }
+
+    /// The same envelope, for a kind a *sibling* produced: those stay wire
+    /// strings, which is the half of the merged store this crate does not close.
+    fn relayed(
+        kind: EventKind,
+        source: Source,
+        node: Option<&str>,
+        fields: &[(&str, serde_json::Value)],
+    ) -> Envelope {
         Envelope {
             v: ENVELOPE_VERSION,
             ts: sys::now_rfc3339(),
             stream: "s".into(),
             seq: 0,
-            source: Source::Pipeline,
-            kind: EventKind(kind.into()),
+            source,
+            kind,
             labels: Labels {
                 run_id: Some("demo".into()),
                 round: Some(1),
@@ -598,7 +618,7 @@ mod tests {
             "demo",
             dead_pid(),
             &[event(
-                crate::journal::RUN_STARTED,
+                crate::journal::PipelineKind::RunStarted,
                 None,
                 &[("plan", json!(plan()))],
             )],
@@ -618,7 +638,7 @@ mod tests {
             "demo",
             sys::pid(),
             &[event(
-                crate::journal::RUN_STARTED,
+                crate::journal::PipelineKind::RunStarted,
                 None,
                 &[("plan", json!(plan()))],
             )],
@@ -640,7 +660,7 @@ mod tests {
         ledger::append_line(
             &paths.journal(),
             &serde_json::to_string(&event(
-                crate::journal::RUN_STARTED,
+                crate::journal::PipelineKind::RunStarted,
                 None,
                 &[("plan", json!(plan()))],
             ))
@@ -674,7 +694,7 @@ mod tests {
             "demo",
             sys::pid(),
             &[event(
-                crate::journal::RUN_STARTED,
+                crate::journal::PipelineKind::RunStarted,
                 None,
                 &[("plan", json!(plan()))],
             )],
@@ -695,19 +715,19 @@ mod tests {
     #[test]
     fn every_view_renders_from_the_merged_stream() {
         let root = scratch("render");
-        let mut agent = event(
-            "turn-finished",
+        let mut agent = relayed(
+            EventKind("turn-finished".into()),
+            Source::Agentgraph,
             Some("build"),
             &[("message", json!("ran the gate"))],
         );
-        agent.source = Source::Agentgraph;
         agent.stream = "oneagentgraph-1".into();
-        let mut vcs = event(
-            "session-opened",
+        let mut vcs = relayed(
+            EventKind("session-opened".into()),
+            Source::Vcs,
             Some("build"),
             &[("branch", json!("feature"))],
         );
-        vcs.source = Source::Vcs;
         vcs.stream = "onevcs-tok".into();
 
         write_run(
@@ -716,16 +736,20 @@ mod tests {
             sys::pid(),
             &[
                 event(
-                    crate::journal::RUN_STARTED,
+                    crate::journal::PipelineKind::RunStarted,
                     None,
                     &[("plan", json!(plan()))],
                 ),
                 event(
-                    crate::journal::ROUND_STARTED,
+                    crate::journal::PipelineKind::RoundStarted,
                     None,
                     &[("plan", json!(plan()))],
                 ),
-                event(crate::journal::NODE_DISPATCHED, Some("build"), &[]),
+                event(
+                    crate::journal::PipelineKind::NodeDispatched,
+                    Some("build"),
+                    &[],
+                ),
                 agent,
                 vcs,
             ],
@@ -758,11 +782,15 @@ mod tests {
             sys::pid(),
             &[
                 event(
-                    crate::journal::RUN_STARTED,
+                    crate::journal::PipelineKind::RunStarted,
                     None,
                     &[("plan", json!(plan()))],
                 ),
-                event(crate::journal::NODE_DISPATCHED, Some("build"), &[]),
+                event(
+                    crate::journal::PipelineKind::NodeDispatched,
+                    Some("build"),
+                    &[],
+                ),
             ],
         );
         let view = RunView::open(&RunPaths::under(&root, "demo")).expect("the run reads");
@@ -796,12 +824,12 @@ mod tests {
             sys::pid(),
             &[
                 event(
-                    crate::journal::RUN_STARTED,
+                    crate::journal::PipelineKind::RunStarted,
                     None,
                     &[("plan", json!(waiting_plan))],
                 ),
                 event(
-                    crate::journal::NODE_SETTLED,
+                    crate::journal::PipelineKind::NodeSettled,
                     Some("approve"),
                     &[("status", json!("waiting"))],
                 ),
@@ -821,8 +849,9 @@ mod tests {
     #[test]
     fn a_summary_line_is_capped_and_control_stripped() {
         let long = "x".repeat(500);
-        let stripped = summarize(&event(
-            "kind",
+        let stripped = summarize(&relayed(
+            EventKind("kind".into()),
+            Source::Agentgraph,
             None,
             &[("message", json!(format!("a\nb{long}")))],
         ));

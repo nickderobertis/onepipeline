@@ -14,48 +14,11 @@ use std::path::Path;
 use serde_json::{json, Map, Value};
 
 use crate::error::Result;
-use crate::event::{Envelope, EventKind, Labels, Source, ENVELOPE_VERSION};
+use crate::event::{Envelope, Labels, Source, ENVELOPE_VERSION};
 use crate::ledger::{self, RunPaths};
 use crate::sys;
 
-/// The run was launched.
-pub const RUN_STARTED: &str = "run-started";
-/// A round began executing.
-pub const ROUND_STARTED: &str = "round-started";
-/// A round stopped executing, with the state it settled in.
-pub const ROUND_FINISHED: &str = "round-finished";
-/// A node's dispatch was started.
-pub const NODE_DISPATCHED: &str = "node-dispatched";
-/// A node reached a terminal status for this round.
-pub const NODE_SETTLED: &str = "node-settled";
-/// A live edit was accepted and applied to the desired graph.
-pub const EDIT_COMMITTED: &str = "edit-committed";
-/// A live edit was refused, with the reason its submitter was told.
-pub const EDIT_REJECTED: &str = "edit-rejected";
-/// A surface was *sent*. Delivery is a separate fact.
-pub const PLANNER_SURFACE_QUEUED: &str = "planner-surface-queued";
-/// A surface was *consumed* by the planner. This is what resets the pacemaker.
-pub const PLANNER_SURFACED: &str = "planner-surfaced";
-/// The planner answered a consumed surface.
-pub const PLANNER_REPLIED: &str = "planner-replied";
-/// A human action was attested.
-pub const HUMAN_ATTESTED: &str = "human-attested";
-/// A fresh driver was attached to an intact ledger.
-pub const DRIVER_ADOPTED: &str = "driver-adopted";
-/// The run was ended by `stop`.
-pub const RUN_STOPPED: &str = "run-stopped";
-/// An in-flight dispatch recorded nothing past the stall threshold.
-pub const QUIET_WORKER: &str = "quiet-worker";
-/// A round exceeded its budget and cooperatively cancelled its workers.
-pub const ROUND_BUDGET_EXCEEDED: &str = "round-budget-exceeded";
-/// A request a round boundary depends on was retried.
-pub const BOUNDARY_RETRIED: &str = "boundary-retried";
-/// A cross-DAG edge resolved, with how far its upstream had got when it did.
-pub const CROSS_DAG_SATISFIED: &str = "cross-dag-satisfied";
-/// A cross-DAG upstream advanced after its consumer recorded it.
-pub const UPSTREAM_MODIFIED: &str = "upstream-modified";
-/// The planner requested completion, independently of graph mutation.
-pub const COMPLETION_REQUESTED: &str = "completion-requested";
+pub use crate::event::PipelineKind;
 
 /// The append-only writer for one run.
 ///
@@ -89,14 +52,19 @@ impl Journal {
     }
 
     /// Append one of this crate's own events.
-    pub fn emit(&mut self, kind: &str, labels: Labels, payload: Map<String, Value>) -> Result<()> {
+    pub fn emit(
+        &mut self,
+        kind: PipelineKind,
+        labels: Labels,
+        payload: Map<String, Value>,
+    ) -> Result<()> {
         let envelope = Envelope {
             v: ENVELOPE_VERSION,
             ts: sys::now_rfc3339(),
             stream: self.stream.clone(),
             seq: self.next_seq,
             source: Source::Pipeline,
-            kind: EventKind(kind.to_string()),
+            kind: kind.into(),
             labels,
             payload,
             artifacts: Vec::new(),
@@ -195,6 +163,7 @@ pub fn settled_payload(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::event::EventKind;
     use std::fs;
     use std::path::PathBuf;
 
@@ -213,10 +182,18 @@ mod tests {
 
         let mut journal = Journal::open(&paths);
         journal
-            .emit(RUN_STARTED, labels("demo", None, None), payload(&[]))
+            .emit(
+                PipelineKind::RunStarted,
+                labels("demo", None, None),
+                payload(&[]),
+            )
             .expect("appended");
         journal
-            .emit(ROUND_STARTED, labels("demo", Some(1), None), payload(&[]))
+            .emit(
+                PipelineKind::RoundStarted,
+                labels("demo", Some(1), None),
+                payload(&[]),
+            )
             .expect("appended");
 
         let reopened = Journal::open(&paths);
@@ -237,7 +214,11 @@ mod tests {
         paths.create().expect("the run directory");
         let mut journal = Journal::open(&paths);
         journal
-            .emit(RUN_STARTED, labels("demo", None, None), payload(&[]))
+            .emit(
+                PipelineKind::RunStarted,
+                labels("demo", None, None),
+                payload(&[]),
+            )
             .expect("appended");
         ledger::append_line(&paths.journal(), r#"{"v":99,"from":"the future"}"#).expect("appended");
 

@@ -197,6 +197,8 @@ pub struct Settlement {
     pub branch: Option<String>,
     /// Where a human reads the change it published.
     pub change_url: Option<String>,
+    /// The declared steps this attempt finished, for a continuation to skip.
+    pub completed_steps: Vec<String>,
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
@@ -210,6 +212,7 @@ impl Settlement {
             detail: None,
             branch: None,
             change_url: None,
+            completed_steps: Vec::new(),
         }
     }
 }
@@ -255,7 +258,7 @@ pub fn round_run(paths: &RunPaths) -> Result<GraphState> {
         let plan = plan_of(&state);
         ledger::write_json(&paths.round_plan(round), &plan)?;
         journal.emit(
-            journal::ROUND_STARTED,
+            journal::PipelineKind::RoundStarted,
             journal::labels(&paths.run, Some(round), None),
             journal::payload(&[("plan", json!(plan))]),
         )?;
@@ -321,7 +324,7 @@ fn converge(
                 dispatch.cancel.cancel();
             }
             journal.emit(
-                journal::ROUND_BUDGET_EXCEEDED,
+                journal::PipelineKind::RoundBudgetExceeded,
                 journal::labels(&paths.run, Some(round), None),
                 journal::payload(&[("budget_seconds", json!(launch.round_budget))]),
             )?;
@@ -383,7 +386,7 @@ fn converge(
             // Every retry reaches the journal, so a retry that saved a run is
             // visible in the run's own record rather than only in a log.
             Ok(Message::Retried(retry)) => journal.emit(
-                journal::BOUNDARY_RETRIED,
+                journal::PipelineKind::BoundaryRetried,
                 journal::labels(&paths.run, Some(round), Some(&retry.node)),
                 journal::payload(&[
                     ("role", json!(retry.role.as_str())),
@@ -447,7 +450,7 @@ fn reconcile_edits(
                         }
                     }
                     journal.emit(
-                        journal::EDIT_COMMITTED,
+                        journal::PipelineKind::EditCommitted,
                         journal::labels(&paths.run, Some(state.round), None),
                         journal::payload(&[
                             ("command", json!(command)),
@@ -461,12 +464,12 @@ fn reconcile_edits(
                     for operation in &operations {
                         match operation {
                             edits::Operation::CompletionRequested { reason } => journal.emit(
-                                journal::COMPLETION_REQUESTED,
+                                journal::PipelineKind::CompletionRequested,
                                 journal::labels(&paths.run, Some(state.round), None),
                                 journal::payload(&[("reason", json!(reason))]),
                             )?,
                             edits::Operation::HumanAttested { node } => journal.emit(
-                                journal::HUMAN_ATTESTED,
+                                journal::PipelineKind::HumanAttested,
                                 journal::labels(&paths.run, Some(state.round), Some(node)),
                                 journal::payload(&[("ref", json!(node))]),
                             )?,
@@ -479,7 +482,7 @@ fn reconcile_edits(
                     applied = false;
                     reason = Some(error.to_string());
                     journal.emit(
-                        journal::EDIT_REJECTED,
+                        journal::PipelineKind::EditRejected,
                         journal::labels(&paths.run, Some(state.round), None),
                         journal::payload(&[
                             ("command", json!(command)),
@@ -591,7 +594,7 @@ fn start_ready(
 
         let cancel = CancellationToken::new();
         journal.emit(
-            journal::NODE_DISPATCHED,
+            journal::PipelineKind::NodeDispatched,
             journal::labels(&paths.run, Some(round), Some(&node.id)),
             journal::payload(&[("persona", json!(node.persona))]),
         )?;
@@ -624,7 +627,10 @@ fn spawn(
     cancel: CancellationToken,
     tx: Sender<Message>,
 ) -> Result<()> {
-    let executor_name = rules.select(node.executor.as_deref(), &|name| {
+    // The labels a `node_label` rule selects on. An executor is chosen once per
+    // node, before its steps run, so a node's own labels are what exists here.
+    let labels = dispatch_labels(&paths.run, round, &node.id, None, node.persona.as_deref());
+    let executor_name = rules.select(node.executor.as_deref(), &labels, &|name| {
         rules
             .executors
             .iter()
@@ -981,8 +987,11 @@ fn settle(
     if let Some(url) = &settlement.change_url {
         payload.insert("change_url".into(), json!(url));
     }
+    if !settlement.completed_steps.is_empty() {
+        payload.insert("completed_steps".into(), json!(settlement.completed_steps));
+    }
     journal.emit(
-        journal::NODE_SETTLED,
+        journal::PipelineKind::NodeSettled,
         journal::labels(&paths.run, Some(round), Some(&settlement.node)),
         payload,
     )
@@ -992,7 +1001,7 @@ fn settle(
 fn raise(paths: &RunPaths, journal: &mut Journal, round: u64, surface: Surface) -> Result<()> {
     let queued = ChannelState::new(paths).push(surface)?;
     journal.emit(
-        journal::PLANNER_SURFACE_QUEUED,
+        journal::PipelineKind::PlannerSurfaceQueued,
         journal::labels(&paths.run, Some(round), queued.workstream.as_deref()),
         journal::payload(&[
             ("kind", json!(queued.kind)),
@@ -1039,7 +1048,7 @@ fn watch_for_quiet(
             format!("last activity {quiet_for}s ago")
         };
         journal.emit(
-            journal::QUIET_WORKER,
+            journal::PipelineKind::QuietWorker,
             journal::labels(&paths.run, Some(round), Some(&node)),
             journal::payload(&[
                 ("quiet_for_seconds", json!(quiet_for)),
@@ -1126,7 +1135,7 @@ fn record_result(
     };
     ledger::write_json(&paths.round_result(round), &result)?;
     journal.emit(
-        journal::ROUND_FINISHED,
+        journal::PipelineKind::RoundFinished,
         journal::labels(&paths.run, Some(round), None),
         journal::payload(&[("state", json!(result.state)), ("ok", json!(result.ok()))]),
     )?;
@@ -1250,7 +1259,7 @@ pub fn round_next(paths: &RunPaths) -> Result<Option<u64>> {
     graph::validate(&plan)?;
     ledger::write_json(&paths.round_plan(round), &plan)?;
     journal.emit(
-        journal::ROUND_STARTED,
+        journal::PipelineKind::RoundStarted,
         journal::labels(&paths.run, Some(round), None),
         journal::payload(&[("plan", json!(plan))]),
     )?;
@@ -1363,6 +1372,14 @@ fn carry_preserved_branch(node: &mut Node, state: &RunState, status: Option<Node
         // it was told about and nothing it was not.
         checkpoint: node.resume.as_ref().and_then(|r| r.checkpoint.clone()),
         branch: branch.clone(),
+        // What the attempt actually finished, so the continuation re-runs only
+        // what is left. Carried forward from an earlier continuation as well:
+        // steps a round skipped are still on the branch it preserved.
+        completed_steps: state
+            .completed_steps
+            .get(&node.id)
+            .cloned()
+            .unwrap_or_default(),
     });
     node.branch = Some(branch);
 }

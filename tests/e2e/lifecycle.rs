@@ -498,3 +498,81 @@ fn a_session_line_this_build_cannot_read_is_skipped_and_counted() {
         "the publication still reached the merged store"
     );
 }
+
+/// Every `oneagentgraph run` dispatch, as `(round, step)`.
+fn steps_dispatched(world: &World) -> Vec<(String, String)> {
+    world
+        .invocations()
+        .iter()
+        .filter(|call| call["tool"] == "oneagentgraph" && call["args"][0] == "run")
+        .filter_map(|call| {
+            let args: Vec<&str> = call["args"]
+                .as_array()?
+                .iter()
+                .filter_map(|arg| arg.as_str())
+                .collect();
+            let round = args.iter().find_map(|a| a.strip_prefix("round="))?;
+            let step = args.iter().find_map(|a| a.strip_prefix("step="))?;
+            Some((round.to_string(), step.to_string()))
+        })
+        .collect()
+}
+
+#[test]
+fn a_continuation_skips_the_steps_the_preserved_branch_already_carries() {
+    let world = World::new("lifecycle-resume-steps");
+    // The second step fails, so the node settles failed with the first step's
+    // work committed on the branch the session preserved.
+    world.script("service.review.fail", "1");
+    let node = json!({
+        "id": "service",
+        "repo": "owner/service",
+        "steps": [
+            {"id": "implement", "persona": "engineer", "task": "## What\nimplement"},
+            {"id": "review", "persona": "reviewer", "task": "## What\nreview", "deps": ["implement"]},
+        ],
+    });
+    let run = settle(&world, "resumed", vec![node]);
+    assert_eq!(
+        world.run_json(&run, "round-01/result.json")["nodes"][0]["status"],
+        "failed"
+    );
+
+    // The next round names what the branch carries, and nothing it does not:
+    // `review` never finished, so it is not on the list.
+    world.run(&["round", "next", &run]).exited(0);
+    let carried = world.run_json(&run, "round-02/plan.json");
+    let resume = &carried["tasks"][0]["resume"];
+    assert_eq!(
+        resume["completed_steps"],
+        json!(["implement"]),
+        "the continuation does not say what the branch carries: {carried}"
+    );
+    assert!(
+        resume["branch"].is_string(),
+        "a resume with completed steps but no branch: {carried}"
+    );
+
+    // Run the second round with the failure cleared. `implement` is on the
+    // branch already, so re-running it would redo work — only `review` goes out.
+    std::fs::remove_file(world.fakes.join("service.review.fail")).expect("the failure is cleared");
+    world.run(&["round", "run", &run]).exited(0);
+
+    let dispatched = steps_dispatched(&world);
+    assert_eq!(
+        dispatched
+            .iter()
+            .filter(|(round, step)| round == "2" && step == "implement")
+            .count(),
+        0,
+        "the continuation re-ran a step the branch already carries: {dispatched:?}"
+    );
+    assert_eq!(
+        dispatched
+            .iter()
+            .filter(|(round, step)| round == "2" && step == "review")
+            .count(),
+        1,
+        "the continuation did not re-run the step that failed: {dispatched:?}"
+    );
+}

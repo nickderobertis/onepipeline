@@ -175,7 +175,7 @@ fn start(args: &StartArgs) -> Result<i32> {
 
     let mut open = Journal::open(&paths);
     open.emit(
-        journal::RUN_STARTED,
+        journal::PipelineKind::RunStarted,
         journal::labels(&run, None, None),
         journal::payload(&[
             ("plan", json!(plan)),
@@ -416,7 +416,7 @@ fn adopt(args: &RunArgs) -> Result<i32> {
 
     let mut journal = Journal::open(&paths);
     journal.emit(
-        journal::DRIVER_ADOPTED,
+        journal::PipelineKind::DriverAdopted,
         journal::labels(&paths.run, Some(view.state.round), None),
         journal::payload(&[
             ("adoption", json!(record.adoptions)),
@@ -452,7 +452,7 @@ fn stop(args: &StopArgs) -> Result<i32> {
     let view = RunView::open(&paths)?;
     let mut journal = Journal::open(&paths);
     journal.emit(
-        journal::RUN_STOPPED,
+        journal::PipelineKind::RunStopped,
         journal::labels(&paths.run, Some(view.state.round), None),
         journal::payload(&[("owner", json!(owner)), ("forced", json!(args.force))]),
     )?;
@@ -510,7 +510,7 @@ fn next(args: &RunArgs) -> Result<i32> {
 
     let mut journal = Journal::open(&paths);
     journal.emit(
-        journal::PLANNER_SURFACED,
+        journal::PipelineKind::PlannerSurfaced,
         journal::labels(
             &paths.run,
             Some(view.state.round),
@@ -556,7 +556,7 @@ fn surface(args: &SurfaceArgs) -> Result<i32> {
     })?;
     let mut journal = Journal::open(&paths);
     journal.emit(
-        journal::PLANNER_SURFACE_QUEUED,
+        journal::PipelineKind::PlannerSurfaceQueued,
         journal::labels(&paths.run, Some(view.state.round), None),
         journal::payload(&[
             ("kind", json!(queued.kind)),
@@ -623,7 +623,7 @@ fn submit(paths: &RunPaths, envelope: &Reply) -> Result<i32> {
         let id = channel.answer(envelope)?;
         let mut journal = Journal::open(paths);
         journal.emit(
-            journal::PLANNER_REPLIED,
+            journal::PipelineKind::PlannerReplied,
             journal::labels(&paths.run, Some(view.state.round), None),
             journal::payload(&[
                 ("completion", json!(envelope.completion)),
@@ -633,7 +633,7 @@ fn submit(paths: &RunPaths, envelope: &Reply) -> Result<i32> {
         if let Some(reason) = &envelope.reason {
             if envelope.completion == Some(true) {
                 journal.emit(
-                    journal::COMPLETION_REQUESTED,
+                    journal::PipelineKind::CompletionRequested,
                     journal::labels(&paths.run, Some(view.state.round), None),
                     journal::payload(&[("reason", json!(reason))]),
                 )?;
@@ -686,12 +686,12 @@ fn submit(paths: &RunPaths, envelope: &Reply) -> Result<i32> {
         for command in &envelope.commands {
             match command {
                 Command::Complete { reason } => journal.emit(
-                    journal::COMPLETION_REQUESTED,
+                    journal::PipelineKind::CompletionRequested,
                     journal::labels(&paths.run, Some(view.state.round), None),
                     journal::payload(&[("reason", json!(reason))]),
                 )?,
                 Command::Attest { reference } => journal.emit(
-                    journal::HUMAN_ATTESTED,
+                    journal::PipelineKind::HumanAttested,
                     journal::labels(&paths.run, Some(view.state.round), Some(reference)),
                     journal::payload(&[("ref", json!(reference))]),
                 )?,
@@ -775,7 +775,7 @@ fn serve(args: &RunArgs) -> Result<i32> {
         })?;
         let mut journal = Journal::open(&paths);
         journal.emit(
-            journal::PLANNER_SURFACE_QUEUED,
+            journal::PipelineKind::PlannerSurfaceQueued,
             journal::labels(&paths.run, Some(view.state.round), None),
             journal::payload(&[
                 ("kind", json!(queued.kind)),

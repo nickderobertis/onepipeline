@@ -54,13 +54,28 @@ pub fn execute(
 
     let mut session: Option<String> = None;
     let mut branch: Option<String> = node.branch.clone();
+    // The steps the preserved branch already carries, plus the ones this attempt
+    // adds. Carried forward whole, because the branch a later round preserves is
+    // the same branch: a step skipped this round is still on it.
+    let mut completed: Vec<String> = node
+        .resume
+        .as_ref()
+        .map(|resume| resume.completed_steps.clone())
+        .unwrap_or_default();
 
     for step in &steps {
+        if declared_steps && completed.iter().any(|id| id == &step.id) {
+            // Already on the preserved branch. Re-running it would redo work the
+            // branch carries, which for a step that opened a change is not
+            // idempotent.
+            continue;
+        }
         if step.kind == NodeKind::Human {
             // A ready human step needs a person, and the workstream holds its
             // branch until one acts. The harness never infers that it happened.
             return Settlement {
                 branch,
+                completed_steps: completed,
                 ..Settlement::plain(&node.id, NodeStatus::Waiting, None)
             };
         }
@@ -97,8 +112,12 @@ pub fn execute(
             close(session.as_deref());
             return Settlement {
                 branch,
+                completed_steps: completed,
                 ..drained.settlement
             };
+        }
+        if declared_steps {
+            completed.push(step.id.clone());
         }
     }
 

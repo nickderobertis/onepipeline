@@ -28,9 +28,11 @@
 //! own CLI — so a build of either that still refuses will make the dispatches
 //! this crate starts refuse too.
 //!
-//! Where the contract names a sibling type that sibling does not export, the
-//! code compiles against the type that does exist and the divergence is recorded
-//! in [`docs/contract-divergences.md`](../../../docs/contract-divergences.md).
+//! Where the contract could not be compiled exactly as written, the code
+//! compiles against what does exist and the divergence is recorded in
+//! [`docs/contract-divergences.md`](../../../docs/contract-divergences.md) for
+//! the planner who owns the contract. Every entry there has now been ruled on
+//! and the contract amended to carry the ruling.
 
 #![warn(missing_docs)]
 
