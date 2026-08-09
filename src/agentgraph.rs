@@ -274,18 +274,20 @@ impl GraphRun {
     ///
     /// So this waits for an **answer** rather than for a stopwatch: a graph
     /// announces itself with an envelope before it does any work, so the launch
-    /// returns when that envelope arrives, when the process exits, or — the case
-    /// [`DEFAULT_STARTUP_TIMEOUT_SECONDS`] covers — when it has done neither for
-    /// long enough that it is not going to. A window a refusal merely has to outlast is what
-    /// this replaced: it passed the launch on "still alive", which a graph
-    /// delayed by scheduling or by its own startup work satisfies right up until
-    /// it exits non-zero a moment later.
+    /// returns on whichever comes first — that envelope, or the process's exit —
+    /// and, in the one case that is neither, when it has been silent for the
+    /// [backstop](DEFAULT_STARTUP_TIMEOUT_SECONDS). A window a refusal merely
+    /// has to outlast is what this replaced: it passed the launch on "still
+    /// alive", which a graph delayed by scheduling or by its own startup work
+    /// satisfies right up until it exits non-zero a moment later.
     ///
-    /// The exit is read **before** the evidence, so a graph that announced
-    /// itself and then died is a failed launch rather than a started one: what
-    /// the launcher promises is a driver that is running as it returns.
+    /// **Whichever comes first**, and nothing after it. A graph that announced
+    /// itself and then died has started, and its driver dying afterwards is what
+    /// `DRIVER DEAD` and `adopt` are for; looking again after the answer would
+    /// only make the same scenario land differently depending on which process
+    /// the scheduler ran next.
     ///
-    /// A graph that *succeeded* before answering is not a failure. It ran
+    /// A graph that *succeeded* before answering is not a failure either. It ran
     /// whatever it was given and finished, which the caller reads from the
     /// stream and the ledger like any other settlement.
     pub fn confirm_started(&mut self) -> Result<()> {
@@ -342,12 +344,8 @@ impl GraphRun {
                         "cannot read `{} run`'s first envelope: {error}",
                         binary()
                     ))),
-                    // It announced itself, so it got as far as running. Whether
-                    // it is *still* running is the launcher's actual promise.
-                    None if announced => match self.child.try_wait() {
-                        Ok(Some(status)) if !status.success() => self.refused(status),
-                        _ => Ok(()),
-                    },
+                    // It announced itself, so it started.
+                    None if announced => Ok(()),
                     // The stream ended without one, so its exit is the whole
                     // answer.
                     None => self.settle_unstarted(),
@@ -358,9 +356,18 @@ impl GraphRun {
     }
 
     /// The handshake for a launch whose output goes to a file.
+    ///
+    /// The announcement is looked for first, so this reads the same way the
+    /// piped side does: whichever answer the graph gave first is the answer. A
+    /// graph that announced itself and then died started — the launch is what
+    /// starts it, and a driver that dies afterwards is what `DRIVER DEAD` and
+    /// `adopt` are for.
     fn await_logged_line(&mut self) -> Result<()> {
         let deadline = Instant::now() + startup_timeout();
         loop {
+            if self.logged_an_envelope() {
+                return Ok(());
+            }
             match self.child.try_wait() {
                 Err(error) => {
                     return Err(sibling(format!(
@@ -371,9 +378,6 @@ impl GraphRun {
                 Ok(Some(status)) if status.success() => return Ok(()),
                 Ok(Some(status)) => return self.refused(status),
                 Ok(None) => {}
-            }
-            if self.logged_an_envelope() {
-                return Ok(());
             }
             if Instant::now() >= deadline {
                 return self.gave_no_answer();

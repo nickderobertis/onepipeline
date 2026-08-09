@@ -534,3 +534,30 @@ fn a_graph_that_neither_starts_nor_exits_fails_the_launch_rather_than_outlasting
     // driver: the launch is what an `adopt` is offered from.
     world.run(&["status", "silent"]).out_has("DRIVER DEAD");
 }
+
+/// A graph that finished before it announced anything still launched.
+///
+/// The other end of the handshake: the answer came as an exit rather than as an
+/// envelope, and it was a *clean* one. The graph ran whatever it was given and
+/// stopped, which is a launch that worked and a run with nothing driving it —
+/// the state the ledger records and `adopt` is offered from. Reporting it as a
+/// refusal would fail the launch over the graph's own verdict.
+#[test]
+fn a_graph_that_finished_before_announcing_anything_is_a_launch_that_worked() {
+    let world = World::new("driver-quiet-exit");
+    world.script("run.exit-quietly", "hold");
+    let path = world.plan("quiet", &plan_of("quiet", vec![agent("build", &[])]));
+
+    // Detached: the launch reports the run it started, because starting it is
+    // all it promised.
+    let started = world.run(&["start", &path.to_string_lossy(), "--detach"]);
+    started.exited(0).out_has("\"run_id\"");
+    world.run(&["status", "quiet"]).out_has("DRIVER DEAD");
+
+    // Attached: the launch stays, finds nothing driving the run, and says so —
+    // exit 3 rather than a refusal, because the graph did not refuse anything.
+    world
+        .run(&["start", &path.to_string_lossy(), "--attach"])
+        .exited(NOTHING_DRIVING)
+        .out_has("\"settlement\":\"unattended\"");
+}

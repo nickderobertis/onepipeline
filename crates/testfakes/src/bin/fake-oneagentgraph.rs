@@ -101,6 +101,13 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         fake::wait_for(&dir.join("run.go"));
     }
 
+    // A graph that finishes before it announces anything: it did what it was
+    // given, so the launch succeeded even though nothing is driving anything
+    // afterwards.
+    if dir.join("run.exit-quietly").exists() {
+        return ExitCode::SUCCESS;
+    }
+
     // The dag-scope graph is the driver: its orchestrator member is what runs
     // the engine verbs. Acting that out is how a test exercises `start` end to
     // end rather than only the launch.

@@ -95,18 +95,24 @@ pub fn append(path: &Path, line: &str) {
 
 /// The value of a `--flag VALUE` pair, if it was given.
 pub fn flag(args: &[String], name: &str) -> Option<String> {
-    args.iter()
-        .position(|arg| arg == name)
-        .and_then(|at| args.get(at + 1))
-        .cloned()
+    flags(args, name).into_iter().next()
 }
 
-/// Every value of a repeatable `--flag k=v` pair.
+/// Every value of a repeatable `--flag VALUE` pair, in the order they were
+/// given.
+///
+/// A named flag with nothing after it is refused rather than skipped. Read
+/// leniently it is indistinguishable from the flag never having been passed —
+/// so a caller that stopped sending a value would look, to every assertion in
+/// the suite, exactly like one that still sent it correctly.
 pub fn flags(args: &[String], name: &str) -> Vec<String> {
     args.iter()
         .enumerate()
         .filter(|(_, arg)| arg.as_str() == name)
-        .filter_map(|(at, _)| args.get(at + 1).cloned())
+        .map(|(at, _)| match args.get(at + 1) {
+            Some(value) => value.clone(),
+            None => fail(&format!("{name} was given with no value after it")),
+        })
         .collect()
 }
 
