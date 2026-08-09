@@ -129,12 +129,24 @@ impl Outcome {
 }
 
 /// The terminal line a member is settled on: the turn's report.
+///
+/// A report document, which is what `oneagentgraph` settles a member on and
+/// then stores whole — so it carries the transcript a real one carries, and not
+/// only the verdict fields the settlement reads inline. A single-sided member
+/// has one side, so there is no two-party split here and none is invented.
 fn report(outcome: Outcome) {
     println!(
         "{}",
         serde_json::json!({
             "type": "result",
             "report": {
+                "schema_version": 7,
+                "transcript": {"messages": [
+                    {"role": "assistant", "content": "Ran what the task asked for.", "events": [
+                        {"kind": "tool_call", "name": "bash",
+                         "input": {"command": "echo the turn ran"}, "index": 0},
+                    ]},
+                ]},
                 "completion_reason": outcome.reason(),
                 "identity": "fake-harness",
                 "usage": {"input_tokens": 1, "output_tokens": 1},

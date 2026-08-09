@@ -489,6 +489,109 @@ pub fn results(view: &RunView) -> String {
     out
 }
 
+/// `onepipeline transcript` — one dispatch's turns, its tools, and its words.
+///
+/// Two sources, because they answer at different times and neither is the whole
+/// answer. The merged store carries every `turn-activity` as it arrives, so a
+/// turn's tools are readable *while it runs*; the onejudge report a
+/// `member-settled` retained carries the conversation itself, which is what a
+/// reader asking why a turn did what it did needs, and which exists only once
+/// the member has settled.
+///
+/// A report the producer stored somewhere this host cannot read is said to be
+/// unreadable rather than passed over: an absent transcript and an unread one
+/// are different facts, and the second is the one with a file to go and look at.
+pub fn transcript(view: &RunView, only: Option<&str>) -> String {
+    let mut out = String::new();
+    for node in dispatched(view, only) {
+        out.push_str(&format!("{}  {node}\n", view.paths.run));
+        for event in view
+            .events
+            .iter()
+            .filter(|event| event.source == Source::Agentgraph)
+            .filter(|event| event.labels.node.as_deref() == Some(node.as_str()))
+        {
+            let field = |key: &str| {
+                event
+                    .payload
+                    .get(key)
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+            };
+            match event.kind.0.as_str() {
+                "turn-started" => out.push_str(&format!(
+                    "  turn {}\n",
+                    event
+                        .payload
+                        .get("turn")
+                        .map_or_else(|| "-".to_string(), ToString::to_string)
+                )),
+                "turn-activity" => out.push_str(&format!(
+                    "    {} {}  {}\n",
+                    one_line(field("kind")),
+                    one_line(field("name")),
+                    one_line(field("detail"))
+                )),
+                _ => {}
+            }
+        }
+        for retained in crate::report::retained(&view.events)
+            .into_iter()
+            .filter(|retained| retained.node.as_deref() == Some(node.as_str()))
+        {
+            out.push_str(&format!("  report {}\n", retained.path.display()));
+            let Some(document) = crate::report::read(&retained.path) else {
+                out.push_str("    unreadable from this host\n");
+                continue;
+            };
+            let turns = crate::report::turns(&document);
+            if turns.is_empty() {
+                out.push_str("    it carries no transcript\n");
+            }
+            for turn in turns {
+                out.push_str(&format!("    {}\n", turn.role));
+                for line in turn.text.lines() {
+                    out.push_str(&format!("      {}\n", one_line(line)));
+                }
+                for tool in turn.tools {
+                    out.push_str(&format!(
+                        "      {} {}  {}\n",
+                        one_line(&tool.kind),
+                        one_line(&tool.name),
+                        one_line(&tool.detail)
+                    ));
+                }
+            }
+        }
+    }
+    if out.is_empty() {
+        out.push_str("no dispatch has recorded a transcript\n");
+    }
+    out
+}
+
+/// The nodes this run's merged store carries a dispatch for, in id order.
+pub fn dispatched(view: &RunView, only: Option<&str>) -> Vec<String> {
+    let mut nodes: Vec<String> = view
+        .events
+        .iter()
+        .filter(|event| event.source == Source::Agentgraph)
+        .filter_map(|event| event.labels.node.clone())
+        .filter(|node| only.is_none_or(|wanted| wanted == node))
+        .collect();
+    nodes.sort_unstable();
+    nodes.dedup();
+    nodes
+}
+
+/// One control-stripped line, so a relayed value cannot rewrite the rendering
+/// around it.
+fn one_line(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
+}
+
 /// `onepipeline goals` — what each run is for, and how far it has got.
 pub fn goals(views: &[RunView]) -> String {
     let mut out = String::new();
@@ -883,6 +986,176 @@ mod tests {
         });
         assert_eq!(rendered, "3 event(s), 0s ago");
         assert!(!rendered.contains("now"), "{rendered}");
+    }
+
+    /// Both halves of a transcript: the tools the store carries as the turn
+    /// runs, and the words out of the report the member settled with.
+    #[test]
+    fn a_transcript_renders_the_turns_tools_and_the_report_it_settled_with() {
+        let root = scratch("transcript");
+        let stored = root.join("report.json");
+        std::fs::write(
+            &stored,
+            json!({
+                "schema_version": 7,
+                "transcript": {"messages": [
+                    {"role": "assistant", "content": "Ran the gate.\nIt passed.", "events": [
+                        {"kind": "tool_call", "name": "bash", "input": {"command": "just check"}},
+                    ]},
+                ]},
+            })
+            .to_string(),
+        )
+        .expect("a stored report");
+
+        let mut started = relayed(
+            EventKind("turn-started".into()),
+            Source::Agentgraph,
+            Some("build"),
+            &[("turn", json!(1))],
+        );
+        started.stream = "oneagentgraph-1".into();
+        let mut activity = relayed(
+            EventKind("turn-activity".into()),
+            Source::Agentgraph,
+            Some("build"),
+            &[
+                ("kind", json!("tool_call")),
+                ("name", json!("bash")),
+                ("detail", json!("just check")),
+            ],
+        );
+        activity.stream = "oneagentgraph-1".into();
+        let settled = relayed(
+            EventKind(crate::report::MEMBER_SETTLED.into()),
+            Source::Agentgraph,
+            Some("build"),
+            &[(
+                crate::report::REPORT_PATH,
+                json!(stored.display().to_string()),
+            )],
+        );
+
+        write_run(
+            &root,
+            "demo",
+            sys::pid(),
+            &[
+                event(
+                    crate::journal::PipelineKind::RunStarted,
+                    None,
+                    &[("plan", json!(plan()))],
+                ),
+                started,
+                activity,
+                settled,
+            ],
+        );
+        let view = RunView::open(&RunPaths::under(&root, "demo")).expect("the run reads");
+        let rendered = transcript(&view, None);
+        assert!(rendered.contains("demo  build"), "{rendered}");
+        assert!(rendered.contains("turn 1"), "{rendered}");
+        assert!(
+            rendered.contains("tool_call bash  just check"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("assistant"), "{rendered}");
+        assert!(rendered.contains("Ran the gate."), "{rendered}");
+        assert!(rendered.contains("It passed."), "{rendered}");
+
+        // Scoped to a node that dispatched nothing, there is nothing to render.
+        assert!(transcript(&view, Some("elsewhere")).contains("no dispatch"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A report named and not readable is said to be unreadable. An absent
+    /// transcript and an unread one are different facts, and only the second
+    /// has a file to go and look at.
+    #[test]
+    fn a_report_this_host_cannot_read_is_named_as_unread_rather_than_passed_over() {
+        let root = scratch("transcript-unread");
+        let settled = relayed(
+            EventKind(crate::report::MEMBER_SETTLED.into()),
+            Source::Agentgraph,
+            Some("build"),
+            &[(
+                crate::report::REPORT_PATH,
+                json!("/nowhere/onepipeline/report.json"),
+            )],
+        );
+        write_run(
+            &root,
+            "demo",
+            sys::pid(),
+            &[
+                event(
+                    crate::journal::PipelineKind::RunStarted,
+                    None,
+                    &[("plan", json!(plan()))],
+                ),
+                settled,
+            ],
+        );
+        let view = RunView::open(&RunPaths::under(&root, "demo")).expect("the run reads");
+        let rendered = transcript(&view, None);
+        assert!(rendered.contains("unreadable from this host"), "{rendered}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A report that carries no transcript says so, rather than reading as a
+    /// dispatch that did nothing.
+    #[test]
+    fn a_report_without_a_transcript_says_so() {
+        let root = scratch("transcript-none");
+        let stored = root.join("report.json");
+        std::fs::write(&stored, json!({"usage": {"input_tokens": 1}}).to_string())
+            .expect("a stored report");
+        let settled = relayed(
+            EventKind(crate::report::MEMBER_SETTLED.into()),
+            Source::Agentgraph,
+            Some("build"),
+            &[(
+                crate::report::REPORT_PATH,
+                json!(stored.display().to_string()),
+            )],
+        );
+        write_run(
+            &root,
+            "demo",
+            sys::pid(),
+            &[
+                event(
+                    crate::journal::PipelineKind::RunStarted,
+                    None,
+                    &[("plan", json!(plan()))],
+                ),
+                settled,
+            ],
+        );
+        let view = RunView::open(&RunPaths::under(&root, "demo")).expect("the run reads");
+        assert!(transcript(&view, None).contains("carries no transcript"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_run_that_dispatched_nothing_has_no_transcript_to_render() {
+        let root = scratch("transcript-empty");
+        write_run(
+            &root,
+            "demo",
+            sys::pid(),
+            &[event(
+                crate::journal::PipelineKind::RunStarted,
+                None,
+                &[("plan", json!(plan()))],
+            )],
+        );
+        let view = RunView::open(&RunPaths::under(&root, "demo")).expect("the run reads");
+        assert_eq!(
+            transcript(&view, None),
+            "no dispatch has recorded a transcript\n"
+        );
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]

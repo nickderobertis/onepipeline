@@ -68,7 +68,7 @@ fi
 help="$(onepipeline --help 2>&1 | tr -d '\r')" || fail \
   "'--help' did not run: $help" \
   "the installed binary cannot print its own surface — reinstall it and re-run"
-for command in start adopt round channel next reply surface attest stop runs status host monitor results goals telemetry; do
+for command in start adopt round channel next reply surface attest stop runs status host monitor results goals transcript telemetry; do
   case "$help" in
     *"$command"*) ;;
     *) fail "'--help' does not list the '$command' command" \

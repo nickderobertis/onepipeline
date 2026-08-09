@@ -136,10 +136,13 @@ fn several_steps_share_one_branch_and_run_serially_in_topological_order() {
     });
     let run = settle(&world, "workstream", vec![node]);
 
+    // One settlement per dispatched step, in the order they settled: a
+    // dispatch records several envelopes and counting all of them would say a
+    // step ran as many times as it spoke.
     let steps: Vec<String> = world
         .journal(&run)
         .iter()
-        .filter(|event| event["source"] == "agentgraph")
+        .filter(|event| event["source"] == "agentgraph" && event["kind"] == "member-settled")
         .filter_map(|event| event["labels"]["step"].as_str().map(str::to_string))
         .collect();
     assert_eq!(

@@ -234,7 +234,14 @@ fn stream() -> String {
     format!("fake-oneagentgraph-{}", std::process::id())
 }
 
-/// Emit the turn's envelope, as the sibling would.
+/// Emit the turn's envelopes, as the sibling would: the tool summary from
+/// inside the turn, what the turn consumed, and the settlement that stores the
+/// member's full report.
+///
+/// Three kinds the real CLI really emits. A double that answered a dispatch
+/// with a kind of its own would be an oracle for a stream nothing produces —
+/// the same weakness that let every dispatch be refused while this suite stayed
+/// green.
 fn emit(args: &[String], node: &str, step: Option<&str>, task: &str) {
     let mut labels = stamped(args);
     labels.insert("member".to_string(), "worker".into());
@@ -245,27 +252,101 @@ fn emit(args: &[String], node: &str, step: Option<&str>, task: &str) {
     if let Some(step) = step {
         labels.insert("onepipeline.step".to_string(), step.into());
     }
-    println!(
-        "{}",
+    let envelope = |seq: u64, kind: &str, payload: serde_json::Value| {
+        println!(
+            "{}",
+            serde_json::json!({
+                "v": 1,
+                "ts": fake::now(),
+                "stream": stream(),
+                "seq": seq,
+                "source": "agentgraph",
+                "kind": kind,
+                "labels": labels,
+                "payload": payload,
+            })
+        );
+    };
+
+    envelope(
+        1,
+        "turn-activity",
         serde_json::json!({
-            "v": 1,
-            "ts": fake::now(),
-            "stream": stream(),
-            "seq": 1,
-            "source": "agentgraph",
-            "kind": "turn-finished",
-            "labels": labels,
-            "payload": {
-                "message": "the dispatch ran",
-                // Echoed so a test can assert the task prose the node was given,
-                // including the rendered planner-context section.
-                "task": task,
-                "dir": fake::flag(args, "--dir"),
-                // A pr-author dispatch answers with the title it drafted.
-                "title": drafted_title(task),
-            },
-        })
+            "kind": "tool_call",
+            "name": "bash",
+            "detail": "echo the turn ran",
+            "message": "the dispatch ran",
+            // Echoed so a test can assert the task prose the node was given,
+            // including the rendered planner-context section.
+            "task": task,
+            "dir": fake::flag(args, "--dir"),
+            // A pr-author dispatch answers with the title it drafted.
+            "title": drafted_title(task),
+        }),
     );
+    let report = report_of(task);
+    envelope(
+        2,
+        "turn-completed",
+        serde_json::json!({"usage": report["usage"]}),
+    );
+    // The report is *stored*, and the settlement says where — the sibling's own
+    // contract, and the only reason a turn's tools and words survive the
+    // process that produced them.
+    let path = fake::script_dir()
+        .join("reports")
+        .join(format!("{node}-{}.json", std::process::id()));
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let stored = std::fs::write(&path, report.to_string()).is_ok();
+    envelope(
+        3,
+        "member-settled",
+        serde_json::json!({
+            "completed": true,
+            "verdict": [],
+            "completion_reason": "done_when_met",
+            "report_path": stored.then(|| path.display().to_string()),
+        }),
+    );
+}
+
+/// The onejudge report a settled member stores.
+///
+/// Two-party, because the shipped node-scope graph's `worker` is a two-party
+/// member: its agent side does the work and its judge side supervises it, and
+/// the split between what each spent is what the report carries and nothing on
+/// the wire does.
+fn report_of(task: &str) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": 7,
+        "transcript": {"messages": [
+            {"role": "user", "content": task},
+            {"role": "assistant", "content": "Ran what the task asked for.", "events": [
+                {"kind": "tool_call", "name": "bash",
+                 "input": {"command": "echo the turn ran"}, "index": 0},
+            ]},
+        ]},
+        "verdicts": [],
+        "completion_reason": "done_when_met",
+        "usage": {
+            "input_tokens": 1_200, "output_tokens": 340,
+            "cache_read_tokens": 900, "cache_write_tokens": 120, "cost_usd": 0.42,
+        },
+        "telemetry": {
+            "wall_ms": 1_000,
+            "agent": {"model_ms": 800, "usage": {
+                "input_tokens": 1_000, "output_tokens": 300,
+                "cache_read_tokens": 900, "cache_write_tokens": 120, "cost_usd": 0.40,
+            }},
+            "judge": {"model_ms": 100, "usage": {
+                "input_tokens": 200, "output_tokens": 40, "cost_usd": 0.02,
+            }},
+            "orchestration_ms": 100,
+            "sessions": [],
+        },
+    })
 }
 
 /// The title a `pr-author` dispatch drafts, when it is one.

@@ -22,7 +22,7 @@ use crate::agentgraph;
 use crate::channel::{ChannelState, Command, Reply, Surface, SurfaceKind};
 use crate::cli::{
     AttestArgs, ChannelCommand, Cli, OptionalRunArgs, ReplyArgs, RoundCommand, RunArgs, RunsArgs,
-    StartArgs, StopArgs, SurfaceArgs, TelemetryArgs,
+    StartArgs, StopArgs, SurfaceArgs, TelemetryArgs, TranscriptArgs,
 };
 use crate::edits;
 use crate::engine;
@@ -79,6 +79,7 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             Ok(EXIT_SUCCESS)
         }
         Verb::Goals(args) => report(&args, views::goals),
+        Verb::Transcript(args) => transcript(&args),
         Verb::Telemetry(args) => report_telemetry(&args),
     }
 }
@@ -893,6 +894,31 @@ fn report(args: &OptionalRunArgs, render: fn(&[RunView]) -> String) -> Result<i3
         None => RunView::all(&ledger::runs_root()),
     };
     print!("{}", render(&views));
+    Ok(EXIT_SUCCESS)
+}
+
+/// `onepipeline transcript`.
+///
+/// A node this run never dispatched is refused rather than answered with an
+/// empty transcript: the two read alike, and only one of them means the reader
+/// typed a name that is not in this run.
+fn transcript(args: &TranscriptArgs) -> Result<i32> {
+    let view = RunView::open(&resolve(&args.run)?)?;
+    if let Some(node) = &args.node {
+        if views::dispatched(&view, Some(node)).is_empty() {
+            let dispatched = views::dispatched(&view, None);
+            return Err(Error::Refused(format!(
+                "run '{}' has no dispatch for node '{node}'; it dispatched: {}",
+                args.run,
+                if dispatched.is_empty() {
+                    "nothing yet".to_string()
+                } else {
+                    dispatched.join(", ")
+                }
+            )));
+        }
+    }
+    print!("{}", views::transcript(&view, args.node.as_deref()));
     Ok(EXIT_SUCCESS)
 }
 

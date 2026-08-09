@@ -213,6 +213,44 @@ fn status_says_what_a_live_dispatch_is_doing_and_the_readout_advances() {
     });
 }
 
+/// The tools a real dispatched turn used, read back off the CLI.
+///
+/// There was no transcript verb at all: the evidence was retained — the
+/// sibling stores each settled member's full onejudge report and says where —
+/// and nothing read it, so an agent supervising a run could see that a turn
+/// happened and never what it did.
+#[test]
+fn transcript_renders_a_real_dispatched_turns_tools_and_words() {
+    let world = World::new("real-transcript");
+    world.write_graphs();
+    let path = world.plan("read", &plan_of("read", vec![agent("build", &[])]));
+    world
+        .run_on_agentgraph(&["start", &path.to_string_lossy(), "--attach"])
+        .exited(0)
+        .settled();
+
+    let transcript = world.run(&["transcript", "read", "build"]);
+    transcript.exited(0).out_has("read  build");
+    // The tools, from the turn summaries the sibling emitted as it ran...
+    transcript.out_has("tool_call bash  echo the turn ran");
+    // ...and the words, out of the report that member settled with.
+    transcript.out_has("report ");
+    transcript.out_has("Ran what the task asked for.");
+    assert!(
+        !transcript.stdout.contains("unreadable from this host"),
+        "the retained report was named and not read:\n{}",
+        transcript.stdout
+    );
+
+    // A node this run never dispatched is refused by name rather than answered
+    // with an empty transcript, which reads identically to a quiet one.
+    world
+        .run(&["transcript", "read", "nowhere"])
+        .exited(crate::harness::REFUSED)
+        .err_has("no dispatch for node 'nowhere'")
+        .err_has("build");
+}
+
 /// A launch the sibling refuses is a failed launch.
 ///
 /// The defect this guards against is not that the graph said no — it is that
