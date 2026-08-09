@@ -152,6 +152,55 @@ fn platform_process_may_be_live(pid: u32) -> bool {
     waited != WAIT_OBJECT_0
 }
 
+/// Stop the processes this one starts from inheriting *its own* standard
+/// handles.
+///
+/// Windows creates a process with `bInheritHandles`, which hands over every
+/// inheritable handle the parent holds — not only the three the child is being
+/// given. So a launcher whose own stdout is a pipe passes that pipe's write end
+/// to the driver it starts, and to everything the driver starts in turn;
+/// whoever is reading the pipe then waits not for the launcher but for the whole
+/// tree. `start --detach` would return to its caller only once the run it
+/// detached from had finished, which is the one thing detaching promises not to
+/// do. Unix hands over exactly the descriptors it is told to, so there is
+/// nothing to disown there.
+///
+/// Call this only where nothing further will be started that is meant to
+/// inherit them: it is this process's whole answer, not one spawn's.
+pub fn disown_standard_handles() {
+    platform_disown_standard_handles();
+}
+
+#[cfg(unix)]
+fn platform_disown_standard_handles() {}
+
+#[cfg(windows)]
+fn platform_disown_standard_handles() {
+    use windows_sys::Win32::Foundation::{
+        SetHandleInformation, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+    };
+    use windows_sys::Win32::System::Console::{
+        GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+    };
+
+    for which in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+        // SAFETY: `GetStdHandle` returns a handle this process already owns, or
+        // a null/invalid one it does not; neither borrows memory.
+        let handle = unsafe { GetStdHandle(which) };
+        if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+            // A process started without that stream has nothing to disown.
+            continue;
+        }
+        // A handle whose flags cannot be changed is one no child could have
+        // inherited anyway, so the failure is not worth a diagnostic — least of
+        // all on the stream the diagnostic would go to.
+        //
+        // SAFETY: `handle` is a live handle this process owns, and the call
+        // clears one flag on it.
+        unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) };
+    }
+}
+
 /// The session that launched a run, as the harness's environment reports it.
 ///
 /// Detected from the exported environment and never from process ancestry, and

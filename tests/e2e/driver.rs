@@ -432,3 +432,27 @@ fn a_detached_driver_outlives_its_own_output_and_keeps_what_it_said() {
         "the driver's own words were lost: {log}"
     );
 }
+
+#[test]
+fn a_detached_start_returns_while_the_run_it_launched_is_still_in_flight() {
+    let world = World::new("driver-detach-returns");
+    // The one dispatch this run has is held, so the run cannot settle until
+    // this test releases it.
+    world.script("build.wait", "hold");
+    let run = start_detached(&world, "inflight", vec![agent("build", &[])]);
+
+    // `start --detach` has already returned. A launcher that returns only once
+    // the run has finished has not detached from it at all — which is what a
+    // launcher does when the driver it starts inherits, and holds open, the
+    // streams its own caller is reading.
+    assert!(
+        world.events_of(&run, "round-finished").is_empty(),
+        "the launch did not return until the run had settled: {:?}",
+        world.kinds(&run)
+    );
+
+    world.release("build.go");
+    world.until("the run to settle once it is released", |world| {
+        !world.events_of(&run, "round-finished").is_empty()
+    });
+}

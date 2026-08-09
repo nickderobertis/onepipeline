@@ -193,6 +193,13 @@ fn start(args: &StartArgs) -> Result<i32> {
     // the first record names this process, which is what drives the run until
     // the graph process it starts takes over.
     ledger::write_json(&paths.launch(), &record)?;
+    if args.detach {
+        // Before the driver exists, and only on this path: a detaching launcher
+        // starts nothing else, and the driver it is about to start must not
+        // hold this process's streams open behind it. See
+        // [`sys::disown_standard_handles`] for what inherits what.
+        sys::disown_standard_handles();
+    }
     let log = paths.driver_log();
     let mut launched = launch_graph(
         &paths,
