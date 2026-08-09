@@ -49,6 +49,27 @@ pub struct RunPaths {
     pub dir: PathBuf,
 }
 
+/// Whether a run id names one directory under the runs root and nothing else.
+///
+/// A run id is external input on every verb that takes one, and — since
+/// cross-DAG references carry one — inside plan files too. It is joined onto the
+/// runs root, so a separator, a `..`, or an absolute path would read and write
+/// *outside* the ledger this process was pointed at: `onepipeline status
+/// ../../elsewhere` would render another root's run, and a plan naming
+/// `run:../../elsewhere#node` would resolve its schedule against one.
+///
+/// One segment, and nothing that navigates. `mint_run_id` already produces only
+/// this alphabet; this is the boundary for the ids that arrive from outside.
+pub fn is_valid_run_id(run: &str) -> bool {
+    !run.is_empty()
+        && run != "."
+        && run != ".."
+        && !run.contains('/')
+        && !run.contains('\\')
+        && !Path::new(run).is_absolute()
+        && Path::new(run).components().count() == 1
+}
+
 impl RunPaths {
     /// The paths for `run` under the process's runs root.
     pub fn new(run: &str) -> Self {
@@ -410,6 +431,29 @@ mod tests {
         first.release();
         OwnershipLock::acquire(&paths, "round next").expect("the lock was released");
         fs::remove_dir_all(&root).ok();
+    }
+
+    /// Every verb takes a run id, and a plan's cross-DAG reference carries one.
+    /// It is joined onto the runs root, so anything that navigates reaches a
+    /// ledger this process was never pointed at.
+    #[test]
+    fn a_run_id_names_one_directory_and_never_a_path() {
+        for good in ["demo", "run-2", "a_b", "tracked-release", "R1"] {
+            assert!(is_valid_run_id(good), "{good} was refused");
+        }
+        for bad in [
+            "",
+            ".",
+            "..",
+            "../elsewhere",
+            "../../elsewhere",
+            "a/b",
+            "a\\b",
+            "/absolute",
+            "./here",
+        ] {
+            assert!(!is_valid_run_id(bad), "{bad:?} was accepted");
+        }
     }
 
     #[test]

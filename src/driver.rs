@@ -85,6 +85,15 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
 
 /// The paths for a run that exists, or a refusal naming the root searched.
 fn resolve(run: &str) -> Result<RunPaths> {
+    // Before it is joined onto anything. A run id that navigates is not a run
+    // this root holds, and reporting it as merely missing would leave a caller
+    // believing the path they typed was looked for where they meant.
+    if !ledger::is_valid_run_id(run) {
+        return Err(Error::Invalid(format!(
+            "'{run}' is not a run id: a run id names one directory under the runs root, \
+             so it may not be a path"
+        )));
+    }
     let paths = RunPaths::new(run);
     if !paths.exists() {
         return Err(Error::NoSuchRun {

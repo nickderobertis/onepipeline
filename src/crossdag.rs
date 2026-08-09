@@ -50,10 +50,17 @@ pub struct Reference {
 ///
 /// Both halves must be non-empty: `run:#build` and `run:other#` name nothing
 /// that could ever resolve, so they are malformed rather than merely pending.
+///
+/// The run half must also be a *run id* rather than a path. A plan file is
+/// external input and this half is joined onto the runs root to find the ledger
+/// that answers the edge, so `run:../../elsewhere#node` would otherwise schedule
+/// this run against a ledger outside the root it was pointed at. Refusing it
+/// here makes the plan loader refuse it by name, through the malformed-reference
+/// path that already exists.
 pub fn parse(dependency: &str) -> Option<Reference> {
     let rest = dependency.strip_prefix(PREFIX)?;
     let (run, node) = rest.split_once('#')?;
-    if run.is_empty() || node.is_empty() {
+    if node.is_empty() || !ledger::is_valid_run_id(run) {
         return None;
     }
     Some(Reference {
@@ -288,7 +295,21 @@ mod tests {
             parse("run:other#ship/verify").map(|r| r.node),
             Some("ship/verify".to_string())
         );
-        for malformed in ["run:other", "run:#build", "run:other#", "run:", "run:#"] {
+        for malformed in [
+            "run:other",
+            "run:#build",
+            "run:other#",
+            "run:",
+            "run:#",
+            // A path, not a run id. The ledger that answers an edge is found by
+            // joining this onto the runs root.
+            "run:../elsewhere#build",
+            "run:../../elsewhere#build",
+            "run:a/b#build",
+            "run:/absolute#build",
+            "run:.#build",
+            "run:..#build",
+        ] {
             assert_eq!(parse(malformed), None, "{malformed} parsed");
             assert!(is_malformed(malformed), "{malformed} is not reported wrong");
         }
