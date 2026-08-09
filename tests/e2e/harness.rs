@@ -117,6 +117,15 @@ impl World {
             // slept the real five seconds would be measuring the sleep.
             .env("ONEPIPELINE_BOUNDARY_BACKOFF_SECONDS", "0")
             .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "20")
+            // A held dispatch has to outlast the test holding it. The double's
+            // own default is shorter than [`World::until`]'s deadline, so on a
+            // host slow enough to matter the hold quietly expires, the node
+            // completes, the run settles, and the test fails several steps later
+            // on something that reads like a real defect — a reply refused
+            // because the run it names had settled. Set above `until`'s deadline
+            // so a rendezvous nobody releases fails as the timeout it is, with
+            // the evidence `until` prints.
+            .env("ONEPIPELINE_FAKE_RENDEZVOUS_SECONDS", "180")
             .stdin(Stdio::null());
         command
     }

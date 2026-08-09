@@ -81,6 +81,11 @@ rules:
   - use: local
 ```
 
+Ordered: the first rule whose `when` holds decides, and a rule with no `when` is
+the fallback. A `when` tests an executor's capacity, the node's own labels
+(`when: {node_label: {persona: reviewer}}`), or both — several conditions in one
+`when` all have to hold.
+
 ## Development
 
 ```bash
@@ -91,7 +96,8 @@ just gate        # check + the diff-scoped llmlint tier
 
 `just --list` is the full command surface.
 [`docs/contract-divergences.md`](docs/contract-divergences.md) records every place
-the code could not compile the contract exactly as written.
+the code could not compile the contract exactly as written, and what the planner
+who owns the contract ruled on each.
 
 ## License
 
