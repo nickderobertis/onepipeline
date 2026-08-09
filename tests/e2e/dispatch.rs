@@ -2,8 +2,8 @@
 //!
 //! Every other journey here substitutes that sibling wholesale, which is what
 //! let a run report success while the sibling was refusing every dispatch it was
-//! sent: the double accepted a `--label` the real CLI reserves. These two
-//! journeys close that gap from the other side — the real binary resolves the
+//! sent: the double accepted a `--label` the real CLI reserves. The journeys
+//! here close that gap from the other side — the real binary resolves the
 //! graph, supervises the member, and stamps the stream, and the only thing
 //! standing in is the paid model turn, replaced at that library's own
 //! `ONEAGENTGRAPH_ONEHARNESS_BIN` override.
@@ -13,7 +13,7 @@
 // thing a gate cannot run for free. Real `onepipeline` dispatches, real `oneagentgraph`
 // resolves the graph and supervises the member, and nothing between them is stubbed.
 
-use crate::harness::{agent, plan_of, World};
+use crate::harness::{agent, human, plan_of, World};
 
 /// A whole run, dispatched through the real sibling: the plan is launched, its
 /// driver is a real graph run, the node's dispatch is another, and a member runs
@@ -123,4 +123,44 @@ fn a_launch_the_graph_refuses_fails_with_the_graphs_own_words() {
             started.stdout
         );
     }
+}
+
+/// An adoption whose graph refuses is a failed adoption.
+///
+/// `adopt` is the other launcher, and it is the one reached from a run that has
+/// already lost a driver: an adoption that reported success while starting
+/// nothing would leave that run undriven a second time, with the offered way
+/// back looking like it had worked.
+#[test]
+fn an_adoption_the_graph_refuses_fails_rather_than_leaving_the_run_undriven() {
+    let world = World::new("real-adopt-refusal");
+    world.write_graphs();
+    // A human action settles the round without a person, so the driver finishes
+    // and the run is left intact and undriven — which is what `adopt` is for.
+    let path = world.plan(
+        "orphaned",
+        &plan_of("orphaned", vec![human("approve", &[])]),
+    );
+    world
+        .run_real(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+    world.until("the driver to be gone", |world| {
+        world
+            .run_real(&["status", "orphaned"])
+            .stdout
+            .contains("DRIVER DEAD")
+    });
+
+    // The graph the launch record names goes away under it, so the relaunch the
+    // adoption performs is refused by the sibling.
+    std::fs::remove_file(world.graphs().join("dag-scope.yaml")).expect("the graph is removed");
+
+    let adopted = world.run_real(&["adopt", "orphaned"]);
+    adopted.exited(crate::harness::REFUSED);
+    adopted.err_has("oneagentgraph");
+    assert!(
+        world.events_of("orphaned", "driver-adopted").len() == 1,
+        "the adoption was recorded more than once: {:?}",
+        world.events_of("orphaned", "driver-adopted")
+    );
 }

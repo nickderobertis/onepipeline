@@ -58,6 +58,19 @@ other direction.
 Never invent a local stand-in for a sibling type the contract names: record the
 divergence instead.
 
+Two rules govern what crosses the subprocess boundary:
+
+- **Every label sent to a sibling is namespaced under `onepipeline.`.** That
+  library's run is not this one's, so it reserves the keys it stamps itself —
+  `run_id`, `member`, `persona` — and refuses a `--label` naming one. A label
+  added later joins the namespace; none is ever sent bare. Coming back,
+  `agentgraph::adopt_labels` reads them off a relayed envelope without rewriting
+  what the producer stamped, so both identities stay on the one line.
+- **A launcher confirms what it launched.** `start` and `adopt` do not wait for
+  the driver, so `launch_graph` watches it long enough to catch a refusal and
+  fails with the graph's own words. An exit 0 and a pid for a process that had
+  already died is the failure that rule exists to prevent.
+
 Both are ordinary crates.io dependencies, pinned to a published version. **Keep
 them that way** — a `git`/`rev` source makes the graph unreproducible from the
 registries alone, hides which released version carries a given API, and leaves
@@ -85,5 +98,15 @@ workspace member so they can never ship; `tests/e2e/harness.rs` builds them on
 demand, because a package-scoped build — `cargo llvm-cov` runs one — does not
 build another member's binaries.
 
-The doubles are the only honest way to test this crate: it *is* a composition
-layer, so a test that stubbed the seam would be testing nothing.
+A double is honest only where the thing it replaces cannot be run: this crate
+*is* a composition layer, so a test that stubbed the seam would be testing
+nothing. `tests/e2e/dispatch.rs` therefore runs the **real** `oneagentgraph`,
+built from the pinned dependency by `harness::sibling_binary`, and substitutes
+only the paid model turn — at that library's own `ONEAGENTGRAPH_ONEHARNESS_BIN`
+override, by `fake-oneharness`. The scripted doubles stay for the scenarios a
+real sibling would need paid turns to produce, and they refuse what the real CLI
+refuses by *calling* it (`oneagentgraph::run::parse_label`) rather than by
+copying its rules. A double that accepted a label the sibling reserves is what
+let every dispatch be refused while this suite stayed green.
+
+Give the `onevcs` seam the same journey when that sibling implements its surface.
