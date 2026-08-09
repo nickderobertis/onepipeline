@@ -13,11 +13,12 @@
 use onepipeline_testfakes as fake;
 use std::process::ExitCode;
 
-/// The label keys the real `oneagentgraph` stamps itself, and so refuses on a
-/// `--label`. Its own list, restated here because a double stands in for the
-/// sibling's *behaviour* — a crate-level test drives the same keys through
-/// `oneagentgraph::run::parse_label`, which is the copy that cannot drift.
-const RESERVED_LABELS: &[&str] = &["run_id", "member", "persona"];
+/// The exit code the real CLI answers an invalid configuration with — its own
+/// constant, so a double cannot answer a refusal with a code the sibling stopped
+/// using.
+fn invalid_config() -> ExitCode {
+    ExitCode::from(u8::try_from(oneagentgraph::error::EXIT_INVALID_CONFIG).unwrap_or(1))
+}
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -64,18 +65,15 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     if fake::flag(args, "--output").as_deref() != Some("json") {
         return fake::refuse("oneagentgraph run requires --output json");
     }
-    // The real CLI refuses a `--label` naming a key it stamps itself, and exits
-    // 2 doing it. A double that accepted one would be the weak oracle that let
-    // every dispatch be refused by the real sibling while this suite stayed
-    // green — which is exactly what happened.
+    // Every `--label` goes through the sibling's *own* parser, so this double
+    // refuses exactly what the real CLI refuses — a key it stamps itself, one
+    // that is not `k=v`, one that is not an identifier — and cannot drift from
+    // it. A double that accepted a label the sibling reserves was the weak
+    // oracle that let every dispatch be refused while this suite stayed green.
     for label in fake::flags(args, "--label") {
-        let key = label.split('=').next().unwrap_or_default();
-        if RESERVED_LABELS.contains(&key) {
-            eprintln!(
-                "oneagentgraph: invalid config: --label {label:?}: {key:?} is a reserved label \
-                 this run stamps itself; pick another name so a consumer can tell the two apart"
-            );
-            return ExitCode::from(2);
+        if let Err(refusal) = oneagentgraph::run::parse_label(&label) {
+            eprintln!("oneagentgraph: {refusal}");
+            return invalid_config();
         }
     }
 

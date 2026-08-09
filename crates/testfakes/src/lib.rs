@@ -279,7 +279,17 @@ pub fn drive(dir: &Path) -> std::process::ExitCode {
         }
         // `continuing` is the only answer that means there is another round to
         // run. Complete, and every gated state, ends the driver.
-        if !String::from_utf8_lossy(&next.stdout).contains("\"continuing\"") {
+        //
+        // Read as the document the transition prints rather than as text it
+        // contains: a run *named* `continuing`, or a payload that merely
+        // mentioned the word, would otherwise put this driver into a round the
+        // engine never opened.
+        let settlement: serde_json::Value = String::from_utf8_lossy(&next.stdout)
+            .lines()
+            .rev()
+            .find_map(|line| serde_json::from_str(line.trim()).ok())
+            .unwrap_or(serde_json::Value::Null);
+        if settlement.get("state").and_then(serde_json::Value::as_str) != Some("continuing") {
             return std::process::ExitCode::SUCCESS;
         }
     }

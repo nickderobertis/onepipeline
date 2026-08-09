@@ -108,6 +108,12 @@ pub fn label_args(labels: &Labels) -> Vec<String> {
 /// key the producer stamped itself stands, and the namespaced copy stays in
 /// `extra` beside it rather than being consumed. That is what keeps the two
 /// `run_id`s — the graph run's and this run's — both readable on the one line.
+///
+/// It is also why a namespaced value this crate cannot read — a `round` that is
+/// not a number — is left rather than reported: nothing is dropped, because the
+/// value stays under its own key exactly as it arrived. The envelope's *own*
+/// boundary is [`GraphRun::events`], which parses the line or skips it; a label
+/// the schema does not name has already crossed it.
 pub fn adopt_labels(labels: &mut Labels) {
     let stamped = |key: &str| {
         labels

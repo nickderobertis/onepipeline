@@ -46,26 +46,64 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     let Some(prompt) = fake::flag(args, "--prompt") else {
         return fake::refuse("oneharness run requires --prompt");
     };
+    for flag in ["--events", "--stream"] {
+        if !args.iter().any(|arg| arg == flag) {
+            return fake::refuse(&format!("oneharness run requires {flag}"));
+        }
+    }
+    // Both paths are this process's external input, and both are things
+    // `oneagentgraph` composed rather than passed through: a config it wrote and
+    // a worktree it resolved. A double that ran anyway would settle a member
+    // whose launch was prepared against neither.
     if !std::path::Path::new(&config).is_file() {
         return fake::refuse(&format!(
             "oneharness run was given --config {config}, which is not a file"
+        ));
+    }
+    if !std::path::Path::new(&cwd).is_dir() {
+        return fake::refuse(&format!(
+            "oneharness run was given --cwd {cwd}, which is not a directory"
         ));
     }
 
     // The turn itself. The orchestrator member's prompt names the engine verbs
     // it is to drive the run with, so this turn drives them — the same work the
     // `oneagentgraph` double does when it is standing in for the whole sibling.
-    let drove = prompt.contains("onepipeline round run");
-    if drove && fake::drive(dir) != ExitCode::SUCCESS {
-        report(dir, &prompt, &cwd, false);
-        return ExitCode::from(1);
+    let outcome =
+        if prompt.contains("onepipeline round run") && fake::drive(dir) != ExitCode::SUCCESS {
+            Outcome::TurnFailed
+        } else {
+            Outcome::DoneWhenMet
+        };
+    report(dir, &prompt, &cwd, outcome);
+    match outcome {
+        Outcome::DoneWhenMet => ExitCode::SUCCESS,
+        Outcome::TurnFailed => ExitCode::from(1),
     }
-    report(dir, &prompt, &cwd, true);
-    ExitCode::SUCCESS
+}
+
+/// How the turn ended, in the vocabulary a report names it with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Outcome {
+    /// The turn reached what it was asked for.
+    DoneWhenMet,
+    /// It did not, and says so with a non-zero exit as well as with the
+    /// reason below: `oneagentgraph` settles a member on the pair.
+    TurnFailed,
+}
+
+impl Outcome {
+    /// The `completion_reason` a report carries.
+    fn reason(self) -> &'static str {
+        match self {
+            Self::DoneWhenMet => "done_when_met",
+            Self::TurnFailed => "turn_failed",
+        }
+    }
 }
 
 /// The two lines a member is settled on: what the turn did, then its report.
-fn report(dir: &std::path::Path, prompt: &str, cwd: &str, completed: bool) {
+fn report(dir: &std::path::Path, prompt: &str, cwd: &str, outcome: Outcome) {
     println!(
         "{}",
         serde_json::json!({
@@ -79,14 +117,14 @@ fn report(dir: &std::path::Path, prompt: &str, cwd: &str, completed: bool) {
     // assertable from this side of the boundary.
     fake::append(
         &dir.join("turns.jsonl"),
-        &serde_json::json!({"prompt": prompt, "cwd": cwd, "completed": completed}).to_string(),
+        &serde_json::json!({"prompt": prompt, "cwd": cwd, "outcome": outcome.reason()}).to_string(),
     );
     println!(
         "{}",
         serde_json::json!({
             "type": "result",
             "report": {
-                "completion_reason": if completed { "done_when_met" } else { "turn_failed" },
+                "completion_reason": outcome.reason(),
                 "identity": "fake-harness",
                 "usage": {"input_tokens": 1, "output_tokens": 1},
                 "verdicts": [],

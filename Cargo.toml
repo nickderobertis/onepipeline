@@ -6,6 +6,13 @@
 members = [".", "crates/testfakes"]
 resolver = "2"
 
+# The sibling this crate composes, pinned once for the whole workspace: the
+# `oneagentgraph` double refuses what the real CLI refuses by calling the real
+# CLI's own parser, so both members build against the same version or the double
+# would be an oracle for a build nothing runs.
+[workspace.dependencies]
+oneagentgraph = "0.2.1"
+
 [package]
 name = "onepipeline"
 version = "0.1.2"
@@ -60,7 +67,7 @@ thiserror = "2"
 # The siblings this crate composes. Both are on crates.io, so they resolve from
 # the registry like any other dependency — no git source, so a clone of this repo
 # builds from the registries alone.
-oneagentgraph = "0.2.1"
+oneagentgraph = { workspace = true }
 onevcs = "0.1.2"
 
 # Process liveness is the one host fact this crate cannot get from `std` on the

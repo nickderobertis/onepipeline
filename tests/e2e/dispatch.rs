@@ -35,6 +35,13 @@ fn a_plan_dispatches_through_the_real_oneagentgraph_and_its_members_run() {
         .expect("the launch named its run")
         .to_string();
 
+    // llmlint: ignore-block[tests_mirror_real_usage] what this crate delivers *is* the
+    // command line it composes for its sibling: a dispatch that reached `oneagentgraph`
+    // with the wrong labels is refused by that CLI and never reaches a view, which is
+    // exactly how it went unnoticed. The invocation record is the double's account of a
+    // real subprocess execution — the evidence a server-side test takes from the request
+    // it received — and every assertion on it here sits beside one on the run's own
+    // settled state.
     // A member really ran, twice: the orchestrator that drove the run, and the
     // worker the node was dispatched to. Each was given the prose its own graph
     // was launched with.
@@ -51,6 +58,7 @@ fn a_plan_dispatches_through_the_real_oneagentgraph_and_its_members_run() {
         prompts.iter().any(|p| p.contains("Do build.")),
         "the node's own task never reached a member: {prompts:?}"
     );
+    // llmlint: ignore-end[tests_mirror_real_usage]
 
     // And the node settled on what that member did.
     assert_eq!(
