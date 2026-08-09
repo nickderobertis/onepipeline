@@ -16,6 +16,7 @@ use std::sync::mpsc::Sender;
 use onevcs::SessionRequest;
 
 use crate::engine::{self, Message, Settlement};
+use crate::event::{Envelope, Labels};
 use crate::executor::{DispatchRequest, Executor, WorkspaceSpec};
 use crate::graph::NodeStatus;
 use crate::plan::{Node, NodeKind, Step};
@@ -53,6 +54,14 @@ pub fn execute(
     };
 
     let mut session: Option<String> = None;
+    // The session's own stream, followed from the moment there is a token to
+    // follow, so the publication that comes after the steps is visible while it
+    // runs rather than only once it is over.
+    let mut stream: Option<crate::vcs::Follower> = None;
+    // Where in the run the session's own envelopes belong. The node, not a
+    // step: a session outlives every step that wrote in it, and the publication
+    // that follows them belongs to none.
+    let whose = engine::dispatch_labels(run, round, &node.id, None, node.persona.as_deref());
     let mut branch: Option<String> = node.branch.clone();
     // The steps the preserved branch already carries, plus the ones this attempt
     // adds. Carried forward whole, because the branch a later round preserves is
@@ -107,9 +116,13 @@ pub fn execute(
         // the branch it left behind.
         session = drained.session.or(session);
         branch = drained.branch.or(branch);
+        if stream.is_none() {
+            if let Some(token) = &session {
+                stream = crate::vcs::follow(token, relay_into(tx, whose.clone()));
+            }
+        }
         if drained.settlement.status != NodeStatus::Done {
-            relay_session_events(tx, session.as_deref());
-            close(session.as_deref());
+            end_session(stream, tx, session.as_deref(), &whose);
             return Settlement {
                 branch,
                 completed_steps: completed,
@@ -130,7 +143,9 @@ pub fn execute(
         };
     };
 
-    publish(executor, run, round, node, cancel, tx, &token, branch)
+    let settlement = publish(executor, run, round, node, cancel, tx, &token, branch);
+    end_session(stream, tx, Some(&token), &whose);
+    settlement
 }
 
 /// Draft the change request, then publish through `onevcs`.
@@ -157,8 +172,6 @@ fn publish(
         .unwrap_or_else(|| draft_title(executor, run, round, node, cancel, tx));
 
     let published = crate::vcs::publish(token, node.merge_policy, Some(&title));
-    relay_session_events(tx, Some(token));
-    close(Some(token));
     match published {
         Ok(published) => {
             let labels =
@@ -243,15 +256,66 @@ pub fn deterministic_title(node: &Node) -> String {
         .unwrap_or_else(|| format!("chore: {}", node.id))
 }
 
-/// Fold the session's own event stream into the merged one.
+/// Put every envelope a followed session writes into the merged stream.
+fn relay_into(tx: &Sender<Message>, node: Labels) -> Box<dyn Fn(Envelope) + Send> {
+    let tx = tx.clone();
+    Box::new(move |mut envelope| {
+        stamp(&mut envelope.labels, &node);
+        let _ = tx.send(Message::Event(Box::new(envelope)));
+    })
+}
+
+/// Say which node a session's envelope belongs to, where its producer could not.
+///
+/// `onevcs` stamps what it knows, and a session does not know it is a graph
+/// node: the crate that opened it does. Without this a whole publication —
+/// gate, push, change request, merge — lands in the merged store belonging to
+/// no node, so every per-node view reads it as work that happened to nobody.
+///
+/// An enricher, so it never rewrites: a key the producer stamped stands.
+fn stamp(labels: &mut Labels, known: &Labels) {
+    labels.run_id = labels.run_id.take().or_else(|| known.run_id.clone());
+    labels.round = labels.round.or(known.round);
+    labels.node = labels.node.take().or_else(|| known.node.clone());
+    labels.persona = labels.persona.take().or_else(|| known.persona.clone());
+}
+
+/// Close the session, and collect what its stream said.
+///
+/// Closing is what ends the follow, so it comes first — the follow prints its
+/// tail and returns. A follow that never started, or that produced no record at
+/// all, leaves the evidence unread, and the stream is read once here instead: a
+/// gap in the merged store is what makes a later reader think nothing happened.
+fn end_session(
+    stream: Option<crate::vcs::Follower>,
+    tx: &Sender<Message>,
+    token: Option<&str>,
+    node: &Labels,
+) {
+    match stream {
+        Some(follower) => {
+            close(token);
+            if !follower.finish() {
+                relay_session_events(tx, token, node);
+            }
+        }
+        None => {
+            relay_session_events(tx, token, node);
+            close(token);
+        }
+    }
+}
+
+/// Fold the session's own event stream into the merged one, in one read.
 ///
 /// `onevcs` records the gate, the commits, and the publication against the
 /// session; without this the merged store would carry a lifecycle node's
 /// settlement with none of the evidence behind it.
-fn relay_session_events(tx: &Sender<Message>, token: Option<&str>) {
+fn relay_session_events(tx: &Sender<Message>, token: Option<&str>, node: &Labels) {
     let Some(token) = token else { return };
+    let relay = relay_into(tx, node.clone());
     for envelope in crate::vcs::events(token) {
-        let _ = tx.send(Message::Event(Box::new(envelope)));
+        relay(envelope);
     }
 }
 

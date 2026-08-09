@@ -262,6 +262,64 @@ fn a_drafting_failure_falls_back_deterministic_and_still_publishes() {
     );
 }
 
+/// Publication, watched while it happens.
+///
+/// It is the longest wall-clock segment a lifecycle node has — the gate run,
+/// the push, the change request, the check polling, the merge — and read once
+/// at settlement every record of it appears at once, when it is over. The claim
+/// here is the opposite one: a record written *during* the publication is
+/// readable out of the merged store while the node is still in flight.
+#[test]
+fn a_publications_own_records_reach_the_journal_while_it_is_still_publishing() {
+    let world = World::new("lifecycle-livepublish");
+    world.script("publish.hold", "hold");
+    let path = world.plan(
+        "watched",
+        &plan_of("watched", vec![lifecycle("service", &[])]),
+    );
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+
+    world.until("the gate to start", |world| {
+        !world.events_of("watched", "gate-started").is_empty()
+    });
+    assert!(
+        world.events_of("watched", "node-settled").is_empty(),
+        "the node settled before the publication was even watched: {}",
+        world.dump()
+    );
+    // Under the node it belongs to: a session does not know it is a graph node,
+    // so every per-node view would otherwise read a whole publication as work
+    // that happened to nobody.
+    let gate = &world.events_of("watched", "gate-started")[0];
+    assert_eq!(gate["labels"]["node"], "service", "{gate}");
+    assert_eq!(gate["source"], "vcs", "{gate}");
+    world
+        .run(&["monitor", "watched"])
+        .exited(0)
+        .out_has("gate-started");
+
+    world.release("publish.go");
+    world.until("the run to settle", |world| {
+        !world.events_of("watched", "round-finished").is_empty()
+    });
+    // And the rest of the publication landed too, exactly once each.
+    for kind in ["gate-verdict", "push", "change-opened", "session-closed"] {
+        assert_eq!(
+            world.events_of("watched", kind).len(),
+            1,
+            "{kind} reached the merged store {} time(s): {}",
+            world.events_of("watched", kind).len(),
+            world.dump()
+        );
+    }
+    assert_eq!(
+        world.run_json("watched", "round-01/result.json")["state"],
+        "complete"
+    );
+}
+
 #[test]
 fn a_session_that_cannot_open_is_an_infrastructure_failure_by_name() {
     let world = World::new("lifecycle-nosession");

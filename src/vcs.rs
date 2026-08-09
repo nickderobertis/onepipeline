@@ -17,8 +17,12 @@
 // so they cannot be read back into; when they gain `Deserialize` these two mirrors go
 // away entirely and the sibling's types are used directly.
 
+use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use onevcs::{MergePolicy, SessionRequest};
 use serde::Deserialize;
@@ -194,6 +198,135 @@ pub fn events(token: &str) -> Vec<Envelope> {
         .collect();
     report_skipped("onevcs", lines.len() - envelopes.len());
     envelopes
+}
+
+/// How long a follow may keep reading after its session was closed.
+///
+/// `onevcs events --follow` returns on a session it reads as closed, so this
+/// only covers the case where the close itself failed and nothing will ever
+/// mark it: a node that has already settled must not hang on its own cleanup.
+const FOLLOW_GRACE: Duration = Duration::from_secs(5);
+
+/// How often a finishing follow re-asks whether its reader has ended.
+const FOLLOW_POLL: Duration = Duration::from_millis(20);
+
+/// A session's own event stream, followed as `onevcs` writes it.
+///
+/// Read *once at settlement*, a lifecycle node's gate run, push, change
+/// request, check polling, and merge are one opaque blocking call: every record
+/// appears at once, when it is over — and that stretch is the longest
+/// wall-clock segment the node has. `onevcs events TOKEN --follow` is the
+/// sibling's own general answer to that, and this is it, used.
+///
+/// `None` when the follow could not be started at all. That is a publication
+/// nobody is watching rather than a publication with no record, so it is said
+/// out loud and the caller reads the stream once instead.
+pub fn follow(token: &str, sink: Box<dyn Fn(Envelope) + Send>) -> Option<Follower> {
+    let started = Command::new(binary())
+        .arg("events")
+        .arg(token)
+        .arg("--follow")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        // Inherited rather than piped: nothing here would read a pipe, and a
+        // full one stops the follow mid-publication. The sibling's own words
+        // reach the driver's stderr, which is where its other refusals go.
+        .stderr(Stdio::inherit())
+        .spawn();
+    let mut child = match started {
+        Ok(child) => child,
+        Err(error) => {
+            eprintln!("onepipeline: cannot follow session {token}'s events: {error}");
+            return None;
+        }
+    };
+    let Some(stdout) = child.stdout.take() else {
+        stop(&mut child);
+        eprintln!("onepipeline: cannot read session {token}'s events as they are written");
+        return None;
+    };
+
+    let relayed = Arc::new(AtomicU64::new(0));
+    let counted = Arc::clone(&relayed);
+    let reader = std::thread::Builder::new()
+        .name(format!("{}-events", binary()))
+        .spawn(move || {
+            let mut skipped = 0usize;
+            for line in BufReader::new(stdout)
+                .lines()
+                .map_while(std::io::Result::ok)
+            {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                match serde_json::from_str::<Envelope>(&line) {
+                    Ok(envelope) => {
+                        counted.fetch_add(1, Ordering::SeqCst);
+                        sink(envelope);
+                    }
+                    Err(_) => skipped += 1,
+                }
+            }
+            report_skipped("onevcs", skipped);
+        });
+    match reader {
+        Ok(reader) => Some(Follower {
+            child,
+            reader,
+            relayed,
+        }),
+        Err(error) => {
+            stop(&mut child);
+            eprintln!("onepipeline: cannot follow session {token}'s events: {error}");
+            None
+        }
+    }
+}
+
+/// One session's stream, being followed.
+#[derive(Debug)]
+pub struct Follower {
+    child: Child,
+    reader: std::thread::JoinHandle<()>,
+    relayed: Arc<AtomicU64>,
+}
+
+impl Follower {
+    /// Stop following, and report whether anything was relayed.
+    ///
+    /// Called *after* `session close`, which is what ends the follow: `onevcs
+    /// events --follow` prints everything it has not printed yet and only then
+    /// returns on a closed session, so waiting for it loses nothing.
+    ///
+    /// `false` is the one answer a caller has to act on: the follow neither
+    /// ended cleanly nor relayed a record, so the session's evidence is still
+    /// unread and reading it once leaves no gap rather than a duplicate. A
+    /// follow that *did* end cleanly having read nothing is a session that
+    /// recorded nothing, which is not the same thing.
+    pub fn finish(mut self) -> bool {
+        let deadline = Instant::now() + FOLLOW_GRACE;
+        let ended = loop {
+            match self.child.try_wait() {
+                Ok(Some(status)) => break status.success(),
+                Err(_) => break false,
+                Ok(None) if Instant::now() >= deadline => {
+                    stop(&mut self.child);
+                    break false;
+                }
+                Ok(None) => std::thread::sleep(FOLLOW_POLL),
+            }
+        };
+        // The reader ends on its own once the pipe closes, which the wait above
+        // has already made true.
+        let _ = self.reader.join();
+        ended || self.relayed.load(Ordering::SeqCst) > 0
+    }
+}
+
+/// End a follow this process started and will not read.
+fn stop(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// Say when a sibling's stream carried lines this build could not read.
