@@ -740,7 +740,14 @@ fn serve(args: &RunArgs) -> Result<i32> {
     let stdin = std::io::stdin();
 
     for line in stdin.lock().lines() {
-        let Ok(line) = line else { break };
+        // End of input and a broken pipe are not the same fact. Read as one,
+        // the orchestrator's judge side exits 0 on a stream that failed
+        // mid-round, so the boundary question it was carrying never reaches the
+        // planner and nothing anywhere says why.
+        let line = line.map_err(|e| Error::Sibling {
+            tool: "oneagentgraph",
+            message: format!("the orchestrator's frame stream could not be read: {e}"),
+        })?;
         if line.trim().is_empty() {
             continue;
         }

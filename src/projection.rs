@@ -72,6 +72,23 @@ pub struct RunState {
     pub strict: bool,
     /// Every node this run's nodes named across another run's DAG.
     pub cross_dag_watches: BTreeMap<String, u64>,
+    /// Where each resolved upstream had got when this run first resolved it.
+    ///
+    /// Folded from the journal rather than held in a process, because a watch
+    /// outlives the round that captured it: a baseline this run re-derived every
+    /// round would never see the upstream move.
+    pub cross_dag_baselines: BTreeMap<String, u64>,
+    /// The `(dependency, consumer)` pairs already reported as moved, so a watch
+    /// reports once rather than once per reconcile pass.
+    pub cross_dag_reported: BTreeSet<(String, String)>,
+    /// How each cross-DAG dependency resolved, for the caller that went and
+    /// looked.
+    ///
+    /// Empty by default, and an absent reference derives as blocked — so a
+    /// reader that cannot reach another run's ledger reports a consumer as
+    /// waiting rather than inventing an answer about it. `crate::crossdag` is
+    /// what fills this in.
+    pub cross_dag: BTreeMap<String, NodeStatus>,
     /// The notes each node was given *during the round just finished*.
     ///
     /// A note reports state observed while one attempt ran, so it is stale as
@@ -93,7 +110,7 @@ impl RunState {
     /// Every node's status, with the derived gates recomputed against the graph
     /// as it stands now.
     pub fn statuses(&self) -> BTreeMap<String, NodeStatus> {
-        crate::graph::derive(&self.graph, &self.recorded, &|_| None)
+        self.statuses_with(&|dependency| self.cross_dag.get(dependency).copied())
     }
 
     /// Every node's status, resolving cross-DAG references through `upstream`.
@@ -250,12 +267,31 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
             state.stopped = true;
             state.round_open = false;
         }
+        journal::CROSS_DAG_SATISFIED => {
+            if let (Some(dependency), Some(last)) = (
+                payload.get("dependency").and_then(Value::as_str),
+                payload.get("last_seq").and_then(Value::as_u64),
+            ) {
+                // The *first* baseline stands. A later one would move the mark
+                // the watch measures from, which is the one thing that would
+                // make a moved upstream unreportable.
+                state
+                    .cross_dag_baselines
+                    .entry(dependency.to_string())
+                    .or_insert(last);
+            }
+        }
         journal::UPSTREAM_MODIFIED => {
-            if let Some(reference) = payload.get("ref").and_then(Value::as_str) {
+            if let Some(dependency) = payload.get("dependency").and_then(Value::as_str) {
                 *state
                     .cross_dag_watches
-                    .entry(reference.to_string())
+                    .entry(dependency.to_string())
                     .or_insert(0) += 1;
+                if let Some(consumer) = event.labels.node.as_deref() {
+                    state
+                        .cross_dag_reported
+                        .insert((dependency.to_string(), consumer.to_string()));
+                }
             }
         }
         _ => {}
@@ -308,7 +344,7 @@ pub fn millis_of(ts: &str) -> Option<u64> {
     // Three digits, so the millisecond field cannot leave its own range.
     let ms = field(20, 23)?;
     if !(1..=12).contains(&month)
-        || !(1..=31).contains(&day)
+        || !(1..=days_in_month(year, month)).contains(&day)
         || hour > 23
         || minute > 59
         // 60 is a leap second, which is a time a sibling may legitimately render.
@@ -319,6 +355,21 @@ pub fn millis_of(ts: &str) -> Option<u64> {
     let days = days_from_civil(year, month, day);
     let total = days * 86_400 + hour * 3_600 + minute * 60 + second;
     u64::try_from(total.checked_mul(1_000)?.checked_add(ms)?).ok()
+}
+
+/// How many days that month of that year has.
+///
+/// A blanket 1..=31 would accept 31 February, and `days_from_civil` would
+/// silently normalise it into early March — a timestamp that never existed,
+/// carried forward as this run's timing evidence.
+fn days_in_month(year: i64, month: i64) -> i64 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
+        2 => 28,
+        _ => 0,
+    }
 }
 
 /// Howard Hinnant's `days_from_civil`, the inverse of the renderer's.
@@ -411,6 +462,18 @@ mod tests {
         assert_eq!(millis_of("2026-08-08T13:29:61.678Z"), None);
         // A leap second is a real time, and is read as one.
         assert!(millis_of("2026-08-08T23:59:60.000Z").is_some());
+        // A day its month does not have would otherwise normalise into the next
+        // month — a timestamp that never existed, read as timing evidence.
+        assert_eq!(millis_of("2026-02-31T00:00:00.000Z"), None);
+        assert_eq!(millis_of("2026-04-31T00:00:00.000Z"), None);
+        assert_eq!(
+            millis_of("2026-02-29T00:00:00.000Z"),
+            None,
+            "2026 is not a leap year"
+        );
+        assert!(millis_of("2024-02-29T00:00:00.000Z").is_some(), "2024 is");
+        assert_eq!(millis_of("2100-02-29T00:00:00.000Z"), None, "2100 is not");
+        assert!(millis_of("2000-02-29T00:00:00.000Z").is_some(), "2000 is");
     }
 
     #[test]
@@ -537,8 +600,8 @@ mod tests {
             pipeline(
                 journal::UPSTREAM_MODIFIED,
                 5,
-                None,
-                &[("ref", json!("run:o#n"))],
+                Some("consumer"),
+                &[("dependency", json!("run:o#n"))],
             ),
             pipeline(journal::RUN_STOPPED, 6, None, &[]),
         ];

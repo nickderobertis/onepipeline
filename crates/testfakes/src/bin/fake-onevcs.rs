@@ -18,7 +18,10 @@ fn main() -> ExitCode {
         args.get(1).map(String::as_str),
     ) {
         (Some("session"), Some("open")) => open(&args, &dir),
-        (Some("session"), Some("close")) => ExitCode::SUCCESS,
+        (Some("session"), Some("close")) => match fake::required(&args, 2, "TOKEN") {
+            Ok(_) => ExitCode::SUCCESS,
+            Err(refusal) => refusal,
+        },
         (Some("publish"), _) => publish(&args, &dir),
         (Some("events"), _) => events(&args, &dir),
         (Some("session"), Some(other)) => {

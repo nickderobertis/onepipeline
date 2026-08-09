@@ -20,9 +20,6 @@ use crate::plan::{Node, NodeKind, Plan, Step};
 /// The separator reserved for addressing a step within its node.
 pub const STEP_SEPARATOR: char = '/';
 
-/// The prefix of a cross-DAG dependency, `run:<id>#<node>`.
-pub const CROSS_DAG_PREFIX: &str = "run:";
-
 /// Where a node has got to.
 ///
 /// The settled statuses are recorded in the journal; [`Blocked`](Self::Blocked)
@@ -249,7 +246,7 @@ impl Graph {
 /// round to be satisfied: it is never removed as a satisfied dependency, and it
 /// is carried to whatever depends on a consumer the transition carried out.
 pub fn is_cross_dag(reference: &str) -> bool {
-    reference.starts_with(CROSS_DAG_PREFIX) && reference.contains('#')
+    crate::crossdag::is_reference(reference)
 }
 
 /// Check that a plan is one this engine may execute.
@@ -307,6 +304,17 @@ pub fn validate_edited(plan: &Plan) -> Result<()> {
             }
             if is_cross_dag(dep) {
                 continue;
+            }
+            // Anything meant as a cross-DAG reference names no node of this
+            // graph, so reporting it as a missing dependency would send a
+            // planner looking for a node they never wrote.
+            if crate::crossdag::is_malformed(dep) {
+                return Err(Error::Invalid(format!(
+                    "node '{}' depends on '{dep}', which is a malformed cross-DAG \
+                     reference; expected '{}'",
+                    node.id,
+                    crate::crossdag::SYNTAX
+                )));
             }
             if !seen.contains(dep) {
                 return Err(Error::Invalid(format!(

@@ -16,11 +16,7 @@ fn main() -> ExitCode {
 
     match args.first().map(String::as_str) {
         Some("run") => run(&args, &dir),
-        Some("reset-timer") if dir.join("reset-timer.fail").exists() => {
-            eprintln!("no resettable schedule named that member");
-            ExitCode::from(2)
-        }
-        Some("reset-timer") => ExitCode::SUCCESS,
+        Some("reset-timer") => reset_timer(&args, &dir),
         Some("health") => {
             println!("fake-provider: 1 identity bound, 0% utilized");
             ExitCode::SUCCESS
@@ -28,6 +24,20 @@ fn main() -> ExitCode {
         Some(other) => fake::refuse(&format!("unknown oneagentgraph command '{other}'")),
         None => fake::refuse("oneagentgraph takes a command"),
     }
+}
+
+/// `oneagentgraph reset-timer RUN MEMBER`
+fn reset_timer(args: &[String], dir: &std::path::Path) -> ExitCode {
+    for (at, name) in [(1, "RUN"), (2, "MEMBER")] {
+        if let Err(refusal) = fake::required(args, at, name) {
+            return refusal;
+        }
+    }
+    if dir.join("reset-timer.fail").exists() {
+        eprintln!("no resettable schedule named that member");
+        return ExitCode::from(2);
+    }
+    ExitCode::SUCCESS
 }
 
 /// `oneagentgraph run GRAPH --task T --output json [--label k=v]...`
@@ -99,8 +109,16 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     emit(args, &node, step.as_deref(), &task);
 
     if let Some(code) = fake::node_script(dir, &key, "fail") {
+        // A scripted code that is not a code is a test that means something
+        // other than what it says. Defaulting it to 1 would quietly pass the
+        // scenario the author did not write.
+        let Ok(code) = code.parse::<u8>() else {
+            fake::fail(&format!(
+                "{key}.fail holds {code:?}, which is not an exit code"
+            ));
+        };
         eprintln!("the node failed its gate");
-        return ExitCode::from(code.parse::<u8>().unwrap_or(1));
+        return ExitCode::from(code);
     }
     ExitCode::SUCCESS
 }

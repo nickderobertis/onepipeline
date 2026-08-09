@@ -8,6 +8,12 @@
 //!
 //! Ported from `test_live_edit_e2e`.
 
+// llmlint: ignore-file[e2e_not_mocked] `World` substitutes the two *siblings* at their
+// subprocess boundary and nothing inside the crate under test, which is driven as a real
+// compiled binary. There is no alternative today: both sibling crates are at their own
+// interface-only stage and refuse every invocation with exit 70. `harness.rs` carries the
+// same suppression and the full rationale.
+
 use crate::harness::{agent, human, lifecycle, plan_of, World, REFUSED};
 use serde_json::{json, Value};
 
@@ -540,7 +546,7 @@ fn edits_accepted_but_not_reconciled_in_time_are_reported_queued() {
     std::fs::write(&cursor, "99").expect("the cursor is advanced");
 
     // llmlint: ignore-end[tests_mirror_real_usage]
-    let reply = world.run_with_stdin_timeout(
+    let reply = world.run_with_stdin_on(
         command,
         &envelope(json!([{"op": "context", "id": "slow", "note": "a note"}])),
     );

@@ -142,7 +142,18 @@ impl RunView {
         let launch: LaunchRecord = ledger::read_json(&paths.launch())?;
         let mut events = crate::journal::read(&paths.journal());
         crate::journal::merge_order(&mut events);
-        let state = projection::fold(&events);
+        let mut state = projection::fold(&events);
+        // A view resolves cross-DAG edges the same way the round does, so a
+        // consumer this run is about to dispatch is not reported blocked to the
+        // person deciding whether to intervene. Reading only: rendering a run
+        // records nothing about it.
+        state.cross_dag = crate::crossdag::resolve_quietly(
+            &paths
+                .dir
+                .parent()
+                .map_or_else(ledger::runs_root, Path::to_path_buf),
+            &state.graph,
+        );
         Ok(Self {
             paths: paths.clone(),
             launch,

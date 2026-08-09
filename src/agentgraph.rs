@@ -116,16 +116,23 @@ impl GraphRun {
         Box::new(
             BufReader::new(stdout)
                 .lines()
-                .map_while(std::result::Result::ok)
-                .filter(|line| !line.trim().is_empty())
-                .filter_map(|line| match serde_json::from_str::<Envelope>(&line) {
-                    Ok(envelope) => Some(envelope),
-                    Err(_) => {
-                        crate::vcs::report_skipped("oneagentgraph", 1);
-                        None
-                    }
-                })
-                .map(Ok),
+                .filter_map(|line| match line {
+                    // A stream that broke is not a stream that ended. Read as the same
+                    // thing, a relay stops mid-run and reports a clean finish, and the
+                    // turns after the break are lost with nothing saying so.
+                    Err(error) => Some(Err(sibling(format!(
+                        "reading `{} run` output: {error}",
+                        binary()
+                    )))),
+                    Ok(line) if line.trim().is_empty() => None,
+                    Ok(line) => match serde_json::from_str::<Envelope>(&line) {
+                        Ok(envelope) => Some(Ok(envelope)),
+                        Err(_) => {
+                            crate::vcs::report_skipped("oneagentgraph", 1);
+                            None
+                        }
+                    },
+                }),
         )
     }
 

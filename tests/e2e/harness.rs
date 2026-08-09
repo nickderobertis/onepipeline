@@ -28,15 +28,19 @@ use std::process::{Command, Output, Stdio};
 
 use serde_json::Value;
 
+// The exit codes are the crate's own, not a second copy of them. A suite that
+// restated the numbers would keep passing against a build that had changed one,
+// which is exactly the drift these journeys exist to catch.
+
 /// The exit code a refused or malformed command carries.
-pub const REFUSED: i32 = 2;
+pub const REFUSED: i32 = onepipeline::error::EXIT_REFUSED;
 
 /// The exit code for accepted-but-not-yet-reconciled edits, and for a round
 /// that settled unfinished.
-pub const QUEUED: i32 = 1;
+pub const QUEUED: i32 = onepipeline::error::EXIT_QUEUED;
 
 /// The exit code for a run nothing is driving.
-pub const NOTHING_DRIVING: i32 = 3;
+pub const NOTHING_DRIVING: i32 = onepipeline::error::EXIT_NOTHING_DRIVING;
 
 /// clap's exit code for a usage error.
 pub const USAGE_ERROR: i32 = 2;
@@ -124,11 +128,14 @@ impl World {
 
     /// Run a command with an envelope on stdin.
     pub fn run_with_stdin(&self, args: &[&str], stdin: &str) -> Run {
-        self.run_with_stdin_timeout(self.cmd(args), stdin)
+        self.run_with_stdin_on(self.cmd(args), stdin)
     }
 
     /// Run an already-configured command with an envelope on stdin.
-    pub fn run_with_stdin_timeout(&self, command: Command, stdin: &str) -> Run {
+    ///
+    /// The caller configures the command — an environment override, most often
+    /// the reply timeout — and this only feeds it and waits.
+    pub fn run_with_stdin_on(&self, command: Command, stdin: &str) -> Run {
         use std::io::Write;
         let mut command = command;
         let mut child = command

@@ -4,6 +4,12 @@
 //!
 //! Ported from `test_plan_e2e`, `test_single_node_plan_e2e`, and `test_scheduling_e2e`.
 
+// llmlint: ignore-file[e2e_not_mocked] `World` substitutes the two *siblings* at their
+// subprocess boundary and nothing inside the crate under test, which is driven as a real
+// compiled binary. There is no alternative today: both sibling crates are at their own
+// interface-only stage and refuse every invocation with exit 70. `harness.rs` carries the
+// same suppression and the full rationale.
+
 use crate::harness::{agent, human, plan_of, World, QUEUED, REFUSED};
 use serde_json::json;
 
@@ -55,6 +61,91 @@ fn a_cross_dag_dependency_is_accepted_and_gates_only_the_node_that_names_it() {
             .all(|event| event["labels"]["node"] != "consume"),
         "a node gated by an unresolved upstream was dispatched anyway"
     );
+}
+
+/// The graph a dispatch was launched with, for each node the doubles saw.
+fn graphs_dispatched(world: &World) -> Vec<(String, String)> {
+    world
+        .invocations()
+        .iter()
+        .filter(|invocation| {
+            invocation["tool"] == "oneagentgraph" && invocation["args"][0] == "run"
+        })
+        .filter_map(|invocation| {
+            let graph = invocation["args"][1].as_str()?.to_string();
+            let node = invocation["args"]
+                .as_array()?
+                .iter()
+                .filter_map(|arg| arg.as_str())
+                .find_map(|arg| arg.strip_prefix("node="))?
+                .to_string();
+            Some((node, graph))
+        })
+        .collect()
+}
+
+#[test]
+fn a_node_dispatches_under_the_agent_graph_it_names() {
+    let world = World::new("plan-nodegraph");
+    // A config of its own, so the assertion cannot pass on the default.
+    let special = world.root.join("special-node-scope.yaml");
+    std::fs::copy(
+        crate::harness::repo_file("graphs/node-scope.yaml"),
+        &special,
+    )
+    .expect("the override config is written");
+
+    let mut overridden = agent("special", &[]);
+    overridden["agent_graph"] = json!(special.to_string_lossy());
+    settle(&world, "graphs", vec![agent("ordinary", &[]), overridden]);
+
+    let dispatched = graphs_dispatched(&world);
+    let graph_of = |node: &str| {
+        dispatched
+            .iter()
+            .find(|(id, _)| id == node)
+            .unwrap_or_else(|| panic!("{node} never dispatched: {dispatched:?}"))
+            .1
+            .clone()
+    };
+    assert_eq!(graph_of("special"), special.to_string_lossy());
+    // The node that named none still gets the shipped default.
+    assert!(
+        graph_of("ordinary").ends_with("node-scope.yaml")
+            && graph_of("ordinary") != special.to_string_lossy(),
+        "the override leaked onto a node that never asked for it: {dispatched:?}"
+    );
+}
+
+#[test]
+fn a_node_pinned_to_an_executor_the_rules_do_not_declare_is_refused_by_name() {
+    let world = World::new("plan-pin");
+    let rules = world.root.join("only-local.yaml");
+    std::fs::write(
+        &rules,
+        "executors: [{name: local, type: local}]\nrules: [{use: local}]\n",
+    )
+    .expect("the rules are written");
+
+    let mut pinned = agent("build", &[]);
+    // Naming where the work runs is the planner deciding it. A pin nothing
+    // declares is a scheduling decision that can never be honoured, so it fails
+    // before any provider time is spent rather than silently falling back.
+    pinned["executor"] = json!("a-cluster-nobody-declared");
+    let path = world.plan("pinned", &plan_of("pinned", vec![pinned]));
+    let mut command = world.cmd(&["round", "run", "pinned"]);
+    command.env("ONEPIPELINE_EXECUTOR_RULES", &rules);
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+    let refused = command.output().expect("the binary runs");
+    let said = String::from_utf8_lossy(&refused.stderr).to_string();
+    assert!(
+        !refused.status.success(),
+        "the round dispatched anyway: {said}"
+    );
+    assert!(said.contains("a-cluster-nobody-declared"), "{said}");
+    assert!(said.contains("do not declare"), "{said}");
 }
 
 #[test]

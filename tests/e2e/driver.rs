@@ -3,6 +3,12 @@
 //!
 //! Ported from `test_orchestrate_launch_e2e`, `test_attach_settles_e2e`, `test_run_ownership_e2e`, `test_round_ownership_e2e`, `test_run_adoption_e2e`, `test_relaunch_seed_e2e`, and the driver-liveness half of `test_liveness_e2e`.
 
+// llmlint: ignore-file[e2e_not_mocked] `World` substitutes the two *siblings* at their
+// subprocess boundary and nothing inside the crate under test, which is driven as a real
+// compiled binary. There is no alternative today: both sibling crates are at their own
+// interface-only stage and refuse every invocation with exit 70. `harness.rs` carries the
+// same suppression and the full rationale.
+
 use crate::harness::{agent, human, plan_of, World, NOTHING_DRIVING, REFUSED};
 use serde_json::json;
 
@@ -138,6 +144,34 @@ fn a_live_driver_that_has_stopped_writing_reads_as_parked_rather_than_dead() {
 }
 
 #[test]
+fn a_parked_run_is_adoptable_as_much_as_a_dead_one_is() {
+    let world = World::new("driver-adopt-parked");
+    // Its driver is alive and holding, so this is the *other* undriven verdict:
+    // nothing has proved the process gone, and nothing is happening either.
+    world.script("driver.wait", "hold");
+    let run = start_detached(&world, "idle", vec![agent("build", &[])]);
+    world.until("the run to be reported parked", |world| {
+        let mut status = world.cmd(&["status", &run]);
+        status.env("ONEPIPELINE_PARKED_AFTER_SECONDS", "1");
+        let out = status.output().expect("the binary runs");
+        String::from_utf8_lossy(&out.stdout).contains("PARKED")
+    });
+
+    // The hint a parked run prints has to be a hint that works: an `adopt` that
+    // refused here would leave the only offered way back closed.
+    let mut adopt = world.cmd(&["adopt", &run]);
+    adopt.env("ONEPIPELINE_PARKED_AFTER_SECONDS", "1");
+    let adopted = adopt.output().expect("the binary runs");
+    assert!(
+        !String::from_utf8_lossy(&adopted.stderr).contains("still being driven"),
+        "a parked run refused the adoption its own status line offers: {}",
+        String::from_utf8_lossy(&adopted.stderr)
+    );
+    assert_eq!(world.events_of(&run, "driver-adopted").len(), 1);
+    world.release("driver.go");
+}
+
+#[test]
 fn a_dead_driver_reads_as_driver_dead_and_adopt_is_the_way_back() {
     let world = World::new("driver-dead");
     let run = start_detached(&world, "orphaned", vec![human("approve", &[])]);
@@ -264,6 +298,28 @@ fn the_owner_stops_its_own_run_without_force() {
 
     world.run(&["stop", &run]).exited(0).out_has("[mine]");
     assert_eq!(world.events_of(&run, "run-stopped").len(), 1);
+
+    // Recording the stop is not stopping it. The ledger says stopped either
+    // way — `status` reads `run-stopped` and reports the run undriven without
+    // ever looking at a process — so the ledger cannot be the evidence here.
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("nothing is driving this run");
+
+    // The process itself, where this host can see one. Asserted under `cfg`
+    // rather than through a path that simply does not exist elsewhere: a probe
+    // that is vacuously true off Linux would read as coverage and prove
+    // nothing.
+    #[cfg(target_os = "linux")]
+    {
+        let driver = world.run_json(&run, "launch.json")["pid"]
+            .as_u64()
+            .expect("a recorded driver");
+        world.until("the driver process to end", |_| {
+            !std::path::Path::new(&format!("/proc/{driver}")).exists()
+        });
+    }
     world.release("build.go");
 }
 

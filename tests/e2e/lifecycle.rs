@@ -5,6 +5,12 @@
 //!
 //! Ported from the lifecycle-node composition halves of `test_lifecycle_e2e`.
 
+// llmlint: ignore-file[e2e_not_mocked] `World` substitutes the two *siblings* at their
+// subprocess boundary and nothing inside the crate under test, which is driven as a real
+// compiled binary. There is no alternative today: both sibling crates are at their own
+// interface-only stage and refuse every invocation with exit 70. `harness.rs` carries the
+// same suppression and the full rationale.
+
 use crate::harness::{lifecycle, plan_of, World};
 use serde_json::json;
 
@@ -15,6 +21,27 @@ fn settle(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
         !world.events_of(name, "round-finished").is_empty()
     });
     name.to_string()
+}
+
+/// Run one round from this test rather than from the driver, and keep what it
+/// said.
+///
+/// The orchestrator member runs `round run` as a subprocess of a subprocess, so
+/// its diagnostics reach no descriptor a test can read. This is the same command
+/// that member runs, with its stderr in hand.
+fn driven(
+    world: &World,
+    name: &str,
+    nodes: Vec<serde_json::Value>,
+) -> (String, crate::harness::Run) {
+    world.script("driver.wait", "hold");
+    let path = world.plan(name, &plan_of(name, nodes));
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+    let round = world.run(&["round", "run", name]);
+    world.release("driver.go");
+    (name.to_string(), round)
 }
 
 /// The `onevcs` invocations, in order.
@@ -328,6 +355,63 @@ fn an_explicit_pin_the_planner_wrote_wins_over_a_branch_a_dispatch_preserved() {
 }
 
 #[test]
+fn a_step_dispatches_under_its_own_agent_graph_before_its_nodes() {
+    let world = World::new("lifecycle-graphs");
+    let node_graph = world.root.join("workstream-graph.yaml");
+    let step_graph = world.root.join("one-step-graph.yaml");
+    for path in [&node_graph, &step_graph] {
+        std::fs::copy(crate::harness::repo_file("graphs/node-scope.yaml"), path)
+            .expect("the override config is written");
+    }
+
+    // The node names one for its whole workstream; one step overrides it. The
+    // narrower statement wins, which is what makes a per-step override worth
+    // stating at all.
+    let node = json!({
+        "id": "service",
+        "repo": "owner/service",
+        "agent_graph": node_graph.to_string_lossy(),
+        "steps": [
+            {"id": "implement", "persona": "engineer", "task": "## What\nimplement"},
+            {
+                "id": "review",
+                "persona": "reviewer",
+                "task": "## What\nreview",
+                "deps": ["implement"],
+                "agent_graph": step_graph.to_string_lossy(),
+            },
+        ],
+    });
+    settle(&world, "stepgraphs", vec![node]);
+
+    let by_step: Vec<(String, String)> = world
+        .invocations()
+        .iter()
+        .filter(|call| call["tool"] == "oneagentgraph" && call["args"][0] == "run")
+        .filter_map(|call| {
+            let graph = call["args"][1].as_str()?.to_string();
+            let step = call["args"]
+                .as_array()?
+                .iter()
+                .filter_map(|arg| arg.as_str())
+                .find_map(|arg| arg.strip_prefix("step="))?
+                .to_string();
+            Some((step, graph))
+        })
+        .collect();
+    let graph_of = |step: &str| {
+        by_step
+            .iter()
+            .find(|(id, _)| id == step)
+            .unwrap_or_else(|| panic!("{step} never dispatched: {by_step:?}"))
+            .1
+            .clone()
+    };
+    assert_eq!(graph_of("implement"), node_graph.to_string_lossy());
+    assert_eq!(graph_of("review"), step_graph.to_string_lossy());
+}
+
+#[test]
 fn a_lifecycle_node_carries_the_pins_the_plan_states_into_its_session() {
     let world = World::new("lifecycle-pins");
     let mut node = lifecycle("service", &[]);
@@ -370,9 +454,14 @@ fn a_lifecycle_node_carries_the_pins_the_plan_states_into_its_session() {
 fn a_session_stream_that_cannot_be_read_is_reported_and_does_not_fail_the_node() {
     let world = World::new("lifecycle-noevents");
     world.script("events.fail", "");
-    let run = settle(&world, "silentstream", vec![lifecycle("service", &[])]);
+    let run = driven(&world, "silentstream", vec![lifecycle("service", &[])]);
+
+    // Said out loud. A silent gap in the merged store is what makes a later
+    // reader think nothing happened.
+    run.1.err_has("cannot read session").err_has("events");
 
     // The evidence is missing, not the result: the node published and settled.
+    let run = run.0;
     let result = world.run_json(&run, "round-01/result.json");
     assert_eq!(result["state"], "complete", "{result}");
     assert!(
@@ -388,7 +477,10 @@ fn a_session_stream_that_cannot_be_read_is_reported_and_does_not_fail_the_node()
 fn a_session_line_this_build_cannot_read_is_skipped_and_counted() {
     let world = World::new("lifecycle-futureline");
     world.script("events.unreadable", "");
-    let run = settle(&world, "futurestream", vec![lifecycle("service", &[])]);
+    let run = driven(&world, "futurestream", vec![lifecycle("service", &[])]);
+    run.1
+        .err_has("skipped 1 onevcs line(s) this build cannot read");
+    let run = run.0;
 
     // A sibling emitting a shape this build does not know must not stop the
     // node, and must not vanish silently either.

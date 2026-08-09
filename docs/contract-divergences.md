@@ -157,3 +157,37 @@ The proposal for the planner is whether `resume` should name the steps a
 continuation may keep, and if so whether the content/non-content distinction
 belongs in this crate's fold or in `onevcs`, which is the library that knows what
 its merge path refused.
+
+## 8. Cross-DAG edges are named by the schema and nowhere else
+
+The contract names the feature once, in the plan-schema sentence: "cross-DAG
+`run:<id>#<node>` refs". That fixes the *syntax* and nothing else. It does not
+say what resolves an edge, what an unresolvable one does, or what either records
+— and an edge that is only syntax is inert, because a reference nothing resolves
+blocks its consumer for ever.
+
+The semantics implemented are `ai-orchestrator`'s, which
+`docs/orchestration.md` states and which this crate's task named as the source
+being preserved:
+
+- An edge resolves by reading the referenced run's ledger. Only a `node-settled`
+  of `done` satisfies it; an unknown run, a node that has not settled, and one
+  that settled `failed` or `skipped` all leave the consumer **blocked**, never
+  failed, because the upstream may still arrive.
+- Resolution is re-read on every reconcile pass and afresh in every later round,
+  so an upstream that arrives after a consumer was blocked starts it in the next
+  round rather than parking the run.
+- On first resolution the consumer records how far the upstream had got
+  (`cross-dag-satisfied`, `{dependency, last_seq}`). If the upstream passes that
+  point afterwards the consumer reports it once per consumer
+  (`upstream-modified`, `{dependency, captured_last_seq, observed_last_seq}`)
+  and **does not re-run**: the work was correct when it was done, and repeating
+  it is the planner's judgement.
+- `last_seq` is the count of records in the upstream's merged store. A run is
+  written by several processes, so no single stream's `seq` describes it.
+
+Both kinds are wire strings, which divergence 6 already covers. The proposal for
+the planner is to state the four rules above in the contract — most of all
+*blocked-not-failed* and *reported-not-rerun*, which are the two a different
+implementation would most plausibly get wrong, and which no consumer of this
+crate can discover from the schema sentence alone.

@@ -5,6 +5,12 @@
 //!
 //! Ported from `test_boundary_retry_e2e`.
 
+// llmlint: ignore-file[e2e_not_mocked] `World` substitutes the two *siblings* at their
+// subprocess boundary and nothing inside the crate under test, which is driven as a real
+// compiled binary. There is no alternative today: both sibling crates are at their own
+// interface-only stage and refuse every invocation with exit 70. `harness.rs` carries the
+// same suppression and the full rationale.
+
 use crate::harness::{agent, plan_of, World};
 
 fn settle(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {

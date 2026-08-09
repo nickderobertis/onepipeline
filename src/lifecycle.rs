@@ -86,7 +86,7 @@ pub fn execute(
             workspace: WorkspaceSpec::VcsSession(request.clone()),
             cancel: cancel.clone(),
         };
-        let drained = engine::attempt(executor, &node.id, "worker", cancel, tx, &build);
+        let drained = engine::attempt(executor, &node.id, engine::Role::Worker, cancel, tx, &build);
         // The session the dispatch opened is what publication needs, whether or
         // not the step succeeded: a cancelled step's commits are preserved on
         // the branch it left behind.

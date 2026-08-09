@@ -50,6 +50,8 @@ pub const QUIET_WORKER: &str = "quiet-worker";
 pub const ROUND_BUDGET_EXCEEDED: &str = "round-budget-exceeded";
 /// A request a round boundary depends on was retried.
 pub const BOUNDARY_RETRIED: &str = "boundary-retried";
+/// A cross-DAG edge resolved, with how far its upstream had got when it did.
+pub const CROSS_DAG_SATISFIED: &str = "cross-dag-satisfied";
 /// A cross-DAG upstream advanced after its consumer recorded it.
 pub const UPSTREAM_MODIFIED: &str = "upstream-modified";
 /// The planner requested completion, independently of graph mutation.

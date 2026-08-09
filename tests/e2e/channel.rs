@@ -5,6 +5,12 @@
 //!
 //! Ported from `test_channel_e2e`.
 
+// llmlint: ignore-file[e2e_not_mocked] `World` substitutes the two *siblings* at their
+// subprocess boundary and nothing inside the crate under test, which is driven as a real
+// compiled binary. There is no alternative today: both sibling crates are at their own
+// interface-only stage and refuse every invocation with exit 70. `harness.rs` carries the
+// same suppression and the full rationale.
+
 use crate::harness::{agent, human, plan_of, World, REFUSED};
 
 /// Start a run detached and wait until its first round is open.
@@ -46,6 +52,61 @@ fn a_surface_is_queued_sent_and_then_read_exactly_once() {
     assert_eq!(again.json()["surface"], serde_json::Value::Null);
 
     world.release("build.go");
+}
+
+#[test]
+fn a_surface_left_over_from_a_finished_round_is_discarded_rather_than_delivered() {
+    let world = World::new("channel-stale");
+    world.script("flaky.wait", "hold");
+    world.script("flaky.fail", "1");
+    let run = running(&world, "stale", vec![agent("flaky", &[])]);
+
+    // Queued while round one is the round that is running.
+    world
+        .run(&[
+            "surface",
+            &run,
+            "--kind",
+            "check-in",
+            "--message",
+            "from round one",
+        ])
+        .exited(0);
+    world.release("flaky.go");
+    world.until("round one to finish", |world| {
+        !world.events_of(&run, "round-finished").is_empty()
+    });
+
+    // Round two, held open so the read below happens inside it.
+    std::fs::remove_file(world.fakes.join("flaky.go")).expect("the rendezvous is re-armed");
+    world.run(&["round", "next", &run]).exited(0);
+    let mut second = world
+        .cmd(&["round", "run", &run])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the round starts");
+    world.until("round two to open", |world| {
+        world.events_of(&run, "round-started").len() >= 2
+    });
+
+    // It describes work in a round that has finished. Delivering it would send
+    // the planner to look at a node this round is not running, and the check-in
+    // that replaces it describes the round that is.
+    let read = world.run(&["next", &run]);
+    read.exited(0);
+    assert!(
+        !read.stdout.contains("from round one"),
+        "a surface from a finished round was delivered: {}",
+        read.stdout
+    );
+    assert!(
+        world.events_of(&run, "planner-surfaced").is_empty(),
+        "a stale surface was consumed"
+    );
+
+    world.release("flaky.go");
+    second.wait().expect("the round finishes");
 }
 
 #[test]

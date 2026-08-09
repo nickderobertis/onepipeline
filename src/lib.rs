@@ -49,6 +49,7 @@ pub mod views;
 // a promise this crate did not make. The binary reaches them through
 // [`run`](crate::run).
 mod agentgraph;
+mod crossdag;
 mod driver;
 mod edits;
 mod engine;

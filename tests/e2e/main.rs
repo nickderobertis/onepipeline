@@ -20,6 +20,7 @@ mod harness;
 
 mod boundary;
 mod channel;
+mod crossdag;
 mod driver;
 mod journal;
 mod lifecycle;

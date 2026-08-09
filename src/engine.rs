@@ -105,6 +105,13 @@ impl RoundResult {
 }
 
 /// The shape a round result is written and read as.
+// llmlint: ignore-block[invalid_states_unrepresentable] `ok` beside `state` is the wire's
+// shape, not a state this crate can hold. The type is private, its only constructor is the
+// `From<RoundResult>` below — which computes `ok` from `state` — and the `From` back drops
+// the field, so a file claiming `state: failed, ok: true` is normalised rather than
+// believed. Removing `ok` from the wire is a different change: `round-NN/result.json` is a
+// machine-read artifact whose consumers filter on it, so it would need a schema version and
+// a golden. Raise that with the planner who owns the contract.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RoundResultWire {
@@ -114,6 +121,8 @@ struct RoundResultWire {
     ok: bool,
     nodes: Vec<NodeResult>,
 }
+
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 impl From<RoundResult> for RoundResultWire {
     fn from(result: RoundResult) -> Self {
@@ -291,9 +300,17 @@ fn converge(
     let budget = Duration::from_secs(launch.round_budget);
     let stall_after = Duration::from_secs(stall_after_seconds());
     let mut budget_spent = false;
+    let mut upstreams = crate::crossdag::Observer::of_run(paths, state);
 
     loop {
         reconcile_edits(paths, journal, state, &channel, &mut in_flight)?;
+
+        // Another run's ledger is the only thing that can answer a cross-DAG
+        // edge, and it is written by a process this one does not control — so
+        // the answer is re-read on every pass rather than taken once. This is
+        // also where an upstream that moved past what a consumer recorded is
+        // noticed, which cannot happen at any single moment in the round.
+        state.cross_dag = upstreams.resolve(&state.graph, paths, round, journal)?;
 
         if !budget_spent && started.elapsed() > budget {
             budget_spent = true;
@@ -369,7 +386,7 @@ fn converge(
                 journal::BOUNDARY_RETRIED,
                 journal::labels(&paths.run, Some(round), Some(&retry.node)),
                 journal::payload(&[
-                    ("role", json!(retry.role)),
+                    ("role", json!(retry.role.as_str())),
                     ("attempt", json!(retry.attempt)),
                     ("attempts", json!(retry.attempts)),
                     ("backoff_seconds", json!(retry.backoff_seconds)),
@@ -655,7 +672,7 @@ fn execute_direct(
         workspace: WorkspaceSpec::Path(project_dir()),
         cancel: cancel.clone(),
     };
-    attempt(executor, &node.id, "worker", cancel, tx, &request).settlement
+    attempt(executor, &node.id, Role::Worker, cancel, tx, &request).settlement
 }
 
 /// How far one attempt got.
@@ -700,7 +717,7 @@ pub(crate) struct Drained {
 pub(crate) fn attempt(
     executor: &dyn Executor,
     node: &str,
-    role: &str,
+    role: Role,
     cancel: &CancellationToken,
     tx: &Sender<Message>,
     request: &dyn Fn() -> DispatchRequest,
@@ -754,7 +771,7 @@ pub(crate) fn attempt(
         }
         let _ = tx.send(Message::Retried(Box::new(BoundaryRetry {
             node: node.to_string(),
-            role: role.to_string(),
+            role,
             attempt,
             attempts,
             backoff_seconds: backoff.as_secs(),
@@ -766,12 +783,34 @@ pub(crate) fn attempt(
     last
 }
 
+/// Which side of a node's dispatch was retried.
+///
+/// One variant, because the boundary retry guards exactly one side today: a
+/// dispatch that produced nothing. The `pr-author` draft is off the publication
+/// path and falls back deterministically rather than being asked again, and a
+/// judge side is the sibling's to retry. The enum is here rather than a string
+/// so the journal's word has one source and a second side is additive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Role {
+    /// The node's own work.
+    Worker,
+}
+
+impl Role {
+    /// The word the journal records this role as.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Worker => "worker",
+        }
+    }
+}
+
 /// One retried attempt, as the journal records it.
 pub(crate) struct BoundaryRetry {
     /// The node whose dispatch was asked again.
     pub node: String,
     /// Which side was retried.
-    pub role: String,
+    pub role: Role,
     /// Which attempt this follows.
     pub attempt: u32,
     /// How many attempts the budget allows.
@@ -1176,7 +1215,21 @@ pub fn round_next(paths: &RunPaths) -> Result<Option<u64>> {
     // human, a parked node, an unresolved upstream — so opening one would
     // dispatch nothing, settle identically, and do it again forever. The run
     // waits instead, which is the state `results` and `status` already report.
-    let ready = crate::graph::derive(&next, &BTreeMap::new(), &|_| None);
+    // Resolved the same way the round would, and for the same reason: a next
+    // round whose only startable work is gated by an upstream that has *already*
+    // arrived would otherwise be judged empty, and the run would park on work it
+    // could start immediately. Reading only — the transition records the round it
+    // opens, and an edge's own evidence belongs to the round that acts on it.
+    let upstreams = crate::crossdag::resolve_quietly(
+        &paths
+            .dir
+            .parent()
+            .map_or_else(ledger::runs_root, std::path::Path::to_path_buf),
+        &next,
+    );
+    let ready = crate::graph::derive(&next, &BTreeMap::new(), &|dependency| {
+        upstreams.get(dependency).copied()
+    });
     if !ready.values().any(|status| *status == NodeStatus::Ready) {
         println!(
             "{}",
