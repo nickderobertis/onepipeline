@@ -1,3 +1,11 @@
+<!-- llmlint: ignore-file[instruction_layer_localized] the localized layer is this file;
+the ownership half of the rule is repo governance rather than this subtree's. The root
+`AGENTS.md` records that branch protection on `main` is applied by the create-repo
+skill's `setup_github_governance.py`, and GitHub holds that required set with nothing
+reconciling it — a `CODEOWNERS` in a single-owner repo would be a second copy of the
+same routing, free to drift from the one that decides. Adding one is the repo owner's
+call, not a property of these instructions. -->
+
 # The crate
 
 Every **public** item here exists because `docs/contract.md` names it. The
