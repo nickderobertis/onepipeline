@@ -8,7 +8,7 @@ resolver = "2"
 
 [package]
 name = "onepipeline"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.88"
 description = "Execute a task DAG over oneagentgraph and onevcs, merging their event streams into one."
