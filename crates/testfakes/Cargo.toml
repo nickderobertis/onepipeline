@@ -1,0 +1,30 @@
+# Test-support only: the two sibling CLIs `onepipeline` composes, as real
+# executables a test can drive it against.
+#
+# A separate workspace member rather than extra `[[bin]]`s on the crate itself,
+# because these must never ship in the published artifact. `cargo test` builds
+# every workspace member's binaries, so `tests/e2e` finds them beside the
+# `onepipeline` binary it already resolves through cargo.
+[package]
+name = "onepipeline-testfakes"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.88"
+publish = false
+license = "MIT"
+description = "Subprocess doubles for oneagentgraph and onevcs, used by onepipeline's e2e tests."
+
+[dependencies]
+serde_json = "1"
+
+[[bin]]
+name = "fake-oneagentgraph"
+path = "src/bin/fake-oneagentgraph.rs"
+
+[[bin]]
+name = "fake-onevcs"
+path = "src/bin/fake-onevcs.rs"
+
+[lib]
+name = "onepipeline_testfakes"
+path = "src/lib.rs"

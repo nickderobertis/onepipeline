@@ -34,10 +34,13 @@ never a unilateral edit.
 and drives them through the public types, so the doc and the types cannot drift.
 Adding a contract type without extending that test leaves the doc unproven.
 
-The crate implements that surface and **nothing behind it**: every command
-parses and then refuses, so anything published makes that promise and no other.
-[`docs/contract-divergences.md`](docs/contract-divergences.md) records every
-place the contract could not be compiled exactly as written.
+The crate implements that surface and **nothing beyond it**: the engine behind
+it is private, so anything published promises what the contract says and no
+more. [`docs/contract-divergences.md`](docs/contract-divergences.md) records
+every place the contract could not be compiled exactly as written, and what the
+planner who owns the contract ruled on each. That file is the status; do not
+restate it anywhere, here included. A new divergence goes there as a proposal
+and is never resolved unilaterally.
 
 ## Stack and composition
 
@@ -53,8 +56,8 @@ place the contract could not be compiled exactly as written.
   are attached for manual download only. asdf / direnv — the committed
   `rust-toolchain.toml`, `Cargo.lock`, and `package-lock.json` already pin the
   workspace. A benchmark tier — nothing here is a hot path yet. What each
-  *project* deliberately does without is recorded with that project, in
-  [`src/AGENTS.md`](src/AGENTS.md) and [`npm/AGENTS.md`](npm/AGENTS.md).
+  *project* deliberately does without is recorded with that project, under its
+  own **Deliberately absent** heading.
 
 ## Command surface
 

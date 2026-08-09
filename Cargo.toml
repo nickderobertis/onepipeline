@@ -1,8 +1,9 @@
 [workspace]
-# One member today — the crate at the root. Declared explicitly so a second
-# crate (a future engine, a test-support crate) joins the graph by being listed
-# here rather than by changing what `--workspace` means.
-members = ["."]
+# The crate at the root, plus the test-support crate whose binaries stand in for
+# the two siblings at their subprocess boundary. Members are listed explicitly so
+# a new one joins the graph deliberately rather than by changing what
+# `--workspace` means.
+members = [".", "crates/testfakes"]
 resolver = "2"
 
 [package]
@@ -62,9 +63,26 @@ thiserror = "2"
 oneagentgraph = { version = "0.1", git = "https://github.com/nickderobertis/oneagentgraph.git", rev = "e88f70aabf3f60ae380c26228de640f1e5af2441" }
 onevcs = { version = "0.1", git = "https://github.com/nickderobertis/onevcs.git", rev = "131bad3ee4d6ee95754d909d8b460f2da4258b63" }
 
-[dev-dependencies]
-assert_cmd = "2"
-predicates = "3"
+# Process liveness is the one host fact this crate cannot get from `std` on the
+# MSRV floor, and every `DRIVER DEAD` / `PARKED` verdict rests on it. Both are
+# already in the dependency graph transitively; naming them here makes the
+# platform call explicit rather than incidental.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_System_Console",
+  "Win32_System_Threading",
+] }
+
+# No dev-dependencies. The e2e suite drives the compiled binary as a subprocess
+# with `std::process` and reads what it wrote, so it needs no command-assertion
+# crate — `tests/e2e/harness.rs` is the whole of it. The subprocess doubles for
+# the two siblings are a workspace member rather than a dependency: a dev-dep
+# would build that crate's *library*, and what the suite needs is its binaries,
+# which the harness builds on demand.
 
 [[test]]
 name = "e2e"

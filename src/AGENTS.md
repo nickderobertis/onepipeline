@@ -1,33 +1,50 @@
 # The crate
 
-Every public item here exists because `docs/contract.md` names it, and the crate
-is at the **interface-only** stage: the surface compiles, and nothing behind it
-does anything.
+Every **public** item here exists because `docs/contract.md` names it. The
+engine behind that surface is private — `mod engine`, `mod driver`, `mod edits`,
+`mod ledger`, and the rest — so a consumer can only reach what the contract
+promised.
 
-Rules while that holds:
+Rules:
 
-- **No method bodies** beyond derives, trivial field constructors, and serde
-  `default` helpers. A byte-size parse, a predicate evaluation, a capacity probe,
-  a graph walk — all of it belongs to the implementation change, not here.
 - **Add no public item the contract does not name.** A `RunId` newtype, a
   builder, a convenience accessor, an extra enum variant: each is interface
-  drift, and a consumer that pins to it gets a breaking change when the
-  implementation lands.
-- **`main` parses and refuses.** Exit code 70 (`EX_SOFTWARE`) is scaffolding kept
-  clear of every code the contract spends — `0` / `1` / `2` are `reply`'s
-  applied / queued / refused verdicts and `3` is "nothing is driving the run". It
-  goes away with the implementation.
+  drift, and a consumer that pins to it gets a breaking change. When the engine
+  needs a type, it goes in a private module.
 - **Optionality is a decision, not a default.** Where the contract states a
   default or shows a field as optional, that reading is encoded. Where it neither
   states a default nor marks a field optional, the field is *required* — do not
   quietly relax one to make a plan or a rules file parse.
 - **`#![warn(missing_docs)]` with `clippy -D warnings` means undocumented public
-  items fail the gate.** That is deliberate: at this stage the docs are most of
-  what the crate delivers.
+  items fail the gate.**
+- **Exit codes are spent.** `0` / `1` / `2` are `reply`'s applied / queued /
+  refused verdicts, `3` is "nothing is driving the run", and a round carries `0`
+  for a complete graph and `1` for one that settled unfinished. Do not mint a
+  fifth without the contract naming it.
 
-The llmlint directives in these files name which rule above forbids their fix.
-They are exemptions for this stage, not permanent ones: revisit each with the
-implementation rather than widening its directive.
+## Where the engine lives
+
+- `plan.rs` reads a plan file; `graph.rs` decides whether the graph it describes
+  is legal and what may run now. Both halves of "is this input acceptable" are
+  there, at the trust boundary.
+- `engine.rs` is the reconcile loop and the round transition — the **single
+  writer**, holding the run's ownership lock.
+- `edits.rs` is the one validator both the submission check and the reconciler
+  run, which is what makes "applied or rejected with a reason" true.
+- `projection.rs` folds the journal into the plan of record. A round's
+  `plan.json` is its launch record and is never rewritten.
+- `agentgraph.rs` and `vcs.rs` are the sibling CLIs, reached as subprocesses.
+  Nothing here reimplements what they own.
+
+Two ordering rules in `engine.rs` are load-bearing and easy to undo:
+
+- `start_ready` runs **before** the terminal check. A ready human action derives
+  as `waiting`, a settled status, so a terminal check that ran first would end
+  the round with that settlement unrecorded — and a later `attest` would have
+  nothing to validate against.
+- `attest` and `complete` are legal at a round boundary; every other command
+  needs a live round. Refusing an attestation between rounds strands every
+  human-gated run, because no later round can open until the action is recorded.
 
 ## The siblings
 
@@ -51,13 +68,23 @@ secret unset until the siblings publish.
 
 ## Deliberately absent
 
-There is no `typecheck` target. `cargo clippy --all-targets -- -D warnings`
-*is* this crate's type check and already runs as `lint`, so a separate target
+There is no `typecheck` target. The clippy pass `lint` already runs, over every
+target and denying warnings, *is* this crate's type check, so a separate target
 would re-compile the tree to learn nothing new.
 
 ## Tests
 
 `tests/contract.rs` reads `docs/contract.md` itself, so a type added here without
 a matching assertion there leaves the document unproven. Extend it in the same
-change. `tests/e2e/main.rs` drives the compiled binary, so a new argument form is
-not accepted until a test invokes it the way a user would.
+change.
+
+`tests/e2e/` drives the compiled binary against **real executables** standing in
+for the two siblings, built from `crates/testfakes` and scripted per test from a
+directory (`build.fail`, `build.wait` + `build.go` to hold a dispatch open,
+`service.pr-author.fail` to fail one persona's dispatch only). A separate
+workspace member so they can never ship; `tests/e2e/harness.rs` builds them on
+demand, because a package-scoped build — `cargo llvm-cov` runs one — does not
+build another member's binaries.
+
+The doubles are the only honest way to test this crate: it *is* a composition
+layer, so a test that stubbed the seam would be testing nothing.

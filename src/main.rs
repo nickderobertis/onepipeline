@@ -1,47 +1,31 @@
 //! The `onepipeline` binary.
 //!
-//! At the interface-only stage this parses the full command surface from
-//! `docs/contract.md` and then refuses: no run starts, no view reports, and no
-//! subcommand does its work. The refusal is loud and carries an exit code the
-//! contract has not spent, so a caller that wired this in early fails visibly
-//! rather than reading an empty stream as a run that settled.
+//! Argument parsing, one call into the library, and an exit code. Every failure
+//! carries the code `docs/contract.md` assigns it — `0` applied, `1` queued or
+//! unfinished, `2` refused or malformed, `3` nothing is driving the run — so a
+//! caller reads the outcome from the status rather than from the text.
+
+use std::process::ExitCode;
 
 use clap::Parser;
-use onepipeline::cli::{ChannelCommand, Cli, Command, RoundCommand};
-use onepipeline::error::EXIT_NOT_IMPLEMENTED;
+use onepipeline::cli::Cli;
 
-fn main() {
+fn main() -> ExitCode {
     let cli = Cli::parse();
-    let command = name_of(&cli.command);
-    eprintln!(
-        "onepipeline: NOT IMPLEMENTED — `{command}` parses per docs/contract.md, \
-         but this build implements none of it."
-    );
-    eprintln!(
-        "ACTION: use a release that implements the contract; \
-         `onepipeline --help` shows the surface this one agrees to."
-    );
-    std::process::exit(EXIT_NOT_IMPLEMENTED);
+    match onepipeline::run(cli) {
+        Ok(code) => exit(code),
+        Err(error) => {
+            eprintln!("onepipeline: {error}");
+            exit(error.exit_code())
+        }
+    }
 }
 
-fn name_of(command: &Command) -> &'static str {
-    match command {
-        Command::Start(_) => "start",
-        Command::Adopt(_) => "adopt",
-        Command::Round(RoundCommand::Run(_)) => "round run",
-        Command::Round(RoundCommand::Next(_)) => "round next",
-        Command::Channel(ChannelCommand::Serve(_)) => "channel serve",
-        Command::Next(_) => "next",
-        Command::Reply(_) => "reply",
-        Command::Surface(_) => "surface",
-        Command::Attest(_) => "attest",
-        Command::Stop(_) => "stop",
-        Command::Runs(_) => "runs",
-        Command::Status(_) => "status",
-        Command::Host => "host",
-        Command::Monitor(_) => "monitor",
-        Command::Results(_) => "results",
-        Command::Goals(_) => "goals",
-        Command::Telemetry(_) => "telemetry",
-    }
+/// Narrow an exit code to the process's own type.
+///
+/// Every code this crate produces is one the contract names, all of which fit;
+/// anything else would be a bug, and reporting it as a refusal is better than
+/// truncating it into a code that means something else.
+fn exit(code: i32) -> ExitCode {
+    ExitCode::from(u8::try_from(code).unwrap_or(onepipeline::error::EXIT_REFUSED as u8))
 }

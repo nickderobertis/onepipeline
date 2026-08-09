@@ -4,9 +4,15 @@ Composes oneagentgraph + onevcs, owns the task DAG, merges the three event strea
 
 Plan schema v1 = ai-orchestrator tracked-graph schema v7 node shapes unchanged (`agent` direct, lifecycle with `repo`, `kind: human`, nested `steps` on one branch, `expects_no_diff`, `context`, cross-DAG `run:<id>#<node>` refs, What/Why/Acceptance-criteria task prose, judge-only `done_when`), with: `repo` resolved through onevcs; new optional per-node `executor: NAME`; new optional `agent_graph: REF` overriding the default node-scope graph config.
 
+`resume` continues a node on the branch its previous attempt preserved: `{branch, checkpoint?, completed_steps?}`. `branch` is the preserved branch. `completed_steps` names the steps that branch already carries, and a continuation skips exactly those and re-runs the rest — an absent or empty list re-runs the whole workstream, which repeats work but never skips it. `checkpoint` must be a commit reachable on the remote; a local-only revision is not a checkpoint, because the machine that continues the node is not the machine that made it.
+
+Cross-DAG edges: a `run:<id>#<node>` dep resolves by reading the referenced run's ledger, and only a `node-settled` of `done` satisfies it. An unknown run, a node that has not settled, and one that settled `failed` or `skipped` all leave the consumer **blocked, never failed** — the upstream may still arrive. Resolution is re-read on every reconcile pass and afresh in every later round, so an upstream that arrives after its consumer was blocked starts that consumer in the next round rather than parking the run. On first resolution the consumer records how far the upstream had got (`cross-dag-satisfied`, `{dependency, last_seq}`); if the upstream passes that point afterwards the consumer reports it once (`upstream-modified`, `{dependency, captured_last_seq, observed_last_seq}`) and is **reported, not re-run** — the work was correct when it was done, and repeating it is the planner's judgement. `last_seq` is the count of records in the upstream's merged store, because a run is written by several processes and no single stream's `seq` describes it.
+
 Driver contract: `onepipeline start plan.json [--attach|--detach] [--round-budget 14400] [--heartbeat-interval 1800]` launches the dag-scope agent graph (shipped default: `orchestrator` member + resettable-cron `check-in` member) via oneagentgraph. The orchestrator member drives engine verbs (`onepipeline round run|next`) guarded by the run ownership lock (single writer); its judge side is `onepipeline channel serve RUN` as a command provider. Attach returns when the run settles; exit 3 = nothing is driving the run. `onepipeline adopt RUN` attaches a fresh driver to an intact ledger. Ownership: runs belong to the launching session; `runs --mine`; `stop` refuses another session's run and `--force` names the owner.
 
 Channel (public contract): `onepipeline next RUN`, `reply RUN [FILE]`, `surface RUN --kind check-in --message TEXT`, `attest RUN REF`, `stop RUN`. Reply envelope: legacy verdicts plus `{"version": 1, "commands": [...]}` with ops `add | drop | reparent | retry | cancel | requeue | attest | complete | context` — required fields and validation semantics exactly as ai-orchestrator's live-edit protocol (docs/orchestration.md#live-graph-edits): applied-or-rejected-with-reason, durable command queue, reply exit 0 = applied, 1 = accepted-not-yet-reconciled, 2 = refused/malformed. Surface consumption triggers `oneagentgraph reset-timer RUN check-in` — the whole pacemaker-reset contract.
+
+Merged stream: envelope NDJSON, one store per run, interleaving the three sources `pipeline`, `agentgraph`, `vcs`. A relayed envelope keeps its producer's own `stream`, `seq`, `source`, and kind, so a sibling's kind is a wire string this library never rejects. This library's **own** kinds are a closed set — the `PipelineKind` enum, which is what emits them — and exactly these: `run-started`, `round-started`, `round-finished`, `node-dispatched`, `node-settled`, `edit-committed`, `edit-rejected`, `planner-surface-queued`, `planner-surfaced`, `planner-replied`, `human-attested`, `driver-adopted`, `run-stopped`, `quiet-worker`, `round-budget-exceeded`, `boundary-retried`, `cross-dag-satisfied`, `upstream-modified`, `completion-requested`.
 
 Executor seam:
 
@@ -18,10 +24,10 @@ pub trait Executor {
     fn dispatch(&self, req: DispatchRequest) -> Result<Box<dyn DispatchHandle>>;
 }
 pub struct DispatchRequest {
-    pub graph: ResolvedGraphRef,                 // content-addressed node-scope agent-graph config (oneagentgraph type)
+    pub graph: ConfigRef,                        // content-addressed node-scope agent-graph config (oneagentgraph type)
     pub task: String,
     pub labels: Labels,                          // reserved: run_id, round, node, step, persona
-    pub workspace: WorkspaceSpec,                // Path(PathBuf) | VcsSession(SessionSpec: onevcs type)
+    pub workspace: WorkspaceSpec,                // Path(PathBuf) | VcsSession(SessionRequest: onevcs type)
     pub cancel: CancellationToken,
 }
 pub trait DispatchHandle {
@@ -29,9 +35,16 @@ pub trait DispatchHandle {
     fn wait(&mut self) -> Result<DispatchOutcome>;
     fn cancel(&self, mode: CancelMode);          // Cooperative | Kill
 }
+#[non_exhaustive]
+pub struct DispatchOutcome {
+    pub succeeded: bool,                         // the settlement itself: a stream of turns does not carry it
+    pub detail: String,
+    pub session: Option<String>,                 // the executing machine opened it, so it hands the token back
+    pub branch: Option<String>,
+}
 ```
 
-`WorkspaceSpec::VcsSession` means the machine running the dispatch opens the onevcs session there; v1 ships `LocalExecutor` only (supports both variants), the trait + rules grammar are shaped for WS dispatch-server and k8s executors.
+`WorkspaceSpec::VcsSession` means the machine running the dispatch opens the onevcs session there — so the request carries `onevcs::SessionRequest`, the *ask*, and never an opened `onevcs::Session`; v1 ships `LocalExecutor` only (supports both variants), the trait + rules grammar are shaped for WS dispatch-server and k8s executors. `DispatchOutcome` is `#[non_exhaustive]`: naming a further field later is additive.
 
 Executor rules (YAML, ordered predicates over capacity + node labels):
 
@@ -43,6 +56,10 @@ rules:
     use: local
   - use: local
 ```
+
+`min_free_mem` is carried as the string a rules file wrote it as, so the file round-trips; the units are exactly `B`, `KiB`, `MiB`, `GiB`, `TiB`, and a bare byte count. Any other unit is refused when the rules file loads, naming the executor and the list — read leniently an unreadable limit means *no limit at all*, so the one file written to keep dispatches off an exhausted host would be the file that removed the bound.
+
+`when` is a mapping, and there are exactly two predicate families in it. `executor_has_capacity: NAME` matches on **capacity**: the named executor's `CapacityReport` against the limits its `executors` entry declares. `node_label: {KEY: VALUE, ...}` matches on the **node's labels** by exact string equality, never a glob or a pattern. The keys it may name are the reserved ones that exist when the choice is made — `run_id`, `round`, `node`, `persona` — because an executor is chosen once per node, before any of its steps run; `step` and a free-form extra are refused at load rather than left as a condition nothing can satisfy. Several conditions in one `when` conjoin: all of them hold or the rule does not fire. A `when` naming neither family is refused at load rather than read as an always-true rule. A rule with no `when` at all is the fallback, and the first rule that holds decides.
 
 Views (CLI, semantics ported 1:1): `runs`, `status`, `host`, `monitor`, `results`, `goals`, `telemetry [--breakdown]` — unread-surface accounting, driver liveness (DRIVER DEAD vs PARKED vs UNDRIVEN), provider-health block sourced from `oneagentgraph health`, WALL buckets that sum exactly.
 

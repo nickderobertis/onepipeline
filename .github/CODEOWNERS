@@ -2,3 +2,10 @@
 # graph grows — the npm distribution and the Rust crate are separate Nx projects
 # and can take separate reviewers.
 * @nickderobertis
+
+# The localized instruction layers. Naming them explicitly is the point: a change
+# to a subtree's rules is a change to how everything under it is judged, so it
+# routes on its own line rather than under the catch-all above.
+/AGENTS.md @nickderobertis
+/src/AGENTS.md @nickderobertis
+/npm/AGENTS.md @nickderobertis

@@ -12,10 +12,11 @@ agents come from `oneagentgraph`; the clones, worktrees, gates, and change
 requests come from `onevcs`. Dependency direction is one-way: neither sibling
 depends on this crate.
 
-> **This build implements none of it.** `onepipeline` is at the *interface-only*
-> stage: the public types, traits, config schemas, and CLI surface are the
-> approved contract in [`docs/contract.md`](docs/contract.md), compiled, and
-> every command parses and then refuses with exit code `70`. Nothing runs yet.
+The public types, traits, config schemas, and CLI surface are the approved
+contract in [`docs/contract.md`](docs/contract.md), compiled — and implemented
+behind it. `onepipeline` composes its two siblings by running their CLIs, so a
+build of either that still refuses will make the dispatches this crate starts
+refuse too; the composition layer itself is complete.
 
 ## Install
 
@@ -80,6 +81,11 @@ rules:
   - use: local
 ```
 
+Ordered: the first rule whose `when` holds decides, and a rule with no `when` is
+the fallback. A `when` tests an executor's capacity, the node's own labels
+(`when: {node_label: {persona: reviewer}}`), or both — several conditions in one
+`when` all have to hold.
+
 ## Development
 
 ```bash
@@ -90,7 +96,8 @@ just gate        # check + the diff-scoped llmlint tier
 
 `just --list` is the full command surface.
 [`docs/contract-divergences.md`](docs/contract-divergences.md) records every place
-the code could not compile the contract exactly as written.
+the code could not compile the contract exactly as written, and what the planner
+who owns the contract ruled on each.
 
 ## License
 

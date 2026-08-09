@@ -18,11 +18,10 @@ use onepipeline::channel::{Command as Edit, Dependents, Reply, SurfaceKind};
 use onepipeline::cli::{
     Cli, Command, DEFAULT_HEARTBEAT_INTERVAL_SECONDS, DEFAULT_ROUND_BUDGET_SECONDS,
 };
-use onepipeline::error::{
-    EXIT_NOTHING_DRIVING, EXIT_NOT_IMPLEMENTED, EXIT_QUEUED, EXIT_REFUSED, EXIT_SUCCESS,
-};
+use onepipeline::error::{EXIT_NOTHING_DRIVING, EXIT_QUEUED, EXIT_REFUSED, EXIT_SUCCESS};
 use onepipeline::event::{
-    ArtifactId, ArtifactRef, Envelope, EventKind, Labels, Source, ENVELOPE_VERSION,
+    ArtifactId, ArtifactRef, Envelope, EventKind, Labels, PipelineKind, Source, ENVELOPE_VERSION,
+    PIPELINE_KINDS,
 };
 use onepipeline::executor::{
     CancelMode, CancellationToken, Capabilities, CapacityReport, DispatchRequest, Executor,
@@ -141,7 +140,8 @@ fn the_contracts_rules_example_parses_and_round_trips() {
     assert_eq!(
         rules.rules[0].when,
         Some(Predicate {
-            executor_has_capacity: "local".into()
+            executor_has_capacity: Some("local".into()),
+            ..Predicate::default()
         }),
         "the first rule tests capacity"
     );
@@ -156,6 +156,43 @@ fn the_contracts_rules_example_parses_and_round_trips() {
         serde_norway::from_str(&serde_norway::to_string(&rules).expect("serializes"))
             .expect("re-parses");
     assert_eq!(round_tripped, rules);
+}
+
+#[test]
+fn the_contract_states_both_predicate_families_and_what_each_matches_on() {
+    let prose = CONTRACT.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        prose.contains("`executor_has_capacity: NAME` matches on **capacity**"),
+        "the contract no longer says what the capacity family matches on"
+    );
+    assert!(
+        prose.contains("`node_label: {KEY: VALUE, ...}` matches on the **node's labels**"),
+        "the contract no longer says what the label family matches on"
+    );
+    assert!(
+        prose.contains("Several conditions in one `when` conjoin"),
+        "the contract no longer says how two conditions in one `when` combine"
+    );
+
+    // The keys the contract lists are the keys the grammar accepts. Both halves
+    // of that sentence are gated: a key the code accepts and the contract does
+    // not name is undocumented surface, and the other way round is a promise
+    // nothing keeps.
+    for key in onepipeline::rules::SELECTABLE_LABELS {
+        assert!(
+            prose.contains(&format!("`{key}`")),
+            "the contract does not name the selectable label `{key}`"
+        );
+    }
+    let rules: ExecutorRules = serde_norway::from_str(
+        "executors: [{name: local, type: local}]\n\
+         rules: [{when: {node_label: {step: implement}}, use: local}]\n",
+    )
+    .expect("it parses");
+    let err = rules
+        .validate()
+        .expect_err("`step` is not a key the contract lists");
+    assert!(err.to_string().contains("step"), "{err}");
 }
 
 #[test]
@@ -201,7 +238,7 @@ fn the_dispatch_request_carries_every_field_the_contract_declares() {
             base: None,
             execution_checkout: None,
         }),
-        cancel: CancellationToken,
+        cancel: CancellationToken::new(),
     };
 
     assert_contract_names(
@@ -214,7 +251,7 @@ fn the_dispatch_request_carries_every_field_the_contract_declares() {
     );
     assert_contract_names(
         "WorkspaceSpec variant",
-        &["Path(PathBuf)", "VcsSession(SessionSpec"],
+        &["Path(PathBuf)", "VcsSession(SessionRequest"],
     );
 
     // The contract's `WorkspaceSpec::VcsSession` means the machine running the
@@ -244,14 +281,17 @@ fn the_local_executor_is_the_one_v1_ships_and_takes_both_workspaces() {
 }
 
 #[test]
-fn the_local_executors_capacity_claims_nothing_it_has_not_measured() {
-    // Interface-only: nothing probes the host yet, so the report must not let a
-    // rules file select this executor on numbers nobody measured.
+fn the_local_executors_capacity_reports_the_three_numbers_the_contract_names() {
+    // A rules file selects on these, so each has to be a number a predicate can
+    // compare. Every unreadable input resolves toward "has capacity" rather than
+    // toward a zero that would stall a healthy host.
     let report = LocalExecutor.capacity();
-    assert_eq!(report, CapacityReport::default());
-    assert_eq!(report.slots_free, 0);
-    assert_eq!(report.load1, 0.0);
-    assert_eq!(report.mem_free_bytes, 0);
+    assert!(
+        report.load1.is_finite() && report.load1 >= 0.0,
+        "{report:?}"
+    );
+    assert!(report.mem_free_bytes > 0, "{report:?}");
+    assert_ne!(report, CapacityReport::default(), "nothing was probed");
     assert_contract_names(
         "CapacityReport field",
         &["slots_free", "load1", "mem_free_bytes"],
@@ -259,7 +299,11 @@ fn the_local_executors_capacity_claims_nothing_it_has_not_measured() {
 }
 
 #[test]
-fn dispatching_refuses_rather_than_pretending_to_run() {
+fn dispatching_goes_through_the_oneagentgraph_seam_and_says_so_when_it_cannot() {
+    // The seam is a subprocess boundary: this crate composes `oneagentgraph`
+    // rather than reimplementing it. Pointed at an executable that does not
+    // exist, the failure names that sibling instead of reading as a node the
+    // agent failed.
     // `Box<dyn DispatchHandle>` is not `Debug`, so the success arm is destructured
     // rather than unwrapped.
     let Err(err) = LocalExecutor.dispatch(DispatchRequest {
@@ -267,13 +311,14 @@ fn dispatching_refuses_rather_than_pretending_to_run() {
         task: "anything".into(),
         labels: Labels::default(),
         workspace: WorkspaceSpec::Path(PathBuf::from(".")),
-        cancel: CancellationToken,
+        cancel: CancellationToken::new(),
     }) else {
-        panic!("nothing is implemented behind the seam, so dispatch cannot succeed");
+        panic!("no `oneagentgraph` is installed here, so the dispatch cannot start");
     };
+    let message = err.to_string();
     assert!(
-        err.to_string().contains("NOT IMPLEMENTED"),
-        "the refusal is loud: {err}"
+        message.contains("oneagentgraph"),
+        "the seam is unnamed: {message}"
     );
 }
 
@@ -343,7 +388,11 @@ fn every_node_shape() -> Value {
                 "execution_checkout": "isolated",
                 "verify_via_ci": true,
                 "parked": true,
-                "resume": {"branch": "feat/thing", "checkpoint": "abc1234"},
+                "resume": {
+                    "branch": "feat/thing",
+                    "checkpoint": "abc1234",
+                    "completed_steps": ["implement"]
+                },
                 "deps": ["approval"],
                 "steps": [
                     {
@@ -411,7 +460,8 @@ fn the_plan_schema_carries_every_node_shape_the_contract_names() {
         lifecycle.resume,
         Some(Resume {
             branch: "feat/thing".into(),
-            checkpoint: Some("abc1234".into())
+            checkpoint: Some("abc1234".into()),
+            completed_steps: vec!["implement".into()],
         })
     );
     let steps = lifecycle
@@ -436,6 +486,45 @@ fn the_plan_schema_carries_every_node_shape_the_contract_names() {
             "`executor: NAME`",
             "`agent_graph: REF`",
         ],
+    );
+}
+
+#[test]
+fn resume_carries_what_the_contract_says_a_preserved_branch_needs() {
+    let prose = CONTRACT.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        prose.contains("`{branch, checkpoint?, completed_steps?}`"),
+        "the contract no longer states the `resume` shape"
+    );
+    assert!(
+        prose.contains("`completed_steps` names the steps that branch already carries"),
+        "the contract no longer says what `completed_steps` means"
+    );
+    assert!(
+        prose.contains("`checkpoint` must be a commit reachable on the remote"),
+        "the contract no longer says what a checkpoint is"
+    );
+
+    // The shape the contract states is the shape the schema reads, including a
+    // continuation that names no steps at all.
+    let full: Resume = serde_json::from_value(json!({
+        "branch": "feat/thing",
+        "checkpoint": "abc1234",
+        "completed_steps": ["implement", "review"]
+    }))
+    .expect("the stated shape parses");
+    assert_eq!(full.completed_steps, ["implement", "review"]);
+
+    let minimal: Resume =
+        serde_json::from_value(json!({"branch": "feat/thing"})).expect("branch alone is a resume");
+    assert!(
+        minimal.completed_steps.is_empty(),
+        "an absent list re-runs the whole workstream"
+    );
+    // And an empty list is omitted again, so an old consumer sees no new field.
+    assert_eq!(
+        serde_json::to_value(&minimal).expect("serializes"),
+        json!({"branch": "feat/thing"})
     );
 }
 
@@ -666,15 +755,18 @@ fn the_reply_exit_codes_are_the_ones_the_contract_assigns() {
     assert!(CONTRACT.contains("exit 3 = nothing is driving the run"));
     assert_eq!(EXIT_NOTHING_DRIVING, 3);
 
-    // The interface-only refusal must not collide with any of them.
-    for spent in [
+    // Each code means one thing: a caller that reads the status must not have
+    // to guess which of two verdicts it got.
+    let spent = [
         EXIT_SUCCESS,
         EXIT_QUEUED,
         EXIT_REFUSED,
         EXIT_NOTHING_DRIVING,
-    ] {
-        assert_ne!(EXIT_NOT_IMPLEMENTED, spent);
-    }
+    ];
+    let mut unique = spent.to_vec();
+    unique.sort_unstable();
+    unique.dedup();
+    assert_eq!(unique.len(), spent.len(), "two verdicts share an exit code");
 }
 
 #[test]
@@ -742,6 +834,40 @@ fn the_three_merged_streams_are_the_three_libraries_the_contract_composes() {
 
     // A fourth source is not a stream this crate merges.
     serde_json::from_value::<Source>(json!("harness")).expect_err("an unknown source is refused");
+}
+
+#[test]
+fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
+    // Both directions. A kind the crate emits and the contract does not list is
+    // undocumented wire; a kind the contract lists and the enum does not carry is
+    // a promise nothing keeps. `PIPELINE_KINDS` is what `Journal::emit` accepts,
+    // so this is the emitted set and not a second copy of it.
+    assert_eq!(PIPELINE_KINDS.len(), 19, "the closed set changed size");
+    let listed: BTreeSet<String> = backticked()
+        .into_iter()
+        .filter(|token| {
+            token.chars().all(|c| c.is_ascii_lowercase() || c == '-') && token.contains('-')
+        })
+        .collect();
+    for kind in PIPELINE_KINDS {
+        assert!(
+            listed.contains(kind.as_str()),
+            "docs/contract.md does not list the `{kind}` kind this crate emits"
+        );
+    }
+
+    // The wire spelling is the enum's, not a string beside it.
+    assert_eq!(PipelineKind::RunStarted.as_str(), "run-started");
+    assert_eq!(
+        PipelineKind::from_wire(&EventKind("node-settled".into())),
+        Some(PipelineKind::NodeSettled)
+    );
+    // A sibling's kind stays a wire string: the enum declines it rather than
+    // rejecting the envelope.
+    assert_eq!(
+        PipelineKind::from_wire(&EventKind("gate-finished".into())),
+        None
+    );
 }
 
 #[test]
@@ -993,26 +1119,49 @@ fn the_pr_author_never_blocks_publication() {
     );
 }
 
+/// Every divergence the record raises, and the name its ruling adopted.
+///
+/// A divergence is closed by the contract *saying* the thing, so each entry
+/// gates both halves: the record marks the item resolved, and the contract names
+/// what was ruled. An entry that quietly loses its ruling, or a contract that
+/// stops naming it, fails here.
+const RULINGS: &[(&str, &str)] = &[
+    ("1.", "ConfigRef"),
+    ("2.", "SessionRequest"),
+    ("3.", "DispatchOutcome"),
+    ("4.", "node_label"),
+    ("5.", "min_free_mem"),
+    ("6.", "PipelineKind"),
+    ("7.", "completed_steps"),
+    ("8.", "cross-dag-satisfied"),
+];
+
 #[test]
-fn every_recorded_divergence_names_a_type_the_contract_actually_declares() {
+fn every_recorded_divergence_is_resolved_and_the_contract_says_what_was_ruled() {
     let divergences = std::fs::read_to_string(repo_root().join("docs/contract-divergences.md"))
         .expect("the divergence record ships");
-    for named in [
-        "ResolvedGraphRef",
-        "SessionSpec",
-        "DispatchOutcome",
-        "min_free_mem",
-        "executor_has_capacity",
-    ] {
+
+    let sections: Vec<&str> = divergences.split("\n## ").skip(1).collect();
+    assert_eq!(sections.len(), RULINGS.len(), "{sections:?}");
+
+    for ((number, named), section) in RULINGS.iter().zip(&sections) {
+        let heading = section.lines().next().expect("a heading");
+        assert!(
+            heading.starts_with(number) && heading.ends_with("— RESOLVED"),
+            "divergence {number} is not marked resolved: {heading}"
+        );
+        assert!(
+            section.contains("**Ruling:"),
+            "divergence {number} is marked resolved but records no ruling"
+        );
+        // `executor_has_capacity` is the one name the record and the contract
+        // shared before any ruling; every other is what a ruling adopted.
         assert!(
             CONTRACT.contains(named),
-            "the contract no longer names `{named}`; retire its divergence entry"
-        );
-        assert!(
-            divergences.contains(named),
-            "`{named}` diverges from the contract but is not recorded"
+            "the contract does not name `{named}`, which divergence {number} was ruled onto it"
         );
     }
+    assert!(CONTRACT.contains("executor_has_capacity"));
 }
 
 #[test]
@@ -1045,6 +1194,76 @@ fn the_smoke_scripts_command_list_is_the_binarys_whole_surface() {
     );
 }
 
+/// The `name: Type` pairs a struct in `src/executor.rs` declares.
+///
+/// Read out of the source rather than reflected off the type, because a
+/// `#[non_exhaustive]` struct cannot be built field-by-field from outside the
+/// crate — which is exactly the property that would otherwise catch the drift.
+fn declared_fields(struct_name: &str) -> Vec<String> {
+    let source = std::fs::read_to_string(repo_root().join("src/executor.rs"))
+        .expect("the executor seam ships");
+    let body = source
+        .split_once(&format!("pub struct {struct_name} {{"))
+        .expect("the struct is declared")
+        .1
+        .split_once("\n}")
+        .expect("the struct is closed")
+        .0;
+    body.lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("pub ") && line.ends_with(','))
+        .map(|line| {
+            line.trim_start_matches("pub ")
+                .trim_end_matches(',')
+                .to_string()
+        })
+        .collect()
+}
+
+/// The divergences document restates two things that live in the code. Each copy
+/// is gated here, so a change to the code fails this suite instead of leaving
+/// the document quietly wrong.
+#[test]
+fn the_divergence_record_matches_the_code_it_describes() {
+    let raw = std::fs::read_to_string(repo_root().join("docs/contract-divergences.md"))
+        .expect("the divergence record ships");
+    let doc = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    // Divergence 3's ruling put `DispatchOutcome`'s fields in the contract and
+    // kept this gate on the prose. The type is `#[non_exhaustive]`, so a struct
+    // literal here cannot be the gate; its declaration is read instead, and
+    // every field it declares must appear in both documents.
+    let declared = declared_fields("DispatchOutcome");
+    assert!(!declared.is_empty(), "DispatchOutcome declares no fields");
+    let contract = CONTRACT.split_whitespace().collect::<Vec<_>>().join(" ");
+    for field in &declared {
+        assert!(
+            doc.contains(field.as_str()),
+            "the divergence record does not spell `{field}`, which DispatchOutcome declares"
+        );
+        assert!(
+            contract.contains(field.as_str()),
+            "the contract does not spell `{field}`, which DispatchOutcome declares"
+        );
+    }
+
+    // Divergence 5 names the units the rules parser accepts.
+    for unit in ["KiB", "MiB", "GiB", "TiB"] {
+        assert!(
+            onepipeline::rules::bytes_of(&format!("1{unit}")).is_some(),
+            "the rules parser does not accept {unit}, which the record says it does"
+        );
+        assert!(
+            doc.contains(unit),
+            "the divergence record does not name the {unit} unit the parser accepts"
+        );
+    }
+    assert!(
+        onepipeline::rules::bytes_of("2GB").is_none(),
+        "the record says `2GB` is treated as no limit; the parser accepted it"
+    );
+}
+
 #[test]
 fn the_readmes_interface_claims_match_the_code_they_describe() {
     // The README restates numbers that live in the code. Each copy is gated
@@ -1054,10 +1273,6 @@ fn the_readmes_interface_claims_match_the_code_they_describe() {
     // Wrapped prose, so match on its words rather than its line breaks.
     let readme = raw.split_whitespace().collect::<Vec<_>>().join(" ");
 
-    assert!(
-        readme.contains(&format!("exit code `{EXIT_NOT_IMPLEMENTED}`")),
-        "the README states a different interface-only exit code than the crate uses"
-    );
     assert!(
         readme.contains(&format!(
             "exit `{EXIT_NOTHING_DRIVING}` means nothing is driving"

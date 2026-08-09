@@ -156,11 +156,12 @@ describe("the npm distribution", () => {
     const project = mkdtempSync(join(work, "app-"));
     installInto(project, [launcherTgz, platformTgz]);
 
-    // The interface-only refusal exits 70; a launcher that collapsed every
-    // failure to 1 would hide the contract's own codes from a caller.
+    // Reading a run nobody recorded exits 2, the contract's "refused". A
+    // launcher that collapsed every failure to 1 would hide the contract's own
+    // codes from a caller.
     const refused = launch(project, ["next", "run-1"]);
-    assert.equal(refused.code, 70, refused.stderr);
-    assert.match(refused.stderr, /NOT IMPLEMENTED/);
+    assert.equal(refused.code, 2, refused.stderr);
+    assert.match(refused.stderr, /no such run 'run-1'/);
   });
 
   it("says what to do when the platform package is missing", () => {

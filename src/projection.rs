@@ -1,0 +1,775 @@
+//! Folding the journal into the state a round, a transition, and every view
+//! read from.
+//!
+//! **The plan of record is the graph the round executed.** A round's
+//! `round-NN/plan.json` is its launch record and is never rewritten, so a
+//! transition that derived the next round from it would lose every live edit the
+//! reconciler committed — a `retry` replacement's new id, an amended budget, a
+//! branch pin. This module folds the round's own authoritative journal instead,
+//! and the next round derives from what actually ran.
+//!
+//! A journal that cannot be folded strictly falls back to the launch record,
+//! which is the same state that makes a recovery report rather than guess.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use serde_json::Value;
+
+use crate::edits::{self, Frontier, Operation};
+use crate::event::{Envelope, Source};
+use crate::graph::{Graph, NodeStatus};
+use crate::journal;
+use crate::plan::Plan;
+
+/// Everything the journal says about a run.
+#[derive(Debug, Clone, Default)]
+pub struct RunState {
+    /// The desired graph the current round is converging toward, with every
+    /// committed edit applied.
+    pub graph: Graph,
+    /// The plan the run was launched with, for the fields a graph does not
+    /// carry — the goal and the name.
+    pub plan: Option<Plan>,
+    /// The statuses the journal recorded *in the current round*. A node absent
+    /// from this map has not started, which is what `reparent` and `cancel`
+    /// test for.
+    pub recorded: BTreeMap<String, NodeStatus>,
+    /// Each settled node's outcome, when it recorded one.
+    pub outcomes: BTreeMap<String, String>,
+    /// The branch each settled node left behind, as its dispatch reported it.
+    ///
+    /// Not the same thing as the branch a node's *plan* pins: this is what the
+    /// work actually landed on, which for an unpinned node the sibling named,
+    /// and it is the only record of where preserved work is.
+    pub branches: BTreeMap<String, String>,
+    /// Where a human reads the change each published node opened.
+    pub change_urls: BTreeMap<String, String>,
+    /// The declared steps each node's attempt finished.
+    ///
+    /// What a continuation may skip, and the only record of it: a step is not a
+    /// node, so nothing else in the journal says one finished.
+    pub completed_steps: BTreeMap<String, Vec<String>>,
+    /// When each node was dispatched, in epoch milliseconds.
+    pub dispatched_at: BTreeMap<String, u64>,
+    /// When each node settled, in epoch milliseconds.
+    pub settled_at: BTreeMap<String, u64>,
+    /// The current round number. `0` before the first round starts.
+    pub round: u64,
+    /// Whether a round is executing. Edits require a live round.
+    pub round_open: bool,
+    /// Human actions attested across the whole run.
+    pub attestations: BTreeSet<String>,
+    /// The completion reasons the planner has journalled.
+    pub completion_requests: Vec<String>,
+    /// Surfaces sent, and surfaces a planner actually read.
+    pub surfaces_queued: u64,
+    /// Surfaces consumed through `next`. This is what resets the pacemaker.
+    pub surfaces_read: u64,
+    /// When the last surface was read, in epoch milliseconds.
+    pub last_surface_at: Option<u64>,
+    /// The last event of any kind, in epoch milliseconds — the run's own
+    /// evidence that something is still writing to it.
+    pub last_write_at: Option<u64>,
+    /// Whether `stop` ended the run.
+    pub stopped: bool,
+    /// Whether the fold met a line it could not read. Strict replay reports
+    /// rather than silently folding an incomplete graph.
+    pub strict: bool,
+    /// Every node this run's nodes named across another run's DAG.
+    pub cross_dag_watches: BTreeMap<String, u64>,
+    /// Where each resolved upstream had got when this run first resolved it.
+    ///
+    /// Folded from the journal rather than held in a process, because a watch
+    /// outlives the round that captured it: a baseline this run re-derived every
+    /// round would never see the upstream move.
+    pub cross_dag_baselines: BTreeMap<String, u64>,
+    /// The `(dependency, consumer)` pairs already reported as moved, so a watch
+    /// reports once rather than once per reconcile pass.
+    pub cross_dag_reported: BTreeSet<(String, String)>,
+    /// How each cross-DAG dependency resolved, for the caller that went and
+    /// looked.
+    ///
+    /// Empty by default, and an absent reference derives as blocked — so a
+    /// reader that cannot reach another run's ledger reports a consumer as
+    /// waiting rather than inventing an answer about it. `crate::crossdag` is
+    /// what fills this in.
+    pub cross_dag: BTreeMap<String, NodeStatus>,
+    /// The notes each node was given *during the round just finished*.
+    ///
+    /// A note reports state observed while one attempt ran, so it is stale as
+    /// soon as the next attempt moves. The transition sets this set on the next
+    /// plan rather than appending to it, which is what stops a node
+    /// accumulating instructions.
+    pub notes_this_round: BTreeMap<String, String>,
+}
+
+impl RunState {
+    /// The frontier an edit is judged against.
+    pub fn frontier(&self) -> Frontier {
+        Frontier {
+            recorded: self.recorded.clone(),
+            attestations: self.attestations.clone(),
+        }
+    }
+
+    /// Every node's status, with the derived gates recomputed against the graph
+    /// as it stands now.
+    pub fn statuses(&self) -> BTreeMap<String, NodeStatus> {
+        self.statuses_with(&|dependency| self.cross_dag.get(dependency).copied())
+    }
+
+    /// Every node's status, resolving cross-DAG references through `upstream`.
+    pub fn statuses_with(
+        &self,
+        upstream: &dyn Fn(&str) -> Option<NodeStatus>,
+    ) -> BTreeMap<String, NodeStatus> {
+        crate::graph::derive(&self.graph, &self.recorded, upstream)
+    }
+}
+
+/// Fold a run's whole journal.
+pub fn fold(events: &[Envelope]) -> RunState {
+    let mut state = RunState {
+        strict: true,
+        ..RunState::default()
+    };
+    for event in events {
+        fold_one(&mut state, event);
+    }
+    state
+}
+
+fn fold_one(state: &mut RunState, event: &Envelope) {
+    state.last_write_at = Some(
+        millis_of(&event.ts)
+            .unwrap_or(0)
+            .max(state.last_write_at.unwrap_or(0)),
+    );
+    if event.source != Source::Pipeline {
+        // A relayed envelope is evidence the run is working, and nothing else:
+        // a sibling library does not decide this crate's graph state.
+        return;
+    }
+    let payload = &event.payload;
+    match journal::PipelineKind::from_wire(&event.kind) {
+        Some(journal::PipelineKind::RunStarted) => {
+            if let Some(plan) = plan_of(payload) {
+                state.graph = Graph::from_plan(&plan);
+                state.plan = Some(plan);
+            }
+        }
+        Some(journal::PipelineKind::RoundStarted) => {
+            state.round = event.labels.round.unwrap_or(state.round + 1);
+            state.round_open = true;
+            // A round's recorded statuses are its own: the previous round's
+            // settlements are folded into the graph it was handed, not carried
+            // as live frontier state.
+            state.recorded.clear();
+            state.outcomes.clear();
+            state.notes_this_round.clear();
+            if let Some(plan) = plan_of(payload) {
+                state.graph = Graph::from_plan(&plan);
+                if state.plan.is_none() {
+                    state.plan = Some(plan);
+                }
+            }
+        }
+        Some(journal::PipelineKind::RoundFinished) => state.round_open = false,
+        Some(journal::PipelineKind::NodeDispatched) => {
+            if let Some(node) = &event.labels.node {
+                state.recorded.insert(node.clone(), NodeStatus::Running);
+                if let Some(ts) = millis_of(&event.ts) {
+                    state.dispatched_at.insert(node.clone(), ts);
+                }
+            }
+        }
+        Some(journal::PipelineKind::NodeSettled) => {
+            let Some(node) = &event.labels.node else {
+                return;
+            };
+            let status = payload
+                .get("status")
+                .and_then(Value::as_str)
+                .and_then(NodeStatus::parse);
+            if let Some(status) = status {
+                state.recorded.insert(node.clone(), status);
+            }
+            if let Some(outcome) = payload.get("outcome").and_then(Value::as_str) {
+                state.outcomes.insert(node.clone(), outcome.to_string());
+            }
+            // What the dispatch left behind, which nothing else records: the
+            // round result is derived from this fold, and a later round's
+            // continuation has no other way to find the branch the work is on.
+            if let Some(branch) = payload.get("branch").and_then(Value::as_str) {
+                state.branches.insert(node.clone(), branch.to_string());
+            }
+            if let Some(steps) = payload.get("completed_steps").and_then(Value::as_array) {
+                state.completed_steps.insert(
+                    node.clone(),
+                    steps
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect(),
+                );
+            }
+            if let Some(url) = payload.get("change_url").and_then(Value::as_str) {
+                state.change_urls.insert(node.clone(), url.to_string());
+            }
+            if let Some(ts) = millis_of(&event.ts) {
+                state.settled_at.insert(node.clone(), ts);
+            }
+        }
+        Some(journal::PipelineKind::EditCommitted) => {
+            let operations = payload
+                .get("operations")
+                .and_then(|value| serde_json::from_value::<Vec<Operation>>(value.clone()).ok());
+            let Some(operations) = operations else {
+                // An `edit-committed` whose operations this build cannot fold
+                // might have been an authoritative graph mutation.
+                state.strict = false;
+                return;
+            };
+            for operation in &operations {
+                edits::apply(&mut state.graph, operation);
+                match operation {
+                    Operation::HumanAttested { node } => {
+                        state.attestations.insert(node.clone());
+                        state.recorded.insert(node.clone(), NodeStatus::Done);
+                    }
+                    // A completion request is recorded as its own event by
+                    // whichever side took it, so folding it here too would
+                    // count one request twice.
+                    Operation::CompletionRequested { .. } => {}
+                    Operation::RetryRequested { node, .. } => {
+                        // The superseded node stays in the executed graph,
+                        // cancelled, so the transition removes it exactly as an
+                        // explicit `drop` would.
+                        state.recorded.insert(node.clone(), NodeStatus::Cancelled);
+                    }
+                    Operation::NodeParked { node } => {
+                        state.recorded.insert(node.clone(), NodeStatus::Parked);
+                    }
+                    Operation::NodeRequeued { node, .. } => {
+                        state.recorded.remove(node);
+                    }
+                    Operation::ContextAdded { node, note } => {
+                        state.notes_this_round.insert(node.clone(), note.clone());
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Some(journal::PipelineKind::HumanAttested) => {
+            if let Some(reference) = payload.get("ref").and_then(Value::as_str) {
+                state.attestations.insert(reference.to_string());
+                state
+                    .recorded
+                    .insert(reference.to_string(), NodeStatus::Done);
+            }
+        }
+        Some(journal::PipelineKind::CompletionRequested) => {
+            if let Some(reason) = payload.get("reason").and_then(Value::as_str) {
+                state.completion_requests.push(reason.to_string());
+            }
+        }
+        Some(journal::PipelineKind::PlannerSurfaceQueued) => state.surfaces_queued += 1,
+        Some(journal::PipelineKind::PlannerSurfaced) => {
+            state.surfaces_read += 1;
+            state.last_surface_at = millis_of(&event.ts);
+        }
+        Some(journal::PipelineKind::RunStopped) => {
+            state.stopped = true;
+            state.round_open = false;
+        }
+        Some(journal::PipelineKind::CrossDagSatisfied) => {
+            if let (Some(dependency), Some(last)) = (
+                payload.get("dependency").and_then(Value::as_str),
+                payload.get("last_seq").and_then(Value::as_u64),
+            ) {
+                // The *first* baseline stands. A later one would move the mark
+                // the watch measures from, which is the one thing that would
+                // make a moved upstream unreportable.
+                state
+                    .cross_dag_baselines
+                    .entry(dependency.to_string())
+                    .or_insert(last);
+            }
+        }
+        Some(journal::PipelineKind::UpstreamModified) => {
+            if let Some(dependency) = payload.get("dependency").and_then(Value::as_str) {
+                *state
+                    .cross_dag_watches
+                    .entry(dependency.to_string())
+                    .or_insert(0) += 1;
+                if let Some(consumer) = event.labels.node.as_deref() {
+                    state
+                        .cross_dag_reported
+                        .insert((dependency.to_string(), consumer.to_string()));
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn plan_of(payload: &serde_json::Map<String, Value>) -> Option<Plan> {
+    payload
+        .get("plan")
+        .and_then(|value| serde_json::from_value::<Plan>(value.clone()).ok())
+}
+
+/// Parse an envelope timestamp back to epoch milliseconds.
+///
+/// The envelope fixes one format, so this reads exactly that one: anything else
+/// is `None` rather than a guess, and a caller treats an untimed event as
+/// carrying no timing evidence.
+pub fn millis_of(ts: &str) -> Option<u64> {
+    let bytes = ts.as_bytes();
+    // `YYYY-MM-DDThh:mm:ss.sssZ` exactly: every separator in its own place, and
+    // every other position a digit. Without the separator check a string that
+    // merely *starts* like a timestamp parses, and `str::parse` would take a
+    // signed field like `+12` as well — either way a stranger's malformed clock
+    // becomes this run's timing evidence.
+    if bytes.len() != 24 {
+        return None;
+    }
+    for (at, separator) in [
+        (4, b'-'),
+        (7, b'-'),
+        (10, b'T'),
+        (13, b':'),
+        (16, b':'),
+        (19, b'.'),
+        (23, b'Z'),
+    ] {
+        if bytes[at] != separator {
+            return None;
+        }
+    }
+    let field = |from: usize, to: usize| -> Option<i64> {
+        let text = ts.get(from..to)?;
+        if !text.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        text.parse().ok()
+    };
+    let (year, month, day) = (field(0, 4)?, field(5, 7)?, field(8, 10)?);
+    let (hour, minute, second) = (field(11, 13)?, field(14, 16)?, field(17, 19)?);
+    // Three digits, so the millisecond field cannot leave its own range.
+    let ms = field(20, 23)?;
+    if !(1..=12).contains(&month)
+        || !(1..=days_in_month(year, month)).contains(&day)
+        || hour > 23
+        || minute > 59
+        // 60 is a leap second, which is a time a sibling may legitimately render.
+        || second > 60
+    {
+        return None;
+    }
+    let days = days_from_civil(year, month, day);
+    let total = days * 86_400 + hour * 3_600 + minute * 60 + second;
+    u64::try_from(total.checked_mul(1_000)?.checked_add(ms)?).ok()
+}
+
+/// How many days that month of that year has.
+///
+/// A blanket 1..=31 would accept 31 February, and `days_from_civil` would
+/// silently normalise it into early March — a timestamp that never existed,
+/// carried forward as this run's timing evidence.
+fn days_in_month(year: i64, month: i64) -> i64 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
+        2 => 28,
+        _ => 0,
+    }
+}
+
+/// Howard Hinnant's `days_from_civil`, the inverse of the renderer's.
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = if month > 2 { month - 3 } else { month + 9 };
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::event::{Labels, ENVELOPE_VERSION};
+    use crate::journal::{labels, payload};
+    use crate::plan::{Node, PLAN_SCHEMA_VERSION};
+    use serde_json::json;
+
+    fn agent(id: &str, deps: &[&str]) -> Node {
+        Node {
+            id: id.into(),
+            persona: Some("engineer".into()),
+            task: Some("## What\ndo it".into()),
+            deps: deps.iter().map(|d| (*d).to_string()).collect(),
+            ..Node::default()
+        }
+    }
+
+    fn plan_of_nodes(nodes: Vec<Node>) -> Plan {
+        Plan {
+            schema_version: PLAN_SCHEMA_VERSION,
+            goal: None,
+            name: Some("demo".into()),
+            concurrency: 4,
+            tasks: nodes,
+        }
+    }
+
+    fn pipeline(
+        kind: journal::PipelineKind,
+        seq: u64,
+        node: Option<&str>,
+        fields: &[(&str, Value)],
+    ) -> Envelope {
+        Envelope {
+            v: ENVELOPE_VERSION,
+            ts: crate::sys::rfc3339_from_millis(1_786_000_000_000 + seq * 1_000),
+            stream: "s".into(),
+            seq,
+            source: Source::Pipeline,
+            kind: kind.into(),
+            labels: Labels {
+                node: node.map(str::to_string),
+                ..labels("demo", Some(1), None)
+            },
+            payload: payload(fields),
+            artifacts: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_timestamp_round_trips_through_the_envelope_format() {
+        for millis in [0u64, 1_786_296_585_678, 1_709_164_800_000] {
+            let rendered = crate::sys::rfc3339_from_millis(millis);
+            assert_eq!(millis_of(&rendered), Some(millis), "{rendered}");
+        }
+        assert_eq!(millis_of("nope"), None);
+        assert_eq!(millis_of("2026-08-08T13:29:45.678+00:00"), None);
+        assert_eq!(millis_of("2026-13-08T13:29:45.678Z"), None);
+        assert_eq!(millis_of("2026-08-00T13:29:45.678Z"), None);
+        assert_eq!(millis_of("20x6-08-08T13:29:45.678Z"), None);
+    }
+
+    /// A timestamp is a *stranger's* clock — the two sibling libraries render
+    /// it — and it is what the whole telemetry timeline is computed from. One
+    /// that reads as a plausible number without being a time would put a run's
+    /// wall clock somewhere in the wrong century, silently.
+    #[test]
+    fn a_timestamp_shaped_string_that_is_not_a_time_carries_no_timing_evidence() {
+        // Right length, wrong separators: a stranger's format that merely
+        // starts like this one.
+        assert_eq!(millis_of("2026-08-08 13:29:45.678Z"), None);
+        assert_eq!(millis_of("2026/08/08T13:29:45.678Z"), None);
+        assert_eq!(millis_of("2026-08-08T13-29-45.678Z"), None);
+        assert_eq!(millis_of("2026-08-08T13:29:45,678Z"), None);
+        // Signed fields, which an integer parse would otherwise take.
+        assert_eq!(millis_of("2026-08-08T+3:29:45.678Z"), None);
+        assert_eq!(millis_of("+026-08-08T13:29:45.678Z"), None);
+        // Out of range, digit by digit.
+        assert_eq!(millis_of("2026-08-08T24:29:45.678Z"), None);
+        assert_eq!(millis_of("2026-08-08T13:60:45.678Z"), None);
+        assert_eq!(millis_of("2026-08-08T13:29:61.678Z"), None);
+        // A leap second is a real time, and is read as one.
+        assert!(millis_of("2026-08-08T23:59:60.000Z").is_some());
+        // A day its month does not have would otherwise normalise into the next
+        // month — a timestamp that never existed, read as timing evidence.
+        assert_eq!(millis_of("2026-02-31T00:00:00.000Z"), None);
+        assert_eq!(millis_of("2026-04-31T00:00:00.000Z"), None);
+        assert_eq!(
+            millis_of("2026-02-29T00:00:00.000Z"),
+            None,
+            "2026 is not a leap year"
+        );
+        assert!(millis_of("2024-02-29T00:00:00.000Z").is_some(), "2024 is");
+        assert_eq!(millis_of("2100-02-29T00:00:00.000Z"), None, "2100 is not");
+        assert!(millis_of("2000-02-29T00:00:00.000Z").is_some(), "2000 is");
+    }
+
+    #[test]
+    fn the_fold_reconstructs_the_graph_the_round_executed() {
+        let plan = plan_of_nodes(vec![agent("build", &[]), agent("ship", &["build"])]);
+        let retry = Operation::NodeAdded {
+            node: Box::new(agent("build-2", &[])),
+            retry_of: Some("build".into()),
+        };
+        let events = vec![
+            pipeline(
+                journal::PipelineKind::RunStarted,
+                0,
+                None,
+                &[("plan", json!(plan))],
+            ),
+            pipeline(
+                journal::PipelineKind::RoundStarted,
+                1,
+                None,
+                &[("plan", json!(plan))],
+            ),
+            pipeline(journal::PipelineKind::NodeDispatched, 2, Some("build"), &[]),
+            pipeline(
+                journal::PipelineKind::NodeSettled,
+                3,
+                Some("build"),
+                &[
+                    ("status", json!("failed")),
+                    ("outcome", json!("gate-failed")),
+                ],
+            ),
+            pipeline(
+                journal::PipelineKind::EditCommitted,
+                4,
+                None,
+                &[
+                    ("command", json!({"op": "retry"})),
+                    (
+                        "operations",
+                        json!([
+                            Operation::RetryRequested {
+                                node: "build".into(),
+                                replacement: "build-2".into(),
+                                reset: vec!["ship".into()],
+                            },
+                            retry,
+                        ]),
+                    ),
+                ],
+            ),
+        ];
+
+        let state = fold(&events);
+        assert!(state.strict);
+        assert_eq!(state.round, 1);
+        assert!(state.round_open);
+        assert!(
+            state.graph.contains("build-2"),
+            "the replacement is not in the plan of record"
+        );
+        assert_eq!(state.recorded["build"], NodeStatus::Cancelled);
+        assert_eq!(state.outcomes["build"], "gate-failed");
+        assert!(state.dispatched_at.contains_key("build"));
+        assert!(state.settled_at.contains_key("build"));
+    }
+
+    #[test]
+    fn an_edit_whose_operations_cannot_be_folded_ends_strict_replay() {
+        let plan = plan_of_nodes(vec![agent("build", &[])]);
+        let events = vec![
+            pipeline(
+                journal::PipelineKind::RunStarted,
+                0,
+                None,
+                &[("plan", json!(plan))],
+            ),
+            pipeline(
+                journal::PipelineKind::EditCommitted,
+                1,
+                None,
+                &[("operations", json!([{"kind": "from-the-future"}]))],
+            ),
+        ];
+        let state = fold(&events);
+        assert!(!state.strict, "an unfoldable operation was folded anyway");
+    }
+
+    #[test]
+    fn a_new_round_clears_the_previous_rounds_frontier() {
+        let plan = plan_of_nodes(vec![agent("build", &[])]);
+        let mut second = pipeline(
+            journal::PipelineKind::RoundStarted,
+            3,
+            None,
+            &[("plan", json!(plan))],
+        );
+        second.labels.round = Some(2);
+        let events = vec![
+            pipeline(
+                journal::PipelineKind::RunStarted,
+                0,
+                None,
+                &[("plan", json!(plan))],
+            ),
+            pipeline(
+                journal::PipelineKind::RoundStarted,
+                1,
+                None,
+                &[("plan", json!(plan))],
+            ),
+            pipeline(
+                journal::PipelineKind::NodeSettled,
+                2,
+                Some("build"),
+                &[("status", json!("failed"))],
+            ),
+            pipeline(journal::PipelineKind::RoundFinished, 4, None, &[]),
+            second,
+        ];
+        let state = fold(&events);
+        assert_eq!(state.round, 2);
+        assert!(state.round_open);
+        assert!(
+            state.recorded.is_empty(),
+            "round 1's frontier leaked into round 2"
+        );
+    }
+
+    #[test]
+    fn attestations_completions_surfaces_and_stops_are_all_folded() {
+        let plan = plan_of_nodes(vec![Node {
+            id: "approve".into(),
+            kind: crate::plan::NodeKind::Human,
+            task: Some("approve it".into()),
+            ..Node::default()
+        }]);
+        let events = vec![
+            pipeline(
+                journal::PipelineKind::RunStarted,
+                0,
+                None,
+                &[("plan", json!(plan))],
+            ),
+            pipeline(journal::PipelineKind::PlannerSurfaceQueued, 1, None, &[]),
+            pipeline(journal::PipelineKind::PlannerSurfaced, 2, None, &[]),
+            pipeline(
+                journal::PipelineKind::HumanAttested,
+                3,
+                None,
+                &[("ref", json!("approve"))],
+            ),
+            pipeline(
+                journal::PipelineKind::CompletionRequested,
+                4,
+                None,
+                &[("reason", json!("verified"))],
+            ),
+            pipeline(
+                journal::PipelineKind::UpstreamModified,
+                5,
+                Some("consumer"),
+                &[("dependency", json!("run:o#n"))],
+            ),
+            pipeline(journal::PipelineKind::RunStopped, 6, None, &[]),
+        ];
+        let state = fold(&events);
+        assert_eq!(state.surfaces_queued, 1);
+        assert_eq!(state.surfaces_read, 1);
+        assert!(state.last_surface_at.is_some());
+        assert!(state.attestations.contains("approve"));
+        assert_eq!(state.recorded["approve"], NodeStatus::Done);
+        assert_eq!(state.completion_requests, vec!["verified".to_string()]);
+        assert_eq!(state.cross_dag_watches["run:o#n"], 1);
+        assert!(state.stopped);
+        assert!(!state.round_open);
+    }
+
+    #[test]
+    fn a_relayed_sibling_envelope_is_evidence_of_work_and_nothing_more() {
+        let plan = plan_of_nodes(vec![agent("build", &[])]);
+        let mut relayed = pipeline(
+            journal::PipelineKind::NodeSettled,
+            1,
+            Some("build"),
+            &[("status", json!("done"))],
+        );
+        relayed.source = Source::Agentgraph;
+        let state = fold(&[
+            pipeline(
+                journal::PipelineKind::RunStarted,
+                0,
+                None,
+                &[("plan", json!(plan))],
+            ),
+            relayed,
+        ]);
+        assert!(
+            state.recorded.is_empty(),
+            "a sibling's envelope decided this crate's graph state"
+        );
+        assert!(state.last_write_at.is_some());
+    }
+
+    #[test]
+    fn parking_and_requeueing_move_the_node_in_and_out_of_the_frontier() {
+        let plan = plan_of_nodes(vec![agent("sweep", &[])]);
+        let park = pipeline(
+            journal::PipelineKind::EditCommitted,
+            1,
+            None,
+            &[(
+                "operations",
+                json!([Operation::NodeParked {
+                    node: "sweep".into()
+                }]),
+            )],
+        );
+        let state = fold(&[
+            pipeline(
+                journal::PipelineKind::RunStarted,
+                0,
+                None,
+                &[("plan", json!(plan))],
+            ),
+            park.clone(),
+        ]);
+        assert_eq!(state.recorded["sweep"], NodeStatus::Parked);
+        assert!(state.graph.get("sweep").expect("sweep").parked);
+
+        let requeue = pipeline(
+            journal::PipelineKind::EditCommitted,
+            2,
+            None,
+            &[(
+                "operations",
+                json!([Operation::NodeRequeued {
+                    node: "sweep".into(),
+                    amend: None
+                }]),
+            )],
+        );
+        let state = fold(&[
+            pipeline(
+                journal::PipelineKind::RunStarted,
+                0,
+                None,
+                &[("plan", json!(plan))],
+            ),
+            park,
+            requeue,
+        ]);
+        assert!(!state.recorded.contains_key("sweep"));
+        assert!(!state.graph.get("sweep").expect("sweep").parked);
+    }
+
+    #[test]
+    fn the_frontier_and_derived_statuses_come_off_the_same_fold() {
+        let plan = plan_of_nodes(vec![agent("build", &[]), agent("ship", &["build"])]);
+        let state = fold(&[
+            pipeline(
+                journal::PipelineKind::RunStarted,
+                0,
+                None,
+                &[("plan", json!(plan))],
+            ),
+            pipeline(
+                journal::PipelineKind::NodeSettled,
+                1,
+                Some("build"),
+                &[("status", json!("done"))],
+            ),
+        ]);
+        assert_eq!(state.frontier().recorded["build"], NodeStatus::Done);
+        assert_eq!(state.statuses()["ship"], NodeStatus::Ready);
+        let upstream = |_: &str| Some(NodeStatus::Done);
+        assert_eq!(state.statuses_with(&upstream)["ship"], NodeStatus::Ready);
+    }
+}
