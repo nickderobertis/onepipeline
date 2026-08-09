@@ -68,8 +68,8 @@ secret unset until the siblings publish.
 
 ## Deliberately absent
 
-There is no `typecheck` target. `cargo clippy --all-targets -- -D warnings`
-*is* this crate's type check and already runs as `lint`, so a separate target
+There is no `typecheck` target. The clippy pass `lint` already runs, over every
+target and denying warnings, *is* this crate's type check, so a separate target
 would re-compile the tree to learn nothing new.
 
 ## Tests

@@ -472,12 +472,33 @@ pub fn repo_file(relative: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
 }
 
+/// Read a JSONL file the code under test wrote.
+///
+/// A file that is not there yet is an empty stream: every `until` polls one
+/// before its first record exists. A **line** that is not JSON is not read the
+/// same way. Several processes append to these, so the last line of the file
+/// may be an append still in flight and is skipped; a torn line with another
+/// line after it cannot be, so it is a record the writer lost, and reading past
+/// it would let a test assert against a gap and call it a pass.
 fn read_jsonl(path: &Path) -> Vec<Value> {
-    std::fs::read_to_string(path)
-        .unwrap_or_default()
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let lines: Vec<&str> = text
         .lines()
         .filter(|line| !line.trim().is_empty())
-        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let last = lines.len().saturating_sub(1);
+    lines
+        .iter()
+        .enumerate()
+        .filter_map(|(at, line)| match serde_json::from_str(line) {
+            Ok(value) => Some(value),
+            Err(_) if at == last => None,
+            Err(error) => panic!(
+                "{} line {} is torn, so a record the writer appended was lost: {error}\n{line}",
+                path.display(),
+                at + 1
+            ),
+        })
         .collect()
 }
 

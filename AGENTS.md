@@ -54,8 +54,8 @@ proposal rather than a decision.
   are attached for manual download only. asdf / direnv — the committed
   `rust-toolchain.toml`, `Cargo.lock`, and `package-lock.json` already pin the
   workspace. A benchmark tier — nothing here is a hot path yet. What each
-  *project* deliberately does without is recorded with that project, in
-  [`src/AGENTS.md`](src/AGENTS.md) and [`npm/AGENTS.md`](npm/AGENTS.md).
+  *project* deliberately does without is recorded with that project, under its
+  own **Deliberately absent** heading.
 
 ## Command surface
 

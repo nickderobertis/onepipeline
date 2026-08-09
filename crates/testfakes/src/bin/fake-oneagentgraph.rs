@@ -190,7 +190,14 @@ fn drafted_title(task: &str) -> Option<String> {
 /// `round next`, and nothing else that changes run state — so `start`'s journey
 /// is exercised through the same commands a real orchestrator would use.
 fn drive(dir: &std::path::Path) -> ExitCode {
-    let run = std::env::var("ONEPIPELINE_RUN_ID").unwrap_or_default();
+    // Required, not defaulted: an empty run id would send every engine verb at
+    // a run named by nothing, and the refusals that came back would read as the
+    // engine's fault rather than as the launcher never having said which run
+    // this driver is for.
+    let run = match std::env::var("ONEPIPELINE_RUN_ID") {
+        Ok(run) if !run.is_empty() => run,
+        _ => fake::fail("ONEPIPELINE_RUN_ID is unset: no run to drive"),
+    };
     let binary = match std::env::var("ONEPIPELINE_FAKE_DRIVER_BIN") {
         Ok(binary) if !binary.is_empty() => binary,
         _ => fake::fail("ONEPIPELINE_FAKE_DRIVER_BIN is unset: nothing to drive the run with"),
