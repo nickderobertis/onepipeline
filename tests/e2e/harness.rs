@@ -323,6 +323,17 @@ impl Run {
         self
     }
 
+    /// Assert an attached launch reported a settlement rather than failing.
+    ///
+    /// `start --attach` prints one `{"run_id": …, "settlement": …}` line however
+    /// the run settled, so its absence means the launch itself failed — a driver
+    /// that could not be started, a ledger that could not be read. Said here,
+    /// because the wait that follows a launch in a test can otherwise only fail
+    /// as a bare timeout, with the reason on a descriptor nobody kept.
+    pub fn settled(&self) -> &Self {
+        self.out_has("\"settlement\"")
+    }
+
     /// Assert stderr contains a fragment.
     pub fn err_has(&self, fragment: &str) -> &Self {
         assert!(
@@ -354,7 +365,7 @@ pub fn binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_onepipeline"))
 }
 
-/// One of the sibling doubles, beside the binary cargo built.
+/// One of the sibling doubles, pinned to a name only this process holds.
 ///
 /// The doubles live in a separate workspace member so they can never ship, and a
 /// package-scoped build — `cargo llvm-cov` runs one — does not build another
@@ -365,14 +376,24 @@ pub fn binary() -> PathBuf {
 /// there" would silently run last week's fixture against this week's test. The
 /// build happens once per process; `.config/nextest.toml` bounds how many run at
 /// a time, and cargo's own lock serialises those.
+///
+/// The path handed back is **never** the one cargo publishes. Every test runs in
+/// its own process and each builds the doubles, so several cargo invocations
+/// uplift the same `target/debug/<name>` — and an uplift is a remove followed by
+/// a link, so that name is briefly absent. A test that had already looked would
+/// then spawn a binary that vanished under it: on macOS that surfaced both as a
+/// missing double and, worse, as a whole run stuck at `run-started` because the
+/// launcher could not start its driver. Linking each process its own name once
+/// closes the window — a link keeps the inode alive whatever cargo does to the
+/// name it was made from.
 pub fn double(name: &str) -> PathBuf {
-    static BUILT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
     let debug = binary()
         .parent()
         .expect("the binary is in a directory")
         .to_path_buf();
-    BUILT.get_or_init(|| {
+    let held = BUILT.get_or_init(|| {
         let target = debug
             .parent()
             .expect("the profile directory is inside a target directory");
@@ -388,14 +409,35 @@ pub fn double(name: &str) -> PathBuf {
             "the subprocess doubles did not build: {}",
             String::from_utf8_lossy(&built.stderr)
         );
+        let held = debug.join("doubles").join(std::process::id().to_string());
+        std::fs::create_dir_all(&held).expect("a directory for this process's doubles");
+        held
     });
-    let path = debug.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
-    assert!(
-        path.is_file(),
-        "the {name} double is missing from {}",
-        debug.display()
-    );
-    path
+
+    let file = format!("{name}{}", std::env::consts::EXE_SUFFIX);
+    let published = debug.join(&file);
+    let mine = held.join(&file);
+    if !mine.is_file() {
+        // Bounded, and retried rather than asserted on the first look: the
+        // window this closes is another process's uplift, which is short but
+        // real, and a bare `is_file` here would only move the flake one line up.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            let _ = std::fs::remove_file(&mine);
+            match std::fs::hard_link(&published, &mine)
+                .or_else(|_| std::fs::copy(&published, &mine).map(|_| ()))
+            {
+                Ok(()) => break,
+                Err(error) => assert!(
+                    std::time::Instant::now() < deadline,
+                    "the {name} double never appeared in {}: {error}",
+                    debug.display()
+                ),
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+    mine
 }
 
 /// A file shipped in the repository.

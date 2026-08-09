@@ -14,7 +14,9 @@ use crate::harness::{agent, human, lifecycle, plan_of, World};
 
 fn settled(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
     let path = world.plan(name, &plan_of(name, nodes));
-    world.run(&["start", &path.to_string_lossy(), "--attach"]);
+    world
+        .run(&["start", &path.to_string_lossy(), "--attach"])
+        .settled();
     world.until("the run to settle", |world| {
         !world.events_of(name, "round-finished").is_empty()
     });

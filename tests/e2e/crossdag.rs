@@ -30,7 +30,9 @@ fn consumer(id: &str, upstream: &str) -> Value {
 /// Run a plan to settlement, attached, and return the run id.
 fn settle(world: &World, name: &str, nodes: Vec<Value>) -> String {
     let path = world.plan(name, &plan_of(name, nodes));
-    world.run(&["start", &path.to_string_lossy(), "--attach"]);
+    world
+        .run(&["start", &path.to_string_lossy(), "--attach"])
+        .settled();
     world.until("the run to settle", |world| {
         !world.events_of(name, "round-finished").is_empty()
     });
