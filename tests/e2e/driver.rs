@@ -491,19 +491,29 @@ fn a_refusal_slower_than_any_launch_window_still_fails_the_launch() {
         );
     }
 
-    // A bound that is not a number of seconds falls back to the default rather
-    // than to nothing. Read as zero, the wait would end before any graph could
-    // answer and every launch would fail as unanswered — so this refusal, which
-    // arrives long after a zero bound would have given up, has to come back as
-    // the graph's own words and not as a launch that waited no time at all.
-    let mut launch = world.cmd(&["start", &path.to_string_lossy(), "--detach"]);
-    launch.env(
-        "ONEPIPELINE_STARTUP_TIMEOUT_SECONDS",
-        "however long it takes",
-    );
-    let started = world.run_on(launch, "start --detach");
-    started.exited(REFUSED);
-    started.err_has("a member that does not exist");
+    // An unusable bound falls back to the default rather than to nothing. Read
+    // as zero, the wait would end before any graph could answer and every launch
+    // would fail as unanswered — so this refusal, which arrives long after a
+    // zero bound would have given up, has to come back as the graph's own words
+    // and not as a launch that waited no time at all.
+    //
+    // Both ways a value is unusable, because they are unusable for different
+    // reasons and only one of them is caught by reading it: `0` is a perfectly
+    // good number, and the only thing standing between it and a wait that ends
+    // before it starts is the crate declining to take it.
+    for unusable in ["however long it takes", "0"] {
+        let mut launch = world.cmd(&["start", &path.to_string_lossy(), "--detach"]);
+        launch.env("ONEPIPELINE_STARTUP_TIMEOUT_SECONDS", unusable);
+        let started = world.run_on(launch, "start --detach");
+        started.exited(REFUSED);
+        assert!(
+            !started.stderr.contains("neither started nor exited"),
+            "`{unusable}` was taken as the bound, so the launch gave up before \
+             the graph answered:\n{}",
+            started.stderr
+        );
+        started.err_has("a member that does not exist");
+    }
 }
 
 /// A graph that says nothing and does not exit is not a driver either.
