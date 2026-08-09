@@ -167,15 +167,8 @@ pub fn adopt_labels(labels: &mut Labels) {
 #[derive(Debug)]
 pub struct GraphRun {
     child: Child,
-    /// The file its own output went to, when it was not piped here. It is the
-    /// only place a refusal's message exists for a launch that logs, and it
-    /// holds one launch's output and no other: the only caller that logs is
-    /// `start --detach`, into a run directory minted for that launch.
-    log: Option<PathBuf>,
-    /// Its piped stdout, held here rather than on the child, because the
-    /// handshake reads the first line off it and [`events`](Self::events) reads
-    /// the rest.
-    stdout: Option<BufReader<std::process::ChildStdout>>,
+    /// Where this launch's output went, and what reads it back.
+    output: Output,
     /// Everything the handshake read on its way to an answer. These are the
     /// graph's own lines — its announcement, and anything it wrote before one —
     /// so they are put back at the head of the stream rather than spent on the
@@ -195,6 +188,28 @@ pub enum GraphOutput<'a> {
     Relayed,
     /// Appended to a file, for a caller that is about to exit.
     Logged(&'a Path),
+}
+
+/// A started graph's output, from the reading side.
+///
+/// One value rather than a field per destination: a launch's output went to a
+/// pipe or to a file, never to both and never to neither, and which one decides
+/// where its announcement and its refusal are read from. Held as two `Option`s
+/// those two questions could disagree — a launch with neither would be asked for
+/// its answer in a file it does not have, and wait out the backstop for a
+/// refusal already sitting on its pipe.
+#[derive(Debug)]
+enum Output {
+    /// Piped here. The reader lives on this side rather than on the child
+    /// because the handshake reads the first line off it and
+    /// [`events`](GraphRun::events) reads the rest; `None` is that stream handed
+    /// on, not a relayed launch that never had one.
+    Relayed(Option<BufReader<std::process::ChildStdout>>),
+    /// Appended to this file. It is the only place a refusal's message exists
+    /// for a launch that logs, and it holds one launch's output and no other:
+    /// the only caller that logs is `start --detach`, into a run directory
+    /// minted for that launch.
+    Logged(PathBuf),
 }
 
 impl GraphRun {
@@ -221,7 +236,6 @@ impl GraphRun {
             command.env(key, value);
         }
         command.stdin(Stdio::null());
-        let mut log = None;
         match output {
             GraphOutput::Relayed => {
                 command.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -244,17 +258,20 @@ impl GraphRun {
                 command.stdout(log(path)?).stderr(log(path)?);
             }
         }
-        if let GraphOutput::Logged(path) = output {
-            log = Some(path.to_path_buf());
-        }
         let mut child = command
             .spawn()
             .map_err(|e| sibling(format!("cannot start `{} run`: {e}", binary())))?;
-        let stdout = child.stdout.take().map(BufReader::new);
+        // The destination asked for is the destination recorded, so the two
+        // cannot come apart: a relayed launch reads its pipe even on the host
+        // where taking the handle back off the child somehow gave nothing, and
+        // reports that silence as the launch failing to answer.
+        let output = match output {
+            GraphOutput::Relayed => Output::Relayed(child.stdout.take().map(BufReader::new)),
+            GraphOutput::Logged(path) => Output::Logged(path.to_path_buf()),
+        };
         Ok(Self {
             child,
-            log,
-            stdout,
+            output,
             started_with: Vec::new(),
         })
     }
@@ -287,12 +304,20 @@ impl GraphRun {
     /// whatever it was given and finished, which the caller reads from the
     /// stream and the ledger like any other settlement.
     pub fn confirm_started(&mut self) -> Result<()> {
-        match self.stdout.take() {
+        // On where the output went, not on whether a stream happens to be in
+        // hand: those are the same question only as long as they agree.
+        let piped = match &mut self.output {
+            Output::Relayed(stdout) => stdout.take(),
+            // Written to a file, so the answer is read from there.
+            Output::Logged(_) => return self.await_logged_line(),
+        };
+        match piped {
             // Piped here, so the first line is the answer — and it is an
             // envelope the caller is owed, not a token to spend.
             Some(reader) => self.await_first_line(reader),
-            // Written to a file, so the answer is read from there.
-            None => self.await_logged_line(),
+            // A pipe was asked for and there is nothing to read it with, so the
+            // graph cannot answer through it. Its exit is the whole answer.
+            None => self.settle_unstarted(),
         }
     }
 
@@ -333,7 +358,7 @@ impl GraphRun {
             // hide the gap it leaves.
             Ok((error, read, reader)) => {
                 let announced = read.last().is_some_and(|line| is_envelope(line));
-                self.stdout = Some(reader);
+                self.output = Output::Relayed(Some(reader));
                 self.started_with = read;
                 match error {
                     Some(error) => Err(sibling(format!(
@@ -389,7 +414,7 @@ impl GraphRun {
     /// the graph said on stderr, and past a line from a build whose shape this
     /// one cannot read, rather than taking either for an announcement.
     fn logged_an_envelope(&self) -> bool {
-        let Some(path) = &self.log else {
+        let Output::Logged(path) = &self.output else {
             return false;
         };
         let Ok(text) = std::fs::read_to_string(path) else {
@@ -452,9 +477,9 @@ impl GraphRun {
     /// writes, and a logged launch's file also holds whatever it managed to emit
     /// first.
     fn evidence(&mut self) -> String {
-        let text = match &self.log {
-            Some(path) => std::fs::read_to_string(path).unwrap_or_default(),
-            None => self
+        let text = match &self.output {
+            Output::Logged(path) => std::fs::read_to_string(path).unwrap_or_default(),
+            Output::Relayed(_) => self
                 .child
                 .stderr
                 .take()
@@ -485,7 +510,14 @@ impl GraphRun {
     /// own `graph-started`, and a launcher that swallowed it would leave the
     /// merged store without the event that says the driver began.
     pub fn events(&mut self) -> Box<dyn Iterator<Item = Result<Envelope>> + Send> {
-        let Some(stdout) = self.stdout.take() else {
+        let piped = match &mut self.output {
+            // Taken for good: the stream is the caller's from here.
+            Output::Relayed(stdout) => stdout.take(),
+            // A logged launch's envelopes are in its file, which stays named —
+            // its refusal is still read from there.
+            Output::Logged(_) => None,
+        };
+        let Some(stdout) = piped else {
             return Box::new(std::iter::empty());
         };
         let announced: Vec<_> = std::mem::take(&mut self.started_with);

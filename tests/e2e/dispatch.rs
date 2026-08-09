@@ -8,6 +8,15 @@
 //! standing in is the paid model turn, replaced at that library's own
 //! `ONEAGENTGRAPH_ONEHARNESS_BIN` override.
 
+// llmlint: ignore-file[e2e_not_mocked] the layer under test is this crate's dispatch
+// *through* `oneagentgraph`, and that layer is real here: the sibling's own compiled
+// binary resolves the graph, prepares the member, supervises it, and stamps the stream.
+// What stands in is one layer below it — the paid model turn `oneagentgraph` itself
+// spawns, swapped at that library's own documented `ONEAGENTGRAPH_ONEHARNESS_BIN`
+// override, which knows nothing about this crate. There is no offline stand-in for a
+// provider turn, and these journeys run inside `just check`, which has neither a
+// credential nor a budget for one.
+
 use crate::harness::{agent, human, plan_of, World};
 use serde_json::Value;
 
