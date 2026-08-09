@@ -227,6 +227,16 @@ impl World {
         read_jsonl(&self.fakes.join("turns.jsonl"))
     }
 
+    /// Run an already-configured command to completion.
+    ///
+    /// For a journey that needs one environment override — a timeout it is
+    /// deliberately driving past — without a second copy of everything
+    /// [`cmd`](World::cmd) wires up.
+    pub fn run_on(&self, command: Command, args: &str) -> Run {
+        let mut command = command;
+        Run::of(command.output().expect("the binary runs"), &[args], self)
+    }
+
     /// Run a command with an envelope on stdin.
     pub fn run_with_stdin(&self, args: &[&str], stdin: &str) -> Run {
         self.run_with_stdin_on(self.cmd(args), stdin)

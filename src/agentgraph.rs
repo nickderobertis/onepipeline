@@ -43,17 +43,34 @@ pub const CHECK_IN_MEMBER: &str = "check-in";
 /// later must not be able to start colliding.
 pub const LABEL_PREFIX: &str = "onepipeline.";
 
-/// How long a launch watches its graph before reporting that it started.
+/// The backstop on the startup handshake — not the handshake itself.
 ///
-/// A launcher does not wait for its driver — that is what launching one means —
-/// so a refusal is only observable in the window between spawning the process
-/// and returning. A CLI rejects an argument it cannot accept before it does
-/// anything else, so this is a wide margin over the microseconds that takes, and
-/// it is the whole of what stands between an operator and a printed pid for a
-/// run that was already dead when it was printed.
-pub const LAUNCH_GRACE: Duration = Duration::from_millis(500);
+/// The handshake below waits for an *answer*: the graph's first envelope, or its
+/// exit. This bound only covers the third case, a process that gives neither,
+/// and reaching it fails the launch rather than passing it. Nothing is ever
+/// reported as started because a stopwatch ran out — that reading is the defect
+/// this replaced, where a refusal a little slower than the window was announced
+/// as a running driver.
+pub const DEFAULT_STARTUP_TIMEOUT_SECONDS: u64 = 30;
 
-/// How often the window above is checked.
+/// The environment variable that moves the backstop above.
+pub const STARTUP_TIMEOUT_ENV: &str = "ONEPIPELINE_STARTUP_TIMEOUT_SECONDS";
+
+/// How long a launch waits for an answer before reporting that it got none.
+///
+/// An unusable value falls back to the default rather than to zero: a `0` would
+/// make every launch time out before its graph could answer, which fails every
+/// run rather than the one the operator was configuring.
+fn startup_timeout() -> Duration {
+    let seconds = std::env::var(STARTUP_TIMEOUT_ENV)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|seconds| *seconds > 0)
+        .unwrap_or(DEFAULT_STARTUP_TIMEOUT_SECONDS);
+    Duration::from_secs(seconds)
+}
+
+/// How often a logged launch's output is re-read while it is waited on.
 const LAUNCH_POLL: Duration = Duration::from_millis(10);
 
 /// How much of a refused launch's own output is carried into the failure.
@@ -140,9 +157,20 @@ pub fn adopt_labels(labels: &mut Labels) {
 #[derive(Debug)]
 pub struct GraphRun {
     child: Child,
-    /// The file its own output went to, when it was not piped here. It is the
-    /// only place a refusal's message exists for a launch that logs.
-    log: Option<PathBuf>,
+    /// The file its own output went to, when it was not piped here, and how far
+    /// that file already went before this graph was started. Both are needed: it
+    /// is the only place a refusal's message exists for a launch that logs, and
+    /// the file outlives one launch — a driver log an earlier driver wrote into
+    /// would otherwise answer this launch's handshake with that one's evidence.
+    log: Option<(PathBuf, u64)>,
+    /// Its piped stdout, held here rather than on the child, because the
+    /// handshake reads the first line off it and [`events`](Self::events) reads
+    /// the rest.
+    stdout: Option<BufReader<std::process::ChildStdout>>,
+    /// The line the handshake took as proof the graph started. It is an envelope
+    /// like any other, so it is put back at the head of the stream rather than
+    /// being spent on the handshake.
+    started_with: Option<String>,
 }
 
 /// Where a started graph's own stdout and stderr go.
@@ -207,30 +235,106 @@ impl GraphRun {
             }
         }
         if let GraphOutput::Logged(path) = output {
-            log = Some(path.to_path_buf());
+            // Measured before the graph exists, so everything past this offset is
+            // this launch's own.
+            let written = std::fs::metadata(path).map(|file| file.len()).unwrap_or(0);
+            log = Some((path.to_path_buf(), written));
         }
-        let child = command
+        let mut child = command
             .spawn()
             .map_err(|e| sibling(format!("cannot start `{} run`: {e}", binary())))?;
-        Ok(Self { child, log })
+        let stdout = child.stdout.take().map(BufReader::new);
+        Ok(Self {
+            child,
+            log,
+            stdout,
+            started_with: None,
+        })
     }
 
-    /// Report a launch the graph refused, rather than a pid it never used.
+    /// Wait for the graph to say it started, and report it if it did not.
     ///
     /// Spawning proves a program was found, and nothing else. A graph that
     /// rejects its arguments — an unreadable config, a label it reserves — has
-    /// exited before the launcher is next scheduled, and a launcher that only
-    /// asked whether the *spawn* worked answers with an exit 0 and the pid of a
-    /// dead process. The run then sits with nothing driving it, and the message
-    /// saying why is in a stream nobody read. So the launch is watched for
-    /// [`LAUNCH_GRACE`], and a graph that ended badly in that window fails the
-    /// launch carrying the graph's own words.
+    /// exited before it drove anything, and a launcher that only asked whether
+    /// the *spawn* worked answers with an exit 0 and the pid of a dead process.
+    /// The run then sits with nothing driving it, and the message saying why is
+    /// in a stream nobody read.
     ///
-    /// A graph that has *succeeded* inside the window is not a failure: it ran
+    /// So this waits for an **answer** rather than for a stopwatch: a graph
+    /// announces itself with an envelope before it does any work, so the launch
+    /// returns when that envelope arrives, when the process exits, or — the case
+    /// [`DEFAULT_STARTUP_TIMEOUT_SECONDS`] covers — when it has done neither for
+    /// long enough that it is not going to. A window a refusal merely has to outlast is what
+    /// this replaced: it passed the launch on "still alive", which a graph
+    /// delayed by scheduling or by its own startup work satisfies right up until
+    /// it exits non-zero a moment later.
+    ///
+    /// The exit is read **before** the evidence, so a graph that announced
+    /// itself and then died is a failed launch rather than a started one: what
+    /// the launcher promises is a driver that is running as it returns.
+    ///
+    /// A graph that *succeeded* before answering is not a failure. It ran
     /// whatever it was given and finished, which the caller reads from the
     /// stream and the ledger like any other settlement.
     pub fn confirm_started(&mut self) -> Result<()> {
-        let deadline = Instant::now() + LAUNCH_GRACE;
+        match self.stdout.take() {
+            // Piped here, so the first line is the answer — and it is an
+            // envelope the caller is owed, not a token to spend.
+            Some(reader) => self.await_first_line(reader),
+            // Written to a file, so the answer is read from there.
+            None => self.await_logged_line(),
+        }
+    }
+
+    /// The handshake for a launch whose output is piped here.
+    fn await_first_line(&mut self, reader: BufReader<std::process::ChildStdout>) -> Result<()> {
+        // On a thread, because a read of a pipe blocks until the graph writes,
+        // dies, or neither — and the third is exactly what this call must not
+        // hang on. The reader is handed back with the line, so the stream is
+        // whole again whichever way the answer came.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name(format!("{}-handshake", binary()))
+            .spawn(move || {
+                let mut reader = reader;
+                let mut line = String::new();
+                let read = reader.read_line(&mut line);
+                let _ = tx.send((read, line, reader));
+            })
+            .map_err(|e| sibling(format!("cannot wait for `{} run` to start: {e}", binary())))?;
+
+        match rx.recv_timeout(startup_timeout()) {
+            Ok((Err(error), _, reader)) => {
+                self.stdout = Some(reader);
+                Err(sibling(format!(
+                    "cannot read `{} run`'s first envelope: {error}",
+                    binary()
+                )))
+            }
+            // End of stream: it will say nothing more, so its exit is the whole
+            // answer.
+            Ok((Ok(0), _, reader)) => {
+                self.stdout = Some(reader);
+                self.settle_unstarted()
+            }
+            Ok((Ok(_), line, reader)) => {
+                self.stdout = Some(reader);
+                self.started_with = Some(line);
+                // It spoke, so it got as far as running. Whether it is *still*
+                // running is the launcher's actual promise.
+                match self.child.try_wait() {
+                    Ok(Some(status)) if !status.success() => self.refused(status),
+                    _ => Ok(()),
+                }
+            }
+            Err(_) => self.gave_no_answer(),
+        }
+    }
+
+    /// The handshake for a launch whose output goes to a file.
+    fn await_logged_line(&mut self) -> Result<()> {
+        let deadline = Instant::now() + startup_timeout();
         loop {
             match self.child.try_wait() {
                 Err(error) => {
@@ -240,24 +344,86 @@ impl GraphRun {
                     )))
                 }
                 Ok(Some(status)) if status.success() => return Ok(()),
-                Ok(Some(status)) => {
-                    let ended = status.code().map_or_else(
-                        || "was ended by a signal".to_string(),
-                        |code| format!("exited {code}"),
-                    );
-                    return Err(sibling(format!(
-                        "`{} run` {ended} instead of driving the run: {}",
-                        binary(),
-                        self.evidence()
-                    )));
-                }
+                Ok(Some(status)) => return self.refused(status),
                 Ok(None) => {}
             }
-            if Instant::now() >= deadline {
+            if self.logged_an_envelope() {
                 return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return self.gave_no_answer();
             }
             std::thread::sleep(LAUNCH_POLL);
         }
+    }
+
+    /// Whether this launch has written a whole envelope into its log yet.
+    ///
+    /// A *complete* line — one the writer has terminated — and one that parses
+    /// as a JSON object, which a refusal's prose does not. Both streams share the
+    /// file, so this looks past whatever the graph said on stderr first rather
+    /// than reading only the first line.
+    fn logged_an_envelope(&self) -> bool {
+        let Some((path, from)) = &self.log else {
+            return false;
+        };
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return false;
+        };
+        let mine = text.get(usize::try_from(*from).unwrap_or(usize::MAX)..);
+        mine.into_iter()
+            .flat_map(|mine| mine.split_inclusive('\n'))
+            .filter(|line| line.ends_with('\n'))
+            .any(|line| {
+                serde_json::from_str::<serde_json::Value>(line.trim())
+                    .is_ok_and(|value| value.is_object())
+            })
+    }
+
+    /// The graph closed its stream without announcing itself: report whatever it
+    /// exited with.
+    fn settle_unstarted(&mut self) -> Result<()> {
+        let deadline = Instant::now() + startup_timeout();
+        loop {
+            match self.child.try_wait() {
+                Err(error) => {
+                    return Err(sibling(format!(
+                        "cannot tell whether `{} run` started: {error}",
+                        binary()
+                    )))
+                }
+                Ok(Some(status)) if status.success() => return Ok(()),
+                Ok(Some(status)) => return self.refused(status),
+                Ok(None) if Instant::now() >= deadline => return self.gave_no_answer(),
+                Ok(None) => std::thread::sleep(LAUNCH_POLL),
+            }
+        }
+    }
+
+    /// A launch the graph ended instead of driving.
+    fn refused(&mut self, status: std::process::ExitStatus) -> Result<()> {
+        let ended = status.code().map_or_else(
+            || "was ended by a signal".to_string(),
+            |code| format!("exited {code}"),
+        );
+        Err(sibling(format!(
+            "`{} run` {ended} instead of driving the run: {}",
+            binary(),
+            self.evidence()
+        )))
+    }
+
+    /// A launch that neither started nor ended. It is not left running: nothing
+    /// would ever collect it, and the caller is being told it did not start.
+    fn gave_no_answer(&mut self) -> Result<()> {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        Err(sibling(format!(
+            "`{} run` neither started nor exited within {}s, so nothing is driving the run: {}",
+            binary(),
+            startup_timeout().as_secs(),
+            self.evidence()
+        )))
     }
 
     /// What the graph itself said, from wherever its output went.
@@ -267,7 +433,7 @@ impl GraphRun {
     /// first.
     fn evidence(&mut self) -> String {
         let text = match &self.log {
-            Some(path) => std::fs::read_to_string(path).unwrap_or_default(),
+            Some((path, _)) => std::fs::read_to_string(path).unwrap_or_default(),
             None => self
                 .child
                 .stderr
@@ -294,13 +460,19 @@ impl GraphRun {
     /// A line the envelope schema does not accept is skipped rather than ending
     /// the stream: a sibling emitting a kind this build does not know is not a
     /// reason to stop relaying the ones it does.
+    ///
+    /// The line the handshake read is put back at the head: it is the graph's
+    /// own `graph-started`, and a launcher that swallowed it would leave the
+    /// merged store without the event that says the driver began.
     pub fn events(&mut self) -> Box<dyn Iterator<Item = Result<Envelope>> + Send> {
-        let Some(stdout) = self.child.stdout.take() else {
+        let Some(stdout) = self.stdout.take() else {
             return Box::new(std::iter::empty());
         };
+        let announced = self.started_with.take().map(Ok);
         Box::new(
-            BufReader::new(stdout)
-                .lines()
+            announced
+                .into_iter()
+                .chain(stdout.lines())
                 .filter_map(|line| match line {
                     // A stream that broke is not a stream that ended. Read as the same
                     // thing, a relay stops mid-run and reports a clean finish, and the

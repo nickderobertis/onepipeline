@@ -456,3 +456,67 @@ fn a_detached_start_returns_while_the_run_it_launched_is_still_in_flight() {
         !world.events_of(&run, "round-finished").is_empty()
     });
 }
+
+/// A refusal that takes its time is still a refusal.
+///
+/// This is the shape a launcher gets wrong most easily. A graph validates before
+/// it announces itself, and how long that takes is the host's business — a
+/// config fetched over the network, a machine under load, a process the
+/// scheduler has not run yet. A launcher that waited a fixed moment and then
+/// called a still-running process started would report exactly this refusal as a
+/// running driver, print its pid, and leave the run undriven with the reason in
+/// a file nobody opens.
+///
+/// So the launch is held until the graph *answers* — and the answer here comes
+/// well after any window a launcher might have waited instead.
+#[test]
+fn a_refusal_slower_than_any_launch_window_still_fails_the_launch() {
+    let world = World::new("driver-slow-refusal");
+    world.script("run.refuse-after", "1500");
+    let path = world.plan("stalled", &plan_of("stalled", vec![agent("build", &[])]));
+
+    // Both launch forms: the graph's own words are in a different place for
+    // each, and a launcher that reported this one as started would do it for
+    // whichever form it did not wait on.
+    for form in ["--detach", "--attach"] {
+        let started = world.run(&["start", &path.to_string_lossy(), form]);
+
+        started.exited(REFUSED);
+        started.err_has("oneagentgraph");
+        started.err_has("a member that does not exist");
+        assert!(
+            !started.stdout.contains("\"pid\""),
+            "`start {form}` reported a pid for a graph that went on to refuse:\n{}",
+            started.stdout
+        );
+    }
+}
+
+/// A graph that says nothing and does not exit is not a driver either.
+///
+/// The third answer to the startup handshake, and the only one that is not an
+/// answer at all. A launch cannot wait on it forever, so the wait is bounded —
+/// and reaching that bound fails the launch rather than passing it, which is the
+/// difference between this and the fixed window it replaced. The process is
+/// ended with it: nothing would ever collect one the launcher has just disowned.
+#[test]
+fn a_graph_that_neither_starts_nor_exits_fails_the_launch_rather_than_outlasting_it() {
+    let world = World::new("driver-silent-graph");
+    world.script("run.hang", "hold");
+    let path = world.plan("silent", &plan_of("silent", vec![agent("build", &[])]));
+
+    let mut launch = world.cmd(&["start", &path.to_string_lossy(), "--detach"]);
+    launch.env("ONEPIPELINE_STARTUP_TIMEOUT_SECONDS", "1");
+    let started = world.run_on(launch, "start --detach");
+
+    started.exited(REFUSED);
+    started.err_has("neither started nor exited");
+    assert!(
+        !started.stdout.contains("\"pid\""),
+        "a launch that never got an answer still printed a pid:\n{}",
+        started.stdout
+    );
+    // Nothing is driving the run, and the ledger says so rather than naming a
+    // driver: the launch is what an `adopt` is offered from.
+    world.run(&["status", "silent"]).out_has("DRIVER DEAD");
+}

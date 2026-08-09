@@ -74,10 +74,14 @@ Two rules govern what crosses the subprocess boundary:
   added later joins the namespace; none is ever sent bare. Coming back,
   `agentgraph::adopt_labels` reads them off a relayed envelope without rewriting
   what the producer stamped, so both identities stay on the one line.
-- **A launcher confirms what it launched.** `start` and `adopt` do not wait for
-  the driver, so `launch_graph` watches it long enough to catch a refusal and
-  fails with the graph's own words. An exit 0 and a pid for a process that had
-  already died is the failure that rule exists to prevent.
+- **A launcher waits for an answer, never for a window.** `start` and `adopt` do
+  not wait for the driver, so `confirm_started` holds the launch until the graph
+  announces itself with its first envelope or exits — and that envelope is put
+  back at the head of the relayed stream rather than spent. A fixed grace is the
+  wrong shape here whatever its length: it passes the launch on "still alive",
+  which a refusal delayed by scheduling or startup work satisfies right up until
+  it exits non-zero a moment later. The backstop that bounds the wait *fails* the
+  launch; nothing is ever reported as started because a stopwatch ran out.
 
 Both are ordinary crates.io dependencies, pinned to a published version. **Keep
 them that way** — a `git`/`rev` source makes the graph unreproducible from the

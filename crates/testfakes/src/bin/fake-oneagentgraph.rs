@@ -77,10 +77,41 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         }
     }
 
+    // A refusal a launcher cannot catch by glancing: the real CLI validates
+    // before it announces itself, and how long that takes is the host's
+    // business — a config fetched over the network, a loaded machine. Scripted
+    // in milliseconds so a journey can put one past any window a launcher might
+    // have waited instead of waiting for an answer.
+    if let Some(delay) = fake::node_script(dir, "run", "refuse-after") {
+        let Ok(millis) = delay.trim().parse::<u64>() else {
+            fake::fail(&format!(
+                "run.refuse-after holds {delay:?}, which is not a number of milliseconds"
+            ));
+        };
+        std::thread::sleep(std::time::Duration::from_millis(millis));
+        eprintln!("oneagentgraph: invalid config: the graph names a member that does not exist");
+        return invalid_config();
+    }
+
+    // A graph that neither announces itself nor exits — the third answer, and
+    // the only one a launcher cannot wait out. The rendezvous is bounded by the
+    // double's own timeout, so a launcher that failed to end this process leaves
+    // a test failing on that rather than a stray one behind.
+    if dir.join("run.hang").exists() {
+        fake::wait_for(&dir.join("run.go"));
+    }
+
     // The dag-scope graph is the driver: its orchestrator member is what runs
     // the engine verbs. Acting that out is how a test exercises `start` end to
     // end rather than only the launch.
     if graph.contains("dag-scope") {
+        // Announced before any work, as the real CLI announces a run. This is
+        // the line the launcher's startup handshake waits for; a double that
+        // stayed silent until it settled would make every launch wait out the
+        // whole run. A node's dispatch is not waited on that way, and scripting
+        // one to produce *nothing* is a scenario this suite needs, so the
+        // announcement belongs to the launched graph rather than to every run.
+        announce(args, &graph);
         return fake::drive(dir);
     }
 
@@ -154,24 +185,52 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Emit one envelope, as the sibling would.
-///
-/// The labels are stamped the way the real CLI stamps them: the graph run's own
-/// identity under the keys it reserves, and every `--label` the caller passed
-/// carried through verbatim beside them. The two `run_id`s on one line are the
-/// point — a graph run is not the pipeline run that dispatched it.
-fn emit(args: &[String], node: &str, step: Option<&str>, task: &str) {
-    let mut labels = serde_json::Map::new();
-    labels.insert(
-        "run_id".to_string(),
-        format!("fake-graph-{}", std::process::id()).into(),
+/// Announce the run, as the sibling's first line does.
+fn announce(args: &[String], graph: &str) {
+    println!(
+        "{}",
+        serde_json::json!({
+            "v": 1,
+            "ts": fake::now(),
+            "stream": stream(),
+            "seq": 0,
+            "source": "agentgraph",
+            "kind": "graph-started",
+            "labels": stamped(args),
+            "payload": {"graph": graph},
+        })
     );
-    labels.insert("member".to_string(), "worker".into());
+}
+
+/// The labels the sibling stamps: its own run and member, and every `--label`
+/// the caller passed, carried through verbatim beside them. The two `run_id`s on
+/// one line are the point — a graph run is not the pipeline run that dispatched
+/// it.
+fn stamped(args: &[String]) -> serde_json::Map<String, serde_json::Value> {
+    let mut labels = serde_json::Map::new();
+    labels.insert("run_id".to_string(), graph_run().into());
     for pair in fake::flags(args, "--label") {
         if let Some((key, value)) = pair.split_once('=') {
             labels.insert(key.to_string(), value.into());
         }
     }
+    labels
+}
+
+/// This graph run's own id, which is not the id of the run that started it.
+fn graph_run() -> String {
+    format!("fake-graph-{}", std::process::id())
+}
+
+/// The stream every envelope of this run carries.
+fn stream() -> String {
+    format!("fake-oneagentgraph-{}", std::process::id())
+}
+
+/// Emit the turn's envelope, as the sibling would.
+fn emit(args: &[String], node: &str, step: Option<&str>, task: &str) {
+    let mut labels = stamped(args);
+    labels.insert("member".to_string(), "worker".into());
     // The node and the step are what the run being acted out is, so they are
     // stated rather than echoed: a node with no `--label` of its own still
     // belongs to one.
@@ -184,8 +243,8 @@ fn emit(args: &[String], node: &str, step: Option<&str>, task: &str) {
         serde_json::json!({
             "v": 1,
             "ts": fake::now(),
-            "stream": format!("fake-oneagentgraph-{}", std::process::id()),
-            "seq": 0,
+            "stream": stream(),
+            "seq": 1,
             "source": "agentgraph",
             "kind": "turn-finished",
             "labels": labels,
