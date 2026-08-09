@@ -47,6 +47,30 @@ pub const NOTHING_DRIVING: i32 = onepipeline::error::EXIT_NOTHING_DRIVING;
 /// clap's exit code for a usage error.
 pub const USAGE_ERROR: i32 = 2;
 
+/// The variable that moves the startup handshake's backstop.
+///
+/// The suite's one copy, not the crate's own constant: the module that declares
+/// it is private, and this crate publishes the contract's surface and nothing
+/// else, so making it reachable from here would put an item on the public API
+/// that `docs/contract.md` does not name.
+///
+/// A copy is only safe while something proves it is still the name the binary
+/// reads, and that is what
+/// `a_graph_that_neither_starts_nor_exits_fails_the_launch_rather_than_outlasting_it`
+/// does: it sets this to a second and requires the launch to give up inside
+/// [`OVERRIDE_TOOK_EFFECT`]. Renamed in the crate and not here, the override
+/// would be inert, the launch would wait out the much longer default, and that
+/// test would fail on the elapsed time rather than passing a little slower.
+pub const STARTUP_TIMEOUT_ENV: &str = "ONEPIPELINE_STARTUP_TIMEOUT_SECONDS";
+
+/// How long a launch given a one-second backstop may take before the override
+/// has to be presumed inert.
+///
+/// Well above a second of process startup on a loaded host, and well below the
+/// crate's own default backstop, which is what a launch that never read
+/// [`STARTUP_TIMEOUT_ENV`] would wait instead.
+pub const OVERRIDE_TOOK_EFFECT: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// One test's world: a scratch root with everything the binary reads.
 pub struct World {
     /// The scratch root, removed when the test finishes.

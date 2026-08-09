@@ -503,7 +503,7 @@ fn a_refusal_slower_than_any_launch_window_still_fails_the_launch() {
     // before it starts is the crate declining to take it.
     for unusable in ["however long it takes", "0"] {
         let mut launch = world.cmd(&["start", &path.to_string_lossy(), "--detach"]);
-        launch.env("ONEPIPELINE_STARTUP_TIMEOUT_SECONDS", unusable);
+        launch.env(crate::harness::STARTUP_TIMEOUT_ENV, unusable);
         let started = world.run_on(launch, "start --detach");
         started.exited(REFUSED);
         assert!(
@@ -536,11 +536,24 @@ fn a_graph_that_neither_starts_nor_exits_fails_the_launch_rather_than_outlasting
     // The second launch mints a run of its own beside the first.
     for (form, run) in [("--detach", "silent"), ("--attach", "silent-2")] {
         let mut launch = world.cmd(&["start", &path.to_string_lossy(), form]);
-        launch.env("ONEPIPELINE_STARTUP_TIMEOUT_SECONDS", "1");
+        launch.env(crate::harness::STARTUP_TIMEOUT_ENV, "1");
+        let began = std::time::Instant::now();
         let started = world.run_on(launch, form);
+        let took = began.elapsed();
 
         started.exited(REFUSED);
         started.err_has("neither started nor exited");
+        // And it gave up on *this* bound rather than on the default. The suite
+        // keeps its own copy of the variable's name, so this is what stands
+        // between that copy and a rename: an inert override leaves the launch
+        // waiting out a backstop many times longer than the one it asked for.
+        assert!(
+            took < crate::harness::OVERRIDE_TOOK_EFFECT,
+            "`start {form}` was given a 1s backstop and took {took:?}, so it \
+             waited out the default instead — is `{}` still the name the binary \
+             reads?",
+            crate::harness::STARTUP_TIMEOUT_ENV
+        );
         assert!(
             !started.stdout.contains("\"pid\""),
             "`start {form}` never got an answer and still printed a pid:\n{}",
