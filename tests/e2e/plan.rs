@@ -133,12 +133,17 @@ fn a_node_pinned_to_an_executor_the_rules_do_not_declare_is_refused_by_name() {
     // before any provider time is spent rather than silently falling back.
     pinned["executor"] = json!("a-cluster-nobody-declared");
     let path = world.plan("pinned", &plan_of("pinned", vec![pinned]));
-    let mut command = world.cmd(&["round", "run", "pinned"]);
-    command.env("ONEPIPELINE_EXECUTOR_RULES", &rules);
+    // The driver is held, so this round is run once and by this test. Left to
+    // race, the driver's own `round run` takes the ownership lock first and the
+    // refusal being asserted has already happened somewhere nothing can read.
+    world.script("driver.wait", "hold");
     world
         .run(&["start", &path.to_string_lossy(), "--detach"])
         .exited(0);
+    let mut command = world.cmd(&["round", "run", "pinned"]);
+    command.env("ONEPIPELINE_EXECUTOR_RULES", &rules);
     let refused = command.output().expect("the binary runs");
+    world.release("driver.go");
     let said = String::from_utf8_lossy(&refused.stderr).to_string();
     assert!(
         !refused.status.success(),
