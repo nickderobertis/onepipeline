@@ -290,11 +290,31 @@ pub fn drive(dir: &Path) -> std::process::ExitCode {
         // contains: a run *named* `continuing`, or a payload that merely
         // mentioned the word, would otherwise put this driver into a round the
         // engine never opened.
-        let settlement: serde_json::Value = String::from_utf8_lossy(&next.stdout)
+        //
+        // A transition that exited 0 and printed no document at all is the one
+        // answer this cannot make sense of, and it is refused rather than read
+        // as a stop: taken for one, a driver would end the run quietly and every
+        // test that expected another round would fail somewhere else, on the
+        // round that never opened instead of on the answer that never came.
+        let settlement: serde_json::Value = match String::from_utf8_lossy(&next.stdout)
             .lines()
             .rev()
             .find_map(|line| serde_json::from_str(line.trim()).ok())
-            .unwrap_or(serde_json::Value::Null);
+        {
+            Some(settlement) => settlement,
+            None => {
+                append(
+                    &dir.join("driver-saw.jsonl"),
+                    &serde_json::json!({
+                        "run": run,
+                        "round_next": next.status.code(),
+                        "unreadable_settlement": String::from_utf8_lossy(&next.stdout),
+                    })
+                    .to_string(),
+                );
+                return std::process::ExitCode::from(1);
+            }
+        };
         if settlement.get("state").and_then(serde_json::Value::as_str) != Some("continuing") {
             return std::process::ExitCode::SUCCESS;
         }
