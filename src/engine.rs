@@ -737,10 +737,12 @@ pub(crate) fn attempt(
             Err(error) => Drained {
                 settlement: Settlement {
                     detail: Some(error.to_string()),
-                    // A dispatch that could not be started at all is an
-                    // infrastructure failure rather than a task the agent
-                    // failed: retrying it unchanged would otherwise spend the
-                    // next budget the same way.
+                    // Named an infrastructure failure rather than a task the
+                    // agent failed, because none of it is the agent's: the
+                    // dispatch layer refused before any work began. It is
+                    // still retried below, and this is the case retrying is
+                    // most likely to recover — an executor that was
+                    // momentarily unable to start anything.
                     ..failed(node, "infrastructure-failure")
                 },
                 reached: Reached::NotStarted,
