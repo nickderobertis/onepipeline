@@ -246,7 +246,7 @@ fn launch_graph(
          `onepipeline round next {}` and nothing else to change run state.",
         paths.run, paths.run, paths.run
     );
-    agentgraph::GraphRun::start(
+    let mut launched = agentgraph::GraphRun::start(
         &record.graph,
         &task,
         None,
@@ -259,7 +259,12 @@ fn launch_graph(
             ),
         ],
         output,
-    )
+    )?;
+    // A launcher is the one caller that never waits for what it started, so a
+    // graph that refused this launch would otherwise be reported as a running
+    // driver — an exit 0 and a pid for a process that is already gone.
+    launched.confirm_started()?;
+    Ok(launched)
 }
 
 /// How an attach ended.

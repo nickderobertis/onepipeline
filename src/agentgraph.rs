@@ -11,8 +11,9 @@
 //! in for one.
 
 use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 use crate::error::{Error, Result};
 use crate::event::{Envelope, Labels};
@@ -29,6 +30,35 @@ pub const RUN_ID_ENV: &str = "ONEPIPELINE_RUN_ID";
 /// The member of the shipped dag-scope graph that paces planner updates.
 pub const CHECK_IN_MEMBER: &str = "check-in";
 
+/// The prefix every label this crate stamps on a sibling's run carries.
+///
+/// A run of this library is not a run of `oneagentgraph`: one plan's node is
+/// dispatched as its own graph run, so both libraries have a `run_id` and the
+/// two mean different things. `oneagentgraph` reserves the keys it stamps
+/// itself — `run_id`, `member`, `persona` — and **refuses** a `--label` naming
+/// one, which is a correct and general contract rather than anything to work
+/// around: a consumer of the merged stream has to be able to tell the two
+/// identities apart. So every key this crate sends is namespaced under a prefix
+/// it owns, including the ones that do not collide today, because a label added
+/// later must not be able to start colliding.
+pub const LABEL_PREFIX: &str = "onepipeline.";
+
+/// How long a launch watches its graph before reporting that it started.
+///
+/// A launcher does not wait for its driver — that is what launching one means —
+/// so a refusal is only observable in the window between spawning the process
+/// and returning. A CLI rejects an argument it cannot accept before it does
+/// anything else, so this is a wide margin over the microseconds that takes, and
+/// it is the whole of what stands between an operator and a printed pid for a
+/// run that was already dead when it was printed.
+pub const LAUNCH_GRACE: Duration = Duration::from_millis(500);
+
+/// How often the window above is checked.
+const LAUNCH_POLL: Duration = Duration::from_millis(10);
+
+/// How much of a refused launch's own output is carried into the failure.
+const EVIDENCE_CHARS: usize = crate::event::MAX_PAYLOAD_TEXT_BYTES / 4;
+
 /// The executable this process invokes.
 pub fn binary() -> String {
     std::env::var(BINARY_ENV)
@@ -44,10 +74,11 @@ fn sibling(message: impl Into<String>) -> Error {
     }
 }
 
-/// Render the reserved label keys as the `k=v` pairs the CLI takes.
+/// Render the reserved label keys as the `k=v` pairs the CLI takes, each under
+/// [`LABEL_PREFIX`].
 pub fn label_args(labels: &Labels) -> Vec<String> {
     let mut args = Vec::new();
-    let mut push = |key: &str, value: String| args.push(format!("{key}={value}"));
+    let mut push = |key: &str, value: String| args.push(format!("{LABEL_PREFIX}{key}={value}"));
     if let Some(run) = &labels.run_id {
         push("run_id", run.clone());
     }
@@ -66,10 +97,46 @@ pub fn label_args(labels: &Labels) -> Vec<String> {
     args
 }
 
+/// Read this crate's own place in the run back off a relayed envelope.
+///
+/// The namespaced keys arrive in [`Labels::extra`], because that is where a key
+/// the schema does not name lands. A view, a stall watch, and a per-node
+/// evidence list all ask a relayed envelope which node it belongs to, so the
+/// answer is put where every other envelope carries it.
+///
+/// This is an enricher, and enrichers never rewrite what is already there: a
+/// key the producer stamped itself stands, and the namespaced copy stays in
+/// `extra` beside it rather than being consumed. That is what keeps the two
+/// `run_id`s — the graph run's and this run's — both readable on the one line.
+pub fn adopt_labels(labels: &mut Labels) {
+    let stamped = |key: &str| {
+        labels
+            .extra
+            .get(&format!("{LABEL_PREFIX}{key}"))
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+    };
+    let (run, round, node, step, persona) = (
+        stamped("run_id"),
+        stamped("round"),
+        stamped("node"),
+        stamped("step"),
+        stamped("persona"),
+    );
+    labels.run_id = labels.run_id.take().or(run);
+    labels.round = labels.round.or_else(|| round.and_then(|r| r.parse().ok()));
+    labels.node = labels.node.take().or(node);
+    labels.step = labels.step.take().or(step);
+    labels.persona = labels.persona.take().or(persona);
+}
+
 /// One `oneagentgraph run`, started and streaming.
 #[derive(Debug)]
 pub struct GraphRun {
     child: Child,
+    /// The file its own output went to, when it was not piped here. It is the
+    /// only place a refusal's message exists for a launch that logs.
+    log: Option<PathBuf>,
 }
 
 /// Where a started graph's own stdout and stderr go.
@@ -110,6 +177,7 @@ impl GraphRun {
             command.env(key, value);
         }
         command.stdin(Stdio::null());
+        let mut log = None;
         match output {
             GraphOutput::Relayed => {
                 command.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -132,10 +200,87 @@ impl GraphRun {
                 command.stdout(log(path)?).stderr(log(path)?);
             }
         }
+        if let GraphOutput::Logged(path) = output {
+            log = Some(path.to_path_buf());
+        }
         let child = command
             .spawn()
             .map_err(|e| sibling(format!("cannot start `{} run`: {e}", binary())))?;
-        Ok(Self { child })
+        Ok(Self { child, log })
+    }
+
+    /// Report a launch the graph refused, rather than a pid it never used.
+    ///
+    /// Spawning proves a program was found, and nothing else. A graph that
+    /// rejects its arguments — an unreadable config, a label it reserves — has
+    /// exited before the launcher is next scheduled, and a launcher that only
+    /// asked whether the *spawn* worked answers with an exit 0 and the pid of a
+    /// dead process. The run then sits with nothing driving it, and the message
+    /// saying why is in a stream nobody read. So the launch is watched for
+    /// [`LAUNCH_GRACE`], and a graph that ended badly in that window fails the
+    /// launch carrying the graph's own words.
+    ///
+    /// A graph that has *succeeded* inside the window is not a failure: it ran
+    /// whatever it was given and finished, which the caller reads from the
+    /// stream and the ledger like any other settlement.
+    pub fn confirm_started(&mut self) -> Result<()> {
+        let deadline = Instant::now() + LAUNCH_GRACE;
+        loop {
+            match self.child.try_wait() {
+                Err(error) => {
+                    return Err(sibling(format!(
+                        "cannot tell whether `{} run` started: {error}",
+                        binary()
+                    )))
+                }
+                Ok(Some(status)) if status.success() => return Ok(()),
+                Ok(Some(status)) => {
+                    let ended = status.code().map_or_else(
+                        || "was ended by a signal".to_string(),
+                        |code| format!("exited {code}"),
+                    );
+                    return Err(sibling(format!(
+                        "`{} run` {ended} instead of driving the run: {}",
+                        binary(),
+                        self.evidence()
+                    )));
+                }
+                Ok(None) => {}
+            }
+            if Instant::now() >= deadline {
+                return Ok(());
+            }
+            std::thread::sleep(LAUNCH_POLL);
+        }
+    }
+
+    /// What the graph itself said, from wherever its output went.
+    ///
+    /// The tail rather than the head: a refusal is the last thing a program
+    /// writes, and a logged launch's file also holds whatever it managed to emit
+    /// first.
+    fn evidence(&mut self) -> String {
+        let text = match &self.log {
+            Some(path) => std::fs::read_to_string(path).unwrap_or_default(),
+            None => self
+                .child
+                .stderr
+                .take()
+                .map(|mut pipe| {
+                    use std::io::Read;
+                    let mut text = String::new();
+                    let _ = pipe.read_to_string(&mut text);
+                    text
+                })
+                .unwrap_or_default(),
+        };
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return "it said nothing".to_string();
+        }
+        let mut tail: Vec<char> = trimmed.chars().rev().take(EVIDENCE_CHARS).collect();
+        tail.reverse();
+        tail.into_iter().collect()
     }
 
     /// The envelopes it has produced, taken once.
@@ -160,7 +305,10 @@ impl GraphRun {
                     )))),
                     Ok(line) if line.trim().is_empty() => None,
                     Ok(line) => match serde_json::from_str::<Envelope>(&line) {
-                        Ok(envelope) => Some(Ok(envelope)),
+                        Ok(mut envelope) => {
+                            adopt_labels(&mut envelope.labels);
+                            Some(Ok(envelope))
+                        }
                         Err(_) => {
                             crate::vcs::report_skipped("oneagentgraph", 1);
                             None
@@ -284,7 +432,7 @@ mod tests {
     }
 
     #[test]
-    fn only_the_reserved_labels_the_contract_names_are_rendered() {
+    fn only_the_reserved_labels_the_contract_names_are_rendered_and_each_is_namespaced() {
         let labels = Labels {
             run_id: Some("demo".into()),
             round: Some(2),
@@ -296,14 +444,83 @@ mod tests {
         assert_eq!(
             label_args(&labels),
             vec![
-                "run_id=demo",
-                "round=2",
-                "node=build",
-                "step=implement",
-                "persona=engineer",
+                "onepipeline.run_id=demo",
+                "onepipeline.round=2",
+                "onepipeline.node=build",
+                "onepipeline.step=implement",
+                "onepipeline.persona=engineer",
             ]
         );
         assert!(label_args(&Labels::default()).is_empty());
+    }
+
+    /// The sibling's own rule, driven through the sibling's own parser — not a
+    /// second copy of the list it reserves. A key this crate starts sending
+    /// fails here rather than at the launch it would have refused.
+    #[test]
+    fn every_label_this_crate_sends_is_one_oneagentgraph_accepts() {
+        let labels = Labels {
+            run_id: Some("demo".into()),
+            round: Some(2),
+            node: Some("build".into()),
+            step: Some("implement".into()),
+            persona: Some("engineer".into()),
+            extra: serde_json::Map::new(),
+        };
+        for arg in label_args(&labels) {
+            let parsed = oneagentgraph::run::parse_label(&arg)
+                .unwrap_or_else(|error| panic!("oneagentgraph refuses `--label {arg}`: {error}"));
+            assert!(
+                parsed.key().starts_with(LABEL_PREFIX),
+                "{} escaped the namespace",
+                parsed.key()
+            );
+        }
+    }
+
+    #[test]
+    fn a_relayed_envelopes_namespaced_labels_are_adopted_without_rewriting_the_producers() {
+        let mut labels = Labels {
+            // The graph run's own identity, which is not this run's.
+            run_id: Some("node-scope-1786304152340-19".into()),
+            ..Labels::default()
+        };
+        for (key, value) in [
+            ("onepipeline.run_id", "demo"),
+            ("onepipeline.round", "2"),
+            ("onepipeline.node", "build"),
+            ("onepipeline.step", "implement"),
+            ("onepipeline.persona", "engineer"),
+        ] {
+            labels.extra.insert(key.into(), value.into());
+        }
+        adopt_labels(&mut labels);
+
+        assert_eq!(
+            labels.run_id.as_deref(),
+            Some("node-scope-1786304152340-19"),
+            "the graph run's own id was overwritten"
+        );
+        assert_eq!(labels.round, Some(2));
+        assert_eq!(labels.node.as_deref(), Some("build"));
+        assert_eq!(labels.step.as_deref(), Some("implement"));
+        assert_eq!(labels.persona.as_deref(), Some("engineer"));
+        assert_eq!(
+            labels.extra["onepipeline.run_id"], "demo",
+            "the namespaced copy is what tells the two runs apart"
+        );
+    }
+
+    #[test]
+    fn a_relayed_envelope_stamped_with_nothing_of_this_crates_is_left_as_it_arrived() {
+        let mut labels = Labels {
+            run_id: Some("elsewhere".into()),
+            ..Labels::default()
+        };
+        labels.extra.insert("member".into(), "worker".into());
+        let untouched = labels.clone();
+        adopt_labels(&mut labels);
+        assert_eq!(labels, untouched);
     }
 
     #[test]

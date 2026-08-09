@@ -60,8 +60,8 @@ thiserror = "2"
 # The siblings this crate composes. Both are on crates.io, so they resolve from
 # the registry like any other dependency — no git source, so a clone of this repo
 # builds from the registries alone.
-oneagentgraph = "0.1.1"
-onevcs = "0.1.1"
+oneagentgraph = "0.2.1"
+onevcs = "0.1.2"
 
 # Process liveness is the one host fact this crate cannot get from `std` on the
 # MSRV floor, and every `DRIVER DEAD` / `PARKED` verdict rests on it. Both are

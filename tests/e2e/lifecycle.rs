@@ -200,7 +200,10 @@ fn the_pr_author_dispatch_drafts_the_title_and_never_blocks_publication() {
 
     // One post-verification dispatch, under the `pr-author` persona.
     assert!(
-        world.was_invoked("oneagentgraph", &["--label", "persona=pr-author"]),
+        world.was_invoked(
+            "oneagentgraph",
+            &["--label", "onepipeline.persona=pr-author"]
+        ),
         "no pr-author dispatch: {:?}",
         world.invocations()
     );
@@ -230,7 +233,10 @@ fn a_planner_supplied_title_wins_over_the_drafting_dispatch() {
         "the planner's title was overwritten: {published}"
     );
     assert!(
-        !world.was_invoked("oneagentgraph", &["--label", "persona=pr-author"]),
+        !world.was_invoked(
+            "oneagentgraph",
+            &["--label", "onepipeline.persona=pr-author"]
+        ),
         "a title the planner set still spent a drafting dispatch"
     );
 }
@@ -396,7 +402,7 @@ fn a_step_dispatches_under_its_own_agent_graph_before_its_nodes() {
                 .as_array()?
                 .iter()
                 .filter_map(|arg| arg.as_str())
-                .find_map(|arg| arg.strip_prefix("step="))?
+                .find_map(|arg| arg.strip_prefix("onepipeline.step="))?
                 .to_string();
             Some((step, graph))
         })
@@ -511,8 +517,12 @@ fn steps_dispatched(world: &World) -> Vec<(String, String)> {
                 .iter()
                 .filter_map(|arg| arg.as_str())
                 .collect();
-            let round = args.iter().find_map(|a| a.strip_prefix("round="))?;
-            let step = args.iter().find_map(|a| a.strip_prefix("step="))?;
+            let round = args
+                .iter()
+                .find_map(|a| a.strip_prefix("onepipeline.round="))?;
+            let step = args
+                .iter()
+                .find_map(|a| a.strip_prefix("onepipeline.step="))?;
             Some((round.to_string(), step.to_string()))
         })
         .collect()

@@ -9,6 +9,12 @@
 use onepipeline_testfakes as fake;
 use std::process::ExitCode;
 
+/// The label keys the real `oneagentgraph` stamps itself, and so refuses on a
+/// `--label`. Its own list, restated here because a double stands in for the
+/// sibling's *behaviour* — a crate-level test drives the same keys through
+/// `oneagentgraph::run::parse_label`, which is the copy that cannot drift.
+const RESERVED_LABELS: &[&str] = &["run_id", "member", "persona"];
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let dir = fake::script_dir();
@@ -54,6 +60,20 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     if fake::flag(args, "--output").as_deref() != Some("json") {
         return fake::refuse("oneagentgraph run requires --output json");
     }
+    // The real CLI refuses a `--label` naming a key it stamps itself, and exits
+    // 2 doing it. A double that accepted one would be the weak oracle that let
+    // every dispatch be refused by the real sibling while this suite stayed
+    // green — which is exactly what happened.
+    for label in fake::flags(args, "--label") {
+        let key = label.split('=').next().unwrap_or_default();
+        if RESERVED_LABELS.contains(&key) {
+            eprintln!(
+                "oneagentgraph: invalid config: --label {label:?}: {key:?} is a reserved label \
+                 this run stamps itself; pick another name so a consumer can tell the two apart"
+            );
+            return ExitCode::from(2);
+        }
+    }
 
     // The dag-scope graph is the driver: its orchestrator member is what runs
     // the engine verbs. Acting that out is how a test exercises `start` end to
@@ -62,9 +82,9 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         return drive(dir);
     }
 
-    let node = fake::label(args, "node").unwrap_or_else(|| "unknown".into());
-    let step = fake::label(args, "step");
-    let persona = fake::label(args, "persona");
+    let node = fake::label(args, "onepipeline.node").unwrap_or_else(|| "unknown".into());
+    let step = fake::label(args, "onepipeline.step");
+    let persona = fake::label(args, "onepipeline.persona");
     // A node dispatches under more than one persona — its own worker, and the
     // `pr-author` that drafts its change request — so a script may name either
     // the persona or the node/step it applies to.
@@ -133,27 +153,29 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
 }
 
 /// Emit one envelope, as the sibling would.
+///
+/// The labels are stamped the way the real CLI stamps them: the graph run's own
+/// identity under the keys it reserves, and every `--label` the caller passed
+/// carried through verbatim beside them. The two `run_id`s on one line are the
+/// point — a graph run is not the pipeline run that dispatched it.
 fn emit(args: &[String], node: &str, step: Option<&str>, task: &str) {
     let mut labels = serde_json::Map::new();
-    for (key, value) in [
-        ("run_id", fake::label(args, "run_id")),
-        ("round", fake::label(args, "round")),
-        ("node", Some(node.to_string())),
-        ("step", step.map(str::to_string)),
-        ("persona", fake::label(args, "persona")),
-    ] {
-        if let Some(value) = value {
-            // `round` is a number on the wire; everything else is a string.
-            let value = if key == "round" {
-                value
-                    .parse::<u64>()
-                    .map(serde_json::Value::from)
-                    .unwrap_or(value.into())
-            } else {
-                value.into()
-            };
-            labels.insert(key.to_string(), value);
+    labels.insert(
+        "run_id".to_string(),
+        format!("fake-graph-{}", std::process::id()).into(),
+    );
+    labels.insert("member".to_string(), "worker".into());
+    for pair in fake::flags(args, "--label") {
+        if let Some((key, value)) = pair.split_once('=') {
+            labels.insert(key.to_string(), value.into());
         }
+    }
+    // The node and the step are what the run being acted out is, so they are
+    // stated rather than echoed: a node with no `--label` of its own still
+    // belongs to one.
+    labels.insert("onepipeline.node".to_string(), node.into());
+    if let Some(step) = step {
+        labels.insert("onepipeline.step".to_string(), step.into());
     }
     println!(
         "{}",

@@ -304,6 +304,15 @@ fn dispatching_goes_through_the_oneagentgraph_seam_and_says_so_when_it_cannot() 
     // rather than reimplementing it. Pointed at an executable that does not
     // exist, the failure names that sibling instead of reading as a node the
     // agent failed.
+    //
+    // The seam is *named* rather than left to `PATH`: `oneagentgraph` is a
+    // published CLI, so a host that has it installed would otherwise make this
+    // assertion depend on whose machine it ran on. nextest runs each test in its
+    // own process, so the variable this sets reaches nothing else.
+    std::env::set_var(
+        "ONEPIPELINE_ONEAGENTGRAPH_BIN",
+        "oneagentgraph-that-is-not-installed",
+    );
     // `Box<dyn DispatchHandle>` is not `Debug`, so the success arm is destructured
     // rather than unwrapped.
     let Err(err) = LocalExecutor.dispatch(DispatchRequest {

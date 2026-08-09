@@ -77,7 +77,7 @@ fn graphs_dispatched(world: &World) -> Vec<(String, String)> {
                 .as_array()?
                 .iter()
                 .filter_map(|arg| arg.as_str())
-                .find_map(|arg| arg.strip_prefix("node="))?
+                .find_map(|arg| arg.strip_prefix("onepipeline.node="))?
                 .to_string();
             Some((node, graph))
         })
@@ -169,7 +169,10 @@ fn a_single_node_plan_runs_to_completion_and_records_its_evidence() {
 
     // The dispatch really went through the `oneagentgraph` seam, with the
     // reserved labels stamped on it.
-    assert!(world.was_invoked("oneagentgraph", &["run", "--label", "node=build"]));
+    assert!(world.was_invoked(
+        "oneagentgraph",
+        &["run", "--label", "onepipeline.node=build"]
+    ));
     let kinds = world.kinds(&run);
     for expected in [
         "run-started",
@@ -278,7 +281,10 @@ fn a_ready_human_action_waits_and_blocks_what_it_unblocks() {
     assert_eq!(node("ship")["blocked_by"], json!(["approve"]));
     // The harness never guesses that a person acted, so nothing was dispatched
     // for the human node.
-    assert!(!world.was_invoked("oneagentgraph", &["run", "--label", "node=approve"]));
+    assert!(!world.was_invoked(
+        "oneagentgraph",
+        &["run", "--label", "onepipeline.node=approve"]
+    ));
 }
 
 #[test]
@@ -298,7 +304,10 @@ fn an_expects_no_diff_node_settles_without_spending_a_dispatch() {
     assert_eq!(result["nodes"][0]["status"], "done");
     assert_eq!(result["nodes"][0]["outcome"], "no-changes");
     assert!(
-        !world.was_invoked("oneagentgraph", &["run", "--label", "node=handoff"]),
+        !world.was_invoked(
+            "oneagentgraph",
+            &["run", "--label", "onepipeline.node=handoff"]
+        ),
         "an expects_no_diff node spent a dispatch"
     );
 }
