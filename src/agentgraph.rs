@@ -167,12 +167,11 @@ pub fn adopt_labels(labels: &mut Labels) {
 #[derive(Debug)]
 pub struct GraphRun {
     child: Child,
-    /// The file its own output went to, when it was not piped here, and how far
-    /// that file already went before this graph was started. Both are needed: it
-    /// is the only place a refusal's message exists for a launch that logs, and
-    /// the file outlives one launch — a driver log an earlier driver wrote into
-    /// would otherwise answer this launch's handshake with that one's evidence.
-    log: Option<(PathBuf, u64)>,
+    /// The file its own output went to, when it was not piped here. It is the
+    /// only place a refusal's message exists for a launch that logs, and it
+    /// holds one launch's output and no other: the only caller that logs is
+    /// `start --detach`, into a run directory minted for that launch.
+    log: Option<PathBuf>,
     /// Its piped stdout, held here rather than on the child, because the
     /// handshake reads the first line off it and [`events`](Self::events) reads
     /// the rest.
@@ -246,10 +245,7 @@ impl GraphRun {
             }
         }
         if let GraphOutput::Logged(path) = output {
-            // Measured before the graph exists, so everything past this offset is
-            // this launch's own.
-            let written = std::fs::metadata(path).map(|file| file.len()).unwrap_or(0);
-            log = Some((path.to_path_buf(), written));
+            log = Some(path.to_path_buf());
         }
         let mut child = command
             .spawn()
@@ -393,15 +389,13 @@ impl GraphRun {
     /// the graph said on stderr, and past a line from a build whose shape this
     /// one cannot read, rather than taking either for an announcement.
     fn logged_an_envelope(&self) -> bool {
-        let Some((path, from)) = &self.log else {
+        let Some(path) = &self.log else {
             return false;
         };
         let Ok(text) = std::fs::read_to_string(path) else {
             return false;
         };
-        let mine = text.get(usize::try_from(*from).unwrap_or(usize::MAX)..);
-        mine.into_iter()
-            .flat_map(|mine| mine.split_inclusive('\n'))
+        text.split_inclusive('\n')
             .filter(|line| line.ends_with('\n'))
             .any(is_envelope)
     }
@@ -459,7 +453,7 @@ impl GraphRun {
     /// first.
     fn evidence(&mut self) -> String {
         let text = match &self.log {
-            Some((path, _)) => std::fs::read_to_string(path).unwrap_or_default(),
+            Some(path) => std::fs::read_to_string(path).unwrap_or_default(),
             None => self
                 .child
                 .stderr
