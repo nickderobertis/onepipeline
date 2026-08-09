@@ -2,12 +2,23 @@
 //!
 //! It speaks the sibling's command surface — `run`, `reset-timer`, `health` —
 //! emits envelope NDJSON on stdout, and records every invocation so a test can
-//! assert on what `onepipeline` actually asked for. It is a stand-in for
-//! `oneagentgraph`, which is itself interface-only and refuses everything; the
-//! composition on this side of the boundary is what the tests exercise.
+//! assert on what `onepipeline` actually asked for.
+//!
+//! It stands in for the real `oneagentgraph` so a journey can *state* a scenario
+//! — a node that fails its gate, a dispatch held open, a driver that dies —
+//! rather than arrange one out of real agent turns. That makes it an oracle, and
+//! an oracle is only worth what it refuses: where the real CLI says no, this one
+//! says no the same way. `tests/e2e/dispatch.rs` drives the real binary.
 
 use onepipeline_testfakes as fake;
 use std::process::ExitCode;
+
+/// The exit code the real CLI answers an invalid configuration with — its own
+/// constant, so a double cannot answer a refusal with a code the sibling stopped
+/// using.
+fn invalid_config() -> ExitCode {
+    ExitCode::from(u8::try_from(oneagentgraph::error::EXIT_INVALID_CONFIG).unwrap_or(1))
+}
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -54,17 +65,66 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     if fake::flag(args, "--output").as_deref() != Some("json") {
         return fake::refuse("oneagentgraph run requires --output json");
     }
+    // Every `--label` goes through the sibling's *own* parser, so this double
+    // refuses exactly what the real CLI refuses — a key it stamps itself, one
+    // that is not `k=v`, one that is not an identifier — and cannot drift from
+    // it. A double that accepted a label the sibling reserves was the weak
+    // oracle that let every dispatch be refused while this suite stayed green.
+    for label in fake::flags(args, "--label") {
+        if let Err(refusal) = oneagentgraph::run::parse_label(&label) {
+            eprintln!("oneagentgraph: {refusal}");
+            return invalid_config();
+        }
+    }
+
+    // A refusal a launcher cannot catch by glancing: the real CLI validates
+    // before it announces itself, and how long that takes is the host's
+    // business — a config fetched over the network, a loaded machine. Scripted
+    // in milliseconds so a journey can put one past any window a launcher might
+    // have waited instead of waiting for an answer.
+    if let Some(delay) = fake::node_script(dir, "run", "refuse-after") {
+        let Ok(millis) = delay.trim().parse::<u64>() else {
+            fake::fail(&format!(
+                "run.refuse-after holds {delay:?}, which is not a number of milliseconds"
+            ));
+        };
+        std::thread::sleep(std::time::Duration::from_millis(millis));
+        eprintln!("oneagentgraph: invalid config: the graph names a member that does not exist");
+        return invalid_config();
+    }
+
+    // A graph that neither announces itself nor exits — the third answer, and
+    // the only one a launcher cannot wait out. The rendezvous is bounded by the
+    // double's own timeout, so a launcher that failed to end this process leaves
+    // a test failing on that rather than a stray one behind.
+    if dir.join("run.hang").exists() {
+        fake::wait_for(&dir.join("run.go"));
+    }
+
+    // A graph that finishes before it announces anything: it did what it was
+    // given, so the launch succeeded even though nothing is driving anything
+    // afterwards.
+    if dir.join("run.exit-quietly").exists() {
+        return ExitCode::SUCCESS;
+    }
 
     // The dag-scope graph is the driver: its orchestrator member is what runs
     // the engine verbs. Acting that out is how a test exercises `start` end to
     // end rather than only the launch.
     if graph.contains("dag-scope") {
-        return drive(dir);
+        // Announced before any work, as the real CLI announces a run. This is
+        // the line the launcher's startup handshake waits for; a double that
+        // stayed silent until it settled would make every launch wait out the
+        // whole run. A node's dispatch is not waited on that way, and scripting
+        // one to produce *nothing* is a scenario this suite needs, so the
+        // announcement belongs to the launched graph rather than to every run.
+        announce(args, &graph);
+        return fake::drive(dir);
     }
 
-    let node = fake::label(args, "node").unwrap_or_else(|| "unknown".into());
-    let step = fake::label(args, "step");
-    let persona = fake::label(args, "persona");
+    let node = fake::label(args, "onepipeline.node").unwrap_or_else(|| "unknown".into());
+    let step = fake::label(args, "onepipeline.step");
+    let persona = fake::label(args, "onepipeline.persona");
     // A node dispatches under more than one persona — its own worker, and the
     // `pr-author` that drafts its change request — so a script may name either
     // the persona or the node/step it applies to.
@@ -132,36 +192,66 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Emit one envelope, as the sibling would.
-fn emit(args: &[String], node: &str, step: Option<&str>, task: &str) {
+/// Announce the run, as the sibling's first line does.
+fn announce(args: &[String], graph: &str) {
+    println!(
+        "{}",
+        serde_json::json!({
+            "v": 1,
+            "ts": fake::now(),
+            "stream": stream(),
+            "seq": 0,
+            "source": "agentgraph",
+            "kind": "graph-started",
+            "labels": stamped(args),
+            "payload": {"graph": graph},
+        })
+    );
+}
+
+/// The labels the sibling stamps: its own run and member, and every `--label`
+/// the caller passed, carried through verbatim beside them. The two `run_id`s on
+/// one line are the point — a graph run is not the pipeline run that dispatched
+/// it.
+fn stamped(args: &[String]) -> serde_json::Map<String, serde_json::Value> {
     let mut labels = serde_json::Map::new();
-    for (key, value) in [
-        ("run_id", fake::label(args, "run_id")),
-        ("round", fake::label(args, "round")),
-        ("node", Some(node.to_string())),
-        ("step", step.map(str::to_string)),
-        ("persona", fake::label(args, "persona")),
-    ] {
-        if let Some(value) = value {
-            // `round` is a number on the wire; everything else is a string.
-            let value = if key == "round" {
-                value
-                    .parse::<u64>()
-                    .map(serde_json::Value::from)
-                    .unwrap_or(value.into())
-            } else {
-                value.into()
-            };
-            labels.insert(key.to_string(), value);
+    labels.insert("run_id".to_string(), graph_run().into());
+    for pair in fake::flags(args, "--label") {
+        if let Some((key, value)) = pair.split_once('=') {
+            labels.insert(key.to_string(), value.into());
         }
+    }
+    labels
+}
+
+/// This graph run's own id, which is not the id of the run that started it.
+fn graph_run() -> String {
+    format!("fake-graph-{}", std::process::id())
+}
+
+/// The stream every envelope of this run carries.
+fn stream() -> String {
+    format!("fake-oneagentgraph-{}", std::process::id())
+}
+
+/// Emit the turn's envelope, as the sibling would.
+fn emit(args: &[String], node: &str, step: Option<&str>, task: &str) {
+    let mut labels = stamped(args);
+    labels.insert("member".to_string(), "worker".into());
+    // The node and the step are what the run being acted out is, so they are
+    // stated rather than echoed: a node with no `--label` of its own still
+    // belongs to one.
+    labels.insert("onepipeline.node".to_string(), node.into());
+    if let Some(step) = step {
+        labels.insert("onepipeline.step".to_string(), step.into());
     }
     println!(
         "{}",
         serde_json::json!({
             "v": 1,
             "ts": fake::now(),
-            "stream": format!("fake-oneagentgraph-{}", std::process::id()),
-            "seq": 0,
+            "stream": stream(),
+            "seq": 1,
             "source": "agentgraph",
             "kind": "turn-finished",
             "labels": labels,
@@ -182,99 +272,4 @@ fn emit(args: &[String], node: &str, step: Option<&str>, task: &str) {
 fn drafted_title(task: &str) -> Option<String> {
     task.starts_with("Read this branch's diff")
         .then(|| "feat: drafted from the diff".to_string())
-}
-
-/// Act as the dag-scope graph's orchestrator member: drive the engine verbs.
-///
-/// Exactly what the shipped `orchestrator` persona instructs — `round run` then
-/// `round next`, and nothing else that changes run state — so `start`'s journey
-/// is exercised through the same commands a real orchestrator would use.
-fn drive(dir: &std::path::Path) -> ExitCode {
-    // Required, not defaulted: an empty run id would send every engine verb at
-    // a run named by nothing, and the refusals that came back would read as the
-    // engine's fault rather than as the launcher never having said which run
-    // this driver is for.
-    let run = match std::env::var("ONEPIPELINE_RUN_ID") {
-        Ok(run) if !run.is_empty() => run,
-        _ => fake::fail("ONEPIPELINE_RUN_ID is unset: no run to drive"),
-    };
-    let binary = match std::env::var("ONEPIPELINE_FAKE_DRIVER_BIN") {
-        Ok(binary) if !binary.is_empty() => binary,
-        _ => fake::fail("ONEPIPELINE_FAKE_DRIVER_BIN is unset: nothing to drive the run with"),
-    };
-    // The first thing a real orchestrator member does is read the run's ledger,
-    // so the first thing this one records is whether that ledger was there to
-    // be read. A launcher that started its driver before writing the launch
-    // record leaves this `false` — and the driver then dies on a file its own
-    // launcher had not written yet, with the run stuck at `run-started`.
-    fake::append(
-        &dir.join("driver-saw.jsonl"),
-        &serde_json::json!({
-            "run": run,
-            "launch_record": launch_record(&run).is_some_and(|path| path.is_file()),
-        })
-        .to_string(),
-    );
-
-    if dir.join("driver.wait").exists() {
-        fake::wait_for(&dir.join("driver.go"));
-    }
-    // Bounded: a graph that never settles ends this driver rather than
-    // spinning, so a test fails on its own assertion instead of hanging.
-    for _ in 0..8 {
-        // Inherited on purpose: an attached launcher relays what the engine
-        // verb says, and a real orchestrator member does not swallow it. What
-        // it *exited* with is recorded, because that is the fact this driver
-        // then acts on and nothing else in the tree writes it down.
-        let ran = std::process::Command::new(&binary)
-            .args(["round", "run", &run])
-            .status();
-        let Ok(ran) = ran else {
-            return ExitCode::from(1);
-        };
-        fake::append(
-            &dir.join("driver-saw.jsonl"),
-            &serde_json::json!({"run": run, "round_run": ran.code()}).to_string(),
-        );
-        // A round that settled unfinished is the planner's move, not the
-        // orchestrator's: it never re-dispatches a failed node on its own
-        // judgement. The shipped persona says the same thing in prose.
-        if !ran.success() {
-            return ExitCode::SUCCESS;
-        }
-        let next = std::process::Command::new(&binary)
-            .args(["round", "next", &run])
-            .output();
-        let Ok(next) = next else {
-            return ExitCode::from(1);
-        };
-        if !next.status.success() {
-            fake::append(
-                &dir.join("driver-saw.jsonl"),
-                &serde_json::json!({
-                    "run": run,
-                    "round_next": next.status.code(),
-                    "stderr": String::from_utf8_lossy(&next.stderr),
-                })
-                .to_string(),
-            );
-            return ExitCode::from(1);
-        }
-        // `continuing` is the only answer that means there is another round to
-        // run. Complete, and every gated state, ends the driver.
-        if !String::from_utf8_lossy(&next.stdout).contains("\"continuing\"") {
-            return ExitCode::SUCCESS;
-        }
-    }
-    ExitCode::SUCCESS
-}
-
-/// The launch record of the run this driver was started for.
-///
-/// Resolved from the same two variables the launcher hands every driver, so the
-/// probe above reads exactly the file `onepipeline round run` opens first.
-fn launch_record(run: &str) -> Option<std::path::PathBuf> {
-    let root = std::env::var("ONEPIPELINE_RUNS_DIR").ok()?;
-    (!root.is_empty() && !run.is_empty())
-        .then(|| std::path::PathBuf::from(root).join(run).join("launch.json"))
 }

@@ -7,9 +7,9 @@
 
 // llmlint: ignore-file[e2e_not_mocked] `World` substitutes the two *siblings* at their
 // subprocess boundary and nothing inside the crate under test, which is driven as a real
-// compiled binary. There is no alternative today: both sibling crates are at their own
-// interface-only stage and refuse every invocation with exit 70. `harness.rs` carries the
-// same suppression and the full rationale.
+// compiled binary. The scenario this journey states is one a real sibling would need paid
+// model turns to produce, and `dispatch.rs` is where the real `oneagentgraph` binary is
+// driven instead. `harness.rs` carries the same suppression and the full rationale.
 
 use crate::harness::{lifecycle, plan_of, World};
 use serde_json::json;
@@ -198,12 +198,15 @@ fn the_pr_author_dispatch_drafts_the_title_and_never_blocks_publication() {
     let world = World::new("lifecycle-pr-author");
     let run = settle(&world, "authored", vec![lifecycle("service", &[])]);
 
-    // One post-verification dispatch, under the `pr-author` persona.
     assert!(
-        world.was_invoked("oneagentgraph", &["--label", "persona=pr-author"]),
+        world.was_invoked(
+            "oneagentgraph",
+            &["--label", "onepipeline.persona=pr-author"]
+        ),
         "no pr-author dispatch: {:?}",
         world.invocations()
     );
+
     let drafted = std::fs::read_to_string(world.fakes.join("published.jsonl"))
         .expect("the publication was recorded");
     assert!(
@@ -230,7 +233,10 @@ fn a_planner_supplied_title_wins_over_the_drafting_dispatch() {
         "the planner's title was overwritten: {published}"
     );
     assert!(
-        !world.was_invoked("oneagentgraph", &["--label", "persona=pr-author"]),
+        !world.was_invoked(
+            "oneagentgraph",
+            &["--label", "onepipeline.persona=pr-author"]
+        ),
         "a title the planner set still spent a drafting dispatch"
     );
 }
@@ -396,11 +402,12 @@ fn a_step_dispatches_under_its_own_agent_graph_before_its_nodes() {
                 .as_array()?
                 .iter()
                 .filter_map(|arg| arg.as_str())
-                .find_map(|arg| arg.strip_prefix("step="))?
+                .find_map(|arg| arg.strip_prefix("onepipeline.step="))?
                 .to_string();
             Some((step, graph))
         })
         .collect();
+
     let graph_of = |step: &str| {
         by_step
             .iter()
@@ -499,7 +506,6 @@ fn a_session_line_this_build_cannot_read_is_skipped_and_counted() {
     );
 }
 
-/// Every `oneagentgraph run` dispatch, as `(round, step)`.
 fn steps_dispatched(world: &World) -> Vec<(String, String)> {
     world
         .invocations()
@@ -511,8 +517,12 @@ fn steps_dispatched(world: &World) -> Vec<(String, String)> {
                 .iter()
                 .filter_map(|arg| arg.as_str())
                 .collect();
-            let round = args.iter().find_map(|a| a.strip_prefix("round="))?;
-            let step = args.iter().find_map(|a| a.strip_prefix("step="))?;
+            let round = args
+                .iter()
+                .find_map(|a| a.strip_prefix("onepipeline.round="))?;
+            let step = args
+                .iter()
+                .find_map(|a| a.strip_prefix("onepipeline.step="))?;
             Some((round.to_string(), step.to_string()))
         })
         .collect()

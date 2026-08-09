@@ -6,9 +6,9 @@
 
 // llmlint: ignore-file[e2e_not_mocked] `World` substitutes the two *siblings* at their
 // subprocess boundary and nothing inside the crate under test, which is driven as a real
-// compiled binary. There is no alternative today: both sibling crates are at their own
-// interface-only stage and refuse every invocation with exit 70. `harness.rs` carries the
-// same suppression and the full rationale.
+// compiled binary. The scenario this journey states is one a real sibling would need paid
+// model turns to produce, and `dispatch.rs` is where the real `oneagentgraph` binary is
+// driven instead. `harness.rs` carries the same suppression and the full rationale.
 
 use crate::harness::{agent, human, plan_of, World, QUEUED, REFUSED};
 use serde_json::json;
@@ -63,7 +63,6 @@ fn a_cross_dag_dependency_is_accepted_and_gates_only_the_node_that_names_it() {
     );
 }
 
-/// The graph a dispatch was launched with, for each node the doubles saw.
 fn graphs_dispatched(world: &World) -> Vec<(String, String)> {
     world
         .invocations()
@@ -77,7 +76,7 @@ fn graphs_dispatched(world: &World) -> Vec<(String, String)> {
                 .as_array()?
                 .iter()
                 .filter_map(|arg| arg.as_str())
-                .find_map(|arg| arg.strip_prefix("node="))?
+                .find_map(|arg| arg.strip_prefix("onepipeline.node="))?
                 .to_string();
             Some((node, graph))
         })
@@ -167,9 +166,11 @@ fn a_single_node_plan_runs_to_completion_and_records_its_evidence() {
     assert_eq!(result["nodes"][0]["id"], "build");
     assert_eq!(result["nodes"][0]["status"], "done");
 
-    // The dispatch really went through the `oneagentgraph` seam, with the
-    // reserved labels stamped on it.
-    assert!(world.was_invoked("oneagentgraph", &["run", "--label", "node=build"]));
+    assert!(world.was_invoked(
+        "oneagentgraph",
+        &["run", "--label", "onepipeline.node=build"]
+    ));
+
     let kinds = world.kinds(&run);
     for expected in [
         "run-started",
@@ -276,9 +277,10 @@ fn a_ready_human_action_waits_and_blocks_what_it_unblocks() {
     assert_eq!(node("approve")["unblocks"], json!(["ship"]));
     assert_eq!(node("ship")["status"], "blocked");
     assert_eq!(node("ship")["blocked_by"], json!(["approve"]));
-    // The harness never guesses that a person acted, so nothing was dispatched
-    // for the human node.
-    assert!(!world.was_invoked("oneagentgraph", &["run", "--label", "node=approve"]));
+    assert!(!world.was_invoked(
+        "oneagentgraph",
+        &["run", "--label", "onepipeline.node=approve"]
+    ));
 }
 
 #[test]
@@ -298,7 +300,10 @@ fn an_expects_no_diff_node_settles_without_spending_a_dispatch() {
     assert_eq!(result["nodes"][0]["status"], "done");
     assert_eq!(result["nodes"][0]["outcome"], "no-changes");
     assert!(
-        !world.was_invoked("oneagentgraph", &["run", "--label", "node=handoff"]),
+        !world.was_invoked(
+            "oneagentgraph",
+            &["run", "--label", "onepipeline.node=handoff"]
+        ),
         "an expects_no_diff node spent a dispatch"
     );
 }
@@ -457,26 +462,20 @@ fn a_worker_that_goes_quiet_is_surfaced_without_blocking_the_round() {
     command.env("ONEPIPELINE_STALL_AFTER_SECONDS", "1");
     command.output().expect("the binary runs");
 
-    world.until("the quiet worker to be reported", |world| {
-        !world.events_of("quiet", "quiet-worker").is_empty()
-    });
-    let reported = world.events_of("quiet", "quiet-worker");
-    assert_eq!(reported[0]["labels"]["node"], "slow");
-    assert_eq!(reported[0]["payload"]["threshold_seconds"], 1);
-    assert_eq!(reported[0]["payload"]["persona"], "engineer");
-
     // A stall is evidence rather than a verdict, so the surface is
     // non-blocking: the round's other workers are not stopped to ask.
-    let surfaced = world
-        .events_of("quiet", "planner-surface-queued")
-        .into_iter()
-        .find(|event| event["payload"]["kind"] == "quiet-worker")
-        .expect("the stall was surfaced");
+    let surfaced = world.surfaced("quiet", "quiet-worker");
     assert_eq!(surfaced["payload"]["blocking"], false);
     assert!(surfaced["payload"]["message"]
         .as_str()
         .expect("a message")
         .contains("nothing recorded since it was dispatched"));
+
+    // Written before the surface was raised, so it is there once the surface is.
+    let reported = world.events_of("quiet", "quiet-worker");
+    assert_eq!(reported[0]["labels"]["node"], "slow");
+    assert_eq!(reported[0]["payload"]["threshold_seconds"], 1);
+    assert_eq!(reported[0]["payload"]["persona"], "engineer");
 
     // A node is reported once per quiet stretch, not once per pass.
     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -503,21 +502,13 @@ fn a_round_that_outlives_its_budget_cancels_its_workers_and_asks_the_planner() {
         ])
         .exited(0);
 
-    world.until("the budget to be spent", |world| {
-        !world
-            .events_of("budgeted", "round-budget-exceeded")
-            .is_empty()
-    });
+    // Blocking, so a wedged dispatch layer cannot leave the planner silent.
+    let surfaced = world.surfaced("budgeted", "round-budget");
+    assert_eq!(surfaced["payload"]["blocking"], true);
+
+    // Written before the surface was raised, so it is there once the surface is.
     let exceeded = world.events_of("budgeted", "round-budget-exceeded");
     assert_eq!(exceeded[0]["payload"]["budget_seconds"], 1);
-
-    // Blocking, so a wedged dispatch layer cannot leave the planner silent.
-    let surfaced = world
-        .events_of("budgeted", "planner-surface-queued")
-        .into_iter()
-        .find(|event| event["payload"]["kind"] == "round-budget")
-        .expect("the spent budget was surfaced");
-    assert_eq!(surfaced["payload"]["blocking"], true);
 
     world.release("slow.go");
     world.until("the round to finish", |world| {

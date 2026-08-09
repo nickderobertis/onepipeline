@@ -26,6 +26,11 @@ allow = [
     "ISC",
     "BSD-3-Clause",
     "CDLA-Permissive-2.0",
+    # `borrow-or-share`, under the JSON Schema validator `oneharness-core` uses
+    # to check envelopes. MIT-0 is MIT without the attribution clause — OSI
+    # approved, and strictly more permissive than the MIT this crate itself
+    # ships under, so it imposes no condition the allow list already accepts.
+    "MIT-0",
 ]
 confidence-threshold = 0.9
 exceptions = []

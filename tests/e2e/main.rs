@@ -9,18 +9,19 @@
 //! the command vocabulary `docs/contract.md` fixes.
 
 // llmlint: ignore-file[e2e_not_mocked] the doubles substitute the two *siblings* at
-// their subprocess boundary, never anything inside the crate under test, and there is
-// no alternative today: both crates are at their own interface-only stage, so the real
-// `oneagentgraph run` and `onevcs session open` refuse every invocation with exit 70. A
-// suite built on them would prove only that this crate can start a process that says no.
-// The same rationale, at more length, is in `harness.rs`; revisit each seam as its
-// sibling implements it.
+// their subprocess boundary, never anything inside the crate under test. `dispatch.rs`
+// drives the real `oneagentgraph` binary and substitutes only the paid model turn;
+// every other journey scripts a scenario a real sibling would need paid turns to
+// produce, and `onevcs` has no alternative at all — it is still at its interface-only
+// stage and refuses every invocation with exit 70. The same rationale, at more length,
+// is in `harness.rs`.
 
 mod harness;
 
 mod boundary;
 mod channel;
 mod crossdag;
+mod dispatch;
 mod driver;
 mod journal;
 mod lifecycle;

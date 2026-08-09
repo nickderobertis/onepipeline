@@ -1,4 +1,4 @@
-# Test-support only: the two sibling CLIs `onepipeline` composes, as real
+# Test-support only: the sibling CLIs `onepipeline` composes, as real
 # executables a test can drive it against.
 #
 # A separate workspace member rather than extra `[[bin]]`s on the crate itself,
@@ -16,6 +16,10 @@ description = "Subprocess doubles for oneagentgraph and onevcs, used by onepipel
 
 [dependencies]
 serde_json = "1"
+# The sibling itself, so the `oneagentgraph` double refuses a `--label` by asking
+# the real CLI's own parser rather than by keeping a second copy of the keys it
+# reserves — a copy is a list that goes stale the round after the sibling adds one.
+oneagentgraph = { workspace = true }
 
 [[bin]]
 name = "fake-oneagentgraph"
@@ -24,6 +28,12 @@ path = "src/bin/fake-oneagentgraph.rs"
 [[bin]]
 name = "fake-onevcs"
 path = "src/bin/fake-onevcs.rs"
+
+# One layer further out than the other two: this stands in for the paid model
+# turn only, for the journeys that drive the real `oneagentgraph` binary.
+[[bin]]
+name = "fake-oneharness"
+path = "src/bin/fake-oneharness.rs"
 
 [lib]
 name = "onepipeline_testfakes"

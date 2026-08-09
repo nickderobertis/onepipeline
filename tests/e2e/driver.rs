@@ -5,9 +5,9 @@
 
 // llmlint: ignore-file[e2e_not_mocked] `World` substitutes the two *siblings* at their
 // subprocess boundary and nothing inside the crate under test, which is driven as a real
-// compiled binary. There is no alternative today: both sibling crates are at their own
-// interface-only stage and refuse every invocation with exit 70. `harness.rs` carries the
-// same suppression and the full rationale.
+// compiled binary. The scenario this journey states is one a real sibling would need paid
+// model turns to produce, and `dispatch.rs` is where the real `oneagentgraph` binary is
+// driven instead. `harness.rs` carries the same suppression and the full rationale.
 
 use crate::harness::{agent, human, plan_of, World, NOTHING_DRIVING, REFUSED};
 use serde_json::json;
@@ -407,11 +407,22 @@ fn a_detached_driver_outlives_its_own_output_and_keeps_what_it_said() {
     world.script("build.unreadable", "");
     let run = start_detached(&world, "detachedlog", vec![agent("build", &[])]);
 
-    world.until("the run to settle", |world| {
+    // On the driver's own record of the round, not on the engine's event for it.
+    // `round-finished` is journaled by the `round run` the driver spawned, so it
+    // is there while that child is still exiting and before the driver has
+    // written down what it exited with — a gap wide enough to lose on a host
+    // whose process teardown is slower, where this waited on one fact and then
+    // asserted a different one that had not happened yet.
+    world.until("the driver to finish its round", |world| {
         !world.events_of(&run, "round-finished").is_empty()
+            && world
+                .driver_saw()
+                .iter()
+                .any(|record| record["round_run"].is_number())
     });
 
-    // The driver ran its round to the end rather than dying on its first line.
+    // The driver ran its round to the end rather than dying on its first line,
+    // and the verb it ran succeeded.
     let saw = world.driver_saw();
     assert!(
         saw.iter().any(|record| record["round_run"] == json!(0)),
@@ -455,4 +466,139 @@ fn a_detached_start_returns_while_the_run_it_launched_is_still_in_flight() {
     world.until("the run to settle once it is released", |world| {
         !world.events_of(&run, "round-finished").is_empty()
     });
+}
+
+/// A refusal that takes its time is still a refusal.
+///
+/// This is the shape a launcher gets wrong most easily. A graph validates before
+/// it announces itself, and how long that takes is the host's business — a
+/// config fetched over the network, a machine under load, a process the
+/// scheduler has not run yet. A launcher that waited a fixed moment and then
+/// called a still-running process started would report exactly this refusal as a
+/// running driver, print its pid, and leave the run undriven with the reason in
+/// a file nobody opens.
+///
+/// So the launch is held until the graph *answers* — and the answer here comes
+/// well after any window a launcher might have waited instead.
+#[test]
+fn a_refusal_slower_than_any_launch_window_still_fails_the_launch() {
+    let world = World::new("driver-slow-refusal");
+    world.script("run.refuse-after", "1500");
+    let path = world.plan("stalled", &plan_of("stalled", vec![agent("build", &[])]));
+
+    // Both launch forms: the graph's own words are in a different place for
+    // each, and a launcher that reported this one as started would do it for
+    // whichever form it did not wait on.
+    for form in ["--detach", "--attach"] {
+        let started = world.run(&["start", &path.to_string_lossy(), form]);
+
+        started.exited(REFUSED);
+        started.err_has("oneagentgraph");
+        started.err_has("a member that does not exist");
+        assert!(
+            !started.stdout.contains("\"pid\""),
+            "`start {form}` reported a pid for a graph that went on to refuse:\n{}",
+            started.stdout
+        );
+    }
+
+    // An unusable bound falls back to the default rather than to nothing. Read
+    // as zero, the wait would end before any graph could answer and every launch
+    // would fail as unanswered — so this refusal, which arrives long after a
+    // zero bound would have given up, has to come back as the graph's own words
+    // and not as a launch that waited no time at all.
+    //
+    // Both ways a value is unusable, because they are unusable for different
+    // reasons and only one of them is caught by reading it: `0` is a perfectly
+    // good number, and the only thing standing between it and a wait that ends
+    // before it starts is the crate declining to take it.
+    for unusable in ["however long it takes", "0"] {
+        let mut launch = world.cmd(&["start", &path.to_string_lossy(), "--detach"]);
+        launch.env(crate::harness::STARTUP_TIMEOUT_ENV, unusable);
+        let started = world.run_on(launch, "start --detach");
+        started.exited(REFUSED);
+        assert!(
+            !started.stderr.contains("neither started nor exited"),
+            "`{unusable}` was taken as the bound, so the launch gave up before \
+             the graph answered:\n{}",
+            started.stderr
+        );
+        started.err_has("a member that does not exist");
+    }
+}
+
+/// A graph that says nothing and does not exit is not a driver either.
+///
+/// The third answer to the startup handshake, and the only one that is not an
+/// answer at all. A launch cannot wait on it forever, so the wait is bounded —
+/// and reaching that bound fails the launch rather than passing it, which is the
+/// difference between this and the fixed window it replaced. The process is
+/// ended with it: nothing would ever collect one the launcher has just disowned.
+///
+/// Both launch forms wait on different things — a file one launcher polls, a
+/// pipe the other reads — so a silence that only one of them gave up on would
+/// hang the other for as long as the graph did.
+#[test]
+fn a_graph_that_neither_starts_nor_exits_fails_the_launch_rather_than_outlasting_it() {
+    let world = World::new("driver-silent-graph");
+    world.script("run.hang", "hold");
+    let path = world.plan("silent", &plan_of("silent", vec![agent("build", &[])]));
+
+    // The second launch mints a run of its own beside the first.
+    for (form, run) in [("--detach", "silent"), ("--attach", "silent-2")] {
+        let mut launch = world.cmd(&["start", &path.to_string_lossy(), form]);
+        launch.env(crate::harness::STARTUP_TIMEOUT_ENV, "1");
+        let began = std::time::Instant::now();
+        let started = world.run_on(launch, form);
+        let took = began.elapsed();
+
+        started.exited(REFUSED);
+        started.err_has("neither started nor exited");
+        // And it gave up on *this* bound rather than on the default. The suite
+        // keeps its own copy of the variable's name, so this is what stands
+        // between that copy and a rename: an inert override leaves the launch
+        // waiting out a backstop many times longer than the one it asked for.
+        assert!(
+            took < crate::harness::OVERRIDE_TOOK_EFFECT,
+            "`start {form}` was given a 1s backstop and took {took:?}, so it \
+             waited out the default instead — is `{}` still the name the binary \
+             reads?",
+            crate::harness::STARTUP_TIMEOUT_ENV
+        );
+        assert!(
+            !started.stdout.contains("\"pid\""),
+            "`start {form}` never got an answer and still printed a pid:\n{}",
+            started.stdout
+        );
+        // Nothing is driving the run, and the ledger says so rather than naming
+        // a driver: the launch is what an `adopt` is offered from.
+        world.run(&["status", run]).out_has("DRIVER DEAD");
+    }
+}
+
+/// A graph that finished before it announced anything still launched.
+///
+/// The other end of the handshake: the answer came as an exit rather than as an
+/// envelope, and it was a *clean* one. The graph ran whatever it was given and
+/// stopped, which is a launch that worked and a run with nothing driving it —
+/// the state the ledger records and `adopt` is offered from. Reporting it as a
+/// refusal would fail the launch over the graph's own verdict.
+#[test]
+fn a_graph_that_finished_before_announcing_anything_is_a_launch_that_worked() {
+    let world = World::new("driver-quiet-exit");
+    world.script("run.exit-quietly", "hold");
+    let path = world.plan("quiet", &plan_of("quiet", vec![agent("build", &[])]));
+
+    // Detached: the launch reports the run it started, because starting it is
+    // all it promised.
+    let started = world.run(&["start", &path.to_string_lossy(), "--detach"]);
+    started.exited(0).out_has("\"run_id\"");
+    world.run(&["status", "quiet"]).out_has("DRIVER DEAD");
+
+    // Attached: the launch stays, finds nothing driving the run, and says so —
+    // exit 3 rather than a refusal, because the graph did not refuse anything.
+    world
+        .run(&["start", &path.to_string_lossy(), "--attach"])
+        .exited(NOTHING_DRIVING)
+        .out_has("\"settlement\":\"unattended\"");
 }

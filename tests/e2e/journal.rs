@@ -6,9 +6,9 @@
 
 // llmlint: ignore-file[e2e_not_mocked] `World` substitutes the two *siblings* at their
 // subprocess boundary and nothing inside the crate under test, which is driven as a real
-// compiled binary. There is no alternative today: both sibling crates are at their own
-// interface-only stage and refuse every invocation with exit 70. `harness.rs` carries the
-// same suppression and the full rationale.
+// compiled binary. The scenario this journey states is one a real sibling would need paid
+// model turns to produce, and `dispatch.rs` is where the real `oneagentgraph` binary is
+// driven instead. `harness.rs` carries the same suppression and the full rationale.
 
 use crate::harness::{agent, human, plan_of, World};
 use serde_json::json;
@@ -30,14 +30,25 @@ fn a_runs_journal_is_one_ordered_merged_stream_with_per_stream_sequences() {
     let events = world.journal("sequenced");
     assert!(events.len() > 4, "{events:?}");
 
-    // Every envelope is version 1, timestamped in the one format, and carries
-    // the run it belongs to.
+    // Every envelope is version 1, timestamped in the one format, and says which
+    // run it belongs to. A relayed one says so under this crate's own namespace:
+    // the sibling's `run_id` is its *graph* run, a different identity that the
+    // merged store keeps rather than overwrites.
     for event in &events {
         assert_eq!(event["v"], 1, "{event}");
         let ts = event["ts"].as_str().expect("a timestamp");
         assert_eq!(ts.len(), 24, "{ts} is not RFC 3339 millisecond UTC");
         assert!(ts.ends_with('Z'), "{ts} is not UTC");
-        assert_eq!(event["labels"]["run_id"], "sequenced", "{event}");
+        let labels = &event["labels"];
+        if event["source"] == "pipeline" {
+            assert_eq!(labels["run_id"], "sequenced", "{event}");
+        } else {
+            assert_eq!(labels["onepipeline.run_id"], "sequenced", "{event}");
+            assert_ne!(
+                labels["run_id"], "sequenced",
+                "the sibling's own run id was overwritten: {event}"
+            );
+        }
     }
 
     // `seq` is monotonic **per stream** — that is what a consumer detects loss
