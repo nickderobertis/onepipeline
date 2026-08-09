@@ -513,26 +513,33 @@ fn a_refusal_slower_than_any_launch_window_still_fails_the_launch() {
 /// and reaching that bound fails the launch rather than passing it, which is the
 /// difference between this and the fixed window it replaced. The process is
 /// ended with it: nothing would ever collect one the launcher has just disowned.
+///
+/// Both launch forms wait on different things — a file one launcher polls, a
+/// pipe the other reads — so a silence that only one of them gave up on would
+/// hang the other for as long as the graph did.
 #[test]
 fn a_graph_that_neither_starts_nor_exits_fails_the_launch_rather_than_outlasting_it() {
     let world = World::new("driver-silent-graph");
     world.script("run.hang", "hold");
     let path = world.plan("silent", &plan_of("silent", vec![agent("build", &[])]));
 
-    let mut launch = world.cmd(&["start", &path.to_string_lossy(), "--detach"]);
-    launch.env("ONEPIPELINE_STARTUP_TIMEOUT_SECONDS", "1");
-    let started = world.run_on(launch, "start --detach");
+    // The second launch mints a run of its own beside the first.
+    for (form, run) in [("--detach", "silent"), ("--attach", "silent-2")] {
+        let mut launch = world.cmd(&["start", &path.to_string_lossy(), form]);
+        launch.env("ONEPIPELINE_STARTUP_TIMEOUT_SECONDS", "1");
+        let started = world.run_on(launch, form);
 
-    started.exited(REFUSED);
-    started.err_has("neither started nor exited");
-    assert!(
-        !started.stdout.contains("\"pid\""),
-        "a launch that never got an answer still printed a pid:\n{}",
-        started.stdout
-    );
-    // Nothing is driving the run, and the ledger says so rather than naming a
-    // driver: the launch is what an `adopt` is offered from.
-    world.run(&["status", "silent"]).out_has("DRIVER DEAD");
+        started.exited(REFUSED);
+        started.err_has("neither started nor exited");
+        assert!(
+            !started.stdout.contains("\"pid\""),
+            "`start {form}` never got an answer and still printed a pid:\n{}",
+            started.stdout
+        );
+        // Nothing is driving the run, and the ledger says so rather than naming
+        // a driver: the launch is what an `adopt` is offered from.
+        world.run(&["status", run]).out_has("DRIVER DEAD");
+    }
 }
 
 /// A graph that finished before it announced anything still launched.
