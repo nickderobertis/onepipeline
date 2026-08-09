@@ -91,6 +91,16 @@ fn sibling(message: impl Into<String>) -> Error {
     }
 }
 
+/// Whether a line the graph wrote is an envelope this build can read.
+///
+/// What the startup handshake accepts as an announcement, so the bar is the
+/// schema rather than "some JSON": a graph writes its refusal and its warnings
+/// to the same place, and a newer build's envelope shape is a line this one
+/// cannot read. Neither is a run saying it started.
+fn is_envelope(line: &str) -> bool {
+    serde_json::from_str::<Envelope>(line.trim()).is_ok()
+}
+
 /// Render the reserved label keys as the `k=v` pairs the CLI takes, each under
 /// [`LABEL_PREFIX`].
 pub fn label_args(labels: &Labels) -> Vec<String> {
@@ -167,10 +177,11 @@ pub struct GraphRun {
     /// handshake reads the first line off it and [`events`](Self::events) reads
     /// the rest.
     stdout: Option<BufReader<std::process::ChildStdout>>,
-    /// The line the handshake took as proof the graph started. It is an envelope
-    /// like any other, so it is put back at the head of the stream rather than
-    /// being spent on the handshake.
-    started_with: Option<String>,
+    /// Everything the handshake read on its way to an answer. These are the
+    /// graph's own lines — its announcement, and anything it wrote before one —
+    /// so they are put back at the head of the stream rather than spent on the
+    /// handshake.
+    started_with: Vec<String>,
 }
 
 /// Where a started graph's own stdout and stderr go.
@@ -248,7 +259,7 @@ impl GraphRun {
             child,
             log,
             stdout,
-            started_with: None,
+            started_with: Vec::new(),
         })
     }
 
@@ -291,41 +302,55 @@ impl GraphRun {
     fn await_first_line(&mut self, reader: BufReader<std::process::ChildStdout>) -> Result<()> {
         // On a thread, because a read of a pipe blocks until the graph writes,
         // dies, or neither — and the third is exactly what this call must not
-        // hang on. The reader is handed back with the line, so the stream is
+        // hang on. The reader is handed back with what was read, so the stream is
         // whole again whichever way the answer came.
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::Builder::new()
             .name(format!("{}-handshake", binary()))
             .spawn(move || {
                 let mut reader = reader;
-                let mut line = String::new();
-                let read = reader.read_line(&mut line);
-                let _ = tx.send((read, line, reader));
+                let mut read = Vec::new();
+                loop {
+                    let mut line = String::new();
+                    match reader.read_line(&mut line) {
+                        Err(error) => break tx.send((Some(error), read, reader)),
+                        // End of stream: it will say nothing more.
+                        Ok(0) => break tx.send((None, read, reader)),
+                        Ok(_) => {
+                            let announced = is_envelope(&line);
+                            read.push(line);
+                            if announced {
+                                break tx.send((None, read, reader));
+                            }
+                        }
+                    }
+                }
             })
             .map_err(|e| sibling(format!("cannot wait for `{} run` to start: {e}", binary())))?;
 
         match rx.recv_timeout(startup_timeout()) {
-            Ok((Err(error), _, reader)) => {
+            // Everything read on the way to the answer is the caller's, whether
+            // or not it was the answer: a line this build cannot parse is one
+            // `events` reports as skipped, and a handshake that ate it would
+            // hide the gap it leaves.
+            Ok((error, read, reader)) => {
+                let announced = read.last().is_some_and(|line| is_envelope(line));
                 self.stdout = Some(reader);
-                Err(sibling(format!(
-                    "cannot read `{} run`'s first envelope: {error}",
-                    binary()
-                )))
-            }
-            // End of stream: it will say nothing more, so its exit is the whole
-            // answer.
-            Ok((Ok(0), _, reader)) => {
-                self.stdout = Some(reader);
-                self.settle_unstarted()
-            }
-            Ok((Ok(_), line, reader)) => {
-                self.stdout = Some(reader);
-                self.started_with = Some(line);
-                // It spoke, so it got as far as running. Whether it is *still*
-                // running is the launcher's actual promise.
-                match self.child.try_wait() {
-                    Ok(Some(status)) if !status.success() => self.refused(status),
-                    _ => Ok(()),
+                self.started_with = read;
+                match error {
+                    Some(error) => Err(sibling(format!(
+                        "cannot read `{} run`'s first envelope: {error}",
+                        binary()
+                    ))),
+                    // It announced itself, so it got as far as running. Whether
+                    // it is *still* running is the launcher's actual promise.
+                    None if announced => match self.child.try_wait() {
+                        Ok(Some(status)) if !status.success() => self.refused(status),
+                        _ => Ok(()),
+                    },
+                    // The stream ended without one, so its exit is the whole
+                    // answer.
+                    None => self.settle_unstarted(),
                 }
             }
             Err(_) => self.gave_no_answer(),
@@ -359,10 +384,10 @@ impl GraphRun {
 
     /// Whether this launch has written a whole envelope into its log yet.
     ///
-    /// A *complete* line — one the writer has terminated — and one that parses
-    /// as a JSON object, which a refusal's prose does not. Both streams share the
-    /// file, so this looks past whatever the graph said on stderr first rather
-    /// than reading only the first line.
+    /// A *complete* line — one the writer has terminated — that the envelope
+    /// schema accepts. Both streams share the file, so this looks past whatever
+    /// the graph said on stderr, and past a line from a build whose shape this
+    /// one cannot read, rather than taking either for an announcement.
     fn logged_an_envelope(&self) -> bool {
         let Some((path, from)) = &self.log else {
             return false;
@@ -374,10 +399,7 @@ impl GraphRun {
         mine.into_iter()
             .flat_map(|mine| mine.split_inclusive('\n'))
             .filter(|line| line.ends_with('\n'))
-            .any(|line| {
-                serde_json::from_str::<serde_json::Value>(line.trim())
-                    .is_ok_and(|value| value.is_object())
-            })
+            .any(is_envelope)
     }
 
     /// The graph closed its stream without announcing itself: report whatever it
@@ -468,10 +490,11 @@ impl GraphRun {
         let Some(stdout) = self.stdout.take() else {
             return Box::new(std::iter::empty());
         };
-        let announced = self.started_with.take().map(Ok);
+        let announced: Vec<_> = std::mem::take(&mut self.started_with);
         Box::new(
             announced
                 .into_iter()
+                .map(Ok)
                 .chain(stdout.lines())
                 .filter_map(|line| match line {
                     // A stream that broke is not a stream that ended. Read as the same

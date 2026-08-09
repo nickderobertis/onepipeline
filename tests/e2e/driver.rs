@@ -490,6 +490,20 @@ fn a_refusal_slower_than_any_launch_window_still_fails_the_launch() {
             started.stdout
         );
     }
+
+    // A bound that is not a number of seconds falls back to the default rather
+    // than to nothing. Read as zero, the wait would end before any graph could
+    // answer and every launch would fail as unanswered — so this refusal, which
+    // arrives long after a zero bound would have given up, has to come back as
+    // the graph's own words and not as a launch that waited no time at all.
+    let mut launch = world.cmd(&["start", &path.to_string_lossy(), "--detach"]);
+    launch.env(
+        "ONEPIPELINE_STARTUP_TIMEOUT_SECONDS",
+        "however long it takes",
+    );
+    let started = world.run_on(launch, "start --detach");
+    started.exited(REFUSED);
+    started.err_has("a member that does not exist");
 }
 
 /// A graph that says nothing and does not exit is not a driver either.

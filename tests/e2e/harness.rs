@@ -12,7 +12,7 @@
 // dispatch held open, a driver that dies — instead of arranging one out of real agent
 // turns. `onevcs` has no alternative yet: it is still at its interface-only stage and
 // refuses every invocation with exit 70. `oneagentgraph` does, and `dispatch.rs` takes
-// it: those journeys run the real binary through [`World::real_cmd`] and substitute only
+// it: those journeys run the real binary through [`World::agentgraph_cmd`] and substitute only
 // the paid model turn. Every scripted scenario a journey here needs is one the real
 // sibling would need a paid turn to produce.
 
@@ -141,18 +141,20 @@ impl World {
         )
     }
 
-    /// The `onepipeline` binary with the **real** `oneagentgraph` behind the
-    /// seam, and only the paid model turn replaced.
+    /// The `onepipeline` binary with the **real** `oneagentgraph` behind that one
+    /// seam, and only the paid model turn replaced inside it.
     ///
-    /// The double swapped in here is one layer further out than the ones
-    /// [`cmd`](World::cmd) uses: `oneagentgraph` resolves the graph, prepares the
-    /// member, and supervises it for real, and what stands in is the harness it
-    /// spawns — at that library's own documented `ONEAGENTGRAPH_ONEHARNESS_BIN`
-    /// override, which knows nothing about this crate.
-    pub fn real_cmd(&self, args: &[&str]) -> Command {
+    /// Only that seam: `onevcs` is still the double [`cmd`](World::cmd) wires up,
+    /// so these journeys stay off lifecycle nodes. The double swapped in here is
+    /// one layer further out than the others — `oneagentgraph` resolves the
+    /// graph, prepares the member, and supervises it for real, and what stands in
+    /// is the harness it spawns, at that library's own documented
+    /// `ONEAGENTGRAPH_ONEHARNESS_BIN` override, which knows nothing about this
+    /// crate.
+    pub fn agentgraph_cmd(&self, args: &[&str]) -> Command {
         let mut command = self.cmd(args);
         command
-            .env("ONEPIPELINE_ONEAGENTGRAPH_BIN", sibling_binary())
+            .env("ONEPIPELINE_ONEAGENTGRAPH_BIN", oneagentgraph_binary())
             .env("ONEAGENTGRAPH_ONEHARNESS_BIN", double("fake-oneharness"))
             .env("ONEAGENTGRAPH_STATE_DIR", self.root.join("graph-state"))
             .env(
@@ -175,9 +177,9 @@ impl World {
     }
 
     /// Run a command against the real `oneagentgraph`.
-    pub fn run_real(&self, args: &[&str]) -> Run {
+    pub fn run_on_agentgraph(&self, args: &[&str]) -> Run {
         Run::of(
-            self.real_cmd(args).output().expect("the binary runs"),
+            self.agentgraph_cmd(args).output().expect("the binary runs"),
             args,
             self,
         )
@@ -188,7 +190,7 @@ impl World {
         self.root.join("graphs")
     }
 
-    /// Write the graph configs [`real_cmd`](World::real_cmd) names.
+    /// Write the graph configs [`agentgraph_cmd`](World::agentgraph_cmd) names.
     ///
     /// Single-sided `kind: oneharness` members: the two-party kind runs a
     /// onejudge conversation in `oneagentgraph`'s own process against a provider
@@ -525,7 +527,7 @@ pub fn double(name: &str) -> PathBuf {
 /// `Cargo.lock` pins. Cargo builds a dependency's binary the same way it builds
 /// a workspace member's, so this needs no extra provisioning — the library is
 /// already compiled by the time a test runs.
-pub fn sibling_binary() -> PathBuf {
+pub fn oneagentgraph_binary() -> PathBuf {
     static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     let held = BUILT.get_or_init(|| {
         build(&[

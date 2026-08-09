@@ -113,7 +113,7 @@ build another member's binaries.
 A double is honest only where the thing it replaces cannot be run: this crate
 *is* a composition layer, so a test that stubbed the seam would be testing
 nothing. `tests/e2e/dispatch.rs` therefore runs the **real** `oneagentgraph`,
-built from the pinned dependency by `harness::sibling_binary`, and substitutes
+built from the pinned dependency by `harness::oneagentgraph_binary`, and substitutes
 only the paid model turn — at that library's own `ONEAGENTGRAPH_ONEHARNESS_BIN`
 override, by `fake-oneharness`. The scripted doubles stay for the scenarios a
 real sibling would need paid turns to produce, and they refuse what the real CLI

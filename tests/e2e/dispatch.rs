@@ -28,7 +28,7 @@ fn a_plan_dispatches_through_the_real_oneagentgraph_and_its_members_run() {
     world.write_graphs();
     let path = world.plan("real", &plan_of("real", vec![agent("build", &[])]));
 
-    let started = world.run_real(&["start", &path.to_string_lossy(), "--attach"]);
+    let started = world.run_on_agentgraph(&["start", &path.to_string_lossy(), "--attach"]);
     started.exited(0).settled();
     let run = started.json()["run_id"]
         .as_str()
@@ -112,7 +112,7 @@ fn a_launch_the_graph_refuses_fails_with_the_graphs_own_words() {
     let path = world.plan("refused", &plan_of("refused", vec![agent("build", &[])]));
 
     for form in ["--detach", "--attach"] {
-        let started = world.run_real(&["start", &path.to_string_lossy(), form]);
+        let started = world.run_on_agentgraph(&["start", &path.to_string_lossy(), form]);
 
         started.exited(crate::harness::REFUSED);
         started.err_has("oneagentgraph");
@@ -142,11 +142,11 @@ fn an_adoption_the_graph_refuses_fails_rather_than_leaving_the_run_undriven() {
         &plan_of("orphaned", vec![human("approve", &[])]),
     );
     world
-        .run_real(&["start", &path.to_string_lossy(), "--detach"])
+        .run_on_agentgraph(&["start", &path.to_string_lossy(), "--detach"])
         .exited(0);
     world.until("the driver to be gone", |world| {
         world
-            .run_real(&["status", "orphaned"])
+            .run_on_agentgraph(&["status", "orphaned"])
             .stdout
             .contains("DRIVER DEAD")
     });
@@ -155,7 +155,7 @@ fn an_adoption_the_graph_refuses_fails_rather_than_leaving_the_run_undriven() {
     // adoption performs is refused by the sibling.
     std::fs::remove_file(world.graphs().join("dag-scope.yaml")).expect("the graph is removed");
 
-    let adopted = world.run_real(&["adopt", "orphaned"]);
+    let adopted = world.run_on_agentgraph(&["adopt", "orphaned"]);
     adopted.exited(crate::harness::REFUSED);
     adopted.err_has("oneagentgraph");
     assert!(
