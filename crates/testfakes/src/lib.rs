@@ -80,7 +80,11 @@ pub fn append(path: &Path, line: &str) {
         .create(true)
         .append(true)
         .open(path);
-    let written = opened.and_then(|mut file| writeln!(file, "{line}"));
+    // One `write_all` of the record and its terminator: several doubles record
+    // into this file at once, and `writeln!` writes the text and the newline
+    // separately, so a second appender in between tears the line and the test
+    // reading it sees a gap rather than a dispatch.
+    let written = opened.and_then(|mut file| file.write_all(format!("{line}\n").as_bytes()));
     if let Err(error) = written {
         fail(&format!("cannot record into {}: {error}", path.display()));
     }

@@ -269,7 +269,14 @@ pub fn append_line(path: &Path, line: &str) -> Result<()> {
         .append(true)
         .open(path)
         .map_err(ledger)?;
-    writeln!(file, "{line}").map_err(ledger)?;
+    // One `write_all` of the record *and* its terminator, never `writeln!`:
+    // that macro writes the text and the newline as two calls, and a run's
+    // journal is appended by several processes at once — the launcher's relay
+    // and the round's own writer among them. A second appender landing between
+    // the two tears the record in half, and a torn line is silently skipped by
+    // every reader here, so the event simply disappears.
+    file.write_all(format!("{line}\n").as_bytes())
+        .map_err(ledger)?;
     file.flush().map_err(ledger)
 }
 
@@ -409,6 +416,46 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("a scratch root");
         dir
+    }
+
+    /// A run's journal has several appenders at once — the launcher relaying its
+    /// driver's stream, and the round's own writer — so a record has to reach the
+    /// file whole. Written as concurrent appenders because that is the only way
+    /// the tearing shows: each opens its own descriptor, exactly as the separate
+    /// processes do.
+    #[test]
+    fn concurrent_appenders_each_land_a_whole_line() {
+        let root = scratch("append");
+        let path = root.join("events.jsonl");
+        const WRITERS: usize = 8;
+        const EACH: usize = 60;
+
+        std::thread::scope(|scope| {
+            for writer in 0..WRITERS {
+                let path = path.clone();
+                scope.spawn(move || {
+                    for n in 0..EACH {
+                        let line = serde_json::json!({
+                            "writer": writer,
+                            "seq": n,
+                            // Long enough that a torn write is not hidden by the
+                            // kernel's small-write behaviour.
+                            "payload": "x".repeat(512),
+                        })
+                        .to_string();
+                        append_line(&path, &line).expect("the line is appended");
+                    }
+                });
+            }
+        });
+
+        let lines = read_lines(&path);
+        assert_eq!(lines.len(), WRITERS * EACH, "a record was torn or lost");
+        for line in &lines {
+            serde_json::from_str::<serde_json::Value>(line)
+                .unwrap_or_else(|e| panic!("a torn record reached the file: {e}: {line}"));
+        }
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]
