@@ -407,11 +407,22 @@ fn a_detached_driver_outlives_its_own_output_and_keeps_what_it_said() {
     world.script("build.unreadable", "");
     let run = start_detached(&world, "detachedlog", vec![agent("build", &[])]);
 
-    world.until("the run to settle", |world| {
+    // On the driver's own record of the round, not on the engine's event for it.
+    // `round-finished` is journaled by the `round run` the driver spawned, so it
+    // is there while that child is still exiting and before the driver has
+    // written down what it exited with — a gap wide enough to lose on a host
+    // whose process teardown is slower, where this waited on one fact and then
+    // asserted a different one that had not happened yet.
+    world.until("the driver to finish its round", |world| {
         !world.events_of(&run, "round-finished").is_empty()
+            && world
+                .driver_saw()
+                .iter()
+                .any(|record| record["round_run"].is_number())
     });
 
-    // The driver ran its round to the end rather than dying on its first line.
+    // The driver ran its round to the end rather than dying on its first line,
+    // and the verb it ran succeeded.
     let saw = world.driver_saw();
     assert!(
         saw.iter().any(|record| record["round_run"] == json!(0)),
