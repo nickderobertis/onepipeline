@@ -117,6 +117,17 @@ impl RunPaths {
         self.dir.join("owner.lock")
     }
 
+    /// Where a **detached** driver's own output goes.
+    ///
+    /// A file rather than a pipe, because the process that would read the pipe
+    /// is the launcher, and `--detach` means the launcher is about to exit. A
+    /// driver holding the write end of a pipe nobody holds the read end of dies
+    /// on its first line of output — and it dies mid-round, leaving a run whose
+    /// round never closes and whose driver is gone.
+    pub fn driver_log(&self) -> PathBuf {
+        self.dir.join("driver.log")
+    }
+
     /// The channel's transport state.
     pub fn channel_dir(&self) -> PathBuf {
         self.dir.join("channel")

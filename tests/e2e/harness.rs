@@ -132,7 +132,11 @@ impl World {
 
     /// Run a command to completion.
     pub fn run(&self, args: &[&str]) -> Run {
-        Run::of(self.cmd(args).output().expect("the binary runs"), args)
+        Run::of(
+            self.cmd(args).output().expect("the binary runs"),
+            args,
+            self,
+        )
     }
 
     /// Run a command with an envelope on stdin.
@@ -162,6 +166,7 @@ impl World {
         Run::of(
             child.wait_with_output().expect("the binary runs"),
             &["reply"],
+            self,
         )
     }
 
@@ -208,17 +213,25 @@ impl World {
         );
     }
 
-    /// Every run's journal, as the kinds it recorded. What a timeout needs to
-    /// say *why* it timed out — the alternative is a bare deadline with no
-    /// evidence, which is a whole debugging session per flake.
-    fn dump(&self) -> String {
+    /// Every run's journal, as the kinds it recorded, and what the driver made
+    /// of each engine verb it ran. What a failure needs to say *why* it failed
+    /// — the alternative is a bare assertion with no evidence, which is a whole
+    /// debugging session per platform-only defect. The driver's own verbs are
+    /// in here because it runs them as a subprocess of a subprocess, so a
+    /// refusal one of them printed reaches no other descriptor a test can read.
+    pub fn dump(&self) -> String {
         let mut out = String::new();
-        let Ok(entries) = std::fs::read_dir(&self.runs) else {
-            return "  (no runs root)".into();
-        };
-        for entry in entries.flatten() {
-            let run = entry.file_name().to_string_lossy().to_string();
-            out.push_str(&format!("  {run}: {:?}\n", self.kinds(&run)));
+        match std::fs::read_dir(&self.runs) {
+            Err(_) => out.push_str("  (no runs root)\n"),
+            Ok(entries) => {
+                for entry in entries.flatten() {
+                    let run = entry.file_name().to_string_lossy().to_string();
+                    out.push_str(&format!("  {run}: {:?}\n", self.kinds(&run)));
+                }
+            }
+        }
+        for saw in self.driver_saw() {
+            out.push_str(&format!("  driver saw: {saw}\n"));
         }
         out
     }
@@ -299,15 +312,20 @@ pub struct Run {
     pub stderr: String,
     /// The arguments it was given, for a failure message that names them.
     pub args: String,
+    /// What the world held once it had run, for a failure message that says
+    /// *why*. Taken here rather than in the assertion because a command is
+    /// often asserted on well after the next one has moved the run on.
+    pub world: String,
 }
 
 impl Run {
-    fn of(output: Output, args: &[&str]) -> Self {
+    fn of(output: Output, args: &[&str], world: &World) -> Self {
         Self {
             code: output.status.code().unwrap_or(-1),
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
             args: args.join(" "),
+            world: world.dump(),
         }
     }
 
@@ -315,8 +333,8 @@ impl Run {
     pub fn exited(&self, code: i32) -> &Self {
         assert_eq!(
             self.code, code,
-            "`onepipeline {}` exited {} not {code}\nstdout: {}\nstderr: {}",
-            self.args, self.code, self.stdout, self.stderr
+            "`onepipeline {}` exited {} not {code}\nstdout: {}\nstderr: {}\nthe world held:\n{}",
+            self.args, self.code, self.stdout, self.stderr, self.world
         );
         self
     }

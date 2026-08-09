@@ -392,3 +392,43 @@ fn the_engine_verbs_drive_a_run_the_planner_launched_detached() {
     assert!(!world.run_file(&run, "round-02").exists());
     world.release("driver.go");
 }
+
+#[test]
+fn a_detached_driver_outlives_its_own_output_and_keeps_what_it_said() {
+    let world = World::new("driver-detached-output");
+    // The dispatch emits a line this build cannot read, so the engine verb the
+    // driver runs says so — on the driver's own stderr, from a subprocess of a
+    // subprocess. That is the one thing a detached driver cannot be given a
+    // pipe for: the process that would read it is the launcher, and `--detach`
+    // means the launcher has already gone. Written into such a pipe, the verb
+    // dies of a broken one mid-round, and the run is left holding an open round
+    // with nothing driving it — which surfaces much later, and as something
+    // else entirely: a `reply` refused because the run "has settled".
+    world.script("build.unreadable", "");
+    let run = start_detached(&world, "detachedlog", vec![agent("build", &[])]);
+
+    world.until("the run to settle", |world| {
+        !world.events_of(&run, "round-finished").is_empty()
+    });
+
+    // The driver ran its round to the end rather than dying on its first line.
+    let saw = world.driver_saw();
+    assert!(
+        saw.iter().any(|record| record["round_run"] == json!(0)),
+        "the driver's round did not finish: {saw:?}"
+    );
+    assert_eq!(
+        world.run_json(&run, "round-01/result.json")["state"],
+        "complete"
+    );
+
+    // And what it said is on disk, where a planner who never attached can read
+    // it. A detached driver's words are otherwise the run's one unrecoverable
+    // output.
+    let log = std::fs::read_to_string(world.run_file(&run, "driver.log"))
+        .expect("the detached driver's output was kept");
+    assert!(
+        log.contains("skipped"),
+        "the driver's own words were lost: {log}"
+    );
+}

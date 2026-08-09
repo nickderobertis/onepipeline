@@ -72,14 +72,29 @@ pub struct GraphRun {
     child: Child,
 }
 
+/// Where a started graph's own stdout and stderr go.
+///
+/// Not a detail: a pipe is only a place to write if something holds its read
+/// end. A launcher that starts a graph and then exits leaves the graph writing
+/// into a pipe with no reader, and the graph dies on its first line — so a
+/// launcher that will not stay to read says so here.
+#[derive(Debug, Clone, Copy)]
+pub enum GraphOutput<'a> {
+    /// Piped, for a caller that stays and reads the envelopes.
+    Relayed,
+    /// Appended to a file, for a caller that is about to exit.
+    Logged(&'a Path),
+}
+
 impl GraphRun {
-    /// Start a graph, streaming its envelopes on stdout.
+    /// Start a graph, with its envelopes going wherever `output` says.
     pub fn start(
         graph: &str,
         task: &str,
         dir: Option<&Path>,
         labels: &Labels,
         env: &[(String, String)],
+        output: GraphOutput<'_>,
     ) -> Result<Self> {
         let mut command = Command::new(binary());
         command.arg("run").arg(graph);
@@ -94,10 +109,29 @@ impl GraphRun {
         for (key, value) in env {
             command.env(key, value);
         }
-        command
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        command.stdin(Stdio::null());
+        match output {
+            GraphOutput::Relayed => {
+                command.stdout(Stdio::piped()).stderr(Stdio::piped());
+            }
+            GraphOutput::Logged(path) => {
+                // One file, opened twice: the two streams interleave the way
+                // they would on a terminal, which is how they are read.
+                let log = |path: &Path| {
+                    std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(path)
+                        .map_err(|e| {
+                            sibling(format!(
+                                "cannot open {} for the driver: {e}",
+                                path.display()
+                            ))
+                        })
+                };
+                command.stdout(log(path)?).stderr(log(path)?);
+            }
+        }
         let child = command
             .spawn()
             .map_err(|e| sibling(format!("cannot start `{} run`: {e}", binary())))?;

@@ -346,9 +346,9 @@ fn a_node_label_rule_routes_the_node_it_names_and_only_that_node() {
 /// Launch a one-node run whose driver is held, run its round from here, and
 /// return what that round said.
 ///
-/// The round is run from the test rather than from the driver because the
-/// orchestrator member runs it as a subprocess of a subprocess, so its refusal
-/// reaches no descriptor a test can read. Holding the driver at its rendezvous
+/// The round is run from the test rather than from the driver so the refusal is
+/// this command's own stderr, asserted where it was produced rather than read
+/// back out of what the driver recorded. Holding the driver at its rendezvous
 /// is what keeps this the run's single writer.
 fn refused_round(world: &World, name: &str, rules: &std::path::Path) -> String {
     world.script("driver.wait", "hold");

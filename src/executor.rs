@@ -31,7 +31,7 @@ use std::sync::Arc;
 use oneagentgraph::config::ConfigRef;
 use onevcs::SessionRequest;
 
-use crate::agentgraph::GraphRun;
+use crate::agentgraph::{GraphOutput, GraphRun};
 use crate::error::Result;
 use crate::event::{Envelope, Labels};
 
@@ -221,7 +221,15 @@ impl Executor for LocalExecutor {
                 (session.worktree.clone(), Some(session))
             }
         };
-        let run = GraphRun::start(&req.graph.0, &req.task, Some(&dir), &req.labels, &[])?;
+        // Relayed: this dispatch is read turn by turn into the merged store.
+        let run = GraphRun::start(
+            &req.graph.0,
+            &req.task,
+            Some(&dir),
+            &req.labels,
+            &[],
+            GraphOutput::Relayed,
+        )?;
         Ok(Box::new(LocalDispatch {
             run,
             cancel: req.cancel,

@@ -215,12 +215,20 @@ fn drive(dir: &std::path::Path) -> ExitCode {
     // Bounded: a graph that never settles ends this driver rather than
     // spinning, so a test fails on its own assertion instead of hanging.
     for _ in 0..8 {
+        // Inherited on purpose: an attached launcher relays what the engine
+        // verb says, and a real orchestrator member does not swallow it. What
+        // it *exited* with is recorded, because that is the fact this driver
+        // then acts on and nothing else in the tree writes it down.
         let ran = std::process::Command::new(&binary)
             .args(["round", "run", &run])
             .status();
         let Ok(ran) = ran else {
             return ExitCode::from(1);
         };
+        fake::append(
+            &dir.join("driver-saw.jsonl"),
+            &serde_json::json!({"run": run, "round_run": ran.code()}).to_string(),
+        );
         // A round that settled unfinished is the planner's move, not the
         // orchestrator's: it never re-dispatches a failed node on its own
         // judgement. The shipped persona says the same thing in prose.
@@ -234,6 +242,15 @@ fn drive(dir: &std::path::Path) -> ExitCode {
             return ExitCode::from(1);
         };
         if !next.status.success() {
+            fake::append(
+                &dir.join("driver-saw.jsonl"),
+                &serde_json::json!({
+                    "run": run,
+                    "round_next": next.status.code(),
+                    "stderr": String::from_utf8_lossy(&next.stderr),
+                })
+                .to_string(),
+            );
             return ExitCode::from(1);
         }
         // `continuing` is the only answer that means there is another round to

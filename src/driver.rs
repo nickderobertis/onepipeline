@@ -193,7 +193,16 @@ fn start(args: &StartArgs) -> Result<i32> {
     // the first record names this process, which is what drives the run until
     // the graph process it starts takes over.
     ledger::write_json(&paths.launch(), &record)?;
-    let mut launched = launch_graph(&paths, &record)?;
+    let log = paths.driver_log();
+    let mut launched = launch_graph(
+        &paths,
+        &record,
+        if args.detach {
+            agentgraph::GraphOutput::Logged(&log)
+        } else {
+            agentgraph::GraphOutput::Relayed
+        },
+    )?;
     record.pid = launched.pid();
     ledger::write_json(&paths.launch(), &record)?;
 
@@ -216,7 +225,15 @@ fn start(args: &StartArgs) -> Result<i32> {
 }
 
 /// Start the dag-scope graph that drives the run.
-fn launch_graph(paths: &RunPaths, record: &LaunchRecord) -> Result<agentgraph::GraphRun> {
+///
+/// `output` is the launcher's promise about itself: an attaching launcher stays
+/// and relays what the driver produces, and a detaching one is about to exit, so
+/// the driver is given a file instead of a pipe whose reader is going away.
+fn launch_graph(
+    paths: &RunPaths,
+    record: &LaunchRecord,
+    output: agentgraph::GraphOutput<'_>,
+) -> Result<agentgraph::GraphRun> {
     let task = format!(
         "Drive run {} to settlement. Use `onepipeline round run {}` and \
          `onepipeline round next {}` and nothing else to change run state.",
@@ -234,6 +251,7 @@ fn launch_graph(paths: &RunPaths, record: &LaunchRecord) -> Result<agentgraph::G
                 ledger::runs_root().to_string_lossy().into_owned(),
             ),
         ],
+        output,
     )
 }
 
@@ -424,7 +442,8 @@ fn adopt(args: &RunArgs) -> Result<i32> {
         ]),
     )?;
 
-    let mut launched = launch_graph(&paths, &record)?;
+    // Relayed: an adoption attaches, so this process stays to read it.
+    let mut launched = launch_graph(&paths, &record, agentgraph::GraphOutput::Relayed)?;
     attach(&paths, Some(&mut launched))
 }
 
