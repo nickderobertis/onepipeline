@@ -92,6 +92,10 @@ fn a_plan_dispatches_through_the_real_oneagentgraph_and_its_members_run() {
 /// The defect this guards against is not that the graph said no — it is that
 /// saying no was invisible: the launcher exited 0 and printed the pid of a
 /// process that had already died, and the reason was in a stream nobody read.
+///
+/// Both launch forms, because the graph's words are somewhere different in each:
+/// a detaching launcher gives its driver a log file, an attaching one a pipe,
+/// and a refusal that only one of them reported would leave the other silent.
 #[test]
 fn a_launch_the_graph_refuses_fails_with_the_graphs_own_words() {
     let world = World::new("real-refusal");
@@ -99,14 +103,16 @@ fn a_launch_the_graph_refuses_fails_with_the_graphs_own_words() {
     // file the sibling cannot read — a refusal it reports in its own words.
     let path = world.plan("refused", &plan_of("refused", vec![agent("build", &[])]));
 
-    let started = world.run_real(&["start", &path.to_string_lossy(), "--detach"]);
+    for form in ["--detach", "--attach"] {
+        let started = world.run_real(&["start", &path.to_string_lossy(), form]);
 
-    started.exited(crate::harness::REFUSED);
-    started.err_has("oneagentgraph");
-    started.err_has("dag-scope.yaml");
-    assert!(
-        !started.stdout.contains("\"pid\""),
-        "a refused launch still printed a pid to drive:\n{}",
-        started.stdout
-    );
+        started.exited(crate::harness::REFUSED);
+        started.err_has("oneagentgraph");
+        started.err_has("dag-scope.yaml");
+        assert!(
+            !started.stdout.contains("\"pid\""),
+            "`start {form}` still printed a pid to drive:\n{}",
+            started.stdout
+        );
+    }
 }
