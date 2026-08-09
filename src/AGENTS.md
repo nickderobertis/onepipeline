@@ -58,13 +58,12 @@ other direction.
 Never invent a local stand-in for a sibling type the contract names: record the
 divergence instead.
 
-Both are resolved from git by revision, each carrying the `version` it will
-publish under, so the dependency is not a wildcard and the requirement is already
-release-shaped. **Do not publish this crate to crates.io before both siblings are
-there** — those requirements would resolve to nothing and the published crate
-would not build. Cargo will not stop you; the guard is that `release.yml`'s
-`publish-crate` job self-activates on `CARGO_REGISTRY_TOKEN`, so leave that
-secret unset until the siblings publish.
+Both are ordinary crates.io dependencies, pinned to a published version. **Keep
+them that way** — a `git`/`rev` source makes the graph unreproducible from the
+registries alone, hides which released version carries a given API, and leaves
+the crate unbuildable for anyone without access to that revision. When a sibling
+grows an API this crate needs, the answer is a release of the sibling, not a
+revision pin here.
 
 ## Deliberately absent
 

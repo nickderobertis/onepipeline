@@ -19,6 +19,13 @@ allow = [
     "MIT",
     "Apache-2.0",
     "Unicode-3.0",
+    # The TLS stack `oneagentgraph` reaches its host over: ring, rustls-webpki,
+    # untrusted (ISC), subtle (BSD-3-Clause), and the webpki root-certificate
+    # bundles, whose CDLA-Permissive-2.0 covers the certificate *data* rather
+    # than code. All are permissive and impose no condition MIT does not.
+    "ISC",
+    "BSD-3-Clause",
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.9
 exceptions = []
@@ -35,10 +42,8 @@ skip-tree = []
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# The two sibling repositories this crate composes, and only those. An
-# unrecognised git source still fails, so a dependency cannot quietly arrive
-# from somewhere nobody reviewed.
-allow-git = [
-    "https://github.com/nickderobertis/oneagentgraph",
-    "https://github.com/nickderobertis/onevcs",
-]
+# Empty on purpose: every dependency, the two siblings included, resolves from
+# crates.io. With no git source allowed, a `git = ` dependency — a revision pin
+# that would make this graph unreproducible from the registries alone — fails
+# the check instead of being reintroduced by hand.
+allow-git = []
