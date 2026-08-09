@@ -91,9 +91,18 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
             .unwrap_or_default()
             .lines()
             .count();
-        let recover_after: usize = fake::node_script(dir, &key, "recover-after")
-            .and_then(|text| text.parse().ok())
-            .unwrap_or(usize::MAX);
+        // A scripted count that is not a count is a test that means something
+        // other than what it says: read leniently it becomes "never recovers",
+        // so the scenario written to prove recovery would prove the opposite.
+        let recover_after: usize = match fake::node_script(dir, &key, "recover-after") {
+            None => usize::MAX,
+            Some(text) => match text.trim().parse() {
+                Ok(after) => after,
+                Err(_) => fake::fail(&format!(
+                    "{key}.recover-after holds {text:?}, which is not an attempt count"
+                )),
+            },
+        };
         if so_far < recover_after {
             eprintln!("provider refused before the first turn");
             return ExitCode::from(1);
