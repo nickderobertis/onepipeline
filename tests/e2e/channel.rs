@@ -7,9 +7,9 @@
 
 // llmlint: ignore-file[e2e_not_mocked] `World` substitutes the two *siblings* at their
 // subprocess boundary and nothing inside the crate under test, which is driven as a real
-// compiled binary. There is no alternative today: both sibling crates are at their own
-// interface-only stage and refuse every invocation with exit 70. `harness.rs` carries the
-// same suppression and the full rationale.
+// compiled binary. The scenario this journey states is one a real sibling would need paid
+// model turns to produce, and `dispatch.rs` is where the real `oneagentgraph` binary is
+// driven instead. `harness.rs` carries the same suppression and the full rationale.
 
 use crate::harness::{agent, human, plan_of, World, REFUSED};
 

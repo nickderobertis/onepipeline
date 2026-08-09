@@ -8,11 +8,13 @@
 //! reading its stdout.
 
 // llmlint: ignore-file[e2e_not_mocked] the two siblings are substituted at their
-// subprocess boundary, and there is no alternative: both crates are at their own
-// interface-only stage, so the real `oneagentgraph run` and `onevcs session open`
-// refuse every invocation with exit 70. A suite built on them would prove that this
-// crate can start a process that says no. Revisit each seam as its sibling implements
-// it — the doubles are scripted per test and swapping one out is an env var.
+// subprocess boundary, so a journey can state a scenario — a node that fails its gate, a
+// dispatch held open, a driver that dies — instead of arranging one out of real agent
+// turns. `onevcs` has no alternative yet: it is still at its interface-only stage and
+// refuses every invocation with exit 70. `oneagentgraph` does, and `dispatch.rs` takes
+// it: those journeys run the real binary through [`World::real_cmd`] and substitute only
+// the paid model turn. Every scripted scenario a journey here needs is one the real
+// sibling would need a paid turn to produce.
 
 // A shared harness is used a piece at a time: every helper below is exercised by some
 // journey, and none by all of them. Rust judges that per test binary, so without this the
@@ -137,6 +139,92 @@ impl World {
             args,
             self,
         )
+    }
+
+    /// The `onepipeline` binary with the **real** `oneagentgraph` behind the
+    /// seam, and only the paid model turn replaced.
+    ///
+    /// The double swapped in here is one layer further out than the ones
+    /// [`cmd`](World::cmd) uses: `oneagentgraph` resolves the graph, prepares the
+    /// member, and supervises it for real, and what stands in is the harness it
+    /// spawns — at that library's own documented `ONEAGENTGRAPH_ONEHARNESS_BIN`
+    /// override, which knows nothing about this crate.
+    pub fn real_cmd(&self, args: &[&str]) -> Command {
+        let mut command = self.cmd(args);
+        command
+            .env("ONEPIPELINE_ONEAGENTGRAPH_BIN", sibling_binary())
+            .env("ONEAGENTGRAPH_ONEHARNESS_BIN", double("fake-oneharness"))
+            .env("ONEAGENTGRAPH_STATE_DIR", self.root.join("graph-state"))
+            .env(
+                "ONEPIPELINE_DAG_GRAPH",
+                self.graphs().join("dag-scope.yaml"),
+            )
+            .env(
+                "ONEPIPELINE_NODE_GRAPH",
+                self.graphs().join("node-scope.yaml"),
+            )
+            // This suite runs inside a dispatch of the very system it is a
+            // library for, and that dispatch exports its own harness selection.
+            // A leaked value would put a member on an identity — and a bill —
+            // nobody in this test chose.
+            .env_remove("ONEHARNESS_HARNESSES")
+            .env_remove("ONEHARNESS_MODEL")
+            .env_remove("ONEHARNESS_MODELS")
+            .env_remove("ONEHARNESS_MODE");
+        command
+    }
+
+    /// Run a command against the real `oneagentgraph`.
+    pub fn run_real(&self, args: &[&str]) -> Run {
+        Run::of(
+            self.real_cmd(args).output().expect("the binary runs"),
+            args,
+            self,
+        )
+    }
+
+    /// Where this world's agent-graph configs live.
+    pub fn graphs(&self) -> PathBuf {
+        self.root.join("graphs")
+    }
+
+    /// Write the graph configs [`real_cmd`](World::real_cmd) names.
+    ///
+    /// Single-sided `kind: oneharness` members: the two-party kind runs a
+    /// onejudge conversation in `oneagentgraph`'s own process against a provider
+    /// this suite has no offline stand-in for, and the seam under test — a
+    /// dispatch reaching the sibling, being accepted, and streaming back — is the
+    /// same one either way.
+    pub fn write_graphs(&self) {
+        let dir = self.graphs();
+        std::fs::create_dir_all(&dir).expect("a directory for the graph configs");
+        // The identity chain is the operator's own file, which the graph names
+        // and this suite never selects out of: one harness family, so the model
+        // pairing rule holds.
+        std::fs::write(
+            dir.join("oneharness.toml"),
+            "run_mode = \"fallback\"\nharnesses = [\"claude-code\"]\n",
+        )
+        .expect("the harness config is written");
+        for (file, member) in [
+            ("dag-scope.yaml", "orchestrator"),
+            ("node-scope.yaml", "worker"),
+        ] {
+            std::fs::write(
+                dir.join(file),
+                format!(
+                    "version: 1\nname: {}\nmembers:\n  {member}:\n    kind: oneharness\n    \
+                     oneharness_config: ./oneharness.toml\n",
+                    file.trim_end_matches(".yaml"),
+                ),
+            )
+            .expect("the graph config is written");
+        }
+    }
+
+    /// Every turn the paid-harness double was asked for, in order.
+    pub fn turns(&self) -> Vec<Value> {
+        read_jsonl(&self.fakes.join("turns.jsonl"))
     }
 
     /// Run a command with an envelope on stdin.
@@ -415,32 +503,66 @@ pub fn binary() -> PathBuf {
 /// name it was made from.
 pub fn double(name: &str) -> PathBuf {
     static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    let held = BUILT.get_or_init(|| build(&["--package", "onepipeline-testfakes"]));
+    held_copy(held, name)
+}
 
+/// The **real** `oneagentgraph` binary, built from the version this crate
+/// depends on.
+///
+/// Not the one on `PATH`: that is whatever an operator happened to install, and
+/// a journey proving this crate composes its sibling has to compose the sibling
+/// `Cargo.lock` pins. Cargo builds a dependency's binary the same way it builds
+/// a workspace member's, so this needs no extra provisioning — the library is
+/// already compiled by the time a test runs.
+pub fn sibling_binary() -> PathBuf {
+    static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    let held = BUILT.get_or_init(|| {
+        build(&[
+            "--package",
+            "oneagentgraph",
+            "--bin",
+            "oneagentgraph",
+            "--locked",
+        ])
+    });
+    held_copy(held, "oneagentgraph")
+}
+
+/// Build one package's binaries into the target directory this test's own binary
+/// came out of, and return the per-process directory they are held in.
+fn build(selection: &[&str]) -> PathBuf {
     let debug = binary()
         .parent()
         .expect("the binary is in a directory")
         .to_path_buf();
-    let held = BUILT.get_or_init(|| {
-        let target = debug
-            .parent()
-            .expect("the profile directory is inside a target directory");
-        let built = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
-            .args(["build", "--offline", "--package", "onepipeline-testfakes"])
-            .arg("--target-dir")
-            .arg(target)
-            .current_dir(repo_file("."))
-            .output()
-            .expect("cargo builds the subprocess doubles");
-        assert!(
-            built.status.success(),
-            "the subprocess doubles did not build: {}",
-            String::from_utf8_lossy(&built.stderr)
-        );
-        let held = debug.join("doubles").join(std::process::id().to_string());
-        std::fs::create_dir_all(&held).expect("a directory for this process's doubles");
-        held
-    });
+    let target = debug
+        .parent()
+        .expect("the profile directory is inside a target directory");
+    let built = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+        .args(["build", "--offline"])
+        .args(selection)
+        .arg("--target-dir")
+        .arg(target)
+        .current_dir(repo_file("."))
+        .output()
+        .expect("cargo builds the subprocess doubles");
+    assert!(
+        built.status.success(),
+        "{selection:?} did not build: {}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let held = debug.join("doubles").join(std::process::id().to_string());
+    std::fs::create_dir_all(&held).expect("a directory for this process's doubles");
+    held
+}
 
+/// This process's own name for a built binary, made once and kept.
+fn held_copy(held: &Path, name: &str) -> PathBuf {
+    let debug = binary()
+        .parent()
+        .expect("the binary is in a directory")
+        .to_path_buf();
     let file = format!("{name}{}", std::env::consts::EXE_SUFFIX);
     let published = debug.join(&file);
     let mine = held.join(&file);

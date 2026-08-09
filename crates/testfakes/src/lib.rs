@@ -1,9 +1,12 @@
-//! What the two subprocess doubles share.
+//! What the subprocess doubles share.
 //!
-//! These are **doubles for the siblings**, not for anything inside
-//! `onepipeline`. They are real executables speaking `oneagentgraph`'s and
-//! `onevcs`'s command surfaces, so the code under test composes them exactly as
-//! it composes the real ones — by executing a program and reading its stdout.
+//! These are **doubles for what is outside the crate under test**, never for
+//! anything inside it. Two of them are real executables speaking
+//! `oneagentgraph`'s and `onevcs`'s command surfaces, so the code under test
+//! composes them exactly as it composes the real ones — by executing a program
+//! and reading its stdout. The third stands one layer further out: it speaks
+//! `oneharness`'s surface, for the journeys that drive the real `oneagentgraph`
+//! and need only the paid model turn replaced.
 //!
 //! Each is scripted from a directory the test prepares: what a node's dispatch
 //! does, whether it waits for a rendezvous, and what it exits with are all files
@@ -191,4 +194,103 @@ pub fn now() -> String {
         (sod % 3_600) / 60,
         sod % 60
     )
+}
+
+/// Act as the dag-scope graph's orchestrator member: drive the engine verbs.
+///
+/// Exactly what the shipped `orchestrator` persona instructs — `round run` then
+/// `round next`, and nothing else that changes run state — so `start`'s journey
+/// is exercised through the same commands a real orchestrator would use.
+///
+/// Shared by both doubles, because the orchestrator is a *member* rather than a
+/// graph: the `oneagentgraph` double acts it out when it is standing in for the
+/// whole sibling, and the `oneharness` double acts it out when the real sibling
+/// is running the graph and only the paid turn is being replaced.
+pub fn drive(dir: &Path) -> std::process::ExitCode {
+    // Required, not defaulted: an empty run id would send every engine verb at
+    // a run named by nothing, and the refusals that came back would read as the
+    // engine's fault rather than as the launcher never having said which run
+    // this driver is for.
+    let run = match std::env::var("ONEPIPELINE_RUN_ID") {
+        Ok(run) if !run.is_empty() => run,
+        _ => fail("ONEPIPELINE_RUN_ID is unset: no run to drive"),
+    };
+    let binary = match std::env::var("ONEPIPELINE_FAKE_DRIVER_BIN") {
+        Ok(binary) if !binary.is_empty() => binary,
+        _ => fail("ONEPIPELINE_FAKE_DRIVER_BIN is unset: nothing to drive the run with"),
+    };
+    // The first thing a real orchestrator member does is read the run's ledger,
+    // so the first thing this one records is whether that ledger was there to
+    // be read. A launcher that started its driver before writing the launch
+    // record leaves this `false` — and the driver then dies on a file its own
+    // launcher had not written yet, with the run stuck at `run-started`.
+    append(
+        &dir.join("driver-saw.jsonl"),
+        &serde_json::json!({
+            "run": run,
+            "launch_record": launch_record(&run).is_some_and(|path| path.is_file()),
+        })
+        .to_string(),
+    );
+
+    if dir.join("driver.wait").exists() {
+        wait_for(&dir.join("driver.go"));
+    }
+    // Bounded: a graph that never settles ends this driver rather than
+    // spinning, so a test fails on its own assertion instead of hanging.
+    for _ in 0..8 {
+        // Inherited on purpose: an attached launcher relays what the engine
+        // verb says, and a real orchestrator member does not swallow it. What
+        // it *exited* with is recorded, because that is the fact this driver
+        // then acts on and nothing else in the tree writes it down.
+        let ran = std::process::Command::new(&binary)
+            .args(["round", "run", &run])
+            .status();
+        let Ok(ran) = ran else {
+            return std::process::ExitCode::from(1);
+        };
+        append(
+            &dir.join("driver-saw.jsonl"),
+            &serde_json::json!({"run": run, "round_run": ran.code()}).to_string(),
+        );
+        // A round that settled unfinished is the planner's move, not the
+        // orchestrator's: it never re-dispatches a failed node on its own
+        // judgement. The shipped persona says the same thing in prose.
+        if !ran.success() {
+            return std::process::ExitCode::SUCCESS;
+        }
+        let next = std::process::Command::new(&binary)
+            .args(["round", "next", &run])
+            .output();
+        let Ok(next) = next else {
+            return std::process::ExitCode::from(1);
+        };
+        if !next.status.success() {
+            append(
+                &dir.join("driver-saw.jsonl"),
+                &serde_json::json!({
+                    "run": run,
+                    "round_next": next.status.code(),
+                    "stderr": String::from_utf8_lossy(&next.stderr),
+                })
+                .to_string(),
+            );
+            return std::process::ExitCode::from(1);
+        }
+        // `continuing` is the only answer that means there is another round to
+        // run. Complete, and every gated state, ends the driver.
+        if !String::from_utf8_lossy(&next.stdout).contains("\"continuing\"") {
+            return std::process::ExitCode::SUCCESS;
+        }
+    }
+    std::process::ExitCode::SUCCESS
+}
+
+/// The launch record of the run this driver was started for.
+///
+/// Resolved from the same two variables the launcher hands every driver, so the
+/// probe above reads exactly the file `onepipeline round run` opens first.
+fn launch_record(run: &str) -> Option<PathBuf> {
+    let root = std::env::var("ONEPIPELINE_RUNS_DIR").ok()?;
+    (!root.is_empty() && !run.is_empty()).then(|| PathBuf::from(root).join(run).join("launch.json"))
 }
