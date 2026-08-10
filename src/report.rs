@@ -3,11 +3,27 @@
 //! `oneagentgraph` stores each member's full report and puts its `report_path`
 //! on the `member-settled` it relays here, so the evidence behind a dispatch —
 //! every turn, its tools, its text, and what the two sides of the conversation
-//! spent — is retained rather than summarised away. This module is the reader:
-//! which reports a run's merged store names, and what one says.
+//! spent — is retained rather than summarised away.
 //!
-//! It reads the document **structurally**, by field name, rather than into the
-//! producing library's own types. The report is a sibling's artifact and this
+//! # Ingest copies; readers never follow
+//!
+//! `report_path` points into the *producing* library's own scratch, which is a
+//! directory this crate neither chooses nor can attest. A reader that opened
+//! whatever a journal line named would be an arbitrary-file reader driven by
+//! whatever wrote to the journal — an absolute path anywhere on the host, or a
+//! symlink to something else entirely, and its contents printed by `transcript`.
+//!
+//! So the two halves are split. [`retain`] runs at **ingest**, on the envelope a
+//! process this crate started has just written to its own stdout, and copies the
+//! report into the run's own [`reports_dir`](crate::ledger::RunPaths::reports_dir)
+//! — refusing anything that is not a plain file of the producing library's own
+//! name and size. [`retained`] and [`read`] run at **read** time and open
+//! nothing but that copy, at a path derived from the settlement rather than
+//! taken from it. A settlement whose copy is not there is reported as unretained,
+//! naming the path that was not read.
+//!
+//! The document itself is read **structurally**, by field name, rather than into
+//! the producing library's own types. The report is a sibling's artifact and this
 //! crate is a consumer of it: a stricter read would refuse a whole report over
 //! one field it did not recognise and report nothing at all, which for evidence
 //! is the wrong direction to fail in. Every other cross-library read here is
@@ -28,6 +44,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::event::{Envelope, Source};
+use crate::ledger::RunPaths;
 
 /// The kind `oneagentgraph` settles a member with.
 pub const MEMBER_SETTLED: &str = "member-settled";
@@ -35,29 +52,93 @@ pub const MEMBER_SETTLED: &str = "member-settled";
 /// The payload key naming where the member's report was stored.
 pub const REPORT_PATH: &str = "report_path";
 
-/// One member's retained report, as its settlement named it.
+/// The most of a report this run copies into its own storage.
+///
+/// A bound rather than a promise about size: the copy happens on the engine's
+/// single-writer thread while a round is converging, and a producer that named
+/// something enormous must not be able to stall it or fill the runs root. Well
+/// past a real report, which is a transcript and its verdicts.
+pub const MAX_REPORT_BYTES: u64 = 32 * 1024 * 1024;
+
+/// One member's report, as its settlement named it and as this run kept it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Retained {
     /// The node whose dispatch produced it, when the envelope named one.
     pub node: Option<String>,
     /// The member within that dispatch, when the producer stamped one.
     pub member: Option<String>,
-    /// Where the producing library stored it.
-    pub path: PathBuf,
+    /// Where the producing library said it stored it. **Displayed, never
+    /// opened**: it is a stranger's path on a journal line.
+    pub named: PathBuf,
+    /// This run's own copy, under its
+    /// [`reports_dir`](crate::ledger::RunPaths::reports_dir). The only file any
+    /// reader here opens, and derived from the settlement rather than taken
+    /// from it.
+    pub kept: PathBuf,
 }
 
-// llmlint: ignore-block[boundary_inputs_validated] the check below is the whole of what
-// this boundary can validate without losing evidence. `report_path` is an absolute path in
-// the *producing* library's own state directory: `oneagentgraph` mints it under a run root
-// this crate neither chooses nor can recompute — a dispatch may carry a different
-// `ONEAGENTGRAPH_STATE_DIR`, and a future executor stores it on another machine entirely —
-// so pinning it to a root known here would refuse legitimate reports and report a
-// dispatch's evidence as missing, which is the failure direction this whole reader exists
-// to avoid. What *is* validated is the part that decides whether a path names a report at
-// all: the file name, taken from the sibling's own `REPORT_FILE` constant so it cannot
-// drift. And the input is not an untrusted one: it arrives on a line in the run's own
-// journal, whose only writers are this crate's engine and the siblings it relays, and
-// anyone able to append to it already holds write access to the run directory.
+/// Copy the report a relayed settlement names into the run's own storage.
+///
+/// Called as the envelope is **ingested** — from the stdout of a process this
+/// crate started, before the line exists anywhere a stranger could have written
+/// it — which is the one moment the named path carries the producer's authority
+/// rather than the journal's.
+///
+/// Everything it refuses, it refuses out loud and without opening: a name that
+/// is not the producing library's own [`REPORT_FILE`](oneagentgraph::member::REPORT_FILE),
+/// anything that is not a plain file (a symlink is the case this exists for —
+/// it names one file and delivers another), and anything past
+/// [`MAX_REPORT_BYTES`]. A refusal costs the transcript its words and nothing
+/// else: the settlement still relays, and every reader says the copy is not
+/// there.
+pub fn retain(paths: &RunPaths, event: &Envelope) {
+    if event.source != Source::Agentgraph || event.kind.0 != MEMBER_SETTLED {
+        return;
+    }
+    let Some(named) = event
+        .payload
+        .get(REPORT_PATH)
+        .and_then(Value::as_str)
+        .filter(|path| !path.is_empty())
+    else {
+        return;
+    };
+    let refuse = |why: &str| {
+        eprintln!("onepipeline: not retaining the report at '{named}': {why}");
+    };
+    if Path::new(named).file_name().and_then(|name| name.to_str())
+        != Some(oneagentgraph::member::REPORT_FILE)
+    {
+        return refuse(&format!(
+            "a report the producing library wrote is named {}",
+            oneagentgraph::member::REPORT_FILE
+        ));
+    }
+    // `symlink_metadata` does not follow, which is the whole point: a symlink
+    // named as a report is a path that says one thing and delivers another.
+    match std::fs::symlink_metadata(named) {
+        Err(error) => return refuse(&format!("it cannot be read: {error}")),
+        Ok(about) if about.file_type().is_symlink() => {
+            return refuse("it is a symlink, and a report is a file the producer wrote")
+        }
+        Ok(about) if !about.is_file() => return refuse("it is not a file"),
+        Ok(about) if about.len() > MAX_REPORT_BYTES => {
+            return refuse(&format!("it is larger than {MAX_REPORT_BYTES} bytes"))
+        }
+        Ok(_) => {}
+    }
+    let kept = paths.report_for(&event.stream, event.seq);
+    let copied = std::fs::create_dir_all(paths.reports_dir())
+        .and_then(|()| std::fs::copy(named, &kept))
+        .map(|_| ());
+    if let Err(error) = copied {
+        refuse(&format!(
+            "it cannot be copied to {}: {error}",
+            kept.display()
+        ));
+    }
+}
+
 /// Every report a `member-settled` in this store named, in settlement order.
 ///
 /// A settlement that stored no report is absent rather than listed with an
@@ -65,34 +146,19 @@ pub struct Retained {
 /// that invented a path for it would send a reader looking for a file nobody
 /// wrote.
 ///
-/// The path is a **trust boundary**: it arrives on a journal line, and this
-/// crate is about to open it and print what is inside. So it is accepted only
-/// where it names the file the producing library itself writes —
-/// [`oneagentgraph::member::REPORT_FILE`] — which is the sibling's own constant
-/// rather than a spelling this crate chose, so it cannot drift from what
-/// `member-settled` actually points at. Anything else is refused out loud: a
-/// line naming some other file is not a report, and reading it would make this
-/// verb an arbitrary-file reader driven by whatever wrote to the journal.
-pub fn retained(events: &[Envelope]) -> Vec<Retained> {
+/// What comes back names *both* paths and opens neither. The copy's name is
+/// derived from the settlement's own stream and sequence, so a reader reaches
+/// this run's storage whatever the journal line says the producer's path was.
+pub fn retained(paths: &RunPaths, events: &[Envelope]) -> Vec<Retained> {
     events
         .iter()
         .filter(|event| event.source == Source::Agentgraph && event.kind.0 == MEMBER_SETTLED)
         .filter_map(|event| {
-            let path = event
+            let named = event
                 .payload
                 .get(REPORT_PATH)
                 .and_then(Value::as_str)
                 .filter(|path| !path.is_empty())?;
-            if Path::new(path).file_name().and_then(|name| name.to_str())
-                != Some(oneagentgraph::member::REPORT_FILE)
-            {
-                eprintln!(
-                    "onepipeline: ignoring a member-settled naming '{path}', which is not a \
-                     {} the producing library wrote",
-                    oneagentgraph::member::REPORT_FILE
-                );
-                return None;
-            }
             Some(Retained {
                 node: event.labels.node.clone(),
                 member: event
@@ -101,20 +167,21 @@ pub fn retained(events: &[Envelope]) -> Vec<Retained> {
                     .get("member")
                     .and_then(Value::as_str)
                     .map(str::to_string),
-                path: PathBuf::from(path),
+                named: PathBuf::from(named),
+                kept: paths.report_for(&event.stream, event.seq),
             })
         })
         .collect()
 }
-// llmlint: ignore-end[boundary_inputs_validated]
 
-/// Read one report, or `None` when it is not there to read.
+/// Read this run's own copy of one report, or `None` when it did not keep one.
 ///
-/// A report the machine that ran the dispatch stored elsewhere, or that its
-/// scratch has since been swept of, is simply absent — a caller says so rather
-/// than reporting a dispatch as having produced nothing.
-pub fn read(path: &Path) -> Option<Value> {
-    let text = std::fs::read_to_string(path).ok()?;
+/// The path is [`Retained::kept`] and nothing else. A dispatch whose report was
+/// refused at ingest, ran on another machine, or was swept has no copy here —
+/// and a caller says which of those it is meeting rather than reporting a
+/// dispatch as having produced nothing.
+pub fn read(kept: &Path) -> Option<Value> {
+    let text = std::fs::read_to_string(kept).ok()?;
     serde_json::from_str(&text).ok()
 }
 
@@ -195,10 +262,25 @@ mod tests {
     use crate::event::{EventKind, Labels, ENVELOPE_VERSION};
     use serde_json::json;
 
-    /// A path naming the file the producing library writes, under a directory
-    /// of its own.
-    fn stored(dir: &str) -> String {
-        format!("{dir}/{}", oneagentgraph::member::REPORT_FILE)
+    /// A scratch root for one test, removed when it ends.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "onepipeline-report-{name}-{}-{:?}",
+            crate::sys::pid(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch root");
+        dir
+    }
+
+    /// A producer's scratch holding the file it says it wrote.
+    fn produced(root: &Path, body: &str) -> PathBuf {
+        let dir = root.join("producer");
+        std::fs::create_dir_all(&dir).expect("a producer scratch");
+        let path = dir.join(oneagentgraph::member::REPORT_FILE);
+        std::fs::write(&path, body).expect("a stored report");
+        path
     }
 
     fn settled(node: Option<&str>, path: Option<&str>) -> Envelope {
@@ -220,47 +302,128 @@ mod tests {
         }
     }
 
+    /// Ingest copies the report into the run's own storage, and the reader is
+    /// pointed at that copy rather than at the path the settlement named.
     #[test]
-    fn a_settlement_that_stored_a_report_names_where_it_went() {
-        let stored = stored("/tmp/member");
-        let retained = retained(&[settled(Some("build"), Some(&stored))]);
+    fn ingest_keeps_the_run_its_own_copy_and_the_reader_opens_that() {
+        let root = scratch("kept");
+        let paths = RunPaths::under(&root, "demo");
+        paths.create().expect("the run directory");
+        let produced = produced(&root, r#"{"transcript":{"messages":[]}}"#);
+
+        let event = settled(Some("build"), Some(&produced.display().to_string()));
+        retain(&paths, &event);
+
+        let retained = retained(&paths, &[event]);
         assert_eq!(retained.len(), 1);
         assert_eq!(retained[0].node.as_deref(), Some("build"));
         assert_eq!(retained[0].member.as_deref(), Some("worker"));
-        assert_eq!(retained[0].path, PathBuf::from(&stored));
+        assert_eq!(retained[0].named, produced);
+        assert_eq!(retained[0].kept, paths.report_for("oneagentgraph-1", 4));
+        assert!(
+            retained[0].kept.starts_with(paths.reports_dir()),
+            "the copy is not in the run's own storage: {:?}",
+            retained[0].kept
+        );
+        assert!(read(&retained[0].kept).is_some());
+
+        // The producer's file going away afterwards costs the run nothing: its
+        // own copy is what every reader opens.
+        std::fs::remove_file(&produced).expect("the producer's copy is removed");
+        assert!(read(&retained[0].kept).is_some());
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// A `null` or empty `report_path` is the producer saying it stored none.
     #[test]
     fn a_settlement_that_stored_none_is_not_listed_with_an_invented_path() {
-        assert!(retained(&[settled(Some("build"), None)]).is_empty());
-        assert!(retained(&[settled(Some("build"), Some(""))]).is_empty());
+        let paths = RunPaths::under(Path::new("/nowhere"), "demo");
+        assert!(retained(&paths, &[settled(Some("build"), None)]).is_empty());
+        assert!(retained(&paths, &[settled(Some("build"), Some(""))]).is_empty());
     }
 
-    /// The path arrives on a journal line and this crate is about to open it, so
-    /// a line naming anything but the file the producing library writes is
-    /// refused rather than read.
+    /// Ingest opens a path a *live producer* named, so it refuses everything
+    /// that is not the plain file that producer writes — a symlink most of all,
+    /// which names one file and delivers another.
     #[test]
-    fn a_settlement_naming_a_file_the_producer_never_writes_is_refused() {
+    fn ingest_refuses_anything_that_is_not_the_producers_own_plain_file() {
+        let root = scratch("refused");
+        let paths = RunPaths::under(&root, "demo");
+        paths.create().expect("the run directory");
+        let secret = root.join("secret.json");
+        std::fs::write(&secret, r#"{"transcript":{"messages":[]}}"#).expect("a secret");
+
+        let planted = root.join("planted");
+        std::fs::create_dir_all(&planted).expect("a planted directory");
+        let link = planted.join(oneagentgraph::member::REPORT_FILE);
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&secret, &link).expect("a symlink");
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&secret, &link).expect("a symlink");
+
         for named in [
-            "/etc/passwd",
-            "/tmp/member/../../etc/hosts",
-            "/tmp/member/notes.json",
-            "/tmp/member/report.json.bak",
-            "/",
+            // A symlink wearing the producer's own file name.
+            link.display().to_string(),
+            // A file the producing library never writes.
+            secret.display().to_string(),
+            // Nothing at all.
+            root.join("gone")
+                .join(oneagentgraph::member::REPORT_FILE)
+                .display()
+                .to_string(),
+            // A directory.
+            planted.display().to_string(),
         ] {
+            let event = settled(Some("build"), Some(&named));
+            retain(&paths, &event);
+            let kept = &retained(&paths, &[event])[0].kept;
             assert!(
-                retained(&[settled(Some("build"), Some(named))]).is_empty(),
-                "'{named}' was accepted as a retained report"
+                read(kept).is_none(),
+                "'{named}' was copied into the run's storage"
             );
         }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A report past the bound is refused rather than copied: the copy happens
+    /// on the engine's single-writer thread, mid-round.
+    #[test]
+    fn ingest_refuses_a_report_past_its_bound() {
+        let root = scratch("oversize");
+        let paths = RunPaths::under(&root, "demo");
+        paths.create().expect("the run directory");
+        let produced = produced(&root, "x");
+        // Claimed rather than written: the check is on the size the filesystem
+        // reports, and a real 32MiB fixture would be a slow way to say so.
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&produced)
+            .expect("the stored report");
+        file.set_len(MAX_REPORT_BYTES + 1).expect("a large report");
+        drop(file);
+
+        let event = settled(Some("build"), Some(&produced.display().to_string()));
+        retain(&paths, &event);
+        assert!(read(&retained(&paths, &[event])[0].kept).is_none());
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
     fn a_pipeline_event_of_the_same_shape_is_not_a_members_report() {
-        let mut ours = settled(Some("build"), Some(&stored("/tmp/member")));
+        let root = scratch("ours");
+        let paths = RunPaths::under(&root, "demo");
+        paths.create().expect("the run directory");
+        let produced = produced(&root, "{}");
+        let mut ours = settled(Some("build"), Some(&produced.display().to_string()));
         ours.source = Source::Pipeline;
-        assert!(retained(&[ours]).is_empty());
+
+        retain(&paths, &ours);
+        assert!(retained(&paths, &[ours]).is_empty());
+        assert!(
+            !paths.reports_dir().exists(),
+            "this crate's own event was ingested as a sibling's report"
+        );
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]

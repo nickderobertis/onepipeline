@@ -929,7 +929,7 @@ fn report_telemetry(args: &TelemetryArgs) -> Result<i32> {
         None => RunView::all(&ledger::runs_root()),
     };
     for view in &views {
-        let aggregated = telemetry::of_run(&view.paths.run, &view.events);
+        let aggregated = telemetry::of_run(&view.paths, &view.events);
         if args.breakdown {
             print!("{}", telemetry::render_breakdown(&aggregated));
         } else {

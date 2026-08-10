@@ -13,6 +13,15 @@
 use onepipeline_testfakes as fake;
 use std::process::ExitCode;
 
+/// A readable document a settlement can be made to *point at* but which nothing
+/// should ever read back.
+///
+/// One recognisable string, in a valid report shape: a test asserts it never
+/// reaches a rendered transcript, so a reader that followed the path it was
+/// handed fails on the words rather than on a missing file.
+pub const PLANTED: &str =
+    r#"{"transcript":{"messages":[{"role":"assistant","content":"planted-and-never-read"}]}}"#;
+
 /// The exit code the real CLI answers an invalid configuration with — its own
 /// constant, so a double cannot answer a refusal with a code the sibling stopped
 /// using.
@@ -299,20 +308,39 @@ fn emit(args: &[String], node: &str, step: Option<&str>, task: &str) {
         .join("reports")
         .join(format!("{}-{}", fake::segment(node), std::process::id()))
         .join(oneagentgraph::member::REPORT_FILE);
-    // Where the settlement says the report went. A member that settled on a
-    // machine whose scratch this reader cannot reach still *names* it, so
-    // `report.missing` publishes the path and writes nothing: the evidence is
-    // missing, not the settlement. `report.elsewhere` names a file the real
-    // library never writes, which a consumer must refuse rather than open.
+    // Where the settlement says the report went. Four scenarios a consumer has
+    // to tell apart, and each is a real thing a producer — or something wearing
+    // one's clothes — can put on that line.
     let scripted = |name: &str| fake::script_dir().join(name).exists();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     let named = if scripted("report.elsewhere") {
-        Some(path.with_file_name("notes.json"))
+        // A readable file the producing library never writes, under a name
+        // nothing should follow.
+        let planted = path.with_file_name("notes.json");
+        let _ = std::fs::write(&planted, PLANTED);
+        Some(planted)
+    } else if scripted("report.symlink") {
+        // A path wearing the producer's own file name that *delivers* another
+        // file. The one case a name check alone cannot catch.
+        let secret = path.with_file_name("secret.json");
+        let _ = std::fs::write(&secret, PLANTED);
+        let link = path.with_file_name("linked");
+        let _ = std::fs::create_dir_all(&link);
+        let link = link.join(oneagentgraph::member::REPORT_FILE);
+        let _ = std::fs::remove_file(&link);
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(&secret, &link);
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_file(&secret, &link);
+        made.is_ok().then_some(link)
     } else if scripted("report.missing") {
+        // A member that settled on a machine whose scratch this reader cannot
+        // reach: the settlement names where the report went and nothing wrote
+        // one there. The evidence is missing, not the settlement.
         Some(path.clone())
     } else {
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
         // A report document a harness produced without a transcript: the
         // verdict fields the settlement reads inline, and nothing else.
         let document = if scripted("report.bare") {

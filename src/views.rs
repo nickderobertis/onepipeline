@@ -501,15 +501,14 @@ pub fn results(view: &RunView) -> String {
 /// reader asking why a turn did what it did needs, and which exists only once
 /// the member has settled.
 ///
-/// A report the producer stored somewhere this host cannot read is said to be
-/// unreadable rather than passed over: an absent transcript and an unread one
-/// are different facts, and the second is the one with a file to go and look at.
+/// A report this run did not keep a copy of is said to be unretained rather
+/// than passed over: an absent transcript and an unread one are different facts.
+/// The path the producer named is printed and **never opened** — the only file
+/// this verb reads is the run's own copy, made when the settlement was ingested.
 pub fn transcript(view: &RunView, only: Option<&str>) -> String {
     let mut out = String::new();
-    // Read once for the whole run rather than per node: this is what refuses a
-    // settlement naming a file the producer never writes, and it says so out
-    // loud — once, not once for every node the run dispatched.
-    let retained = crate::report::retained(&view.events);
+    // Derived once for the whole run rather than per node.
+    let retained = crate::report::retained(&view.paths, &view.events);
     for node in dispatched(view, only) {
         out.push_str(&format!("{}  {node}\n", view.paths.run));
         for event in view
@@ -548,14 +547,18 @@ pub fn transcript(view: &RunView, only: Option<&str>) -> String {
         {
             // Named by the member that settled with it: a graph runs more than
             // one, and a reader looking at two reports has to know whose is
-            // whose.
+            // whose. The path is the producer's own, printed so a reader knows
+            // what the settlement claimed — and it is not what is opened.
             out.push_str(&format!(
                 "  report {} {}\n",
                 retained.member.as_deref().unwrap_or("-"),
-                retained.path.display()
+                retained.named.display()
             ));
-            let Some(document) = crate::report::read(&retained.path) else {
-                out.push_str("    unreadable from this host\n");
+            let Some(document) = crate::report::read(&retained.kept) else {
+                out.push_str(
+                    "    not retained by this run, so it is not read: only this run's own \
+                     copy of a report is ever opened\n",
+                );
                 continue;
             };
             let turns = crate::report::turns(&document);
@@ -1011,7 +1014,11 @@ mod tests {
     #[test]
     fn a_transcript_renders_the_turns_tools_and_the_report_it_settled_with() {
         let root = scratch("transcript");
-        let stored = root.join("report.json");
+        let paths = RunPaths::under(&root, "demo");
+        // This run's own copy, at the name ingest gives it: the reader derives
+        // that name from the settlement rather than following the path on it.
+        let stored = paths.report_for("s", 0);
+        std::fs::create_dir_all(paths.reports_dir()).expect("the run's report storage");
         std::fs::write(
             &stored,
             json!({
@@ -1048,10 +1055,7 @@ mod tests {
             EventKind(crate::report::MEMBER_SETTLED.into()),
             Source::Agentgraph,
             Some("build"),
-            &[(
-                crate::report::REPORT_PATH,
-                json!(stored.display().to_string()),
-            )],
+            &[(crate::report::REPORT_PATH, json!("/elsewhere/report.json"))],
         );
 
         write_run(
@@ -1086,11 +1090,11 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// A report named and not readable is said to be unreadable. An absent
-    /// transcript and an unread one are different facts, and only the second
-    /// has a file to go and look at.
+    /// A settlement whose report this run kept no copy of is said to be
+    /// unretained, and the path it named is printed and not opened. An absent
+    /// transcript and an unread one are different facts.
     #[test]
-    fn a_report_this_host_cannot_read_is_named_as_unread_rather_than_passed_over() {
+    fn a_report_this_run_did_not_keep_is_named_as_unretained_and_never_opened() {
         let root = scratch("transcript-unread");
         let settled = relayed(
             EventKind(crate::report::MEMBER_SETTLED.into()),
@@ -1116,7 +1120,11 @@ mod tests {
         );
         let view = RunView::open(&RunPaths::under(&root, "demo")).expect("the run reads");
         let rendered = transcript(&view, None);
-        assert!(rendered.contains("unreadable from this host"), "{rendered}");
+        assert!(rendered.contains("not retained by this run"), "{rendered}");
+        assert!(
+            rendered.contains("/nowhere/onepipeline/report.json"),
+            "the path that was not read is not named: {rendered}"
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -1125,17 +1133,18 @@ mod tests {
     #[test]
     fn a_report_without_a_transcript_says_so() {
         let root = scratch("transcript-none");
-        let stored = root.join("report.json");
-        std::fs::write(&stored, json!({"usage": {"input_tokens": 1}}).to_string())
-            .expect("a stored report");
+        let paths = RunPaths::under(&root, "demo");
+        std::fs::create_dir_all(paths.reports_dir()).expect("the run's report storage");
+        std::fs::write(
+            paths.report_for("s", 0),
+            json!({"usage": {"input_tokens": 1}}).to_string(),
+        )
+        .expect("a stored report");
         let settled = relayed(
             EventKind(crate::report::MEMBER_SETTLED.into()),
             Source::Agentgraph,
             Some("build"),
-            &[(
-                crate::report::REPORT_PATH,
-                json!(stored.display().to_string()),
-            )],
+            &[(crate::report::REPORT_PATH, json!("/elsewhere/report.json"))],
         );
         write_run(
             &root,

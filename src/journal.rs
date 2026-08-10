@@ -78,7 +78,15 @@ impl Journal {
     /// A relayed envelope keeps its own `stream`, `seq`, and `source`: the merge
     /// is an interleaving of three streams, not a rewriting of two of them, and
     /// per-stream `seq` gaps are how a consumer detects loss.
+    ///
+    /// This is also **ingest**: the envelope is arriving from a process this
+    /// crate started, which is the one moment a path it names carries the
+    /// producer's authority rather than the journal's. So the evidence a
+    /// settlement points at is copied into the run's own storage here, and every
+    /// reader afterwards opens that copy instead of following the line. See
+    /// [`crate::report::retain`].
     pub fn relay(&mut self, envelope: &Envelope) -> Result<()> {
+        crate::report::retain(&self.paths, envelope);
         self.append(envelope)
     }
 

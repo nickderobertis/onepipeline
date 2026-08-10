@@ -10,7 +10,29 @@
 // model turns to produce, and `dispatch.rs` is where the real `oneagentgraph` binary is
 // driven instead. `harness.rs` carries the same suppression and the full rationale.
 
-use crate::harness::{agent, human, lifecycle, plan_of, World};
+use crate::harness::{agent, human, lifecycle, plan_of, Run, World};
+
+/// The document a double plants where a settlement points but nothing should
+/// read, and the words that prove it was read if they ever appear.
+const PLANTED_DOCUMENT: &str =
+    r#"{"transcript":{"messages":[{"role":"assistant","content":"planted-and-never-read"}]}}"#;
+
+/// The one recognisable string inside it.
+const PLANTED_WORDS: &str = "planted-and-never-read";
+
+/// Run one round from this test rather than from the driver, keeping what it
+/// said: a refusal made as an envelope is ingested reaches the engine's own
+/// stderr, which in a detached run goes to a log no assertion can read.
+fn driven(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> (String, Run) {
+    world.script("driver.wait", "hold");
+    let path = world.plan(name, &plan_of(name, nodes));
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+    let round = world.run(&["round", "run", name]);
+    world.release("driver.go");
+    (name.to_string(), round)
+}
 
 /// How long a held publication phase is kept open, so its bucket is a real
 /// duration on the clock rather than a bucket that merely exists.
@@ -410,13 +432,13 @@ fn telemetry_counts_a_no_diff_node_without_counting_a_dispatch() {
     );
 }
 
-/// A dispatch whose retained report this host cannot reach.
+/// A dispatch whose report was never written where its settlement said.
 ///
-/// The settlement still names where the report went, so the evidence is missing
-/// rather than the result — and every view that would have read it says which
-/// of the two it is meeting instead of reporting a dispatch that did nothing.
+/// The settlement still names where it went, so the evidence is missing rather
+/// than the result — and every view that would have read it says which of the
+/// two it is meeting instead of reporting a dispatch that did nothing.
 #[test]
-fn evidence_this_host_cannot_read_is_reported_as_unread_rather_than_as_nothing() {
+fn evidence_this_run_could_not_keep_is_reported_as_unread_rather_than_as_nothing() {
     let world = World::new("views-unread");
     world.script("report.missing", "");
     let run = settled(&world, "unread", vec![agent("build", &[])]);
@@ -428,8 +450,8 @@ fn evidence_this_host_cannot_read_is_reported_as_unread_rather_than_as_nothing()
         // The turn's tools are in the merged store and still render.
         .out_has("tool_call bash")
         // The words are not, and the line says so rather than omitting the
-        // report it cannot read.
-        .out_has("unreadable from this host");
+        // report it has no copy of.
+        .out_has("not retained by this run");
 
     // Same fact in the telemetry: the member's total is on the wire, and the
     // split between its two sides was only ever in the report.
@@ -488,29 +510,105 @@ fn transcript_given_no_node_renders_every_dispatch_the_run_recorded() {
     );
 }
 
-/// A `member-settled` naming a file the producing library never writes.
+/// A settlement naming a file the producing library never writes.
 ///
-/// The path arrives on a journal line and `transcript` is about to open it, so
-/// a line naming something else is refused out loud rather than read: without
-/// that, the verb is an arbitrary-file reader driven by whatever wrote to the
-/// journal.
+/// Nothing follows it: the run keeps its own copy of the evidence it ingests,
+/// and every reader afterwards opens only that. The refusal is said out loud
+/// where the ingest happened, and the transcript says the report is not there.
 #[test]
 fn a_settlement_naming_a_file_the_producer_never_writes_is_refused_out_loud() {
     let world = World::new("views-elsewhere");
     world.script("report.elsewhere", "");
-    let run = settled(&world, "elsewhere", vec![agent("build", &[])]);
+    let run = driven(&world, "elsewhere", vec![agent("build", &[])]);
+    // Refused as it was ingested, naming the file and why.
+    run.1
+        .err_has("not retaining the report at")
+        .err_has("notes.json");
 
-    let transcript = world.run(&["transcript", &run]);
+    let transcript = world.run(&["transcript", &run.0]);
     transcript
         .exited(0)
         // The turn's own record still renders; only the named file is refused.
         .out_has("tool_call bash")
-        .err_has("ignoring a member-settled naming")
-        .err_has("notes.json");
+        .out_has("not retained by this run");
     assert!(
-        !transcript.stdout.contains("report "),
-        "a path the producer never writes was read anyway:\n{}",
+        !transcript.stdout.contains(PLANTED_WORDS),
+        "a file the producer never writes was read anyway:\n{}",
         transcript.stdout
+    );
+}
+
+/// A settlement naming a **symlink** that wears the producer's own file name.
+///
+/// The one case a name check alone cannot catch: the path says `report.json`
+/// and delivers something else. Ingest does not follow it, so there is nothing
+/// for a reader to open.
+#[test]
+fn a_settlement_naming_a_symlink_is_refused_and_never_followed() {
+    let world = World::new("views-symlink");
+    world.script("report.symlink", "");
+    let run = driven(&world, "linked", vec![agent("build", &[])]);
+    run.1
+        .err_has("not retaining the report at")
+        .err_has("symlink");
+
+    let transcript = world.run(&["transcript", &run.0]);
+    transcript.exited(0).out_has("not retained by this run");
+    assert!(
+        !transcript.stdout.contains(PLANTED_WORDS),
+        "the symlink was followed to what it pointed at:\n{}",
+        transcript.stdout
+    );
+}
+
+/// A settlement written into the journal *after* the fact, naming a readable
+/// file outside anything this run owns.
+///
+/// The threat the confinement exists for: a line in the store is not a
+/// producer, and a reader that opened what one pointed at would print any JSON
+/// document on the host. Only what the run copied at ingest is ever read.
+#[test]
+fn a_journal_line_naming_a_file_outside_the_run_is_never_read() {
+    let world = World::new("views-outofroot");
+    let run = settled(&world, "planted", vec![agent("build", &[])]);
+
+    // A readable report, in the producing library's own file name, outside every
+    // directory this run owns.
+    let outside = world.root.join("outside");
+    std::fs::create_dir_all(&outside).expect("a directory outside the run");
+    let planted = outside.join("report.json");
+    std::fs::write(&planted, PLANTED_DOCUMENT).expect("a planted report");
+
+    let forged = serde_json::json!({
+        "v": 1,
+        "ts": "2099-01-01T00:00:00.000Z",
+        "stream": "forged",
+        "seq": 0,
+        "source": "agentgraph",
+        "kind": "member-settled",
+        "labels": {"node": "build", "onepipeline.node": "build"},
+        "payload": {"report_path": planted.display().to_string()},
+    });
+    let journal = world.run_file(&run, "events.jsonl");
+    let mut existing = std::fs::read_to_string(&journal).expect("the journal reads");
+    existing.push_str(&format!("{forged}\n"));
+    std::fs::write(&journal, existing).expect("the journal is appended to");
+
+    let transcript = world.run(&["transcript", &run]);
+    transcript
+        .exited(0)
+        .out_has(&planted.display().to_string())
+        .out_has("not retained by this run");
+    assert!(
+        !transcript.stdout.contains(PLANTED_WORDS),
+        "a path a journal line named was read:\n{}",
+        transcript.stdout
+    );
+    // And the same line buys nothing in the telemetry, which reads the same copy.
+    let usage = world.run(&["telemetry", &run]).json()["usage"].clone();
+    assert!(
+        usage.get("agent").is_some(),
+        "the real report still counts: {usage}"
     );
 }
 

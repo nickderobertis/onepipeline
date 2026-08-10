@@ -1,0 +1,62 @@
+{
+  "schema_version": 2,
+  "run_id": "golden",
+  "wall_ms": 120000,
+  "buckets": [
+    {
+      "name": "agent",
+      "ms": 40000
+    },
+    {
+      "name": "judge"
+    },
+    {
+      "name": "llmlint"
+    },
+    {
+      "name": "gate",
+      "ms": 30000
+    },
+    {
+      "name": "publication_wait",
+      "ms": 10000
+    },
+    {
+      "name": "lock_wait",
+      "ms": 0
+    },
+    {
+      "name": "setup",
+      "ms": 20000
+    },
+    {
+      "name": "scheduling",
+      "ms": 20000
+    }
+  ],
+  "usage": {
+    "agent": {
+      "input": 1000,
+      "output": 300,
+      "cache_read": 900,
+      "cache_write": 120,
+      "cost_usd": 0.4
+    },
+    "judge": {
+      "input": 200,
+      "output": 40
+    },
+    "total": {
+      "input": 1200,
+      "output": 340,
+      "cache_read": 900,
+      "cache_write": 120,
+      "cost_usd": 0.42
+    }
+  },
+  "dispatches": 1,
+  "settled_done": 1,
+  "no_diff": 0,
+  "surfaces_queued": 2,
+  "surfaces_read": 1
+}

@@ -303,3 +303,13 @@ For the same reason the retained report is read **structurally**, by field name,
 rather than through the producing libraries' own types: it is a sibling's
 artifact, and a stricter read would refuse a whole report over one field it did
 not recognise and report nothing at all.
+
+The report is also read out of **this run's own copy** rather than from the path
+`report_path` names. `oneagentgraph` mints that path under a state root this
+crate neither chooses nor can recompute — the sibling's library exposes no
+accessor for it, and a future executor stores the report on another machine
+entirely — so there is no root to pin it to. What there *is* is a moment when
+the path carries the producer's authority: the envelope arriving on the stdout
+of a process this crate started. The copy is taken there and every reader opens
+only it. Should `oneagentgraph` ever expose its state root, pinning the ingest
+to it would be a second lock on the same door, and welcome.

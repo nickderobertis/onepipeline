@@ -70,6 +70,28 @@ pub fn is_valid_run_id(run: &str) -> bool {
         && Path::new(run).components().count() == 1
 }
 
+/// One producer-supplied name, as a single path segment.
+///
+/// Everything outside `[A-Za-z0-9._-]` becomes a `-`, and a name that is empty
+/// or navigates gets one of its own: a segment built from a stranger's string
+/// has to be a *name*, never a path, and `..` is the shortest path there is.
+fn path_segment(name: &str) -> String {
+    let mapped: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    if mapped.is_empty() || mapped.chars().all(|c| c == '.') {
+        return "unnamed".to_string();
+    }
+    mapped
+}
+
 impl RunPaths {
     /// The paths for `run` under the process's runs root.
     pub fn new(run: &str) -> Self {
@@ -131,6 +153,30 @@ impl RunPaths {
     /// The channel's transport state.
     pub fn channel_dir(&self) -> PathBuf {
         self.dir.join("channel")
+    }
+
+    /// Where this run keeps its own copy of the evidence its dispatches left.
+    ///
+    /// Run-**owned**: a sibling's report lives in that library's scratch, which
+    /// is a directory this crate neither chooses nor can attest, and a reader
+    /// that opened whatever a journal line pointed at would be an
+    /// arbitrary-file reader driven by whatever wrote to the journal. So the
+    /// evidence is copied here as it is ingested, and every reader afterwards
+    /// opens only what is under this directory.
+    pub fn reports_dir(&self) -> PathBuf {
+        self.dir.join("reports")
+    }
+
+    /// This run's copy of one relayed settlement's report.
+    ///
+    /// Named from the producing stream and its sequence number, which identify
+    /// the settlement and nothing else — so a reader derives the name rather
+    /// than following a path, and both sides agree without either trusting one.
+    /// The stream is written as a single sanitised segment: it is a producer's
+    /// string, and joining one raw is how a name becomes a path.
+    pub fn report_for(&self, stream: &str, seq: u64) -> PathBuf {
+        self.reports_dir()
+            .join(format!("{}-{seq}.json", path_segment(stream)))
     }
 
     /// A file within the channel's transport state.

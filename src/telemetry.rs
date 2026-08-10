@@ -26,6 +26,7 @@ use serde_json::Value;
 use crate::event::{Envelope, Source};
 use crate::graph::NodeStatus;
 use crate::journal;
+use crate::ledger::RunPaths;
 use crate::projection;
 
 /// The schema version of the telemetry document.
@@ -335,10 +336,11 @@ fn side_of(event: &Envelope) -> Option<Role> {
 /// Aggregate one run's telemetry from its merged event store.
 ///
 /// The per-party split is read from the onejudge reports the run's
-/// `member-settled` events named, which is where a two-party member records
-/// what each side spent; a report this host cannot read contributes nothing
-/// rather than a zero.
-pub fn of_run(run: &str, events: &[Envelope]) -> RunTelemetry {
+/// `member-settled` events named — which is where a two-party member records
+/// what each side spent — through **this run's own copies** of them, so a
+/// document a journal line points at is never opened. A report the run did not
+/// keep contributes nothing rather than a zero.
+pub fn of_run(paths: &RunPaths, events: &[Envelope]) -> RunTelemetry {
     let state = projection::fold(events);
     let stamps: Vec<(u64, &Envelope)> = events
         .iter()
@@ -453,10 +455,10 @@ pub fn of_run(run: &str, events: &[Envelope]) -> RunTelemetry {
 
     RunTelemetry {
         schema_version: TELEMETRY_SCHEMA_VERSION,
-        run_id: run.to_string(),
+        run_id: paths.run.clone(),
         wall_ms,
         buckets,
-        usage: usage_of(events),
+        usage: usage_of(paths, events),
         dispatches: state.dispatched_at.len() as u64,
         settled_done: state
             .recorded
@@ -524,7 +526,7 @@ fn balance(buckets: &mut [Bucket], wall_ms: u64) {
 /// the report that member settled with, so `agent` and `judge` come from there —
 /// and a run whose members were single-sided, or whose reports this host cannot
 /// read, has no split to report and says so by absence.
-fn usage_of(events: &[Envelope]) -> BTreeMap<Party, Usage> {
+fn usage_of(paths: &RunPaths, events: &[Envelope]) -> BTreeMap<Party, Usage> {
     let mut totals: BTreeMap<Party, Usage> = BTreeMap::new();
     let mut fold = |party: Party, usage: &Usage| {
         if !usage.is_empty() {
@@ -540,8 +542,8 @@ fn usage_of(events: &[Envelope]) -> BTreeMap<Party, Usage> {
             fold(Party::Total, &Usage::of(usage));
         }
     }
-    for retained in crate::report::retained(events) {
-        let Some(document) = crate::report::read(&retained.path) else {
+    for retained in crate::report::retained(paths, events) {
+        let Some(document) = crate::report::read(&retained.kept) else {
             continue;
         };
         let Some(telemetry) = document.get("telemetry") else {
@@ -697,6 +699,22 @@ mod tests {
         )
     }
 
+    /// One run's paths, under a scratch root this test owns.
+    ///
+    /// Real paths rather than a stand-in: the per-party usage is read out of
+    /// this run's *own* copy of a report, so a test that proves the split has to
+    /// put one where the reader will look for it.
+    fn paths() -> RunPaths {
+        let root = std::env::temp_dir().join(format!(
+            "onepipeline-telemetry-{}-{:?}",
+            crate::sys::pid(),
+            std::thread::current().id()
+        ));
+        let paths = RunPaths::under(&root, "demo");
+        paths.create().expect("the run directory");
+        paths
+    }
+
     fn plan() -> Plan {
         Plan {
             schema_version: PLAN_SCHEMA_VERSION,
@@ -727,7 +745,7 @@ mod tests {
         telemetry.buckets.iter().filter_map(|b| b.ms).sum()
     }
 
-    fn bucket(telemetry: &RunTelemetry, name: BucketName) -> Option<u64> {
+    fn bucket_of(telemetry: &RunTelemetry, name: BucketName) -> Option<u64> {
         telemetry
             .buckets
             .iter()
@@ -754,7 +772,7 @@ mod tests {
             ),
             at(100, journal::PipelineKind::RoundFinished, None, &[]),
         ];
-        let telemetry = of_run("demo", &events);
+        let telemetry = of_run(&paths(), &events);
         assert_eq!(telemetry.wall_ms, 100_000);
         assert_eq!(
             summed(&telemetry),
@@ -762,8 +780,8 @@ mod tests {
             "{:?}",
             telemetry.buckets
         );
-        assert_eq!(bucket(&telemetry, BucketName::Agent), Some(60_000));
-        assert_eq!(bucket(&telemetry, BucketName::Scheduling), Some(40_000));
+        assert_eq!(bucket_of(&telemetry, BucketName::Agent), Some(60_000));
+        assert_eq!(bucket_of(&telemetry, BucketName::Scheduling), Some(40_000));
         assert_eq!(telemetry.dispatches, 1);
         assert_eq!(telemetry.settled_done, 1);
     }
@@ -796,7 +814,7 @@ mod tests {
                 &[("status", json!("done"))],
             ),
         ];
-        let telemetry = of_run("demo", &events);
+        let telemetry = of_run(&paths(), &events);
         assert_eq!(
             summed(&telemetry),
             telemetry.wall_ms,
@@ -805,17 +823,17 @@ mod tests {
         );
         // The workspace before the turn ran in it, and again between the lock
         // and the gate.
-        assert_eq!(bucket(&telemetry, BucketName::Setup), Some(20_000));
+        assert_eq!(bucket_of(&telemetry, BucketName::Setup), Some(20_000));
         // The turn itself, and the stretch after the session closed with the
         // node still in flight.
-        assert_eq!(bucket(&telemetry, BucketName::Agent), Some(40_000));
-        assert_eq!(bucket(&telemetry, BucketName::LockWait), Some(10_000));
-        assert_eq!(bucket(&telemetry, BucketName::Gate), Some(30_000));
+        assert_eq!(bucket_of(&telemetry, BucketName::Agent), Some(40_000));
+        assert_eq!(bucket_of(&telemetry, BucketName::LockWait), Some(10_000));
+        assert_eq!(bucket_of(&telemetry, BucketName::Gate), Some(30_000));
         assert_eq!(
-            bucket(&telemetry, BucketName::PublicationWait),
+            bucket_of(&telemetry, BucketName::PublicationWait),
             Some(10_000)
         );
-        assert_eq!(bucket(&telemetry, BucketName::Scheduling), Some(10_000));
+        assert_eq!(bucket_of(&telemetry, BucketName::Scheduling), Some(10_000));
     }
 
     /// A node holds more than one session — its steps' and the one its change
@@ -830,7 +848,7 @@ mod tests {
         // record landing after the lock wait it did not interrupt.
         opened.stream = "z-second-session".into();
         let telemetry = of_run(
-            "demo",
+            &paths(),
             &[
                 started(),
                 at(
@@ -852,7 +870,7 @@ mod tests {
                 ),
             ],
         );
-        assert_eq!(bucket(&telemetry, BucketName::LockWait), Some(40_000));
+        assert_eq!(bucket_of(&telemetry, BucketName::LockWait), Some(40_000));
         assert_eq!(summed(&telemetry), telemetry.wall_ms);
     }
 
@@ -863,7 +881,7 @@ mod tests {
     #[test]
     fn a_bucket_nothing_measures_is_absent_rather_than_zero() {
         let telemetry = of_run(
-            "demo",
+            &paths(),
             &[
                 started(),
                 at(
@@ -875,9 +893,9 @@ mod tests {
                 turn(20, "turn-activity", Some("build"), &[]),
             ],
         );
-        assert_eq!(bucket(&telemetry, BucketName::Llmlint), None);
-        assert_eq!(bucket(&telemetry, BucketName::Judge), None);
-        assert_eq!(bucket(&telemetry, BucketName::Agent), Some(10_000));
+        assert_eq!(bucket_of(&telemetry, BucketName::Llmlint), None);
+        assert_eq!(bucket_of(&telemetry, BucketName::Judge), None);
+        assert_eq!(bucket_of(&telemetry, BucketName::Agent), Some(10_000));
 
         let document = serde_json::to_value(&telemetry).expect("it serialises");
         let llmlint = document["buckets"]
@@ -900,7 +918,7 @@ mod tests {
     #[test]
     fn a_turn_a_producer_attributes_to_the_judge_is_measured_as_the_judges() {
         let telemetry = of_run(
-            "demo",
+            &paths(),
             &[
                 started(),
                 at(
@@ -929,14 +947,14 @@ mod tests {
                 ),
             ],
         );
-        assert_eq!(bucket(&telemetry, BucketName::Judge), Some(30_000));
-        assert_eq!(bucket(&telemetry, BucketName::Agent), Some(20_000));
+        assert_eq!(bucket_of(&telemetry, BucketName::Judge), Some(30_000));
+        assert_eq!(bucket_of(&telemetry, BucketName::Agent), Some(20_000));
         assert_eq!(summed(&telemetry), telemetry.wall_ms);
     }
 
     #[test]
     fn an_empty_run_has_a_zero_wall_clock_and_still_balances() {
-        let telemetry = of_run("demo", &[]);
+        let telemetry = of_run(&paths(), &[]);
         assert_eq!(telemetry.wall_ms, 0);
         assert_eq!(summed(&telemetry), 0);
         assert!(render_breakdown(&telemetry).contains("WALL 0s"));
@@ -979,7 +997,7 @@ mod tests {
         ];
         // Deliberately out of order: the wall clock is first-to-last as read.
         events.reverse();
-        let telemetry = of_run("demo", &events);
+        let telemetry = of_run(&paths(), &events);
         assert_eq!(
             summed(&telemetry),
             telemetry.wall_ms,
@@ -991,7 +1009,7 @@ mod tests {
     #[test]
     fn the_breakdown_names_every_bucket_and_every_party() {
         let rendered = render_breakdown(&of_run(
-            "demo",
+            &paths(),
             &[
                 started(),
                 at(
@@ -1030,9 +1048,11 @@ mod tests {
     /// settled with.
     #[test]
     fn usage_is_totalled_from_the_turns_and_split_by_the_report_they_settled_with() {
-        let dir = std::env::temp_dir().join(format!("onepipeline-usage-{}", crate::sys::pid()));
-        std::fs::create_dir_all(&dir).expect("a scratch directory");
-        let stored = dir.join("report.json");
+        let paths = paths();
+        // The run's *own* copy, where a reader looks — put there by ingest for
+        // the settlement below, which the fixture stands in for.
+        let stored = paths.report_for("s", 20);
+        std::fs::create_dir_all(paths.reports_dir()).expect("the run's report storage");
         std::fs::write(
             &stored,
             json!({
@@ -1049,7 +1069,7 @@ mod tests {
         .expect("a stored report");
 
         let telemetry = of_run(
-            "demo",
+            &paths,
             &[
                 started(),
                 turn(
@@ -1069,10 +1089,9 @@ mod tests {
                     20,
                     crate::report::MEMBER_SETTLED,
                     Some("build"),
-                    &[(
-                        crate::report::REPORT_PATH,
-                        json!(stored.display().to_string()),
-                    )],
+                    // The path the producer named, which is never opened: the
+                    // reader goes to this run's own copy of it.
+                    &[(crate::report::REPORT_PATH, json!("/elsewhere/report.json"))],
                 ),
             ],
         );
@@ -1103,7 +1122,7 @@ mod tests {
             .find(|line| line.trim_start().starts_with("usage llmlint"))
             .expect("the llmlint party is still named");
         assert!(llmlint.contains(UNMEASURED), "{llmlint}");
-        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&paths.dir).ok();
     }
 
     /// The producer's own two spellings for the same numbers: the report's, and
@@ -1128,7 +1147,7 @@ mod tests {
     #[test]
     fn a_report_this_host_cannot_read_leaves_the_split_absent() {
         let telemetry = of_run(
-            "demo",
+            &paths(),
             &[
                 started(),
                 turn(
@@ -1172,6 +1191,225 @@ mod tests {
         assert_eq!(total.cache_read, None);
         assert_eq!(total.cost_usd, Some(0.5));
         assert!(!total.is_empty());
+    }
+
+    /// The checked-in shape of a schema-2 document.
+    ///
+    /// Read rather than restated: this is the wire a consumer parses, and the
+    /// only thing that stops a field being renamed, an absent bucket becoming a
+    /// zero, or the version moving without anyone deciding to move it.
+    const GOLDEN: &str = include_str!("../tests/golden/telemetry-v2.json");
+
+    /// The document the golden pins, built through the types.
+    fn golden() -> RunTelemetry {
+        let usage = |input, output, cache: Option<(u64, u64)>, cost| Usage {
+            input: Some(input),
+            output: Some(output),
+            cache_read: cache.map(|(read, _)| read),
+            cache_write: cache.map(|(_, write)| write),
+            cost_usd: cost,
+        };
+        RunTelemetry {
+            schema_version: TELEMETRY_SCHEMA_VERSION,
+            run_id: "golden".into(),
+            wall_ms: 120_000,
+            buckets: vec![
+                Bucket {
+                    name: BucketName::Agent,
+                    ms: Some(40_000),
+                },
+                // Unmeasured, and absent from the wire because of it.
+                Bucket {
+                    name: BucketName::Judge,
+                    ms: None,
+                },
+                Bucket {
+                    name: BucketName::Llmlint,
+                    ms: None,
+                },
+                Bucket {
+                    name: BucketName::Gate,
+                    ms: Some(30_000),
+                },
+                Bucket {
+                    name: BucketName::PublicationWait,
+                    ms: Some(10_000),
+                },
+                // Measured, and nothing waited: a real zero, on the wire.
+                Bucket {
+                    name: BucketName::LockWait,
+                    ms: Some(0),
+                },
+                Bucket {
+                    name: BucketName::Setup,
+                    ms: Some(20_000),
+                },
+                Bucket {
+                    name: BucketName::Scheduling,
+                    ms: Some(20_000),
+                },
+            ],
+            usage: BTreeMap::from([
+                (
+                    Party::Agent,
+                    usage(1_000, 300, Some((900, 120)), Some(0.40)),
+                ),
+                // A side that reported no cache and no cost claims neither.
+                (Party::Judge, usage(200, 40, None, None)),
+                (
+                    Party::Total,
+                    usage(1_200, 340, Some((900, 120)), Some(0.42)),
+                ),
+            ]),
+            dispatches: 1,
+            settled_done: 1,
+            no_diff: 0,
+            surfaces_queued: 2,
+            surfaces_read: 1,
+        }
+    }
+
+    #[test]
+    fn a_schema_2_document_is_the_shape_the_golden_pins() {
+        let rendered = serde_json::to_string_pretty(&golden()).expect("it serialises");
+        assert_eq!(
+            rendered.trim(),
+            GOLDEN.trim(),
+            "the telemetry document changed shape. If that was deliberate, bump \
+             TELEMETRY_SCHEMA_VERSION and update tests/golden/telemetry-v2.json together"
+        );
+        // The measured spans still add up, in the document as much as in the code.
+        assert_eq!(summed(&golden()), golden().wall_ms);
+    }
+
+    #[test]
+    fn a_schema_2_document_round_trips_through_the_types() {
+        let value = golden();
+        let read: RunTelemetry =
+            serde_json::from_str(GOLDEN).expect("the golden reads back into the types");
+        assert_eq!(read, value);
+        let again: RunTelemetry =
+            serde_json::from_str(&serde_json::to_string(&value).expect("it serialises"))
+                .expect("it reads back");
+        assert_eq!(again, value);
+    }
+
+    /// The distinction the whole document turns on, held at the wire: an
+    /// unmeasured bucket carries no `ms` **key**, and a measured zero carries
+    /// `0`. A reader that could not tell them apart would report a run that
+    /// nobody measured as a run that spent nothing.
+    #[test]
+    fn an_unmeasured_bucket_omits_its_span_and_a_measured_zero_keeps_it() {
+        let document: Value =
+            serde_json::from_str(&serde_json::to_string(&golden()).expect("it serialises"))
+                .expect("it is JSON");
+        let bucket = |name: &str| {
+            document["buckets"]
+                .as_array()
+                .expect("buckets")
+                .iter()
+                .find(|bucket| bucket["name"] == name)
+                .unwrap_or_else(|| panic!("a {name} bucket"))
+                .clone()
+        };
+        for absent in ["judge", "llmlint"] {
+            assert!(
+                bucket(absent).get("ms").is_none(),
+                "the {absent} bucket carried a span nothing measured"
+            );
+        }
+        assert_eq!(bucket("lock_wait")["ms"], 0);
+
+        // And back: an absent key is `None`, never `Some(0)`.
+        let read: RunTelemetry = serde_json::from_value(document).expect("it reads back");
+        assert_eq!(bucket_of(&read, BucketName::Judge), None);
+        assert_eq!(bucket_of(&read, BucketName::LockWait), Some(0));
+    }
+
+    /// The same rule for usage: a field nothing reported is not written, and a
+    /// party that reported nothing at all is not on the map.
+    #[test]
+    fn an_unreported_usage_field_is_omitted_and_round_trips_as_absent() {
+        let document: Value =
+            serde_json::from_str(&serde_json::to_string(&golden()).expect("it serialises"))
+                .expect("it is JSON");
+        let judge = &document["usage"]["judge"];
+        assert_eq!(judge["input"], 200);
+        for unreported in ["cache_read", "cache_write", "cost_usd"] {
+            assert!(
+                judge.get(unreported).is_none(),
+                "the judge claimed a {unreported} nothing reported: {judge}"
+            );
+        }
+        assert!(
+            document["usage"].get("llmlint").is_none(),
+            "a party nothing reported for is on the wire: {}",
+            document["usage"]
+        );
+
+        // A usage with no signal at all serialises to an empty object and reads
+        // back as one, rather than as five zeros.
+        let empty = Usage::default();
+        let rendered = serde_json::to_string(&empty).expect("it serialises");
+        assert_eq!(rendered, "{}");
+        let read: Usage = serde_json::from_str(&rendered).expect("it reads back");
+        assert_eq!(read, empty);
+        assert!(read.is_empty());
+    }
+
+    /// A schema-1 document is **refused**, by name.
+    ///
+    /// `1` named four buckets this build does not have and carried no `usage` at
+    /// all, so there is no reading of one that is not a guess: a `dispatching`
+    /// span silently dropped, or a run reported as having spent nothing. The
+    /// version moved for exactly that reason, and the refusal is what makes the
+    /// move mean something to a consumer.
+    #[test]
+    fn a_schema_1_document_is_refused_rather_than_read_as_a_newer_one() {
+        let v1 = json!({
+            "schema_version": 1,
+            "run_id": "old",
+            "wall_ms": 100_000,
+            "buckets": [
+                {"name": "dispatching", "ms": 60_000},
+                {"name": "awaiting-planner", "ms": 0},
+                {"name": "awaiting-human", "ms": 0},
+                {"name": "orchestrating", "ms": 40_000},
+            ],
+            "dispatches": 1,
+            "settled_done": 1,
+            "no_diff": 0,
+            "surfaces_queued": 0,
+            "surfaces_read": 0,
+        });
+        let refusal = serde_json::from_value::<RunTelemetry>(v1.clone())
+            .expect_err("a schema-1 document was read as a schema-2 one");
+        assert!(
+            refusal.to_string().contains("dispatching"),
+            "the refusal does not name what it could not read: {refusal}"
+        );
+
+        // And with its buckets renamed, it is still refused: `usage` is not
+        // optional, and a run with no usage field is not a run that spent
+        // nothing.
+        let mut renamed = v1;
+        renamed["buckets"] = json!([{"name": "agent", "ms": 100_000}]);
+        let refusal = serde_json::from_value::<RunTelemetry>(renamed)
+            .expect_err("a document with no usage was read");
+        assert!(
+            refusal.to_string().contains("usage"),
+            "the refusal does not name the missing field: {refusal}"
+        );
+    }
+
+    /// The version is a decision, not an accident: it moves when the shape does,
+    /// and the golden is named for the one it pins.
+    #[test]
+    fn the_schema_version_and_the_golden_name_the_same_number() {
+        assert_eq!(TELEMETRY_SCHEMA_VERSION, 2);
+        assert_eq!(golden().schema_version, TELEMETRY_SCHEMA_VERSION);
+        let document: Value = serde_json::from_str(GOLDEN).expect("the golden is JSON");
+        assert_eq!(document["schema_version"], TELEMETRY_SCHEMA_VERSION);
     }
 
     #[test]
