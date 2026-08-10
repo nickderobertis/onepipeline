@@ -284,8 +284,8 @@ fn a_publications_own_records_reach_the_journal_while_it_is_still_publishing() {
         .run(&["start", &path.to_string_lossy(), "--detach"])
         .exited(0);
 
-    world.until("the gate to start", |world| {
-        !world.events_of("watched", "gate-started").is_empty()
+    world.until("the publication to wait on the lock", |world| {
+        !world.events_of("watched", "lock-wait").is_empty()
     });
     assert!(
         world.events_of("watched", "node-settled").is_empty(),
@@ -295,20 +295,27 @@ fn a_publications_own_records_reach_the_journal_while_it_is_still_publishing() {
     // Under the node it belongs to: a session does not know it is a graph node,
     // so every per-node view would otherwise read a whole publication as work
     // that happened to nobody.
-    let gate = &world.events_of("watched", "gate-started")[0];
-    assert_eq!(gate["labels"]["node"], "service", "{gate}");
-    assert_eq!(gate["source"], "vcs", "{gate}");
+    let waiting = &world.events_of("watched", "lock-wait")[0];
+    assert_eq!(waiting["labels"]["node"], "service", "{waiting}");
+    assert_eq!(waiting["source"], "vcs", "{waiting}");
     world
         .run(&["monitor", "watched"])
         .exited(0)
-        .out_has("gate-started");
+        .out_has("lock-wait");
 
     world.release("publish.go");
     world.until("the run to settle", |world| {
         !world.events_of("watched", "round-finished").is_empty()
     });
     // And the rest of the publication landed too, exactly once each.
-    for kind in ["gate-verdict", "push", "change-opened", "session-closed"] {
+    for kind in [
+        "lock-acquired",
+        "gate-started",
+        "gate-verdict",
+        "push",
+        "change-opened",
+        "session-closed",
+    ] {
         assert_eq!(
             world.events_of("watched", kind).len(),
             1,

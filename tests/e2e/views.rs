@@ -12,6 +12,15 @@
 
 use crate::harness::{agent, human, lifecycle, plan_of, World};
 
+/// How long a held publication phase is kept open, so its bucket is a real
+/// duration on the clock rather than a bucket that merely exists.
+const HELD: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// The floor a held stretch must clear once it has been measured. Below the
+/// hold, because the two records bracketing it are written either side of the
+/// rendezvous rather than exactly on it.
+const FLOOR: u64 = 250;
+
 fn settled(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
     let path = world.plan(name, &plan_of(name, nodes));
     world
@@ -184,6 +193,17 @@ fn status_carries_the_provider_health_block_from_the_sibling() {
         .out_has("providers: fake-provider");
 }
 
+/// Every measured bucket, summed. An unmeasured one carries no `ms` at all,
+/// which is the point: a zero there would read as a measurement.
+fn measured(document: &serde_json::Value) -> u64 {
+    document["buckets"]
+        .as_array()
+        .expect("buckets")
+        .iter()
+        .filter_map(|bucket| bucket.get("ms").and_then(serde_json::Value::as_u64))
+        .sum()
+}
+
 #[test]
 fn telemetry_buckets_sum_exactly_to_the_wall_clock() {
     let world = World::new("views-telemetry");
@@ -197,22 +217,169 @@ fn telemetry_buckets_sum_exactly_to_the_wall_clock() {
     telemetry.exited(0);
     let document = telemetry.json();
     let wall = document["wall_ms"].as_u64().expect("a wall clock");
-    let summed: u64 = document["buckets"]
+    assert_eq!(
+        measured(&document),
+        wall,
+        "the buckets do not sum to WALL: {document}"
+    );
+    assert_eq!(document["schema_version"], 2, "{document}");
+    assert_eq!(document["dispatches"], 2);
+    assert_eq!(document["settled_done"], 2);
+
+    // Eight buckets, and the two nothing in this stack measures are served
+    // absent rather than as a zero that reads as measured.
+    let named: Vec<&str> = document["buckets"]
         .as_array()
         .expect("buckets")
         .iter()
-        .map(|bucket| bucket["ms"].as_u64().expect("a bucket"))
-        .sum();
-    assert_eq!(summed, wall, "the buckets do not sum to WALL: {document}");
-    assert_eq!(document["dispatches"], 2);
-    assert_eq!(document["settled_done"], 2);
+        .map(|bucket| bucket["name"].as_str().expect("a bucket name"))
+        .collect();
+    assert_eq!(
+        named,
+        vec![
+            "agent",
+            "judge",
+            "llmlint",
+            "gate",
+            "publication_wait",
+            "lock_wait",
+            "setup",
+            "scheduling",
+        ],
+        "{document}"
+    );
+    for absent in ["judge", "llmlint"] {
+        let bucket = document["buckets"]
+            .as_array()
+            .expect("buckets")
+            .iter()
+            .find(|bucket| bucket["name"] == absent)
+            .expect("the bucket is still named");
+        assert!(
+            bucket.get("ms").is_none(),
+            "{absent} reported a measured span nothing produces: {bucket}"
+        );
+    }
 
     let breakdown = world.run(&["telemetry", &run, "--breakdown"]);
     breakdown
         .exited(0)
         .out_has("WALL")
-        .out_has("dispatching")
-        .out_has("orchestrating");
+        .out_has("agent")
+        .out_has("scheduling")
+        .out_has("not measured");
+}
+
+/// The number a run is budgeted against, on a host whose routine failure mode
+/// is quota exhaustion across five identities.
+#[test]
+fn telemetry_reports_what_each_party_spent() {
+    let world = World::new("views-usage");
+    let run = settled(&world, "spent", vec![agent("build", &[])]);
+
+    let document = world.run(&["telemetry", &run]).json();
+    let usage = &document["usage"];
+    let total = &usage["total"];
+    assert!(
+        total["input"].as_u64().is_some_and(|tokens| tokens > 0),
+        "the run reported no input tokens: {document}"
+    );
+    assert!(
+        total["output"].as_u64().is_some_and(|tokens| tokens > 0),
+        "the run reported no output tokens: {document}"
+    );
+    assert!(total["cost_usd"].as_f64().is_some(), "{document}");
+
+    // The split between the sides of a two-party member is in the report it
+    // settled with, which is where it is read from.
+    assert!(
+        usage["agent"]["input"].as_u64().is_some_and(|t| t > 0),
+        "the agent side reported nothing: {document}"
+    );
+    assert!(
+        usage["judge"]["input"].as_u64().is_some_and(|t| t > 0),
+        "the judge side reported nothing: {document}"
+    );
+    // Nothing in this stack runs an LLM-lint pass, so it is absent rather than
+    // present and zero.
+    assert!(usage.get("llmlint").is_none(), "{document}");
+
+    world
+        .run(&["telemetry", &run, "--breakdown"])
+        .exited(0)
+        .out_has("usage agent")
+        .out_has("usage total");
+}
+
+/// A gate run and a lock wait are the two stretches an operator most needs
+/// answered apart from the agent's — and a lifecycle node spends real time in
+/// both.
+#[test]
+fn telemetry_separates_gate_and_lock_time_from_agent_time() {
+    let world = World::new("views-gatetime");
+    // Both stretches are held open for a measurable span, so each is a real
+    // duration on the clock rather than a bucket that merely exists.
+    world.script("publish.hold", "hold");
+    world.script("gate.hold", "hold");
+    let path = world.plan("gated", &plan_of("gated", vec![lifecycle("service", &[])]));
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+
+    for (waited, release, held) in [
+        ("lock-wait", "publish.go", "the lock wait"),
+        ("gate-started", "gate.go", "the gate"),
+    ] {
+        world.until(&format!("{held} to start"), |world| {
+            !world.events_of("gated", waited).is_empty()
+        });
+        let since = std::time::Instant::now();
+        world.until(&format!("{held} to last a measurable stretch"), |_| {
+            since.elapsed() >= HELD
+        });
+        world.release(release);
+    }
+    world.until("the run to settle", |world| {
+        !world.events_of("gated", "round-finished").is_empty()
+    });
+
+    let document = world.run(&["telemetry", "gated"]).json();
+    let span = |name: &str| {
+        document["buckets"]
+            .as_array()
+            .expect("buckets")
+            .iter()
+            .find(|bucket| bucket["name"] == name)
+            .unwrap_or_else(|| panic!("a {name} bucket"))
+            .get("ms")
+            .and_then(serde_json::Value::as_u64)
+    };
+    // Each held stretch is its own bucket, and neither is inside the agent's:
+    // the whole point of the eight-way split.
+    for name in ["lock_wait", "gate"] {
+        let ms = span(name).unwrap_or_else(|| panic!("{name} is unmeasured: {document}"));
+        assert!(
+            ms >= FLOOR,
+            "{name} measured {ms}ms of a stretch held for {}ms: {document}",
+            HELD.as_millis()
+        );
+    }
+    let agent = span("agent").expect("the agent bucket is measured");
+    assert!(
+        agent < span("gate").expect("gate") + span("lock_wait").expect("lock_wait"),
+        "the held stretches were charged to the agent: {document}"
+    );
+    for name in ["publication_wait", "setup"] {
+        assert!(
+            span(name).is_some(),
+            "{name} is unmeasured for a run that published: {document}"
+        );
+    }
+    assert_eq!(
+        measured(&document),
+        document["wall_ms"].as_u64().expect("a wall clock"),
+        "{document}"
+    );
 }
 
 #[test]
@@ -231,13 +398,15 @@ fn telemetry_counts_a_no_diff_node_without_counting_a_dispatch() {
     let document = world.run(&["telemetry", &run]).json();
     assert_eq!(document["no_diff"], 1);
     assert_eq!(document["dispatches"], 0);
-    let summed: u64 = document["buckets"]
-        .as_array()
-        .expect("buckets")
-        .iter()
-        .map(|bucket| bucket["ms"].as_u64().expect("a bucket"))
-        .sum();
-    assert_eq!(summed, document["wall_ms"].as_u64().expect("a wall clock"));
+    assert_eq!(
+        measured(&document),
+        document["wall_ms"].as_u64().expect("a wall clock")
+    );
+    // A run that dispatched nothing spent nothing, and says so by absence.
+    assert!(
+        document["usage"].as_object().is_some_and(|u| u.is_empty()),
+        "{document}"
+    );
 }
 
 #[test]

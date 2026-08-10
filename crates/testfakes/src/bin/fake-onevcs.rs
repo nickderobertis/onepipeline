@@ -136,11 +136,22 @@ fn publish(args: &[String], dir: &std::path::Path) -> ExitCode {
         Ok(token) => token,
         Err(refusal) => return refusal,
     };
-    emit(dir, &token, "gate-started", serde_json::json!({}));
-    // Held mid-publication, so a test can read the merged store while the
-    // publication is genuinely still running.
+    // The identity's lock comes before its gate, and a publication waits on
+    // both. Each is held separately where a test asks, so the two stretches can
+    // be measured apart from each other and from the agent's.
+    emit(
+        dir,
+        &token,
+        "lock-wait",
+        serde_json::json!({"identity": token}),
+    );
     if dir.join("publish.hold").exists() {
         fake::wait_for(&dir.join("publish.go"));
+    }
+    emit(dir, &token, "lock-acquired", serde_json::json!({}));
+    emit(dir, &token, "gate-started", serde_json::json!({}));
+    if dir.join("gate.hold").exists() {
+        fake::wait_for(&dir.join("gate.go"));
     }
     if dir.join("publish.fail").exists() {
         emit(
