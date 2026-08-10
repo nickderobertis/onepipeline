@@ -285,29 +285,40 @@ fn a_publications_own_records_reach_the_journal_while_it_is_still_publishing() {
         .exited(0);
 
     world.until("the publication to wait on the lock", |world| {
-        !world.events_of("watched", "lock-wait").is_empty()
+        world
+            .run(&["monitor", "watched"])
+            .stdout
+            .contains("lock-wait")
     });
+    // Mid-publication, and readable: `monitor` renders the record and `status`
+    // still calls the node running. Both are what an operator has open.
+    let watching = world.run(&["status", "watched"]);
+    watching.exited(0).out_has("service: running");
     assert!(
-        world.events_of("watched", "node-settled").is_empty(),
+        !world
+            .run(&["results", "watched"])
+            .stdout
+            .contains("service                  done"),
         "the node settled before the publication was even watched: {}",
         world.dump()
     );
-    // Under the node it belongs to: a session does not know it is a graph node,
-    // so every per-node view would otherwise read a whole publication as work
-    // that happened to nobody.
+    // Under the node it belongs to. A session does not know it is a graph node,
+    // so every per-node reader would otherwise take a whole publication for work
+    // that happened to nobody — and no view renders a relayed envelope's node,
+    // so the merged store the contract defines is where that is readable.
     let waiting = &world.events_of("watched", "lock-wait")[0];
     assert_eq!(waiting["labels"]["node"], "service", "{waiting}");
     assert_eq!(waiting["source"], "vcs", "{waiting}");
-    world
-        .run(&["monitor", "watched"])
-        .exited(0)
-        .out_has("lock-wait");
 
     world.release("publish.go");
     world.until("the run to settle", |world| {
-        !world.events_of("watched", "round-finished").is_empty()
+        world.run(&["results", "watched"]).stdout.contains("done")
     });
-    // And the rest of the publication landed too, exactly once each.
+    // And the rest of the publication landed too, exactly once each: `monitor`
+    // renders one line per event, so a record relayed twice — by a follow and by
+    // the read that covers for one — shows up as two.
+    let stream = world.run(&["monitor", "watched"]);
+    stream.exited(0);
     for kind in [
         "lock-acquired",
         "gate-started",
@@ -316,18 +327,22 @@ fn a_publications_own_records_reach_the_journal_while_it_is_still_publishing() {
         "change-opened",
         "session-closed",
     ] {
+        let seen = stream
+            .stdout
+            .lines()
+            .filter(|line| line.contains(kind))
+            .count();
         assert_eq!(
-            world.events_of("watched", kind).len(),
-            1,
-            "{kind} reached the merged store {} time(s): {}",
-            world.events_of("watched", kind).len(),
-            world.dump()
+            seen, 1,
+            "{kind} reached the merged store {seen} time(s):\n{}",
+            stream.stdout
         );
     }
-    assert_eq!(
-        world.run_json("watched", "round-01/result.json")["state"],
-        "complete"
-    );
+    world
+        .run(&["results", "watched"])
+        .exited(0)
+        .out_has("service")
+        .out_has("done");
 }
 
 #[test]

@@ -46,6 +46,18 @@ pub struct Retained {
     pub path: PathBuf,
 }
 
+// llmlint: ignore-block[boundary_inputs_validated] the check below is the whole of what
+// this boundary can validate without losing evidence. `report_path` is an absolute path in
+// the *producing* library's own state directory: `oneagentgraph` mints it under a run root
+// this crate neither chooses nor can recompute — a dispatch may carry a different
+// `ONEAGENTGRAPH_STATE_DIR`, and a future executor stores it on another machine entirely —
+// so pinning it to a root known here would refuse legitimate reports and report a
+// dispatch's evidence as missing, which is the failure direction this whole reader exists
+// to avoid. What *is* validated is the part that decides whether a path names a report at
+// all: the file name, taken from the sibling's own `REPORT_FILE` constant so it cannot
+// drift. And the input is not an untrusted one: it arrives on a line in the run's own
+// journal, whose only writers are this crate's engine and the siblings it relays, and
+// anyone able to append to it already holds write access to the run directory.
 /// Every report a `member-settled` in this store named, in settlement order.
 ///
 /// A settlement that stored no report is absent rather than listed with an
@@ -94,6 +106,7 @@ pub fn retained(events: &[Envelope]) -> Vec<Retained> {
         })
         .collect()
 }
+// llmlint: ignore-end[boundary_inputs_validated]
 
 /// Read one report, or `None` when it is not there to read.
 ///

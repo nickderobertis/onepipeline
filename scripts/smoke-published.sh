@@ -68,6 +68,10 @@ fi
 help="$(onepipeline --help 2>&1 | tr -d '\r')" || fail \
   "'--help' did not run: $help" \
   "the installed binary cannot print its own surface — reinstall it and re-run"
+# The list below is not a second source: `tests/contract.rs`'s
+# `the_smoke_scripts_command_list_is_the_binarys_whole_surface` parses this very
+# line and asserts it equals the binary's subcommands, so a command added or
+# renamed fails the gate here rather than leaving a published artifact unchecked.
 for command in start adopt round channel next reply surface attest stop runs status host monitor results goals transcript telemetry; do
   case "$help" in
     *"$command"*) ;;
