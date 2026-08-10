@@ -295,7 +295,9 @@ pub fn evidence(paths: &RunPaths, events: &[Envelope]) -> Vec<Evidence> {
 /// there. A run directory a tamperer reached can hold a **symlink** where the
 /// copy was, and following one would print whatever it points at under the
 /// name of a dispatch's own words. So the copy is opened without following and
-/// read only as a plain file, bounded as it was when it was written.
+/// read only as a plain file, bounded as it was when it was written — and the
+/// directory holding it is refused when *it* is the link, because a derived
+/// name walks its parent whatever the last component is.
 ///
 /// Absent is quiet, because it is ordinary: a dispatch whose report was refused
 /// at ingest, ran on another machine, or was swept has no copy here, and the
@@ -308,6 +310,19 @@ pub fn read(kept: &Path) -> Option<Value> {
             kept.display()
         );
     };
+    // Not following the *copy* is only half of it: the name is derived onto a
+    // directory, and the open still walks whatever that directory has become.
+    // Storage swapped for a link would serve a stranger's documents under this
+    // run's own derived names, which is the one thing every reader downstream
+    // trusts. Ingest refuses to write through a swapped storage directory for
+    // the same reason; this is that boundary on the side that would hand what
+    // is behind it to an operator.
+    if kept.parent().is_some_and(|storage| {
+        std::fs::symlink_metadata(storage).is_ok_and(|about| about.file_type().is_symlink())
+    }) {
+        refuse("this run's report storage is a symlink, not a directory it owns");
+        return None;
+    }
     let file = match open_no_follow(kept) {
         Ok(file) => file,
         // Nothing there is the ordinary answer, and the reader has a line for

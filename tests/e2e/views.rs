@@ -17,7 +17,8 @@ use crate::harness::{agent, human, lifecycle, plan_of, Run, World};
 const PLANTED_DOCUMENT: &str =
     r#"{"transcript":{"messages":[{"role":"assistant","content":"planted-and-never-read"}]}}"#;
 
-/// The one recognisable string inside it.
+/// The sentinel every "was it read?" assertion below matches on, which is only
+/// evidence for as long as it stays a substring of the document above.
 const PLANTED_WORDS: &str = "planted-and-never-read";
 
 /// Run one round from this test rather than from the driver, keeping what it
@@ -715,6 +716,57 @@ fn a_retained_copy_swapped_for_a_link_is_refused_at_the_read() {
             .stdout
             .contains(PLANTED_WORDS),
         "the swapped copy was read by the telemetry instead"
+    );
+}
+
+/// The *directory* the copies live in, swapped for a link to somewhere else.
+///
+/// Refusing a swapped file is only half of it: opening
+/// `<run>/reports/<name>.json` without following the last component still
+/// walks whatever `reports` has become, so a link there hands a reader every
+/// document behind it under this run's own derived names. Ingest already
+/// refuses to *write* through a swapped storage directory; this is the same
+/// boundary on the side that would hand the content to an operator.
+#[test]
+fn report_storage_swapped_for_a_link_is_refused_at_the_read() {
+    let world = World::new("views-swapstore");
+    let run = settled(&world, "swapped", vec![agent("build", &[])]);
+
+    let reports = world.run_file(&run, "reports");
+    let kept = std::fs::read_dir(&reports)
+        .expect("this run's report storage")
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| path.is_file())
+        .expect("a retained report");
+    let name = kept.file_name().expect("the copy's own name").to_owned();
+
+    // Somewhere else entirely, holding a document under the very name this run
+    // derives — so nothing but the storage directory itself has to be forged.
+    let elsewhere = world.root.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).expect("a directory outside the run");
+    std::fs::write(elsewhere.join(&name), PLANTED_DOCUMENT).expect("a planted report");
+
+    std::fs::remove_dir_all(&reports).expect("this run's storage is removed");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&elsewhere, &reports).expect("the storage is swapped for a link");
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_dir(&elsewhere, &reports)
+        .expect("the storage is swapped for a link");
+
+    let transcript = world.run(&["transcript", &run]);
+    transcript.exited(0).out_has("not retained by this run");
+    assert!(
+        !transcript.stdout.contains(PLANTED_WORDS),
+        "the reader walked a swapped storage directory:\n{}",
+        transcript.stdout
+    );
+    assert!(
+        !world
+            .run(&["telemetry", &run])
+            .stdout
+            .contains(PLANTED_WORDS),
+        "the telemetry walked a swapped storage directory"
     );
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
