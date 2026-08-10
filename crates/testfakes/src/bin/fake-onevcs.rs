@@ -232,9 +232,22 @@ fn events(args: &[String], dir: &std::path::Path) -> ExitCode {
     }
     let follow = args.iter().any(|arg| arg == "--follow");
     let path = stream_of(dir, &token);
+    // The real CLI refuses a token whose stream it cannot find, and a double
+    // that read a missing file as an empty one would let a caller ask for a
+    // session that never existed and hear nothing about it.
+    if !path.is_file() {
+        eprintln!("no event stream for {token:?}");
+        return ExitCode::from(2);
+    }
     let mut written = 0usize;
     loop {
-        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) => {
+                eprintln!("cannot read the stream for {token:?}: {error}");
+                return ExitCode::from(2);
+            }
+        };
         let lines: Vec<&str> = text
             .lines()
             .filter(|line| !line.trim().is_empty())

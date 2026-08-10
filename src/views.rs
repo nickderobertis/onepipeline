@@ -508,9 +508,13 @@ pub fn results(view: &RunView) -> String {
 pub fn transcript(view: &RunView, only: Option<&str>) -> String {
     let mut out = String::new();
     // Derived once for the whole run rather than per node.
-    let retained = crate::report::retained(&view.paths, &view.events);
-    for node in dispatched(view, only) {
-        out.push_str(&format!("{}  {node}\n", view.paths.run));
+    let settlements = crate::report::evidence(&view.paths, &view.events);
+    for node in nodes_with_agent_records(view, only) {
+        // Every value on a rendered line is a stranger's: a node label a
+        // producer stamped, a member it named, a path it chose, a role its
+        // report carried. One control character in any of them rewrites the
+        // line around it, so they all go through the same strip.
+        out.push_str(&format!("{}  {}\n", view.paths.run, one_line(&node)));
         for event in view
             .events
             .iter()
@@ -541,9 +545,9 @@ pub fn transcript(view: &RunView, only: Option<&str>) -> String {
                 _ => {}
             }
         }
-        for retained in retained
+        for settled in settlements
             .iter()
-            .filter(|retained| retained.node.as_deref() == Some(node.as_str()))
+            .filter(|settled| settled.node.as_deref() == Some(node.as_str()))
         {
             // Named by the member that settled with it: a graph runs more than
             // one, and a reader looking at two reports has to know whose is
@@ -551,10 +555,10 @@ pub fn transcript(view: &RunView, only: Option<&str>) -> String {
             // what the settlement claimed — and it is not what is opened.
             out.push_str(&format!(
                 "  report {} {}\n",
-                retained.member.as_deref().unwrap_or("-"),
-                retained.named.display()
+                one_line(settled.member.as_deref().unwrap_or("-")),
+                one_line(&settled.named.display().to_string())
             ));
-            let Some(document) = crate::report::read(&retained.kept) else {
+            let Some(document) = crate::report::read(&settled.kept) else {
                 out.push_str(
                     "    not retained by this run, so it is not read: only this run's own \
                      copy of a report is ever opened\n",
@@ -566,7 +570,7 @@ pub fn transcript(view: &RunView, only: Option<&str>) -> String {
                 out.push_str("    it carries no transcript\n");
             }
             for turn in turns {
-                out.push_str(&format!("    {}\n", turn.role));
+                out.push_str(&format!("    {}\n", one_line(&turn.role)));
                 for line in turn.text.lines() {
                     out.push_str(&format!("      {}\n", one_line(line)));
                 }
@@ -587,12 +591,16 @@ pub fn transcript(view: &RunView, only: Option<&str>) -> String {
     out
 }
 
-/// The nodes this run's merged store carries a dispatch for, in id order.
+/// The nodes this run's merged store carries an `oneagentgraph` record for, in
+/// id order.
+///
+/// Any record, not only a settled turn: a node whose dispatch is still running
+/// has a transcript worth reading, and that is most of what this verb is for.
 ///
 /// Crate-visible: `docs/contract.md` names the views, not the parts one is
 /// assembled from, and a public item the contract does not name is a promise
 /// this crate did not make.
-pub(crate) fn dispatched(view: &RunView, only: Option<&str>) -> Vec<String> {
+pub(crate) fn nodes_with_agent_records(view: &RunView, only: Option<&str>) -> Vec<String> {
     let mut nodes: Vec<String> = view
         .events
         .iter()

@@ -308,9 +308,9 @@ fn emit(args: &[String], node: &str, step: Option<&str>, task: &str) {
         .join("reports")
         .join(format!("{}-{}", fake::segment(node), std::process::id()))
         .join(oneagentgraph::member::REPORT_FILE);
-    // Where the settlement says the report went. Four scenarios a consumer has
-    // to tell apart, and each is a real thing a producer — or something wearing
-    // one's clothes — can put on that line.
+    // Where the settlement says the report went. Each branch is a real thing a
+    // producer — or something wearing one's clothes — can put on that line, and
+    // a consumer has to tell every one of them from a report it may read.
     let scripted = |name: &str| fake::script_dir().join(name).exists();
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -335,6 +335,21 @@ fn emit(args: &[String], node: &str, step: Option<&str>, task: &str) {
         #[cfg(windows)]
         let made = std::os::windows::fs::symlink_file(&secret, &link);
         made.is_ok().then_some(link)
+    } else if scripted("report.directory") {
+        // A path that is not a file at all, wearing the report's name.
+        let dir = path.with_file_name("as-a-directory");
+        let _ = std::fs::create_dir_all(dir.join(oneagentgraph::member::REPORT_FILE));
+        Some(dir.join(oneagentgraph::member::REPORT_FILE))
+    } else if scripted("report.oversize") {
+        // Far past what a consumer will copy. Claimed rather than written: the
+        // bound is on the size the filesystem reports, and writing the bytes
+        // would be a slow way to say the same thing.
+        let _ = std::fs::write(&path, PLANTED);
+        let sized = std::fs::OpenOptions::new().write(true).open(&path);
+        if let Ok(file) = sized {
+            let _ = file.set_len(64 * 1024 * 1024);
+        }
+        Some(path.clone())
     } else if scripted("report.missing") {
         // A member that settled on a machine whose scratch this reader cannot
         // reach: the settlement names where the report went and nothing wrote

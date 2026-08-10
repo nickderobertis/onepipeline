@@ -42,14 +42,17 @@ pub const TELEMETRY_SCHEMA_VERSION: u32 = 2;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunTelemetry {
-    /// The schema version.
+    /// The schema version. Read back only as the one this build writes.
+    #[serde(deserialize_with = "this_version")]
     pub schema_version: u32,
     /// The run.
     pub run_id: String,
     /// The whole elapsed time, in milliseconds.
     pub wall_ms: u64,
     /// The buckets, whose measured spans sum exactly to
-    /// [`wall_ms`](Self::wall_ms).
+    /// [`wall_ms`](Self::wall_ms). Exactly the eight
+    /// [`BucketName::ALL`] names, once each, in that order.
+    #[serde(deserialize_with = "every_bucket")]
     pub buckets: Vec<Bucket>,
     /// What each party spent. A party nothing reported for is absent from the
     /// map rather than present and zero.
@@ -64,6 +67,46 @@ pub struct RunTelemetry {
     pub surfaces_queued: u64,
     /// Surfaces a planner actually consumed.
     pub surfaces_read: u64,
+}
+
+/// Read the version, refusing a document this build cannot honestly read.
+///
+/// The number is the whole compatibility statement, so a reader that took any
+/// value would be honouring none of it: schema `1` named four spans —
+/// `dispatching`, `awaiting-planner`, `awaiting-human`, `orchestrating` — and
+/// carried no `usage` at all, and reading one as a `2` would drop a span or
+/// report a run as having spent nothing. Refused by name, with both numbers.
+fn this_version<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<u32, D::Error> {
+    let found = u32::deserialize(reader)?;
+    if found != TELEMETRY_SCHEMA_VERSION {
+        return Err(serde::de::Error::custom(format!(
+            "telemetry schema_version {found}, and this build reads \
+             {TELEMETRY_SCHEMA_VERSION}"
+        )));
+    }
+    Ok(found)
+}
+
+/// Read the buckets, refusing any set that is not the eight.
+///
+/// The document's one property is that its measured spans sum exactly to the
+/// wall clock, and that means nothing over a set that may be missing a bucket,
+/// carry one twice, or arrive in another order — a consumer indexing the eighth
+/// would be reading whichever happened to be there.
+fn every_bucket<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<Vec<Bucket>, D::Error> {
+    let found = Vec::<Bucket>::deserialize(reader)?;
+    let named: Vec<BucketName> = found.iter().map(|bucket| bucket.name).collect();
+    if named != BucketName::ALL {
+        return Err(serde::de::Error::custom(format!(
+            "buckets {:?}, and a telemetry document carries exactly {:?}",
+            named.iter().map(|name| name.as_str()).collect::<Vec<_>>(),
+            BucketName::ALL
+                .iter()
+                .map(|name| name.as_str())
+                .collect::<Vec<_>>()
+        )));
+    }
+    Ok(found)
 }
 
 /// One span of the run's wall clock, named by what the run was doing.
@@ -542,7 +585,7 @@ fn usage_of(paths: &RunPaths, events: &[Envelope]) -> BTreeMap<Party, Usage> {
             fold(Party::Total, &Usage::of(usage));
         }
     }
-    for retained in crate::report::retained(paths, events) {
+    for retained in crate::report::evidence(paths, events) {
         let Some(document) = crate::report::read(&retained.kept) else {
             continue;
         };
@@ -1385,20 +1428,61 @@ mod tests {
         let refusal = serde_json::from_value::<RunTelemetry>(v1.clone())
             .expect_err("a schema-1 document was read as a schema-2 one");
         assert!(
+            refusal.to_string().contains("schema_version 1")
+                && refusal
+                    .to_string()
+                    .contains(&TELEMETRY_SCHEMA_VERSION.to_string()),
+            "the refusal names neither the version it met nor the one it reads: {refusal}"
+        );
+
+        // Stamped `2` and it is still refused, on every other way it is not one:
+        // four buckets this build does not have, and no `usage` at all — and a
+        // run with no usage field is not a run that spent nothing.
+        let mut relabelled = v1;
+        relabelled["schema_version"] = json!(TELEMETRY_SCHEMA_VERSION);
+        let refusal = serde_json::from_value::<RunTelemetry>(relabelled.clone())
+            .expect_err("a schema-1 body under a schema-2 stamp was read");
+        assert!(
             refusal.to_string().contains("dispatching"),
             "the refusal does not name what it could not read: {refusal}"
         );
 
-        // And with its buckets renamed, it is still refused: `usage` is not
-        // optional, and a run with no usage field is not a run that spent
-        // nothing.
-        let mut renamed = v1;
+        let mut renamed = relabelled;
         renamed["buckets"] = json!([{"name": "agent", "ms": 100_000}]);
         let refusal = serde_json::from_value::<RunTelemetry>(renamed)
-            .expect_err("a document with no usage was read");
+            .expect_err("a document carrying one bucket was read");
         assert!(
-            refusal.to_string().contains("usage"),
-            "the refusal does not name the missing field: {refusal}"
+            refusal.to_string().contains("exactly"),
+            "the refusal does not say the set is fixed: {refusal}"
+        );
+    }
+
+    /// The eight, once each, in the order the breakdown renders them. A set
+    /// that is short one, carries one twice, or arrives shuffled makes the sum
+    /// invariant unreadable — and a consumer indexing the eighth would be
+    /// reading whichever happened to be there.
+    #[test]
+    fn a_bucket_set_that_is_not_the_eight_is_refused() {
+        let document = |buckets: Value| {
+            let mut value = serde_json::to_value(golden()).expect("it serialises");
+            value["buckets"] = buckets;
+            serde_json::from_value::<RunTelemetry>(value)
+        };
+        let whole = serde_json::to_value(golden()).expect("it serialises")["buckets"].clone();
+        assert!(document(whole.clone()).is_ok(), "the eight were refused");
+
+        let short: Vec<Value> = whole.as_array().expect("buckets")[..7].to_vec();
+        assert!(document(json!(short)).is_err(), "a set of seven was read");
+
+        let mut twice = whole.as_array().expect("buckets").clone();
+        twice[1] = twice[0].clone();
+        assert!(document(json!(twice)).is_err(), "a doubled bucket was read");
+
+        let mut shuffled = whole.as_array().expect("buckets").clone();
+        shuffled.reverse();
+        assert!(
+            document(json!(shuffled)).is_err(),
+            "a shuffled set was read"
         );
     }
 

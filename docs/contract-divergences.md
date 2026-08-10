@@ -306,10 +306,25 @@ not recognise and report nothing at all.
 
 The report is also read out of **this run's own copy** rather than from the path
 `report_path` names. `oneagentgraph` mints that path under a state root this
-crate neither chooses nor can recompute — the sibling's library exposes no
-accessor for it, and a future executor stores the report on another machine
-entirely — so there is no root to pin it to. What there *is* is a moment when
-the path carries the producer's authority: the envelope arriving on the stdout
-of a process this crate started. The copy is taken there and every reader opens
-only it. Should `oneagentgraph` ever expose its state root, pinning the ingest
-to it would be a second lock on the same door, and welcome.
+crate neither chooses nor can recompute: the constant naming the environment
+variable lives in that library's `src/main.rs`, private to its binary, its
+library exposes no accessor, an operator moves the root with a variable this
+crate does not set, and a future executor stores the report on another machine
+entirely. So there is no root to pin it to, and one pinned here would be this
+crate re-declaring a sibling's config — refusing legitimate reports the moment
+it was wrong, which for evidence is the wrong direction to fail in.
+
+What there *is* instead is a moment when the path carries the producer's
+authority: the envelope arriving on the stdout of a process this crate started.
+The copy is taken there — refusing a name that is not the producing library's
+own `REPORT_FILE`, a symlink, anything that is not a plain file, and anything
+past a size bound — and every reader afterwards opens only that copy, at a name
+derived from the settlement. A line forged into a journal afterwards reaches
+nothing at all.
+
+**Proposal (for `oneagentgraph`): expose the state root its binary resolves.**
+A `pub fn state_dir(env) -> PathBuf` on the library, or the `STATE_DIR_ENV`
+constant made public, would let this crate confine the ingest to a
+producer-owned root as well — a second lock on the same door. It is a general
+accessor for a location that library already computes, so nothing in it would
+need to know this crate exists.

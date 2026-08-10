@@ -242,12 +242,12 @@ fn transcript_renders_a_real_dispatched_turns_tools_and_words() {
         transcript.stdout
     );
 
-    // A node this run never dispatched is refused by name rather than answered
+    // A node this run has no record for is refused by name rather than answered
     // with an empty transcript, which reads identically to a quiet one.
     world
         .run(&["transcript", "read", "nowhere"])
         .exited(crate::harness::REFUSED)
-        .err_has("no dispatch for node 'nowhere'")
+        .err_has("has recorded nothing for node 'nowhere'")
         .err_has("build");
 }
 

@@ -905,15 +905,15 @@ fn report(args: &OptionalRunArgs, render: fn(&[RunView]) -> String) -> Result<i3
 fn transcript(args: &TranscriptArgs) -> Result<i32> {
     let view = RunView::open(&resolve(&args.run)?)?;
     if let Some(node) = &args.node {
-        if views::dispatched(&view, Some(node)).is_empty() {
-            let dispatched = views::dispatched(&view, None);
+        if views::nodes_with_agent_records(&view, Some(node)).is_empty() {
+            let recorded = views::nodes_with_agent_records(&view, None);
             return Err(Error::Refused(format!(
-                "run '{}' has no dispatch for node '{node}'; it dispatched: {}",
+                "run '{}' has recorded nothing for node '{node}'; it has records for: {}",
                 args.run,
-                if dispatched.is_empty() {
+                if recorded.is_empty() {
                     "nothing yet".to_string()
                 } else {
-                    dispatched.join(", ")
+                    recorded.join(", ")
                 }
             )));
         }

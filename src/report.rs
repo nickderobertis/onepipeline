@@ -17,7 +17,7 @@
 //! process this crate started has just written to its own stdout, and copies the
 //! report into the run's own [`reports_dir`](crate::ledger::RunPaths::reports_dir)
 //! — refusing anything that is not a plain file of the producing library's own
-//! name and size. [`retained`] and [`read`] run at **read** time and open
+//! name and size. [`evidence`] and [`read`] run at **read** time and open
 //! nothing but that copy, at a path derived from the settlement rather than
 //! taken from it. A settlement whose copy is not there is reported as unretained,
 //! naming the path that was not read.
@@ -60,9 +60,14 @@ pub const REPORT_PATH: &str = "report_path";
 /// past a real report, which is a transcript and its verdicts.
 pub const MAX_REPORT_BYTES: u64 = 32 * 1024 * 1024;
 
-/// One member's report, as its settlement named it and as this run kept it.
+/// What one settlement said about its report, and where this run's copy would
+/// be.
+///
+/// Deliberately *not* named for having kept one: a settlement names a report
+/// whether or not the copy was made, and telling a reader which of those it is
+/// meeting is the whole job. [`read`] on [`kept`](Self::kept) is the answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Retained {
+pub struct Evidence {
     /// The node whose dispatch produced it, when the envelope named one.
     pub node: Option<String>,
     /// The member within that dispatch, when the producer stamped one.
@@ -77,6 +82,23 @@ pub struct Retained {
     pub kept: PathBuf,
 }
 
+// llmlint: ignore-block[boundary_inputs_validated] this function is the *only* place a
+// producer-named path is opened, and there is no producer-owned root left to confine it
+// to. `oneagentgraph` mints its report path under a state directory whose location its
+// **binary** resolves — the const is private to `src/main.rs`, the library exposes no
+// accessor, an operator moves it with an environment variable this crate does not set, and
+// a future executor stores it on another machine — so a root pinned here would be this
+// crate re-declaring a sibling's config, and would refuse legitimate reports the moment it
+// was wrong. What bounds this instead is *when* it runs and *what it accepts*: the envelope
+// is arriving on the stdout of a process this crate spawned, before the line exists
+// anywhere a stranger could have written it; the name must be the producing library's own
+// `REPORT_FILE`; a symlink, a directory, and anything past `MAX_REPORT_BYTES` are refused
+// out loud; and the destination is derived, never taken. Every *reader* — `transcript`,
+// `telemetry` — opens only that destination, so a line forged into a journal afterwards
+// reaches nothing. What remains is a producer that has been compromised copying one
+// `report.json` it wrote into the run that spawned it, which is inside the authority it
+// already has: that same producer chooses the report's contents. Divergence 12 in
+// `docs/contract-divergences.md` records the missing accessor as the open proposal it is.
 /// Copy the report a relayed settlement names into the run's own storage.
 ///
 /// Called as the envelope is **ingested** — from the stdout of a process this
@@ -138,8 +160,11 @@ pub fn retain(paths: &RunPaths, event: &Envelope) {
         ));
     }
 }
+// llmlint: ignore-end[boundary_inputs_validated]
 
-/// Every report a `member-settled` in this store named, in settlement order.
+/// What every `member-settled` in this store said about its report, in
+/// settlement order — including the ones whose copy was refused, which are
+/// exactly the ones a reader has to be able to name.
 ///
 /// A settlement that stored no report is absent rather than listed with an
 /// empty path: the producer says so with a null `report_path`, and a consumer
@@ -149,7 +174,7 @@ pub fn retain(paths: &RunPaths, event: &Envelope) {
 /// What comes back names *both* paths and opens neither. The copy's name is
 /// derived from the settlement's own stream and sequence, so a reader reaches
 /// this run's storage whatever the journal line says the producer's path was.
-pub fn retained(paths: &RunPaths, events: &[Envelope]) -> Vec<Retained> {
+pub fn evidence(paths: &RunPaths, events: &[Envelope]) -> Vec<Evidence> {
     events
         .iter()
         .filter(|event| event.source == Source::Agentgraph && event.kind.0 == MEMBER_SETTLED)
@@ -159,7 +184,7 @@ pub fn retained(paths: &RunPaths, events: &[Envelope]) -> Vec<Retained> {
                 .get(REPORT_PATH)
                 .and_then(Value::as_str)
                 .filter(|path| !path.is_empty())?;
-            Some(Retained {
+            Some(Evidence {
                 node: event.labels.node.clone(),
                 member: event
                     .labels
@@ -176,7 +201,7 @@ pub fn retained(paths: &RunPaths, events: &[Envelope]) -> Vec<Retained> {
 
 /// Read this run's own copy of one report, or `None` when it did not keep one.
 ///
-/// The path is [`Retained::kept`] and nothing else. A dispatch whose report was
+/// The path is [`Evidence::kept`] and nothing else. A dispatch whose report was
 /// refused at ingest, ran on another machine, or was swept has no copy here —
 /// and a caller says which of those it is meeting rather than reporting a
 /// dispatch as having produced nothing.
@@ -314,7 +339,7 @@ mod tests {
         let event = settled(Some("build"), Some(&produced.display().to_string()));
         retain(&paths, &event);
 
-        let retained = retained(&paths, &[event]);
+        let retained = evidence(&paths, &[event]);
         assert_eq!(retained.len(), 1);
         assert_eq!(retained[0].node.as_deref(), Some("build"));
         assert_eq!(retained[0].member.as_deref(), Some("worker"));
@@ -338,8 +363,8 @@ mod tests {
     #[test]
     fn a_settlement_that_stored_none_is_not_listed_with_an_invented_path() {
         let paths = RunPaths::under(Path::new("/nowhere"), "demo");
-        assert!(retained(&paths, &[settled(Some("build"), None)]).is_empty());
-        assert!(retained(&paths, &[settled(Some("build"), Some(""))]).is_empty());
+        assert!(evidence(&paths, &[settled(Some("build"), None)]).is_empty());
+        assert!(evidence(&paths, &[settled(Some("build"), Some(""))]).is_empty());
     }
 
     /// Ingest opens a path a *live producer* named, so it refuses everything
@@ -376,7 +401,7 @@ mod tests {
         ] {
             let event = settled(Some("build"), Some(&named));
             retain(&paths, &event);
-            let kept = &retained(&paths, &[event])[0].kept;
+            let kept = &evidence(&paths, &[event])[0].kept;
             assert!(
                 read(kept).is_none(),
                 "'{named}' was copied into the run's storage"
@@ -404,7 +429,7 @@ mod tests {
 
         let event = settled(Some("build"), Some(&produced.display().to_string()));
         retain(&paths, &event);
-        assert!(read(&retained(&paths, &[event])[0].kept).is_none());
+        assert!(read(&evidence(&paths, &[event])[0].kept).is_none());
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -418,7 +443,7 @@ mod tests {
         ours.source = Source::Pipeline;
 
         retain(&paths, &ours);
-        assert!(retained(&paths, &[ours]).is_empty());
+        assert!(evidence(&paths, &[ours]).is_empty());
         assert!(
             !paths.reports_dir().exists(),
             "this crate's own event was ingested as a sibling's report"

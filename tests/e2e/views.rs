@@ -561,6 +561,40 @@ fn a_settlement_naming_a_symlink_is_refused_and_never_followed() {
     );
 }
 
+/// A settlement naming something that is not a file, and one naming a file past
+/// the bound a copy will take.
+///
+/// Both are refused as they are ingested and both leave the reader saying the
+/// report is not there — the shapes a name check alone would wave through, and
+/// the one that would let a producer fill the runs root or stall the writer
+/// that is copying it.
+#[test]
+fn a_settlement_naming_a_directory_or_an_oversize_file_is_refused_at_ingest() {
+    for (scripted, why) in [
+        ("report.directory", "not a file"),
+        ("report.oversize", "larger than"),
+    ] {
+        let world = World::new(&format!("views-{}", scripted.replace('.', "-")));
+        world.script(scripted, "");
+        let run = driven(&world, "refused", vec![agent("build", &[])]);
+        run.1.err_has("not retaining the report at").err_has(why);
+
+        let transcript = world.run(&["transcript", &run.0]);
+        transcript.exited(0).out_has("not retained by this run");
+        assert!(
+            !transcript.stdout.contains(PLANTED_WORDS),
+            "'{scripted}' was copied and read anyway:\n{}",
+            transcript.stdout
+        );
+    }
+}
+
+// llmlint: ignore-block[tests_mirror_real_usage] the *arrangement* below writes a line
+// into the run's store on purpose, because that is the threat: a settlement no producer
+// emitted. No command forges one — a user interface that could would be the defect — so
+// there is nothing else to reach this condition with. Everything asserted afterwards is
+// through the CLI, which is where the claim lives: `transcript` does not open what the
+// line named, and says so.
 /// A settlement written into the journal *after* the fact, naming a readable
 /// file outside anything this run owns.
 ///
@@ -611,6 +645,7 @@ fn a_journal_line_naming_a_file_outside_the_run_is_never_read() {
         "the real report still counts: {usage}"
     );
 }
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 /// A report a harness produced without a transcript. It is a report this build
 /// can say nothing further about, which is not a dispatch that did nothing.
