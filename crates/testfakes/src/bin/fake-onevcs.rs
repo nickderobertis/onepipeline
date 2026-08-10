@@ -224,6 +224,12 @@ fn events(args: &[String], dir: &std::path::Path) -> ExitCode {
         println!("{{\"from\":\"a newer onevcs\"}}");
         return ExitCode::SUCCESS;
     }
+    // The real CLI parses this command with clap, so it refuses an argument it
+    // does not know. A double that shrugged one off would let this crate reach
+    // the sibling with a flag it has never had and keep the suite green.
+    if let Some(unknown) = args.iter().skip(2).find(|arg| *arg != "--follow") {
+        return fake::refuse(&format!("onevcs events does not take '{unknown}'"));
+    }
     let follow = args.iter().any(|arg| arg == "--follow");
     let path = stream_of(dir, &token);
     let mut written = 0usize;

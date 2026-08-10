@@ -71,6 +71,7 @@ fn monitor_writes_nothing_and_consumes_nothing() {
         vec!["results", "readonly"],
         vec!["status", "readonly"],
         vec!["goals", "readonly"],
+        vec!["transcript", "readonly"],
         vec!["telemetry", "readonly"],
         vec!["runs"],
         vec!["host"],
@@ -440,6 +441,50 @@ fn evidence_this_host_cannot_read_is_reported_as_unread_rather_than_as_nothing()
     assert!(
         usage.get("agent").is_none() && usage.get("judge").is_none(),
         "an unreadable report was reported as a measured split: {usage}"
+    );
+}
+
+/// Given no node, the verb covers every node the run dispatched.
+///
+/// The form an agent reaches for first: it does not yet know which node it is
+/// looking for, which is the whole reason to read a transcript.
+#[test]
+fn transcript_given_no_node_renders_every_dispatch_the_run_recorded() {
+    let world = World::new("views-alltranscripts");
+    let run = settled(
+        &world,
+        "everynode",
+        vec![agent("first", &[]), agent("second", &["first"])],
+    );
+
+    let transcript = world.run(&["transcript", &run]);
+    transcript.exited(0);
+    for node in ["first", "second"] {
+        transcript.out_has(&format!("everynode  {node}"));
+    }
+    // Each with its own turn, its own tools, and its own retained report. Two
+    // tool lines per node, because the verb reads both sources it names: the
+    // bounded summary the store carried while the turn ran, and the structured
+    // input the report kept once it settled.
+    assert_eq!(
+        transcript
+            .stdout
+            .lines()
+            .filter(|line| line.contains("tool_call bash"))
+            .count(),
+        4,
+        "a node's tools were missed or doubled:\n{}",
+        transcript.stdout
+    );
+    assert_eq!(
+        transcript
+            .stdout
+            .lines()
+            .filter(|line| line.trim_start().starts_with("report "))
+            .count(),
+        2,
+        "a node's retained report was missed or doubled:\n{}",
+        transcript.stdout
     );
 }
 
