@@ -658,6 +658,67 @@ fn a_journal_line_naming_a_file_outside_the_run_is_never_read() {
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 
+// llmlint: ignore-block[tests_mirror_real_usage] the *arrangement* below swaps this
+// run's own copy for a link on purpose, because that is the threat, and no command
+// swaps one — a user interface that could would be the defect. Everything asserted
+// afterwards is through the CLI: `transcript` renders, says the copy is not read,
+// and says so on stderr where the read happened.
+/// This run's own copy, swapped after ingest for a link to a document outside
+/// the run.
+///
+/// The other half of the boundary the ingest journeys guard. Every reader
+/// downstream opens the copy rather than what a settlement named, so a copy
+/// swapped for a link would deliver a stranger's file by a longer road — and
+/// the copy is the one path this crate is entitled to trust. It is refused at
+/// the read, out loud, and the reader still renders everything else.
+#[test]
+fn a_retained_copy_swapped_for_a_link_is_refused_at_the_read() {
+    let world = World::new("views-tampered");
+    let run = settled(&world, "tampered", vec![agent("build", &[])]);
+
+    // What the swapped copy would deliver, outside every directory this run owns.
+    let planted = world.root.join("outside-report.json");
+    std::fs::write(&planted, PLANTED_DOCUMENT).expect("a planted report");
+
+    // The copy is found where the run put it rather than at a name this test
+    // derived: the run owns that naming, and a test that restated it would pass
+    // while a reader looked somewhere else.
+    let reports = world.run_file(&run, "reports");
+    let kept = std::fs::read_dir(&reports)
+        .expect("this run's report storage")
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| path.is_file())
+        .expect("a retained report to tamper with");
+    std::fs::remove_file(&kept).expect("the copy is removed");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&planted, &kept).expect("the copy is swapped for a link");
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_file(&planted, &kept).expect("the copy is swapped for a link");
+
+    let transcript = world.run(&["transcript", &run]);
+    transcript
+        .exited(0)
+        // The dispatch's own record still renders; only the swapped copy is refused.
+        .out_has("tool_call bash")
+        .out_has("not retained by this run")
+        .err_has("not reading the retained report at");
+    assert!(
+        !transcript.stdout.contains(PLANTED_WORDS),
+        "the swapped copy was followed to what it pointed at:\n{}",
+        transcript.stdout
+    );
+    // And the same swap buys nothing in the telemetry, which reads the same copy.
+    assert!(
+        !world
+            .run(&["telemetry", &run])
+            .stdout
+            .contains(PLANTED_WORDS),
+        "the swapped copy was read by the telemetry instead"
+    );
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
 /// A report a harness produced without a transcript. It is a report this build
 /// can say nothing further about, which is not a dispatch that did nothing.
 #[test]
