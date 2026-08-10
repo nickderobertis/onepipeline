@@ -186,6 +186,21 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     }
     emit(args, &node, step.as_deref(), &task);
 
+    // A dispatch that changed nothing is a branch with nothing to publish, so a
+    // journey that means to reach a real publication says what its worker wrote.
+    // Scripted rather than always: every other journey here is about the
+    // dispatch, and a file appearing in the workspace would be a change nobody
+    // asked for.
+    if let Some(body) = fake::node_script(dir, &key, "work") {
+        let Some(workspace) = fake::flag(args, "--dir") else {
+            fake::fail("a scripted `work` needs the dispatch's --dir to write into");
+        };
+        let path = std::path::Path::new(&workspace).join(format!("{}.md", fake::segment(&key)));
+        if let Err(error) = std::fs::write(&path, body) {
+            fake::fail(&format!("cannot write {}: {error}", path.display()));
+        }
+    }
+
     if let Some(code) = fake::node_script(dir, &key, "fail") {
         // A scripted code that is not a code is a test that means something
         // other than what it says. Defaulting it to 1 would quietly pass the

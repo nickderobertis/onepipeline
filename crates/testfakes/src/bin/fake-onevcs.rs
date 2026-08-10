@@ -195,14 +195,12 @@ fn publish(args: &[String], dir: &std::path::Path) -> ExitCode {
         "change-opened",
         serde_json::json!({"url": url, "id": token}),
     );
-    println!(
-        "{}",
-        serde_json::json!({
-            "url": url,
-            "id": token,
-            "outcome": "change-open",
-        })
-    );
+    // What the real `onevcs publish` prints: one line of prose for a person, and
+    // nothing machine-readable. A double that printed a JSON record here would be
+    // an oracle for a shape the sibling has never produced — which is how this
+    // crate came to parse the publication's stdout as JSON and fail every real
+    // publication as unreadable.
+    println!("change request open at {url}");
     ExitCode::SUCCESS
 }
 

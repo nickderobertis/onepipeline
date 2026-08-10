@@ -9,23 +9,19 @@
 //! what [`WorkspaceSpec::VcsSession`](crate::executor::WorkspaceSpec::VcsSession)
 //! means: the clone, worktree, and branch are cut where the work happens.
 
-// llmlint: ignore-file[invalid_states_unrepresentable] `OpenSession` and `Published`
-// mirror, field for field, what the `onevcs` CLI prints. A token, a branch name, a change
-// id, and an outcome are strings *on that wire*, and narrowing them here would mean this
-// crate deciding a vocabulary the sibling owns — the exact re-declaration src/AGENTS.md
-// forbids. `onevcs::SessionToken` and `onevcs::MergeOutcome` are `Serialize`-only today,
-// so they cannot be read back into; when they gain `Deserialize` these two mirrors go
-// away entirely and the sibling's types are used directly.
+// llmlint: ignore-file[invalid_states_unrepresentable] `Published` carries a change
+// request's URL, its host-assigned id, and how it landed as the strings the sibling
+// recorded them as. Narrowing them here would mean this crate deciding a vocabulary the
+// sibling owns — the exact re-declaration src/AGENTS.md forbids — and `onevcs` publishes
+// no type for what a publication produced: `publish::Outcome` is behind a private module.
 
 use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use onevcs::{MergePolicy, SessionRequest};
-use serde::Deserialize;
+use onevcs::{MergePolicy, Session, SessionRequest};
 
 use crate::error::{Error, Result};
 use crate::event::Envelope;
@@ -51,36 +47,23 @@ fn sibling(message: impl Into<String>) -> Error {
     }
 }
 
-/// The session `onevcs session open` handed back.
-///
-/// `onevcs::Session` is `Serialize` only, so what the CLI prints is read back
-/// into this mirror rather than into the sibling's own type. It carries exactly
-/// the four fields that type does, and no field this crate invented.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct OpenSession {
-    /// The handle the session is published and closed by.
-    pub token: String,
-    /// The worktree the change is made in.
-    pub worktree: PathBuf,
-    /// The branch the worktree has checked out.
-    pub branch: String,
-    /// The base that branch was cut from.
-    pub base: String,
-}
-
 /// What a publication produced.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
+///
+/// Folded from the session's own event stream rather than read off the command's
+/// stdout, because **`onevcs publish` prints one line of prose for a person and
+/// no machine-readable record at all** — `merged at SHA`, `change request open at
+/// URL`, `merge queued for URL`, `nothing to publish: …`. What it writes down
+/// *is* structured: the change request it opened, the merge that landed, and the
+/// queue it entered are envelopes on the stream this crate already relays. So the
+/// outcome is read from those, and never from a sentence whose wording is the
+/// sibling's to change.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Published {
     /// Where a human reads the change, when one was opened.
-    #[serde(default)]
     pub url: Option<String>,
     /// The host's identifier for it, when one was opened.
-    #[serde(default)]
     pub id: Option<String>,
     /// How it landed.
-    #[serde(default)]
     pub outcome: Option<String>,
 }
 
@@ -102,7 +85,7 @@ fn run_json<T: serde::de::DeserializeOwned>(command: &mut Command, what: &str) -
 }
 
 /// Open a session over a per-run clone and worktree.
-pub fn session_open(request: &SessionRequest) -> Result<OpenSession> {
+pub fn session_open(request: &SessionRequest) -> Result<Session> {
     let mut command = Command::new(binary());
     command.arg("session").arg("open").arg(&request.repo);
     if let Some(branch) = &request.branch {
@@ -118,6 +101,13 @@ pub fn session_open(request: &SessionRequest) -> Result<OpenSession> {
 }
 
 /// Verify a session's work and publish it under its policy.
+///
+/// The exit status is the whole verdict — `onevcs publish` says whether the
+/// change landed with its code and describes it on stdout in prose — so success
+/// is read from the status and the *shape* of what happened from the session's
+/// own stream. Reading stdout as JSON is what this used to do, and against the
+/// real sibling every publication then failed as unreadable: a change that had
+/// already merged, reported as a publication failure.
 pub fn publish(token: &str, policy: Option<MergePolicy>, title: Option<&str>) -> Result<Published> {
     let mut command = Command::new(binary());
     command.arg("publish").arg(token);
@@ -127,7 +117,70 @@ pub fn publish(token: &str, policy: Option<MergePolicy>, title: Option<&str>) ->
     if let Some(title) = title {
         command.arg("--title").arg(title);
     }
-    run_json(&mut command, "publish")
+    let output = command
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| sibling(format!("cannot start `{} publish`: {e}", binary())))?;
+    if !output.status.success() {
+        return Err(sibling(format!(
+            "publish exited {}: {}",
+            output.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(published_from(&events(token)))
+}
+
+/// What the session's stream says its publication produced.
+///
+/// The kinds are `onevcs`'s own, and each carries the fields that command
+/// records: `change-opened` names the change request and its URL, `change-merged`
+/// and `merge-completed` say it reached its base, and `merge-queued` carrying a
+/// `url` is the host holding it. `merge-queued` *without* one is the identity's
+/// own lock queue, which every publication passes through and which says nothing
+/// about the outcome — reading it as one would report every local merge as
+/// queued.
+fn published_from(events: &[Envelope]) -> Published {
+    /// How far a publication got, so a later record never reads as less than an
+    /// earlier one.
+    fn rank(outcome: &str) -> u8 {
+        match outcome {
+            "merged" => 3,
+            "queued" => 2,
+            "change-open" => 1,
+            _ => 0,
+        }
+    }
+    let text = |envelope: &Envelope, key: &str| {
+        envelope
+            .payload
+            .get(key)
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+    };
+    let mut published = Published::default();
+    for envelope in events {
+        let reached = match envelope.kind.0.as_str() {
+            "change-opened" => {
+                published.url = text(envelope, "url").or(published.url.take());
+                published.id = text(envelope, "id").or(published.id.take());
+                "change-open"
+            }
+            "change-merged" | "merge-completed" => {
+                published.url = text(envelope, "url").or(published.url.take());
+                "merged"
+            }
+            "merge-queued" if text(envelope, "url").is_some() => {
+                published.url = text(envelope, "url").or(published.url.take());
+                "queued"
+            }
+            _ => continue,
+        };
+        if rank(reached) > rank(published.outcome.as_deref().unwrap_or_default()) {
+            published.outcome = Some(reached.to_string());
+        }
+    }
+    published
 }
 
 /// How a merge policy is spelled on the command line.
@@ -365,17 +418,17 @@ pub fn report_skipped(tool: &str, skipped: usize) {
 /// It carries `Source::Vcs` because `onevcs` is what opened the session: the
 /// merge is an interleaving of three streams, and a lifecycle node's branch
 /// belongs to that one.
-pub fn session_opened_event(session: &OpenSession, labels: &crate::event::Labels) -> Envelope {
+pub fn session_opened_event(session: &Session, labels: &crate::event::Labels) -> Envelope {
     Envelope {
         v: crate::event::ENVELOPE_VERSION,
         ts: crate::sys::now_rfc3339(),
-        stream: format!("onevcs-{}", session.token),
+        stream: format!("onevcs-{}", session.token.0),
         seq: 0,
         source: crate::event::Source::Vcs,
         kind: crate::event::EventKind("session-opened".into()),
         labels: labels.clone(),
         payload: crate::journal::payload(&[
-            ("token", serde_json::json!(session.token)),
+            ("token", serde_json::json!(session.token.0)),
             ("branch", serde_json::json!(session.branch)),
             ("base", serde_json::json!(session.base)),
             ("worktree", serde_json::json!(session.worktree)),
@@ -462,6 +515,74 @@ mod tests {
             ..Node::default()
         };
         assert!(request_for(&node).is_none());
+    }
+
+    fn recorded(kind: &str, payload: serde_json::Value) -> Envelope {
+        Envelope {
+            v: crate::event::ENVELOPE_VERSION,
+            ts: "2026-01-01T00:00:00.000Z".into(),
+            stream: "s-1".into(),
+            seq: 1,
+            source: crate::event::Source::Vcs,
+            kind: crate::event::EventKind(kind.into()),
+            labels: crate::event::Labels::default(),
+            payload: payload.as_object().cloned().unwrap_or_default(),
+            artifacts: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_change_request_the_session_recorded_is_where_a_human_reads_it() {
+        let published = published_from(&[recorded(
+            "change-opened",
+            serde_json::json!({"url": "https://example.invalid/pull/7", "id": "7"}),
+        )]);
+        assert_eq!(
+            published.url.as_deref(),
+            Some("https://example.invalid/pull/7")
+        );
+        assert_eq!(published.id.as_deref(), Some("7"));
+        assert_eq!(published.outcome.as_deref(), Some("change-open"));
+    }
+
+    #[test]
+    fn a_change_that_reached_its_base_outranks_the_request_that_opened_it() {
+        let published = published_from(&[
+            recorded(
+                "change-opened",
+                serde_json::json!({"url": "https://example.invalid/pull/7", "id": "7"}),
+            ),
+            recorded(
+                "merge-queued",
+                serde_json::json!({"url": "https://example.invalid/pull/7"}),
+            ),
+            recorded(
+                "change-merged",
+                serde_json::json!({"url": "https://example.invalid/pull/7", "sha": "abc"}),
+            ),
+        ]);
+        assert_eq!(published.outcome.as_deref(), Some("merged"));
+        assert_eq!(published.id.as_deref(), Some("7"));
+    }
+
+    #[test]
+    fn the_identitys_own_lock_queue_is_not_a_publication_the_host_is_holding() {
+        // Every publication passes through it, and it carries no change request.
+        // Read as an outcome, a local merge would report itself queued forever.
+        let published = published_from(&[
+            recorded("merge-queued", serde_json::json!({"identity": "repo"})),
+            recorded(
+                "merge-completed",
+                serde_json::json!({"identity": "repo", "sha": "abc"}),
+            ),
+        ]);
+        assert_eq!(published.outcome.as_deref(), Some("merged"));
+        assert_eq!(published.url, None);
+    }
+
+    #[test]
+    fn a_session_that_recorded_nothing_publishable_claims_no_outcome() {
+        assert_eq!(published_from(&[]), Published::default());
     }
 
     #[test]

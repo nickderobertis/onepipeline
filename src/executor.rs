@@ -245,7 +245,7 @@ struct LocalDispatch {
     run: GraphRun,
     cancel: CancellationToken,
     labels: Labels,
-    session: Option<crate::vcs::OpenSession>,
+    session: Option<onevcs::Session>,
 }
 
 impl DispatchHandle for LocalDispatch {
@@ -267,7 +267,7 @@ impl DispatchHandle for LocalDispatch {
         Ok(DispatchOutcome {
             succeeded: settled.succeeded(),
             detail: settled.stderr.trim().to_string(),
-            session: self.session.as_ref().map(|s| s.token.clone()),
+            session: self.session.as_ref().map(|s| s.token.0.clone()),
             branch: self.session.as_ref().map(|s| s.branch.clone()),
         })
     }

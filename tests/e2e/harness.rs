@@ -10,11 +10,14 @@
 // llmlint: ignore-file[e2e_not_mocked] the two siblings are substituted at their
 // subprocess boundary, so a journey can state a scenario — a node that fails its gate, a
 // dispatch held open, a driver that dies — instead of arranging one out of real agent
-// turns. `onevcs` has no alternative yet: it is still at its interface-only stage and
-// refuses every invocation with exit 70. `oneagentgraph` does, and `dispatch.rs` takes
-// it: those journeys run the real binary through [`World::agentgraph_cmd`] and substitute only
-// the paid model turn. Every scripted scenario a journey here needs is one the real
-// sibling would need a paid turn to produce.
+// turns and a repository put into that state. Neither substitution is for want of a real
+// sibling: both are implemented, and both have a journey here that drives the real
+// binary. `dispatch.rs` runs the real `oneagentgraph` through [`World::agentgraph_cmd`]
+// and substitutes only the paid model turn; `real_vcs.rs` runs the real `onevcs` through
+// [`World::vcs_cmd`] over a real bare-repository origin, publishing `local-direct` so the
+// whole path is git and no host is asked for anything. Those two are what keep the
+// doubles honest — a scripted answer no real sibling produces is how this crate came to
+// read `onevcs publish`'s stdout as JSON, which the real command has never printed.
 
 // A shared harness is used a piece at a time: every helper below is exercised by some
 // journey, and none by all of them. Rust judges that per test binary, so without this the
@@ -204,6 +207,42 @@ impl World {
     pub fn run_on_agentgraph(&self, args: &[&str]) -> Run {
         Run::of(
             self.agentgraph_cmd(args).output().expect("the binary runs"),
+            args,
+            self,
+        )
+    }
+
+    /// The state root the **real** `onevcs` keeps everything under.
+    ///
+    /// Per world, so a journey's registry, sessions, streams, and locks are its
+    /// own and never the operator's `~/.onevcs`.
+    pub fn onevcs_home(&self) -> PathBuf {
+        self.root.join("onevcs-home")
+    }
+
+    /// The `onepipeline` binary with the **real** `onevcs` behind that one seam.
+    ///
+    /// Only that seam: `oneagentgraph` is still the double [`cmd`](World::cmd)
+    /// wires up, because what these journeys are about is the composition with
+    /// the repository side. The git identity is carried in the environment
+    /// rather than written into a config, so nothing outside this world's
+    /// scratch root is touched by a commit `onevcs` makes.
+    pub fn vcs_cmd(&self, args: &[&str]) -> Command {
+        let mut command = self.cmd(args);
+        command
+            .env("ONEPIPELINE_ONEVCS_BIN", onevcs_binary())
+            .env("ONEVCS_HOME", self.onevcs_home())
+            .env("GIT_AUTHOR_NAME", GIT_WHO)
+            .env("GIT_AUTHOR_EMAIL", GIT_EMAIL)
+            .env("GIT_COMMITTER_NAME", GIT_WHO)
+            .env("GIT_COMMITTER_EMAIL", GIT_EMAIL);
+        command
+    }
+
+    /// Run a command against the real `onevcs`.
+    pub fn run_on_vcs(&self, args: &[&str]) -> Run {
+        Run::of(
+            self.vcs_cmd(args).output().expect("the binary runs"),
             args,
             self,
         )
@@ -560,6 +599,28 @@ pub fn double(name: &str) -> PathBuf {
     static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     let held = BUILT.get_or_init(|| build(&["--package", "onepipeline-testfakes"]));
     held_copy(held, name)
+}
+
+/// Who a commit a journey's `onevcs` makes is attributed to.
+///
+/// Carried in the environment on every command, because a session's clone
+/// inherits no local config and a global one is the operator's, not this
+/// suite's.
+pub const GIT_WHO: &str = "onepipeline e2e";
+
+/// The address that attribution carries. Reserved by RFC 2606, so it can never
+/// reach anybody.
+pub const GIT_EMAIL: &str = "e2e@onepipeline.invalid";
+
+/// The **real** `onevcs` binary, built from the version this crate depends on.
+///
+/// The same trick [`oneagentgraph_binary`] uses and for the same reason: a
+/// journey proving this crate composes its sibling has to compose the sibling
+/// `Cargo.lock` pins, not whatever an operator happened to install on `PATH`.
+pub fn onevcs_binary() -> PathBuf {
+    static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    let held = BUILT.get_or_init(|| build(&["--package", "onevcs", "--bin", "onevcs", "--locked"]));
+    held_copy(held, "onevcs")
 }
 
 /// The **real** `oneagentgraph` binary, built from the version this crate

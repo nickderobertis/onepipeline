@@ -71,7 +71,7 @@ thiserror = "2"
 # the registry like any other dependency — no git source, so a clone of this repo
 # builds from the registries alone.
 oneagentgraph = { workspace = true }
-onevcs = "0.1.3"
+onevcs = "0.2.0"
 
 # Process liveness is the one host fact this crate cannot get from `std` on the
 # MSRV floor, and every `DRIVER DEAD` / `PARKED` verdict rests on it. Both are
