@@ -335,9 +335,7 @@ pub fn read(kept: &Path) -> Option<Value> {
     }
     use std::io::Read;
     let mut text = String::new();
-    file.take(MAX_REPORT_BYTES)
-        .read_to_string(&mut text)
-        .ok()?;
+    file.take(MAX_REPORT_BYTES).read_to_string(&mut text).ok()?;
     serde_json::from_str(&text).ok()
 }
 
