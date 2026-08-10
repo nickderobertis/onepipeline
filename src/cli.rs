@@ -69,6 +69,8 @@ pub enum Command {
     Results(RunArgs),
     /// What each run is for, and how far it has got.
     Goals(OptionalRunArgs),
+    /// A dispatched turn's tools and reasoning, from the evidence it retained.
+    Transcript(TranscriptArgs),
     /// Session timing and usage.
     Telemetry(TelemetryArgs),
 }
@@ -173,6 +175,15 @@ pub struct RunsArgs {
     /// List only the runs this session launched.
     #[arg(long)]
     pub mine: bool,
+}
+
+/// `onepipeline transcript`.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct TranscriptArgs {
+    /// The run id.
+    pub run: String,
+    /// The node whose transcript to read. Omitted, every node that dispatched.
+    pub node: Option<String>,
 }
 
 /// `onepipeline telemetry`.

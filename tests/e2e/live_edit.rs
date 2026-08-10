@@ -76,7 +76,11 @@ fn add_reparent_and_context_are_applied_and_reported_applied() {
     let relayed = world
         .journal(&run)
         .into_iter()
-        .rfind(|event| event["labels"]["node"] == "extra" && event["source"] == "agentgraph")
+        .rfind(|event| {
+            event["labels"]["node"] == "extra"
+                && event["source"] == "agentgraph"
+                && event["kind"] == "turn-activity"
+        })
         .expect("the added node dispatched");
     let task = relayed["payload"]["task"].as_str().expect("task prose");
     assert!(task.contains("## Planner context"), "{task}");

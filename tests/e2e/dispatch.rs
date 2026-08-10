@@ -135,6 +135,122 @@ fn a_plan_dispatches_through_the_real_oneagentgraph_and_its_members_run() {
     }
 }
 
+/// How many events a `status` line reports for one node.
+///
+/// Read off the rendered line rather than out of the journal: the claim under
+/// test is what an operator sees, and a count taken from anywhere else would
+/// pass while the line said something different.
+fn events_reported(status: &str, node: &str) -> u64 {
+    let line = status
+        .lines()
+        .find(|line| line.trim_start().starts_with(&format!("{node}: running")))
+        .unwrap_or_else(|| panic!("`status` has no in-flight line for {node}:\n{status}"));
+    let at = line
+        .find(" event(s)")
+        .unwrap_or_else(|| panic!("`{line}` carries no event count"));
+    let digits: String = line[..at]
+        .chars()
+        .rev()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits
+        .chars()
+        .rev()
+        .collect::<String>()
+        .parse()
+        .unwrap_or_else(|e| panic!("`{line}` carries no readable count: {e}"))
+}
+
+/// What a live node is doing, read while it is doing it.
+///
+/// Mid-round, `status` used to say a node had been in flight for thirty-four
+/// minutes and nothing else — the readout a healthy node has twice been
+/// reported dead against. The producer emits the tool summary this needs; the
+/// claim here is that it is read, and that it **advances** between two readings
+/// of a dispatch that is still in flight for both of them.
+#[test]
+fn status_says_what_a_live_dispatch_is_doing_and_the_readout_advances() {
+    let world = World::new("real-activity");
+    world.write_graphs();
+    world.script("turn.hold", "hold");
+    let path = world.plan("watched", &plan_of("watched", vec![agent("build", &[])]));
+    world
+        .run_on_agentgraph(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+
+    world.until("the dispatch to report a turn", |world| {
+        !world.events_of("watched", "turn-activity").is_empty()
+    });
+    // Read through the ordinary view wiring: `status` only reads the merged
+    // store, so the sibling behind it is the health probe's and nothing else.
+    let first = world.run(&["status", "watched"]);
+    first
+        .exited(0)
+        .out_has("build: running")
+        .out_has("now bash echo the turn ran")
+        .out_has("event(s)")
+        .out_has("ago");
+    let before = events_reported(&first.stdout, "build");
+
+    world.release("turn.go");
+    world.until("the dispatch to report a second turn", |world| {
+        world.events_of("watched", "turn-activity").len() > 1
+    });
+    let second = world.run(&["status", "watched"]);
+    second
+        .exited(0)
+        .out_has("build: running")
+        .out_has("now bash cargo llvm-cov --workspace");
+    assert!(
+        events_reported(&second.stdout, "build") > before,
+        "the readout did not advance while the node was still in flight:\n{}",
+        second.stdout
+    );
+
+    world.release("turn.settle");
+    world.until("the run to settle", |world| {
+        !world.events_of("watched", "round-finished").is_empty()
+    });
+}
+
+/// The tools a real dispatched turn used, read back off the CLI.
+///
+/// There was no transcript verb at all: the evidence was retained — the
+/// sibling stores each settled member's full onejudge report and says where —
+/// and nothing read it, so an agent supervising a run could see that a turn
+/// happened and never what it did.
+#[test]
+fn transcript_renders_a_real_dispatched_turns_tools_and_words() {
+    let world = World::new("real-transcript");
+    world.write_graphs();
+    let path = world.plan("read", &plan_of("read", vec![agent("build", &[])]));
+    world
+        .run_on_agentgraph(&["start", &path.to_string_lossy(), "--attach"])
+        .exited(0)
+        .settled();
+
+    let transcript = world.run(&["transcript", "read", "build"]);
+    transcript.exited(0).out_has("read  build");
+    // The tools, from the turn summaries the sibling emitted as it ran...
+    transcript.out_has("tool_call bash  echo the turn ran");
+    // ...and the words, out of the report that member settled with.
+    transcript.out_has("report ");
+    transcript.out_has("Ran what the task asked for.");
+    assert!(
+        !transcript.stdout.contains("unreadable from this host"),
+        "the retained report was named and not read:\n{}",
+        transcript.stdout
+    );
+
+    // A node this run has no record for is refused by name rather than answered
+    // with an empty transcript, which reads identically to a quiet one.
+    world
+        .run(&["transcript", "read", "nowhere"])
+        .exited(crate::harness::REFUSED)
+        .err_has("has recorded nothing for node 'nowhere'")
+        .err_has("build");
+}
+
 /// A launch the sibling refuses is a failed launch.
 ///
 /// The defect this guards against is not that the graph said no — it is that

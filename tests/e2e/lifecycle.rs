@@ -136,10 +136,13 @@ fn several_steps_share_one_branch_and_run_serially_in_topological_order() {
     });
     let run = settle(&world, "workstream", vec![node]);
 
+    // One settlement per dispatched step, in the order they settled: a
+    // dispatch records several envelopes and counting all of them would say a
+    // step ran as many times as it spoke.
     let steps: Vec<String> = world
         .journal(&run)
         .iter()
-        .filter(|event| event["source"] == "agentgraph")
+        .filter(|event| event["source"] == "agentgraph" && event["kind"] == "member-settled")
         .filter_map(|event| event["labels"]["step"].as_str().map(str::to_string))
         .collect();
     assert_eq!(
@@ -260,6 +263,86 @@ fn a_drafting_failure_falls_back_deterministic_and_still_publishes() {
         published.contains("chore: service"),
         "the deterministic title was not used: {published}"
     );
+}
+
+/// Publication, watched while it happens.
+///
+/// It is the longest wall-clock segment a lifecycle node has — the gate run,
+/// the push, the change request, the check polling, the merge — and read once
+/// at settlement every record of it appears at once, when it is over. The claim
+/// here is the opposite one: a record written *during* the publication is
+/// readable out of the merged store while the node is still in flight.
+#[test]
+fn a_publications_own_records_reach_the_journal_while_it_is_still_publishing() {
+    let world = World::new("lifecycle-livepublish");
+    world.script("publish.hold", "hold");
+    let path = world.plan(
+        "watched",
+        &plan_of("watched", vec![lifecycle("service", &[])]),
+    );
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+
+    world.until("the publication to wait on the lock", |world| {
+        world
+            .run(&["monitor", "watched"])
+            .stdout
+            .contains("lock-wait")
+    });
+    // Mid-publication, and readable: `monitor` renders the record and `status`
+    // still calls the node running. Both are what an operator has open.
+    let watching = world.run(&["status", "watched"]);
+    watching.exited(0).out_has("service: running");
+    assert!(
+        !world
+            .run(&["results", "watched"])
+            .stdout
+            .contains("service                  done"),
+        "the node settled before the publication was even watched: {}",
+        world.dump()
+    );
+    // Under the node it belongs to. A session does not know it is a graph node,
+    // so every per-node reader would otherwise take a whole publication for work
+    // that happened to nobody — and no view renders a relayed envelope's node,
+    // so the merged store the contract defines is where that is readable.
+    let waiting = &world.events_of("watched", "lock-wait")[0];
+    assert_eq!(waiting["labels"]["node"], "service", "{waiting}");
+    assert_eq!(waiting["source"], "vcs", "{waiting}");
+
+    world.release("publish.go");
+    world.until("the run to settle", |world| {
+        world.run(&["results", "watched"]).stdout.contains("done")
+    });
+    // And the rest of the publication landed too, exactly once each: `monitor`
+    // renders one line per event, so a record relayed twice — by a follow and by
+    // the read that covers for one — shows up as two.
+    let stream = world.run(&["monitor", "watched"]);
+    stream.exited(0);
+    for kind in [
+        "lock-acquired",
+        "gate-started",
+        "gate-verdict",
+        "push",
+        "change-opened",
+        "session-closed",
+    ] {
+        let seen = stream
+            .stdout
+            .lines()
+            .filter(|line| line.contains(kind))
+            .count();
+        assert_eq!(
+            seen, 1,
+            "{kind} reached the merged store {seen} time(s):\n{}",
+            stream.stdout
+        );
+    }
+    world
+        .run(&["results", "watched"])
+        .exited(0)
+        .out_has("service")
+        .out_has("done");
 }
 
 #[test]
@@ -465,8 +548,12 @@ fn a_session_stream_that_cannot_be_read_is_reported_and_does_not_fail_the_node()
     world.script("events.fail", "");
     let run = driven(&world, "silentstream", vec![lifecycle("service", &[])]);
 
-    // Said out loud. A silent gap in the merged store is what makes a later
-    // reader think nothing happened.
+    // Both halves of the recovery, through the CLI. The follow starts, its
+    // child refuses and relays nothing, so the node falls back to reading the
+    // stream once — and this message is the *fallback's* own, so seeing it is
+    // what proves the fallback ran rather than the follow having quietly
+    // covered for it. Said out loud either way: a silent gap in the merged
+    // store is what makes a later reader think nothing happened.
     run.1.err_has("cannot read session").err_has("events");
 
     // The evidence is missing, not the result: the node published and settled.

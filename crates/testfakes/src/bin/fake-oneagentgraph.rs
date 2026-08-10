@@ -13,6 +13,15 @@
 use onepipeline_testfakes as fake;
 use std::process::ExitCode;
 
+/// A readable document a settlement can be made to *point at* but which nothing
+/// should ever read back.
+///
+/// One recognisable string, in a valid report shape: a test asserts it never
+/// reaches a rendered transcript, so a reader that followed the path it was
+/// handed fails on the words rather than on a missing file.
+pub const PLANTED: &str =
+    r#"{"transcript":{"messages":[{"role":"assistant","content":"planted-and-never-read"}]}}"#;
+
 /// The exit code the real CLI answers an invalid configuration with — its own
 /// constant, so a double cannot answer a refusal with a code the sibling stopped
 /// using.
@@ -234,7 +243,14 @@ fn stream() -> String {
     format!("fake-oneagentgraph-{}", std::process::id())
 }
 
-/// Emit the turn's envelope, as the sibling would.
+/// Emit the turn's envelopes, as the sibling would: the tool summary from
+/// inside the turn, what the turn consumed, and the settlement that stores the
+/// member's full report.
+///
+/// Three kinds the real CLI really emits. A double that answered a dispatch
+/// with a kind of its own would be an oracle for a stream nothing produces —
+/// the same weakness that let every dispatch be refused while this suite stayed
+/// green.
 fn emit(args: &[String], node: &str, step: Option<&str>, task: &str) {
     let mut labels = stamped(args);
     labels.insert("member".to_string(), "worker".into());
@@ -245,27 +261,159 @@ fn emit(args: &[String], node: &str, step: Option<&str>, task: &str) {
     if let Some(step) = step {
         labels.insert("onepipeline.step".to_string(), step.into());
     }
-    println!(
-        "{}",
+    let envelope = |seq: u64, kind: &str, payload: serde_json::Value| {
+        println!(
+            "{}",
+            serde_json::json!({
+                "v": 1,
+                "ts": fake::now(),
+                "stream": stream(),
+                "seq": seq,
+                "source": "agentgraph",
+                "kind": kind,
+                "labels": labels,
+                "payload": payload,
+            })
+        );
+    };
+
+    envelope(
+        1,
+        "turn-activity",
         serde_json::json!({
-            "v": 1,
-            "ts": fake::now(),
-            "stream": stream(),
-            "seq": 1,
-            "source": "agentgraph",
-            "kind": "turn-finished",
-            "labels": labels,
-            "payload": {
-                "message": "the dispatch ran",
-                // Echoed so a test can assert the task prose the node was given,
-                // including the rendered planner-context section.
-                "task": task,
-                "dir": fake::flag(args, "--dir"),
-                // A pr-author dispatch answers with the title it drafted.
-                "title": drafted_title(task),
-            },
-        })
+            "kind": "tool_call",
+            "name": "bash",
+            "detail": "echo the turn ran",
+            "message": "the dispatch ran",
+            // Echoed so a test can assert the task prose the node was given,
+            // including the rendered planner-context section.
+            "task": task,
+            "dir": fake::flag(args, "--dir"),
+            // A pr-author dispatch answers with the title it drafted.
+            "title": drafted_title(task),
+        }),
     );
+    let report = report_of(task);
+    envelope(
+        2,
+        "turn-completed",
+        serde_json::json!({"usage": report["usage"]}),
+    );
+    // The report is *stored*, and the settlement says where — the sibling's own
+    // contract, and the only reason a turn's tools and words survive the
+    // process that produced them. Under a directory of this member's own,
+    // named exactly as the real library names it: a consumer only reads a
+    // `report_path` that names the file `oneagentgraph` itself writes.
+    let path = fake::script_dir()
+        .join("reports")
+        .join(format!("{}-{}", fake::segment(node), std::process::id()))
+        .join(oneagentgraph::member::REPORT_FILE);
+    // Where the settlement says the report went. Each branch is a real thing a
+    // producer — or something wearing one's clothes — can put on that line, and
+    // a consumer has to tell every one of them from a report it may read.
+    let scripted = |name: &str| fake::script_dir().join(name).exists();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let named = if scripted("report.elsewhere") {
+        // A readable file the producing library never writes, under a name
+        // nothing should follow.
+        let planted = path.with_file_name("notes.json");
+        let _ = std::fs::write(&planted, PLANTED);
+        Some(planted)
+    } else if scripted("report.symlink") {
+        // A path wearing the producer's own file name that *delivers* another
+        // file. The one case a name check alone cannot catch.
+        let secret = path.with_file_name("secret.json");
+        let _ = std::fs::write(&secret, PLANTED);
+        let link = path.with_file_name("linked");
+        let _ = std::fs::create_dir_all(&link);
+        let link = link.join(oneagentgraph::member::REPORT_FILE);
+        let _ = std::fs::remove_file(&link);
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(&secret, &link);
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_file(&secret, &link);
+        made.is_ok().then_some(link)
+    } else if scripted("report.directory") {
+        // A path that is not a file at all, wearing the report's name.
+        let dir = path.with_file_name("as-a-directory");
+        let _ = std::fs::create_dir_all(dir.join(oneagentgraph::member::REPORT_FILE));
+        Some(dir.join(oneagentgraph::member::REPORT_FILE))
+    } else if scripted("report.oversize") {
+        // Far past what a consumer will copy. Claimed rather than written: the
+        // bound is on the size the filesystem reports, and writing the bytes
+        // would be a slow way to say the same thing.
+        let _ = std::fs::write(&path, PLANTED);
+        let sized = std::fs::OpenOptions::new().write(true).open(&path);
+        if let Ok(file) = sized {
+            let _ = file.set_len(64 * 1024 * 1024);
+        }
+        Some(path.clone())
+    } else if scripted("report.missing") {
+        // A member that settled on a machine whose scratch this reader cannot
+        // reach: the settlement names where the report went and nothing wrote
+        // one there. The evidence is missing, not the settlement.
+        Some(path.clone())
+    } else {
+        // A report document a harness produced without a transcript: the
+        // verdict fields the settlement reads inline, and nothing else.
+        let document = if scripted("report.bare") {
+            serde_json::json!({"completion_reason": "done_when_met", "verdicts": []})
+        } else {
+            report.clone()
+        };
+        std::fs::write(&path, document.to_string())
+            .is_ok()
+            .then(|| path.clone())
+    };
+    envelope(
+        3,
+        "member-settled",
+        serde_json::json!({
+            "completed": true,
+            "verdict": [],
+            "completion_reason": "done_when_met",
+            "report_path": named.map(|path| path.display().to_string()),
+        }),
+    );
+}
+
+/// The onejudge report a settled member stores.
+///
+/// Two-party, because the shipped node-scope graph's `worker` is a two-party
+/// member: its agent side does the work and its judge side supervises it, and
+/// the split between what each spent is what the report carries and nothing on
+/// the wire does.
+fn report_of(task: &str) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": 7,
+        "transcript": {"messages": [
+            {"role": "user", "content": task},
+            {"role": "assistant", "content": "Ran what the task asked for.", "events": [
+                {"kind": "tool_call", "name": "bash",
+                 "input": {"command": "echo the turn ran"}, "index": 0},
+            ]},
+        ]},
+        "verdicts": [],
+        "completion_reason": "done_when_met",
+        "usage": {
+            "input_tokens": 1_200, "output_tokens": 340,
+            "cache_read_tokens": 900, "cache_write_tokens": 120, "cost_usd": 0.42,
+        },
+        "telemetry": {
+            "wall_ms": 1_000,
+            "agent": {"model_ms": 800, "usage": {
+                "input_tokens": 1_000, "output_tokens": 300,
+                "cache_read_tokens": 900, "cache_write_tokens": 120, "cost_usd": 0.40,
+            }},
+            "judge": {"model_ms": 100, "usage": {
+                "input_tokens": 200, "output_tokens": 40, "cost_usd": 0.02,
+            }},
+            "orchestration_ms": 100,
+            "sessions": [],
+        },
+    })
 }
 
 /// The title a `pr-author` dispatch drafts, when it is one.
