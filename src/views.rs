@@ -506,6 +506,10 @@ pub fn results(view: &RunView) -> String {
 /// are different facts, and the second is the one with a file to go and look at.
 pub fn transcript(view: &RunView, only: Option<&str>) -> String {
     let mut out = String::new();
+    // Read once for the whole run rather than per node: this is what refuses a
+    // settlement naming a file the producer never writes, and it says so out
+    // loud — once, not once for every node the run dispatched.
+    let retained = crate::report::retained(&view.events);
     for node in dispatched(view, only) {
         out.push_str(&format!("{}  {node}\n", view.paths.run));
         for event in view
@@ -538,8 +542,8 @@ pub fn transcript(view: &RunView, only: Option<&str>) -> String {
                 _ => {}
             }
         }
-        for retained in crate::report::retained(&view.events)
-            .into_iter()
+        for retained in retained
+            .iter()
             .filter(|retained| retained.node.as_deref() == Some(node.as_str()))
         {
             // Named by the member that settled with it: a graph runs more than
