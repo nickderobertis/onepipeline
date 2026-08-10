@@ -10,7 +10,38 @@
 // model turns to produce, and `dispatch.rs` is where the real `oneagentgraph` binary is
 // driven instead. `harness.rs` carries the same suppression and the full rationale.
 
-use crate::harness::{agent, human, lifecycle, plan_of, World};
+use crate::harness::{agent, human, lifecycle, plan_of, Run, World};
+
+/// The document a double plants where a settlement points but nothing should
+/// read, and the words that prove it was read if they ever appear.
+const PLANTED_DOCUMENT: &str =
+    r#"{"transcript":{"messages":[{"role":"assistant","content":"planted-and-never-read"}]}}"#;
+
+/// The one recognisable string inside it.
+const PLANTED_WORDS: &str = "planted-and-never-read";
+
+/// Run one round from this test rather than from the driver, keeping what it
+/// said: a refusal made as an envelope is ingested reaches the engine's own
+/// stderr, which in a detached run goes to a log no assertion can read.
+fn driven(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> (String, Run) {
+    world.script("driver.wait", "hold");
+    let path = world.plan(name, &plan_of(name, nodes));
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+    let round = world.run(&["round", "run", name]);
+    world.release("driver.go");
+    (name.to_string(), round)
+}
+
+/// How long a held publication phase is kept open, so its bucket is a real
+/// duration on the clock rather than a bucket that merely exists.
+const HELD: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// The floor a held stretch must clear once it has been measured. Below the
+/// hold, because the two records bracketing it are written either side of the
+/// rendezvous rather than exactly on it.
+const FLOOR: u64 = 250;
 
 fn settled(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
     let path = world.plan(name, &plan_of(name, nodes));
@@ -62,6 +93,7 @@ fn monitor_writes_nothing_and_consumes_nothing() {
         vec!["results", "readonly"],
         vec!["status", "readonly"],
         vec!["goals", "readonly"],
+        vec!["transcript", "readonly"],
         vec!["telemetry", "readonly"],
         vec!["runs"],
         vec!["host"],
@@ -184,6 +216,17 @@ fn status_carries_the_provider_health_block_from_the_sibling() {
         .out_has("providers: fake-provider");
 }
 
+/// Every measured bucket, summed. An unmeasured one carries no `ms` at all,
+/// which is the point: a zero there would read as a measurement.
+fn measured(document: &serde_json::Value) -> u64 {
+    document["buckets"]
+        .as_array()
+        .expect("buckets")
+        .iter()
+        .filter_map(|bucket| bucket.get("ms").and_then(serde_json::Value::as_u64))
+        .sum()
+}
+
 #[test]
 fn telemetry_buckets_sum_exactly_to_the_wall_clock() {
     let world = World::new("views-telemetry");
@@ -197,22 +240,169 @@ fn telemetry_buckets_sum_exactly_to_the_wall_clock() {
     telemetry.exited(0);
     let document = telemetry.json();
     let wall = document["wall_ms"].as_u64().expect("a wall clock");
-    let summed: u64 = document["buckets"]
+    assert_eq!(
+        measured(&document),
+        wall,
+        "the buckets do not sum to WALL: {document}"
+    );
+    assert_eq!(document["schema_version"], 2, "{document}");
+    assert_eq!(document["dispatches"], 2);
+    assert_eq!(document["settled_done"], 2);
+
+    // Eight buckets, and the two nothing in this stack measures are served
+    // absent rather than as a zero that reads as measured.
+    let named: Vec<&str> = document["buckets"]
         .as_array()
         .expect("buckets")
         .iter()
-        .map(|bucket| bucket["ms"].as_u64().expect("a bucket"))
-        .sum();
-    assert_eq!(summed, wall, "the buckets do not sum to WALL: {document}");
-    assert_eq!(document["dispatches"], 2);
-    assert_eq!(document["settled_done"], 2);
+        .map(|bucket| bucket["name"].as_str().expect("a bucket name"))
+        .collect();
+    assert_eq!(
+        named,
+        vec![
+            "agent",
+            "judge",
+            "llmlint",
+            "gate",
+            "publication_wait",
+            "lock_wait",
+            "setup",
+            "scheduling",
+        ],
+        "{document}"
+    );
+    for absent in ["judge", "llmlint"] {
+        let bucket = document["buckets"]
+            .as_array()
+            .expect("buckets")
+            .iter()
+            .find(|bucket| bucket["name"] == absent)
+            .expect("the bucket is still named");
+        assert!(
+            bucket.get("ms").is_none(),
+            "{absent} reported a measured span nothing produces: {bucket}"
+        );
+    }
 
     let breakdown = world.run(&["telemetry", &run, "--breakdown"]);
     breakdown
         .exited(0)
         .out_has("WALL")
-        .out_has("dispatching")
-        .out_has("orchestrating");
+        .out_has("agent")
+        .out_has("scheduling")
+        .out_has("not measured");
+}
+
+/// The number a run is budgeted against, on a host whose routine failure mode
+/// is quota exhaustion across five identities.
+#[test]
+fn telemetry_reports_what_each_party_spent() {
+    let world = World::new("views-usage");
+    let run = settled(&world, "spent", vec![agent("build", &[])]);
+
+    let document = world.run(&["telemetry", &run]).json();
+    let usage = &document["usage"];
+    let total = &usage["total"];
+    assert!(
+        total["input"].as_u64().is_some_and(|tokens| tokens > 0),
+        "the run reported no input tokens: {document}"
+    );
+    assert!(
+        total["output"].as_u64().is_some_and(|tokens| tokens > 0),
+        "the run reported no output tokens: {document}"
+    );
+    assert!(total["cost_usd"].as_f64().is_some(), "{document}");
+
+    // The split between the sides of a two-party member is in the report it
+    // settled with, which is where it is read from.
+    assert!(
+        usage["agent"]["input"].as_u64().is_some_and(|t| t > 0),
+        "the agent side reported nothing: {document}"
+    );
+    assert!(
+        usage["judge"]["input"].as_u64().is_some_and(|t| t > 0),
+        "the judge side reported nothing: {document}"
+    );
+    // Nothing in this stack runs an LLM-lint pass, so it is absent rather than
+    // present and zero.
+    assert!(usage.get("llmlint").is_none(), "{document}");
+
+    world
+        .run(&["telemetry", &run, "--breakdown"])
+        .exited(0)
+        .out_has("usage agent")
+        .out_has("usage total");
+}
+
+/// A gate run and a lock wait are the two stretches an operator most needs
+/// answered apart from the agent's — and a lifecycle node spends real time in
+/// both.
+#[test]
+fn telemetry_separates_gate_and_lock_time_from_agent_time() {
+    let world = World::new("views-gatetime");
+    // Both stretches are held open for a measurable span, so each is a real
+    // duration on the clock rather than a bucket that merely exists.
+    world.script("publish.hold", "hold");
+    world.script("gate.hold", "hold");
+    let path = world.plan("gated", &plan_of("gated", vec![lifecycle("service", &[])]));
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+
+    for (waited, release, held) in [
+        ("lock-wait", "publish.go", "the lock wait"),
+        ("gate-started", "gate.go", "the gate"),
+    ] {
+        world.until(&format!("{held} to start"), |world| {
+            !world.events_of("gated", waited).is_empty()
+        });
+        let since = std::time::Instant::now();
+        world.until(&format!("{held} to last a measurable stretch"), |_| {
+            since.elapsed() >= HELD
+        });
+        world.release(release);
+    }
+    world.until("the run to settle", |world| {
+        !world.events_of("gated", "round-finished").is_empty()
+    });
+
+    let document = world.run(&["telemetry", "gated"]).json();
+    let span = |name: &str| {
+        document["buckets"]
+            .as_array()
+            .expect("buckets")
+            .iter()
+            .find(|bucket| bucket["name"] == name)
+            .unwrap_or_else(|| panic!("a {name} bucket"))
+            .get("ms")
+            .and_then(serde_json::Value::as_u64)
+    };
+    // Each held stretch is its own bucket, and neither is inside the agent's:
+    // the whole point of the eight-way split.
+    for name in ["lock_wait", "gate"] {
+        let ms = span(name).unwrap_or_else(|| panic!("{name} is unmeasured: {document}"));
+        assert!(
+            ms >= FLOOR,
+            "{name} measured {ms}ms of a stretch held for {}ms: {document}",
+            HELD.as_millis()
+        );
+    }
+    let agent = span("agent").expect("the agent bucket is measured");
+    assert!(
+        agent < span("gate").expect("gate") + span("lock_wait").expect("lock_wait"),
+        "the held stretches were charged to the agent: {document}"
+    );
+    for name in ["publication_wait", "setup"] {
+        assert!(
+            span(name).is_some(),
+            "{name} is unmeasured for a run that published: {document}"
+        );
+    }
+    assert_eq!(
+        measured(&document),
+        document["wall_ms"].as_u64().expect("a wall clock"),
+        "{document}"
+    );
 }
 
 #[test]
@@ -231,13 +421,308 @@ fn telemetry_counts_a_no_diff_node_without_counting_a_dispatch() {
     let document = world.run(&["telemetry", &run]).json();
     assert_eq!(document["no_diff"], 1);
     assert_eq!(document["dispatches"], 0);
-    let summed: u64 = document["buckets"]
-        .as_array()
-        .expect("buckets")
-        .iter()
-        .map(|bucket| bucket["ms"].as_u64().expect("a bucket"))
-        .sum();
-    assert_eq!(summed, document["wall_ms"].as_u64().expect("a wall clock"));
+    assert_eq!(
+        measured(&document),
+        document["wall_ms"].as_u64().expect("a wall clock")
+    );
+    // A run that dispatched nothing spent nothing, and says so by absence.
+    assert!(
+        document["usage"].as_object().is_some_and(|u| u.is_empty()),
+        "{document}"
+    );
+}
+
+/// A dispatch whose report was never written where its settlement said.
+///
+/// The settlement still names where it went, so the evidence is missing rather
+/// than the result — and every view that would have read it says which of the
+/// two it is meeting instead of reporting a dispatch that did nothing.
+#[test]
+fn evidence_this_run_could_not_keep_is_reported_as_unread_rather_than_as_nothing() {
+    let world = World::new("views-unread");
+    world.script("report.missing", "");
+    let run = settled(&world, "unread", vec![agent("build", &[])]);
+
+    let transcript = world.run(&["transcript", &run]);
+    transcript
+        .exited(0)
+        .out_has("unread  build")
+        // The turn's tools are in the merged store and still render.
+        .out_has("tool_call bash")
+        // The words are not, and the line says so rather than omitting the
+        // report it has no copy of.
+        .out_has("not retained by this run");
+
+    // Same fact in the telemetry: the member's total is on the wire, and the
+    // split between its two sides was only ever in the report.
+    let usage = world.run(&["telemetry", &run]).json()["usage"].clone();
+    assert!(
+        usage["total"]["input"].as_u64().is_some_and(|t| t > 0),
+        "{usage}"
+    );
+    assert!(
+        usage.get("agent").is_none() && usage.get("judge").is_none(),
+        "an unreadable report was reported as a measured split: {usage}"
+    );
+}
+
+/// Given no node, the verb covers every node the run dispatched.
+///
+/// The form an agent reaches for first: it does not yet know which node it is
+/// looking for, which is the whole reason to read a transcript.
+#[test]
+fn transcript_given_no_node_renders_every_dispatch_the_run_recorded() {
+    let world = World::new("views-alltranscripts");
+    let run = settled(
+        &world,
+        "everynode",
+        vec![agent("first", &[]), agent("second", &["first"])],
+    );
+
+    let transcript = world.run(&["transcript", &run]);
+    transcript.exited(0);
+    for node in ["first", "second"] {
+        transcript.out_has(&format!("everynode  {node}"));
+    }
+    // Each with its own turn, its own tools, and its own retained report. Two
+    // tool lines per node, because the verb reads both sources it names: the
+    // bounded summary the store carried while the turn ran, and the structured
+    // input the report kept once it settled.
+    assert_eq!(
+        transcript
+            .stdout
+            .lines()
+            .filter(|line| line.contains("tool_call bash"))
+            .count(),
+        4,
+        "a node's tools were missed or doubled:\n{}",
+        transcript.stdout
+    );
+    assert_eq!(
+        transcript
+            .stdout
+            .lines()
+            .filter(|line| line.trim_start().starts_with("report "))
+            .count(),
+        2,
+        "a node's retained report was missed or doubled:\n{}",
+        transcript.stdout
+    );
+}
+
+/// A settlement naming a file the producing library never writes.
+///
+/// Nothing follows it: the run keeps its own copy of the evidence it ingests,
+/// and every reader afterwards opens only that. The refusal is said out loud
+/// where the ingest happened, and the transcript says the report is not there.
+#[test]
+fn a_settlement_naming_a_file_the_producer_never_writes_is_refused_out_loud() {
+    let world = World::new("views-elsewhere");
+    world.script("report.elsewhere", "");
+    let run = driven(&world, "elsewhere", vec![agent("build", &[])]);
+    // Refused as it was ingested, naming the file and why.
+    run.1
+        .err_has("not retaining the report at")
+        .err_has("notes.json");
+
+    let transcript = world.run(&["transcript", &run.0]);
+    transcript
+        .exited(0)
+        // The turn's own record still renders; only the named file is refused.
+        .out_has("tool_call bash")
+        .out_has("not retained by this run");
+    assert!(
+        !transcript.stdout.contains(PLANTED_WORDS),
+        "a file the producer never writes was read anyway:\n{}",
+        transcript.stdout
+    );
+}
+
+/// A settlement naming a **symlink** that wears the producer's own file name.
+///
+/// The one case a name check alone cannot catch: the path says `report.json`
+/// and delivers something else. Ingest does not follow it, so there is nothing
+/// for a reader to open.
+#[test]
+fn a_settlement_naming_a_symlink_is_refused_and_never_followed() {
+    let world = World::new("views-symlink");
+    world.script("report.symlink", "");
+    let run = driven(&world, "linked", vec![agent("build", &[])]);
+    run.1
+        .err_has("not retaining the report at")
+        .err_has("symlink");
+
+    let transcript = world.run(&["transcript", &run.0]);
+    transcript.exited(0).out_has("not retained by this run");
+    assert!(
+        !transcript.stdout.contains(PLANTED_WORDS),
+        "the symlink was followed to what it pointed at:\n{}",
+        transcript.stdout
+    );
+}
+
+/// A settlement naming something that is not a file, and one naming a file past
+/// the bound a copy will take.
+///
+/// Both are refused as they are ingested and both leave the reader saying the
+/// report is not there — the shapes a name check alone would wave through, and
+/// the one that would let a producer fill the runs root or stall the writer
+/// that is copying it.
+#[test]
+fn a_settlement_naming_a_directory_or_an_oversize_file_is_refused_at_ingest() {
+    // A directory is the one shape the two platforms refuse at a different
+    // step, so its *reason* is the one thing written per-platform here. Unix
+    // opens a directory, and the metadata taken from that handle says what it
+    // is; Windows will not hand out a handle to one at all, so ingest never
+    // gets past the open. Refused either way, without reading it either way —
+    // which is what the rest of this journey asserts, unchanged on both.
+    #[cfg(unix)]
+    let a_directory_is = "it is not a file";
+    #[cfg(not(unix))]
+    let a_directory_is = "it cannot be opened as a plain file";
+
+    for (scripted, why) in [
+        ("report.directory", a_directory_is),
+        ("report.oversize", "larger than"),
+    ] {
+        let world = World::new(&format!("views-{}", scripted.replace('.', "-")));
+        world.script(scripted, "");
+        let run = driven(&world, "refused", vec![agent("build", &[])]);
+        run.1.err_has("not retaining the report at").err_has(why);
+
+        let transcript = world.run(&["transcript", &run.0]);
+        transcript.exited(0).out_has("not retained by this run");
+        assert!(
+            !transcript.stdout.contains(PLANTED_WORDS),
+            "'{scripted}' was copied and read anyway:\n{}",
+            transcript.stdout
+        );
+    }
+}
+
+// llmlint: ignore-block[tests_mirror_real_usage] the *arrangement* below writes a line
+// into the run's store on purpose, because that is the threat: a settlement no producer
+// emitted. No command forges one — a user interface that could would be the defect — so
+// there is nothing else to reach this condition with. Everything asserted afterwards is
+// through the CLI, which is where the claim lives: `transcript` does not open what the
+// line named, and says so.
+/// A settlement written into the journal *after* the fact, naming a readable
+/// file outside anything this run owns.
+///
+/// The threat the confinement exists for: a line in the store is not a
+/// producer, and a reader that opened what one pointed at would print any JSON
+/// document on the host. Only what the run copied at ingest is ever read.
+#[test]
+fn a_journal_line_naming_a_file_outside_the_run_is_never_read() {
+    let world = World::new("views-outofroot");
+    let run = settled(&world, "planted", vec![agent("build", &[])]);
+
+    // A readable report, in the producing library's own file name, outside every
+    // directory this run owns.
+    let outside = world.root.join("outside");
+    std::fs::create_dir_all(&outside).expect("a directory outside the run");
+    let planted = outside.join("report.json");
+    std::fs::write(&planted, PLANTED_DOCUMENT).expect("a planted report");
+
+    let forged = serde_json::json!({
+        "v": 1,
+        "ts": "2099-01-01T00:00:00.000Z",
+        "stream": "forged",
+        "seq": 0,
+        "source": "agentgraph",
+        "kind": "member-settled",
+        "labels": {"node": "build", "onepipeline.node": "build"},
+        "payload": {"report_path": planted.display().to_string()},
+    });
+    let journal = world.run_file(&run, "events.jsonl");
+    let mut existing = std::fs::read_to_string(&journal).expect("the journal reads");
+    existing.push_str(&format!("{forged}\n"));
+    std::fs::write(&journal, existing).expect("the journal is appended to");
+
+    let transcript = world.run(&["transcript", &run]);
+    transcript
+        .exited(0)
+        .out_has(&planted.display().to_string())
+        .out_has("not retained by this run");
+    assert!(
+        !transcript.stdout.contains(PLANTED_WORDS),
+        "a path a journal line named was read:\n{}",
+        transcript.stdout
+    );
+    // And the same line buys nothing in the telemetry, which reads the same copy.
+    let usage = world.run(&["telemetry", &run]).json()["usage"].clone();
+    assert!(
+        usage.get("agent").is_some(),
+        "the real report still counts: {usage}"
+    );
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+/// A report a harness produced without a transcript. It is a report this build
+/// can say nothing further about, which is not a dispatch that did nothing.
+#[test]
+fn a_retained_report_carrying_no_transcript_says_so() {
+    let world = World::new("views-bare");
+    world.script("report.bare", "");
+    let run = settled(&world, "bare", vec![agent("build", &[])]);
+
+    world
+        .run(&["transcript", &run])
+        .exited(0)
+        .out_has("report ")
+        .out_has("it carries no transcript");
+}
+
+/// A dispatch that has recorded something without naming a tool claims the
+/// count and the age, and nothing more.
+///
+/// The session a lifecycle node opens is recorded before its first turn is, so
+/// this is the state every lifecycle node passes through — and it is where a
+/// readout that invented a "now" would be inventing it.
+#[test]
+fn a_dispatch_that_has_named_no_tool_reports_its_count_rather_than_a_guess() {
+    let world = World::new("views-nameless");
+    world.script("service.wait", "hold");
+    let path = world.plan(
+        "nameless",
+        &plan_of("nameless", vec![lifecycle("service", &[])]),
+    );
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+    world.until("the session to be recorded", |world| {
+        !world.events_of("nameless", "session-opened").is_empty()
+    });
+
+    let status = world.run(&["status", "nameless"]);
+    status
+        .exited(0)
+        .out_has("service: running")
+        .out_has("event(s)");
+    assert!(
+        !status.stdout.contains("now "),
+        "a dispatch that has named no tool was reported doing one:\n{}",
+        status.stdout
+    );
+    world.release("service.go");
+}
+
+/// A run whose driver has not dispatched anything yet has no transcript, and
+/// says so rather than rendering an empty one.
+#[test]
+fn a_run_that_has_dispatched_nothing_says_it_has_no_transcript() {
+    let world = World::new("views-notranscript");
+    world.script("driver.wait", "hold");
+    let path = world.plan("quiet", &plan_of("quiet", vec![agent("build", &[])]));
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+
+    world
+        .run(&["transcript", "quiet"])
+        .exited(0)
+        .out_has("no dispatch has recorded a transcript");
+    world.release("driver.go");
 }
 
 #[test]

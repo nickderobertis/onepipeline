@@ -6,10 +6,16 @@ code takes the nearest thing that does exist, and the divergence is recorded
 here as a proposal for the planner who owns the contract. Nothing on this list is
 resolved unilaterally.
 
-Every entry below has since been **ruled on by the planner who owns the
-contract**, and `docs/contract.md` was amended to carry each ruling. The entries
-stay for the record: each states what diverged, what was ruled, and where the
-amended contract now says it.
+Entries **1–9** have since been **ruled on by the planner who owns the
+contract**, and `docs/contract.md` was amended to carry each ruling. They stay
+for the record: each states what diverged, what was ruled, and where the amended
+contract now says it.
+
+Entries **10 onward are open**. Each states what the code does today and the
+proposal it is waiting on — most of them a question for a *producer* rather than
+for this crate, because `oneagentgraph` and `onevcs` are independent tools that
+expose general integration hooks only and nothing in them may know about this
+one. An open entry is recorded here and never resolved from this repository.
 
 ## 1. `ResolvedGraphRef` is not a type `oneagentgraph` exports — RESOLVED
 
@@ -216,3 +222,109 @@ being preserved. The contract now states all four:
   written by several processes, so no single stream's `seq` describes it.
 
 Both kinds are `onepipeline`'s own, and divergence 6 now enumerates them.
+
+## 9. The views were not the 1:1 port the contract claimed — RESOLVED
+
+**Ruling: state what the views actually report. The buckets are the eight
+`ai-orchestrator` carries, and `usage` exists.**
+
+The contract said "Views (CLI, semantics ported 1:1) … WALL buckets that sum
+exactly", and they were not ported 1:1:
+
+- `BucketName` had four variants — `dispatching`, `awaiting-planner`,
+  `awaiting-human`, `orchestrating` — where the wire and `ai-orchestrator` both
+  carry eight, and the reduction was not recorded anywhere.
+- `RunTelemetry` carried **no usage field at all**, while the module's own doc
+  comment and the CLI's help both promised "session timing and usage".
+- `status` said a node had been in flight for thirty-four minutes and nothing
+  else, though `oneagentgraph` emits a bounded tool summary from both member
+  kinds and this crate already relayed it into the journal unread.
+- A lifecycle node's session stream was read once, immediately before `close`,
+  so the whole publication — the longest wall-clock segment the node has —
+  appeared in one batch when it was already over.
+- There was no transcript verb, though the evidence a turn leaves behind is
+  retained and named on every `member-settled`.
+
+The contract now states each of these: the eight bucket names, the four usage
+parties and their fields, the per-node activity readout, the followed session
+stream, and `transcript`. `awaiting-planner` and `awaiting-human` are **not**
+among the eight; the time they named lands in `scheduling`, whose definition now
+says so. The telemetry document's `schema_version` went from `1` to `2`, because
+a consumer filtering on `dispatching` finds no such bucket under `2`.
+
+## 10. The merged stream does not say which side of a turn ran — OPEN
+
+**Proposal (for `oneagentgraph`): stamp the conversation side on a turn, the way
+`fallback-advanced` already carries `role: agent | judge`.**
+
+The contract's eight buckets and four usage parties both distinguish the agent
+side of a dispatch from the judge side supervising it. The *usage* split is
+answerable — the onejudge report a member settles with carries
+`telemetry.agent.usage` and `telemetry.judge.usage`, and this crate reads it
+from the `report_path` the settlement names. The *timing* split is not: only the
+agent side's tool events are streamed, and no `turn-started`, `turn-activity`, or
+`turn-completed` says which side it belongs to.
+
+So the `judge` **bucket** is served absent rather than as a zero, and the judge's
+wall time is inside `agent` until a producer says otherwise.
+`telemetry::of_run` already reads `payload.role` where one is stamped, so a
+producer that adds it needs no change here. The `judge` **party** of `usage` is
+populated today.
+
+## 11. Nothing in this stack runs an LLM-lint pass — OPEN
+
+**Proposal: leave `llmlint` absent until something produces it, or drop it from
+the contract's party and bucket lists.**
+
+The contract names `llmlint` as one of the four usage parties and one of the
+eight buckets, because `ai-orchestrator` accounts for one. No member of the
+shipped graphs runs an LLM-lint pass and no library in the stack reports one, so
+both are served **absent**. That is deliberate and is the rule the contract
+states — an unmeasured bucket must not read as a measured zero — but it means
+two named slots are permanently empty until a producer fills them.
+
+## 12. `turn-completed` spells its usage two ways — OPEN
+
+**Proposal (for `oneagentgraph`): make the emitted payload and the declared type
+agree.**
+
+`oneagentgraph::event::TurnCompleted` declares `usage` as a struct spelling the
+numbers `tokens_in`, `tokens_out`, `cache_read`, `cache_write`, `cost`,
+`duration`. What the library actually emits is the onejudge report's own usage
+object, which spells them `input_tokens`, `output_tokens`, `cache_read_tokens`,
+`cache_write_tokens`, `cost_usd` — and that is what its own text renderer reads.
+
+This crate reads **both** spellings. Picking one would leave a run whose
+producer used the other reporting no usage at all, and on a host whose routine
+failure mode is quota exhaustion a silently unaccounted run is worse than a
+verbose reader.
+
+For the same reason the retained report is read **structurally**, by field name,
+rather than through the producing libraries' own types: it is a sibling's
+artifact, and a stricter read would refuse a whole report over one field it did
+not recognise and report nothing at all.
+
+The report is also read out of **this run's own copy** rather than from the path
+`report_path` names. `oneagentgraph` mints that path under a state root this
+crate neither chooses nor can recompute: the constant naming the environment
+variable lives in that library's `src/main.rs`, private to its binary, its
+library exposes no accessor, an operator moves the root with a variable this
+crate does not set, and a future executor stores the report on another machine
+entirely. So there is no root to pin it to, and one pinned here would be this
+crate re-declaring a sibling's config — refusing legitimate reports the moment
+it was wrong, which for evidence is the wrong direction to fail in.
+
+What there *is* instead is a moment when the path carries the producer's
+authority: the envelope arriving on the stdout of a process this crate started.
+The copy is taken there — refusing a name that is not the producing library's
+own `REPORT_FILE`, a symlink, anything that is not a plain file, and anything
+past a size bound — and every reader afterwards opens only that copy, at a name
+derived from the settlement. A line forged into a journal afterwards reaches
+nothing at all.
+
+**Proposal (for `oneagentgraph`): expose the state root its binary resolves.**
+A `pub fn state_dir(env) -> PathBuf` on the library, or the `STATE_DIR_ENV`
+constant made public, would let this crate confine the ingest to a
+producer-owned root as well — a second lock on the same door. It is a general
+accessor for a location that library already computes, so nothing in it would
+need to know this crate exists.

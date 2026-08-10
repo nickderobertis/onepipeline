@@ -124,6 +124,33 @@ pub fn label(args: &[String], key: &str) -> Option<String> {
         .find_map(|pair| pair.strip_prefix(&prefix).map(str::to_string))
 }
 
+/// One externally-supplied name, as a single path segment.
+///
+/// A double is handed node ids and session tokens that came off a plan or a
+/// command line, and it writes files named after them. Interpolated raw, a name
+/// carrying a separator or a `..` would put a double's scratch outside the
+/// directory the test gave it. So exactly three characters survive beside
+/// letters and digits — `-`, `_`, and nothing else — which leaves neither a
+/// separator nor a dot to build one out of, and an empty result gets a name of
+/// its own rather than resolving to the directory itself.
+pub fn segment(name: &str) -> String {
+    let mapped: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    if mapped.is_empty() {
+        "unnamed".to_string()
+    } else {
+        mapped
+    }
+}
+
 /// A per-node script file, e.g. `build.fail`.
 pub fn node_script(dir: &Path, node: &str, suffix: &str) -> Option<String> {
     std::fs::read_to_string(dir.join(format!("{node}.{suffix}")))

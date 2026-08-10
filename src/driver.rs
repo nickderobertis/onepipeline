@@ -22,7 +22,7 @@ use crate::agentgraph;
 use crate::channel::{ChannelState, Command, Reply, Surface, SurfaceKind};
 use crate::cli::{
     AttestArgs, ChannelCommand, Cli, OptionalRunArgs, ReplyArgs, RoundCommand, RunArgs, RunsArgs,
-    StartArgs, StopArgs, SurfaceArgs, TelemetryArgs,
+    StartArgs, StopArgs, SurfaceArgs, TelemetryArgs, TranscriptArgs,
 };
 use crate::edits;
 use crate::engine;
@@ -79,6 +79,7 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             Ok(EXIT_SUCCESS)
         }
         Verb::Goals(args) => report(&args, views::goals),
+        Verb::Transcript(args) => transcript(&args),
         Verb::Telemetry(args) => report_telemetry(&args),
     }
 }
@@ -896,6 +897,31 @@ fn report(args: &OptionalRunArgs, render: fn(&[RunView]) -> String) -> Result<i3
     Ok(EXIT_SUCCESS)
 }
 
+/// `onepipeline transcript`.
+///
+/// A node this run never dispatched is refused rather than answered with an
+/// empty transcript: the two read alike, and only one of them means the reader
+/// typed a name that is not in this run.
+fn transcript(args: &TranscriptArgs) -> Result<i32> {
+    let view = RunView::open(&resolve(&args.run)?)?;
+    if let Some(node) = &args.node {
+        if views::nodes_with_agent_records(&view, Some(node)).is_empty() {
+            let recorded = views::nodes_with_agent_records(&view, None);
+            return Err(Error::Refused(format!(
+                "run '{}' has recorded nothing for node '{node}'; it has records for: {}",
+                args.run,
+                if recorded.is_empty() {
+                    "nothing yet".to_string()
+                } else {
+                    recorded.join(", ")
+                }
+            )));
+        }
+    }
+    print!("{}", views::transcript(&view, args.node.as_deref()));
+    Ok(EXIT_SUCCESS)
+}
+
 /// `onepipeline telemetry`.
 fn report_telemetry(args: &TelemetryArgs) -> Result<i32> {
     let views = match &args.run {
@@ -903,7 +929,7 @@ fn report_telemetry(args: &TelemetryArgs) -> Result<i32> {
         None => RunView::all(&ledger::runs_root()),
     };
     for view in &views {
-        let aggregated = telemetry::of_run(&view.paths.run, &view.events);
+        let aggregated = telemetry::of_run(&view.paths, &view.events);
         if args.breakdown {
             print!("{}", telemetry::render_breakdown(&aggregated));
         } else {

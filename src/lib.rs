@@ -60,6 +60,7 @@ mod journal;
 mod ledger;
 mod lifecycle;
 mod projection;
+mod report;
 mod sys;
 mod telemetry;
 mod vcs;

@@ -34,6 +34,9 @@ categories = ["command-line-utilities", "development-tools"]
 include = [
   "src/**/*.rs",
   "tests/**/*.rs",
+  # The checked-in telemetry golden, which `src/telemetry.rs` reads at compile
+  # time: without it the packaged crate does not build, let alone test.
+  "tests/golden/*.json",
   "Cargo.toml",
   "README.md",
   "LICENSE",

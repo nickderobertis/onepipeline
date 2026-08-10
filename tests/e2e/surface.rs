@@ -41,6 +41,7 @@ const COMMANDS: &[(&str, &[&str])] = &[
     ("monitor", &["monitor", "run-1"]),
     ("results", &["results", "run-1"]),
     ("goals", &["goals"]),
+    ("transcript", &["transcript", "run-1"]),
     ("telemetry", &["telemetry"]),
 ];
 
@@ -93,6 +94,7 @@ fn a_verb_that_names_a_run_nobody_recorded_refuses_and_says_where_it_looked() {
         vec!["next", "ghost"],
         vec!["monitor", "ghost"],
         vec!["results", "ghost"],
+        vec!["transcript", "ghost"],
         vec!["status", "ghost"],
         vec!["stop", "ghost"],
         vec!["adopt", "ghost"],
