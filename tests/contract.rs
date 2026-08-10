@@ -1392,6 +1392,7 @@ fn the_readmes_interface_claims_match_the_code_they_describe() {
         "monitor",
         "results",
         "goals",
+        "transcript",
         "telemetry",
     ] {
         assert!(
