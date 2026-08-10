@@ -409,6 +409,58 @@ fn telemetry_counts_a_no_diff_node_without_counting_a_dispatch() {
     );
 }
 
+/// A dispatch whose retained report this host cannot reach.
+///
+/// The settlement still names where the report went, so the evidence is missing
+/// rather than the result — and every view that would have read it says which
+/// of the two it is meeting instead of reporting a dispatch that did nothing.
+#[test]
+fn evidence_this_host_cannot_read_is_reported_as_unread_rather_than_as_nothing() {
+    let world = World::new("views-unread");
+    world.script("report.missing", "");
+    let run = settled(&world, "unread", vec![agent("build", &[])]);
+
+    let transcript = world.run(&["transcript", &run]);
+    transcript
+        .exited(0)
+        .out_has("unread  build")
+        // The turn's tools are in the merged store and still render.
+        .out_has("tool_call bash")
+        // The words are not, and the line says so rather than omitting the
+        // report it cannot read.
+        .out_has("unreadable from this host");
+
+    // Same fact in the telemetry: the member's total is on the wire, and the
+    // split between its two sides was only ever in the report.
+    let usage = world.run(&["telemetry", &run]).json()["usage"].clone();
+    assert!(
+        usage["total"]["input"].as_u64().is_some_and(|t| t > 0),
+        "{usage}"
+    );
+    assert!(
+        usage.get("agent").is_none() && usage.get("judge").is_none(),
+        "an unreadable report was reported as a measured split: {usage}"
+    );
+}
+
+/// A run whose driver has not dispatched anything yet has no transcript, and
+/// says so rather than rendering an empty one.
+#[test]
+fn a_run_that_has_dispatched_nothing_says_it_has_no_transcript() {
+    let world = World::new("views-notranscript");
+    world.script("driver.wait", "hold");
+    let path = world.plan("quiet", &plan_of("quiet", vec![agent("build", &[])]));
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+
+    world
+        .run(&["transcript", "quiet"])
+        .exited(0)
+        .out_has("no dispatch has recorded a transcript");
+    world.release("driver.go");
+}
+
 #[test]
 fn runs_summarises_every_recorded_run_and_says_whose_it_is() {
     let world = World::new("views-runs");

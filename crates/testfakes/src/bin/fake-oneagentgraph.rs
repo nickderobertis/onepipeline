@@ -292,14 +292,25 @@ fn emit(args: &[String], node: &str, step: Option<&str>, task: &str) {
     );
     // The report is *stored*, and the settlement says where — the sibling's own
     // contract, and the only reason a turn's tools and words survive the
-    // process that produced them.
+    // process that produced them. Under a directory of this member's own,
+    // named exactly as the real library names it: a consumer only reads a
+    // `report_path` that names the file `oneagentgraph` itself writes.
     let path = fake::script_dir()
         .join("reports")
-        .join(format!("{node}-{}.json", std::process::id()));
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let stored = std::fs::write(&path, report.to_string()).is_ok();
+        .join(format!("{}-{}", fake::segment(node), std::process::id()))
+        .join(oneagentgraph::member::REPORT_FILE);
+    // A member that settled on a machine whose scratch this reader cannot
+    // reach: the settlement still names where the report went, and the file is
+    // not there to read. The evidence is missing, not the settlement — so the
+    // path is published either way, which is the whole scenario.
+    let stored = if fake::script_dir().join("report.missing").exists() {
+        true
+    } else {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        std::fs::write(&path, report.to_string()).is_ok()
+    };
     envelope(
         3,
         "member-settled",

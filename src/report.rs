@@ -13,6 +13,16 @@
 //! is the wrong direction to fail in. Every other cross-library read here is
 //! lenient for the same reason.
 
+// llmlint: ignore-file[invalid_states_unrepresentable] `Turn::role` and `Tool::kind` are
+// **onejudge's** vocabulary, read out of an artifact that library wrote, and this crate
+// only renders them. Narrowing either into an enum here would re-declare a vocabulary a
+// sibling owns — the re-declaration src/AGENTS.md forbids — and would make a role or a
+// tool kind that a newer onejudge emits unrenderable, which for evidence is the wrong
+// direction to fail in. `src/event.rs` and `src/vcs.rs` carry the same suppression for the
+// same reason. The one place this crate *branches* on a sibling's role,
+// `telemetry::of_run`, parses it through `oneagentgraph::event::Role` rather than matching
+// strings.
+
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
@@ -42,6 +52,15 @@ pub struct Retained {
 /// empty path: the producer says so with a null `report_path`, and a consumer
 /// that invented a path for it would send a reader looking for a file nobody
 /// wrote.
+///
+/// The path is a **trust boundary**: it arrives on a journal line, and this
+/// crate is about to open it and print what is inside. So it is accepted only
+/// where it names the file the producing library itself writes —
+/// [`oneagentgraph::member::REPORT_FILE`] — which is the sibling's own constant
+/// rather than a spelling this crate chose, so it cannot drift from what
+/// `member-settled` actually points at. Anything else is refused out loud: a
+/// line naming some other file is not a report, and reading it would make this
+/// verb an arbitrary-file reader driven by whatever wrote to the journal.
 pub fn retained(events: &[Envelope]) -> Vec<Retained> {
     events
         .iter()
@@ -52,6 +71,16 @@ pub fn retained(events: &[Envelope]) -> Vec<Retained> {
                 .get(REPORT_PATH)
                 .and_then(Value::as_str)
                 .filter(|path| !path.is_empty())?;
+            if Path::new(path).file_name().and_then(|name| name.to_str())
+                != Some(oneagentgraph::member::REPORT_FILE)
+            {
+                eprintln!(
+                    "onepipeline: ignoring a member-settled naming '{path}', which is not a \
+                     {} the producing library wrote",
+                    oneagentgraph::member::REPORT_FILE
+                );
+                return None;
+            }
             Some(Retained {
                 node: event.labels.node.clone(),
                 member: event
@@ -153,6 +182,12 @@ mod tests {
     use crate::event::{EventKind, Labels, ENVELOPE_VERSION};
     use serde_json::json;
 
+    /// A path naming the file the producing library writes, under a directory
+    /// of its own.
+    fn stored(dir: &str) -> String {
+        format!("{dir}/{}", oneagentgraph::member::REPORT_FILE)
+    }
+
     fn settled(node: Option<&str>, path: Option<&str>) -> Envelope {
         let mut labels = Labels {
             node: node.map(str::to_string),
@@ -174,11 +209,12 @@ mod tests {
 
     #[test]
     fn a_settlement_that_stored_a_report_names_where_it_went() {
-        let retained = retained(&[settled(Some("build"), Some("/tmp/report.json"))]);
+        let stored = stored("/tmp/member");
+        let retained = retained(&[settled(Some("build"), Some(&stored))]);
         assert_eq!(retained.len(), 1);
         assert_eq!(retained[0].node.as_deref(), Some("build"));
         assert_eq!(retained[0].member.as_deref(), Some("worker"));
-        assert_eq!(retained[0].path, PathBuf::from("/tmp/report.json"));
+        assert_eq!(retained[0].path, PathBuf::from(&stored));
     }
 
     /// A `null` or empty `report_path` is the producer saying it stored none.
@@ -188,9 +224,28 @@ mod tests {
         assert!(retained(&[settled(Some("build"), Some(""))]).is_empty());
     }
 
+    /// The path arrives on a journal line and this crate is about to open it, so
+    /// a line naming anything but the file the producing library writes is
+    /// refused rather than read.
+    #[test]
+    fn a_settlement_naming_a_file_the_producer_never_writes_is_refused() {
+        for named in [
+            "/etc/passwd",
+            "/tmp/member/../../etc/hosts",
+            "/tmp/member/notes.json",
+            "/tmp/member/report.json.bak",
+            "/",
+        ] {
+            assert!(
+                retained(&[settled(Some("build"), Some(named))]).is_empty(),
+                "'{named}' was accepted as a retained report"
+            );
+        }
+    }
+
     #[test]
     fn a_pipeline_event_of_the_same_shape_is_not_a_members_report() {
-        let mut ours = settled(Some("build"), Some("/tmp/report.json"));
+        let mut ours = settled(Some("build"), Some(&stored("/tmp/member")));
         ours.source = Source::Pipeline;
         assert!(retained(&[ours]).is_empty());
     }

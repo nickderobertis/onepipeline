@@ -19,6 +19,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use oneagentgraph::event::Role;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -315,8 +316,21 @@ const WORKING: [&str; 5] = [
 ];
 
 /// The payload key naming which side of a two-party conversation an event came
-/// from, in the producer's own vocabulary (`agent` or `judge`).
+/// from.
 const ROLE: &str = "role";
+
+/// Which side of a two-party member a relayed event came from, when its
+/// producer said.
+///
+/// Parsed through **`oneagentgraph`'s own `Role`** rather than matched as a
+/// string: the vocabulary is that library's, it is a direct dependency, and a
+/// side it renames is then a compile error here rather than a branch that
+/// silently stops matching. Nothing stamps this on a turn today — divergence 10
+/// in `docs/contract-divergences.md` is the proposal that it should — so this is
+/// what a producer that starts is read with.
+fn side_of(event: &Envelope) -> Option<Role> {
+    serde_json::from_value(event.payload.get(ROLE)?.clone()).ok()
+}
 
 /// Aggregate one run's telemetry from its merged event store.
 ///
@@ -386,21 +400,21 @@ pub fn of_run(run: &str, events: &[Envelope]) -> RunTelemetry {
             Source::Agentgraph if WORKING.contains(&event.kind.0.as_str()) => {
                 // The workspace is ready and a turn is running in it.
                 phases.remove(&whose);
-                match event.payload.get(ROLE).and_then(Value::as_str) {
-                    Some("judge") => {
+                match side_of(event) {
+                    Some(Role::Judge) => {
                         judge_measured = true;
                         judging.insert(whose);
                     }
                     // A turn the producer attributed to the agent side ends the
                     // judge's, as does the member settling.
-                    Some("agent") => {
+                    Some(Role::Agent) => {
                         judge_measured = true;
                         judging.remove(&whose);
                     }
-                    _ if event.kind.0 == crate::report::MEMBER_SETTLED => {
+                    None if event.kind.0 == crate::report::MEMBER_SETTLED => {
                         judging.remove(&whose);
                     }
-                    _ => {}
+                    None => {}
                 }
             }
             Source::Pipeline => match journal::PipelineKind::from_wire(&event.kind) {

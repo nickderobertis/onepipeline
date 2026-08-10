@@ -37,13 +37,19 @@ fn main() -> ExitCode {
 }
 
 /// Where one session's stream is written, so `events` can read it back.
+///
+/// The token arrives on a command line, so it is written as one path segment
+/// rather than interpolated whole: a token carrying a separator would put this
+/// double's scratch outside the directory the test gave it.
 fn stream_of(dir: &Path, token: &str) -> PathBuf {
-    dir.join("streams").join(format!("{token}.jsonl"))
+    dir.join("streams")
+        .join(format!("{}.jsonl", fake::segment(token)))
 }
 
 /// The marker a closed session leaves, which is what ends a `--follow`.
 fn closed_marker(dir: &Path, token: &str) -> PathBuf {
-    dir.join("streams").join(format!("{token}.closed"))
+    dir.join("streams")
+        .join(format!("{}.closed", fake::segment(token)))
 }
 
 /// Append one envelope to the session's stream, in the shape the contract fixes.
