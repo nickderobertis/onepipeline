@@ -976,6 +976,8 @@ fn every_command_the_contract_names_parses() {
         ("monitor", &["monitor", "run-1"]),
         ("results", &["results", "run-1"]),
         ("goals", &["goals"]),
+        ("transcript", &["transcript", "run-1"]),
+        ("transcript NODE", &["transcript", "run-1", "build"]),
         ("telemetry", &["telemetry"]),
         ("telemetry --breakdown", &["telemetry", "--breakdown"]),
     ];
@@ -1018,7 +1020,66 @@ fn the_contract_names_every_command_and_view_this_crate_offers() {
         );
     }
     assert!(tokens.contains("telemetry [--breakdown]"));
+    assert!(tokens.contains("transcript RUN [NODE]"));
     assert!(tokens.contains("runs --mine"));
+}
+
+/// The words the telemetry document writes, gated against the contract that
+/// names them.
+///
+/// Read out of the source rather than through the types: `telemetry` is behind
+/// the contract's surface — the document reaches a consumer through the CLI —
+/// so this suite cannot build a `BucketName` to ask it what it spells.
+#[test]
+fn the_contract_names_every_bucket_and_every_usage_party_the_document_writes() {
+    let source = std::fs::read_to_string(repo_root().join("src/telemetry.rs"))
+        .expect("the telemetry view ships");
+    let tokens = backticked();
+
+    for (what, list) in [
+        ("bucket", "pub const ALL: [Self; 8]"),
+        ("party", "pub const ALL: [Self; 4]"),
+    ] {
+        let declared: Vec<String> = source
+            .split_once(list)
+            .unwrap_or_else(|| panic!("telemetry declares its {what} list"))
+            .1
+            .split_once("];")
+            .expect("the list is closed")
+            .0
+            .split(',')
+            .filter_map(|entry| entry.trim().strip_prefix("Self::"))
+            .map(wire_word)
+            .collect();
+        assert!(!declared.is_empty(), "the {what} list is empty");
+        for name in declared {
+            assert!(
+                tokens.contains(&name),
+                "the contract does not name the `{name}` {what}"
+            );
+        }
+    }
+
+    // And the fields a party's usage carries, each one a number an operator
+    // budgets against.
+    for field in ["input", "output", "cache_read", "cache_write", "cost_usd"] {
+        assert!(
+            tokens.contains(field),
+            "the contract does not name the `{field}` usage field"
+        );
+    }
+}
+
+/// One `CamelCase` variant as the wire spells it: `snake_case`.
+fn wire_word(variant: &str) -> String {
+    let mut out = String::new();
+    for (at, letter) in variant.char_indices() {
+        if letter.is_uppercase() && at > 0 {
+            out.push('_');
+        }
+        out.extend(letter.to_lowercase());
+    }
+    out
 }
 
 #[test]
@@ -1143,15 +1204,31 @@ const RULINGS: &[(&str, &str)] = &[
     ("6.", "PipelineKind"),
     ("7.", "completed_steps"),
     ("8.", "cross-dag-satisfied"),
+    ("9.", "publication_wait"),
 ];
 
 #[test]
-fn every_recorded_divergence_is_resolved_and_the_contract_says_what_was_ruled() {
+fn every_recorded_divergence_is_ruled_on_or_states_the_proposal_it_waits_on() {
     let divergences = std::fs::read_to_string(repo_root().join("docs/contract-divergences.md"))
         .expect("the divergence record ships");
 
     let sections: Vec<&str> = divergences.split("\n## ").skip(1).collect();
-    assert_eq!(sections.len(), RULINGS.len(), "{sections:?}");
+    assert!(sections.len() >= RULINGS.len(), "{sections:?}");
+
+    // Everything after the ruled-on entries is a proposal the planner who owns
+    // the contract has not answered. It is recorded and marked, never resolved
+    // from this repository — which is the whole point of the file.
+    for section in sections.iter().skip(RULINGS.len()) {
+        let heading = section.lines().next().expect("a heading");
+        assert!(
+            heading.ends_with("— OPEN"),
+            "an unruled divergence is not marked open: {heading}"
+        );
+        assert!(
+            section.contains("**Proposal"),
+            "divergence `{heading}` is open and states no proposal"
+        );
+    }
 
     for ((number, named), section) in RULINGS.iter().zip(&sections) {
         let heading = section.lines().next().expect("a heading");

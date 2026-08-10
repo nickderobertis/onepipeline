@@ -1,10 +1,13 @@
 //! What the read-only views report.
 //!
 //! The views are the CLI's `runs`, `status`, `host`, `monitor`, `results`,
-//! `goals`, and `telemetry`. Their semantics are ported one-to-one from
-//! `ai-orchestrator`, and the one distinction that has cost real supervision
-//! time is named here as a type rather than left to prose: whether a run is
-//! being driven, and if not, how it stopped being driven.
+//! `goals`, `transcript`, and `telemetry`. The one distinction that has cost
+//! real supervision time is named here as a type rather than left to prose:
+//! whether a run is being driven, and if not, how it stopped being driven.
+//!
+//! The second is not a type but a rule: **a view never reports an unmeasured
+//! thing as a measured nothing.** A dispatch that has named no tool says so; a
+//! report this host cannot read says so; a bucket nothing produces is absent.
 //!
 //! Everything here **reads**. A view opens a run's ledger and its merged event
 //! store, probes the recorded driver, and renders — and writes nothing back, so

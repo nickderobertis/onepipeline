@@ -63,8 +63,12 @@ reconciler applied it, `1` when it is queued but not yet reconciled, and `2` whe
 it was refused.
 
 Read-only views — `runs`, `status`, `host`, `monitor`, `results`, `goals`,
-`telemetry` — report unread surfaces, driver liveness, and provider health
-without touching a run.
+`transcript`, `telemetry` — report unread surfaces, driver liveness, and
+provider health without touching a run. `status` says what each in-flight node
+is doing right now, with an event count and an age; `transcript RUN [NODE]`
+renders a dispatched turn's tools and its words; `telemetry` reports what each
+party spent and where the wall clock went, in eight buckets that sum exactly.
+Anything nothing in the stack measures is reported absent, never as a zero.
 
 ## Where a dispatch runs
 
