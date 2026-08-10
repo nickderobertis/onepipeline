@@ -72,6 +72,13 @@ fn add_reparent_and_context_are_applied_and_reported_applied() {
         !world.events_of(&run, "round-finished").is_empty()
     });
 
+    // llmlint: ignore-block[tests_mirror_real_usage] the prose a dispatch actually
+    // received is not rendered by any view: `transcript` renders a turn-activity's
+    // kind, name, and detail, and `results` renders the plan's own `task` for a
+    // node still waiting — neither shows `Node::rendered_task`, which is where a
+    // carried note is folded in. The relayed record the dispatch produced is the
+    // only place this is readable, and whether the note reached the worker at all
+    // is the whole point of the `context` op asserted applied above.
     // The note reached the dispatch it was aimed at, as its own section.
     let relayed = world
         .journal(&run)
@@ -86,6 +93,7 @@ fn add_reparent_and_context_are_applied_and_reported_applied() {
     assert!(task.contains("## Planner context"), "{task}");
     assert!(task.contains("the fixture moved"), "{task}");
     assert!(task.contains("adds no acceptance criteria"), "{task}");
+    // llmlint: ignore-end[tests_mirror_real_usage]
 }
 
 #[test]

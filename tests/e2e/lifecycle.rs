@@ -284,11 +284,14 @@ fn a_publications_own_records_reach_the_journal_while_it_is_still_publishing() {
         .run(&["start", &path.to_string_lossy(), "--detach"])
         .exited(0);
 
+    // On one rendered line, so the record an operator sees mid-publication is
+    // the vcs stream's own rather than something else wearing the same word.
     world.until("the publication to wait on the lock", |world| {
         world
             .run(&["monitor", "watched"])
             .stdout
-            .contains("lock-wait")
+            .lines()
+            .any(|line| line.contains("vcs:") && line.contains("lock-wait"))
     });
     // Mid-publication, and readable: `monitor` renders the record and `status`
     // still calls the node running. Both are what an operator has open.
@@ -302,13 +305,20 @@ fn a_publications_own_records_reach_the_journal_while_it_is_still_publishing() {
         "the node settled before the publication was even watched: {}",
         world.dump()
     );
-    // Under the node it belongs to. A session does not know it is a graph node,
-    // so every per-node reader would otherwise take a whole publication for work
-    // that happened to nobody — and no view renders a relayed envelope's node,
-    // so the merged store the contract defines is where that is readable.
+    // llmlint: ignore-block[tests_mirror_real_usage] which *node* a relayed record
+    // belongs to is the one fact about it no surface renders, so the merged store
+    // the contract defines is the only place it is readable. `monitor` renders a
+    // vcs record under `vcs:{stream}` and never its node; `status` and `host` fold
+    // every relayed envelope — agentgraph's turns included — into a single per-node
+    // count, so a publication that arrived unlabelled would leave that count
+    // looking exactly the same; and `telemetry` is run-level. Everything a surface
+    // *does* render about this record is asserted through the CLI above. The claim
+    // is worth making because a session does not know it is a graph node: without
+    // the label every per-node reader takes a whole publication for work that
+    // happened to nobody.
     let waiting = &world.events_of("watched", "lock-wait")[0];
     assert_eq!(waiting["labels"]["node"], "service", "{waiting}");
-    assert_eq!(waiting["source"], "vcs", "{waiting}");
+    // llmlint: ignore-end[tests_mirror_real_usage]
 
     world.release("publish.go");
     world.until("the run to settle", |world| {
