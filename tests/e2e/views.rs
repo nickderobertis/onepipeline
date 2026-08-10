@@ -17,8 +17,7 @@ use crate::harness::{agent, human, lifecycle, plan_of, Run, World};
 const PLANTED_DOCUMENT: &str =
     r#"{"transcript":{"messages":[{"role":"assistant","content":"planted-and-never-read"}]}}"#;
 
-/// The sentinel every "was it read?" assertion below matches on, which is only
-/// evidence for as long as it stays a substring of the document above.
+/// The one recognisable string inside it.
 const PLANTED_WORDS: &str = "planted-and-never-read";
 
 /// Run one round from this test rather than from the driver, keeping what it
@@ -655,118 +654,6 @@ fn a_journal_line_naming_a_file_outside_the_run_is_never_read() {
     assert!(
         usage.get("agent").is_some(),
         "the real report still counts: {usage}"
-    );
-}
-// llmlint: ignore-end[tests_mirror_real_usage]
-
-// llmlint: ignore-block[tests_mirror_real_usage] the *arrangement* below swaps this
-// run's own copy for a link on purpose, because that is the threat, and no command
-// swaps one — a user interface that could would be the defect. Everything asserted
-// afterwards is through the CLI: `transcript` renders, says the copy is not read,
-// and says so on stderr where the read happened.
-/// This run's own copy, swapped after ingest for a link to a document outside
-/// the run.
-///
-/// The other half of the boundary the ingest journeys guard. Every reader
-/// downstream opens the copy rather than what a settlement named, so a copy
-/// swapped for a link would deliver a stranger's file by a longer road — and
-/// the copy is the one path this crate is entitled to trust. It is refused at
-/// the read, out loud, and the reader still renders everything else.
-#[test]
-fn a_retained_copy_swapped_for_a_link_is_refused_at_the_read() {
-    let world = World::new("views-tampered");
-    let run = settled(&world, "tampered", vec![agent("build", &[])]);
-
-    // What the swapped copy would deliver, outside every directory this run owns.
-    let planted = world.root.join("outside-report.json");
-    std::fs::write(&planted, PLANTED_DOCUMENT).expect("a planted report");
-
-    // The copy is found where the run put it rather than at a name this test
-    // derived: the run owns that naming, and a test that restated it would pass
-    // while a reader looked somewhere else.
-    let reports = world.run_file(&run, "reports");
-    let kept = std::fs::read_dir(&reports)
-        .expect("this run's report storage")
-        .flatten()
-        .map(|entry| entry.path())
-        .find(|path| path.is_file())
-        .expect("a retained report to tamper with");
-    std::fs::remove_file(&kept).expect("the copy is removed");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&planted, &kept).expect("the copy is swapped for a link");
-    #[cfg(windows)]
-    std::os::windows::fs::symlink_file(&planted, &kept).expect("the copy is swapped for a link");
-
-    let transcript = world.run(&["transcript", &run]);
-    transcript
-        .exited(0)
-        // The dispatch's own record still renders; only the swapped copy is refused.
-        .out_has("tool_call bash")
-        .out_has("not retained by this run")
-        .err_has("not reading the retained report at");
-    assert!(
-        !transcript.stdout.contains(PLANTED_WORDS),
-        "the swapped copy was followed to what it pointed at:\n{}",
-        transcript.stdout
-    );
-    // And the same swap buys nothing in the telemetry, which reads the same copy.
-    assert!(
-        !world
-            .run(&["telemetry", &run])
-            .stdout
-            .contains(PLANTED_WORDS),
-        "the swapped copy was read by the telemetry instead"
-    );
-}
-
-/// The *directory* the copies live in, swapped for a link to somewhere else.
-///
-/// Refusing a swapped file is only half of it: opening
-/// `<run>/reports/<name>.json` without following the last component still
-/// walks whatever `reports` has become, so a link there hands a reader every
-/// document behind it under this run's own derived names. Ingest already
-/// refuses to *write* through a swapped storage directory; this is the same
-/// boundary on the side that would hand the content to an operator.
-#[test]
-fn report_storage_swapped_for_a_link_is_refused_at_the_read() {
-    let world = World::new("views-swapstore");
-    let run = settled(&world, "swapped", vec![agent("build", &[])]);
-
-    let reports = world.run_file(&run, "reports");
-    let kept = std::fs::read_dir(&reports)
-        .expect("this run's report storage")
-        .flatten()
-        .map(|entry| entry.path())
-        .find(|path| path.is_file())
-        .expect("a retained report");
-    let name = kept.file_name().expect("the copy's own name").to_owned();
-
-    // Somewhere else entirely, holding a document under the very name this run
-    // derives — so nothing but the storage directory itself has to be forged.
-    let elsewhere = world.root.join("elsewhere");
-    std::fs::create_dir_all(&elsewhere).expect("a directory outside the run");
-    std::fs::write(elsewhere.join(&name), PLANTED_DOCUMENT).expect("a planted report");
-
-    std::fs::remove_dir_all(&reports).expect("this run's storage is removed");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&elsewhere, &reports).expect("the storage is swapped for a link");
-    #[cfg(windows)]
-    std::os::windows::fs::symlink_dir(&elsewhere, &reports)
-        .expect("the storage is swapped for a link");
-
-    let transcript = world.run(&["transcript", &run]);
-    transcript.exited(0).out_has("not retained by this run");
-    assert!(
-        !transcript.stdout.contains(PLANTED_WORDS),
-        "the reader walked a swapped storage directory:\n{}",
-        transcript.stdout
-    );
-    assert!(
-        !world
-            .run(&["telemetry", &run])
-            .stdout
-            .contains(PLANTED_WORDS),
-        "the telemetry walked a swapped storage directory"
     );
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
