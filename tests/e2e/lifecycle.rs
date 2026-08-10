@@ -410,13 +410,58 @@ fn a_published_node_reports_where_a_human_reads_the_change_it_opened() {
     // The URL the sibling handed back is the one piece of evidence a person
     // actually opens, and until it reaches the run's own record it lives only
     // inside a journal payload nobody reads by hand.
-    let published = world.run_json(&run, "round-01/result.json")["nodes"][0]["change_url"]
+    let node = world.run_json(&run, "round-01/result.json")["nodes"][0].clone();
+    let published = node["change_url"]
         .as_str()
         .expect("the published node recorded where its change is")
         .to_string();
     assert!(published.contains("/changes/"), "{published}");
+    // A change request left open for review is an outcome of its own — the node
+    // is done and the change has *not* reached its base — so it is named rather
+    // than reported as a bare "published".
+    assert_eq!(node["outcome"], "change-open", "{node}");
+
+    // And the host's own identifier for it, which is what a later command
+    // addresses the change by.
+    let recorded = &world.events_of(&run, "published")[0];
+    assert!(
+        recorded["payload"]["id"].is_string(),
+        "the publication recorded no change id: {recorded}"
+    );
 
     world.run(&["results", &run]).exited(0).out_has(&published);
+}
+
+#[test]
+fn a_change_the_host_merged_settles_the_node_on_the_merge_rather_than_the_request() {
+    let world = World::new("lifecycle-merged");
+    world.script("publish.merged", "");
+    let run = settle(&world, "landed", vec![lifecycle("service", &[])]);
+
+    let node = world.run_json(&run, "round-01/result.json")["nodes"][0].clone();
+    assert_eq!(node["status"], "done", "{node}");
+    assert_eq!(node["outcome"], "merged", "{node}");
+    // The change request it merged is still where a person reads what landed.
+    assert!(
+        node["change_url"]
+            .as_str()
+            .is_some_and(|url| url.contains("/changes/")),
+        "{node}"
+    );
+}
+
+#[test]
+fn a_change_the_host_is_holding_settles_the_node_as_queued() {
+    let world = World::new("lifecycle-queued");
+    world.script("publish.queued", "");
+    let run = settle(&world, "queued", vec![lifecycle("service", &[])]);
+
+    // The host has it and will land it once its checks pass. The node is done —
+    // there is nothing more for this round to do — and it says so as queued
+    // rather than as merged, which would claim the base already carries it.
+    let node = world.run_json(&run, "round-01/result.json")["nodes"][0].clone();
+    assert_eq!(node["status"], "done", "{node}");
+    assert_eq!(node["outcome"], "queued", "{node}");
 }
 
 #[test]

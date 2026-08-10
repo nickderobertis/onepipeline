@@ -82,6 +82,13 @@ consuming `project.json` — an undeclared one silently drops that project out o
   the real package around the real binary. An in-process `main()` call is not an
   e2e, and every journey it covers runs inside `just check` rather than behind
   `#[ignore]`.
+- **Each sibling has a journey that drives the real binary**, built from the
+  version `Cargo.lock` pins: `tests/e2e/dispatch.rs` for `oneagentgraph` and
+  `tests/e2e/real_vcs.rs` for `onevcs`. The doubles in `crates/testfakes` are a
+  way to *state a scenario*, never a stand-in for a sibling nobody has run — a
+  double scripted with an answer no real sibling produces is how this crate came
+  to read `onevcs publish`'s stdout as JSON, which that command has never
+  printed. When a double's answer changes, check it against the real one.
 - **Validate external input at its trust boundary.** Plan files, executor-rules
   files, and reply envelopes are external input: the schema structs reject
   unknown fields, so a typo fails loudly instead of being silently dropped.

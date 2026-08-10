@@ -133,10 +133,13 @@ pub fn publish(token: &str, policy: Option<MergePolicy>, title: Option<&str>) ->
 
 /// What the session's stream says its publication produced.
 ///
-/// The kinds are `onevcs`'s own, and each carries the fields that command
-/// records: `change-opened` names the change request and its URL, `change-merged`
-/// and `merge-completed` say it reached its base, and `merge-queued` carrying a
-/// `url` is the host holding it. `merge-queued` *without* one is the identity's
+/// The kinds are read back into [`onevcs::EventKind`] — the sibling's own enum,
+/// which is what spells them on the wire — rather than compared against strings
+/// this crate restated. A kind renamed there stops matching here at the type
+/// level instead of silently never firing. Each carries the fields that command
+/// records: `ChangeOpened` names the change request and its URL, `ChangeMerged`
+/// and `MergeCompleted` say it reached its base, and `MergeQueued` carrying a
+/// `url` is the host holding it. `MergeQueued` *without* one is the identity's
 /// own lock queue, which every publication passes through and which says nothing
 /// about the outcome — reading it as one would report every local merge as
 /// queued.
@@ -160,17 +163,26 @@ fn published_from(events: &[Envelope]) -> Published {
     };
     let mut published = Published::default();
     for envelope in events {
-        let reached = match envelope.kind.0.as_str() {
-            "change-opened" => {
+        // Through the sibling's own deserializer: a kind this build does not
+        // know — a later `onevcs` emitting one it has learned — is passed over
+        // rather than guessed at, which is what the merged stream already does
+        // with it.
+        let Ok(kind) = serde_json::from_value::<onevcs::EventKind>(serde_json::Value::String(
+            envelope.kind.0.clone(),
+        )) else {
+            continue;
+        };
+        let reached = match kind {
+            onevcs::EventKind::ChangeOpened => {
                 published.url = text(envelope, "url").or(published.url.take());
                 published.id = text(envelope, "id").or(published.id.take());
                 "change-open"
             }
-            "change-merged" | "merge-completed" => {
+            onevcs::EventKind::ChangeMerged | onevcs::EventKind::MergeCompleted => {
                 published.url = text(envelope, "url").or(published.url.take());
                 "merged"
             }
-            "merge-queued" if text(envelope, "url").is_some() => {
+            onevcs::EventKind::MergeQueued if text(envelope, "url").is_some() => {
                 published.url = text(envelope, "url").or(published.url.take());
                 "queued"
             }

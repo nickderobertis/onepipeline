@@ -195,11 +195,34 @@ fn publish(args: &[String], dir: &std::path::Path) -> ExitCode {
         "change-opened",
         serde_json::json!({"url": url, "id": token}),
     );
-    // What the real `onevcs publish` prints: one line of prose for a person, and
-    // nothing machine-readable. A double that printed a JSON record here would be
-    // an oracle for a shape the sibling has never produced — which is how this
-    // crate came to parse the publication's stdout as JSON and fail every real
-    // publication as unreadable.
+
+    // What the host did with the change request it was handed. Each ending is the
+    // sibling's own: the records it writes and, on stdout, the one line of prose
+    // it prints for a person — `Outcome::describe`. A double that printed a JSON
+    // record here would be an oracle for a shape the sibling has never produced,
+    // which is how this crate came to parse the publication's stdout as JSON and
+    // fail every real publication as unreadable.
+    if dir.join("publish.merged").exists() {
+        let sha = format!("{token}-sha");
+        emit(
+            dir,
+            &token,
+            "change-merged",
+            serde_json::json!({"url": url, "sha": sha}),
+        );
+        println!("merged at {sha}");
+        return ExitCode::SUCCESS;
+    }
+    if dir.join("publish.queued").exists() {
+        emit(
+            dir,
+            &token,
+            "merge-queued",
+            serde_json::json!({"identity": token, "queue_position": 0, "url": url}),
+        );
+        println!("merge queued for {url}");
+        return ExitCode::SUCCESS;
+    }
     println!("change request open at {url}");
     ExitCode::SUCCESS
 }

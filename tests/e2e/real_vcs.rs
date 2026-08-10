@@ -192,14 +192,29 @@ fn a_lifecycle_node_publishes_through_the_real_onevcs_and_the_base_advances() {
     );
 
     // And the sibling's own record of it joined the merged store, which is what
-    // a person reads afterwards.
+    // a person reads afterwards — **once each**. The publication is followed as
+    // it happens and read once more if the follow relayed nothing, so a record
+    // that arrives twice is the recovery covering for a follow that worked.
     let kinds = vcs_kinds(&world, "landed");
-    for kind in ["session-opened", "gate-verdict", "push", "merge-completed"] {
-        assert!(
-            kinds.iter().any(|seen| seen == kind),
-            "the publication's {kind} never reached the merged store: {kinds:?}"
+    for kind in ["gate-verdict", "push", "merge-completed", "session-closed"] {
+        let seen = kinds.iter().filter(|seen| *seen == kind).count();
+        assert_eq!(
+            seen, 1,
+            "the publication's {kind} reached the merged store {seen} time(s): {kinds:?}"
         );
     }
+
+    // Under the node it belongs to. A `onevcs` session does not know it is a
+    // graph node — the real one stamps its own token and identity and nothing
+    // else — so without the enricher a whole real publication lands in the store
+    // belonging to nobody.
+    let verdict = &world.events_of("landed", "gate-verdict")[0];
+    assert_eq!(verdict["labels"]["node"], "service", "{verdict}");
+    assert_eq!(verdict["labels"]["run_id"], "landed", "{verdict}");
+    assert!(
+        verdict["labels"]["session"].is_string(),
+        "the sibling's own label was rewritten: {verdict}"
+    );
     world
         .run(&["results", "landed"])
         .exited(0)
