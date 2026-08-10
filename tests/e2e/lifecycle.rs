@@ -533,8 +533,12 @@ fn a_session_stream_that_cannot_be_read_is_reported_and_does_not_fail_the_node()
     world.script("events.fail", "");
     let run = driven(&world, "silentstream", vec![lifecycle("service", &[])]);
 
-    // Said out loud. A silent gap in the merged store is what makes a later
-    // reader think nothing happened.
+    // Both halves of the recovery, through the CLI. The follow starts, its
+    // child refuses and relays nothing, so the node falls back to reading the
+    // stream once — and this message is the *fallback's* own, so seeing it is
+    // what proves the fallback ran rather than the follow having quietly
+    // covered for it. Said out loud either way: a silent gap in the merged
+    // store is what makes a later reader think nothing happened.
     run.1.err_has("cannot read session").err_has("events");
 
     // The evidence is missing, not the result: the node published and settled.

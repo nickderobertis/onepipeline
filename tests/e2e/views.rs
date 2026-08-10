@@ -443,6 +443,81 @@ fn evidence_this_host_cannot_read_is_reported_as_unread_rather_than_as_nothing()
     );
 }
 
+/// A `member-settled` naming a file the producing library never writes.
+///
+/// The path arrives on a journal line and `transcript` is about to open it, so
+/// a line naming something else is refused out loud rather than read: without
+/// that, the verb is an arbitrary-file reader driven by whatever wrote to the
+/// journal.
+#[test]
+fn a_settlement_naming_a_file_the_producer_never_writes_is_refused_out_loud() {
+    let world = World::new("views-elsewhere");
+    world.script("report.elsewhere", "");
+    let run = settled(&world, "elsewhere", vec![agent("build", &[])]);
+
+    let transcript = world.run(&["transcript", &run]);
+    transcript
+        .exited(0)
+        // The turn's own record still renders; only the named file is refused.
+        .out_has("tool_call bash")
+        .err_has("ignoring a member-settled naming")
+        .err_has("notes.json");
+    assert!(
+        !transcript.stdout.contains("report "),
+        "a path the producer never writes was read anyway:\n{}",
+        transcript.stdout
+    );
+}
+
+/// A report a harness produced without a transcript. It is a report this build
+/// can say nothing further about, which is not a dispatch that did nothing.
+#[test]
+fn a_retained_report_carrying_no_transcript_says_so() {
+    let world = World::new("views-bare");
+    world.script("report.bare", "");
+    let run = settled(&world, "bare", vec![agent("build", &[])]);
+
+    world
+        .run(&["transcript", &run])
+        .exited(0)
+        .out_has("report ")
+        .out_has("it carries no transcript");
+}
+
+/// A dispatch that has recorded something without naming a tool claims the
+/// count and the age, and nothing more.
+///
+/// The session a lifecycle node opens is recorded before its first turn is, so
+/// this is the state every lifecycle node passes through — and it is where a
+/// readout that invented a "now" would be inventing it.
+#[test]
+fn a_dispatch_that_has_named_no_tool_reports_its_count_rather_than_a_guess() {
+    let world = World::new("views-nameless");
+    world.script("service.wait", "hold");
+    let path = world.plan(
+        "nameless",
+        &plan_of("nameless", vec![lifecycle("service", &[])]),
+    );
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+    world.until("the session to be recorded", |world| {
+        !world.events_of("nameless", "session-opened").is_empty()
+    });
+
+    let status = world.run(&["status", "nameless"]);
+    status
+        .exited(0)
+        .out_has("service: running")
+        .out_has("event(s)");
+    assert!(
+        !status.stdout.contains("now "),
+        "a dispatch that has named no tool was reported doing one:\n{}",
+        status.stdout
+    );
+    world.release("service.go");
+}
+
 /// A run whose driver has not dispatched anything yet has no transcript, and
 /// says so rather than rendering an empty one.
 #[test]

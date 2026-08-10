@@ -299,17 +299,30 @@ fn emit(args: &[String], node: &str, step: Option<&str>, task: &str) {
         .join("reports")
         .join(format!("{}-{}", fake::segment(node), std::process::id()))
         .join(oneagentgraph::member::REPORT_FILE);
-    // A member that settled on a machine whose scratch this reader cannot
-    // reach: the settlement still names where the report went, and the file is
-    // not there to read. The evidence is missing, not the settlement — so the
-    // path is published either way, which is the whole scenario.
-    let stored = if fake::script_dir().join("report.missing").exists() {
-        true
+    // Where the settlement says the report went. A member that settled on a
+    // machine whose scratch this reader cannot reach still *names* it, so
+    // `report.missing` publishes the path and writes nothing: the evidence is
+    // missing, not the settlement. `report.elsewhere` names a file the real
+    // library never writes, which a consumer must refuse rather than open.
+    let scripted = |name: &str| fake::script_dir().join(name).exists();
+    let named = if scripted("report.elsewhere") {
+        Some(path.with_file_name("notes.json"))
+    } else if scripted("report.missing") {
+        Some(path.clone())
     } else {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        std::fs::write(&path, report.to_string()).is_ok()
+        // A report document a harness produced without a transcript: the
+        // verdict fields the settlement reads inline, and nothing else.
+        let document = if scripted("report.bare") {
+            serde_json::json!({"completion_reason": "done_when_met", "verdicts": []})
+        } else {
+            report.clone()
+        };
+        std::fs::write(&path, document.to_string())
+            .is_ok()
+            .then(|| path.clone())
     };
     envelope(
         3,
@@ -318,7 +331,7 @@ fn emit(args: &[String], node: &str, step: Option<&str>, task: &str) {
             "completed": true,
             "verdict": [],
             "completion_reason": "done_when_met",
-            "report_path": stored.then(|| path.display().to_string()),
+            "report_path": named.map(|path| path.display().to_string()),
         }),
     );
 }
