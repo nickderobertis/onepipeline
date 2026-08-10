@@ -82,6 +82,9 @@ pub fn execute(
         if step.kind == NodeKind::Human {
             // A ready human step needs a person, and the workstream holds its
             // branch until one acts. The harness never infers that it happened.
+            // The session stays open for them and the follow does not: dropping
+            // it here ends a process that would otherwise read a stream nobody
+            // is waiting for, for as long as the driver lives.
             return Settlement {
                 branch,
                 completed_steps: completed,

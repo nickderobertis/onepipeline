@@ -272,7 +272,7 @@ pub fn follow(token: &str, sink: Box<dyn Fn(Envelope) + Send>) -> Option<Followe
     match reader {
         Ok(reader) => Some(Follower {
             child,
-            reader,
+            reader: Some(reader),
             relayed,
         }),
         Err(error) => {
@@ -284,11 +284,29 @@ pub fn follow(token: &str, sink: Box<dyn Fn(Envelope) + Send>) -> Option<Followe
 }
 
 /// One session's stream, being followed.
+///
+/// Dropping one ends the follow. Not every caller reaches a settlement — a node
+/// whose next step needs a person holds its session *open* for them, and returns
+/// — and a follow left behind there is a process nothing would ever collect,
+/// reading a stream nobody is waiting for.
 #[derive(Debug)]
 pub struct Follower {
     child: Child,
-    reader: std::thread::JoinHandle<()>,
+    /// Taken by [`finish`](Follower::finish), so a drop after one has nothing
+    /// left to wait on.
+    reader: Option<std::thread::JoinHandle<()>>,
     relayed: Arc<AtomicU64>,
+}
+
+impl Drop for Follower {
+    fn drop(&mut self) {
+        stop(&mut self.child);
+        if let Some(reader) = self.reader.take() {
+            // The pipe is closed by the kill above, so the reader is already on
+            // its way out.
+            let _ = reader.join();
+        }
+    }
 }
 
 impl Follower {
@@ -318,7 +336,9 @@ impl Follower {
         };
         // The reader ends on its own once the pipe closes, which the wait above
         // has already made true.
-        let _ = self.reader.join();
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
+        }
         ended || self.relayed.load(Ordering::SeqCst) > 0
     }
 }

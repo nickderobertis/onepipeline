@@ -542,7 +542,14 @@ pub fn transcript(view: &RunView, only: Option<&str>) -> String {
             .into_iter()
             .filter(|retained| retained.node.as_deref() == Some(node.as_str()))
         {
-            out.push_str(&format!("  report {}\n", retained.path.display()));
+            // Named by the member that settled with it: a graph runs more than
+            // one, and a reader looking at two reports has to know whose is
+            // whose.
+            out.push_str(&format!(
+                "  report {} {}\n",
+                retained.member.as_deref().unwrap_or("-"),
+                retained.path.display()
+            ));
             let Some(document) = crate::report::read(&retained.path) else {
                 out.push_str("    unreadable from this host\n");
                 continue;
@@ -574,7 +581,11 @@ pub fn transcript(view: &RunView, only: Option<&str>) -> String {
 }
 
 /// The nodes this run's merged store carries a dispatch for, in id order.
-pub fn dispatched(view: &RunView, only: Option<&str>) -> Vec<String> {
+///
+/// Crate-visible: `docs/contract.md` names the views, not the parts one is
+/// assembled from, and a public item the contract does not name is a promise
+/// this crate did not make.
+pub(crate) fn dispatched(view: &RunView, only: Option<&str>) -> Vec<String> {
     let mut nodes: Vec<String> = view
         .events
         .iter()
