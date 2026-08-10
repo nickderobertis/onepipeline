@@ -570,8 +570,19 @@ fn a_settlement_naming_a_symlink_is_refused_and_never_followed() {
 /// that is copying it.
 #[test]
 fn a_settlement_naming_a_directory_or_an_oversize_file_is_refused_at_ingest() {
+    // A directory is the one shape the two platforms refuse at a different
+    // step, so its *reason* is the one thing written per-platform here. Unix
+    // opens a directory, and the metadata taken from that handle says what it
+    // is; Windows will not hand out a handle to one at all, so ingest never
+    // gets past the open. Refused either way, without reading it either way —
+    // which is what the rest of this journey asserts, unchanged on both.
+    #[cfg(unix)]
+    let a_directory_is = "it is not a file";
+    #[cfg(not(unix))]
+    let a_directory_is = "it cannot be opened as a plain file";
+
     for (scripted, why) in [
-        ("report.directory", "not a file"),
+        ("report.directory", a_directory_is),
         ("report.oversize", "larger than"),
     ] {
         let world = World::new(&format!("views-{}", scripted.replace('.', "-")));
