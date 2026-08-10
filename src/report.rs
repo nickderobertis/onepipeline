@@ -136,23 +136,68 @@ pub fn retain(paths: &RunPaths, event: &Envelope) {
             oneagentgraph::member::REPORT_FILE
         ));
     }
-    // `symlink_metadata` does not follow, which is the whole point: a symlink
-    // named as a report is a path that says one thing and delivers another.
-    match std::fs::symlink_metadata(named) {
+    // A symlink named as a report is a path that says one thing and delivers
+    // another, so it is looked at without following — for the *message*. What
+    // makes the refusal hold is the open below, which will not follow the last
+    // component whatever changed under this check in between.
+    if std::fs::symlink_metadata(named).is_ok_and(|about| about.file_type().is_symlink()) {
+        return refuse("it is a symlink, and a report is a file the producer wrote");
+    }
+    let source = match open_no_follow(Path::new(named)) {
+        Ok(source) => source,
+        Err(error) => return refuse(&format!("it cannot be opened as a plain file: {error}")),
+    };
+    // Asked of the open handle, so what is measured is what will be read: a
+    // path checked and then opened is two different files on a bad day.
+    match source.metadata() {
         Err(error) => return refuse(&format!("it cannot be read: {error}")),
-        Ok(about) if about.file_type().is_symlink() => {
-            return refuse("it is a symlink, and a report is a file the producer wrote")
-        }
         Ok(about) if !about.is_file() => return refuse("it is not a file"),
         Ok(about) if about.len() > MAX_REPORT_BYTES => {
             return refuse(&format!("it is larger than {MAX_REPORT_BYTES} bytes"))
         }
         Ok(_) => {}
     }
+
+    // The run's own storage has to *be* the run's own: a directory swapped for
+    // a link points every copy this run makes somewhere else.
+    let reports = paths.reports_dir();
+    if std::fs::symlink_metadata(&reports).is_ok_and(|about| about.file_type().is_symlink()) {
+        return refuse(&format!(
+            "{} is a symlink, and this run's own storage is a directory it owns",
+            reports.display()
+        ));
+    }
+    if let Err(error) = std::fs::create_dir_all(&reports) {
+        return refuse(&format!("{} cannot be created: {error}", reports.display()));
+    }
     let kept = paths.report_for(&event.stream, event.seq);
-    let copied = std::fs::create_dir_all(paths.reports_dir())
-        .and_then(|()| std::fs::copy(named, &kept))
-        .map(|_| ());
+    let written = match create_new_no_follow(&kept) {
+        Ok(destination) => destination,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            // `create_new` never follows and never truncates, so nothing was
+            // written whatever is there. A plain file is this run's own copy,
+            // already made; anything else is something a tamperer put in its
+            // place, and it is said out loud rather than worked around.
+            if !std::fs::symlink_metadata(&kept).is_ok_and(|about| about.is_file()) {
+                refuse(&format!(
+                    "{} already exists and is not a plain file, so nothing was written \
+                     through it",
+                    kept.display()
+                ));
+            }
+            return;
+        }
+        Err(error) => {
+            return refuse(&format!(
+                "it cannot be copied to {}: {error}",
+                kept.display()
+            ))
+        }
+    };
+    // Bounded again on the way through: the size was true of the handle when it
+    // was measured, and a file being appended to while it is read is not.
+    use std::io::Read;
+    let copied = std::io::copy(&mut source.take(MAX_REPORT_BYTES), &mut { written });
     if let Err(error) = copied {
         refuse(&format!(
             "it cannot be copied to {}: {error}",
@@ -161,6 +206,50 @@ pub fn retain(paths: &RunPaths, event: &Envelope) {
     }
 }
 // llmlint: ignore-end[boundary_inputs_validated]
+
+/// Open a path for reading **without following** its last component.
+///
+/// The guarantee is the open's, not a check's: a path tested and then opened is
+/// two different files on a bad day, and the whole point of refusing a symlink
+/// is that the name and the file disagree.
+fn open_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    // Nothing narrows the open itself on other platforms, so the link is
+    // refused before it instead. The window between the two is that platform's;
+    // every symlink journey in this crate's suite runs where the flag exists.
+    #[cfg(not(unix))]
+    if std::fs::symlink_metadata(path)?.file_type().is_symlink() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "the path is a symlink",
+        ));
+    }
+    options.open(path)
+}
+
+/// Create a file that must not already exist, and must not be reached through a
+/// link.
+///
+/// `create_new` is `O_CREAT | O_EXCL`, which POSIX requires to fail on a
+/// symlink whatever it points at — so a destination pre-planted as a link is
+/// refused rather than written *through*, and an existing copy is never
+/// truncated. Both properties are the open's, in one atomic step.
+fn create_new_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    options.open(path)
+}
 
 /// What every `member-settled` in this store said about its report, in
 /// settlement order — including the ones whose copy was refused, which are
@@ -201,12 +290,54 @@ pub fn evidence(paths: &RunPaths, events: &[Envelope]) -> Vec<Evidence> {
 
 /// Read this run's own copy of one report, or `None` when it did not keep one.
 ///
-/// The path is [`Evidence::kept`] and nothing else. A dispatch whose report was
-/// refused at ingest, ran on another machine, or was swept has no copy here —
-/// and a caller says which of those it is meeting rather than reporting a
-/// dispatch as having produced nothing.
+/// The path is [`Evidence::kept`] and nothing else — but "the run owns that
+/// directory" is a claim about a directory, not a fact about the file found
+/// there. A run directory a tamperer reached can hold a **symlink** where the
+/// copy was, and following one would print whatever it points at under the
+/// name of a dispatch's own words. So the copy is opened without following and
+/// read only as a plain file, bounded as it was when it was written.
+///
+/// Absent is quiet, because it is ordinary: a dispatch whose report was refused
+/// at ingest, ran on another machine, or was swept has no copy here, and the
+/// caller says so on its own line. A copy that *is* there and is not a plain
+/// file is not ordinary, and is said out loud.
 pub fn read(kept: &Path) -> Option<Value> {
-    let text = std::fs::read_to_string(kept).ok()?;
+    let refuse = |why: &str| {
+        eprintln!(
+            "onepipeline: not reading the retained report at {}: {why}",
+            kept.display()
+        );
+    };
+    let file = match open_no_follow(kept) {
+        Ok(file) => file,
+        // Nothing there is the ordinary answer, and the reader has a line for
+        // it already.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => {
+            refuse(&format!("it is not a plain file this run wrote: {error}"));
+            return None;
+        }
+    };
+    match file.metadata() {
+        Err(error) => {
+            refuse(&format!("it cannot be read: {error}"));
+            return None;
+        }
+        Ok(about) if !about.is_file() => {
+            refuse("it is not a plain file this run wrote");
+            return None;
+        }
+        Ok(about) if about.len() > MAX_REPORT_BYTES => {
+            refuse(&format!("it is larger than {MAX_REPORT_BYTES} bytes"));
+            return None;
+        }
+        Ok(_) => {}
+    }
+    use std::io::Read;
+    let mut text = String::new();
+    file.take(MAX_REPORT_BYTES)
+        .read_to_string(&mut text)
+        .ok()?;
     serde_json::from_str(&text).ok()
 }
 
