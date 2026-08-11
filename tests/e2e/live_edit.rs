@@ -16,7 +16,13 @@
 // `oneagentgraph` binary is driven instead. `harness.rs` carries the same suppression and
 // the full rationale.
 
-use crate::harness::{agent, human, lifecycle, plan_of, World, REFUSED};
+use crate::harness::{agent, human, plan_of, World, REFUSED};
+
+/// Only the `cfg(not(windows))` journeys below name a lifecycle node, so the
+/// import carries the same attribute they do: on Windows it would be unused, and
+/// `-D warnings` is right to say so rather than be silenced with an `allow`.
+#[cfg(not(windows))]
+use crate::harness::lifecycle;
 use serde_json::{json, Value};
 
 /// Start a run whose nodes are held open, so edits land against a live round.
@@ -254,7 +260,7 @@ fn a_retry_may_name_only_one_branch() {
     let run = live(
         &world,
         "branchy",
-        vec![crate::harness::lifecycle("service", &[])],
+        vec![lifecycle("service", &[])],
         &["service"],
     );
 

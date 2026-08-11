@@ -12,7 +12,13 @@
 // `dispatch.rs` is where the real binary is driven instead. `harness.rs` carries the same
 // suppression and the full rationale.
 
-use crate::harness::{agent, human, lifecycle, plan_of, Run, World};
+use crate::harness::{agent, human, plan_of, Run, World};
+
+/// Only the `cfg(not(windows))` journeys below name a lifecycle node, so the
+/// import carries the same attribute they do: on Windows it would be unused, and
+/// `-D warnings` is right to say so rather than be silenced with an `allow`.
+#[cfg(not(windows))]
+use crate::harness::lifecycle;
 
 /// The document a double plants where a settlement points but nothing should
 /// read, and the words that prove it was read if they ever appear.
@@ -38,11 +44,19 @@ fn driven(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> (String, 
 
 /// How long a held publication phase is kept open, so its bucket is a real
 /// duration on the clock rather than a bucket that merely exists.
+///
+/// Windows-gated with its one reader,
+/// `telemetry_separates_gate_and_lock_time_from_agent_time`: the journey holds a
+/// `onevcs` gate open, and that library opens no session on Windows at all.
+#[cfg(not(windows))]
 const HELD: std::time::Duration = std::time::Duration::from_millis(400);
 
 /// The floor a held stretch must clear once it has been measured. Below the
 /// hold, because the two records bracketing it are written either side of the
 /// rendezvous rather than exactly on it.
+///
+/// Gated with [`HELD`], and for the same reason.
+#[cfg(not(windows))]
 const FLOOR: u64 = 250;
 
 fn settled(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
