@@ -76,6 +76,19 @@ const LAUNCH_POLL: Duration = Duration::from_millis(10);
 /// How much of a refused launch's own output is carried into the failure.
 const EVIDENCE_CHARS: usize = crate::event::MAX_PAYLOAD_TEXT_BYTES / 4;
 
+/// Say when this sibling's stream carried lines this build could not read.
+///
+/// Skipping them is right — a sibling emitting a kind this build does not know
+/// must not stop the ones it does — but skipping them *quietly* turns a schema
+/// mismatch into a run that merely looks uneventful. `oneagentgraph` is reached
+/// as a process and read off its stdout, so its stream is the one place in this
+/// crate where a line can still arrive unreadable.
+fn report_skipped(skipped: usize) {
+    if skipped > 0 {
+        eprintln!("onepipeline: skipped {skipped} oneagentgraph line(s) this build cannot read");
+    }
+}
+
 /// The executable this process invokes.
 pub fn binary() -> String {
     std::env::var(BINARY_ENV)
@@ -541,7 +554,7 @@ impl GraphRun {
                             Some(Ok(envelope))
                         }
                         Err(_) => {
-                            crate::vcs::report_skipped("oneagentgraph", 1);
+                            report_skipped(1);
                             None
                         }
                     },

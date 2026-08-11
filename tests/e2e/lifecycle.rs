@@ -3,15 +3,37 @@
 //! publication are all the sibling's; the DAG, the rounds, and the pr-author
 //! composition are this one's.
 //!
+//! Every journey here drives the **real** repository side: `onevcs` is a library
+//! this crate calls, so there is nothing to substitute at a subprocess boundary
+//! and nothing scripts what a publication did. What a journey states instead is
+//! the world that library reads — the repository's rules, the command that gates
+//! it, and, at `onevcs`'s own `ONEVCS_GH` seam, what GitHub does with the change
+//! request it is handed.
+//!
+//! **Not on Windows.** `onevcs` opens no session there at all, for a reason that
+//! is its own to fix; `real_vcs.rs` carries the tripwire that fails when it does,
+//! and that is the signal to drop this attribute.
+//!
 //! Ported from the lifecycle-node composition halves of `test_lifecycle_e2e`.
 
-// llmlint: ignore-file[e2e_not_mocked] `World` substitutes the two *siblings* at their
-// subprocess boundary and nothing inside the crate under test, which is driven as a real
-// compiled binary. The scenario this journey states is one a real sibling would need paid
-// model turns to produce, and `dispatch.rs` is where the real `oneagentgraph` binary is
-// driven instead. `harness.rs` carries the same suppression and the full rationale.
+// llmlint: ignore-file[live_tier_compiles_and_requires_credential] a lifecycle journey
+// cannot compile-and-run on Windows: `onevcs` opens no session there at all, because
+// `register` stores the verbatim `\\?\C:\…` form and `session open` hands it to `git clone`,
+// which reads it as a UNC URL and refuses. Neither half is this crate's to change —
+// divergence 18 in `docs/contract-divergences.md` is the proposal. The Windows leg runs
+// `the_real_onevcs_opens_no_session_on_windows_which_is_why_the_journeys_above_are_not_run_here`
+// instead, which fails when that stops being true and is the signal to delete this.
+#![cfg(not(windows))]
 
-use crate::harness::{lifecycle, plan_of, World};
+// llmlint: ignore-file[e2e_not_mocked] the crate under test is driven as a real compiled
+// binary and the sibling these journeys are about — `onevcs` — is the real library, over
+// real git and a real origin on disk. `oneagentgraph` is substituted at its subprocess
+// boundary so a journey states a dispatch outcome rather than paying for a model turn, and
+// GitHub is substituted at `onevcs`'s own `ONEVCS_GH` override so a change request can be
+// opened and merged offline. `harness.rs` carries the same suppression and the full
+// rationale.
+
+use crate::harness::{lifecycle, plan_of, Repository, World};
 use serde_json::json;
 
 fn settle(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
@@ -46,47 +68,141 @@ fn driven(
     (name.to_string(), round)
 }
 
-/// The `onevcs` invocations, in order.
-fn vcs_calls(world: &World) -> Vec<Vec<String>> {
+/// A repository whose gate passes, publishing straight onto its base.
+///
+/// `local-direct` reaches the base with git alone, so a journey that only needs
+/// *a* publication asks no host for anything.
+fn published_locally(world: &World) -> Repository {
+    world.repository("local-direct", &["true"])
+}
+
+/// A shell command a gate can be given, for a journey that needs the gate to do
+/// something other than pass.
+///
+/// The gate runs in the session's worktree, which sits at
+/// `$ONEVCS_HOME/<identity>/runs/<token>/worktree` — so the session's own token
+/// is the name of the directory above it, and a gate can address the stream that
+/// session is writing without this crate telling it one.
+fn gate(script: &str) -> Vec<String> {
+    vec!["bash".to_owned(), "-c".to_owned(), script.to_owned()]
+}
+
+/// Every `onevcs`-produced event one run recorded, by kind.
+fn vcs_kinds(world: &World, run: &str) -> Vec<String> {
     world
-        .invocations()
+        .journal(run)
         .iter()
-        .filter(|invocation| invocation["tool"] == "onevcs")
-        .map(|invocation| {
-            invocation["args"]
-                .as_array()
-                .expect("args")
-                .iter()
-                .filter_map(|arg| arg.as_str().map(str::to_string))
-                .collect()
-        })
+        .filter(|event| event["source"] == "vcs")
+        .filter_map(|event| event["kind"].as_str().map(str::to_string))
         .collect()
+}
+
+/// The session tokens **the sibling itself** opened, in order.
+///
+/// Told apart from this crate's own `session-opened` — which it writes beside
+/// the sibling's for the merged stream — by the fields only the repository side
+/// knows: it names the clone it cut and the checkout it cut it from.
+fn sibling_sessions(world: &World, run: &str) -> Vec<String> {
+    world
+        .journal(run)
+        .iter()
+        .filter(|event| event["source"] == "vcs" && event["kind"] == "session-opened")
+        .filter(|event| event["payload"]["clone"].is_string())
+        .filter_map(|event| event["payload"]["token"].as_str().map(str::to_string))
+        .collect()
+}
+
+/// Every session token a run has recorded an opening for, in order, once each.
+///
+/// This crate writes its own `session-opened` as the dispatch starts, so a token
+/// is readable here while the step that opened it is still running — long before
+/// the sibling's own record of the same session is relayed off its stream.
+fn opened_tokens(world: &World, run: &str) -> Vec<String> {
+    world
+        .journal(run)
+        .iter()
+        .filter(|event| event["source"] == "vcs" && event["kind"] == "session-opened")
+        .filter_map(|event| event["payload"]["token"].as_str().map(str::to_string))
+        .fold(Vec::new(), |mut seen, token| {
+            if !seen.contains(&token) {
+                seen.push(token);
+            }
+            seen
+        })
+}
+
+/// The directory each dispatched step ran in, in the order they settled.
+fn step_directories(world: &World, run: &str) -> Vec<(String, String)> {
+    world
+        .journal(run)
+        .iter()
+        .filter(|event| event["source"] == "agentgraph")
+        .filter_map(|event| {
+            Some((
+                event["labels"]["step"].as_str()?.to_string(),
+                event["payload"]["dir"].as_str()?.to_string(),
+            ))
+        })
+        .fold(Vec::new(), |mut seen, (step, dir)| {
+            if !seen.iter().any(|(known, _)| known == &step) {
+                seen.push((step, dir));
+            }
+            seen
+        })
+}
+
+/// The branch each session a run opened was cut on.
+fn session_branches(world: &World, run: &str) -> Vec<String> {
+    world
+        .journal(run)
+        .iter()
+        .filter(|event| event["source"] == "vcs" && event["kind"] == "session-opened")
+        .filter_map(|event| event["payload"]["branch"].as_str().map(str::to_string))
+        .collect()
+}
+
+/// Why a run settled the way it did, as the sibling itself said it.
+fn why(world: &World, run: &str) -> String {
+    let settled: Vec<String> = world
+        .events_of(run, "node-settled")
+        .iter()
+        .map(|event| {
+            format!(
+                "{} {} {}: {}",
+                event["labels"]["node"],
+                event["payload"]["status"],
+                event["payload"]["outcome"],
+                event["payload"]["detail"]
+            )
+        })
+        .collect();
+    format!(
+        "what the nodes settled on:\n  {}\n  the sibling recorded: {:?}",
+        settled.join("\n  "),
+        vcs_kinds(world, run)
+    )
 }
 
 #[test]
 fn a_lifecycle_node_opens_a_session_works_in_it_and_publishes_through_onevcs() {
     let world = World::new("lifecycle-publish");
+    published_locally(&world);
+    world.script("service.work", "the worker wrote this\n");
     let run = settle(&world, "shipped", vec![lifecycle("service", &[])]);
 
-    let calls = vcs_calls(&world);
-    assert!(
-        calls
-            .iter()
-            .any(|call| call.starts_with(&["session".into(), "open".into()])),
-        "no session was opened: {calls:?}"
-    );
-    assert!(
-        calls
-            .iter()
-            .any(|call| call.first().is_some_and(|verb| verb == "publish")),
-        "nothing was published: {calls:?}"
-    );
-    assert!(
-        calls
-            .iter()
-            .any(|call| call.starts_with(&["session".into(), "close".into()])),
-        "the session was never closed: {calls:?}"
-    );
+    // What the composition did, read off the sibling's own records rather than
+    // off an argument vector: a session was opened, its branch was gated and
+    // pushed, and the session was released. Against a spawned double the
+    // equivalent assertion was "these arguments were passed", which stayed true
+    // of a command that then failed.
+    let kinds = vcs_kinds(&world, &run);
+    for kind in ["session-opened", "gate-verdict", "push", "session-closed"] {
+        assert!(
+            kinds.iter().any(|seen| seen == kind),
+            "the publication recorded no {kind}: {kinds:?}\n{}",
+            why(&world, &run)
+        );
+    }
 
     // The dispatch ran *in the worktree the session handed back*, which is what
     // `WorkspaceSpec::VcsSession` means: the machine running the dispatch opens
@@ -98,18 +214,12 @@ fn a_lifecycle_node_opens_a_session_works_in_it_and_publishes_through_onevcs() {
         .expect("the lifecycle node dispatched");
     let dir = dispatched["payload"]["dir"].as_str().expect("a directory");
     assert!(
-        dir.contains("worktrees"),
+        dir.contains("worktree"),
         "the dispatch did not run in the session's worktree: {dir}"
     );
 
-    // The session's own stream joins the merged one.
-    assert!(
-        world
-            .journal(&run)
-            .iter()
-            .any(|event| event["source"] == "vcs" && event["kind"] == "session-opened"),
-        "the session opening is missing from the merged store"
-    );
+    // The session's own stream joins the merged one, and this crate's record of
+    // the publication joins it beside them.
     assert!(
         world
             .journal(&run)
@@ -119,16 +229,22 @@ fn a_lifecycle_node_opens_a_session_works_in_it_and_publishes_through_onevcs() {
     );
 
     let result = world.run_json(&run, "round-01/result.json");
-    assert_eq!(result["nodes"][0]["status"], "done");
+    assert_eq!(
+        result["nodes"][0]["status"],
+        "done",
+        "{}",
+        why(&world, &run)
+    );
     assert_eq!(result["state"], "complete");
 }
 
 #[test]
 fn several_steps_share_one_branch_and_run_serially_in_topological_order() {
     let world = World::new("lifecycle-steps");
+    published_locally(&world);
     let node = json!({
         "id": "service",
-        "repo": "owner/service",
+        "repo": "service",
         "steps": [
             {"id": "review", "persona": "reviewer", "task": "## What\nreview", "deps": ["implement"]},
             {"id": "implement", "persona": "engineer", "task": "## What\nimplement"},
@@ -151,17 +267,39 @@ fn several_steps_share_one_branch_and_run_serially_in_topological_order() {
         "the steps did not run in topological order"
     );
 
-    // Concurrent writers cannot safely share a worktree, so every step names
-    // the same branch the first one opened.
-    let branches: Vec<String> = vcs_calls(&world)
-        .iter()
-        .filter(|call| call.starts_with(&["session".into(), "open".into()]))
-        .filter_map(|call| {
-            call.iter()
-                .position(|arg| arg == "--branch")
-                .and_then(|at| call.get(at + 1).cloned())
-        })
-        .collect();
+    // **One** session for the whole workstream. A step that opened its own
+    // would be a fresh clone cut from the base, carrying none of the earlier
+    // steps' work — and opening it reclaims the first session's workspace,
+    // uncommitted work and all. Counted off the sibling's own record rather
+    // than this crate's, which writes one of its own beside it.
+    let opened = sibling_sessions(&world, &run);
+    assert_eq!(
+        opened.len(),
+        1,
+        "the workstream opened {} sessions, not one: {opened:?}\n{}",
+        opened.len(),
+        why(&world, &run)
+    );
+
+    // And both steps worked in that session's worktree — the same directory,
+    // which is what "several steps share one branch" has always meant and what
+    // a second session would quietly break.
+    let dirs = step_directories(&world, &run);
+    assert_eq!(
+        dirs.len(),
+        2,
+        "a step recorded no directory it ran in: {dirs:?}"
+    );
+    assert_eq!(
+        dirs[0].1, dirs[1].1,
+        "the steps ran in different worktrees: {dirs:?}"
+    );
+    assert!(
+        dirs[0].1.contains("worktree"),
+        "the steps did not run in the session's worktree: {dirs:?}"
+    );
+    // The branch that one session was cut on is the branch the node published.
+    let branches = session_branches(&world, &run);
     assert!(
         branches.windows(2).all(|pair| pair[0] == pair[1]),
         "the steps did not share one branch: {branches:?}"
@@ -172,12 +310,122 @@ fn several_steps_share_one_branch_and_run_serially_in_topological_order() {
     );
 }
 
+/// A workstream whose session record goes missing between two steps.
+///
+/// Every step after the first runs in the worktree the first step's session
+/// opened, and this crate asks the sibling where that is. When the record it
+/// asks for cannot be read there is no worktree to name — so the step opens a
+/// session of its own, which is what it would have done before, rather than
+/// running nowhere or taking the node down. The fallback is said out loud,
+/// because a workstream that quietly started over is a step's work silently
+/// left behind.
+///
+/// The record is removed while the first step is held at a rendezvous, so the
+/// window is the test's rather than the host's.
+#[test]
+fn a_session_record_that_cannot_be_read_falls_back_to_opening_a_session() {
+    use std::process::Stdio;
+
+    let world = World::new("lifecycle-norecord");
+    published_locally(&world);
+    world.script("service.implement.wait", "hold");
+    world.script("driver.wait", "hold");
+    let node = json!({
+        "id": "service",
+        "repo": "service",
+        // Its own title, so the run spends no `pr-author` dispatch: that one
+        // reads the node's worktree too and would fall back alongside the step,
+        // and this journey is about the step.
+        "title": "feat: land what the steps made",
+        "steps": [
+            {"id": "implement", "persona": "engineer", "task": "## What\nimplement"},
+            {"id": "review", "persona": "reviewer", "task": "## What\nreview", "deps": ["implement"]},
+        ],
+    });
+    let path = world.plan("norecord", &plan_of("norecord", vec![node]));
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+
+    // The round runs from here rather than from the driver, so the fallback's
+    // own words land on a descriptor this test holds.
+    let round = world
+        .cmd(&["round", "run", "norecord"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the binary starts");
+
+    // The first step is held, so its session is open and recorded and nothing
+    // has asked where its worktree is yet. The token comes off *this crate's*
+    // record of the opening, which the executor emits as the dispatch starts —
+    // the sibling's own reaches the merged store only once the session's stream
+    // is relayed, which is after the step settles and therefore too late.
+    world.until("the first step's session to be recorded", |world| {
+        !opened_tokens(world, "norecord").is_empty()
+    });
+    let token = opened_tokens(&world, "norecord")
+        .into_iter()
+        .next()
+        .expect("the session was just seen");
+    // llmlint: ignore-block[tests_mirror_real_usage] the *arrangement* below removes the
+    // session's record on purpose, because that is the condition: a state root a cleanup
+    // swept, or a process that died between writing the record and closing the session.
+    // It is a fault rather than an operation, and no command produces one — every
+    // deletion `onevcs` performs is a run root under `workspaces/`, an integrate or
+    // publish scratch, or a rotated gate log, and `session close` keeps the record
+    // deliberately, because a closed session is still addressable. So there is nothing
+    // else to reach it with. It fails loudly rather than silently if the sibling
+    // relocates its records, and everything asserted afterwards is through the binary:
+    // the round is `onepipeline round run`, and the claim is what it said and what
+    // sessions it recorded.
+    let record = world
+        .onevcs_home()
+        .join("sessions")
+        .join(format!("{token}.json"));
+    std::fs::remove_file(&record)
+        .unwrap_or_else(|error| panic!("cannot remove {}: {error}", record.display()));
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    world.release("service.implement.go");
+    let settled = round.wait_with_output().expect("the round runs");
+    world.release("driver.go");
+    let said = String::from_utf8_lossy(&settled.stderr).into_owned();
+
+    assert!(
+        said.contains("cannot read session") && said.contains("record"),
+        "the fallback was silent about the record it could not read:\n{said}"
+    );
+    // It fell back rather than running nowhere: the second step asked for a
+    // session of its own, which is what it would have done had the first never
+    // opened one. Two distinct tokens, where a workstream whose record *is*
+    // readable records exactly one.
+    let opened = opened_tokens(&world, "norecord");
+    assert_eq!(
+        opened.len(),
+        2,
+        "the step whose worktree could not be found did not open one: {opened:?}\n{}",
+        why(&world, "norecord")
+    );
+    assert_eq!(opened[0], token, "{opened:?}");
+    // And the round settled rather than the driver going down with it. It
+    // settles *failed*: the sibling reclaims a run root nothing holds a lease
+    // on, so opening the second session took the first one's workspace with it
+    // — divergence 14 in `docs/contract-divergences.md`, and the reason a node
+    // opens one session when it can.
+    assert!(
+        !world.events_of("norecord", "round-finished").is_empty(),
+        "the round never settled:\n{said}"
+    );
+}
+
 #[test]
 fn a_human_step_holds_the_workstream_rather_than_being_inferred() {
     let world = World::new("lifecycle-human-step");
+    published_locally(&world);
     let node = json!({
         "id": "service",
-        "repo": "owner/service",
+        "repo": "service",
         "steps": [
             {"id": "implement", "persona": "engineer", "task": "## What\nimplement"},
             {"id": "staging-approval", "kind": "human", "task": "Exercise the staged service.", "deps": ["implement"]},
@@ -187,18 +435,22 @@ fn a_human_step_holds_the_workstream_rather_than_being_inferred() {
 
     let result = world.run_json(&run, "round-01/result.json");
     assert_eq!(result["nodes"][0]["status"], "waiting", "{result}");
-    // Nothing was published: the workstream is held at its human step.
-    assert!(
-        !vcs_calls(&world)
-            .iter()
-            .any(|call| call.first().is_some_and(|verb| verb == "publish")),
-        "a workstream published past its human step"
-    );
+    // Nothing was published: the workstream is held at its human step, so the
+    // sibling never ran a gate and never pushed.
+    let kinds = vcs_kinds(&world, &run);
+    for kind in ["gate-started", "push"] {
+        assert!(
+            !kinds.iter().any(|seen| seen == kind),
+            "a workstream published past its human step: {kinds:?}"
+        );
+    }
 }
 
 #[test]
 fn the_pr_author_dispatch_drafts_the_title_and_never_blocks_publication() {
     let world = World::new("lifecycle-pr-author");
+    let repo = published_locally(&world);
+    world.script("service.work", "the worker wrote this\n");
     let run = settle(&world, "authored", vec![lifecycle("service", &[])]);
 
     assert!(
@@ -210,11 +462,16 @@ fn the_pr_author_dispatch_drafts_the_title_and_never_blocks_publication() {
         world.invocations()
     );
 
-    let drafted = std::fs::read_to_string(world.fakes.join("published.jsonl"))
-        .expect("the publication was recorded");
+    // The drafted title is the subject the change landed under — read off the
+    // base branch, which is the only place a title is a fact rather than an
+    // argument somebody passed.
     assert!(
-        drafted.contains("feat: drafted from the diff"),
-        "the drafted title did not reach publication: {drafted}"
+        repo.base_commits(&world)
+            .iter()
+            .any(|subject| subject == "feat: drafted from the diff"),
+        "the drafted title did not reach publication: {:?}\n{}",
+        repo.base_commits(&world),
+        why(&world, &run)
     );
     assert_eq!(
         world.run_json(&run, "round-01/result.json")["state"],
@@ -225,15 +482,19 @@ fn the_pr_author_dispatch_drafts_the_title_and_never_blocks_publication() {
 #[test]
 fn a_planner_supplied_title_wins_over_the_drafting_dispatch() {
     let world = World::new("lifecycle-title");
+    let repo = published_locally(&world);
+    world.script("service.work", "the worker wrote this\n");
     let mut node = lifecycle("service", &[]);
     node["title"] = json!("fix: the planner named this");
-    settle(&world, "titled", vec![node]);
+    let run = settle(&world, "titled", vec![node]);
 
-    let published = std::fs::read_to_string(world.fakes.join("published.jsonl"))
-        .expect("the publication was recorded");
     assert!(
-        published.contains("fix: the planner named this"),
-        "the planner's title was overwritten: {published}"
+        repo.base_commits(&world)
+            .iter()
+            .any(|subject| subject == "fix: the planner named this"),
+        "the planner's title was overwritten: {:?}\n{}",
+        repo.base_commits(&world),
+        why(&world, &run)
     );
     assert!(
         !world.was_invoked(
@@ -247,6 +508,8 @@ fn a_planner_supplied_title_wins_over_the_drafting_dispatch() {
 #[test]
 fn a_drafting_failure_falls_back_deterministic_and_still_publishes() {
     let world = World::new("lifecycle-fallback");
+    let repo = published_locally(&world);
+    world.script("service.work", "the worker wrote this\n");
     // Only the drafting dispatch fails. It runs after the branch is already
     // verified and is not on the publication path, so the change still lands.
     world.script("service.pr-author.fail", "1");
@@ -254,14 +517,17 @@ fn a_drafting_failure_falls_back_deterministic_and_still_publishes() {
 
     let result = world.run_json(&run, "round-01/result.json");
     assert_eq!(
-        result["state"], "complete",
-        "a drafting failure blocked publication: {result}"
+        result["state"],
+        "complete",
+        "a drafting failure blocked publication: {result}\n{}",
+        why(&world, &run)
     );
-    let published = std::fs::read_to_string(world.fakes.join("published.jsonl"))
-        .expect("the publication was recorded");
     assert!(
-        published.contains("chore: service"),
-        "the deterministic title was not used: {published}"
+        repo.base_commits(&world)
+            .iter()
+            .any(|subject| subject == "chore: service"),
+        "the deterministic title was not used: {:?}",
+        repo.base_commits(&world)
     );
 }
 
@@ -272,10 +538,25 @@ fn a_drafting_failure_falls_back_deterministic_and_still_publishes() {
 /// at settlement every record of it appears at once, when it is over. The claim
 /// here is the opposite one: a record written *during* the publication is
 /// readable out of the merged store while the node is still in flight.
+///
+/// The gate is what is held, because the gate is the one stretch of a real
+/// publication a journey can hold from outside it: `onevcs` runs the
+/// repository's own command, and this one waits for a file.
 #[test]
 fn a_publications_own_records_reach_the_journal_while_it_is_still_publishing() {
     let world = World::new("lifecycle-livepublish");
-    world.script("publish.hold", "hold");
+    let go = world.fakes.join("gate.go");
+    world.repository(
+        "local-direct",
+        &gate(&format!(
+            "until [ -f {} ]; do sleep 0.05; done",
+            go.display()
+        ))
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>(),
+    );
+    world.script("service.work", "the worker wrote this\n");
     let path = world.plan(
         "watched",
         &plan_of("watched", vec![lifecycle("service", &[])]),
@@ -284,11 +565,11 @@ fn a_publications_own_records_reach_the_journal_while_it_is_still_publishing() {
         .run(&["start", &path.to_string_lossy(), "--detach"])
         .exited(0);
 
-    world.until("the publication to wait on the lock", |world| {
+    world.until("the publication to reach its gate", |world| {
         world
             .run(&["monitor", "watched"])
             .stdout
-            .contains("lock-wait")
+            .contains("gate-started")
     });
     // Mid-publication, and readable: `monitor` renders the record and `status`
     // still calls the node running. Both are what an operator has open.
@@ -306,11 +587,11 @@ fn a_publications_own_records_reach_the_journal_while_it_is_still_publishing() {
     // so every per-node reader would otherwise take a whole publication for work
     // that happened to nobody — and no view renders a relayed envelope's node,
     // so the merged store the contract defines is where that is readable.
-    let waiting = &world.events_of("watched", "lock-wait")[0];
-    assert_eq!(waiting["labels"]["node"], "service", "{waiting}");
-    assert_eq!(waiting["source"], "vcs", "{waiting}");
+    let started = &world.events_of("watched", "gate-started")[0];
+    assert_eq!(started["labels"]["node"], "service", "{started}");
+    assert_eq!(started["source"], "vcs", "{started}");
 
-    world.release("publish.go");
+    world.release("gate.go");
     world.until("the run to settle", |world| {
         world.run(&["results", "watched"]).stdout.contains("done")
     });
@@ -324,7 +605,7 @@ fn a_publications_own_records_reach_the_journal_while_it_is_still_publishing() {
         "gate-started",
         "gate-verdict",
         "push",
-        "change-opened",
+        "merge-completed",
         "session-closed",
     ] {
         let seen = stream
@@ -345,24 +626,30 @@ fn a_publications_own_records_reach_the_journal_while_it_is_still_publishing() {
         .out_has("done");
 }
 
-/// The last record of a session, written after the follow watching it ended.
+/// The last record of a session, and the recovery that covers for a follow that
+/// ended before it was written.
 ///
-/// Not a hypothetical: `onevcs session close` flips the session's record to
-/// `Closed` and *then* emits `session-closed`, while `onevcs events --follow`
-/// prints what the stream holds and only then asks whether the session closed.
-/// Between those two the follow returns — cleanly, successfully, having relayed
-/// everything but the tail. This crate read that clean end as "everything was
-/// relayed" and skipped the recovery read, so the merged store carried a whole
-/// publication with no close on it, and a later reader had no way to tell a
-/// session that was released from one that was abandoned. The window is
-/// microseconds wide against a real `onevcs`, which is why it reached a release:
-/// it fails a run in CI now and then and passes on the next one.
+/// Not a hypothetical: closing a session flips its record to `Closed` and *then*
+/// emits `session-closed`, while the follow relays what the stream holds and only
+/// then asks whether the session closed. Between those two the follow returns —
+/// cleanly, successfully, having relayed everything but the tail. This crate read
+/// that clean end as "everything was relayed" and skipped the recovery read, so
+/// the merged store carried a whole publication with no close on it, and a later
+/// reader had no way to tell a session that was released from one that was
+/// abandoned.
+///
+/// The window is microseconds wide and **cannot be widened from outside**: it is
+/// inside one library call now, where the `onevcs` double used to be a process a
+/// journey could delay. So what this asserts is the invariant either path has to
+/// satisfy — the tail arrives, once — rather than which path delivered it. The
+/// arithmetic that makes "once" true when the follow *did* end early is held
+/// deterministically by `relays_only_what_the_follow_did_not` in
+/// `src/lifecycle.rs`.
 #[test]
 fn a_record_written_after_the_follow_ended_still_reaches_the_merged_store_once() {
     let world = World::new("lifecycle-latetail");
-    world.script("publish.merged", "");
-    // The session closes, and its record lands after the follow has given up.
-    world.script("close.slow-record", "");
+    published_locally(&world);
+    world.script("service.work", "the worker wrote this\n");
     let run = settle(&world, "tail", vec![lifecycle("service", &[])]);
 
     // Once. Recovering the tail by re-reading the whole stream would put every
@@ -376,8 +663,7 @@ fn a_record_written_after_the_follow_ended_still_reaches_the_merged_store_once()
         "lock-wait",
         "gate-verdict",
         "push",
-        "change-opened",
-        "change-merged",
+        "merge-completed",
         "session-closed",
     ] {
         let seen = stream
@@ -402,7 +688,8 @@ fn a_record_written_after_the_follow_ended_still_reaches_the_merged_store_once()
 #[test]
 fn a_session_that_cannot_open_is_an_infrastructure_failure_by_name() {
     let world = World::new("lifecycle-nosession");
-    world.script("session-open.fail", "");
+    // No repository registered, so the node names one `onevcs` has never heard
+    // of — which is the refusal an operator actually meets first.
     let run = settle(&world, "nosession", vec![lifecycle("service", &[])]);
 
     // A dispatch that never started failed for a reason that has nothing to do
@@ -415,11 +702,17 @@ fn a_session_that_cannot_open_is_an_infrastructure_failure_by_name() {
 #[test]
 fn a_publication_that_its_gate_rejects_settles_the_node_failed_by_name() {
     let world = World::new("lifecycle-gate");
-    world.script("publish.fail", "");
+    world.repository("local-direct", &["false"]);
+    world.script("service.work", "the worker wrote this\n");
     let run = settle(&world, "rejected", vec![lifecycle("service", &[])]);
 
     let result = world.run_json(&run, "round-01/result.json");
-    assert_eq!(result["nodes"][0]["status"], "failed", "{result}");
+    assert_eq!(
+        result["nodes"][0]["status"],
+        "failed",
+        "{result}\n{}",
+        why(&world, &run)
+    );
     assert_eq!(result["nodes"][0]["outcome"], "publication-failed");
     world
         .run(&["results", &run])
@@ -427,16 +720,73 @@ fn a_publication_that_its_gate_rejects_settles_the_node_failed_by_name() {
         .out_has("publication-failed");
 }
 
+/// A title the sibling will not commit under.
+///
+/// `onevcs::Subject` is the conversion that checks a publication's title, and
+/// this crate builds its request through it — so a title too long to be a commit
+/// subject is refused *where the request is built*, before the session's work is
+/// committed and its base merged, rather than after. The planner sets the title,
+/// so this is reachable from a plan file and the node has to settle on it by
+/// name rather than crash or publish something the sibling would refuse.
+#[test]
+fn a_title_the_sibling_will_not_commit_under_fails_the_node_before_it_publishes() {
+    let world = World::new("lifecycle-longtitle");
+    let repo = world.repository("local-direct", &["true"]);
+    world.script("service.work", "the worker wrote this\n");
+    let mut node = lifecycle("service", &[]);
+    // Past the 72-character subject the sibling accepts, and nothing else about
+    // it is wrong: it is a title a planner could plausibly write.
+    node["title"] = json!(format!(
+        "feat: {}",
+        "land the change the worker made ".repeat(3)
+    ));
+    let run = settle(&world, "longtitle", vec![node]);
+
+    let result = world.run_json(&run, "round-01/result.json");
+    assert_eq!(
+        result["nodes"][0]["status"],
+        "failed",
+        "{result}\n{}",
+        why(&world, &run)
+    );
+    assert_eq!(
+        result["nodes"][0]["outcome"], "publication-failed",
+        "{result}"
+    );
+    // Named, so an operator can fix the plan rather than guess. The words are
+    // the sibling's own refusal, relayed.
+    let settled = &world.events_of(&run, "node-settled")[0];
+    assert!(
+        settled["payload"]["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("title") && detail.contains("limit")),
+        "the refusal does not say the title is why: {settled}"
+    );
+    // And nothing landed: the refusal comes before the publication, not after
+    // half of one.
+    assert_eq!(
+        repo.base_commits(&world),
+        vec!["chore: seed the repository".to_string()],
+        "a title the sibling refused still reached the base"
+    );
+}
+
 #[test]
 fn a_node_whose_publication_failed_continues_the_branch_it_preserved() {
     let world = World::new("lifecycle-preserved");
     // The steps ran and only the merge path refused, so the work is real, it is
     // on that branch, and nothing else points at it.
-    world.script("publish.fail", "");
+    let repo = world.repository("local-direct", &["false"]);
+    world.script("service.work", "the worker wrote this\n");
     let run = settle(&world, "preserved", vec![lifecycle("service", &[])]);
 
     let result = world.run_json(&run, "round-01/result.json");
-    assert_eq!(result["nodes"][0]["status"], "failed", "{result}");
+    assert_eq!(
+        result["nodes"][0]["status"],
+        "failed",
+        "{result}\n{}",
+        why(&world, &run)
+    );
     let preserved = result["nodes"][0]["branch"]
         .as_str()
         .expect("the failed node named the branch it left behind")
@@ -454,11 +804,21 @@ fn a_node_whose_publication_failed_continues_the_branch_it_preserved() {
     assert_eq!(node["resume"]["branch"], json!(preserved), "{next}");
     // The pin and the resume agree, which is the same invariant `retry` holds.
     assert_eq!(node["branch"], json!(preserved), "{next}");
+    // And the branch the plan points at is one the repository actually holds:
+    // a pin naming a branch nobody kept is a continuation that starts from
+    // nothing while reporting that it resumed.
+    assert!(
+        repo.has_branch(&world, &preserved),
+        "the preserved branch {preserved} was not handed back to the checkout"
+    );
 }
 
 #[test]
 fn a_published_node_reports_where_a_human_reads_the_change_it_opened() {
     let world = World::new("lifecycle-evidence");
+    // A change request left open for review, which is what `change-open` means.
+    world.repository("change-open", &["true"]);
+    world.script("service.work", "the worker wrote this\n");
     let run = settle(&world, "evidence", vec![lifecycle("service", &[])]);
 
     // The URL the sibling handed back is the one piece of evidence a person
@@ -467,43 +827,49 @@ fn a_published_node_reports_where_a_human_reads_the_change_it_opened() {
     let node = world.run_json(&run, "round-01/result.json")["nodes"][0].clone();
     let published = node["change_url"]
         .as_str()
-        .expect("the published node recorded where its change is")
+        .unwrap_or_else(|| panic!("{node}\n{}", why(&world, &run)))
         .to_string();
-    assert!(published.contains("/changes/"), "{published}");
+    assert!(published.contains("/pull/"), "{published}");
     // A change request left open for review is an outcome of its own — the node
     // is done and the change has *not* reached its base — so it is named rather
     // than reported as a bare "published".
     assert_eq!(node["outcome"], "change-open", "{node}");
 
     // And the host's own identifier for it, which is what a later command
-    // addresses the change by.
-    let recorded = &world.events_of(&run, "published")[0];
+    // addresses the change by. Read off the sibling's own `change-opened`
+    // record: `onevcs::Publication` carries the URL and no id, so the stream is
+    // where the id is a fact — see the proposal in
+    // `docs/contract-divergences.md`.
+    let opened = &world.events_of(&run, "change-opened")[0];
     assert!(
-        recorded["payload"]["id"].is_string(),
-        "the publication recorded no change id: {recorded}"
+        opened["payload"]["id"].is_string(),
+        "the publication recorded no change id: {opened}"
     );
+    assert_eq!(opened["payload"]["url"], json!(published), "{opened}");
 
     world.run(&["results", &run]).exited(0).out_has(&published);
 }
 
 /// A publication that had nothing to publish.
 ///
-/// `onevcs publish` exits **0** on a branch its base already carries: it prints
-/// `nothing to publish: …` and writes no push, no change request, and no merge.
-/// Read as a success with no outcome, this crate settled it as a bare
-/// "published" — so a node whose worker wrote nothing reported as one that
-/// landed work, and the only way to tell was to notice that the merged store
-/// held no publication at all. The real-everything smoke is where that turned
-/// up, on the first run that reached a real `onevcs` with a clean tree.
+/// `onevcs` reports `PublishOutcome::NothingToPublish` on a branch its base
+/// already carries: it writes no push, no change request, and no merge. Read as
+/// a success with no outcome, this crate settled it as a bare "published" — so a
+/// node whose worker wrote nothing reported as one that landed work, and the
+/// only way to tell was to notice that the merged store held no publication at
+/// all. The real-everything smoke is where that turned up, on the first run that
+/// reached a real `onevcs` with a clean tree.
 #[test]
 fn a_publication_that_had_nothing_to_publish_says_so_rather_than_claiming_it_landed() {
     let world = World::new("lifecycle-nothing");
-    world.script("publish.nothing", "");
+    published_locally(&world);
+    // Nothing is scripted for the worker to write, so the session's branch
+    // carries exactly what its base does.
     let run = settle(&world, "empty", vec![lifecycle("service", &[])]);
 
     let node = world.run_json(&run, "round-01/result.json")["nodes"][0].clone();
     // Done: nothing failed, and there was nothing to do.
-    assert_eq!(node["status"], "done", "{node}");
+    assert_eq!(node["status"], "done", "{node}\n{}", why(&world, &run));
     assert_eq!(node["outcome"], "no-changes", "{node}");
     assert_eq!(node["change_url"], json!(null), "{node}");
     world
@@ -515,39 +881,75 @@ fn a_publication_that_had_nothing_to_publish_says_so_rather_than_claiming_it_lan
 #[test]
 fn a_change_the_host_merged_settles_the_node_on_the_merge_rather_than_the_request() {
     let world = World::new("lifecycle-merged");
-    world.script("publish.merged", "");
+    world.repository("change-direct", &["true"]);
+    // The host lands the change it was handed.
+    world.script("gh.merged", "");
+    world.script("service.work", "the worker wrote this\n");
     let run = settle(&world, "landed", vec![lifecycle("service", &[])]);
 
     let node = world.run_json(&run, "round-01/result.json")["nodes"][0].clone();
-    assert_eq!(node["status"], "done", "{node}");
+    assert_eq!(node["status"], "done", "{node}\n{}", why(&world, &run));
     assert_eq!(node["outcome"], "merged", "{node}");
-    // The change request it merged is still where a person reads what landed.
+    // And the run's own record names nowhere to read it. That is what
+    // `PublishOutcome::Merged` carries — the commit, not the change request — so
+    // the operator-facing `change_url` a queued or open change would have is
+    // empty here, and `results` renders none. It is the proposal recorded as
+    // divergence 15 in `docs/contract-divergences.md`, and this assertion is
+    // what fails when the sibling starts carrying the change request on a merge.
+    assert_eq!(
+        node["change_url"],
+        json!(null),
+        "a merged change now names where a human reads it; carry it into the \
+         settlement and hold this journey to it: {node}"
+    );
+    let results = world.run(&["results", &run]);
+    results.exited(0).out_has("merged");
     assert!(
-        node["change_url"]
+        !results.stdout.contains("/pull/"),
+        "`results` renders a change request the settlement does not carry:\n{}",
+        results.stdout
+    );
+
+    // The change request it merged is still where a person reads what landed —
+    // on the sibling's own record of opening it, which is the only place it
+    // survives.
+    let opened = &world.events_of(&run, "change-opened")[0];
+    assert!(
+        opened["payload"]["url"]
             .as_str()
-            .is_some_and(|url| url.contains("/changes/")),
-        "{node}"
+            .is_some_and(|url| url.contains("/pull/")),
+        "{opened}"
     );
 }
 
 #[test]
 fn a_change_the_host_is_holding_settles_the_node_as_queued() {
     let world = World::new("lifecycle-queued");
-    world.script("publish.queued", "");
+    // `change-auto` asks the host to land it once its checks pass, and this host
+    // has not landed it.
+    world.repository("change-auto", &["true"]);
+    world.script("service.work", "the worker wrote this\n");
     let run = settle(&world, "queued", vec![lifecycle("service", &[])]);
 
     // The host has it and will land it once its checks pass. The node is done —
     // there is nothing more for this round to do — and it says so as queued
     // rather than as merged, which would claim the base already carries it.
     let node = world.run_json(&run, "round-01/result.json")["nodes"][0].clone();
-    assert_eq!(node["status"], "done", "{node}");
+    assert_eq!(node["status"], "done", "{node}\n{}", why(&world, &run));
     assert_eq!(node["outcome"], "queued", "{node}");
+    assert!(
+        node["change_url"]
+            .as_str()
+            .is_some_and(|url| url.contains("/pull/")),
+        "a queued change named nowhere to read it: {node}"
+    );
 }
 
 #[test]
 fn an_explicit_pin_the_planner_wrote_wins_over_a_branch_a_dispatch_preserved() {
     let world = World::new("lifecycle-pin-wins");
-    world.script("publish.fail", "");
+    world.repository("local-direct", &["false"]);
+    world.script("service.work", "the worker wrote this\n");
     let mut node = lifecycle("service", &[]);
     node["branch"] = json!("feature/the-planner-said-so");
     let run = settle(&world, "pinwins", vec![node]);
@@ -573,6 +975,7 @@ fn an_explicit_pin_the_planner_wrote_wins_over_a_branch_a_dispatch_preserved() {
 #[test]
 fn a_step_dispatches_under_its_own_agent_graph_before_its_nodes() {
     let world = World::new("lifecycle-graphs");
+    published_locally(&world);
     let node_graph = world.root.join("workstream-graph.yaml");
     let step_graph = world.root.join("one-step-graph.yaml");
     for path in [&node_graph, &step_graph] {
@@ -585,7 +988,7 @@ fn a_step_dispatches_under_its_own_agent_graph_before_its_nodes() {
     // stating at all.
     let node = json!({
         "id": "service",
-        "repo": "owner/service",
+        "repo": "service",
         "agent_graph": node_graph.to_string_lossy(),
         "steps": [
             {"id": "implement", "persona": "engineer", "task": "## What\nimplement"},
@@ -631,65 +1034,103 @@ fn a_step_dispatches_under_its_own_agent_graph_before_its_nodes() {
 #[test]
 fn a_lifecycle_node_carries_the_pins_the_plan_states_into_its_session() {
     let world = World::new("lifecycle-pins");
+    let repo = world.repository("change-auto", &["true"]);
+    // A second checkout of the same identity, and a second base branch on the
+    // origin: a pin naming either is only a pin if there is something for it to
+    // name.
+    crate::harness::git(&world, &repo.checkout, &["branch", "release", "main"]);
+    crate::harness::git(&world, &repo.checkout, &["push", "origin", "release"]);
+    let primary = world.root.join("primary");
+    crate::harness::git(
+        &world,
+        &world.root,
+        &["clone", &repo.origin.to_string_lossy(), "primary"],
+    );
+    // A session's clone is cut from the execution checkout with `--shared`,
+    // which copies that checkout's *local* branches and not its remote-tracking
+    // ones — so a base a session is asked to cut from has to be a branch the
+    // execution checkout itself holds.
+    crate::harness::git(&world, &primary, &["branch", "release", "origin/release"]);
+    world.register(&primary, Some("https://github.com/owner/service.git"));
+
+    world.script("service.work", "the worker wrote this\n");
     let mut node = lifecycle("service", &[]);
     node["branch"] = json!("feature/pinned");
     node["base_branch"] = json!("release");
     node["execution_checkout"] = json!("primary");
     node["merge_policy"] = json!("change-auto");
-    settle(&world, "pinned", vec![node]);
+    let run = settle(&world, "pinned", vec![node]);
 
-    let opened = vcs_calls(&world)
+    // What the pins actually did, rather than which arguments carried them: the
+    // session was cut on the branch and base the plan named, and the policy it
+    // published under is the one the plan asked for.
+    let opened = world
+        .journal(&run)
         .into_iter()
-        .find(|call| call.starts_with(&["session".into(), "open".into()]))
-        .expect("a session was opened");
+        .find(|event| event["source"] == "vcs" && event["kind"] == "session-opened")
+        .unwrap_or_else(|| panic!("no session was opened\n{}", why(&world, &run)));
+    assert_eq!(opened["payload"]["branch"], "feature/pinned", "{opened}");
+    assert_eq!(opened["payload"]["base"], "release", "{opened}");
     assert!(
-        opened.contains(&"--branch".to_string()) && opened.contains(&"feature/pinned".to_string()),
-        "{opened:?}"
-    );
-    assert!(
-        opened.contains(&"--base".to_string()) && opened.contains(&"release".to_string()),
-        "{opened:?}"
-    );
-    assert!(
-        opened.contains(&"--execution-checkout".to_string())
-            && opened.contains(&"primary".to_string()),
-        "{opened:?}"
+        opened["payload"]["worktree"]
+            .as_str()
+            .is_some_and(|path| path.contains("worktree")),
+        "{opened}"
     );
 
-    let published = vcs_calls(&world)
-        .into_iter()
-        .find(|call| call.first().is_some_and(|verb| verb == "publish"))
-        .expect("something was published");
+    let published = &world.events_of(&run, "published")[0];
+    assert_eq!(
+        published["payload"]["policy"], "change-auto",
+        "the merge policy did not reach onevcs: {published}"
+    );
+    // And the execution checkout the plan pinned is the one the session was cut
+    // from: the primary clone carries the branch, and the one it was not cut
+    // from does not.
     assert!(
-        published.contains(&"--policy".to_string())
-            && published.contains(&"change-auto".to_string()),
-        "the merge policy did not reach onevcs: {published:?}"
+        world.invocations().iter().any(|call| call["tool"] == "gh"),
+        "a change-auto publication asked the host for nothing"
     );
 }
 
 #[test]
 fn a_session_stream_that_cannot_be_read_is_reported_and_does_not_fail_the_node() {
     let world = World::new("lifecycle-noevents");
-    world.script("events.fail", "");
+    // llmlint: ignore-block[tests_mirror_real_usage] the gate *is* the product's own
+    // extension point — a repository's rules file names a command and `onevcs` runs it on
+    // the merge path — so what this states is a repository whose own gate breaks the state
+    // root under it, which is operator-supplied code doing what operator-supplied code
+    // can. No command breaks a stream: every deletion `onevcs` performs is a run root, an
+    // integrate or publish scratch, or a rotated gate log, and none touches `streams/`.
+    // Nor can it be arranged before the run — a stream directory already broken fails
+    // `Stream::open` inside `session open`, which is a session that never opened and a
+    // different journey. So the gate is the point inside a run where the repository's own
+    // code can reach it. Everything asserted is through the binary.
+    //
+    // A file where the streams directory was, so nothing can recreate it:
+    // `EventStream::open` then refuses every session by name.
+    world.repository(
+        "local-direct",
+        &[
+            "bash",
+            "-c",
+            "rm -rf \"$ONEVCS_HOME/streams\" && : > \"$ONEVCS_HOME/streams\"",
+        ],
+    );
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    world.script("service.work", "the worker wrote this\n");
     let run = driven(&world, "silentstream", vec![lifecycle("service", &[])]);
 
-    // Both halves of the recovery, through the CLI. The follow starts, its
-    // child refuses and relays nothing, so the node falls back to reading the
-    // stream once — and this message is the *fallback's* own, so seeing it is
-    // what proves the fallback ran rather than the follow having quietly
-    // covered for it. Said out loud either way: a silent gap in the merged
-    // store is what makes a later reader think nothing happened.
+    // Said out loud: a silent gap in the merged store is what makes a later
+    // reader think nothing happened.
     run.1.err_has("cannot read session").err_has("events");
 
     // The evidence is missing, not the result: the node published and settled.
     let run = run.0;
     let result = world.run_json(&run, "round-01/result.json");
     assert_eq!(result["state"], "complete", "{result}");
-    // `gate-verdict` rather than the `verification-finished` this used to name:
-    // that kind is not one `onevcs::EventKind` declares, so the real sibling has
-    // never emitted it and its absence proved nothing. The gate's verdict is a
-    // record the session genuinely writes and the publication above genuinely
-    // produced, so its absence from the store is the unreadable stream.
+    // `gate-verdict` is the first record the session writes after the gate has
+    // taken its own stream away, so its absence from the store is the
+    // unreadable stream rather than a publication that did not happen.
     assert!(
         !world
             .journal(&run)
@@ -699,13 +1140,40 @@ fn a_session_stream_that_cannot_be_read_is_reported_and_does_not_fail_the_node()
     );
 }
 
+/// A line on a session's stream that this build cannot read.
+///
+/// `onevcs::EventStream` is a **typed** reader: a line it cannot parse refuses
+/// the whole read, and its cursor has already moved past that line — so the
+/// whole records read alongside it are refused with it and never handed back.
+/// That is the sibling's decision and it is recorded as a proposal in
+/// `docs/contract-divergences.md`; what this journey holds is the part that is
+/// this crate's: the node does not fail, and the loss is not silent.
 #[test]
-fn a_session_line_this_build_cannot_read_is_skipped_and_counted() {
+fn a_session_line_this_build_cannot_read_is_reported_and_does_not_fail_the_node() {
     let world = World::new("lifecycle-futureline");
-    world.script("events.unreadable", "");
+    // llmlint: ignore-block[tests_mirror_real_usage] the same extension point as the
+    // journey above, and the same reason: a repository's gate is a command an operator
+    // wrote, and a stream carrying a record this build cannot read is what an
+    // `ONEVCS_HOME` shared with another build of `onevcs` leaves behind. No command
+    // writes one — `Stream::emit` is the only writer and it appends whole envelopes, so a
+    // surface that could would be the defect — and the stream exists only once the
+    // session has opened, which makes the gate the point inside a run where the
+    // repository's own code can reach it. Everything asserted is through the binary.
+    //
+    // The token is the name of the directory above the worktree the gate runs in.
+    world.repository(
+        "local-direct",
+        &[
+            "bash",
+            "-c",
+            "printf '%s\\n' '{\"from\":\"a newer onevcs\"}' \
+             >> \"$ONEVCS_HOME/streams/$(basename \"$(dirname \"$PWD\")\").ndjson\"",
+        ],
+    );
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    world.script("service.work", "the worker wrote this\n");
     let run = driven(&world, "futurestream", vec![lifecycle("service", &[])]);
-    run.1
-        .err_has("skipped 1 onevcs line(s) this build cannot read");
+    run.1.err_has("is not an event envelope");
     let run = run.0;
 
     // A sibling emitting a shape this build does not know must not stop the
@@ -748,12 +1216,14 @@ fn steps_dispatched(world: &World) -> Vec<(String, String)> {
 #[test]
 fn a_continuation_skips_the_steps_the_preserved_branch_already_carries() {
     let world = World::new("lifecycle-resume-steps");
+    published_locally(&world);
     // The second step fails, so the node settles failed with the first step's
     // work committed on the branch the session preserved.
+    world.script("service.implement.work", "the worker wrote this\n");
     world.script("service.review.fail", "1");
     let node = json!({
         "id": "service",
-        "repo": "owner/service",
+        "repo": "service",
         "steps": [
             {"id": "implement", "persona": "engineer", "task": "## What\nimplement"},
             {"id": "review", "persona": "reviewer", "task": "## What\nreview", "deps": ["implement"]},

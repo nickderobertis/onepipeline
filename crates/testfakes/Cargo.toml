@@ -1,5 +1,10 @@
-# Test-support only: the sibling CLIs `onepipeline` composes, as real
-# executables a test can drive it against.
+# Test-support only: the programs `onepipeline` and its siblings reach as
+# subprocesses, as real executables a test can drive them against.
+#
+# There is no `onevcs` here. That sibling is reached by *calling* it, so there is
+# no subprocess boundary to substitute at — what stands in instead is `gh`, at
+# `onevcs`'s own `ONEVCS_GH` override, which decides what GitHub does and leaves
+# every git operation real.
 #
 # A separate workspace member rather than extra `[[bin]]`s on the crate itself,
 # because these must never ship in the published artifact. `cargo test` builds
@@ -20,18 +25,17 @@ serde_json = "1"
 # the real CLI's own parser rather than by keeping a second copy of the keys it
 # reserves — a copy is a list that goes stale the round after the sibling adds one.
 oneagentgraph = { workspace = true }
-# And the other one, for the same reason: the `onevcs` double takes every event
-# kind it writes from `onevcs::EventKind`, so a kind the sibling does not declare
-# will not compile here rather than being scripted into a journey's expectations.
-onevcs = { workspace = true }
 
 [[bin]]
 name = "fake-oneagentgraph"
 path = "src/bin/fake-oneagentgraph.rs"
 
+# GitHub, at `onevcs`'s own `ONEVCS_GH` seam. It needs no dependency on that
+# crate: what it speaks is `gh`'s command surface, and what holds it honest is
+# `tests/smoke/`, which runs the same publication against the real `gh`.
 [[bin]]
-name = "fake-onevcs"
-path = "src/bin/fake-onevcs.rs"
+name = "fake-gh"
+path = "src/bin/fake-gh.rs"
 
 # One layer further out than the other two: this stands in for the paid model
 # turn only, for the journeys that drive the real `oneagentgraph` binary.

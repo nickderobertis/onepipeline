@@ -1,19 +1,20 @@
 [workspace]
 # The crate at the root, plus the test-support crate whose binaries stand in for
-# the two siblings at their subprocess boundary. Members are listed explicitly so
-# a new one joins the graph deliberately rather than by changing what
-# `--workspace` means.
+# the programs this stack spawns: `oneagentgraph`, and the `gh` behind `onevcs`.
+# Members are listed explicitly so a new one joins the graph deliberately rather
+# than by changing what `--workspace` means.
 members = [".", "crates/testfakes"]
 resolver = "2"
 
-# The siblings this crate composes, pinned once for the whole workspace: each
-# double answers out of the real crate's own types — `oneagentgraph`'s refuses
-# what the real CLI refuses by calling its parser, and `onevcs`'s writes only the
-# event kinds `onevcs::EventKind` declares — so both members build against the
-# same version or a double would be an oracle for a build nothing runs.
+# The siblings this crate composes, pinned once for the whole workspace so both
+# members build against the same version. `onevcs` is *called* rather than
+# spawned, so nothing stands in for it; the `oneagentgraph` double still answers
+# out of the real crate's own types — it refuses what the real CLI refuses by
+# calling its parser — because a double that accepted more than the sibling is an
+# oracle for a build nothing runs.
 [workspace.dependencies]
 oneagentgraph = "0.2.2"
-onevcs = "0.2.0"
+onevcs = "0.2.1"
 
 [package]
 name = "onepipeline"
@@ -92,17 +93,18 @@ windows-sys = { version = "0.61", features = [
 # One dev-dependency, and it is not a test framework. The e2e suite drives the
 # compiled binary as a subprocess with `std::process` and reads what it wrote, so
 # it needs no command-assertion crate — `tests/e2e/harness.rs` is the whole of
-# it — and the subprocess doubles for the two siblings are a workspace member
-# rather than a dependency, because a dev-dep would build that crate's *library*
-# and what the suite needs is its binaries.
+# it — and the subprocess doubles are a workspace member rather than a
+# dependency, because a dev-dep would build that crate's *library* and what the
+# suite needs is its binaries.
 #
 # `onevcs-testing` is the sibling's own implementations of the two interfaces it
-# is built around, which is what `tests/onevcs_seam.rs` drives to establish, in
-# code rather than in prose, which `onevcs` operations this crate can reach
-# without spawning a process. It is a dev-dependency and must stay one: what it
-# implements must never be reachable from a release binary.
+# is built around, which is what `tests/onevcs_seam.rs` drives to hold every
+# operation `src/vcs.rs` performs to the seam it performs it on — in code rather
+# than in prose, with no git, no host, and no process. It is a dev-dependency and
+# must stay one: what it implements must never be reachable from a release
+# binary.
 [dev-dependencies]
-onevcs-testing = "0.1.0"
+onevcs-testing = "0.1.1"
 
 [[test]]
 name = "e2e"

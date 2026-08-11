@@ -8,37 +8,34 @@
 //! The machine running the dispatch is the one that opens the session, which is
 //! what [`WorkspaceSpec::VcsSession`](crate::executor::WorkspaceSpec::VcsSession)
 //! means: the clone, worktree, and branch are cut where the work happens.
+//!
+//! # Reached by calling it, never by spawning it
+//!
+//! All four operations this crate performs are `onevcs` **library** calls:
+//! [`onevcs::Vcs::open_session`], [`onevcs::publish`], [`onevcs::close_session`], and
+//! [`EventStream`]. No process is started and no output is parsed, and the
+//! values that come back are the sibling's own types rather than a restatement
+//! of them here.
+//!
+//! That is not only about process cost. `onevcs publish` answers a *person* with
+//! one line of English — `merged at SHA`, `change request open at URL` — and
+//! this crate used to read that line as JSON, so against the real sibling every
+//! publication failed as unreadable while the suite stayed green against a
+//! double that printed the JSON the parser wanted. A [`Publication`] cannot be
+//! misread that way: what the publication did is a case of [`PublishOutcome`],
+//! and the compiler checks every reader of it.
 
-// llmlint: ignore-file[invalid_states_unrepresentable] `Published` carries a change
-// request's URL, its host-assigned id, and how it landed as the strings the sibling
-// recorded them as. Narrowing them here would mean this crate deciding a vocabulary the
-// sibling owns — the exact re-declaration src/AGENTS.md forbids — and `onevcs` publishes
-// no type for what a publication produced: `publish::Outcome` is behind a private module.
-
-use std::io::{BufRead, BufReader};
-use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use onevcs::{MergePolicy, Session, SessionRequest};
+use onevcs::{
+    EventStream, Lifecycle, MergePolicy, Providers, Publication, PublishOutcome, PublishRequest,
+    Session, SessionRequest, SessionToken, Subject,
+};
 
 use crate::error::{Error, Result};
 use crate::event::Envelope;
-
-/// The environment variable naming the `onevcs` executable.
-pub const BINARY_ENV: &str = "ONEPIPELINE_ONEVCS_BIN";
-
-/// The executable's name when the environment names none.
-pub const DEFAULT_BINARY: &str = "onevcs";
-
-/// The executable this process invokes.
-pub fn binary() -> String {
-    std::env::var(BINARY_ENV)
-        .ok()
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| DEFAULT_BINARY.to_string())
-}
 
 fn sibling(message: impl Into<String>) -> Error {
     Error::Sibling {
@@ -47,239 +44,246 @@ fn sibling(message: impl Into<String>) -> Error {
     }
 }
 
-/// What a publication produced.
-///
-/// Folded from the session's own event stream rather than read off the command's
-/// stdout, because **`onevcs publish` prints one line of prose for a person and
-/// no machine-readable record at all** — `merged at SHA`, `change request open at
-/// URL`, `merge queued for URL`, `nothing to publish: …`. What it writes down
-/// *is* structured: the change request it opened, the merge that landed, and the
-/// queue it entered are envelopes on the stream this crate already relays. So the
-/// outcome is read from those, and never from a sentence whose wording is the
-/// sibling's to change.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Published {
-    /// Where a human reads the change, when one was opened.
-    pub url: Option<String>,
-    /// The host's identifier for it, when one was opened.
-    pub id: Option<String>,
-    /// How it landed.
-    pub outcome: Option<String>,
+/// A refusal from the sibling, as this crate's own error.
+fn refusal(error: onevcs::Error) -> Error {
+    sibling(error.to_string())
 }
 
-fn run_json<T: serde::de::DeserializeOwned>(command: &mut Command, what: &str) -> Result<T> {
-    let output = command
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| sibling(format!("cannot start `{} {what}`: {e}", binary())))?;
-    if !output.status.success() {
-        return Err(sibling(format!(
-            "{what} exited {}: {}",
-            output.status.code().unwrap_or(-1),
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    serde_json::from_str(stdout.trim())
-        .map_err(|e| sibling(format!("{what} printed something unreadable: {e}")))
+/// Git and GitHub — what every operation here runs against.
+///
+/// [`Providers::real`] rather than a value held on this module: both defaults are
+/// stateless and the sibling hands out one shared pair per process, so there is
+/// nothing to keep.
+fn providers() -> Providers<'static> {
+    Providers::real()
 }
 
 /// Open a session over a per-run clone and worktree.
 pub fn session_open(request: &SessionRequest) -> Result<Session> {
-    let mut command = Command::new(binary());
-    command.arg("session").arg("open").arg(&request.repo);
-    if let Some(branch) = &request.branch {
-        command.arg("--branch").arg(branch);
-    }
-    if let Some(base) = &request.base {
-        command.arg("--base").arg(base);
-    }
-    if let Some(checkout) = &request.execution_checkout {
-        command.arg("--execution-checkout").arg(checkout);
-    }
-    run_json(&mut command, "session open")
+    providers()
+        .vcs
+        .open_session(request.clone())
+        .map_err(refusal)
 }
 
 /// Verify a session's work and publish it under its policy.
 ///
-/// The exit status is the whole verdict — `onevcs publish` says whether the
-/// change landed with its code and describes it on stdout in prose — so success
-/// is read from the status and the *shape* of what happened from the session's
-/// own stream. Reading stdout as JSON is what this used to do, and against the
-/// real sibling every publication then failed as unreadable: a change that had
-/// already merged, reported as a publication failure.
-pub fn publish(token: &str, policy: Option<MergePolicy>, title: Option<&str>) -> Result<Published> {
-    let mut command = Command::new(binary());
-    command.arg("publish").arg(token);
-    if let Some(policy) = policy {
-        command.arg("--policy").arg(policy_arg(policy));
-    }
-    if let Some(title) = title {
-        command.arg("--title").arg(title);
-    }
-    let output = command
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| sibling(format!("cannot start `{} publish`: {e}", binary())))?;
-    if !output.status.success() {
-        return Err(sibling(format!(
-            "publish exited {}: {}",
-            output.status.code().unwrap_or(-1),
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    Ok(published_from(&events(token)))
-}
-
-/// What the session's stream says its publication produced.
+/// The answer is [`Publication`] — the sibling's own value — so *what happened*
+/// is a case to match on rather than a sentence to read. A publication that did
+/// not land is [`PublishOutcome::Failed`] and not an `Err`: the sibling draws the
+/// line between a refused request and a publication that ran and did not land,
+/// and this crate reads its line rather than a second one.
 ///
-/// The kinds are read back into [`onevcs::EventKind`] — the sibling's own enum,
-/// which is what spells them on the wire — rather than compared against strings
-/// this crate restated. A kind renamed there stops matching here at the type
-/// level instead of silently never firing. Each carries the fields that command
-/// records: `ChangeOpened` names the change request and its URL, `ChangeMerged`
-/// and `MergeCompleted` say it reached its base, and `MergeQueued` carrying a
-/// `url` is the host holding it. `MergeQueued` *without* one is the identity's
-/// own lock queue, which every publication passes through and which says nothing
-/// about the outcome — reading it as one would report every local merge as
-/// queued.
-fn published_from(events: &[Envelope]) -> Published {
-    /// How far a publication got, so a later record never reads as less than an
-    /// earlier one.
-    fn rank(outcome: &str) -> u8 {
-        match outcome {
-            "merged" => 3,
-            "queued" => 2,
-            "change-open" => 1,
-            _ => 0,
-        }
-    }
-    let text = |envelope: &Envelope, key: &str| {
-        envelope
-            .payload
-            .get(key)
-            .and_then(|value| value.as_str())
-            .map(str::to_string)
-    };
-    let mut published = Published::default();
-    for envelope in events {
-        // Through the sibling's own deserializer: a kind this build does not
-        // know — a later `onevcs` emitting one it has learned — is passed over
-        // rather than guessed at, which is what the merged stream already does
-        // with it.
-        let Ok(kind) = serde_json::from_value::<onevcs::EventKind>(serde_json::Value::String(
-            envelope.kind.0.clone(),
-        )) else {
-            continue;
-        };
-        let reached = match kind {
-            // llmlint: ignore[boundary_inputs_validated] the kind *is* the fact being read
-            // here — how far the publication got — and the URL and the id are evidence about
-            // it that may be absent. Requiring them would mean a `change-opened` carrying
-            // neither is folded as no publication at all, so a node with a change request open
-            // on the host would settle as one that published nothing and the next round would
-            // open a second. Missing evidence is reported as missing; it does not unsay the
-            // event.
-            onevcs::EventKind::ChangeOpened => {
-                published.url = text(envelope, "url").or(published.url.take());
-                published.id = text(envelope, "id").or(published.id.take());
-                "change-open"
-            }
-            onevcs::EventKind::ChangeMerged | onevcs::EventKind::MergeCompleted => {
-                published.url = text(envelope, "url").or(published.url.take());
-                "merged"
-            }
-            onevcs::EventKind::MergeQueued if text(envelope, "url").is_some() => {
-                published.url = text(envelope, "url").or(published.url.take());
-                "queued"
-            }
-            _ => continue,
-        };
-        if rank(reached) > rank(published.outcome.as_deref().unwrap_or_default()) {
-            published.outcome = Some(reached.to_string());
-        }
-    }
-    published
+/// The title is checked here, where the request is built, because
+/// [`Subject`]'s conversion is where the sibling checks it — a title too long to
+/// be a commit subject is refused before a session's work is committed rather
+/// than after.
+pub fn publish(
+    token: &str,
+    policy: Option<MergePolicy>,
+    title: Option<&str>,
+) -> Result<Publication> {
+    let title = title
+        .map(|title| title.parse::<Subject>().map_err(sibling))
+        .transpose()?;
+    onevcs::publish(
+        &providers(),
+        &SessionToken(token.to_owned()),
+        &PublishRequest { policy, title },
+    )
+    .map_err(refusal)
 }
 
-/// How a merge policy is spelled on the command line.
-pub fn policy_arg(policy: MergePolicy) -> &'static str {
-    match policy {
-        MergePolicy::LocalDirect => "local-direct",
-        MergePolicy::ChangeOpen => "change-open",
-        MergePolicy::ChangeAuto => "change-auto",
-        MergePolicy::ChangeDirect => "change-direct",
+/// How a publication settles the node that made it.
+///
+/// This crate's own outcome vocabulary, which a plan's readers and `results`
+/// render: `no-changes` is the name a node whose steps all declared no diff
+/// already settles on, so a publication with nothing to publish reads the same
+/// way rather than inventing a second word for it.
+pub fn outcome_of(outcome: &PublishOutcome) -> &'static str {
+    match outcome {
+        PublishOutcome::Merged(_) => "merged",
+        PublishOutcome::ChangeOpen(_) => "change-open",
+        PublishOutcome::Queued(_) => "queued",
+        PublishOutcome::NothingToPublish => "no-changes",
+        PublishOutcome::Failed { .. } => "publication-failed",
     }
+}
+
+/// Where a human reads the change a publication produced, when there is one.
+///
+/// A change request that is open, or that the host is holding, names its URL. A
+/// `local-direct` merge has no change request at all, and a change request the
+/// *host* merged is [`PublishOutcome::Merged`], which carries the commit rather
+/// than the URL — see the `onevcs` proposal in `docs/contract-divergences.md`.
+pub fn change_url(outcome: &PublishOutcome) -> Option<String> {
+    match outcome {
+        PublishOutcome::ChangeOpen(url) | PublishOutcome::Queued(url) => Some(url.to_string()),
+        _ => None,
+    }
+}
+
+/// The worktree an open session is being worked in.
+///
+/// What the second and later dispatches of one lifecycle node run in. They must
+/// **not** open a session of their own: `onevcs` cuts each session its own clone
+/// from the execution checkout, so a second one carries none of the first's
+/// uncommitted work — and opening it reclaims the first's workspace outright,
+/// because a run root whose branch holds no commit the origin lacks is one the
+/// sibling reads as abandoned. Both are recorded in
+/// `docs/contract-divergences.md`.
+///
+/// A read, not a claim: [`onevcs::session`] takes no lease, commits nothing, and
+/// reclaims nothing, so asking where a session is working cannot disturb it —
+/// unlike `adopt`, which commits whatever the worktree holds behind an
+/// incomplete-step marker.
+///
+/// `None` when the record cannot be read, which leaves the caller to open a
+/// session as it would have.
+pub fn worktree_of(token: &str) -> Option<std::path::PathBuf> {
+    onevcs::session(&providers(), &SessionToken(token.to_owned()))
+        .map(|record| record.session.worktree)
+        .map_err(|error| {
+            eprintln!("onepipeline: cannot read session {token}'s record: {error}");
+            error
+        })
+        .ok()
 }
 
 /// Release a session's worktree and its occupancy lease.
 ///
 /// Closing is best-effort on the failure path: a node that already failed must
 /// not be reported as a different failure because its cleanup also failed.
-pub fn session_close(token: &str) -> Result<()> {
-    let output = Command::new(binary())
-        .arg("session")
-        .arg("close")
-        .arg(token)
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| sibling(format!("cannot start `{} session close`: {e}", binary())))?;
-    if output.status.success() {
-        return Ok(());
+pub fn session_close(token: &str) -> Result<Session> {
+    onevcs::close_session(&providers(), &SessionToken(token.to_owned())).map_err(refusal)
+}
+
+/// One session's stream, read from the start of what this reader has not seen.
+///
+/// `None` when the stream cannot be opened or a line of it cannot be read. That
+/// is a publication with no *evidence* rather than a publication that did not
+/// happen — the node's own settlement stands — but a silent gap in the merged
+/// store is what makes a later reader think nothing happened, so it is said out
+/// loud.
+fn opened(token: &str) -> Option<EventStream> {
+    match EventStream::open(&SessionToken(token.to_owned())) {
+        Ok(stream) => Some(stream),
+        Err(error) => {
+            eprintln!("onepipeline: cannot read session {token}'s events: {error}");
+            None
+        }
     }
-    Err(sibling(format!(
-        "session close {token} exited {}: {}",
-        output.status.code().unwrap_or(-1),
-        String::from_utf8_lossy(&output.stderr).trim()
-    )))
+}
+
+/// The next batch of a stream, relayed into this crate's envelope.
+///
+/// [`EventStream::read`] refuses a whole batch over one line it cannot parse, and
+/// its cursor has already moved past that line — so a refusal here is events
+/// lost, not events deferred. It is reported for that reason and the follow keeps
+/// reading: the alternative is to stop relaying a live publication over one
+/// record.
+fn next_batch(stream: &mut EventStream, token: &str) -> Vec<Envelope> {
+    match stream.read() {
+        Ok(events) => events.into_iter().map(relayed).collect(),
+        Err(error) => {
+            eprintln!("onepipeline: cannot read session {token}'s events: {error}");
+            Vec::new()
+        }
+    }
 }
 
 /// A session's own event stream, for relaying into the merged one.
 pub fn events(token: &str) -> Vec<Envelope> {
-    let read = Command::new(binary())
-        .arg("events")
-        .arg(token)
-        .stdin(Stdio::null())
-        .output();
-    let output = match read {
-        Ok(output) if output.status.success() => output,
-        // A session whose stream cannot be read leaves the node's own
-        // settlement intact — the evidence is missing, not the result — but a
-        // silent gap in the merged store is what makes a later reader think
-        // nothing happened, so it is said out loud.
-        Ok(output) => {
-            eprintln!(
-                "onepipeline: cannot read session {token}'s events: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-            return Vec::new();
-        }
-        Err(error) => {
-            eprintln!("onepipeline: cannot read session {token}'s events: {error}");
-            return Vec::new();
-        }
+    let Some(mut stream) = opened(token) else {
+        return Vec::new();
     };
-    let text = String::from_utf8_lossy(&output.stdout);
-    let lines: Vec<&str> = text
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .collect();
-    let envelopes: Vec<Envelope> = lines
-        .iter()
-        .filter_map(|line| serde_json::from_str::<Envelope>(line).ok())
-        .collect();
-    report_skipped("onevcs", lines.len() - envelopes.len());
-    envelopes
+    next_batch(&mut stream, token)
+}
+
+/// One of the sibling's envelopes, as one of this crate's.
+///
+/// Field for field, out of `onevcs`'s own type: the merged stream keeps a
+/// relayed envelope's producer `stream`, `seq`, `source`, and kind exactly as it
+/// was written, which is what lets a consumer detect loss per stream.
+fn relayed(envelope: onevcs::Envelope) -> Envelope {
+    Envelope {
+        v: envelope.v,
+        ts: envelope.ts,
+        stream: envelope.stream,
+        seq: envelope.seq,
+        source: source_of(envelope.source),
+        kind: kind_of(envelope.kind),
+        labels: labels_of(envelope.labels),
+        payload: envelope.payload,
+        artifacts: envelope
+            .artifacts
+            .into_iter()
+            .map(|artifact| crate::event::ArtifactRef {
+                id: crate::event::ArtifactId(artifact.id.0),
+                kind: artifact.kind,
+                bytes: artifact.bytes,
+            })
+            .collect(),
+    }
+}
+
+/// Which library produced a relayed envelope.
+fn source_of(source: onevcs::Source) -> crate::event::Source {
+    match source {
+        onevcs::Source::Agentgraph => crate::event::Source::Agentgraph,
+        onevcs::Source::Vcs => crate::event::Source::Vcs,
+        onevcs::Source::Pipeline => crate::event::Source::Pipeline,
+    }
+}
+
+/// A kind as the sibling spells it on the wire.
+///
+/// Through `onevcs`'s own serializer rather than an arm per variant: how a kind
+/// is spelled is the sibling's to decide, and a table here would be a second
+/// copy of a vocabulary this crate does not own — which is what
+/// `src/AGENTS.md` forbids and what let a double script a kind the sibling has
+/// never emitted.
+fn kind_of(kind: onevcs::EventKind) -> crate::event::EventKind {
+    let wire = serde_json::to_value(kind)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        // `EventKind` is a fieldless enum serialized as a string, so this arm is
+        // unreachable today. It carries the variant's own name rather than
+        // panicking, because losing a relay thread is a worse answer than an
+        // unfamiliar kind in the store.
+        .unwrap_or_else(|| format!("{kind:?}"));
+    crate::event::EventKind(wire)
+}
+
+/// The labels a relayed envelope arrived with.
+///
+/// `onevcs` names one the merged envelope does not reserve — `member` — so it
+/// rides in [`Labels::extra`](crate::event::Labels::extra), which is where the
+/// contract puts anything a producer stamps beyond the reserved keys. Dropping
+/// it would lose a producer's own attribution in the relay.
+fn labels_of(labels: onevcs::Labels) -> crate::event::Labels {
+    let mut extra = labels.extra;
+    if let Some(member) = labels.member {
+        extra.insert("member".to_owned(), serde_json::json!(member));
+    }
+    crate::event::Labels {
+        run_id: labels.run_id,
+        round: labels.round,
+        node: labels.node,
+        step: labels.step,
+        persona: labels.persona,
+        extra,
+    }
 }
 
 /// How long a follow may keep reading after its session was closed.
 ///
-/// `onevcs events --follow` returns on a session it reads as closed, so this
-/// only covers the case where the close itself failed and nothing will ever
-/// mark it: a node that has already settled must not hang on its own cleanup.
+/// The reader ends itself on a session it reads as closed, so this only covers
+/// the case where the close itself failed and nothing will ever mark it: a node
+/// that has already settled must not hang on its own cleanup.
 const FOLLOW_GRACE: Duration = Duration::from_secs(5);
 
-/// How often a finishing follow re-asks whether its reader has ended.
+/// How often a follow asks the stream for what has been appended since.
 const FOLLOW_POLL: Duration = Duration::from_millis(20);
 
 /// A session's own event stream, followed as `onevcs` writes it.
@@ -287,72 +291,59 @@ const FOLLOW_POLL: Duration = Duration::from_millis(20);
 /// Read *once at settlement*, a lifecycle node's gate run, push, change
 /// request, check polling, and merge are one opaque blocking call: every record
 /// appears at once, when it is over — and that stretch is the longest
-/// wall-clock segment the node has. `onevcs events TOKEN --follow` is the
-/// sibling's own general answer to that, and this is it, used.
+/// wall-clock segment the node has. This is the same stream read as it grows,
+/// through [`EventStream`], which hands back only what has been appended since
+/// the last read.
 ///
-/// `None` when the follow could not be started at all. That is a publication
-/// nobody is watching rather than a publication with no record, so it is said
-/// out loud and the caller reads the stream once instead.
+/// `None` when the session's stream cannot be opened at all. That is a
+/// publication nobody is watching rather than a publication with no record, so
+/// it is said out loud and the caller reads the stream once instead.
 pub fn follow(token: &str, sink: Box<dyn Fn(Envelope) + Send>) -> Option<Follower> {
-    let started = Command::new(binary())
-        .arg("events")
-        .arg(token)
-        .arg("--follow")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        // Inherited rather than piped: nothing here would read a pipe, and a
-        // full one stops the follow mid-publication. The sibling's own words
-        // reach the driver's stderr, which is where its other refusals go.
-        .stderr(Stdio::inherit())
-        .spawn();
-    let mut child = match started {
-        Ok(child) => child,
-        Err(error) => {
-            eprintln!("onepipeline: cannot follow session {token}'s events: {error}");
-            return None;
-        }
-    };
-    let Some(stdout) = child.stdout.take() else {
-        stop(&mut child);
-        eprintln!("onepipeline: cannot read session {token}'s events as they are written");
-        return None;
-    };
+    let mut stream = opened(token)?;
+    let session = SessionToken(token.to_owned());
 
     let progress = Arc::new(Progress::default());
     let reached = Arc::clone(&progress);
+    let stop = Arc::new(AtomicBool::new(false));
+    let stopping = Arc::clone(&stop);
+    let followed = token.to_owned();
     let reader = std::thread::Builder::new()
-        .name(format!("{}-events", binary()))
-        .spawn(move || {
-            let mut skipped = 0usize;
-            for line in BufReader::new(stdout)
-                .lines()
-                .map_while(std::io::Result::ok)
-            {
-                if line.trim().is_empty() {
-                    continue;
-                }
-                match serde_json::from_str::<Envelope>(&line) {
-                    Ok(envelope) => {
-                        reached.reached(envelope.seq);
-                        sink(envelope);
-                    }
-                    Err(_) => skipped += 1,
-                }
+        .name(format!("onevcs-{token}-events"))
+        .spawn(move || loop {
+            // Read *before* asking whether the session closed, so a record
+            // written between the two is relayed on the next pass rather than
+            // lost to a follow that stopped one read early.
+            for envelope in next_batch(&mut stream, &followed) {
+                reached.reached(envelope.seq);
+                sink(envelope);
             }
-            report_skipped("onevcs", skipped);
+            if stopping.load(Ordering::SeqCst) || settled(&session) {
+                return;
+            }
+            std::thread::sleep(FOLLOW_POLL);
         });
     match reader {
         Ok(reader) => Some(Follower {
-            child,
             reader: Some(reader),
+            stop,
             progress,
         }),
         Err(error) => {
-            stop(&mut child);
             eprintln!("onepipeline: cannot follow session {token}'s events: {error}");
             None
         }
     }
+}
+
+/// Whether a session has been released, which is what ends a follow.
+///
+/// A session whose record cannot be read is treated as settled: a follow that
+/// kept reading a stream nobody will ever close is a thread this process would
+/// never collect.
+fn settled(session: &SessionToken) -> bool {
+    onevcs::session(&providers(), session)
+        .map(|record| record.lifecycle == Lifecycle::Closed)
+        .unwrap_or(true)
 }
 
 /// How far into a session's stream a follow got.
@@ -390,23 +381,22 @@ impl Progress {
 ///
 /// Dropping one ends the follow. Not every caller reaches a settlement — a node
 /// whose next step needs a person holds its session *open* for them, and returns
-/// — and a follow left behind there is a process nothing would ever collect,
+/// — and a follow left behind there is a thread nothing would ever collect,
 /// reading a stream nobody is waiting for.
 #[derive(Debug)]
 pub struct Follower {
-    child: Child,
     /// Taken by [`finish`](Follower::finish), so a drop after one has nothing
     /// left to wait on.
     reader: Option<std::thread::JoinHandle<()>>,
+    /// Set to end the follow without waiting for the session to close.
+    stop: Arc<AtomicBool>,
     progress: Arc<Progress>,
 }
 
 impl Drop for Follower {
     fn drop(&mut self) {
-        stop(&mut self.child);
+        self.stop.store(true, Ordering::SeqCst);
         if let Some(reader) = self.reader.take() {
-            // The pipe is closed by the kill above, so the reader is already on
-            // its way out.
             let _ = reader.join();
         }
     }
@@ -415,56 +405,36 @@ impl Drop for Follower {
 impl Follower {
     /// Stop following, and say how far into the stream it got.
     ///
-    /// Called *after* `session close`, which is what ends the follow: `onevcs
-    /// events --follow` prints everything it has not printed yet and only then
-    /// returns on a closed session, so waiting for it loses nothing.
+    /// Called *after* `session close`, which is what ends the follow: the reader
+    /// relays everything appended since its last pass and only then asks whether
+    /// the session closed, so waiting for it loses nothing.
     ///
     /// The answer is a **floor, never a promise that the rest is not there**.
-    /// `onevcs session close` marks the session closed and only then writes its
-    /// `session-closed` record, while `onevcs events --follow` prints what the
-    /// file holds and *then* asks whether the session closed — so a follow can
-    /// end cleanly, successfully, with the last record of the session still
-    /// unwritten. Treating a clean end as "everything was relayed" is what
-    /// dropped that record out of the merged store; the caller reads the stream
-    /// once more from this point instead.
+    /// Closing a session marks the record closed and only then writes the
+    /// `session-closed` event, while the follow relays what the stream holds and
+    /// *then* asks whether the session closed — so a follow can end cleanly,
+    /// successfully, with the last record of the session still unwritten.
+    /// Treating a clean end as "everything was relayed" is what dropped that
+    /// record out of the merged store; the caller reads the stream once more
+    /// from this point instead.
     ///
     /// `None` when it relayed nothing at all, which is the whole stream still to
     /// read rather than a stream that held nothing.
     pub fn finish(mut self) -> Option<u64> {
         let deadline = Instant::now() + FOLLOW_GRACE;
-        loop {
-            match self.child.try_wait() {
-                Ok(Some(_)) | Err(_) => break,
-                Ok(None) if Instant::now() >= deadline => {
-                    stop(&mut self.child);
-                    break;
-                }
-                Ok(None) => std::thread::sleep(FOLLOW_POLL),
-            }
+        while self
+            .reader
+            .as_ref()
+            .is_some_and(|reader| !reader.is_finished())
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(FOLLOW_POLL);
         }
-        // The reader ends on its own once the pipe closes, which the wait above
-        // has already made true.
+        self.stop.store(true, Ordering::SeqCst);
         if let Some(reader) = self.reader.take() {
             let _ = reader.join();
         }
         self.progress.reached_through()
-    }
-}
-
-/// End a follow this process started and will not read.
-fn stop(child: &mut Child) {
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
-/// Say when a sibling's stream carried lines this build could not read.
-///
-/// Skipping them is right — a sibling emitting a kind this build does not know
-/// must not stop the ones it does — but skipping them *quietly* turns a schema
-/// mismatch into a run that merely looks uneventful.
-pub fn report_skipped(tool: &str, skipped: usize) {
-    if skipped > 0 {
-        eprintln!("onepipeline: skipped {skipped} {tool} line(s) this build cannot read");
     }
 }
 
@@ -493,24 +463,24 @@ pub fn session_opened_event(session: &Session, labels: &crate::event::Labels) ->
 }
 
 /// The envelope that records a publication, for the merged stream.
-pub fn published_event(
-    published: &Published,
-    branch: &str,
-    labels: &crate::event::Labels,
-) -> Envelope {
+///
+/// Every field is read off the [`Publication`] rather than off the caller: the
+/// branch that carried the change and the policy it landed under are the
+/// sibling's answer, and a second copy assembled here could disagree with it.
+pub fn published_event(published: &Publication, labels: &crate::event::Labels) -> Envelope {
     Envelope {
         v: crate::event::ENVELOPE_VERSION,
         ts: crate::sys::now_rfc3339(),
-        stream: format!("onevcs-{branch}"),
+        stream: format!("onevcs-{}", published.branch),
         seq: 1,
         source: crate::event::Source::Vcs,
         kind: crate::event::EventKind("published".into()),
         labels: labels.clone(),
         payload: crate::journal::payload(&[
-            ("branch", serde_json::json!(branch)),
-            ("url", serde_json::json!(published.url)),
-            ("id", serde_json::json!(published.id)),
-            ("outcome", serde_json::json!(published.outcome)),
+            ("branch", serde_json::json!(published.branch)),
+            ("policy", serde_json::json!(published.policy)),
+            ("outcome", serde_json::json!(outcome_of(&published.outcome))),
+            ("url", serde_json::json!(change_url(&published.outcome))),
         ]),
         artifacts: Vec::new(),
     }
@@ -533,14 +503,6 @@ pub fn request_for(node: &crate::plan::Node) -> Option<SessionRequest> {
 mod tests {
     use super::*;
     use crate::plan::Node;
-
-    #[test]
-    fn every_merge_policy_has_one_spelling_on_the_command_line() {
-        assert_eq!(policy_arg(MergePolicy::LocalDirect), "local-direct");
-        assert_eq!(policy_arg(MergePolicy::ChangeOpen), "change-open");
-        assert_eq!(policy_arg(MergePolicy::ChangeAuto), "change-auto");
-        assert_eq!(policy_arg(MergePolicy::ChangeDirect), "change-direct");
-    }
 
     #[test]
     fn a_lifecycle_node_asks_for_the_session_its_fields_describe() {
@@ -572,82 +534,196 @@ mod tests {
         assert!(request_for(&node).is_none());
     }
 
-    fn recorded(kind: &str, payload: serde_json::Value) -> Envelope {
-        Envelope {
-            v: crate::event::ENVELOPE_VERSION,
-            ts: "2026-01-01T00:00:00.000Z".into(),
-            stream: "s-1".into(),
-            seq: 1,
-            source: crate::event::Source::Vcs,
-            kind: crate::event::EventKind(kind.into()),
-            labels: crate::event::Labels::default(),
-            payload: payload.as_object().cloned().unwrap_or_default(),
-            artifacts: Vec::new(),
-        }
+    #[test]
+    fn every_ending_a_publication_has_settles_the_node_under_its_own_name() {
+        let sha = onevcs::Sha("abc".into());
+        let url: onevcs::Url = "https://example.invalid/pull/7".parse().expect("a URL");
+        assert_eq!(outcome_of(&PublishOutcome::Merged(sha)), "merged");
+        assert_eq!(
+            outcome_of(&PublishOutcome::ChangeOpen(url.clone())),
+            "change-open"
+        );
+        assert_eq!(outcome_of(&PublishOutcome::Queued(url)), "queued");
+        assert_eq!(outcome_of(&PublishOutcome::NothingToPublish), "no-changes");
+        assert_eq!(
+            outcome_of(&PublishOutcome::Failed {
+                kind: onevcs::FailureKind::Gate,
+                reason: "the gate said no".into(),
+                retained: None,
+            }),
+            "publication-failed"
+        );
     }
 
     #[test]
-    fn a_change_request_the_session_recorded_is_where_a_human_reads_it() {
-        let published = published_from(&[recorded(
-            "change-opened",
-            serde_json::json!({"url": "https://example.invalid/pull/7", "id": "7"}),
-        )]);
+    fn a_change_request_is_where_a_human_reads_it_and_a_local_merge_names_none() {
+        let url: onevcs::Url = "https://example.invalid/pull/7".parse().expect("a URL");
         assert_eq!(
-            published.url.as_deref(),
+            change_url(&PublishOutcome::ChangeOpen(url.clone())).as_deref(),
             Some("https://example.invalid/pull/7")
         );
-        assert_eq!(published.id.as_deref(), Some("7"));
-        assert_eq!(published.outcome.as_deref(), Some("change-open"));
-    }
-
-    #[test]
-    fn a_change_that_reached_its_base_outranks_the_request_that_opened_it() {
-        let published = published_from(&[
-            recorded(
-                "change-opened",
-                serde_json::json!({"url": "https://example.invalid/pull/7", "id": "7"}),
-            ),
-            recorded(
-                "merge-queued",
-                serde_json::json!({"url": "https://example.invalid/pull/7"}),
-            ),
-            recorded(
-                "change-merged",
-                serde_json::json!({"url": "https://example.invalid/pull/7", "sha": "abc"}),
-            ),
-        ]);
-        assert_eq!(published.outcome.as_deref(), Some("merged"));
-        assert_eq!(published.id.as_deref(), Some("7"));
-    }
-
-    #[test]
-    fn the_identitys_own_lock_queue_is_not_a_publication_the_host_is_holding() {
-        // Every publication passes through it, and it carries no change request.
-        // Read as an outcome, a local merge would report itself queued forever.
-        let published = published_from(&[
-            recorded("merge-queued", serde_json::json!({"identity": "repo"})),
-            recorded(
-                "merge-completed",
-                serde_json::json!({"identity": "repo", "sha": "abc"}),
-            ),
-        ]);
-        assert_eq!(published.outcome.as_deref(), Some("merged"));
-        assert_eq!(published.url, None);
-    }
-
-    #[test]
-    fn a_session_that_recorded_nothing_publishable_claims_no_outcome() {
-        assert_eq!(published_from(&[]), Published::default());
-    }
-
-    #[test]
-    fn the_binary_comes_from_the_environment_or_falls_back() {
         assert_eq!(
-            std::env::var(BINARY_ENV)
-                .ok()
-                .filter(|v| !v.is_empty())
-                .unwrap_or_else(|| DEFAULT_BINARY.to_string()),
-            binary()
+            change_url(&PublishOutcome::Queued(url)).as_deref(),
+            Some("https://example.invalid/pull/7")
         );
+        assert_eq!(
+            change_url(&PublishOutcome::Merged(onevcs::Sha("abc".into()))),
+            None
+        );
+        assert_eq!(change_url(&PublishOutcome::NothingToPublish), None);
+    }
+
+    #[test]
+    fn a_publication_records_what_the_sibling_said_it_did() {
+        let url: onevcs::Url = "https://example.invalid/pull/7".parse().expect("a URL");
+        let published = Publication {
+            session: SessionToken("s-1".into()),
+            branch: "onepipeline/service".into(),
+            policy: MergePolicy::ChangeOpen,
+            outcome: PublishOutcome::ChangeOpen(url),
+        };
+        let event = published_event(&published, &crate::event::Labels::default());
+        assert_eq!(event.stream, "onevcs-onepipeline/service");
+        assert_eq!(event.payload["branch"], "onepipeline/service");
+        assert_eq!(event.payload["policy"], "change-open");
+        assert_eq!(event.payload["outcome"], "change-open");
+        assert_eq!(event.payload["url"], "https://example.invalid/pull/7");
+    }
+
+    /// What this crate reads from a session stream that is not whole.
+    ///
+    /// `onevcs` appends a record as *two* writes — the line, then its newline —
+    /// so a reader can see the line before its terminator, and its typed reader
+    /// advances its cursor over whatever `str::lines` yields. That was carried
+    /// in as a known risk on exactly the path a publication is followed on, and
+    /// a stream read wrongly is a publication that looks like it never
+    /// happened. So it is exercised rather than reasoned about.
+    ///
+    /// One test, not three: `ONEVCS_HOME` is process-global, and separate tests
+    /// would set it from separate threads and read one another's state root.
+    #[test]
+    fn a_session_stream_that_is_not_whole_is_read_for_what_it_holds() {
+        let root = std::env::temp_dir().join(format!("onepipeline-stream-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("streams")).expect("a scratch state root");
+        std::env::set_var(onevcs_home(), &root);
+
+        let record = |token: &str, seq: u64, kind: &str| {
+            serde_json::json!({
+                "v": 1,
+                "ts": "2026-01-01T00:00:00.000Z",
+                "stream": token,
+                "seq": seq,
+                "source": "vcs",
+                "kind": kind,
+                "labels": {},
+                "payload": {},
+                "artifacts": [],
+            })
+            .to_string()
+        };
+        let write = |token: &str, body: String| {
+            std::fs::write(root.join("streams").join(format!("{token}.ndjson")), body)
+                .expect("the stream is written");
+        };
+        let seqs = |envelopes: &[Envelope]| envelopes.iter().map(|e| e.seq).collect::<Vec<_>>();
+
+        // A whole record whose newline has not been written yet. It is read —
+        // and read *once*: the cursor that consumed it does not hand it back
+        // when the terminator and the next record arrive.
+        let torn = "s-unterminated";
+        write(
+            torn,
+            format!(
+                "{}\n{}",
+                record(torn, 1, "session-opened"),
+                record(torn, 2, "push")
+            ),
+        );
+        let mut stream = opened(torn).expect("the stream opens");
+        assert_eq!(
+            seqs(&next_batch(&mut stream, torn)),
+            vec![1, 2],
+            "a record whose newline was still unwritten was lost"
+        );
+        write(
+            torn,
+            format!(
+                "{}\n{}\n{}\n",
+                record(torn, 1, "session-opened"),
+                record(torn, 2, "push"),
+                record(torn, 3, "session-closed")
+            ),
+        );
+        assert_eq!(
+            seqs(&next_batch(&mut stream, torn)),
+            vec![3],
+            "the terminator arriving handed a record back a second time"
+        );
+
+        // A line that is not a whole envelope — a stream cut mid-record. The
+        // sibling's typed reader refuses the **batch**, and its cursor has
+        // already moved past the line, so the whole records before it in the
+        // same read are refused with it. Reported out loud rather than folded
+        // into an empty stream, and recorded as a proposal for `onevcs` in
+        // `docs/contract-divergences.md`.
+        let cut = "s-cutmidline";
+        let whole = record(cut, 1, "session-opened");
+        let partial = record(cut, 2, "push");
+        write(cut, format!("{whole}\n{}", &partial[..20]));
+        assert!(
+            events(cut).is_empty(),
+            "the typed reader now hands back the whole records before a torn one; \
+             narrow this assertion to the torn record alone"
+        );
+
+        // And a stream nothing wrote at all is not an empty one: it is refused
+        // by name, which is what stops a token nobody opened reading as a
+        // session that recorded nothing.
+        assert!(events("s-neverwritten").is_empty());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The variable naming the sibling's state root, spelled once.
+    ///
+    /// `onevcs` publishes no constant for it, so the test that points it at a
+    /// scratch root says it here rather than in three places.
+    fn onevcs_home() -> &'static str {
+        "ONEVCS_HOME"
+    }
+
+    #[test]
+    fn a_relayed_envelope_keeps_the_kind_and_attribution_its_producer_wrote() {
+        let mut labels = onevcs::Labels {
+            member: Some("worker".into()),
+            ..onevcs::Labels::default()
+        };
+        labels
+            .extra
+            .insert("session".into(), serde_json::json!("s-1"));
+        let envelope = relayed(onevcs::Envelope {
+            v: 1,
+            ts: "2026-01-01T00:00:00.000Z".into(),
+            stream: "s-1".into(),
+            seq: 4,
+            source: onevcs::Source::Vcs,
+            kind: onevcs::EventKind::ChangeOpened,
+            labels,
+            payload: serde_json::Map::new(),
+            artifacts: vec![onevcs::ArtifactRef {
+                id: onevcs::ArtifactId("a-1".into()),
+                kind: "log".into(),
+                bytes: 12,
+            }],
+        });
+        assert_eq!(envelope.kind.0, "change-opened");
+        assert_eq!(envelope.source, crate::event::Source::Vcs);
+        assert_eq!(envelope.seq, 4);
+        // A key the merged envelope does not reserve rides in `extra` rather
+        // than being dropped in the relay.
+        assert_eq!(envelope.labels.extra["member"], "worker");
+        assert_eq!(envelope.labels.extra["session"], "s-1");
+        assert_eq!(envelope.artifacts[0].id.0, "a-1");
     }
 }

@@ -8,13 +8,21 @@
 //!
 //! Ported from `test_live_edit_e2e`.
 
-// llmlint: ignore-file[e2e_not_mocked] `World` substitutes the two *siblings* at their
+// llmlint: ignore-file[e2e_not_mocked] `World` substitutes `oneagentgraph` at its
 // subprocess boundary and nothing inside the crate under test, which is driven as a real
-// compiled binary. The scenario this journey states is one a real sibling would need paid
-// model turns to produce, and `dispatch.rs` is where the real `oneagentgraph` binary is
-// driven instead. `harness.rs` carries the same suppression and the full rationale.
+// compiled binary; `onevcs` is not substituted at all, and the two lifecycle journeys here
+// open real sessions on a real git origin. The scenario the double states is one a real
+// sibling would need paid model turns to produce, and `dispatch.rs` is where the real
+// `oneagentgraph` binary is driven instead. `harness.rs` carries the same suppression and
+// the full rationale.
 
-use crate::harness::{agent, human, lifecycle, plan_of, World, REFUSED};
+use crate::harness::{agent, human, plan_of, World, REFUSED};
+
+/// Only the `cfg(not(windows))` journeys below name a lifecycle node, so the
+/// import carries the same attribute they do: on Windows it would be unused, and
+/// `-D warnings` is right to say so rather than be silenced with an `allow`.
+#[cfg(not(windows))]
+use crate::harness::lifecycle;
 use serde_json::{json, Value};
 
 /// Start a run whose nodes are held open, so edits land against a live round.
@@ -237,13 +245,22 @@ fn retry_supersedes_a_running_node_and_redirects_its_dependents() {
     }
 }
 
+// llmlint: ignore-block[live_tier_compiles_and_requires_credential] a lifecycle journey
+// cannot compile-and-run on Windows: `onevcs` opens no session there at all, because
+// `register` stores the verbatim `\\?\C:\…` form and `session open` hands it to `git clone`,
+// which reads it as a UNC URL and refuses. Neither half is this crate's to change —
+// divergence 18 in `docs/contract-divergences.md` is the proposal. The Windows leg runs
+// `the_real_onevcs_opens_no_session_on_windows_which_is_why_the_journeys_above_are_not_run_here`
+// instead, which fails when that stops being true and is the signal to delete this.
+#[cfg(not(windows))]
 #[test]
 fn a_retry_may_name_only_one_branch() {
     let world = World::new("edit-branch");
+    world.repository("local-direct", &["true"]);
     let run = live(
         &world,
         "branchy",
-        vec![crate::harness::lifecycle("service", &[])],
+        vec![lifecycle("service", &[])],
         &["service"],
     );
 
@@ -268,6 +285,7 @@ fn a_retry_may_name_only_one_branch() {
 
     world.release("service.go");
 }
+// llmlint: ignore-end[live_tier_compiles_and_requires_credential]
 
 #[test]
 fn drop_requires_a_dependents_fate_and_detach_keeps_them() {
@@ -324,9 +342,18 @@ fn drop_requires_a_dependents_fate_and_detach_keeps_them() {
     );
 }
 
+// llmlint: ignore-block[live_tier_compiles_and_requires_credential] a lifecycle journey
+// cannot compile-and-run on Windows: `onevcs` opens no session there at all, because
+// `register` stores the verbatim `\\?\C:\…` form and `session open` hands it to `git clone`,
+// which reads it as a UNC URL and refuses. Neither half is this crate's to change —
+// divergence 18 in `docs/contract-divergences.md` is the proposal. The Windows leg runs
+// `the_real_onevcs_opens_no_session_on_windows_which_is_why_the_journeys_above_are_not_run_here`
+// instead, which fails when that stops being true and is the signal to delete this.
+#[cfg(not(windows))]
 #[test]
 fn drop_refuses_to_remove_the_last_unresolved_publication_anchor() {
     let world = World::new("edit-anchor");
+    world.repository("local-direct", &["true"]);
     // Two lifecycle nodes on one repository: the second is stacked on the
     // first, so the first is what carries both of them to publication.
     let mut stacked = lifecycle("stacked", &["anchor"]);
@@ -351,6 +378,7 @@ fn drop_refuses_to_remove_the_last_unresolved_publication_anchor() {
     world.release("slow.go");
     world.release("anchor.go");
 }
+// llmlint: ignore-end[live_tier_compiles_and_requires_credential]
 
 #[test]
 fn complete_is_journalled_without_touching_the_graph() {
