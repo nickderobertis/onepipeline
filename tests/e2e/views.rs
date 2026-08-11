@@ -366,12 +366,12 @@ fn telemetry_reports_what_each_party_spent() {
 /// one waits for a file. The lock wait cannot be, and not for want of a hold:
 /// the sibling emits `lock-wait` *after* it has waited, carrying the elapsed
 /// seconds in its payload, and then emits `lock-acquired` immediately — so the
-/// interval this crate measures between the two is zero however long the wait
-/// was. The `onevcs` double emitted the marker and *then* blocked, which is a
-/// shape no release of that library has ever produced, and it is what let this
-/// bucket read as measured. The bucket is still served, and it is still not the
-/// agent's; what it is not is a measurement. Recorded as a proposal in
-/// `docs/contract-divergences.md`.
+/// interval this crate measures between the two is the cost of writing two
+/// records, however long the wait was. The `onevcs` double emitted the marker
+/// and *then* blocked, which is a shape no release of that library has ever
+/// produced, and it is what let this bucket read as measured. The bucket is
+/// still served, and it is still not the agent's; what it is not is a
+/// measurement. Recorded as divergence 16 in `docs/contract-divergences.md`.
 // llmlint: ignore-block[live_tier_compiles_and_requires_credential] a lifecycle journey
 // cannot compile-and-run on Windows: `onevcs` opens no session there at all, because
 // `register` stores the verbatim `\\?\C:\…` form and `session open` hands it to `git clone`,
@@ -437,19 +437,31 @@ fn telemetry_separates_gate_and_lock_time_from_agent_time() {
         "the held gate was charged to the agent: {document}"
     );
     // And the wait the sibling did do is on its own record, as the number a
-    // reader would need to charge it: this is the datum the bucket above is
-    // missing, and the assertion that fails when the sibling starts bracketing
-    // the wait instead.
+    // reader would need to charge it: this is the datum the bucket below is
+    // missing, and it is deterministic — the payload either carries the elapsed
+    // seconds or it does not.
     let waited = &world.events_of("gated", "lock-wait")[0];
     assert!(
         waited["payload"]["elapsed"].is_number(),
         "the sibling recorded no elapsed lock wait to charge: {waited}"
     );
-    assert_eq!(
-        span("lock_wait"),
-        Some(0),
-        "the lock wait is measured now; charge it from the marker's own elapsed and hold this \
-         journey to it: {document}"
+    // The bucket is **served** — an unmeasured stretch must not read as absent
+    // any more than a measured zero — and it is **not a measurement**: what it
+    // spans is the cost of the sibling writing two records back to back, which
+    // is below the threshold this journey calls measurable however long the
+    // publication actually waited. Bounded rather than fixed at zero: the two
+    // timestamps are real and millisecond-precise, so on a slow enough host —
+    // under coverage instrumentation, reliably — they differ by one. The
+    // `onevcs` double emitted the marker and *then* blocked, which is what made
+    // an exact number look like a fact here.
+    let lock_wait = span("lock_wait").unwrap_or_else(|| {
+        panic!("the lock_wait bucket is absent, not served as unmeasured: {document}")
+    });
+    assert!(
+        lock_wait < FLOOR,
+        "lock_wait measured {lock_wait}ms, which is a stretch rather than the cost of two \
+         appends — if the wait is genuinely charged now, hold this journey to the wait: \
+         {document}"
     );
     for name in ["publication_wait", "setup"] {
         assert!(
