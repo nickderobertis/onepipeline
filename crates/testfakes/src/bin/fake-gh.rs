@@ -95,8 +95,15 @@ fn main() -> ExitCode {
 /// What a flag's value has to be for this host to trust it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Shape {
-    /// It names something — a repository, a branch, a title, a field list. Empty
-    /// names nothing, so it is refused.
+    /// Exactly this. A selector — `--jq`, `--json`, `--state` — decides what the
+    /// real `gh` puts in its answer, and the answers below are written to one
+    /// query each. Accepting a different selector while replying with the same
+    /// object is this host answering a question nobody asked: `onevcs` narrowing
+    /// its `--json` list would keep passing here and meet a smaller object from
+    /// the real `gh`.
+    Exact(&'static str),
+    /// It names something — a repository, a branch, a title. Empty names
+    /// nothing, so it is refused.
     Named,
     /// Free text a person wrote. `onevcs` passes `--body ""` for a change request
     /// that carries no body, and refusing that would refuse a shape the real `gh`
@@ -137,10 +144,19 @@ fn shaped(
                  another option"
             )));
         }
-        if value.is_empty() && *shape == Shape::Named {
-            return Err(fake::refuse(&format!(
-                "gh {what} was given an empty {flag}, which names nothing"
-            )));
+        match shape {
+            Shape::Exact(asked) if value != asked => {
+                return Err(fake::refuse(&format!(
+                    "gh {what} was given {flag} {value:?}; this host answers {asked:?} and \
+                     nothing else"
+                )));
+            }
+            Shape::Named if value.is_empty() => {
+                return Err(fake::refuse(&format!(
+                    "gh {what} was given an empty {flag}, which names nothing"
+                )));
+            }
+            _ => {}
         }
         seen += 2;
     }
@@ -160,7 +176,13 @@ fn shaped(
 
 /// `gh api user --jq .login`
 fn user(args: &[String]) -> ExitCode {
-    if let Err(refusal) = shaped(args, "api user", 2, &[("--jq", Shape::Named)], &[]) {
+    if let Err(refusal) = shaped(
+        args,
+        "api user",
+        2,
+        &[("--jq", Shape::Exact(".login"))],
+        &[],
+    ) {
         return refusal;
     }
     println!("{WHO}");
@@ -270,8 +292,8 @@ fn list(args: &[String]) -> ExitCode {
             ("--repo", Shape::Named),
             ("--head", Shape::Named),
             ("--base", Shape::Named),
-            ("--state", Shape::Named),
-            ("--json", Shape::Named),
+            ("--state", Shape::Exact("open")),
+            ("--json", Shape::Exact("number,url,state,headRefOid")),
         ],
         &[],
     ) {
@@ -287,7 +309,15 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
         args,
         "pr view",
         3,
-        &[("--repo", Shape::Named), ("--json", Shape::Named)],
+        &[
+            ("--repo", Shape::Named),
+            (
+                "--json",
+                Shape::Exact(
+                    "number,state,mergeStateStatus,headRefOid,mergeCommit,statusCheckRollup",
+                ),
+            ),
+        ],
         &[],
     ) {
         return refusal;
