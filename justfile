@@ -125,19 +125,38 @@ _crate-format:
 _crate-lint:
     @cargo clippy --all-targets --locked --quiet -- -D warnings
 
+# The offline tier: every binary but `smoke`, which needs a GitHub credential
+# and a scratch repository and is run by `just smoke-real` alone. Excluded by
+# name rather than by `#[ignore]`, so the journey is never a skipped test.
+offline-tiers := "not binary(smoke)"
+
 # 95% line coverage is the gate; lower it only with a documented reason in
 # AGENTS.md.
 # The crate's full test suite (unit + contract + e2e) with coverage enforced.
 _crate-test:
     @cargo llvm-cov nextest --locked --fail-under-lines 95 \
-      --status-level fail --final-status-level fail \
+      -E '{{offline-tiers}}' --status-level fail --final-status-level fail \
       || { echo "tests failed, or coverage fell below 95% — cover the lines the table above counts as missed" >&2; exit 1; }
 
 # Coverage instrumentation is measured on Linux only, so the cross-platform CI
 # legs run the same suite through this instead of `test`.
 # Full test suite without coverage instrumentation.
 test-quick:
-    @cargo nextest run --locked --status-level fail
+    @cargo nextest run --locked -E '{{offline-tiers}}' --status-level fail
+
+# The one journey that is not offline: the real `onevcs`, real git against a real
+# remote, and the real GitHub API opening and merging a pull request on a scratch
+# repository. Deliberately outside `check` and `gate` — those stay offline and
+# credential-free — and this is the same entry point CI's `smoke` job calls, so
+# there is one definition of the journey rather than two.
+#
+# It needs `gh` and a credential (`gh auth login`, or GH_TOKEN). With neither it
+# fails and names what is missing; it never skips and never falls back to a fake.
+# Set ONEPIPELINE_SMOKE_REPO to publish somewhere other than the default scratch
+# repository. `--no-capture`, because its whole value is the evidence it prints.
+# Real everything: onevcs, git, and the GitHub API, over one whole lifecycle.
+smoke-real:
+    @cargo nextest run --locked -E 'binary(smoke)' --no-capture --status-level all
 
 # Drives the compiled binary — never an in-process `main()`.
 # The end-to-end binary journeys in isolation (also run by `test`/`check`).
