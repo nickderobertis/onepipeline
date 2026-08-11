@@ -392,6 +392,17 @@ fn a_lifecycle_node_opens_a_real_pull_request_merges_it_and_the_base_advances() 
         .env("GIT_CONFIG_GLOBAL", git_credentials(&world))
         .output()
         .expect("the real onevcs runs");
+    // The status first: a `resolve` that refused prints its reason on stderr and
+    // nothing on stdout, and reading that empty stdout as JSON would report the
+    // refusal as unreadable output — the sibling's own words lost, which is the
+    // shape of defect this whole tier exists to catch.
+    assert!(
+        resolved.status.success(),
+        "`onevcs resolve` refused {} with exit {}: {}",
+        checkout.display(),
+        resolved.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&resolved.stderr).trim()
+    );
     let resolved: Value = serde_json::from_slice(&resolved.stdout).unwrap_or_else(|error| {
         panic!(
             "`onevcs resolve` printed something unreadable ({error}): {}",
@@ -502,15 +513,18 @@ fn a_lifecycle_node_opens_a_real_pull_request_merges_it_and_the_base_advances() 
     // The title the plan gave the node is the one the change request carries.
     assert_eq!(view["title"], json!(title), "{view}");
 
+    // The branch the change landed on, as GitHub names it. Required rather than
+    // defaulted to `main`: this is what the two reads below are addressed to, and
+    // a silent fallback would point them at a branch this run never published to
+    // — so a merge onto some other base would read as a pass.
+    let base_ref = view["baseRefName"].as_str().unwrap_or_else(|| {
+        panic!("GitHub named no base branch for the change request this run opened: {view}")
+    });
+
     // And the base advanced by exactly this change, read off the repository.
-    let head: Value = serde_json::from_str(&gh(&[
-        "api",
-        &format!(
-            "repos/{slug}/commits/{}",
-            view["baseRefName"].as_str().unwrap_or("main")
-        ),
-    ]))
-    .expect("gh answers with JSON");
+    let head: Value =
+        serde_json::from_str(&gh(&["api", &format!("repos/{slug}/commits/{base_ref}")]))
+            .expect("gh answers with JSON");
     assert_eq!(
         head["sha"], view["mergeCommit"]["oid"],
         "the merge landed but the base does not point at it: {head}"
@@ -530,10 +544,7 @@ fn a_lifecycle_node_opens_a_real_pull_request_merges_it_and_the_base_advances() 
         "api",
         "-H",
         "Accept: application/vnd.github.raw",
-        &format!(
-            "repos/{slug}/contents/{file}?ref={}",
-            view["baseRefName"].as_str().unwrap_or("main")
-        ),
+        &format!("repos/{slug}/contents/{file}?ref={base_ref}"),
     ]);
     assert_eq!(
         landed.trim(),
