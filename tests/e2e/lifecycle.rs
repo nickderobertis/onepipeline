@@ -371,12 +371,14 @@ fn a_session_record_that_cannot_be_read_falls_back_to_opening_a_session() {
     // llmlint: ignore-block[tests_mirror_real_usage] the *arrangement* below removes the
     // session's record on purpose, because that is the condition: a state root a cleanup
     // swept, or a process that died between writing the record and closing the session.
-    // It is a fault rather than an operation, and no command produces one — `session
-    // close` keeps the record, deliberately, because a closed session is still
-    // addressable — so there is nothing else to reach it with. It fails loudly rather
-    // than silently if the sibling relocates its records, and everything asserted
-    // afterwards is through the binary: the round is `onepipeline round run`, and the
-    // claim is what it said and what sessions it recorded.
+    // It is a fault rather than an operation, and no command produces one — every
+    // deletion `onevcs` performs is a run root under `workspaces/`, an integrate or
+    // publish scratch, or a rotated gate log, and `session close` keeps the record
+    // deliberately, because a closed session is still addressable. So there is nothing
+    // else to reach it with. It fails loudly rather than silently if the sibling
+    // relocates its records, and everything asserted afterwards is through the binary:
+    // the round is `onepipeline round run`, and the claim is what it said and what
+    // sessions it recorded.
     let record = world
         .onevcs_home()
         .join("sessions")
@@ -1097,9 +1099,12 @@ fn a_session_stream_that_cannot_be_read_is_reported_and_does_not_fail_the_node()
     // extension point — a repository's rules file names a command and `onevcs` runs it on
     // the merge path — so what this states is a repository whose own gate breaks the state
     // root under it, which is operator-supplied code doing what operator-supplied code
-    // can. It has to land mid-publication: a stream broken before the run is a session
-    // that never opened, and no command breaks one afterwards. Everything asserted is
-    // through the binary.
+    // can. No command breaks a stream: every deletion `onevcs` performs is a run root, an
+    // integrate or publish scratch, or a rotated gate log, and none touches `streams/`.
+    // Nor can it be arranged before the run — a stream directory already broken fails
+    // `Stream::open` inside `session open`, which is a session that never opened and a
+    // different journey. So the gate is the point inside a run where the repository's own
+    // code can reach it. Everything asserted is through the binary.
     //
     // A file where the streams directory was, so nothing can recreate it:
     // `EventStream::open` then refuses every session by name.
@@ -1150,9 +1155,10 @@ fn a_session_line_this_build_cannot_read_is_reported_and_does_not_fail_the_node(
     // journey above, and the same reason: a repository's gate is a command an operator
     // wrote, and a stream carrying a record this build cannot read is what an
     // `ONEVCS_HOME` shared with another build of `onevcs` leaves behind. No command
-    // writes one — a surface that could would be the defect — and it has to land inside
-    // the publication, which is where the gate runs. Everything asserted is through the
-    // binary.
+    // writes one — `Stream::emit` is the only writer and it appends whole envelopes, so a
+    // surface that could would be the defect — and the stream exists only once the
+    // session has opened, which makes the gate the point inside a run where the
+    // repository's own code can reach it. Everything asserted is through the binary.
     //
     // The token is the name of the directory above the worktree the gate runs in.
     world.repository(
