@@ -21,6 +21,24 @@
 //! naming the operation that grew, not from re-deriving it. When one fails, do
 //! not adjust it — move `src/vcs.rs` onto the seam and delete the case.
 //!
+//! # A second blocker, independent of the first
+//!
+//! Closing the gap above unblocks `src/vcs.rs`. It does **not** unblock moving
+//! the *e2e journeys* onto the providers, and no release of `onevcs` can: an
+//! e2e here reaches `onepipeline` as a spawned process — `AGENTS.md` fixes that,
+//! an in-process `main()` is not an e2e — so for one to run on [`MemoryVcs`] the
+//! shipped binary would have to link `onevcs-testing` and select it at runtime.
+//! Both this crate's `Cargo.toml` and that crate's own documentation forbid
+//! exactly that: what it implements must never be reachable from a release
+//! binary. Nor is there a seam to inject through, `vcs` being a private module,
+//! and making it public would add an item `docs/contract.md` does not name.
+//!
+//! So the providers' place in this repository is a test *inside* the crate —
+//! this one — which reaches the seam directly and adds no public surface. That
+//! supplements the subprocess journeys and cannot replace them, and a plan that
+//! asks for the replacement is asking for something the three rules above do not
+//! leave room for.
+//!
 //! Offline and hermetic: the providers touch nothing but a scratch state root.
 
 use clap::Parser;
