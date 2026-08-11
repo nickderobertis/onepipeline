@@ -20,6 +20,9 @@
 use onepipeline_testfakes as fake;
 use std::process::ExitCode;
 
+/// What a scripted `harness.work` turn writes into the worktree it was given.
+pub const WORK_FILE: &str = "work.md";
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let dir = fake::script_dir();
@@ -66,10 +69,29 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         ));
     }
 
+    // A worker turn that leaves something behind in the worktree it was given.
+    // Only when scripted, and only for the worker: a publication needs a diff —
+    // `onevcs publish` on a clean tree publishes nothing and says so — and a
+    // journey that means to reach a real change request has to have a turn that
+    // made one. Every other journey here is about the dispatch, and a file
+    // appearing in a worktree unasked would be a change nobody made.
+    let driving = prompt.contains("onepipeline round run");
+    if !driving {
+        if let Some(body) = fake::node_script(dir, "harness", "work") {
+            let path = std::path::Path::new(&cwd).join(WORK_FILE);
+            if let Err(error) = std::fs::write(&path, format!("{body}\n")) {
+                return fake::refuse(&format!("cannot write {}: {error}", path.display()));
+            }
+            // Recorded where every other thing a double did is recorded: a
+            // publication that turns out to have had nothing to publish is
+            // asked, first, whether the turn before it wrote anything.
+            fake::record(dir, "oneharness-work", &[path.display().to_string()]);
+        }
+    }
+
     // The turn itself. The orchestrator member's prompt names the engine verbs
     // it is to drive the run with, so this turn drives them — the same work the
     // `oneagentgraph` double does when it is standing in for the whole sibling.
-    let driving = prompt.contains("onepipeline round run");
     let outcome = if driving && fake::drive(dir) != ExitCode::SUCCESS {
         Outcome::TurnFailed
     } else {

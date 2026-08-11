@@ -345,6 +345,60 @@ fn a_publications_own_records_reach_the_journal_while_it_is_still_publishing() {
         .out_has("done");
 }
 
+/// The last record of a session, written after the follow watching it ended.
+///
+/// Not a hypothetical: `onevcs session close` flips the session's record to
+/// `Closed` and *then* emits `session-closed`, while `onevcs events --follow`
+/// prints what the stream holds and only then asks whether the session closed.
+/// Between those two the follow returns — cleanly, successfully, having relayed
+/// everything but the tail. This crate read that clean end as "everything was
+/// relayed" and skipped the recovery read, so the merged store carried a whole
+/// publication with no close on it, and a later reader had no way to tell a
+/// session that was released from one that was abandoned. The window is
+/// microseconds wide against a real `onevcs`, which is why it reached a release:
+/// it fails a run in CI now and then and passes on the next one.
+#[test]
+fn a_record_written_after_the_follow_ended_still_reaches_the_merged_store_once() {
+    let world = World::new("lifecycle-latetail");
+    world.script("publish.merged", "");
+    // The session closes, and its record lands after the follow has given up.
+    world.script("close.slow-record", "");
+    let run = settle(&world, "tail", vec![lifecycle("service", &[])]);
+
+    // Once. Recovering the tail by re-reading the whole stream would put every
+    // other record in twice, which is the same defect from the other side —
+    // `monitor` renders one line per event, so a duplicate is visible as one.
+    let stream = world.run(&["monitor", &run]);
+    stream.exited(0);
+    // Not `session-opened`: this crate writes one of its own beside the
+    // sibling's, so two is the right answer there and says nothing about relay.
+    for kind in [
+        "lock-wait",
+        "gate-verdict",
+        "push",
+        "change-opened",
+        "change-merged",
+        "session-closed",
+    ] {
+        let seen = stream
+            .stdout
+            .lines()
+            .filter(|line| line.contains(kind))
+            .count();
+        assert_eq!(
+            seen, 1,
+            "{kind} reached the merged store {seen} time(s):\n{}",
+            stream.stdout
+        );
+    }
+    // And it belongs to the node, like every other record the session wrote:
+    // the recovery read is the same relay, not a second path that forgets to
+    // say whose the record is.
+    let closed = &world.events_of(&run, "session-closed")[0];
+    assert_eq!(closed["labels"]["node"], "service", "{closed}");
+    assert_eq!(closed["source"], "vcs", "{closed}");
+}
+
 #[test]
 fn a_session_that_cannot_open_is_an_infrastructure_failure_by_name() {
     let world = World::new("lifecycle-nosession");
@@ -410,13 +464,84 @@ fn a_published_node_reports_where_a_human_reads_the_change_it_opened() {
     // The URL the sibling handed back is the one piece of evidence a person
     // actually opens, and until it reaches the run's own record it lives only
     // inside a journal payload nobody reads by hand.
-    let published = world.run_json(&run, "round-01/result.json")["nodes"][0]["change_url"]
+    let node = world.run_json(&run, "round-01/result.json")["nodes"][0].clone();
+    let published = node["change_url"]
         .as_str()
         .expect("the published node recorded where its change is")
         .to_string();
     assert!(published.contains("/changes/"), "{published}");
+    // A change request left open for review is an outcome of its own — the node
+    // is done and the change has *not* reached its base — so it is named rather
+    // than reported as a bare "published".
+    assert_eq!(node["outcome"], "change-open", "{node}");
+
+    // And the host's own identifier for it, which is what a later command
+    // addresses the change by.
+    let recorded = &world.events_of(&run, "published")[0];
+    assert!(
+        recorded["payload"]["id"].is_string(),
+        "the publication recorded no change id: {recorded}"
+    );
 
     world.run(&["results", &run]).exited(0).out_has(&published);
+}
+
+/// A publication that had nothing to publish.
+///
+/// `onevcs publish` exits **0** on a branch its base already carries: it prints
+/// `nothing to publish: …` and writes no push, no change request, and no merge.
+/// Read as a success with no outcome, this crate settled it as a bare
+/// "published" — so a node whose worker wrote nothing reported as one that
+/// landed work, and the only way to tell was to notice that the merged store
+/// held no publication at all. The real-everything smoke is where that turned
+/// up, on the first run that reached a real `onevcs` with a clean tree.
+#[test]
+fn a_publication_that_had_nothing_to_publish_says_so_rather_than_claiming_it_landed() {
+    let world = World::new("lifecycle-nothing");
+    world.script("publish.nothing", "");
+    let run = settle(&world, "empty", vec![lifecycle("service", &[])]);
+
+    let node = world.run_json(&run, "round-01/result.json")["nodes"][0].clone();
+    // Done: nothing failed, and there was nothing to do.
+    assert_eq!(node["status"], "done", "{node}");
+    assert_eq!(node["outcome"], "no-changes", "{node}");
+    assert_eq!(node["change_url"], json!(null), "{node}");
+    world
+        .run(&["results", &run])
+        .exited(0)
+        .out_has("no-changes");
+}
+
+#[test]
+fn a_change_the_host_merged_settles_the_node_on_the_merge_rather_than_the_request() {
+    let world = World::new("lifecycle-merged");
+    world.script("publish.merged", "");
+    let run = settle(&world, "landed", vec![lifecycle("service", &[])]);
+
+    let node = world.run_json(&run, "round-01/result.json")["nodes"][0].clone();
+    assert_eq!(node["status"], "done", "{node}");
+    assert_eq!(node["outcome"], "merged", "{node}");
+    // The change request it merged is still where a person reads what landed.
+    assert!(
+        node["change_url"]
+            .as_str()
+            .is_some_and(|url| url.contains("/changes/")),
+        "{node}"
+    );
+}
+
+#[test]
+fn a_change_the_host_is_holding_settles_the_node_as_queued() {
+    let world = World::new("lifecycle-queued");
+    world.script("publish.queued", "");
+    let run = settle(&world, "queued", vec![lifecycle("service", &[])]);
+
+    // The host has it and will land it once its checks pass. The node is done —
+    // there is nothing more for this round to do — and it says so as queued
+    // rather than as merged, which would claim the base already carries it.
+    let node = world.run_json(&run, "round-01/result.json")["nodes"][0].clone();
+    assert_eq!(node["status"], "done", "{node}");
+    assert_eq!(node["outcome"], "queued", "{node}");
 }
 
 #[test]
@@ -560,11 +685,16 @@ fn a_session_stream_that_cannot_be_read_is_reported_and_does_not_fail_the_node()
     let run = run.0;
     let result = world.run_json(&run, "round-01/result.json");
     assert_eq!(result["state"], "complete", "{result}");
+    // `gate-verdict` rather than the `verification-finished` this used to name:
+    // that kind is not one `onevcs::EventKind` declares, so the real sibling has
+    // never emitted it and its absence proved nothing. The gate's verdict is a
+    // record the session genuinely writes and the publication above genuinely
+    // produced, so its absence from the store is the unreadable stream.
     assert!(
         !world
             .journal(&run)
             .iter()
-            .any(|event| event["kind"] == "verification-finished"),
+            .any(|event| event["kind"] == "gate-verdict"),
         "the unreadable stream still contributed events"
     );
 }

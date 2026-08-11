@@ -129,6 +129,43 @@ jobs:
       # job can never disagree about which floor was proven.
       - run: just msrv
 
+  # The one tier that is not offline: the real `onevcs`, real git against a real
+  # remote, and the real GitHub API opening and merging a pull request on a
+  # scratch repository. Every other job here would pass against a sibling that
+  # refuses every invocation — R0 did — so this is the job that proves the
+  # composition against the world.
+  #
+  # It calls `just smoke-real`, which is the same entry point a person runs
+  # locally: the journey is defined once, in the test binary, and never
+  # reimplemented as workflow steps. The credential is named rather than
+  # embedded, and the journey refuses loudly rather than skipping when it is
+  # absent — a smoke that can pass without talking to GitHub proves nothing.
+  smoke:
+    needs: changes
+    if: needs.changes.outputs.crate == 'true' && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,nextest
+      - name: Real onevcs, real git, real GitHub
+        run: just smoke-real
+        env:
+          # Its own credential, not the release PAT: the default GITHUB_TOKEN is
+          # scoped to the repository the workflow runs in and this job publishes
+          # to another, but a job running a pull request's own code must not hold
+          # a token that can cut a release. Provision SMOKE_GH_TOKEN as a
+          # fine-grained PAT on the scratch repository alone, with contents and
+          # pull-requests write and nothing else. Absent, this job fails naming
+          # it — which is the intended behaviour, because the alternative is a
+          # smoke that passes without talking to GitHub.
+          GH_TOKEN: ${{ secrets.SMOKE_GH_TOKEN }}
+          # No ONEPIPELINE_SMOKE_REPO: the journey's own default is the scratch
+          # repository, and naming it here again would be a second place for it
+          # to be wrong. Set it only to point a run somewhere else.
+
   # Advisory + license audit and unused-dependency check. Its own Linux-only job:
   # it needs a network advisory DB and must not be duplicated across the matrix.
   deny:

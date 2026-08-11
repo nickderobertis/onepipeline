@@ -2,9 +2,12 @@
 //!
 //! It speaks the sibling's command surface — `session open`, `publish`,
 //! `session close`, `events [--follow]` — hands back a real worktree directory,
-//! and records every invocation. It stands in for `onevcs`, which is itself
-//! interface-only; what a lifecycle test proves is this crate's half of the
-//! composition.
+//! and records every invocation. `onevcs` is fully implemented — `real_vcs.rs`
+//! drives the real binary through a whole publication over a real git origin —
+//! so this stands in for it only to *state a scenario directly*: a rejected gate,
+//! a held publication, a session that will not open, a host that queued the
+//! merge. Every kind it writes comes from [`onevcs::EventKind`], so a shape the
+//! sibling does not produce cannot be scripted here.
 //!
 //! The session's stream is a **file it appends to as the session works**, which
 //! is what makes `events --follow` mean anything: a publication writes its gate,
@@ -53,11 +56,23 @@ fn closed_marker(dir: &Path, token: &str) -> PathBuf {
 }
 
 /// Append one envelope to the session's stream, in the shape the contract fixes.
-fn emit(dir: &Path, token: &str, kind: &str, payload: serde_json::Value) {
+///
+/// The kind is [`onevcs::EventKind`] — the sibling's own enum, which is what
+/// spells a kind on the wire — rather than a string spelled again here. A kind
+/// the sibling does not have cannot be written, which is how this double stays a
+/// statement of a scenario the real one could produce rather than an oracle for
+/// a shape nobody emits.
+fn emit(dir: &Path, token: &str, kind: onevcs::EventKind, payload: serde_json::Value) {
     let path = stream_of(dir, token);
+    // The sibling's own numbering: `onevcs::stream::Stream` resumes the series
+    // from what the file already holds and increments *before* it writes, so the
+    // first record of a stream is `1` and no record is ever `0`. A double that
+    // numbered from zero would let a consumer treat "nothing relayed" and "the
+    // first record relayed" as one answer and never hear about it.
     let seq = std::fs::read_to_string(&path)
         .map(|text| text.lines().filter(|line| !line.trim().is_empty()).count())
-        .unwrap_or(0);
+        .unwrap_or(0)
+        + 1;
     fake::append(
         &path,
         &serde_json::json!({
@@ -103,7 +118,7 @@ fn open(args: &[String], dir: &std::path::Path) -> ExitCode {
     emit(
         dir,
         &token,
-        "session-opened",
+        onevcs::EventKind::SessionOpened,
         serde_json::json!({"branch": branch, "base": base}),
     );
 
@@ -120,16 +135,33 @@ fn open(args: &[String], dir: &std::path::Path) -> ExitCode {
 }
 
 /// `onevcs session close TOKEN`
+///
+/// The marker comes **first**, because that is the sibling's own order:
+/// `app::session_close` calls `workspace::close`, which flips the record to
+/// `Closed`, and only then opens the stream and emits `session-closed`. A
+/// follower prints what the file holds and *then* asks whether the session
+/// closed, so the record can land after the follow has already returned — a
+/// window this double used to close by writing the record first, which made the
+/// tail unlosable here and losable against every real session.
 fn close(args: &[String], dir: &std::path::Path) -> ExitCode {
     let token = match fake::required(args, 2, "TOKEN") {
         Ok(token) => token,
         Err(refusal) => return refusal,
     };
-    emit(dir, &token, "session-closed", serde_json::json!({}));
-    // Written last: a follower prints everything it has not printed *and then*
-    // asks whether the session closed, so the tail is never lost to the marker
-    // arriving first.
     fake::append(&closed_marker(dir, &token), "closed");
+    // The real window is microseconds wide, which is a flake rather than a
+    // scenario. Widening it on request is how a journey *states* the case —
+    // "the sibling wrote its last record after the follow ended" — and depends
+    // on it rather than on how the host happened to schedule two processes.
+    if dir.join("close.slow-record").exists() {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    emit(
+        dir,
+        &token,
+        onevcs::EventKind::SessionClosed,
+        serde_json::json!({}),
+    );
     ExitCode::SUCCESS
 }
 
@@ -142,20 +174,40 @@ fn publish(args: &[String], dir: &std::path::Path) -> ExitCode {
         Ok(token) => token,
         Err(refusal) => return refusal,
     };
+    // A branch that carries no change. The real command exits **0** here,
+    // prints one line of prose, and writes no record at all — no gate, no push,
+    // no change request — because there was nothing to gate or push. Scripted
+    // separately from every other ending because it is the one where success
+    // and "nothing happened" are the same answer, which is exactly what a caller
+    // gets wrong.
+    if dir.join("publish.nothing").exists() {
+        println!("nothing to publish: {token} carries no change its base does not have");
+        return ExitCode::SUCCESS;
+    }
     // The identity's lock comes before its gate, and a publication waits on
     // both. Each is held separately where a test asks, so the two stretches can
     // be measured apart from each other and from the agent's.
     emit(
         dir,
         &token,
-        "lock-wait",
+        onevcs::EventKind::LockWait,
         serde_json::json!({"identity": token}),
     );
     if dir.join("publish.hold").exists() {
         fake::wait_for(&dir.join("publish.go"));
     }
-    emit(dir, &token, "lock-acquired", serde_json::json!({}));
-    emit(dir, &token, "gate-started", serde_json::json!({}));
+    emit(
+        dir,
+        &token,
+        onevcs::EventKind::LockAcquired,
+        serde_json::json!({}),
+    );
+    emit(
+        dir,
+        &token,
+        onevcs::EventKind::GateStarted,
+        serde_json::json!({}),
+    );
     if dir.join("gate.hold").exists() {
         fake::wait_for(&dir.join("gate.go"));
     }
@@ -163,7 +215,7 @@ fn publish(args: &[String], dir: &std::path::Path) -> ExitCode {
         emit(
             dir,
             &token,
-            "gate-verdict",
+            onevcs::EventKind::GateVerdict,
             serde_json::json!({"verdict": "failed"}),
         );
         eprintln!("the merge-path gate rejected the branch");
@@ -172,16 +224,19 @@ fn publish(args: &[String], dir: &std::path::Path) -> ExitCode {
     emit(
         dir,
         &token,
-        "gate-verdict",
+        onevcs::EventKind::GateVerdict,
         serde_json::json!({"verdict": "passed"}),
     );
+    // No `verification-finished` between the verdict and the push: this double
+    // used to write one, and `onevcs::EventKind` has no such variant because the
+    // real command has never emitted it. Taking the kinds from the sibling's enum
+    // is what found it.
     emit(
         dir,
         &token,
-        "verification-finished",
-        serde_json::json!({"verdict": "passed", "token": token}),
+        onevcs::EventKind::Push,
+        serde_json::json!({"remote": "origin"}),
     );
-    emit(dir, &token, "push", serde_json::json!({"remote": "origin"}));
 
     let title = fake::flag(args, "--title").unwrap_or_default();
     fake::append(
@@ -192,17 +247,38 @@ fn publish(args: &[String], dir: &std::path::Path) -> ExitCode {
     emit(
         dir,
         &token,
-        "change-opened",
+        onevcs::EventKind::ChangeOpened,
         serde_json::json!({"url": url, "id": token}),
     );
-    println!(
-        "{}",
-        serde_json::json!({
-            "url": url,
-            "id": token,
-            "outcome": "change-open",
-        })
-    );
+
+    // What the host did with the change request it was handed. Each ending is the
+    // sibling's own: the records it writes and, on stdout, the one line of prose
+    // it prints for a person — `Outcome::describe`. A double that printed a JSON
+    // record here would be an oracle for a shape the sibling has never produced,
+    // which is how this crate came to parse the publication's stdout as JSON and
+    // fail every real publication as unreadable.
+    if dir.join("publish.merged").exists() {
+        let sha = format!("{token}-sha");
+        emit(
+            dir,
+            &token,
+            onevcs::EventKind::ChangeMerged,
+            serde_json::json!({"url": url, "sha": sha}),
+        );
+        println!("merged at {sha}");
+        return ExitCode::SUCCESS;
+    }
+    if dir.join("publish.queued").exists() {
+        emit(
+            dir,
+            &token,
+            onevcs::EventKind::MergeQueued,
+            serde_json::json!({"identity": token, "queue_position": 0, "url": url}),
+        );
+        println!("merge queued for {url}");
+        return ExitCode::SUCCESS;
+    }
+    println!("change request open at {url}");
     ExitCode::SUCCESS
 }
 

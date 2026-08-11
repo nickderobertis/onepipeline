@@ -10,11 +10,14 @@
 // llmlint: ignore-file[e2e_not_mocked] the two siblings are substituted at their
 // subprocess boundary, so a journey can state a scenario — a node that fails its gate, a
 // dispatch held open, a driver that dies — instead of arranging one out of real agent
-// turns. `onevcs` has no alternative yet: it is still at its interface-only stage and
-// refuses every invocation with exit 70. `oneagentgraph` does, and `dispatch.rs` takes
-// it: those journeys run the real binary through [`World::agentgraph_cmd`] and substitute only
-// the paid model turn. Every scripted scenario a journey here needs is one the real
-// sibling would need a paid turn to produce.
+// turns and a repository put into that state. Neither substitution is for want of a real
+// sibling: both are implemented, and both have a journey here that drives the real
+// binary. `dispatch.rs` runs the real `oneagentgraph` through [`World::agentgraph_cmd`]
+// and substitutes only the paid model turn; `real_vcs.rs` runs the real `onevcs` through
+// [`World::vcs_cmd`] over a real bare-repository origin, publishing `local-direct` so the
+// whole path is git and no host is asked for anything. Those two are what keep the
+// doubles honest — a scripted answer no real sibling produces is how this crate came to
+// read `onevcs publish`'s stdout as JSON, which the real command has never printed.
 
 // A shared harness is used a piece at a time: every helper below is exercised by some
 // journey, and none by all of them. Rust judges that per test binary, so without this the
@@ -87,11 +90,21 @@ pub struct World {
 
 impl World {
     /// A fresh world for one test.
+    ///
+    /// The root is named for nothing but uniqueness, and deliberately: a real
+    /// `onevcs` identity derived from a local path becomes **one flattened
+    /// directory component** under the state root, so every character of this
+    /// path is spent twice in a session's clone — once as its own prefix and
+    /// again inside the identity's directory name. Under a Windows temporary
+    /// directory a descriptive name crossed MAX_PATH and `git clone` failed with
+    /// "Filename too long" before a session ever opened. The test that failed
+    /// names itself; its scratch directory does not have to.
     pub fn new(name: &str) -> Self {
+        static NTH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let root = std::env::temp_dir().join(format!(
-            "onepipeline-e2e-{name}-{}-{:?}",
+            "op-{}-{}",
             std::process::id(),
-            std::thread::current().id()
+            NTH.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
         ));
         let _ = std::fs::remove_dir_all(&root);
         let world = Self {
@@ -204,6 +217,80 @@ impl World {
     pub fn run_on_agentgraph(&self, args: &[&str]) -> Run {
         Run::of(
             self.agentgraph_cmd(args).output().expect("the binary runs"),
+            args,
+            self,
+        )
+    }
+
+    /// The state root the **real** `onevcs` keeps everything under.
+    ///
+    /// Per world, so a journey's registry, sessions, streams, and locks are its
+    /// own and never the operator's `~/.onevcs`.
+    pub fn onevcs_home(&self) -> PathBuf {
+        self.root.join("onevcs-home")
+    }
+
+    /// The `onepipeline` binary with the **real** `onevcs` behind that one seam.
+    ///
+    /// Only that seam: `oneagentgraph` is still the double [`cmd`](World::cmd)
+    /// wires up, because what these journeys are about is the composition with
+    /// the repository side. The git identity is carried in the environment
+    /// rather than written into a config, so nothing outside this world's
+    /// scratch root is touched by a commit `onevcs` makes.
+    pub fn vcs_cmd(&self, args: &[&str]) -> Command {
+        let mut command = self.cmd(args);
+        self.with_real_vcs(&mut command);
+        command
+    }
+
+    /// The `onepipeline` binary with **both** siblings real: the `onevcs` and
+    /// `oneagentgraph` binaries `Cargo.lock` pins, and only the paid model turn
+    /// standing in. Its caller must have written the graph configs with
+    /// [`write_graphs`](World::write_graphs) first, as
+    /// [`agentgraph_cmd`](World::agentgraph_cmd)'s callers must.
+    pub fn real_cmd(&self, args: &[&str]) -> Command {
+        let mut command = self.agentgraph_cmd(args);
+        self.with_real_vcs(&mut command);
+        command
+    }
+
+    /// The git configuration this world's processes read instead of the
+    /// operator's, created if it is not there yet.
+    ///
+    /// One file, pointed at with `GIT_CONFIG_GLOBAL`, so a journey can set what a
+    /// real `onevcs` needs on a platform without leaving it set for whoever ran
+    /// the suite — and so the operator's own global config cannot decide what
+    /// these journeys see. Append to it for what one journey needs on top.
+    ///
+    /// `core.longpaths` is what it carries by default. A session's clone sits
+    /// under the flattened identity directory *inside* the state root, which on
+    /// Windows leaves the deepest files git writes — a pack index in the clone —
+    /// past MAX_PATH even from a short root.
+    pub fn gitconfig(&self) -> PathBuf {
+        let path = self.root.join("gitconfig");
+        if !path.is_file() {
+            std::fs::write(&path, "[core]\n\tlongpaths = true\n")
+                .expect("the world's git config is written");
+        }
+        path
+    }
+
+    /// Put the real `onevcs` behind a command, in this world's own state root.
+    fn with_real_vcs(&self, command: &mut Command) {
+        command
+            .env("ONEPIPELINE_ONEVCS_BIN", onevcs_binary())
+            .env("ONEVCS_HOME", self.onevcs_home())
+            .env("GIT_CONFIG_GLOBAL", self.gitconfig())
+            .env("GIT_AUTHOR_NAME", GIT_WHO)
+            .env("GIT_AUTHOR_EMAIL", GIT_EMAIL)
+            .env("GIT_COMMITTER_NAME", GIT_WHO)
+            .env("GIT_COMMITTER_EMAIL", GIT_EMAIL);
+    }
+
+    /// Run a command against the real `onevcs`.
+    pub fn run_on_vcs(&self, args: &[&str]) -> Run {
+        Run::of(
+            self.vcs_cmd(args).output().expect("the binary runs"),
             args,
             self,
         )
@@ -560,6 +647,28 @@ pub fn double(name: &str) -> PathBuf {
     static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     let held = BUILT.get_or_init(|| build(&["--package", "onepipeline-testfakes"]));
     held_copy(held, name)
+}
+
+/// Who a commit a journey's `onevcs` makes is attributed to.
+///
+/// Carried in the environment on every command, because a session's clone
+/// inherits no local config and a global one is the operator's, not this
+/// suite's.
+pub const GIT_WHO: &str = "onepipeline e2e";
+
+/// The address that attribution carries. Reserved by RFC 2606, so it can never
+/// reach anybody.
+pub const GIT_EMAIL: &str = "e2e@onepipeline.invalid";
+
+/// The **real** `onevcs` binary, built from the version this crate depends on.
+///
+/// The same trick [`oneagentgraph_binary`] uses and for the same reason: a
+/// journey proving this crate composes its sibling has to compose the sibling
+/// `Cargo.lock` pins, not whatever an operator happened to install on `PATH`.
+pub fn onevcs_binary() -> PathBuf {
+    static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    let held = BUILT.get_or_init(|| build(&["--package", "onevcs", "--bin", "onevcs", "--locked"]));
+    held_copy(held, "onevcs")
 }
 
 /// The **real** `oneagentgraph` binary, built from the version this crate

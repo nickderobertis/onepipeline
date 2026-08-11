@@ -87,3 +87,10 @@ build another member's binaries.
 
 The doubles are the only honest way to test this crate: it *is* a composition
 layer, so a test that stubbed the seam would be testing nothing.
+
+Each sibling also has a journey driving its **real** binary, built from the
+version `Cargo.lock` pins: `tests/e2e/dispatch.rs` for `oneagentgraph`,
+`tests/e2e/real_vcs.rs` for `onevcs`, and `tests/smoke/` for both at once plus a
+real GitHub. A double states a scenario; it is never a stand-in for a sibling
+nobody has run. When a double's answer changes, check it against the real one,
+and when a journey lands, its real e2e lands with it.

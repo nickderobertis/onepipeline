@@ -9,12 +9,14 @@
 //! the command vocabulary `docs/contract.md` fixes.
 
 // llmlint: ignore-file[e2e_not_mocked] the doubles substitute the two *siblings* at
-// their subprocess boundary, never anything inside the crate under test. `dispatch.rs`
-// drives the real `oneagentgraph` binary and substitutes only the paid model turn;
-// every other journey scripts a scenario a real sibling would need paid turns to
-// produce, and `onevcs` has no alternative at all — it is still at its interface-only
-// stage and refuses every invocation with exit 70. The same rationale, at more length,
-// is in `harness.rs`.
+// their subprocess boundary, never anything inside the crate under test. Both siblings
+// are fully implemented, and both have a journey here that drives the real one:
+// `dispatch.rs` drives the real `oneagentgraph` binary and substitutes only the paid
+// model turn, and `real_vcs.rs` drives the real `onevcs` binary over a real git origin
+// through a whole publication. What the doubles buy the journeys in between is a
+// scenario stated directly — a rejected gate, a held publication, a session that will
+// not open — where the real sibling would need a repository arranged into that state and
+// the real agent a paid turn. The same rationale, at more length, is in `harness.rs`.
 
 mod harness;
 
@@ -27,6 +29,7 @@ mod journal;
 mod lifecycle;
 mod live_edit;
 mod plan;
+mod real_vcs;
 mod shipped;
 mod surface;
 mod views;

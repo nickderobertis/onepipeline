@@ -6,12 +6,14 @@
 members = [".", "crates/testfakes"]
 resolver = "2"
 
-# The sibling this crate composes, pinned once for the whole workspace: the
-# `oneagentgraph` double refuses what the real CLI refuses by calling the real
-# CLI's own parser, so both members build against the same version or the double
-# would be an oracle for a build nothing runs.
+# The siblings this crate composes, pinned once for the whole workspace: each
+# double answers out of the real crate's own types — `oneagentgraph`'s refuses
+# what the real CLI refuses by calling its parser, and `onevcs`'s writes only the
+# event kinds `onevcs::EventKind` declares — so both members build against the
+# same version or a double would be an oracle for a build nothing runs.
 [workspace.dependencies]
 oneagentgraph = "0.2.2"
+onevcs = "0.2.0"
 
 [package]
 name = "onepipeline"
@@ -71,7 +73,7 @@ thiserror = "2"
 # the registry like any other dependency — no git source, so a clone of this repo
 # builds from the registries alone.
 oneagentgraph = { workspace = true }
-onevcs = "0.1.3"
+onevcs = { workspace = true }
 
 # Process liveness is the one host fact this crate cannot get from `std` on the
 # MSRV floor, and every `DRIVER DEAD` / `PARKED` verdict rests on it. Both are
@@ -87,16 +89,33 @@ windows-sys = { version = "0.61", features = [
   "Win32_System_Threading",
 ] }
 
-# No dev-dependencies. The e2e suite drives the compiled binary as a subprocess
-# with `std::process` and reads what it wrote, so it needs no command-assertion
-# crate — `tests/e2e/harness.rs` is the whole of it. The subprocess doubles for
-# the two siblings are a workspace member rather than a dependency: a dev-dep
-# would build that crate's *library*, and what the suite needs is its binaries,
-# which the harness builds on demand.
+# One dev-dependency, and it is not a test framework. The e2e suite drives the
+# compiled binary as a subprocess with `std::process` and reads what it wrote, so
+# it needs no command-assertion crate — `tests/e2e/harness.rs` is the whole of
+# it — and the subprocess doubles for the two siblings are a workspace member
+# rather than a dependency, because a dev-dep would build that crate's *library*
+# and what the suite needs is its binaries.
+#
+# `onevcs-testing` is the sibling's own implementations of the two interfaces it
+# is built around, which is what `tests/onevcs_seam.rs` drives to establish, in
+# code rather than in prose, which `onevcs` operations this crate can reach
+# without spawning a process. It is a dev-dependency and must stay one: what it
+# implements must never be reachable from a release binary.
+[dev-dependencies]
+onevcs-testing = "0.1.0"
 
 [[test]]
 name = "e2e"
 path = "tests/e2e/main.rs"
+
+# The real-everything tier, in its own binary so the offline gate can exclude it
+# by name: `just test`, `just test-quick`, and therefore `just gate` run
+# `not binary(smoke)`, and `just smoke-real` runs this and nothing else. It needs
+# a GitHub credential and a scratch repository, and it refuses rather than skips
+# when it has neither — which is why it must not be in the set a laptop runs.
+[[test]]
+name = "smoke"
+path = "tests/smoke/main.rs"
 
 # A CLI binary: optimize for a small, fast-starting artifact.
 [profile.release]
