@@ -65,7 +65,8 @@ pub enum Error {
         /// What the holder is doing.
         verb: String,
     },
-    /// A sibling library's CLI could not be run, or refused.
+    /// A sibling refused: `onevcs` answering a library call with an error, or
+    /// `oneagentgraph`'s CLI refusing or failing to run.
     /// Exits [`EXIT_REFUSED`].
     #[error("{tool}: {message}")]
     Sibling {

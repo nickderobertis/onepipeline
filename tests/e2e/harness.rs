@@ -1,23 +1,27 @@
 //! The scaffolding every journey here shares.
 //!
-//! Each test gets its own runs root, its own launching session, and its own
-//! scripted **doubles** for the two sibling CLIs. Be clear about what that
-//! means: `oneagentgraph` and `onevcs` are substituted. Nothing *inside*
-//! `onepipeline` is — it is driven as a compiled subprocess, and it reaches the
-//! doubles the same way it reaches the real thing, by executing a program and
-//! reading its stdout.
+//! Each test gets its own runs root, its own launching session, its own `onevcs`
+//! state root, and a scripted **double for `oneagentgraph`**. Be clear about what
+//! that means: `onevcs` is **not** substituted. This crate calls that library
+//! rather than spawning it, so there is no subprocess boundary to stand in at —
+//! every journey below drives the real repository side, over a real bare-
+//! repository origin on disk, and what a journey states instead is the world that
+//! library reads: the repository's rules, its gate command, and — at `onevcs`'s
+//! own `ONEVCS_GH` override — what GitHub does with the change request it is
+//! handed.
+//!
+//! Nothing *inside* `onepipeline` is substituted either: it is driven as a
+//! compiled subprocess.
 
-// llmlint: ignore-file[e2e_not_mocked] the two siblings are substituted at their
-// subprocess boundary, so a journey can state a scenario — a node that fails its gate, a
-// dispatch held open, a driver that dies — instead of arranging one out of real agent
-// turns and a repository put into that state. Neither substitution is for want of a real
-// sibling: both are implemented, and both have a journey here that drives the real
-// binary. `dispatch.rs` runs the real `oneagentgraph` through [`World::agentgraph_cmd`]
-// and substitutes only the paid model turn; `real_vcs.rs` runs the real `onevcs` through
-// [`World::vcs_cmd`] over a real bare-repository origin, publishing `local-direct` so the
-// whole path is git and no host is asked for anything. Those two are what keep the
-// doubles honest — a scripted answer no real sibling produces is how this crate came to
-// read `onevcs publish`'s stdout as JSON, which the real command has never printed.
+// llmlint: ignore-file[e2e_not_mocked] one sibling is substituted at its subprocess
+// boundary — `oneagentgraph`, so a journey can state a dispatch that fails, one held open,
+// or a driver that dies instead of arranging one out of paid agent turns — and
+// `dispatch.rs` runs the real binary through [`World::agentgraph_cmd`], substituting only
+// the paid model turn. `onevcs` is not substituted anywhere: it is linked and called, and
+// these journeys run it against a real git origin. The remaining stand-in is one layer
+// past it — GitHub, at that library's own `ONEVCS_GH` seam, which decides only what the
+// host does with a change request and leaves every git operation real. `tests/smoke/` runs
+// the same publication against the real `gh` and is what holds that honest.
 
 // A shared harness is used a piece at a time: every helper below is exercised by some
 // journey, and none by all of them. Rust judges that per test binary, so without this the
@@ -141,7 +145,18 @@ impl World {
                 "ONEPIPELINE_ONEAGENTGRAPH_BIN",
                 double("fake-oneagentgraph"),
             )
-            .env("ONEPIPELINE_ONEVCS_BIN", double("fake-onevcs"))
+            // `onevcs` is linked into the binary under test, so every command
+            // below carries the state root, the git configuration, and the host
+            // stand-in that library reads — including the ones that never touch a
+            // repository, because a command that reached the operator's own
+            // `~/.onevcs` would be a test writing outside its world.
+            .env("ONEVCS_HOME", self.onevcs_home())
+            .env("ONEVCS_GH", double("fake-gh"))
+            .env("GIT_CONFIG_GLOBAL", self.gitconfig())
+            .env("GIT_AUTHOR_NAME", GIT_WHO)
+            .env("GIT_AUTHOR_EMAIL", GIT_EMAIL)
+            .env("GIT_COMMITTER_NAME", GIT_WHO)
+            .env("GIT_COMMITTER_EMAIL", GIT_EMAIL)
             .env("ONEPIPELINE_FAKE_DIR", &self.fakes)
             .env("ONEPIPELINE_FAKE_DRIVER_BIN", binary())
             .env("ONEPIPELINE_LAUNCHER", "e2e")
@@ -222,7 +237,7 @@ impl World {
         )
     }
 
-    /// The state root the **real** `onevcs` keeps everything under.
+    /// The state root `onevcs` keeps everything under.
     ///
     /// Per world, so a journey's registry, sessions, streams, and locks are its
     /// own and never the operator's `~/.onevcs`.
@@ -230,28 +245,106 @@ impl World {
         self.root.join("onevcs-home")
     }
 
-    /// The `onepipeline` binary with the **real** `onevcs` behind that one seam.
+    /// A repository this world's lifecycle nodes publish from.
     ///
-    /// Only that seam: `oneagentgraph` is still the double [`cmd`](World::cmd)
-    /// wires up, because what these journeys are about is the composition with
-    /// the repository side. The git identity is carried in the environment
-    /// rather than written into a config, so nothing outside this world's
-    /// scratch root is touched by a commit `onevcs` makes.
-    pub fn vcs_cmd(&self, args: &[&str]) -> Command {
-        let mut command = self.cmd(args);
-        self.with_real_vcs(&mut command);
-        command
+    /// A bare origin, a checkout of it registered against that origin, and the
+    /// rules file that decides how work published from it lands. The checkout is
+    /// named `service`, which is the alias `onevcs` registers it under and
+    /// therefore what [`lifecycle`] names as its `repo`.
+    ///
+    /// `publication` is the policy — `local-direct` reaches the base with git
+    /// alone and asks no host for anything; a `change-*` policy opens a change
+    /// request through [`ONEVCS_GH`](World::cmd)'s stand-in. `gate` is the
+    /// command that verifies the branch, which is where a journey states a gate
+    /// that rejects or one that holds.
+    pub fn repository(&self, publication: &str, gate: &[&str]) -> Repository {
+        let origin = self.root.join("origin.git");
+        let checkout = self.root.join("service");
+        let home = self.onevcs_home();
+        for dir in [&origin, &home] {
+            std::fs::create_dir_all(dir).expect("a scratch directory");
+        }
+        git(self, &origin, &["init", "--bare", "--initial-branch=main"]);
+        git(
+            self,
+            &self.root,
+            &["clone", &origin.to_string_lossy(), "service"],
+        );
+        std::fs::write(checkout.join("README.md"), "the repository under test\n")
+            .expect("the seed file is written");
+        git(self, &checkout, &["add", "-A"]);
+        git(
+            self,
+            &checkout,
+            &["commit", "-m", "chore: seed the repository"],
+        );
+        git(self, &checkout, &["push", "-u", "origin", "main"]);
+
+        std::fs::write(
+            home.join("rules.yml"),
+            format!(
+                "version: 2\nrules: []\ndefault:\n  publication: {publication}\n  approvals: \
+                 none\n  gate:\n    command: {}\n",
+                serde_json::json!(gate)
+            ),
+        )
+        .expect("the rules file is written");
+
+        // A hosted origin, so the identity resolves to a host slug and a
+        // `change-*` policy has somewhere to open a change request. It names the
+        // identity and nothing else: the clone a session cuts takes its remote
+        // from the *checkout*, which points at the bare origin above, so every
+        // fetch and push this journey makes stays on this disk.
+        self.register(&checkout, Some("https://github.com/owner/service.git"));
+        Repository { origin, checkout }
     }
 
-    /// The `onepipeline` binary with **both** siblings real: the `onevcs` and
-    /// `oneagentgraph` binaries `Cargo.lock` pins, and only the paid model turn
-    /// standing in. Its caller must have written the graph configs with
+    /// Register a checkout with `onevcs`, **in this process**.
+    ///
+    /// A library call, because nothing in this repository reaches that sibling by
+    /// spawning it any more. Its state root is process-global, so the variable is
+    /// set and the registration run under one lock: two worlds registering at once
+    /// would otherwise write into each other's registry.
+    pub fn register(&self, checkout: &Path, origin: Option<&str>) {
+        use clap::Parser;
+        static REGISTERING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _held = REGISTERING.lock().unwrap_or_else(|held| held.into_inner());
+        std::env::set_var("ONEVCS_HOME", self.onevcs_home());
+        std::env::set_var("GIT_CONFIG_GLOBAL", self.gitconfig());
+        let mut argv: Vec<String> = vec![
+            "onevcs".to_owned(),
+            "register".to_owned(),
+            checkout.to_string_lossy().into_owned(),
+        ];
+        if let Some(origin) = origin {
+            argv.push("--origin".to_owned());
+            argv.push(origin.to_owned());
+        }
+        let code = onevcs::run(&onevcs::cli::Cli::parse_from(argv));
+        assert_eq!(code, 0, "onevcs refused to register {}", checkout.display());
+    }
+
+    /// What `onevcs` resolved a repository to, as its own typed identity.
+    ///
+    /// Under the same lock and for the same reason as [`register`](World::register).
+    pub fn identity(&self, repo: &Path) -> onevcs::Identity {
+        static RESOLVING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _held = RESOLVING.lock().unwrap_or_else(|held| held.into_inner());
+        std::env::set_var("ONEVCS_HOME", self.onevcs_home());
+        std::env::set_var("GIT_CONFIG_GLOBAL", self.gitconfig());
+        onevcs::Providers::real()
+            .vcs
+            .resolve_identity(&repo.to_string_lossy())
+            .unwrap_or_else(|error| panic!("onevcs cannot resolve {}: {error}", repo.display()))
+    }
+
+    /// The `onepipeline` binary with **both** siblings real: `onevcs` linked in
+    /// and the `oneagentgraph` binary `Cargo.lock` pins, with only the paid model
+    /// turn standing in. Its caller must have written the graph configs with
     /// [`write_graphs`](World::write_graphs) first, as
     /// [`agentgraph_cmd`](World::agentgraph_cmd)'s callers must.
     pub fn real_cmd(&self, args: &[&str]) -> Command {
-        let mut command = self.agentgraph_cmd(args);
-        self.with_real_vcs(&mut command);
-        command
+        self.agentgraph_cmd(args)
     }
 
     /// The git configuration this world's processes read instead of the
@@ -273,27 +366,6 @@ impl World {
                 .expect("the world's git config is written");
         }
         path
-    }
-
-    /// Put the real `onevcs` behind a command, in this world's own state root.
-    fn with_real_vcs(&self, command: &mut Command) {
-        command
-            .env("ONEPIPELINE_ONEVCS_BIN", onevcs_binary())
-            .env("ONEVCS_HOME", self.onevcs_home())
-            .env("GIT_CONFIG_GLOBAL", self.gitconfig())
-            .env("GIT_AUTHOR_NAME", GIT_WHO)
-            .env("GIT_AUTHOR_EMAIL", GIT_EMAIL)
-            .env("GIT_COMMITTER_NAME", GIT_WHO)
-            .env("GIT_COMMITTER_EMAIL", GIT_EMAIL);
-    }
-
-    /// Run a command against the real `onevcs`.
-    pub fn run_on_vcs(&self, args: &[&str]) -> Run {
-        Run::of(
-            self.vcs_cmd(args).output().expect("the binary runs"),
-            args,
-            self,
-        )
     }
 
     /// Where this world's agent-graph configs live.
@@ -532,6 +604,75 @@ impl Drop for World {
     }
 }
 
+/// A repository `onevcs` knows about, and what its base branch carries.
+pub struct Repository {
+    /// The bare repository that stands in for the remote.
+    pub origin: PathBuf,
+    /// The registered execution and publication checkout.
+    pub checkout: PathBuf,
+}
+
+impl Repository {
+    /// What the origin's base branch carries now, newest first.
+    pub fn base_commits(&self, world: &World) -> Vec<String> {
+        git(world, &self.origin, &["log", "--format=%s", "main"])
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// One file's contents on the origin's base branch, if it carries one.
+    pub fn base_file(&self, name: &str) -> Option<String> {
+        let shown = Command::new("git")
+            .arg("show")
+            .arg(format!("main:{name}"))
+            .current_dir(&self.origin)
+            .output()
+            .expect("git runs");
+        shown
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&shown.stdout).into_owned())
+    }
+
+    /// Whether the registered checkout carries a branch.
+    ///
+    /// The checkout rather than the origin, because that is where a session
+    /// hands its branch back: closing one copies the branch out of the
+    /// disposable clone into the checkout, published or not, so this is where a
+    /// preserved-but-unpublished workstream survives.
+    pub fn has_branch(&self, world: &World, branch: &str) -> bool {
+        !git(world, &self.checkout, &["branch", "--list", branch])
+            .trim()
+            .is_empty()
+    }
+}
+
+/// Run git in a repository, refusing to continue on anything it rejects.
+///
+/// Through the world's own git config, like every git `onevcs` runs from here:
+/// the origin these journeys build is what the identity is derived from, so it
+/// has to be readable under the same settings the session's clone needs.
+pub fn git(world: &World, repo: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .env("GIT_CONFIG_GLOBAL", world.gitconfig())
+        .env("GIT_AUTHOR_NAME", GIT_WHO)
+        .env("GIT_AUTHOR_EMAIL", GIT_EMAIL)
+        .env("GIT_COMMITTER_NAME", GIT_WHO)
+        .env("GIT_COMMITTER_EMAIL", GIT_EMAIL)
+        .output()
+        .expect("git runs");
+    assert!(
+        output.status.success(),
+        "git {args:?} in {} failed: {}",
+        repo.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
 /// What one command did.
 pub struct Run {
     /// Its exit code.
@@ -659,17 +800,6 @@ pub const GIT_WHO: &str = "onepipeline e2e";
 /// The address that attribution carries. Reserved by RFC 2606, so it can never
 /// reach anybody.
 pub const GIT_EMAIL: &str = "e2e@onepipeline.invalid";
-
-/// The **real** `onevcs` binary, built from the version this crate depends on.
-///
-/// The same trick [`oneagentgraph_binary`] uses and for the same reason: a
-/// journey proving this crate composes its sibling has to compose the sibling
-/// `Cargo.lock` pins, not whatever an operator happened to install on `PATH`.
-pub fn onevcs_binary() -> PathBuf {
-    static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    let held = BUILT.get_or_init(|| build(&["--package", "onevcs", "--bin", "onevcs", "--locked"]));
-    held_copy(held, "onevcs")
-}
 
 /// The **real** `oneagentgraph` binary, built from the version this crate
 /// depends on.
@@ -809,10 +939,14 @@ pub fn human(id: &str, deps: &[&str]) -> Value {
 }
 
 /// A lifecycle node: one that names a repository.
+///
+/// `service` is the alias [`World::repository`] registers its checkout under, so
+/// a journey states the repository once and the node names it the way an
+/// operator would.
 pub fn lifecycle(id: &str, deps: &[&str]) -> Value {
     serde_json::json!({
         "id": id,
-        "repo": "owner/service",
+        "repo": "service",
         "persona": "engineer",
         "task": format!("## What\nShip {id}.\n\n## Why\nUsers need it.\n\n## Acceptance criteria\n- {id} is published."),
         "deps": deps,

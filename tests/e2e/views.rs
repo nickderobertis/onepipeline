@@ -4,11 +4,13 @@
 //!
 //! Ported from `test_monitor_e2e`, `test_monitor_run_plan_e2e`, `test_goals_e2e`, `test_run_views_by_id_e2e`, `test_live_dispatch_views_e2e`, and `test_telemetry_e2e`.
 
-// llmlint: ignore-file[e2e_not_mocked] `World` substitutes the two *siblings* at their
+// llmlint: ignore-file[e2e_not_mocked] `World` substitutes `oneagentgraph` at its
 // subprocess boundary and nothing inside the crate under test, which is driven as a real
-// compiled binary. The scenario this journey states is one a real sibling would need paid
-// model turns to produce, and `dispatch.rs` is where the real `oneagentgraph` binary is
-// driven instead. `harness.rs` carries the same suppression and the full rationale.
+// compiled binary. `onevcs` is not substituted here either: the lifecycle journeys below
+// drive the real library against a real git origin. What the `oneagentgraph` double buys
+// is a dispatch outcome a real sibling would need paid model turns to produce, and
+// `dispatch.rs` is where the real binary is driven instead. `harness.rs` carries the same
+// suppression and the full rationale.
 
 use crate::harness::{agent, human, lifecycle, plan_of, Run, World};
 
@@ -54,9 +56,12 @@ fn settled(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
     name.to_string()
 }
 
+#[cfg(not(windows))]
 #[test]
 fn monitor_renders_all_three_streams_under_their_own_typed_ids() {
     let world = World::new("views-monitor");
+    world.repository("local-direct", &["true"]);
+    world.script("service.work", "the worker wrote this\n");
     let run = settled(&world, "watched", vec![lifecycle("service", &[])]);
 
     let stream = world.run(&["monitor", &run]);
@@ -137,16 +142,18 @@ fn results_reports_each_nodes_own_evidence() {
         .out_has("unblocks: gated");
 }
 
+#[cfg(not(windows))]
 #[test]
 fn goals_says_what_each_run_is_for_and_which_identities_it_holds() {
     let world = World::new("views-goals");
+    world.repository("local-direct", &["true"]);
     let run = settled(&world, "purposeful", vec![lifecycle("service", &[])]);
 
     let goals = world.run(&["goals"]);
     goals
         .exited(0)
         .out_has("Deliver purposeful")
-        .out_has("identities: owner/service");
+        .out_has("identities: service");
     world
         .run(&["goals", &run])
         .exited(0)
@@ -337,31 +344,47 @@ fn telemetry_reports_what_each_party_spent() {
 /// A gate run and a lock wait are the two stretches an operator most needs
 /// answered apart from the agent's — and a lifecycle node spends real time in
 /// both.
+///
+/// The **gate** is held here, because it is the one a journey can hold from
+/// outside the publication: `onevcs` runs the repository's own command, and this
+/// one waits for a file. The lock wait cannot be, and not for want of a hold:
+/// the sibling emits `lock-wait` *after* it has waited, carrying the elapsed
+/// seconds in its payload, and then emits `lock-acquired` immediately — so the
+/// interval this crate measures between the two is zero however long the wait
+/// was. The `onevcs` double emitted the marker and *then* blocked, which is a
+/// shape no release of that library has ever produced, and it is what let this
+/// bucket read as measured. The bucket is still served, and it is still not the
+/// agent's; what it is not is a measurement. Recorded as a proposal in
+/// `docs/contract-divergences.md`.
+#[cfg(not(windows))]
 #[test]
 fn telemetry_separates_gate_and_lock_time_from_agent_time() {
     let world = World::new("views-gatetime");
-    // Both stretches are held open for a measurable span, so each is a real
+    let go = world.fakes.join("gate.go");
+    // The gate is held open for a measurable span, so its bucket is a real
     // duration on the clock rather than a bucket that merely exists.
-    world.script("publish.hold", "hold");
-    world.script("gate.hold", "hold");
+    world.repository(
+        "local-direct",
+        &[
+            "bash",
+            "-c",
+            &format!("until [ -f {} ]; do sleep 0.05; done", go.display()),
+        ],
+    );
+    world.script("service.work", "the worker wrote this\n");
     let path = world.plan("gated", &plan_of("gated", vec![lifecycle("service", &[])]));
     world
         .run(&["start", &path.to_string_lossy(), "--detach"])
         .exited(0);
 
-    for (waited, release, held) in [
-        ("lock-wait", "publish.go", "the lock wait"),
-        ("gate-started", "gate.go", "the gate"),
-    ] {
-        world.until(&format!("{held} to start"), |world| {
-            !world.events_of("gated", waited).is_empty()
-        });
-        let since = std::time::Instant::now();
-        world.until(&format!("{held} to last a measurable stretch"), |_| {
-            since.elapsed() >= HELD
-        });
-        world.release(release);
-    }
+    world.until("the gate to start", |world| {
+        !world.events_of("gated", "gate-started").is_empty()
+    });
+    let since = std::time::Instant::now();
+    world.until("the gate to last a measurable stretch", |_| {
+        since.elapsed() >= HELD
+    });
+    world.release("gate.go");
     world.until("the run to settle", |world| {
         !world.events_of("gated", "round-finished").is_empty()
     });
@@ -377,20 +400,33 @@ fn telemetry_separates_gate_and_lock_time_from_agent_time() {
             .get("ms")
             .and_then(serde_json::Value::as_u64)
     };
-    // Each held stretch is its own bucket, and neither is inside the agent's:
-    // the whole point of the eight-way split.
-    for name in ["lock_wait", "gate"] {
-        let ms = span(name).unwrap_or_else(|| panic!("{name} is unmeasured: {document}"));
-        assert!(
-            ms >= FLOOR,
-            "{name} measured {ms}ms of a stretch held for {}ms: {document}",
-            HELD.as_millis()
-        );
-    }
+    // The held stretch is its own bucket, and it is not inside the agent's: the
+    // whole point of the eight-way split.
+    let gate = span("gate").unwrap_or_else(|| panic!("gate is unmeasured: {document}"));
+    assert!(
+        gate >= FLOOR,
+        "gate measured {gate}ms of a stretch held for {}ms: {document}",
+        HELD.as_millis()
+    );
     let agent = span("agent").expect("the agent bucket is measured");
     assert!(
-        agent < span("gate").expect("gate") + span("lock_wait").expect("lock_wait"),
-        "the held stretches were charged to the agent: {document}"
+        agent < gate,
+        "the held gate was charged to the agent: {document}"
+    );
+    // And the wait the sibling did do is on its own record, as the number a
+    // reader would need to charge it: this is the datum the bucket above is
+    // missing, and the assertion that fails when the sibling starts bracketing
+    // the wait instead.
+    let waited = &world.events_of("gated", "lock-wait")[0];
+    assert!(
+        waited["payload"]["elapsed"].is_number(),
+        "the sibling recorded no elapsed lock wait to charge: {waited}"
+    );
+    assert_eq!(
+        span("lock_wait"),
+        Some(0),
+        "the lock wait is measured now; charge it from the marker's own elapsed and hold this \
+         journey to it: {document}"
     );
     for name in ["publication_wait", "setup"] {
         assert!(
@@ -679,9 +715,11 @@ fn a_retained_report_carrying_no_transcript_says_so() {
 /// The session a lifecycle node opens is recorded before its first turn is, so
 /// this is the state every lifecycle node passes through — and it is where a
 /// readout that invented a "now" would be inventing it.
+#[cfg(not(windows))]
 #[test]
 fn a_dispatch_that_has_named_no_tool_reports_its_count_rather_than_a_guess() {
     let world = World::new("views-nameless");
+    world.repository("local-direct", &["true"]);
     world.script("service.wait", "hold");
     let path = world.plan(
         "nameless",

@@ -368,52 +368,22 @@ fn a_lifecycle_node_opens_a_real_pull_request_merges_it_and_the_base_advances() 
         branch: branch.clone(),
     };
 
-    let registration = Command::new(harness::onevcs_binary())
-        .arg("register")
-        .arg(&checkout)
-        .env("ONEVCS_HOME", &home)
-        .env("GIT_CONFIG_GLOBAL", git_credentials(&world))
-        .output()
-        .expect("the real onevcs runs");
-    assert!(
-        registration.status.success(),
-        "onevcs register refused {}: {}",
-        checkout.display(),
-        String::from_utf8_lossy(&registration.stderr)
-    );
+    // Registered by calling the sibling, not by spawning it: the credential
+    // helper is already in this world's git config, which the registration reads
+    // through `GIT_CONFIG_GLOBAL`.
+    git_credentials(&world);
+    world.register(&checkout, None);
 
     // The identity the publication will be addressed to, read back from the
     // sibling rather than assumed: this is the last point before a push, and it
-    // is what makes "the scratch repository and nothing else" a checked fact.
-    let resolved = Command::new(harness::onevcs_binary())
-        .arg("resolve")
-        .arg(&checkout)
-        .env("ONEVCS_HOME", &home)
-        .env("GIT_CONFIG_GLOBAL", git_credentials(&world))
-        .output()
-        .expect("the real onevcs runs");
-    // The status first: a `resolve` that refused prints its reason on stderr and
-    // nothing on stdout, and reading that empty stdout as JSON would report the
-    // refusal as unreadable output — the sibling's own words lost, which is the
-    // shape of defect this whole tier exists to catch.
-    assert!(
-        resolved.status.success(),
-        "`onevcs resolve` refused {} with exit {}: {}",
-        checkout.display(),
-        resolved.status.code().unwrap_or(-1),
-        String::from_utf8_lossy(&resolved.stderr).trim()
-    );
-    let resolved: Value = serde_json::from_slice(&resolved.stdout).unwrap_or_else(|error| {
-        panic!(
-            "`onevcs resolve` printed something unreadable ({error}): {}",
-            String::from_utf8_lossy(&resolved.stdout)
-        )
-    });
+    // is what makes "the scratch repository and nothing else" a checked fact. As
+    // the sibling's own `Identity`, so a refusal arrives as an error naming the
+    // repository rather than as output this journey has to parse.
     assert_eq!(
-        resolved["identity"],
-        json!(format!("github.com/{slug}")),
+        world.identity(&checkout).origin,
+        format!("github.com/{slug}"),
         "the registered checkout does not resolve to the scratch repository, so this run would \
-         publish somewhere nobody chose: {resolved}"
+         publish somewhere nobody chose"
     );
 
     // The worker turn writes into the worktree `oneagentgraph` resolved for it,

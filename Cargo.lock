@@ -916,15 +916,14 @@ name = "onepipeline-testfakes"
 version = "0.0.0"
 dependencies = [
  "oneagentgraph",
- "onevcs",
  "serde_json",
 ]
 
 [[package]]
 name = "onevcs"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c3746baa7a94d22a6e03bfa32ee65eaae68f130b3e6b3cc04bf62990048b7a04"
+checksum = "8c9c2815180b3239b9c6bf0b6bde0ac72b002f74a72e754802c3bb5288cc1cad"
 dependencies = [
  "clap",
  "fs4",
@@ -940,9 +939,9 @@ dependencies = [
 
 [[package]]
 name = "onevcs-testing"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8964902da56e3b1c1c1c36b340202d955800ce80074f27e60fad8cdf3d379700"
+checksum = "83545a25d31c1eb64a88f8b69d6b9c74174734b407c4ed20b9cfdaf2f2b3fa86"
 dependencies = [
  "onevcs",
  "serde",

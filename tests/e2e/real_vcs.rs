@@ -1,14 +1,11 @@
-//! A lifecycle node published by the **real** `onevcs`.
+//! A lifecycle node published through `onevcs`, read off the repository itself.
 //!
-//! Every other lifecycle journey states its scenario through the `onevcs`
-//! double, which is how a rejected gate or a held publication is reachable
-//! without paid turns and real hosts. What a double cannot prove is the seam
-//! itself: the argv this crate builds, the exit codes it reads, and — the one
-//! that mattered — *the shape of what the sibling prints back*. This crate used
-//! to read `onevcs publish`'s stdout as JSON; the real command prints one line
-//! of prose, so against the real sibling every publication failed as unreadable
-//! while the suite stayed green against a double that printed JSON. That is the
-//! same defect as R0, in the path that merges work.
+//! Every lifecycle journey here drives the real repository side — `onevcs` is
+//! linked into the binary under test, not substituted — so what this file adds is
+//! the assertion none of the others make: that the origin's base branch actually
+//! **advanced by the change**, and that a branch the gate rejected did not reach
+//! it. A settlement is this crate's account of a publication; the repository is
+//! the publication.
 //!
 //! Offline and hermetic: a bare repository on disk is the origin, the identity
 //! publishes `local-direct` so no host is ever asked for anything, and the state
@@ -19,140 +16,25 @@
 //! one that fails when that stops being true.
 
 // llmlint: ignore-file[e2e_not_mocked] the sibling under test is *not* substituted here:
-// `onevcs` is the real binary, built from the version `Cargo.lock` pins, driving real git
-// against a real origin. `oneagentgraph` is still the double, because what these journeys
-// are about is the repository side and a real agent turn is a paid one.
+// `onevcs` is the library this crate links, driving real git against a real origin.
+// `oneagentgraph` is still the double, because what these journeys are about is the
+// repository side and a real agent turn is a paid one.
 
 // Windows compiles the scaffolding and runs only the refusal below, so the parts the two
 // publication journeys alone reach are unreferenced there.
 #![cfg_attr(windows, allow(dead_code, unused_imports))]
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::Path;
 
 use serde_json::json;
 
-use crate::harness::{onevcs_binary, plan_of, World, GIT_EMAIL, GIT_WHO};
-
-/// A registered repository: a bare origin, a checkout of it, and the rules that
-/// decide how work published from it lands.
-struct Registered {
-    /// The bare repository that stands in for the remote.
-    origin: PathBuf,
-    /// The registered execution and publication checkout.
-    checkout: PathBuf,
-}
-
-impl Registered {
-    /// What the origin's base branch carries now.
-    fn base_commits(&self, world: &World) -> Vec<String> {
-        git(world, &self.origin, &["log", "--format=%s", "main"])
-            .lines()
-            .map(str::to_string)
-            .collect()
-    }
-
-    /// One file's contents on the origin's base branch, if it carries one.
-    fn base_file(&self, name: &str) -> Option<String> {
-        let shown = Command::new("git")
-            .arg("show")
-            .arg(format!("main:{name}"))
-            .current_dir(&self.origin)
-            .output()
-            .expect("git runs");
-        shown
-            .status
-            .success()
-            .then(|| String::from_utf8_lossy(&shown.stdout).into_owned())
-    }
-}
-
-/// Run git in a repository, refusing to continue on anything it rejects.
-///
-/// Through the world's own git config, like every git a real `onevcs` runs from
-/// here: the origin these journeys build is what the identity is derived from,
-/// so it has to be readable under the same settings the session's clone needs.
-fn git(world: &World, repo: &Path, args: &[&str]) -> String {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(repo)
-        .env("GIT_CONFIG_GLOBAL", world.gitconfig())
-        .env("GIT_AUTHOR_NAME", GIT_WHO)
-        .env("GIT_AUTHOR_EMAIL", GIT_EMAIL)
-        .env("GIT_COMMITTER_NAME", GIT_WHO)
-        .env("GIT_COMMITTER_EMAIL", GIT_EMAIL)
-        .output()
-        .expect("git runs");
-    assert!(
-        output.status.success(),
-        "git {args:?} in {} failed: {}",
-        repo.display(),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8_lossy(&output.stdout).into_owned()
-}
-
-/// A repository the real `onevcs` knows about, publishing under `gate`.
-///
-/// `local-direct`, so the whole publication is git: the branch is squashed onto
-/// the base and pushed, and no remote host is asked for anything. That is the
-/// one policy whose every step this journey can actually reach offline.
-fn registered(world: &World, gate: &[&str]) -> Registered {
-    let origin = world.root.join("origin.git");
-    let checkout = world.root.join("checkout");
-    let home = world.onevcs_home();
-    for dir in [&origin, &home] {
-        std::fs::create_dir_all(dir).expect("a scratch directory");
-    }
-    git(world, &origin, &["init", "--bare", "--initial-branch=main"]);
-    git(
-        world,
-        &world.root,
-        &["clone", &origin.to_string_lossy(), "checkout"],
-    );
-    std::fs::write(checkout.join("README.md"), "the repository under test\n")
-        .expect("the seed file is written");
-    git(world, &checkout, &["add", "-A"]);
-    git(
-        world,
-        &checkout,
-        &["commit", "-m", "chore: seed the repository"],
-    );
-    git(world, &checkout, &["push", "-u", "origin", "main"]);
-
-    std::fs::write(
-        home.join("rules.yml"),
-        format!(
-            "version: 2\nrules: []\ndefault:\n  publication: local-direct\n  approvals: none\n  \
-             gate:\n    command: {}\n",
-            json!(gate)
-        ),
-    )
-    .expect("the rules file is written");
-
-    let registration = Command::new(onevcs_binary())
-        .arg("register")
-        .arg(&checkout)
-        .env("ONEVCS_HOME", &home)
-        .env("GIT_CONFIG_GLOBAL", world.gitconfig())
-        .output()
-        .expect("the real onevcs runs");
-    assert!(
-        registration.status.success(),
-        "onevcs register refused {}: {}",
-        checkout.display(),
-        String::from_utf8_lossy(&registration.stderr)
-    );
-
-    Registered { origin, checkout }
-}
+use crate::harness::{plan_of, World};
 
 /// A lifecycle node whose repository is the registered checkout.
 ///
-/// It names its own title, so the run spends no `pr-author` dispatch: that
-/// dispatch opens a second session on the same branch, and the real `onevcs`
-/// holds a live session's branch under an occupancy lease. Which title wins is
-/// what `lifecycle.rs` proves; this journey is about the publication.
+/// It names its own title, so the run spends no `pr-author` dispatch: which
+/// title wins is what `lifecycle.rs` proves, and this journey is about the
+/// publication.
 fn node(repo: &Path) -> serde_json::Value {
     json!({
         "id": "service",
@@ -202,12 +84,12 @@ fn vcs_kinds(world: &World, run: &str) -> Vec<String> {
 #[test]
 fn a_lifecycle_node_publishes_through_the_real_onevcs_and_the_base_advances() {
     let world = World::new("real-vcs-publish");
-    let repo = registered(&world, &["true"]);
+    let repo = world.repository("local-direct", &["true"]);
     world.script("service.work", "the worker wrote this\n");
 
     let path = world.plan("landed", &plan_of("landed", vec![node(&repo.checkout)]));
     world
-        .run_on_vcs(&["start", &path.to_string_lossy(), "--attach"])
+        .run(&["start", &path.to_string_lossy(), "--attach"])
         .settled();
     world.until("the run to settle", |world| {
         !world.events_of("landed", "round-finished").is_empty()
@@ -281,12 +163,12 @@ fn a_lifecycle_node_publishes_through_the_real_onevcs_and_the_base_advances() {
 #[test]
 fn a_real_gate_that_rejects_the_branch_fails_the_node_and_leaves_the_base_alone() {
     let world = World::new("real-vcs-gate");
-    let repo = registered(&world, &["false"]);
+    let repo = world.repository("local-direct", &["false"]);
     world.script("service.work", "the worker wrote this\n");
 
     let path = world.plan("refused", &plan_of("refused", vec![node(&repo.checkout)]));
     world
-        .run_on_vcs(&["start", &path.to_string_lossy(), "--attach"])
+        .run(&["start", &path.to_string_lossy(), "--attach"])
         .settled();
     world.until("the run to settle", |world| {
         !world.events_of("refused", "round-finished").is_empty()
@@ -320,8 +202,8 @@ fn a_real_gate_that_rejects_the_branch_fails_the_node_and_leaves_the_base_alone(
     );
 }
 
-/// Windows: the sibling opens no session at all, so the journeys above are not
-/// compiled there.
+/// Windows: the sibling opens no session at all, so no lifecycle journey in this
+/// suite is compiled there.
 ///
 /// `onevcs register` stores what `std::fs::canonicalize` answers, which on
 /// Windows is the verbatim form `\\?\C:\…`, and `session open` hands that path
@@ -332,27 +214,29 @@ fn a_real_gate_that_rejects_the_branch_fails_the_node_and_leaves_the_base_alone(
 /// records and what it hands to git.
 ///
 /// So this is what runs here instead, and **it fails when the sibling stops
-/// doing it**: that is the signal to delete this test and compile the two
-/// journeys above on Windows again, rather than to re-derive the reason.
+/// doing it**: that is the signal to delete this test and compile every
+/// `cfg(not(windows))` lifecycle journey in this suite on Windows again, rather
+/// than to re-derive the reason.
 #[cfg(windows)]
 #[test]
 fn the_real_onevcs_opens_no_session_on_windows_which_is_why_the_journeys_above_are_not_run_here() {
-    let world = World::new("real-vcs-windows");
-    let repo = registered(&world, &["true"]);
+    use onevcs::{SessionRequest, Vcs};
 
-    let opened = Command::new(onevcs_binary())
-        .arg("session")
-        .arg("open")
-        .arg(&repo.checkout)
-        .env("ONEVCS_HOME", world.onevcs_home())
-        .env("GIT_CONFIG_GLOBAL", world.gitconfig())
-        .output()
-        .expect("the real onevcs runs");
+    let world = World::new("real-vcs-windows");
+    let repo = world.repository("local-direct", &["true"]);
+
+    // Through the seam this crate itself publishes on, in this process, with the
+    // world's state root already in place from the registration above.
+    let opened = onevcs::Providers::real().vcs.open_session(SessionRequest {
+        repo: repo.checkout.to_string_lossy().into_owned(),
+        branch: Some("feature".to_owned()),
+        base: Some("main".to_owned()),
+        execution_checkout: None,
+    });
     assert!(
-        !opened.status.success(),
-        "`onevcs session open` now works on Windows. Delete this test and drop the \
-         `cfg(not(windows))` from the two journeys above, which is the whole reason it \
-         exists.\nstdout: {}",
-        String::from_utf8_lossy(&opened.stdout)
+        opened.is_err(),
+        "`onevcs` now opens a session on Windows. Delete this test and drop the \
+         `cfg(not(windows))` from every lifecycle journey in this suite, which is the whole \
+         reason it exists.\nit opened: {opened:?}"
     );
 }

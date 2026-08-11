@@ -58,6 +58,10 @@ pub fn execute(
     // follow, so the publication that comes after the steps is visible while it
     // runs rather than only once it is over.
     let mut stream: Option<crate::vcs::Follower> = None;
+    // The one worktree this node's dispatches work in, once its session has
+    // opened one. See where it is read: every dispatch after the first runs
+    // *there* rather than opening a session beside it.
+    let mut worktree: Option<std::path::PathBuf> = None;
     // Where in the run the session's own envelopes belong. The node, not a
     // step: a session outlives every step that wrote in it, and the publication
     // that follows them belongs to none.
@@ -100,6 +104,17 @@ pub fn execute(
             branch: branch.clone().or_else(|| request.branch.clone()),
             ..request.clone()
         };
+        // And works in the worktree the first step's session opened, rather than
+        // asking for a session of its own. `onevcs` cuts every session its own
+        // clone from the execution checkout, so a second session on the same
+        // branch starts from the base with none of the earlier steps' work — and
+        // opening it reclaims the first session's workspace, uncommitted work
+        // and all. Steps are serial by construction, so one worktree is what
+        // "several steps share one branch" has always meant.
+        let workspace = match &worktree {
+            Some(dir) => WorkspaceSpec::Path(dir.clone()),
+            None => WorkspaceSpec::VcsSession(request.clone()),
+        };
         let build = || DispatchRequest {
             graph: engine::node_graph(step.agent_graph.as_ref().or(node.agent_graph.as_ref())),
             task: step.rendered_task(node.context.as_deref()),
@@ -110,7 +125,7 @@ pub fn execute(
                 declared_steps.then_some(step.id.as_str()),
                 step.persona.as_deref(),
             ),
-            workspace: WorkspaceSpec::VcsSession(request.clone()),
+            workspace: workspace.clone(),
             cancel: cancel.clone(),
         };
         let drained = engine::attempt(executor, &node.id, engine::Role::Worker, cancel, tx, &build);
@@ -121,6 +136,7 @@ pub fn execute(
         branch = drained.branch.or(branch);
         if stream.is_none() {
             if let Some(token) = &session {
+                worktree = crate::vcs::worktree_of(token);
                 stream = crate::vcs::follow(token, relay_into(tx, whose.clone()));
             }
         }
@@ -146,7 +162,17 @@ pub fn execute(
         };
     };
 
-    let settlement = publish(executor, run, round, node, cancel, tx, &token, branch);
+    let settlement = publish(
+        executor,
+        run,
+        round,
+        node,
+        worktree.as_deref(),
+        cancel,
+        tx,
+        &token,
+        branch,
+    );
     end_session(stream, tx, Some(&token), &whose);
     settlement
 }
@@ -155,15 +181,16 @@ pub fn execute(
 #[allow(
     clippy::too_many_arguments,
     reason = "publication needs the dispatch context (executor, run, round, node, cancel, \
-              stream) as well as what the steps left behind (the session token and its \
-              branch); the first six are the node's own dispatch identity and bundling \
-              them would only move the same list one indirection away"
+              stream) as well as what the steps left behind (the session token, its branch, \
+              and the worktree they worked in); the first six are the node's own dispatch \
+              identity and bundling them would only move the same list one indirection away"
 )]
 fn publish(
     executor: &dyn Executor,
     run: &str,
     round: u64,
     node: &Node,
+    worktree: Option<&std::path::Path>,
     cancel: &crate::executor::CancellationToken,
     tx: &Sender<Message>,
     token: &str,
@@ -172,30 +199,38 @@ fn publish(
     let title = node
         .title
         .clone()
-        .unwrap_or_else(|| draft_title(executor, run, round, node, cancel, tx));
+        .unwrap_or_else(|| draft_title(executor, run, round, node, worktree, cancel, tx));
 
-    let published = crate::vcs::publish(token, node.merge_policy, Some(&title));
-    match published {
+    match crate::vcs::publish(token, node.merge_policy, Some(&title)) {
         Ok(published) => {
+            // A publication that did not land is an ending of the publication,
+            // not a refused request: `onevcs` draws that line itself, in
+            // `PublishOutcome::Failed`, and this crate reads its line rather
+            // than a second one. The reason is the sibling's own — the gate it
+            // ran and what that said — and it is what the node settles with.
+            if let onevcs::PublishOutcome::Failed { reason, .. } = &published.outcome {
+                return Settlement {
+                    branch,
+                    detail: Some(format!("onevcs: {reason}")),
+                    ..Settlement::plain(&node.id, NodeStatus::Failed, Some("publication-failed"))
+                };
+            }
             let labels =
                 engine::dispatch_labels(run, round, &node.id, None, node.persona.as_deref());
-            let branch_name = branch.clone().unwrap_or_default();
             let _ = tx.send(Message::Event(Box::new(crate::vcs::published_event(
-                &published,
-                &branch_name,
-                &labels,
+                &published, &labels,
             ))));
             Settlement {
-                branch,
-                change_url: published.url.clone(),
-                // A publication that recorded nothing published nothing.
-                // `onevcs publish` exits 0 on a branch that carries no change —
-                // it prints `nothing to publish: …` and writes no push, no
-                // change request, and no merge — and this used to settle that as
-                // a bare "published", so a node whose worker wrote nothing read
-                // as one that landed work. The existing name for it is the one a
-                // node whose steps all declared no diff already settles on.
-                outcome: published.outcome.clone().or(Some("no-changes".into())),
+                // The branch the publication says carried the change, where a
+                // dispatch reported none: they are the same branch, and the
+                // sibling is the one that knows it.
+                branch: branch.or_else(|| Some(published.branch.clone())),
+                change_url: crate::vcs::change_url(&published.outcome),
+                // Every ending has its own name. A branch whose base already
+                // carries it settles `no-changes` rather than a bare
+                // "published", which is what let a node whose worker wrote
+                // nothing report as one that landed work.
+                outcome: Some(crate::vcs::outcome_of(&published.outcome).to_owned()),
                 ..Settlement::plain(&node.id, NodeStatus::Done, None)
             }
         }
@@ -213,17 +248,31 @@ fn publish(
 /// path: a drafting failure falls back to the deterministic title and the change
 /// still publishes. That is the whole point of running it here rather than
 /// making it a step.
+///
+/// It runs in the node's **own** worktree, which is the only place the diff it is
+/// asked to read exists: a session of its own would be a fresh clone cut from the
+/// base, carrying nothing this node wrote — and opening one reclaims the session
+/// still holding the work. It used to ask for one, and a scripted double that
+/// answered the same worktree for the same branch is what kept that invisible.
 fn draft_title(
     executor: &dyn Executor,
     run: &str,
     round: u64,
     node: &Node,
+    worktree: Option<&std::path::Path>,
     cancel: &crate::executor::CancellationToken,
     tx: &Sender<Message>,
 ) -> String {
     let fallback = deterministic_title(node);
     let Some(request) = crate::vcs::request_for(node) else {
         return fallback;
+    };
+    let workspace = match worktree {
+        Some(dir) => WorkspaceSpec::Path(dir.to_path_buf()),
+        None => WorkspaceSpec::VcsSession(SessionRequest {
+            branch: node.branch.clone().or(request.branch.clone()),
+            ..request
+        }),
     };
     let dispatch = executor.dispatch(DispatchRequest {
         graph: engine::node_graph(None),
@@ -233,10 +282,7 @@ fn draft_title(
             node.rendered_task()
         ),
         labels: engine::dispatch_labels(run, round, &node.id, None, Some(PR_AUTHOR_PERSONA)),
-        workspace: WorkspaceSpec::VcsSession(SessionRequest {
-            branch: node.branch.clone().or(request.branch.clone()),
-            ..request
-        }),
+        workspace,
         cancel: cancel.clone(),
     });
     let Ok(mut handle) = dispatch else {
@@ -293,12 +339,12 @@ fn stamp(labels: &mut Labels, known: &Labels) {
 /// Close the session, and collect what its stream said.
 ///
 /// Closing comes first, because it is what ends the follow *and* what writes the
-/// session's last record: `onevcs session close` marks the session closed before
-/// it emits `session-closed`, and `onevcs events --follow` returns as soon as it
-/// sees a session closed. A follow can therefore end cleanly having relayed
-/// everything but the tail — so the stream is always read once more afterwards,
-/// from the point the follow reached. A gap in the merged store is what makes a
-/// later reader think nothing happened.
+/// session's last record: closing marks the session closed before it emits
+/// `session-closed`, and the follow ends as soon as it reads a session closed. A
+/// follow can therefore end cleanly having relayed everything but the tail — so
+/// the stream is always read once more afterwards, from the point the follow
+/// reached. A gap in the merged store is what makes a later reader think nothing
+/// happened.
 fn end_session(
     stream: Option<crate::vcs::Follower>,
     tx: &Sender<Message>,
@@ -328,12 +374,23 @@ fn relay_session_events(
 ) {
     let Some(token) = token else { return };
     let relay = relay_into(tx, node.clone());
-    for envelope in crate::vcs::events(token) {
-        if followed_through.is_some_and(|seq| envelope.seq <= seq) {
-            continue;
-        }
+    for envelope in beyond(crate::vcs::events(token), followed_through) {
         relay(envelope);
     }
+}
+
+/// The part of a stream a follow did not already relay.
+///
+/// `None` is the whole of it — no follow was started, or one was and relayed
+/// nothing — which is a stream still to read rather than a stream that held
+/// nothing. Otherwise everything numbered past the highest `seq` the follow
+/// reached, and nothing at or below it: a record relayed twice is the same
+/// defect as one lost, seen from the other side.
+fn beyond(envelopes: Vec<Envelope>, followed_through: Option<u64>) -> Vec<Envelope> {
+    envelopes
+        .into_iter()
+        .filter(|envelope| !followed_through.is_some_and(|seq| envelope.seq <= seq))
+        .collect()
 }
 
 fn close(token: Option<&str>) {
@@ -461,6 +518,47 @@ mod tests {
             ..node
         };
         assert_eq!(deterministic_title(&titled), "feat: ship the thing");
+    }
+
+    /// The record a follow ended one read short of, relayed exactly once.
+    ///
+    /// The window this covers is inside a library call now — closing a session
+    /// flips its record and only then writes `session-closed`, and the follow
+    /// reads and only then asks whether the session closed — so it cannot be
+    /// forced from an e2e the way a delayed subprocess once could. This is the
+    /// arithmetic that makes "once" true either way, held on its own.
+    #[test]
+    fn relays_only_what_the_follow_did_not() {
+        let wrote = |seq: u64| Envelope {
+            v: crate::event::ENVELOPE_VERSION,
+            ts: "2026-01-01T00:00:00.000Z".into(),
+            stream: "s-1".into(),
+            seq,
+            source: crate::event::Source::Vcs,
+            kind: crate::event::EventKind("session-closed".into()),
+            labels: Labels::default(),
+            payload: serde_json::Map::new(),
+            artifacts: Vec::new(),
+        };
+        let stream: Vec<Envelope> = (1..=4).map(wrote).collect();
+
+        // A follow that reached the third record leaves the tail and nothing
+        // else: re-reading the whole stream would put the first three in twice.
+        let tail = beyond(stream.clone(), Some(3));
+        assert_eq!(tail.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![4]);
+
+        // A follow that ended having relayed everything leaves nothing.
+        assert!(beyond(stream.clone(), Some(4)).is_empty());
+
+        // And one that relayed nothing at all leaves the whole stream, which is
+        // a stream still to read rather than a stream that held nothing.
+        assert_eq!(
+            beyond(stream, None)
+                .iter()
+                .map(|e| e.seq)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3, 4]
+        );
     }
 
     #[test]

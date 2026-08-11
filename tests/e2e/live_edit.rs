@@ -8,11 +8,13 @@
 //!
 //! Ported from `test_live_edit_e2e`.
 
-// llmlint: ignore-file[e2e_not_mocked] `World` substitutes the two *siblings* at their
+// llmlint: ignore-file[e2e_not_mocked] `World` substitutes `oneagentgraph` at its
 // subprocess boundary and nothing inside the crate under test, which is driven as a real
-// compiled binary. The scenario this journey states is one a real sibling would need paid
-// model turns to produce, and `dispatch.rs` is where the real `oneagentgraph` binary is
-// driven instead. `harness.rs` carries the same suppression and the full rationale.
+// compiled binary; `onevcs` is not substituted at all, and the two lifecycle journeys here
+// open real sessions on a real git origin. The scenario the double states is one a real
+// sibling would need paid model turns to produce, and `dispatch.rs` is where the real
+// `oneagentgraph` binary is driven instead. `harness.rs` carries the same suppression and
+// the full rationale.
 
 use crate::harness::{agent, human, lifecycle, plan_of, World, REFUSED};
 use serde_json::{json, Value};
@@ -237,9 +239,11 @@ fn retry_supersedes_a_running_node_and_redirects_its_dependents() {
     }
 }
 
+#[cfg(not(windows))]
 #[test]
 fn a_retry_may_name_only_one_branch() {
     let world = World::new("edit-branch");
+    world.repository("local-direct", &["true"]);
     let run = live(
         &world,
         "branchy",
@@ -324,9 +328,11 @@ fn drop_requires_a_dependents_fate_and_detach_keeps_them() {
     );
 }
 
+#[cfg(not(windows))]
 #[test]
 fn drop_refuses_to_remove_the_last_unresolved_publication_anchor() {
     let world = World::new("edit-anchor");
+    world.repository("local-direct", &["true"]);
     // Two lifecycle nodes on one repository: the second is stacked on the
     // first, so the first is what carries both of them to publication.
     let mut stacked = lifecycle("stacked", &["anchor"]);
