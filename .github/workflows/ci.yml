@@ -153,15 +153,21 @@ jobs:
       - name: Real onevcs, real git, real GitHub
         run: just smoke-real
         env:
-          # Its own credential, not the release PAT: the default GITHUB_TOKEN is
-          # scoped to the repository the workflow runs in and this job publishes
-          # to another, but a job running a pull request's own code must not hold
-          # a token that can cut a release. Provision SMOKE_GH_TOKEN as a
-          # fine-grained PAT on the scratch repository alone, with contents and
-          # pull-requests write and nothing else. Absent, this job fails naming
-          # it — which is the intended behaviour, because the alternative is a
-          # smoke that passes without talking to GitHub.
-          GH_TOKEN: ${{ secrets.SMOKE_GH_TOKEN }}
+          # llmlint: ignore-block[least_privilege_grants] this grant is wider than
+          # the job needs, and that is the operator's deliberate call rather than an
+          # oversight. The default GITHUB_TOKEN cannot do the work — it is scoped to
+          # the repository the workflow runs in and this job publishes to another —
+          # so the credential has to be a PAT, and the decision is that it is the one
+          # this repository already provisions rather than a second, scratch-only
+          # secret to keep alive. The residual exposure is that a job running a pull
+          # request's own code holds a token that can cut a release; it is accepted,
+          # because this is a single-owner repository with no external contributors,
+          # and GitHub withholds secrets from fork-originated `pull_request` runs in
+          # any case. Absent, this job fails naming the secret — which is the
+          # intended behaviour, because the alternative is a smoke that passes
+          # without talking to GitHub.
+          GH_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          # llmlint: ignore-end[least_privilege_grants]
           # No ONEPIPELINE_SMOKE_REPO: the journey's own default is the scratch
           # repository, and naming it here again would be a second place for it
           # to be wrong. Set it only to point a run somewhere else.

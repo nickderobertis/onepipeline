@@ -122,9 +122,10 @@ fn missing(what: &str) -> String {
         "the real-everything smoke needs the GitHub CLI and a credential for it, and {what}. \
          Install `gh` (https://cli.github.com), then either run `gh auth login` or set GH_TOKEN \
          to a token that can push to, open a pull request on, and merge in the scratch \
-         repository. In CI it is the SMOKE_GH_TOKEN secret, passed as GH_TOKEN: a fine-grained PAT on the scratch repository alone. \
-         This journey never skips and never falls back to a fake: a smoke that can pass without \
-         talking to GitHub proves nothing."
+         repository. In CI it is the RELEASE_PLZ_TOKEN secret, passed as GH_TOKEN — the \
+         repository's existing PAT, which the operator chose for this job deliberately rather \
+         than provisioning a second one. This journey never skips and never falls back to a \
+         fake: a smoke that can pass without talking to GitHub proves nothing."
     )
 }
 
