@@ -97,6 +97,60 @@ fn vcs_kinds(world: &World, run: &str) -> Vec<String> {
         .collect()
 }
 
+/// The session tokens **the sibling itself** opened, in order.
+///
+/// Told apart from this crate's own `session-opened` — which it writes beside
+/// the sibling's for the merged stream — by the fields only the repository side
+/// knows: it names the clone it cut and the checkout it cut it from.
+fn sibling_sessions(world: &World, run: &str) -> Vec<String> {
+    world
+        .journal(run)
+        .iter()
+        .filter(|event| event["source"] == "vcs" && event["kind"] == "session-opened")
+        .filter(|event| event["payload"]["clone"].is_string())
+        .filter_map(|event| event["payload"]["token"].as_str().map(str::to_string))
+        .collect()
+}
+
+/// Every session token a run has recorded an opening for, in order, once each.
+///
+/// This crate writes its own `session-opened` as the dispatch starts, so a token
+/// is readable here while the step that opened it is still running — long before
+/// the sibling's own record of the same session is relayed off its stream.
+fn opened_tokens(world: &World, run: &str) -> Vec<String> {
+    world
+        .journal(run)
+        .iter()
+        .filter(|event| event["source"] == "vcs" && event["kind"] == "session-opened")
+        .filter_map(|event| event["payload"]["token"].as_str().map(str::to_string))
+        .fold(Vec::new(), |mut seen, token| {
+            if !seen.contains(&token) {
+                seen.push(token);
+            }
+            seen
+        })
+}
+
+/// The directory each dispatched step ran in, in the order they settled.
+fn step_directories(world: &World, run: &str) -> Vec<(String, String)> {
+    world
+        .journal(run)
+        .iter()
+        .filter(|event| event["source"] == "agentgraph")
+        .filter_map(|event| {
+            Some((
+                event["labels"]["step"].as_str()?.to_string(),
+                event["payload"]["dir"].as_str()?.to_string(),
+            ))
+        })
+        .fold(Vec::new(), |mut seen, (step, dir)| {
+            if !seen.iter().any(|(known, _)| known == &step) {
+                seen.push((step, dir));
+            }
+            seen
+        })
+}
+
 /// The branch each session a run opened was cut on.
 fn session_branches(world: &World, run: &str) -> Vec<String> {
     world
@@ -213,11 +267,39 @@ fn several_steps_share_one_branch_and_run_serially_in_topological_order() {
         "the steps did not run in topological order"
     );
 
-    // Concurrent writers cannot safely share a worktree, so every step names
-    // the same branch the first one opened — read off the sessions the sibling
-    // actually opened.
+    // **One** session for the whole workstream. A step that opened its own
+    // would be a fresh clone cut from the base, carrying none of the earlier
+    // steps' work — and opening it reclaims the first session's workspace,
+    // uncommitted work and all. Counted off the sibling's own record rather
+    // than this crate's, which writes one of its own beside it.
+    let opened = sibling_sessions(&world, &run);
+    assert_eq!(
+        opened.len(),
+        1,
+        "the workstream opened {} sessions, not one: {opened:?}\n{}",
+        opened.len(),
+        why(&world, &run)
+    );
+
+    // And both steps worked in that session's worktree — the same directory,
+    // which is what "several steps share one branch" has always meant and what
+    // a second session would quietly break.
+    let dirs = step_directories(&world, &run);
+    assert_eq!(
+        dirs.len(),
+        2,
+        "a step recorded no directory it ran in: {dirs:?}"
+    );
+    assert_eq!(
+        dirs[0].1, dirs[1].1,
+        "the steps ran in different worktrees: {dirs:?}"
+    );
+    assert!(
+        dirs[0].1.contains("worktree"),
+        "the steps did not run in the session's worktree: {dirs:?}"
+    );
+    // The branch that one session was cut on is the branch the node published.
     let branches = session_branches(&world, &run);
-    assert_eq!(branches.len(), 2, "a step opened no session: {branches:?}");
     assert!(
         branches.windows(2).all(|pair| pair[0] == pair[1]),
         "the steps did not share one branch: {branches:?}"
@@ -225,6 +307,103 @@ fn several_steps_share_one_branch_and_run_serially_in_topological_order() {
     assert_eq!(
         world.run_json(&run, "round-01/result.json")["state"],
         "complete"
+    );
+}
+
+/// A workstream whose session record goes missing between two steps.
+///
+/// Every step after the first runs in the worktree the first step's session
+/// opened, and this crate asks the sibling where that is. When the record it
+/// asks for cannot be read there is no worktree to name — so the step opens a
+/// session of its own, which is what it would have done before, rather than
+/// running nowhere or taking the node down. The fallback is said out loud,
+/// because a workstream that quietly started over is a step's work silently
+/// left behind.
+///
+/// The record is removed while the first step is held at a rendezvous, so the
+/// window is the test's rather than the host's.
+#[test]
+fn a_session_record_that_cannot_be_read_falls_back_to_opening_a_session() {
+    use std::process::Stdio;
+
+    let world = World::new("lifecycle-norecord");
+    published_locally(&world);
+    world.script("service.implement.wait", "hold");
+    world.script("driver.wait", "hold");
+    let node = json!({
+        "id": "service",
+        "repo": "service",
+        // Its own title, so the run spends no `pr-author` dispatch: that one
+        // reads the node's worktree too and would fall back alongside the step,
+        // and this journey is about the step.
+        "title": "feat: land what the steps made",
+        "steps": [
+            {"id": "implement", "persona": "engineer", "task": "## What\nimplement"},
+            {"id": "review", "persona": "reviewer", "task": "## What\nreview", "deps": ["implement"]},
+        ],
+    });
+    let path = world.plan("norecord", &plan_of("norecord", vec![node]));
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+
+    // The round runs from here rather than from the driver, so the fallback's
+    // own words land on a descriptor this test holds.
+    let round = world
+        .cmd(&["round", "run", "norecord"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the binary starts");
+
+    // The first step is held, so its session is open and recorded and nothing
+    // has asked where its worktree is yet. The token comes off *this crate's*
+    // record of the opening, which the executor emits as the dispatch starts —
+    // the sibling's own reaches the merged store only once the session's stream
+    // is relayed, which is after the step settles and therefore too late.
+    world.until("the first step's session to be recorded", |world| {
+        !opened_tokens(world, "norecord").is_empty()
+    });
+    let token = opened_tokens(&world, "norecord")
+        .into_iter()
+        .next()
+        .expect("the session was just seen");
+    let record = world
+        .onevcs_home()
+        .join("sessions")
+        .join(format!("{token}.json"));
+    std::fs::remove_file(&record)
+        .unwrap_or_else(|error| panic!("cannot remove {}: {error}", record.display()));
+
+    world.release("service.implement.go");
+    let settled = round.wait_with_output().expect("the round runs");
+    world.release("driver.go");
+    let said = String::from_utf8_lossy(&settled.stderr).into_owned();
+
+    assert!(
+        said.contains("cannot read session") && said.contains("record"),
+        "the fallback was silent about the record it could not read:\n{said}"
+    );
+    // It fell back rather than running nowhere: the second step asked for a
+    // session of its own, which is what it would have done had the first never
+    // opened one. Two distinct tokens, where a workstream whose record *is*
+    // readable records exactly one.
+    let opened = opened_tokens(&world, "norecord");
+    assert_eq!(
+        opened.len(),
+        2,
+        "the step whose worktree could not be found did not open one: {opened:?}\n{}",
+        why(&world, "norecord")
+    );
+    assert_eq!(opened[0], token, "{opened:?}");
+    // And the round settled rather than the driver going down with it. It
+    // settles *failed*: the sibling reclaims a run root nothing holds a lease
+    // on, so opening the second session took the first one's workspace with it
+    // — divergence 14 in `docs/contract-divergences.md`, and the reason a node
+    // opens one session when it can.
+    assert!(
+        !world.events_of("norecord", "round-finished").is_empty(),
+        "the round never settled:\n{said}"
     );
 }
 

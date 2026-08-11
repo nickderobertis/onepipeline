@@ -92,26 +92,55 @@ fn main() -> ExitCode {
     }
 }
 
+/// What a flag's value has to be for this host to trust it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shape {
+    /// It names something — a repository, a branch, a title, a field list. Empty
+    /// names nothing, so it is refused.
+    Named,
+    /// Free text a person wrote. `onevcs` passes `--body ""` for a change request
+    /// that carries no body, and refusing that would refuse a shape the real `gh`
+    /// takes every day.
+    Prose,
+}
+
 /// Check one invocation against the exact shape `onevcs` passes.
 ///
 /// `positional` is what must appear before the flags, `flags` every option that
-/// must be present with a value, and `bare` every option that must be present
-/// without one. Anything left over is an argument this host has never taken, and
-/// is refused rather than ignored.
+/// must be present with a value of the shape named beside it, and `bare` every
+/// option that must be present without one. Anything left over is an argument
+/// this host has never taken, and is refused rather than ignored.
 fn shaped(
     args: &[String],
     what: &str,
     positional: usize,
-    flags: &[&str],
+    flags: &[(&str, Shape)],
     bare: &[&str],
 ) -> Result<(), ExitCode> {
     let mut seen = positional;
-    for flag in flags {
+    for (flag, shape) in flags {
         let Some(at) = args.iter().position(|arg| arg == flag) else {
             return Err(fake::refuse(&format!("gh {what} requires {flag}")));
         };
-        if args.get(at + 1).is_none() {
+        // The *value*, not merely its presence: everything read here is
+        // interpolated into the JSON this host prints and into the URL `onevcs`
+        // takes a change request's number out of. A missing value leaves the
+        // next option in its place, and `gh` would read that as an option rather
+        // than as the value — so a host that accepted it would answer a question
+        // nobody asked.
+        let Some(value) = args.get(at + 1) else {
             return Err(fake::refuse(&format!("gh {what} needs a value for {flag}")));
+        };
+        if value.starts_with('-') {
+            return Err(fake::refuse(&format!(
+                "gh {what} was given {value:?} where {flag} needs a value, which gh reads as \
+                 another option"
+            )));
+        }
+        if value.is_empty() && *shape == Shape::Named {
+            return Err(fake::refuse(&format!(
+                "gh {what} was given an empty {flag}, which names nothing"
+            )));
         }
         seen += 2;
     }
@@ -131,7 +160,7 @@ fn shaped(
 
 /// `gh api user --jq .login`
 fn user(args: &[String]) -> ExitCode {
-    if let Err(refusal) = shaped(args, "api user", 2, &["--jq"], &[]) {
+    if let Err(refusal) = shaped(args, "api user", 2, &[("--jq", Shape::Named)], &[]) {
         return refusal;
     }
     println!("{WHO}");
@@ -140,7 +169,13 @@ fn user(args: &[String]) -> ExitCode {
 
 /// `gh run view --repo R --log --job N`
 fn log(args: &[String]) -> ExitCode {
-    if let Err(refusal) = shaped(args, "run view", 2, &["--repo", "--job"], &["--log"]) {
+    if let Err(refusal) = shaped(
+        args,
+        "run view",
+        2,
+        &[("--repo", Shape::Named), ("--job", Shape::Named)],
+        &["--log"],
+    ) {
         return refusal;
     }
     println!("the host's job log");
@@ -192,7 +227,13 @@ fn create(args: &[String], dir: &Path) -> ExitCode {
         args,
         "pr create",
         2,
-        &["--repo", "--head", "--base", "--title", "--body"],
+        &[
+            ("--repo", Shape::Named),
+            ("--head", Shape::Named),
+            ("--base", Shape::Named),
+            ("--title", Shape::Named),
+            ("--body", Shape::Prose),
+        ],
         &[],
     ) {
         return refusal;
@@ -225,7 +266,13 @@ fn list(args: &[String]) -> ExitCode {
         args,
         "pr list",
         2,
-        &["--repo", "--head", "--base", "--state", "--json"],
+        &[
+            ("--repo", Shape::Named),
+            ("--head", Shape::Named),
+            ("--base", Shape::Named),
+            ("--state", Shape::Named),
+            ("--json", Shape::Named),
+        ],
         &[],
     ) {
         return refusal;
@@ -236,7 +283,13 @@ fn list(args: &[String]) -> ExitCode {
 
 /// `gh pr view ID --repo R --json …`
 fn view(args: &[String], dir: &Path) -> ExitCode {
-    if let Err(refusal) = shaped(args, "pr view", 3, &["--repo", "--json"], &[]) {
+    if let Err(refusal) = shaped(
+        args,
+        "pr view",
+        3,
+        &[("--repo", Shape::Named), ("--json", Shape::Named)],
+        &[],
+    ) {
         return refusal;
     }
     let id = match fake::required(args, 2, "ID") {
@@ -288,7 +341,7 @@ fn merge(args: &[String], dir: &Path) -> ExitCode {
     } else {
         &["--squash"]
     };
-    if let Err(refusal) = shaped(args, "pr merge", 3, &["--repo"], bare) {
+    if let Err(refusal) = shaped(args, "pr merge", 3, &[("--repo", Shape::Named)], bare) {
         return refusal;
     }
     let id = match fake::required(args, 2, "ID") {
