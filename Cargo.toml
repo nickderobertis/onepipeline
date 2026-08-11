@@ -87,12 +87,20 @@ windows-sys = { version = "0.61", features = [
   "Win32_System_Threading",
 ] }
 
-# No dev-dependencies. The e2e suite drives the compiled binary as a subprocess
-# with `std::process` and reads what it wrote, so it needs no command-assertion
-# crate — `tests/e2e/harness.rs` is the whole of it. The subprocess doubles for
-# the two siblings are a workspace member rather than a dependency: a dev-dep
-# would build that crate's *library*, and what the suite needs is its binaries,
-# which the harness builds on demand.
+# One dev-dependency, and it is not a test framework. The e2e suite drives the
+# compiled binary as a subprocess with `std::process` and reads what it wrote, so
+# it needs no command-assertion crate — `tests/e2e/harness.rs` is the whole of
+# it — and the subprocess doubles for the two siblings are a workspace member
+# rather than a dependency, because a dev-dep would build that crate's *library*
+# and what the suite needs is its binaries.
+#
+# `onevcs-testing` is the sibling's own implementations of the two interfaces it
+# is built around, which is what `tests/onevcs_seam.rs` drives to establish, in
+# code rather than in prose, which `onevcs` operations this crate can reach
+# without spawning a process. It is a dev-dependency and must stay one: what it
+# implements must never be reachable from a release binary.
+[dev-dependencies]
+onevcs-testing = "0.1.0"
 
 [[test]]
 name = "e2e"
