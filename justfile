@@ -68,6 +68,16 @@ check-affected:
     @bash scripts/nx-affected.sh -t check
     @echo "check-affected: ok"
 
+# What the macOS and Windows legs run: the same tiers as `check`, minus the two
+# that are Linux-only. `test` enforces the coverage floor off instrumentation
+# that is measured on Linux alone, so the suite runs through `test-quick`
+# instead, and `doc` is a link check no second platform can answer differently.
+# Named here rather than spelled out as workflow steps, so the cross-platform
+# legs cannot drift away from what the gate means.
+# Deterministic quality gate for the cross-platform legs, without the coverage floor.
+check-cross: fmt-check lint test-quick
+    @echo "check-cross: ok"
+
 # The complete pre-push bar: the deterministic gate plus the LLM-judge tier
 # scoped to what this branch changed. `check` stays offline and credential-free;
 # this is where the non-deterministic tier joins it.

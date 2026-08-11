@@ -100,10 +100,8 @@ jobs:
           tool: just,nextest
       - name: Bootstrap
         run: just bootstrap
-      - name: Format + lint
-        run: just fmt-check && just lint
-      - name: Tests (unit + contract + e2e)
-        run: just test-quick
+      - name: Quality gate (cross-platform legs)
+        run: just check-cross
 
   # The declared MSRV is a promise to consumers, so prove it rather than document
   # it: a floor that only lives in Cargo.toml drifts the first time a dependency
