@@ -328,3 +328,156 @@ constant made public, would let this crate confine the ingest to a
 producer-owned root as well — a second lock on the same door. It is a general
 accessor for a location that library already computes, so nothing in it would
 need to know this crate exists.
+
+## 13. The contract names a command where the code makes a library call — OPEN
+
+**Proposal: restate the merged-stream sentence in terms of the operation rather
+than the CLI. What it promises is unchanged.**
+
+The contract fixes how a lifecycle node's session reaches the merged stream:
+
+> A lifecycle node's `onevcs` session is **followed** — `onevcs events TOKEN
+> --follow` — from the moment there is a token until the session closes …
+
+Every promise around that clause still holds exactly: the session is followed
+from the moment there is a token until it closes, each envelope is stamped with
+the node it belongs to, an enricher never rewrites a key the producer stamped,
+and a follow that never started or that relayed nothing falls back to reading
+the stream once. What is no longer true is the **mechanism named in the dash**:
+`onevcs 0.2.1` publishes [`EventStream`], a cursor over one session's stream that
+hands back typed envelopes attributed to the session that wrote them, so this
+crate calls it rather than spawning `onevcs events` and parsing its stdout.
+
+Nothing else in the contract names a `onevcs` command, and the same release made
+`publish`, `session close`, and the session record library calls too — so the
+four operations this crate performs are now four function calls and no
+subprocess. The clause is the last place the composition is described as a
+process boundary.
+
+## 14. A second session on one repository destroys the first's workspace — OPEN
+
+**Proposal (for `onevcs`): do not reclaim a run root whose session record is
+`Open`.**
+
+`Vcs::open_session` releases the occupancy lease it took before it returns, and
+the next `open_session` on the same identity reclaims every run root whose lease
+is free and whose clone holds no commit the origin lacks. A session that has been
+opened and is *being worked in* — its worker has written files and committed
+nothing yet — matches both, so opening a second session deletes the first's clone
+and worktree outright. The first publication then fails with `cannot run git: No
+such file or directory`, which is git refusing a working directory that is no
+longer there.
+
+The session record already says `Lifecycle::Open`, so the fact needed to skip it
+is recorded; `reclaim` does not consult it. Nothing here can hold the lease
+instead: `open_session` hands back a [`Session`], not a lease, and `adopt_session`
+— the one call that claims one — commits whatever the worktree holds behind an
+incomplete-step marker, which is not what a caller re-entering its own live
+session means.
+
+**What this crate does today.** A lifecycle node opens **one** session, and every
+dispatch after the first runs in the worktree it handed back
+(`WorkspaceSpec::Path`), so no second session is opened for one node. That is
+also the only correct reading of the composition: a second session is a fresh
+clone cut from the base, so a later step would see none of the earlier steps'
+work and the `pr-author` dispatch — asked to *read this branch's diff* — would
+read an empty one. Both were invisible while a scripted `onevcs` double answered
+the same worktree for the same branch.
+
+**Still reachable, and not fixable here:** two lifecycle nodes on one repository,
+in flight at once, still reclaim each other. Their sessions are opened
+independently and neither can hold a lease.
+
+## 15. A publication's typed outcome drops the change request's identity — OPEN
+
+**Proposal (for `onevcs`): carry the change request on `PublishOutcome::Merged`,
+and its host id alongside the URL.**
+
+`PublishOutcome` is the value this crate settles a node on, and two facts a caller
+needs are not on it:
+
+- **The host's id.** `ChangeOpen` and `Queued` carry a `Url` and nothing else,
+  while the `ChangeRequest` the publication actually opened carries
+  `id: ChangeId` as well — the handle every later command addresses the change
+  by. It is on the session's own `change-opened` event, so this crate reads it
+  from there; a caller that only holds the `Publication` cannot.
+- **Where a merged change is read.** `Merged(Sha)` names the commit and not the
+  change request, so a `change-auto` or `change-direct` publication that *landed*
+  answers with no URL at all — the one ending where a person is most likely to
+  want the link.
+
+`Settlement::change_url` is therefore populated for `change-open` and `queued`
+and empty for `merged`, and the change id is journalled by the sibling rather
+than by this crate.
+
+## 16. `lock-wait` is emitted after the wait, so its bucket measures nothing — OPEN
+
+**Proposal (for `onevcs`): bracket the wait — emit `lock-wait` before waiting for
+the identity's turn, or keep the marker and make the elapsed the reported
+duration.**
+
+The contract's eight-way breakdown separates the time a publication spends
+waiting for an identity's merge queue from the time its gate runs and from the
+agent's. `onevcs` emits `lock-wait` **after** `queue::turn` has returned, with
+the seconds it waited in the payload, and emits `lock-acquired` immediately
+after — so the interval between the two markers is zero however long the wait
+was, and `telemetry`'s `lock_wait` bucket is a measured zero on every real run.
+The wall time lands in whichever bucket precedes it.
+
+The `onevcs` double this repository used to carry emitted the marker and *then*
+blocked, which is a shape no release of that library has produced; that is what
+kept the bucket looking measured.
+
+**Follow-up for this crate, not done here:** charge the bucket from the marker's
+own `elapsed` payload rather than from the interval between two markers. It
+changes how `telemetry::of_run` folds phases and the sums the checked-in golden
+holds, which is a change of its own.
+`telemetry_separates_gate_and_lock_time_from_agent_time` holds the gate half to a
+real held stretch, asserts the elapsed is on the record, and asserts the bucket
+is zero — so it fails, naming both, when either side is fixed.
+
+## 17. A stream line this build cannot read loses the batch around it — OPEN
+
+**Proposal (for `onevcs`): hand back the envelopes that parsed, and report the
+line that did not, rather than refusing the read.**
+
+`EventStream::read` returns `Err` on the first line it cannot parse, and the
+cursor behind it has already advanced past every line in that batch — so the
+whole envelopes read alongside a bad one are discarded with it and are never
+handed back on a later read. One unreadable line therefore hides a whole
+publication rather than itself.
+
+Exercised rather than assumed, in
+`a_session_stream_that_is_not_whole_is_read_for_what_it_holds`: a stream whose
+last record is truncated mid-line hands back **nothing**, including the whole
+record before it.
+
+The same test settles the related worry that came in with the typed reader — that
+`Reader::lines` might tear a final line written without its newline. It does not
+lose one: `onevcs` writes a record as two calls, the line then its terminator, and
+a reader that arrives between them reads the whole line, relays it once, and does
+not hand it back when the terminator lands. That half is sound.
+
+`tests/e2e/lifecycle.rs` holds the part that is this crate's: a line it cannot
+read does not fail the node, and the loss is said out loud rather than folded
+into an empty stream.
+
+## 18. No lifecycle journey runs on Windows — OPEN
+
+**Proposal (for `onevcs`): store, or hand git, a path git will clone from on
+Windows.**
+
+`onevcs register` records what `std::fs::canonicalize` answers, which on Windows
+is the verbatim form `\\?\C:\…`, and `session open` gives that path to `git clone`
+as the repository to clone from. Git reads a leading `\\?\` as a UNC URL and
+refuses it, so no session opens on Windows for this crate or for anybody else
+calling that library.
+
+While `onevcs` was reached as a subprocess only two journeys here drove the real
+one, and only those two were `cfg(not(windows))`. Now that every lifecycle
+journey drives the real repository side, all of them are — `tests/e2e/lifecycle.rs`
+whole, and the lifecycle journeys in `views.rs` and `live_edit.rs`. The Windows
+leg of CI runs the rest of the suite and this crate's own units, and
+`the_real_onevcs_opens_no_session_on_windows_which_is_why_the_journeys_above_are_not_run_here`
+is what fails when the sibling stops doing it — which is the signal to drop every
+one of those attributes.

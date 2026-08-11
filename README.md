@@ -14,8 +14,10 @@ depends on this crate.
 
 The public types, traits, config schemas, and CLI surface are the approved
 contract in [`docs/contract.md`](docs/contract.md), compiled — and implemented
-behind it. `onepipeline` composes its two siblings by running their CLIs, so a
-build of either that still refuses will make the dispatches this crate starts
+behind it. `onevcs` is **linked and called**: sessions, publication, and a
+session's event stream are library calls, so what a publication did is a typed
+value rather than a line of prose to parse. `oneagentgraph` is still run as a
+CLI, so a build of it that refuses will make the dispatches this crate starts
 refuse too; the composition layer itself is complete.
 
 ## Install
