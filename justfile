@@ -132,7 +132,7 @@ offline-tiers := "not binary(smoke)"
 
 # 95% line coverage is the gate; lower it only with a documented reason in
 # AGENTS.md.
-# The crate's full test suite (unit + contract + e2e) with coverage enforced.
+# The crate's offline suite (unit + contract + e2e) with coverage enforced.
 _crate-test:
     @cargo llvm-cov nextest --locked --fail-under-lines 95 \
       -E '{{offline-tiers}}' --status-level fail --final-status-level fail \
@@ -140,7 +140,7 @@ _crate-test:
 
 # Coverage instrumentation is measured on Linux only, so the cross-platform CI
 # legs run the same suite through this instead of `test`.
-# Full test suite without coverage instrumentation.
+# The offline suite without coverage instrumentation.
 test-quick:
     @cargo nextest run --locked -E '{{offline-tiers}}' --status-level fail
 

@@ -64,8 +64,9 @@ and is never resolved unilaterally.
 `just --list` is the index; do not hand-roll equivalents. `just check` is the
 deterministic gate and `just gate` is the complete pre-push bar — `check` plus
 the diff-scoped llmlint tier — and a change is not done until `gate` is green.
-`deps-check` and `msrv` sit outside both because one needs a network advisory
-database and the other a second toolchain; CI runs them as their own jobs.
+`deps-check`, `msrv`, and `smoke-real` sit outside both because one needs a
+network advisory database, one a second toolchain, and one a GitHub credential;
+CI runs each as its own job, through the recipe rather than around it.
 
 The repo-wide verbs delegate to **Nx**, which fans a uniformly-named target out
 across every project; what a target *does* stays with its project. Never loop
@@ -80,22 +81,17 @@ consuming `project.json` — an undeclared one silently drops that project out o
 - **Tests are realistic — never mock the layer under test.** Drive the compiled
   binary as a subprocess and assert on exit code, stdout, and stderr; assemble
   the real package around the real binary. An in-process `main()` call is not an
-  e2e, and every journey it covers runs inside `just check` rather than behind
-  `#[ignore]`.
-- **Each sibling has a journey that drives the real binary**, built from the
-  version `Cargo.lock` pins: `tests/e2e/dispatch.rs` for `oneagentgraph` and
-  `tests/e2e/real_vcs.rs` for `onevcs`. The doubles in `crates/testfakes` are a
-  way to *state a scenario*, never a stand-in for a sibling nobody has run — a
-  double scripted with an answer no real sibling produces is how this crate came
-  to read `onevcs publish`'s stdout as JSON, which that command has never
-  printed. When a double's answer changes, check it against the real one.
+  e2e, and nothing is `#[ignore]`d or skipped to pass.
+- **Two tiers, split by credential.** The offline tier runs in `just check`. The
+  credentialled one is `just smoke-real`, kept out of `check` and `gate` so a
+  laptop pays nothing for it, and run by CI's `smoke` job through that same
+  recipe. A journey that needs a credential belongs in the second tier and
+  **refuses** when it is missing — a skip is a pass nobody earned.
 - **Validate external input at its trust boundary.** Plan files, executor-rules
   files, and reply envelopes are external input: the schema structs reject
   unknown fields, so a typo fails loudly instead of being silently dropped.
 - **Secrets never enter the tree.** `gh-secrets.json` names the required secrets
   and where they come from; the values live in the platform secret store.
-
-When a journey lands, its real e2e lands with it.
 
 ## Commits, releases, and merging
 

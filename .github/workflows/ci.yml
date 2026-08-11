@@ -153,9 +153,15 @@ jobs:
       - name: Real onevcs, real git, real GitHub
         run: just smoke-real
         env:
-          # A PAT, because the scratch repository is not this one and the default
-          # GITHUB_TOKEN is scoped to the repository the workflow runs in.
-          GH_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          # Its own credential, not the release PAT: the default GITHUB_TOKEN is
+          # scoped to the repository the workflow runs in and this job publishes
+          # to another, but a job running a pull request's own code must not hold
+          # a token that can cut a release. Provision SMOKE_GH_TOKEN as a
+          # fine-grained PAT on the scratch repository alone, with contents and
+          # pull-requests write and nothing else. Absent, this job fails naming
+          # it — which is the intended behaviour, because the alternative is a
+          # smoke that passes without talking to GitHub.
+          GH_TOKEN: ${{ secrets.SMOKE_GH_TOKEN }}
           ONEPIPELINE_SMOKE_REPO: nickderobertis/onepipeline-smoke
 
   # Advisory + license audit and unused-dependency check. Its own Linux-only job:

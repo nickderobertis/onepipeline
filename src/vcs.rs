@@ -173,6 +173,13 @@ fn published_from(events: &[Envelope]) -> Published {
             continue;
         };
         let reached = match kind {
+            // llmlint: ignore[boundary_inputs_validated] the kind *is* the fact being read
+            // here — how far the publication got — and the URL and the id are evidence about
+            // it that may be absent. Requiring them would mean a `change-opened` carrying
+            // neither is folded as no publication at all, so a node with a change request open
+            // on the host would settle as one that published nothing and the next round would
+            // open a second. Missing evidence is reported as missing; it does not unsay the
+            // event.
             onevcs::EventKind::ChangeOpened => {
                 published.url = text(envelope, "url").or(published.url.take());
                 published.id = text(envelope, "id").or(published.id.take());
