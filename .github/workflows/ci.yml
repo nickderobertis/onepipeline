@@ -162,7 +162,9 @@ jobs:
           # it — which is the intended behaviour, because the alternative is a
           # smoke that passes without talking to GitHub.
           GH_TOKEN: ${{ secrets.SMOKE_GH_TOKEN }}
-          ONEPIPELINE_SMOKE_REPO: nickderobertis/onepipeline-smoke
+          # No ONEPIPELINE_SMOKE_REPO: the journey's own default is the scratch
+          # repository, and naming it here again would be a second place for it
+          # to be wrong. Set it only to point a run somewhere else.
 
   # Advisory + license audit and unused-dependency check. Its own Linux-only job:
   # it needs a network advisory DB and must not be duplicated across the matrix.

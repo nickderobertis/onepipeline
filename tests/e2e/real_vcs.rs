@@ -13,11 +13,19 @@
 //! Offline and hermetic: a bare repository on disk is the origin, the identity
 //! publishes `local-direct` so no host is ever asked for anything, and the state
 //! root is this world's own. Nothing here reaches the network.
+//!
+//! **Not on Windows**, because the sibling cannot open a session there at all —
+//! see the last test in this file, which is the one that runs on Windows and the
+//! one that fails when that stops being true.
 
 // llmlint: ignore-file[e2e_not_mocked] the sibling under test is *not* substituted here:
 // `onevcs` is the real binary, built from the version `Cargo.lock` pins, driving real git
 // against a real origin. `oneagentgraph` is still the double, because what these journeys
 // are about is the repository side and a real agent turn is a paid one.
+
+// Windows compiles the scaffolding and runs only the refusal below, so the parts the two
+// publication journeys alone reach are unreferenced there.
+#![cfg_attr(windows, allow(dead_code, unused_imports))]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -190,6 +198,7 @@ fn vcs_kinds(world: &World, run: &str) -> Vec<String> {
         .collect()
 }
 
+#[cfg(not(windows))]
 #[test]
 fn a_lifecycle_node_publishes_through_the_real_onevcs_and_the_base_advances() {
     let world = World::new("real-vcs-publish");
@@ -268,6 +277,7 @@ fn a_lifecycle_node_publishes_through_the_real_onevcs_and_the_base_advances() {
         .out_has("done");
 }
 
+#[cfg(not(windows))]
 #[test]
 fn a_real_gate_that_rejects_the_branch_fails_the_node_and_leaves_the_base_alone() {
     let world = World::new("real-vcs-gate");
@@ -307,5 +317,42 @@ fn a_real_gate_that_rejects_the_branch_fails_the_node_and_leaves_the_base_alone(
             .iter()
             .any(|kind| kind == "gate-verdict"),
         "the gate's verdict never reached the merged store"
+    );
+}
+
+/// Windows: the sibling opens no session at all, so the journeys above are not
+/// compiled there.
+///
+/// `onevcs register` stores what `std::fs::canonicalize` answers, which on
+/// Windows is the verbatim form `\\?\C:\…`, and `session open` hands that path
+/// to `git clone` as the repository to clone from. Git reads a leading `\\?\` as
+/// a UNC URL and refuses it — *hostname contains invalid characters* — so no
+/// session opens on Windows, for this crate or for anybody else calling
+/// `onevcs`. Neither half is this crate's to change: the sibling decides what it
+/// records and what it hands to git.
+///
+/// So this is what runs here instead, and **it fails when the sibling stops
+/// doing it**: that is the signal to delete this test and compile the two
+/// journeys above on Windows again, rather than to re-derive the reason.
+#[cfg(windows)]
+#[test]
+fn the_real_onevcs_opens_no_session_on_windows_which_is_why_the_journeys_above_are_not_run_here() {
+    let world = World::new("real-vcs-windows");
+    let repo = registered(&world, &["true"]);
+
+    let opened = Command::new(onevcs_binary())
+        .arg("session")
+        .arg("open")
+        .arg(&repo.checkout)
+        .env("ONEVCS_HOME", world.onevcs_home())
+        .env("GIT_CONFIG_GLOBAL", world.gitconfig())
+        .output()
+        .expect("the real onevcs runs");
+    assert!(
+        !opened.status.success(),
+        "`onevcs session open` now works on Windows. Delete this test and drop the \
+         `cfg(not(windows))` from the two journeys above, which is the whole reason it \
+         exists.\nstdout: {}",
+        String::from_utf8_lossy(&opened.stdout)
     );
 }

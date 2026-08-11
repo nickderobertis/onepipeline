@@ -195,7 +195,18 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         let Some(workspace) = fake::flag(args, "--dir") else {
             fake::fail("a scripted `work` needs the dispatch's --dir to write into");
         };
-        let path = std::path::Path::new(&workspace).join(format!("{}.md", fake::segment(&key)));
+        // `--dir` is this process's external input, and a scripted write is the
+        // one thing here that touches a path outside its own scratch. The real
+        // `oneagentgraph` resolves a workspace before it prepares a member, so a
+        // value that is not one is a misconfigured test rather than a scenario.
+        let workspace = std::path::Path::new(&workspace);
+        if !workspace.is_dir() {
+            fake::fail(&format!(
+                "a scripted `work` was given --dir {}, which is not a directory",
+                workspace.display()
+            ));
+        }
+        let path = workspace.join(format!("{}.md", fake::segment(&key)));
         if let Err(error) = std::fs::write(&path, body) {
             fake::fail(&format!("cannot write {}: {error}", path.display()));
         }
