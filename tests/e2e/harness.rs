@@ -338,13 +338,31 @@ impl World {
             .unwrap_or_else(|error| panic!("onevcs cannot resolve {}: {error}", repo.display()))
     }
 
-    /// The `onepipeline` binary with **both** siblings real: `onevcs` linked in
-    /// and the `oneagentgraph` binary `Cargo.lock` pins, with only the paid model
-    /// turn standing in. Its caller must have written the graph configs with
-    /// [`write_graphs`](World::write_graphs) first, as
+    /// The `onepipeline` binary with **nothing but the paid model turn standing
+    /// in**: `onevcs` linked in, the `oneagentgraph` binary `Cargo.lock` pins,
+    /// and the real `gh` against real GitHub. Its caller must have written the
+    /// graph configs with [`write_graphs`](World::write_graphs) first, as
     /// [`agentgraph_cmd`](World::agentgraph_cmd)'s callers must.
+    ///
+    /// The host stand-in [`cmd`](World::cmd) wires up is **removed** here, and
+    /// that removal is the whole difference. Left in place it would point the
+    /// one credentialled journey in this repository at a program that answers
+    /// every `gh` call out of a scratch directory — a smoke that passes without
+    /// having talked to GitHub, which is the defect that tier exists to remove.
     pub fn real_cmd(&self, args: &[&str]) -> Command {
-        self.agentgraph_cmd(args)
+        let mut command = self.agentgraph_cmd(args);
+        command.env_remove("ONEVCS_GH");
+        command
+    }
+
+    /// Whether a command this world built still carries the host stand-in.
+    ///
+    /// For the credentialled tier to check before it starts, rather than to
+    /// discover from a change request opened somewhere nobody can look.
+    pub fn substitutes_the_host(command: &Command) -> bool {
+        command
+            .get_envs()
+            .any(|(name, value)| name == "ONEVCS_GH" && value.is_some())
     }
 
     /// The git configuration this world's processes read instead of the

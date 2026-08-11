@@ -335,6 +335,15 @@ fn a_lifecycle_node_opens_a_real_pull_request_merges_it_and_the_base_advances() 
 
     let world = World::new("smoke-real");
     world.write_graphs();
+    // Before anything is pushed: the offline journeys answer `gh` out of a
+    // scratch directory at `onevcs`'s own `ONEVCS_GH` override, and a command
+    // that still carried it would open a change request nobody can look at and
+    // report it merged. This tier talks to GitHub or it fails.
+    assert!(
+        !World::substitutes_the_host(&world.real_cmd(&["start"])),
+        "{}",
+        missing("this run still carries a stand-in for `gh`, so it would never reach GitHub")
+    );
     let home = world.onevcs_home();
     std::fs::create_dir_all(&home).expect("a scratch state root");
     rules(&home);
@@ -415,10 +424,17 @@ fn a_lifecycle_node_opens_a_real_pull_request_merges_it_and_the_base_advances() 
         .env("GIT_CONFIG_GLOBAL", git_credentials(&world))
         .output()
         .expect("the binary runs");
+    // A launch that failed because the *run* failed exits non-zero having said
+    // nothing about why on any descriptor a test can read: `monitor`'s rendering
+    // carries the kinds and not the settlement's detail, and the detail is the
+    // sibling's own refusal. So it is read out of the journal here, before the
+    // world is torn down — this assertion used to fail with a bare exit code, one
+    // debugging session away from the reason.
     assert!(
         started.status.success(),
-        "`onepipeline start` exited {}\nstdout: {}\nstderr: {}",
+        "`onepipeline start` exited {}\n{}\nstdout: {}\nstderr: {}",
         started.status.code().unwrap_or(-1),
+        why(&world, "smoke"),
         String::from_utf8_lossy(&started.stdout),
         String::from_utf8_lossy(&started.stderr)
     );
