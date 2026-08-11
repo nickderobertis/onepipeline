@@ -20,6 +20,10 @@ serde_json = "1"
 # the real CLI's own parser rather than by keeping a second copy of the keys it
 # reserves — a copy is a list that goes stale the round after the sibling adds one.
 oneagentgraph = { workspace = true }
+# And the other one, for the same reason: the `onevcs` double takes every event
+# kind it writes from `onevcs::EventKind`, so a kind the sibling does not declare
+# will not compile here rather than being scripted into a journey's expectations.
+onevcs = { workspace = true }
 
 [[bin]]
 name = "fake-oneagentgraph"

@@ -605,11 +605,16 @@ fn a_session_stream_that_cannot_be_read_is_reported_and_does_not_fail_the_node()
     let run = run.0;
     let result = world.run_json(&run, "round-01/result.json");
     assert_eq!(result["state"], "complete", "{result}");
+    // `gate-verdict` rather than the `verification-finished` this used to name:
+    // that kind is not one `onevcs::EventKind` declares, so the real sibling has
+    // never emitted it and its absence proved nothing. The gate's verdict is a
+    // record the session genuinely writes and the publication above genuinely
+    // produced, so its absence from the store is the unreadable stream.
     assert!(
         !world
             .journal(&run)
             .iter()
-            .any(|event| event["kind"] == "verification-finished"),
+            .any(|event| event["kind"] == "gate-verdict"),
         "the unreadable stream still contributed events"
     );
 }

@@ -916,6 +916,7 @@ name = "onepipeline-testfakes"
 version = "0.0.0"
 dependencies = [
  "oneagentgraph",
+ "onevcs",
  "serde_json",
 ]
 

@@ -6,12 +6,14 @@
 members = [".", "crates/testfakes"]
 resolver = "2"
 
-# The sibling this crate composes, pinned once for the whole workspace: the
-# `oneagentgraph` double refuses what the real CLI refuses by calling the real
-# CLI's own parser, so both members build against the same version or the double
-# would be an oracle for a build nothing runs.
+# The siblings this crate composes, pinned once for the whole workspace: each
+# double answers out of the real crate's own types — `oneagentgraph`'s refuses
+# what the real CLI refuses by calling its parser, and `onevcs`'s writes only the
+# event kinds `onevcs::EventKind` declares — so both members build against the
+# same version or a double would be an oracle for a build nothing runs.
 [workspace.dependencies]
 oneagentgraph = "0.2.2"
+onevcs = "0.2.0"
 
 [package]
 name = "onepipeline"
@@ -71,7 +73,7 @@ thiserror = "2"
 # the registry like any other dependency — no git source, so a clone of this repo
 # builds from the registries alone.
 oneagentgraph = { workspace = true }
-onevcs = "0.2.0"
+onevcs = { workspace = true }
 
 # Process liveness is the one host fact this crate cannot get from `std` on the
 # MSRV floor, and every `DRIVER DEAD` / `PARKED` verdict rests on it. Both are
