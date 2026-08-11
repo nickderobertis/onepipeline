@@ -80,7 +80,7 @@ fn vcs_kinds(world: &World, run: &str) -> Vec<String> {
         .collect()
 }
 
-// llmlint: ignore[live_tier_compiles_and_requires_credential] a lifecycle journey
+// llmlint: ignore-block[live_tier_compiles_and_requires_credential] a lifecycle journey
 // cannot compile-and-run on Windows: `onevcs` opens no session there at all, because
 // `register` stores the verbatim `\\?\C:\…` form and `session open` hands it to `git clone`,
 // which reads it as a UNC URL and refuses. Neither half is this crate's to change —
@@ -165,8 +165,9 @@ fn a_lifecycle_node_publishes_through_the_real_onevcs_and_the_base_advances() {
         .out_has("service")
         .out_has("done");
 }
+// llmlint: ignore-end[live_tier_compiles_and_requires_credential]
 
-// llmlint: ignore[live_tier_compiles_and_requires_credential] a lifecycle journey
+// llmlint: ignore-block[live_tier_compiles_and_requires_credential] a lifecycle journey
 // cannot compile-and-run on Windows: `onevcs` opens no session there at all, because
 // `register` stores the verbatim `\\?\C:\…` form and `session open` hands it to `git clone`,
 // which reads it as a UNC URL and refuses. Neither half is this crate's to change —
@@ -215,6 +216,7 @@ fn a_real_gate_that_rejects_the_branch_fails_the_node_and_leaves_the_base_alone(
         "the gate's verdict never reached the merged store"
     );
 }
+// llmlint: ignore-end[live_tier_compiles_and_requires_credential]
 
 /// Windows: the sibling opens no session at all, so no lifecycle journey in this
 /// suite is compiled there.

@@ -239,7 +239,7 @@ fn retry_supersedes_a_running_node_and_redirects_its_dependents() {
     }
 }
 
-// llmlint: ignore[live_tier_compiles_and_requires_credential] a lifecycle journey
+// llmlint: ignore-block[live_tier_compiles_and_requires_credential] a lifecycle journey
 // cannot compile-and-run on Windows: `onevcs` opens no session there at all, because
 // `register` stores the verbatim `\\?\C:\…` form and `session open` hands it to `git clone`,
 // which reads it as a UNC URL and refuses. Neither half is this crate's to change —
@@ -279,6 +279,7 @@ fn a_retry_may_name_only_one_branch() {
 
     world.release("service.go");
 }
+// llmlint: ignore-end[live_tier_compiles_and_requires_credential]
 
 #[test]
 fn drop_requires_a_dependents_fate_and_detach_keeps_them() {
@@ -335,7 +336,7 @@ fn drop_requires_a_dependents_fate_and_detach_keeps_them() {
     );
 }
 
-// llmlint: ignore[live_tier_compiles_and_requires_credential] a lifecycle journey
+// llmlint: ignore-block[live_tier_compiles_and_requires_credential] a lifecycle journey
 // cannot compile-and-run on Windows: `onevcs` opens no session there at all, because
 // `register` stores the verbatim `\\?\C:\…` form and `session open` hands it to `git clone`,
 // which reads it as a UNC URL and refuses. Neither half is this crate's to change —
@@ -371,6 +372,7 @@ fn drop_refuses_to_remove_the_last_unresolved_publication_anchor() {
     world.release("slow.go");
     world.release("anchor.go");
 }
+// llmlint: ignore-end[live_tier_compiles_and_requires_credential]
 
 #[test]
 fn complete_is_journalled_without_touching_the_graph() {

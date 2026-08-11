@@ -56,7 +56,7 @@ fn settled(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
     name.to_string()
 }
 
-// llmlint: ignore[live_tier_compiles_and_requires_credential] a lifecycle journey
+// llmlint: ignore-block[live_tier_compiles_and_requires_credential] a lifecycle journey
 // cannot compile-and-run on Windows: `onevcs` opens no session there at all, because
 // `register` stores the verbatim `\\?\C:\…` form and `session open` hands it to `git clone`,
 // which reads it as a UNC URL and refuses. Neither half is this crate's to change —
@@ -86,6 +86,7 @@ fn monitor_renders_all_three_streams_under_their_own_typed_ids() {
     // reader as run state rather than as an event line, naming the run.
     stream.out_has("-- watched  round-01");
 }
+// llmlint: ignore-end[live_tier_compiles_and_requires_credential]
 
 #[test]
 fn monitor_writes_nothing_and_consumes_nothing() {
@@ -149,7 +150,7 @@ fn results_reports_each_nodes_own_evidence() {
         .out_has("unblocks: gated");
 }
 
-// llmlint: ignore[live_tier_compiles_and_requires_credential] a lifecycle journey
+// llmlint: ignore-block[live_tier_compiles_and_requires_credential] a lifecycle journey
 // cannot compile-and-run on Windows: `onevcs` opens no session there at all, because
 // `register` stores the verbatim `\\?\C:\…` form and `session open` hands it to `git clone`,
 // which reads it as a UNC URL and refuses. Neither half is this crate's to change —
@@ -173,6 +174,7 @@ fn goals_says_what_each_run_is_for_and_which_identities_it_holds() {
         .exited(0)
         .out_has("Deliver purposeful");
 }
+// llmlint: ignore-end[live_tier_compiles_and_requires_credential]
 
 #[test]
 fn every_scoped_view_takes_the_run_id_the_launch_record_advertises() {
@@ -370,7 +372,7 @@ fn telemetry_reports_what_each_party_spent() {
 /// bucket read as measured. The bucket is still served, and it is still not the
 /// agent's; what it is not is a measurement. Recorded as a proposal in
 /// `docs/contract-divergences.md`.
-// llmlint: ignore[live_tier_compiles_and_requires_credential] a lifecycle journey
+// llmlint: ignore-block[live_tier_compiles_and_requires_credential] a lifecycle journey
 // cannot compile-and-run on Windows: `onevcs` opens no session there at all, because
 // `register` stores the verbatim `\\?\C:\…` form and `session open` hands it to `git clone`,
 // which reads it as a UNC URL and refuses. Neither half is this crate's to change —
@@ -461,6 +463,7 @@ fn telemetry_separates_gate_and_lock_time_from_agent_time() {
         "{document}"
     );
 }
+// llmlint: ignore-end[live_tier_compiles_and_requires_credential]
 
 #[test]
 fn telemetry_counts_a_no_diff_node_without_counting_a_dispatch() {
@@ -736,7 +739,7 @@ fn a_retained_report_carrying_no_transcript_says_so() {
 /// The session a lifecycle node opens is recorded before its first turn is, so
 /// this is the state every lifecycle node passes through — and it is where a
 /// readout that invented a "now" would be inventing it.
-// llmlint: ignore[live_tier_compiles_and_requires_credential] a lifecycle journey
+// llmlint: ignore-block[live_tier_compiles_and_requires_credential] a lifecycle journey
 // cannot compile-and-run on Windows: `onevcs` opens no session there at all, because
 // `register` stores the verbatim `\\?\C:\…` form and `session open` hands it to `git clone`,
 // which reads it as a UNC URL and refuses. Neither half is this crate's to change —
@@ -772,6 +775,7 @@ fn a_dispatch_that_has_named_no_tool_reports_its_count_rather_than_a_guess() {
     );
     world.release("service.go");
 }
+// llmlint: ignore-end[live_tier_compiles_and_requires_credential]
 
 /// A run whose driver has not dispatched anything yet has no transcript, and
 /// says so rather than rendering an empty one.

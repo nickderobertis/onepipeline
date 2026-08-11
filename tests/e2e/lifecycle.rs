@@ -529,6 +529,57 @@ fn a_publication_that_its_gate_rejects_settles_the_node_failed_by_name() {
         .out_has("publication-failed");
 }
 
+/// A title the sibling will not commit under.
+///
+/// `onevcs::Subject` is the conversion that checks a publication's title, and
+/// this crate builds its request through it — so a title too long to be a commit
+/// subject is refused *where the request is built*, before the session's work is
+/// committed and its base merged, rather than after. The planner sets the title,
+/// so this is reachable from a plan file and the node has to settle on it by
+/// name rather than crash or publish something the sibling would refuse.
+#[test]
+fn a_title_the_sibling_will_not_commit_under_fails_the_node_before_it_publishes() {
+    let world = World::new("lifecycle-longtitle");
+    let repo = world.repository("local-direct", &["true"]);
+    world.script("service.work", "the worker wrote this\n");
+    let mut node = lifecycle("service", &[]);
+    // Past the 72-character subject the sibling accepts, and nothing else about
+    // it is wrong: it is a title a planner could plausibly write.
+    node["title"] = json!(format!(
+        "feat: {}",
+        "land the change the worker made ".repeat(3)
+    ));
+    let run = settle(&world, "longtitle", vec![node]);
+
+    let result = world.run_json(&run, "round-01/result.json");
+    assert_eq!(
+        result["nodes"][0]["status"],
+        "failed",
+        "{result}\n{}",
+        why(&world, &run)
+    );
+    assert_eq!(
+        result["nodes"][0]["outcome"], "publication-failed",
+        "{result}"
+    );
+    // Named, so an operator can fix the plan rather than guess. The words are
+    // the sibling's own refusal, relayed.
+    let settled = &world.events_of(&run, "node-settled")[0];
+    assert!(
+        settled["payload"]["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("title") && detail.contains("limit")),
+        "the refusal does not say the title is why: {settled}"
+    );
+    // And nothing landed: the refusal comes before the publication, not after
+    // half of one.
+    assert_eq!(
+        repo.base_commits(&world),
+        vec!["chore: seed the repository".to_string()],
+        "a title the sibling refused still reached the base"
+    );
+}
+
 #[test]
 fn a_node_whose_publication_failed_continues_the_branch_it_preserved() {
     let world = World::new("lifecycle-preserved");
