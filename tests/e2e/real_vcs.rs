@@ -37,8 +37,8 @@ struct Registered {
 
 impl Registered {
     /// What the origin's base branch carries now.
-    fn base_commits(&self) -> Vec<String> {
-        git(&self.origin, &["log", "--format=%s", "main"])
+    fn base_commits(&self, world: &World) -> Vec<String> {
+        git(world, &self.origin, &["log", "--format=%s", "main"])
             .lines()
             .map(str::to_string)
             .collect()
@@ -60,10 +60,15 @@ impl Registered {
 }
 
 /// Run git in a repository, refusing to continue on anything it rejects.
-fn git(repo: &Path, args: &[&str]) -> String {
+///
+/// Through the world's own git config, like every git a real `onevcs` runs from
+/// here: the origin these journeys build is what the identity is derived from,
+/// so it has to be readable under the same settings the session's clone needs.
+fn git(world: &World, repo: &Path, args: &[&str]) -> String {
     let output = Command::new("git")
         .args(args)
         .current_dir(repo)
+        .env("GIT_CONFIG_GLOBAL", world.gitconfig())
         .env("GIT_AUTHOR_NAME", GIT_WHO)
         .env("GIT_AUTHOR_EMAIL", GIT_EMAIL)
         .env("GIT_COMMITTER_NAME", GIT_WHO)
@@ -91,16 +96,21 @@ fn registered(world: &World, gate: &[&str]) -> Registered {
     for dir in [&origin, &home] {
         std::fs::create_dir_all(dir).expect("a scratch directory");
     }
-    git(&origin, &["init", "--bare", "--initial-branch=main"]);
+    git(world, &origin, &["init", "--bare", "--initial-branch=main"]);
     git(
+        world,
         &world.root,
         &["clone", &origin.to_string_lossy(), "checkout"],
     );
     std::fs::write(checkout.join("README.md"), "the repository under test\n")
         .expect("the seed file is written");
-    git(&checkout, &["add", "-A"]);
-    git(&checkout, &["commit", "-m", "chore: seed the repository"]);
-    git(&checkout, &["push", "-u", "origin", "main"]);
+    git(world, &checkout, &["add", "-A"]);
+    git(
+        world,
+        &checkout,
+        &["commit", "-m", "chore: seed the repository"],
+    );
+    git(world, &checkout, &["push", "-u", "origin", "main"]);
 
     std::fs::write(
         home.join("rules.yml"),
@@ -116,6 +126,7 @@ fn registered(world: &World, gate: &[&str]) -> Registered {
         .arg("register")
         .arg(&checkout)
         .env("ONEVCS_HOME", &home)
+        .env("GIT_CONFIG_GLOBAL", world.gitconfig())
         .output()
         .expect("the real onevcs runs");
     assert!(
@@ -213,7 +224,7 @@ fn a_lifecycle_node_publishes_through_the_real_onevcs_and_the_base_advances() {
     // The work reached the origin's base branch. Nothing about a settlement
     // proves that; this is the repository saying so.
     assert_eq!(
-        repo.base_commits(),
+        repo.base_commits(&world),
         vec![
             "feat: land the change the worker made".to_string(),
             "chore: seed the repository".to_string(),
@@ -287,7 +298,7 @@ fn a_real_gate_that_rejects_the_branch_fails_the_node_and_leaves_the_base_alone(
 
     // The one thing a rejected gate has to be true of: nothing landed.
     assert_eq!(
-        repo.base_commits(),
+        repo.base_commits(&world),
         vec!["chore: seed the repository".to_string()],
         "a branch the gate rejected still reached the base"
     );

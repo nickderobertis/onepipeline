@@ -90,11 +90,21 @@ pub struct World {
 
 impl World {
     /// A fresh world for one test.
+    ///
+    /// The root is named for nothing but uniqueness, and deliberately: a real
+    /// `onevcs` identity derived from a local path becomes **one flattened
+    /// directory component** under the state root, so every character of this
+    /// path is spent twice in a session's clone — once as its own prefix and
+    /// again inside the identity's directory name. Under a Windows temporary
+    /// directory a descriptive name crossed MAX_PATH and `git clone` failed with
+    /// "Filename too long" before a session ever opened. The test that failed
+    /// names itself; its scratch directory does not have to.
     pub fn new(name: &str) -> Self {
+        static NTH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let root = std::env::temp_dir().join(format!(
-            "onepipeline-e2e-{name}-{}-{:?}",
+            "op-{}-{}",
             std::process::id(),
-            std::thread::current().id()
+            NTH.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
         ));
         let _ = std::fs::remove_dir_all(&root);
         let world = Self {
@@ -229,14 +239,52 @@ impl World {
     /// scratch root is touched by a commit `onevcs` makes.
     pub fn vcs_cmd(&self, args: &[&str]) -> Command {
         let mut command = self.cmd(args);
+        self.with_real_vcs(&mut command);
+        command
+    }
+
+    /// The `onepipeline` binary with **both** siblings real: the `onevcs` and
+    /// `oneagentgraph` binaries `Cargo.lock` pins, and only the paid model turn
+    /// standing in. Its caller must have written the graph configs with
+    /// [`write_graphs`](World::write_graphs) first, as
+    /// [`agentgraph_cmd`](World::agentgraph_cmd)'s callers must.
+    pub fn real_cmd(&self, args: &[&str]) -> Command {
+        let mut command = self.agentgraph_cmd(args);
+        self.with_real_vcs(&mut command);
+        command
+    }
+
+    /// The git configuration this world's processes read instead of the
+    /// operator's, created if it is not there yet.
+    ///
+    /// One file, pointed at with `GIT_CONFIG_GLOBAL`, so a journey can set what a
+    /// real `onevcs` needs on a platform without leaving it set for whoever ran
+    /// the suite — and so the operator's own global config cannot decide what
+    /// these journeys see. Append to it for what one journey needs on top.
+    ///
+    /// `core.longpaths` is what it carries by default. A session's clone sits
+    /// under the flattened identity directory *inside* the state root, which on
+    /// Windows leaves the deepest files git writes — a pack index in the clone —
+    /// past MAX_PATH even from a short root.
+    pub fn gitconfig(&self) -> PathBuf {
+        let path = self.root.join("gitconfig");
+        if !path.is_file() {
+            std::fs::write(&path, "[core]\n\tlongpaths = true\n")
+                .expect("the world's git config is written");
+        }
+        path
+    }
+
+    /// Put the real `onevcs` behind a command, in this world's own state root.
+    fn with_real_vcs(&self, command: &mut Command) {
         command
             .env("ONEPIPELINE_ONEVCS_BIN", onevcs_binary())
             .env("ONEVCS_HOME", self.onevcs_home())
+            .env("GIT_CONFIG_GLOBAL", self.gitconfig())
             .env("GIT_AUTHOR_NAME", GIT_WHO)
             .env("GIT_AUTHOR_EMAIL", GIT_EMAIL)
             .env("GIT_COMMITTER_NAME", GIT_WHO)
             .env("GIT_COMMITTER_EMAIL", GIT_EMAIL);
-        command
     }
 
     /// Run a command against the real `onevcs`.
