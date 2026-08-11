@@ -188,7 +188,14 @@ fn publish(
             Settlement {
                 branch,
                 change_url: published.url.clone(),
-                outcome: published.outcome.clone().or(Some("published".into())),
+                // A publication that recorded nothing published nothing.
+                // `onevcs publish` exits 0 on a branch that carries no change —
+                // it prints `nothing to publish: …` and writes no push, no
+                // change request, and no merge — and this used to settle that as
+                // a bare "published", so a node whose worker wrote nothing read
+                // as one that landed work. The existing name for it is the one a
+                // node whose steps all declared no diff already settles on.
+                outcome: published.outcome.clone().or(Some("no-changes".into())),
                 ..Settlement::plain(&node.id, NodeStatus::Done, None)
             }
         }

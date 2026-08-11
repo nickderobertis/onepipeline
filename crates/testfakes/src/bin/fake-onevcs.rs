@@ -174,6 +174,16 @@ fn publish(args: &[String], dir: &std::path::Path) -> ExitCode {
         Ok(token) => token,
         Err(refusal) => return refusal,
     };
+    // A branch that carries no change. The real command exits **0** here,
+    // prints one line of prose, and writes no record at all — no gate, no push,
+    // no change request — because there was nothing to gate or push. Scripted
+    // separately from every other ending because it is the one where success
+    // and "nothing happened" are the same answer, which is exactly what a caller
+    // gets wrong.
+    if dir.join("publish.nothing").exists() {
+        println!("nothing to publish: {token} carries no change its base does not have");
+        return ExitCode::SUCCESS;
+    }
     // The identity's lock comes before its gate, and a publication waits on
     // both. Each is held separately where a test asks, so the two stretches can
     // be measured apart from each other and from the agent's.

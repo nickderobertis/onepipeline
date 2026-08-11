@@ -486,6 +486,32 @@ fn a_published_node_reports_where_a_human_reads_the_change_it_opened() {
     world.run(&["results", &run]).exited(0).out_has(&published);
 }
 
+/// A publication that had nothing to publish.
+///
+/// `onevcs publish` exits **0** on a branch its base already carries: it prints
+/// `nothing to publish: …` and writes no push, no change request, and no merge.
+/// Read as a success with no outcome, this crate settled it as a bare
+/// "published" — so a node whose worker wrote nothing reported as one that
+/// landed work, and the only way to tell was to notice that the merged store
+/// held no publication at all. The real-everything smoke is where that turned
+/// up, on the first run that reached a real `onevcs` with a clean tree.
+#[test]
+fn a_publication_that_had_nothing_to_publish_says_so_rather_than_claiming_it_landed() {
+    let world = World::new("lifecycle-nothing");
+    world.script("publish.nothing", "");
+    let run = settle(&world, "empty", vec![lifecycle("service", &[])]);
+
+    let node = world.run_json(&run, "round-01/result.json")["nodes"][0].clone();
+    // Done: nothing failed, and there was nothing to do.
+    assert_eq!(node["status"], "done", "{node}");
+    assert_eq!(node["outcome"], "no-changes", "{node}");
+    assert_eq!(node["change_url"], json!(null), "{node}");
+    world
+        .run(&["results", &run])
+        .exited(0)
+        .out_has("no-changes");
+}
+
 #[test]
 fn a_change_the_host_merged_settles_the_node_on_the_merge_rather_than_the_request() {
     let world = World::new("lifecycle-merged");
