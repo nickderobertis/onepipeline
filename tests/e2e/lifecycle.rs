@@ -368,12 +368,22 @@ fn a_session_record_that_cannot_be_read_falls_back_to_opening_a_session() {
         .into_iter()
         .next()
         .expect("the session was just seen");
+    // llmlint: ignore-block[tests_mirror_real_usage] the *arrangement* below removes the
+    // session's record on purpose, because that is the condition: a state root a cleanup
+    // swept, or a process that died between writing the record and closing the session.
+    // It is a fault rather than an operation, and no command produces one — `session
+    // close` keeps the record, deliberately, because a closed session is still
+    // addressable — so there is nothing else to reach it with. It fails loudly rather
+    // than silently if the sibling relocates its records, and everything asserted
+    // afterwards is through the binary: the round is `onepipeline round run`, and the
+    // claim is what it said and what sessions it recorded.
     let record = world
         .onevcs_home()
         .join("sessions")
         .join(format!("{token}.json"));
     std::fs::remove_file(&record)
         .unwrap_or_else(|error| panic!("cannot remove {}: {error}", record.display()));
+    // llmlint: ignore-end[tests_mirror_real_usage]
 
     world.release("service.implement.go");
     let settled = round.wait_with_output().expect("the round runs");
@@ -1083,10 +1093,16 @@ fn a_lifecycle_node_carries_the_pins_the_plan_states_into_its_session() {
 #[test]
 fn a_session_stream_that_cannot_be_read_is_reported_and_does_not_fail_the_node() {
     let world = World::new("lifecycle-noevents");
-    // The gate takes the streams directory away mid-publication, which is the
-    // one thing a journey can do from outside a library call to make the
-    // sibling's own reader refuse. A file where the directory was, so nothing
-    // can recreate it: `EventStream::open` then refuses every session by name.
+    // llmlint: ignore-block[tests_mirror_real_usage] the gate *is* the product's own
+    // extension point — a repository's rules file names a command and `onevcs` runs it on
+    // the merge path — so what this states is a repository whose own gate breaks the state
+    // root under it, which is operator-supplied code doing what operator-supplied code
+    // can. It has to land mid-publication: a stream broken before the run is a session
+    // that never opened, and no command breaks one afterwards. Everything asserted is
+    // through the binary.
+    //
+    // A file where the streams directory was, so nothing can recreate it:
+    // `EventStream::open` then refuses every session by name.
     world.repository(
         "local-direct",
         &[
@@ -1095,6 +1111,7 @@ fn a_session_stream_that_cannot_be_read_is_reported_and_does_not_fail_the_node()
             "rm -rf \"$ONEVCS_HOME/streams\" && : > \"$ONEVCS_HOME/streams\"",
         ],
     );
+    // llmlint: ignore-end[tests_mirror_real_usage]
     world.script("service.work", "the worker wrote this\n");
     let run = driven(&world, "silentstream", vec![lifecycle("service", &[])]);
 
@@ -1129,9 +1146,15 @@ fn a_session_stream_that_cannot_be_read_is_reported_and_does_not_fail_the_node()
 #[test]
 fn a_session_line_this_build_cannot_read_is_reported_and_does_not_fail_the_node() {
     let world = World::new("lifecycle-futureline");
-    // The gate writes a line no build of this envelope can read onto the very
-    // stream its own session is writing. The token is the name of the directory
-    // above the worktree the gate runs in.
+    // llmlint: ignore-block[tests_mirror_real_usage] the same extension point as the
+    // journey above, and the same reason: a repository's gate is a command an operator
+    // wrote, and a stream carrying a record this build cannot read is what an
+    // `ONEVCS_HOME` shared with another build of `onevcs` leaves behind. No command
+    // writes one — a surface that could would be the defect — and it has to land inside
+    // the publication, which is where the gate runs. Everything asserted is through the
+    // binary.
+    //
+    // The token is the name of the directory above the worktree the gate runs in.
     world.repository(
         "local-direct",
         &[
@@ -1141,6 +1164,7 @@ fn a_session_line_this_build_cannot_read_is_reported_and_does_not_fail_the_node(
              >> \"$ONEVCS_HOME/streams/$(basename \"$(dirname \"$PWD\")\").ndjson\"",
         ],
     );
+    // llmlint: ignore-end[tests_mirror_real_usage]
     world.script("service.work", "the worker wrote this\n");
     let run = driven(&world, "futurestream", vec![lifecycle("service", &[])]);
     run.1.err_has("is not an event envelope");
