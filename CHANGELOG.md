@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.6](https://github.com/nickderobertis/onepipeline/compare/v0.1.5...v0.1.6) - 2026-08-11
+
+### Changed
+
+- reach onevcs by calling it, not by spawning it ([#15](https://github.com/nickderobertis/onepipeline/pull/15))
+
 ## [0.1.5](https://github.com/nickderobertis/onepipeline/compare/v0.1.4...v0.1.5) - 2026-08-11
 
 ### Fixed
