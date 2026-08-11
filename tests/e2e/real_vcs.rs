@@ -80,6 +80,13 @@ fn vcs_kinds(world: &World, run: &str) -> Vec<String> {
         .collect()
 }
 
+// llmlint: ignore[live_tier_compiles_and_requires_credential] a lifecycle journey
+// cannot compile-and-run on Windows: `onevcs` opens no session there at all, because
+// `register` stores the verbatim `\\?\C:\…` form and `session open` hands it to `git clone`,
+// which reads it as a UNC URL and refuses. Neither half is this crate's to change —
+// divergence 18 in `docs/contract-divergences.md` is the proposal. The Windows leg runs
+// `the_real_onevcs_opens_no_session_on_windows_which_is_why_the_journeys_above_are_not_run_here`
+// instead, which fails when that stops being true and is the signal to delete this.
 #[cfg(not(windows))]
 #[test]
 fn a_lifecycle_node_publishes_through_the_real_onevcs_and_the_base_advances() {
@@ -159,6 +166,13 @@ fn a_lifecycle_node_publishes_through_the_real_onevcs_and_the_base_advances() {
         .out_has("done");
 }
 
+// llmlint: ignore[live_tier_compiles_and_requires_credential] a lifecycle journey
+// cannot compile-and-run on Windows: `onevcs` opens no session there at all, because
+// `register` stores the verbatim `\\?\C:\…` form and `session open` hands it to `git clone`,
+// which reads it as a UNC URL and refuses. Neither half is this crate's to change —
+// divergence 18 in `docs/contract-divergences.md` is the proposal. The Windows leg runs
+// `the_real_onevcs_opens_no_session_on_windows_which_is_why_the_journeys_above_are_not_run_here`
+// instead, which fails when that stops being true and is the signal to delete this.
 #[cfg(not(windows))]
 #[test]
 fn a_real_gate_that_rejects_the_branch_fails_the_node_and_leaves_the_base_alone() {
@@ -220,23 +234,28 @@ fn a_real_gate_that_rejects_the_branch_fails_the_node_and_leaves_the_base_alone(
 #[cfg(windows)]
 #[test]
 fn the_real_onevcs_opens_no_session_on_windows_which_is_why_the_journeys_above_are_not_run_here() {
-    use onevcs::{SessionRequest, Vcs};
-
     let world = World::new("real-vcs-windows");
     let repo = world.repository("local-direct", &["true"]);
+    world.script("service.work", "the worker wrote this\n");
 
-    // Through the seam this crate itself publishes on, in this process, with the
-    // world's state root already in place from the registration above.
-    let opened = onevcs::Providers::real().vcs.open_session(SessionRequest {
-        repo: repo.checkout.to_string_lossy().into_owned(),
-        branch: Some("feature".to_owned()),
-        base: Some("main".to_owned()),
-        execution_checkout: None,
+    // Through the binary, like every other journey here: what a person running
+    // `onepipeline` on Windows meets is a lifecycle node that cannot start, and
+    // that is the fact this records.
+    let path = world.plan("windows", &plan_of("windows", vec![node(&repo.checkout)]));
+    world
+        .run(&["start", &path.to_string_lossy(), "--attach"])
+        .settled();
+    world.until("the run to settle", |world| {
+        !world.events_of("windows", "round-finished").is_empty()
     });
-    assert!(
-        opened.is_err(),
+
+    let result = world.run_json("windows", "round-01/result.json");
+    assert_eq!(
+        result["nodes"][0]["outcome"],
+        "infrastructure-failure",
         "`onevcs` now opens a session on Windows. Delete this test and drop the \
          `cfg(not(windows))` from every lifecycle journey in this suite, which is the whole \
-         reason it exists.\nit opened: {opened:?}"
+         reason it exists.\n{result}\n{}",
+        why(&world, "windows")
     );
 }

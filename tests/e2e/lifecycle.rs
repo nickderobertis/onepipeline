@@ -16,6 +16,13 @@
 //!
 //! Ported from the lifecycle-node composition halves of `test_lifecycle_e2e`.
 
+// llmlint: ignore-file[live_tier_compiles_and_requires_credential] a lifecycle journey
+// cannot compile-and-run on Windows: `onevcs` opens no session there at all, because
+// `register` stores the verbatim `\\?\C:\…` form and `session open` hands it to `git clone`,
+// which reads it as a UNC URL and refuses. Neither half is this crate's to change —
+// divergence 18 in `docs/contract-divergences.md` is the proposal. The Windows leg runs
+// `the_real_onevcs_opens_no_session_on_windows_which_is_why_the_journeys_above_are_not_run_here`
+// instead, which fails when that stops being true and is the signal to delete this.
 #![cfg(not(windows))]
 
 // llmlint: ignore-file[e2e_not_mocked] the crate under test is driven as a real compiled
@@ -641,10 +648,29 @@ fn a_change_the_host_merged_settles_the_node_on_the_merge_rather_than_the_reques
     let node = world.run_json(&run, "round-01/result.json")["nodes"][0].clone();
     assert_eq!(node["status"], "done", "{node}\n{}", why(&world, &run));
     assert_eq!(node["outcome"], "merged", "{node}");
+    // And the run's own record names nowhere to read it. That is what
+    // `PublishOutcome::Merged` carries — the commit, not the change request — so
+    // the operator-facing `change_url` a queued or open change would have is
+    // empty here, and `results` renders none. It is the proposal recorded as
+    // divergence 15 in `docs/contract-divergences.md`, and this assertion is
+    // what fails when the sibling starts carrying the change request on a merge.
+    assert_eq!(
+        node["change_url"],
+        json!(null),
+        "a merged change now names where a human reads it; carry it into the \
+         settlement and hold this journey to it: {node}"
+    );
+    let results = world.run(&["results", &run]);
+    results.exited(0).out_has("merged");
+    assert!(
+        !results.stdout.contains("/pull/"),
+        "`results` renders a change request the settlement does not carry:\n{}",
+        results.stdout
+    );
+
     // The change request it merged is still where a person reads what landed —
-    // on the sibling's own record of opening it. `PublishOutcome::Merged`
-    // carries the commit and not the URL, which is the proposal recorded in
-    // `docs/contract-divergences.md`.
+    // on the sibling's own record of opening it, which is the only place it
+    // survives.
     let opened = &world.events_of(&run, "change-opened")[0];
     assert!(
         opened["payload"]["url"]

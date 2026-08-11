@@ -1,12 +1,15 @@
 //! What the subprocess doubles share.
 //!
 //! These are **doubles for what is outside the crate under test**, never for
-//! anything inside it. Two of them are real executables speaking
-//! `oneagentgraph`'s and `onevcs`'s command surfaces, so the code under test
-//! composes them exactly as it composes the real ones — by executing a program
-//! and reading its stdout. The third stands one layer further out: it speaks
-//! `oneharness`'s surface, for the journeys that drive the real `oneagentgraph`
-//! and need only the paid model turn replaced.
+//! anything inside it, and never for a library it links — there is no `onevcs`
+//! double here, because that sibling is called rather than spawned. One is a
+//! real executable speaking `oneagentgraph`'s command surface, so the code under
+//! test composes it exactly as it composes the real one, by executing a program
+//! and reading its stdout. The other two stand one layer further out than a
+//! sibling: `oneharness`'s surface, for the journeys that drive the real
+//! `oneagentgraph` and need only the paid model turn replaced, and `gh`'s, at
+//! `onevcs`'s own override, for the journeys that need a host to decide
+//! something without a network or a credential.
 //!
 //! Each is scripted from a directory the test prepares: what a node's dispatch
 //! does, whether it waits for a rendezvous, and what it exits with are all files

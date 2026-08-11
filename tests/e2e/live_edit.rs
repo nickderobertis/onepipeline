@@ -239,6 +239,13 @@ fn retry_supersedes_a_running_node_and_redirects_its_dependents() {
     }
 }
 
+// llmlint: ignore[live_tier_compiles_and_requires_credential] a lifecycle journey
+// cannot compile-and-run on Windows: `onevcs` opens no session there at all, because
+// `register` stores the verbatim `\\?\C:\…` form and `session open` hands it to `git clone`,
+// which reads it as a UNC URL and refuses. Neither half is this crate's to change —
+// divergence 18 in `docs/contract-divergences.md` is the proposal. The Windows leg runs
+// `the_real_onevcs_opens_no_session_on_windows_which_is_why_the_journeys_above_are_not_run_here`
+// instead, which fails when that stops being true and is the signal to delete this.
 #[cfg(not(windows))]
 #[test]
 fn a_retry_may_name_only_one_branch() {
@@ -328,6 +335,13 @@ fn drop_requires_a_dependents_fate_and_detach_keeps_them() {
     );
 }
 
+// llmlint: ignore[live_tier_compiles_and_requires_credential] a lifecycle journey
+// cannot compile-and-run on Windows: `onevcs` opens no session there at all, because
+// `register` stores the verbatim `\\?\C:\…` form and `session open` hands it to `git clone`,
+// which reads it as a UNC URL and refuses. Neither half is this crate's to change —
+// divergence 18 in `docs/contract-divergences.md` is the proposal. The Windows leg runs
+// `the_real_onevcs_opens_no_session_on_windows_which_is_why_the_journeys_above_are_not_run_here`
+// instead, which fails when that stops being true and is the signal to delete this.
 #[cfg(not(windows))]
 #[test]
 fn drop_refuses_to_remove_the_last_unresolved_publication_anchor() {

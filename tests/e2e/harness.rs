@@ -196,11 +196,12 @@ impl World {
     /// The `onepipeline` binary with the **real** `oneagentgraph` behind that one
     /// seam, and only the paid model turn replaced inside it.
     ///
-    /// Only that seam: `onevcs` is still the double [`cmd`](World::cmd) wires up,
-    /// so these journeys stay off lifecycle nodes. The double swapped in here is
-    /// one layer further out than the others — `oneagentgraph` resolves the
-    /// graph, prepares the member, and supervises it for real, and what stands in
-    /// is the harness it spawns, at that library's own documented
+    /// Only that seam: the host stand-in [`cmd`](World::cmd) wires up stays, so
+    /// these journeys need no credential, and they name no lifecycle node —
+    /// what they are about is the dispatch. The double swapped in here is one
+    /// layer further out than the other — `oneagentgraph` resolves the graph,
+    /// prepares the member, and supervises it for real, and what stands in is
+    /// the harness it spawns, at that library's own documented
     /// `ONEAGENTGRAPH_ONEHARNESS_BIN` override, which knows nothing about this
     /// crate.
     pub fn agentgraph_cmd(&self, args: &[&str]) -> Command {

@@ -8,10 +8,13 @@
 //! journey that reaches this has already cloned, committed, gated, and pushed
 //! with real git against a real origin on disk.
 //!
-//! It answers exactly the `gh` invocations `onevcs::GitHub` makes — the
-//! authenticated user, opening a change request, listing them, viewing one,
-//! merging one, and a job log — and refuses anything else, so a call this
-//! library learns to make is a refusal here rather than a silent success.
+//! It answers exactly the `gh` invocations `onevcs::GitHub` makes and **refuses
+//! everything else**, argument by argument: every flag that library passes is
+//! required here, and an invocation carrying one it does not pass is refused. A
+//! double is worth what it refuses — one that shrugged off an unknown flag would
+//! let this stack reach the real `gh` with an argument it has never taken and
+//! keep the suite green. `tests/smoke/` runs the same publication against the
+//! real `gh`, which is what holds the shapes below honest.
 //!
 //! Two endings, because they are the two a host decides: a change request the
 //! host **merged**, when `gh.merged` is scripted, and one it is holding
@@ -37,6 +40,37 @@ const HEAD_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
 /// The commit a merge lands at, when this host merges one.
 const MERGE_SHA: &str = "fedcba9876543210fedcba9876543210fedcba98";
 
+/// What this host knows about one change request.
+///
+/// Two states and no third: a file holding anything else is a scenario nobody
+/// wrote, and reading it leniently would be this program inventing a host
+/// behaviour a journey did not ask for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Change {
+    /// Opened, and the host has not landed it.
+    Open,
+    /// The host landed it, at [`MERGE_SHA`].
+    Merged,
+}
+
+impl Change {
+    /// How the state is written down, and the only two spellings read back.
+    fn as_str(self) -> &'static str {
+        match self {
+            Change::Open => "open",
+            Change::Merged => "merged",
+        }
+    }
+
+    fn parse(recorded: &str) -> Option<Self> {
+        match recorded.trim() {
+            "open" => Some(Change::Open),
+            "merged" => Some(Change::Merged),
+            _ => None,
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let dir = fake::script_dir();
@@ -46,27 +80,94 @@ fn main() -> ExitCode {
         args.first().map(String::as_str),
         args.get(1).map(String::as_str),
     ) {
-        (Some("api"), Some("user")) => {
-            println!("{WHO}");
-            ExitCode::SUCCESS
-        }
+        (Some("api"), Some("user")) => user(&args),
         (Some("pr"), Some("create")) => create(&args, &dir),
-        (Some("pr"), Some("list")) => list(&dir),
+        (Some("pr"), Some("list")) => list(&args),
         (Some("pr"), Some("view")) => view(&args, &dir),
         (Some("pr"), Some("merge")) => merge(&args, &dir),
-        (Some("run"), Some("view")) => {
-            println!("the host's job log");
-            ExitCode::SUCCESS
-        }
+        (Some("run"), Some("view")) => log(&args),
         (Some(one), Some(two)) => fake::refuse(&format!("unknown gh command '{one} {two}'")),
         (Some(one), None) => fake::refuse(&format!("unknown gh command '{one}'")),
         (None, _) => fake::refuse("gh takes a command"),
     }
 }
 
+/// Check one invocation against the exact shape `onevcs` passes.
+///
+/// `positional` is what must appear before the flags, `flags` every option that
+/// must be present with a value, and `bare` every option that must be present
+/// without one. Anything left over is an argument this host has never taken, and
+/// is refused rather than ignored.
+fn shaped(
+    args: &[String],
+    what: &str,
+    positional: usize,
+    flags: &[&str],
+    bare: &[&str],
+) -> Result<(), ExitCode> {
+    let mut seen = positional;
+    for flag in flags {
+        let Some(at) = args.iter().position(|arg| arg == flag) else {
+            return Err(fake::refuse(&format!("gh {what} requires {flag}")));
+        };
+        if args.get(at + 1).is_none() {
+            return Err(fake::refuse(&format!("gh {what} needs a value for {flag}")));
+        }
+        seen += 2;
+    }
+    for flag in bare {
+        if !args.iter().any(|arg| arg == flag) {
+            return Err(fake::refuse(&format!("gh {what} requires {flag}")));
+        }
+        seen += 1;
+    }
+    if args.len() != seen {
+        return Err(fake::refuse(&format!(
+            "gh {what} was given arguments it does not take: {args:?}"
+        )));
+    }
+    Ok(())
+}
+
+/// `gh api user --jq .login`
+fn user(args: &[String]) -> ExitCode {
+    if let Err(refusal) = shaped(args, "api user", 2, &["--jq"], &[]) {
+        return refusal;
+    }
+    println!("{WHO}");
+    ExitCode::SUCCESS
+}
+
+/// `gh run view --repo R --log --job N`
+fn log(args: &[String]) -> ExitCode {
+    if let Err(refusal) = shaped(args, "run view", 2, &["--repo", "--job"], &["--log"]) {
+        return refusal;
+    }
+    println!("the host's job log");
+    ExitCode::SUCCESS
+}
+
 /// Where this host's state for one change request lives.
 fn state_of(dir: &Path, id: &str) -> PathBuf {
     dir.join("gh").join(fake::segment(id))
+}
+
+/// What this host knows about a change request, or nothing if it opened none.
+fn recorded(dir: &Path, id: &str) -> Option<Change> {
+    Change::parse(&std::fs::read_to_string(state_of(dir, id)).ok()?)
+}
+
+/// Write down what this host now knows about a change request.
+fn record(dir: &Path, id: &str, state: Change) {
+    let path = state_of(dir, id);
+    if let Some(parent) = path.parent() {
+        if let Err(error) = std::fs::create_dir_all(parent) {
+            fake::fail(&format!("cannot create {}: {error}", parent.display()));
+        }
+    }
+    if let Err(error) = std::fs::write(&path, state.as_str()) {
+        fake::fail(&format!("cannot write {}: {error}", path.display()));
+    }
 }
 
 /// The number this host gives the next change request it opens.
@@ -87,26 +188,30 @@ fn next_number(dir: &Path) -> u64 {
 /// it takes the host's number out of that URL's last segment, so a URL that does
 /// not end in one would be refused there rather than here.
 fn create(args: &[String], dir: &Path) -> ExitCode {
-    let Some(repo) = fake::flag(args, "--repo") else {
-        return fake::refuse("gh pr create requires --repo");
-    };
-    let Some(head) = fake::flag(args, "--head") else {
-        return fake::refuse("gh pr create requires --head");
-    };
-    let Some(base) = fake::flag(args, "--base") else {
-        return fake::refuse("gh pr create requires --base");
-    };
-    let Some(title) = fake::flag(args, "--title") else {
-        return fake::refuse("gh pr create requires --title");
-    };
+    if let Err(refusal) = shaped(
+        args,
+        "pr create",
+        2,
+        &["--repo", "--head", "--base", "--title", "--body"],
+        &[],
+    ) {
+        return refusal;
+    }
+    let flag = |name: &str| fake::flag(args, name).unwrap_or_default();
     let number = next_number(dir);
     fake::append(
         &dir.join("gh").join("opened.jsonl"),
-        &serde_json::json!({"repo": repo, "head": head, "base": base, "title": title, "number": number})
-            .to_string(),
+        &serde_json::json!({
+            "repo": flag("--repo"),
+            "head": flag("--head"),
+            "base": flag("--base"),
+            "title": flag("--title"),
+            "number": number,
+        })
+        .to_string(),
     );
-    fake::append(&state_of(dir, &number.to_string()), "open");
-    println!("https://github.com/{repo}/pull/{number}");
+    record(dir, &number.to_string(), Change::Open);
+    println!("https://github.com/{}/pull/{number}", flag("--repo"));
     ExitCode::SUCCESS
 }
 
@@ -115,27 +220,46 @@ fn create(args: &[String], dir: &Path) -> ExitCode {
 /// Always empty: a journey here publishes a branch once, so every publication
 /// opens its own change request rather than adopting one. A host that reported
 /// an existing change would make "was one opened?" unanswerable.
-fn list(_dir: &Path) -> ExitCode {
+fn list(args: &[String]) -> ExitCode {
+    if let Err(refusal) = shaped(
+        args,
+        "pr list",
+        2,
+        &["--repo", "--head", "--base", "--state", "--json"],
+        &[],
+    ) {
+        return refusal;
+    }
     println!("[]");
     ExitCode::SUCCESS
 }
 
 /// `gh pr view ID --repo R --json …`
 fn view(args: &[String], dir: &Path) -> ExitCode {
+    if let Err(refusal) = shaped(args, "pr view", 3, &["--repo", "--json"], &[]) {
+        return refusal;
+    }
     let id = match fake::required(args, 2, "ID") {
         Ok(id) => id,
         Err(refusal) => return refusal,
     };
-    let state = std::fs::read_to_string(state_of(dir, &id)).unwrap_or_default();
-    if state.trim().is_empty() {
+    // A number, because that is what `onevcs` takes out of the URL this host
+    // printed and hands back here. Anything else names no change request it
+    // opened, and answering one would be inventing a host that numbers its
+    // changes some other way.
+    let Ok(number) = id.parse::<u64>() else {
+        eprintln!("{id} is not a pull request number");
+        return ExitCode::from(1);
+    };
+    let Some(state) = recorded(dir, &id) else {
         eprintln!("no pull request found for {id}");
         return ExitCode::from(1);
-    }
-    let merged = state.contains("merged");
+    };
+    let merged = state == Change::Merged;
     println!(
         "{}",
         serde_json::json!({
-            "number": id.parse::<u64>().unwrap_or_default(),
+            "number": number,
             "state": if merged { "MERGED" } else { "OPEN" },
             "mergeStateStatus": "CLEAN",
             "headRefOid": HEAD_SHA,
@@ -156,17 +280,27 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
 /// and `onevcs` reads that back from the next `pr view`, not from this command,
 /// so scripting it here rather than in the exit code is what makes the two agree.
 fn merge(args: &[String], dir: &Path) -> ExitCode {
+    // `--auto` is the difference between `change-auto` and `change-direct`, so
+    // the shape is checked with and without it rather than by ignoring it.
+    let auto = args.iter().any(|arg| arg == "--auto");
+    let bare: &[&str] = if auto {
+        &["--squash", "--auto"]
+    } else {
+        &["--squash"]
+    };
+    if let Err(refusal) = shaped(args, "pr merge", 3, &["--repo"], bare) {
+        return refusal;
+    }
     let id = match fake::required(args, 2, "ID") {
         Ok(id) => id,
         Err(refusal) => return refusal,
     };
-    let path = state_of(dir, &id);
-    if !path.is_file() {
+    if recorded(dir, &id).is_none() {
         eprintln!("no pull request found for {id}");
         return ExitCode::from(1);
     }
     if dir.join("gh.merged").exists() {
-        fake::append(&path, "merged");
+        record(dir, &id, Change::Merged);
     }
     ExitCode::SUCCESS
 }
