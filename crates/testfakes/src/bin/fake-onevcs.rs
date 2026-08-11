@@ -64,9 +64,15 @@ fn closed_marker(dir: &Path, token: &str) -> PathBuf {
 /// a shape nobody emits.
 fn emit(dir: &Path, token: &str, kind: onevcs::EventKind, payload: serde_json::Value) {
     let path = stream_of(dir, token);
+    // The sibling's own numbering: `onevcs::stream::Stream` resumes the series
+    // from what the file already holds and increments *before* it writes, so the
+    // first record of a stream is `1` and no record is ever `0`. A double that
+    // numbered from zero would let a consumer treat "nothing relayed" and "the
+    // first record relayed" as one answer and never hear about it.
     let seq = std::fs::read_to_string(&path)
         .map(|text| text.lines().filter(|line| !line.trim().is_empty()).count())
-        .unwrap_or(0);
+        .unwrap_or(0)
+        + 1;
     fake::append(
         &path,
         &serde_json::json!({
@@ -129,21 +135,33 @@ fn open(args: &[String], dir: &std::path::Path) -> ExitCode {
 }
 
 /// `onevcs session close TOKEN`
+///
+/// The marker comes **first**, because that is the sibling's own order:
+/// `app::session_close` calls `workspace::close`, which flips the record to
+/// `Closed`, and only then opens the stream and emits `session-closed`. A
+/// follower prints what the file holds and *then* asks whether the session
+/// closed, so the record can land after the follow has already returned — a
+/// window this double used to close by writing the record first, which made the
+/// tail unlosable here and losable against every real session.
 fn close(args: &[String], dir: &std::path::Path) -> ExitCode {
     let token = match fake::required(args, 2, "TOKEN") {
         Ok(token) => token,
         Err(refusal) => return refusal,
     };
+    fake::append(&closed_marker(dir, &token), "closed");
+    // The real window is microseconds wide, which is a flake rather than a
+    // scenario. Widening it on request is how a journey *states* the case —
+    // "the sibling wrote its last record after the follow ended" — and depends
+    // on it rather than on how the host happened to schedule two processes.
+    if dir.join("close.slow-record").exists() {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
     emit(
         dir,
         &token,
         onevcs::EventKind::SessionClosed,
         serde_json::json!({}),
     );
-    // Written last: a follower prints everything it has not printed *and then*
-    // asks whether the session closed, so the tail is never lost to the marker
-    // arriving first.
-    fake::append(&closed_marker(dir, &token), "closed");
     ExitCode::SUCCESS
 }
 

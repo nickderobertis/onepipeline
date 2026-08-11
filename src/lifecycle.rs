@@ -285,39 +285,46 @@ fn stamp(labels: &mut Labels, known: &Labels) {
 
 /// Close the session, and collect what its stream said.
 ///
-/// Closing is what ends the follow, so it comes first — the follow prints its
-/// tail and returns. A follow that never started, or that produced no record at
-/// all, leaves the evidence unread, and the stream is read once here instead: a
-/// gap in the merged store is what makes a later reader think nothing happened.
+/// Closing comes first, because it is what ends the follow *and* what writes the
+/// session's last record: `onevcs session close` marks the session closed before
+/// it emits `session-closed`, and `onevcs events --follow` returns as soon as it
+/// sees a session closed. A follow can therefore end cleanly having relayed
+/// everything but the tail — so the stream is always read once more afterwards,
+/// from the point the follow reached. A gap in the merged store is what makes a
+/// later reader think nothing happened.
 fn end_session(
     stream: Option<crate::vcs::Follower>,
     tx: &Sender<Message>,
     token: Option<&str>,
     node: &Labels,
 ) {
-    match stream {
-        Some(follower) => {
-            close(token);
-            if !follower.finish() {
-                relay_session_events(tx, token, node);
-            }
-        }
-        None => {
-            relay_session_events(tx, token, node);
-            close(token);
-        }
-    }
+    close(token);
+    // `None` from either side is the whole stream still to read: no follow was
+    // started, or one was and relayed nothing.
+    let followed_through = stream.and_then(crate::vcs::Follower::finish);
+    relay_session_events(tx, token, node, followed_through);
 }
 
-/// Fold the session's own event stream into the merged one, in one read.
+/// Fold the part of the session's stream nothing has relayed into the merged one.
 ///
 /// `onevcs` records the gate, the commits, and the publication against the
 /// session; without this the merged store would carry a lifecycle node's
-/// settlement with none of the evidence behind it.
-fn relay_session_events(tx: &Sender<Message>, token: Option<&str>, node: &Labels) {
+/// settlement with none of the evidence behind it. `followed_through` is the
+/// highest `seq` the follow already relayed, so a record arrives **once**: the
+/// stream is numbered monotonically and resumes its series across the processes
+/// that write to it, which makes that one number the whole of the bookkeeping.
+fn relay_session_events(
+    tx: &Sender<Message>,
+    token: Option<&str>,
+    node: &Labels,
+    followed_through: Option<u64>,
+) {
     let Some(token) = token else { return };
     let relay = relay_into(tx, node.clone());
     for envelope in crate::vcs::events(token) {
+        if followed_through.is_some_and(|seq| envelope.seq <= seq) {
+            continue;
+        }
         relay(envelope);
     }
 }

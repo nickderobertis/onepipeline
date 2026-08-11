@@ -345,6 +345,60 @@ fn a_publications_own_records_reach_the_journal_while_it_is_still_publishing() {
         .out_has("done");
 }
 
+/// The last record of a session, written after the follow watching it ended.
+///
+/// Not a hypothetical: `onevcs session close` flips the session's record to
+/// `Closed` and *then* emits `session-closed`, while `onevcs events --follow`
+/// prints what the stream holds and only then asks whether the session closed.
+/// Between those two the follow returns — cleanly, successfully, having relayed
+/// everything but the tail. This crate read that clean end as "everything was
+/// relayed" and skipped the recovery read, so the merged store carried a whole
+/// publication with no close on it, and a later reader had no way to tell a
+/// session that was released from one that was abandoned. The window is
+/// microseconds wide against a real `onevcs`, which is why it reached a release:
+/// it fails a run in CI now and then and passes on the next one.
+#[test]
+fn a_record_written_after_the_follow_ended_still_reaches_the_merged_store_once() {
+    let world = World::new("lifecycle-latetail");
+    world.script("publish.merged", "");
+    // The session closes, and its record lands after the follow has given up.
+    world.script("close.slow-record", "");
+    let run = settle(&world, "tail", vec![lifecycle("service", &[])]);
+
+    // Once. Recovering the tail by re-reading the whole stream would put every
+    // other record in twice, which is the same defect from the other side —
+    // `monitor` renders one line per event, so a duplicate is visible as one.
+    let stream = world.run(&["monitor", &run]);
+    stream.exited(0);
+    // Not `session-opened`: this crate writes one of its own beside the
+    // sibling's, so two is the right answer there and says nothing about relay.
+    for kind in [
+        "lock-wait",
+        "gate-verdict",
+        "push",
+        "change-opened",
+        "change-merged",
+        "session-closed",
+    ] {
+        let seen = stream
+            .stdout
+            .lines()
+            .filter(|line| line.contains(kind))
+            .count();
+        assert_eq!(
+            seen, 1,
+            "{kind} reached the merged store {seen} time(s):\n{}",
+            stream.stdout
+        );
+    }
+    // And it belongs to the node, like every other record the session wrote:
+    // the recovery read is the same relay, not a second path that forgets to
+    // say whose the record is.
+    let closed = &world.events_of(&run, "session-closed")[0];
+    assert_eq!(closed["labels"]["node"], "service", "{closed}");
+    assert_eq!(closed["source"], "vcs", "{closed}");
+}
+
 #[test]
 fn a_session_that_cannot_open_is_an_infrastructure_failure_by_name() {
     let world = World::new("lifecycle-nosession");

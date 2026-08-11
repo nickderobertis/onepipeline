@@ -144,6 +144,31 @@ fn node(repo: &Path) -> serde_json::Value {
     })
 }
 
+/// Why a run settled the way it did, as the sibling itself said it.
+///
+/// `result.json` records the status and the outcome and not a word of the
+/// reason, and the reason is the sibling's own refusal — the command it ran and
+/// what that printed. It reaches this crate as the sibling error's message and
+/// is journalled as the `detail` of `node-settled`, so this is where a failure
+/// that only happens on one platform names itself instead of costing a
+/// debugging session per platform.
+fn why(world: &World, run: &str) -> String {
+    let settled: Vec<String> = world
+        .events_of(run, "node-settled")
+        .iter()
+        .map(|event| {
+            format!(
+                "{} {} {}: {}",
+                event["labels"]["node"],
+                event["payload"]["status"],
+                event["payload"]["outcome"],
+                event["payload"]["detail"]
+            )
+        })
+        .collect();
+    format!("what the nodes settled on:\n  {}", settled.join("\n  "))
+}
+
 /// Every `onevcs`-produced event one run recorded, by kind.
 fn vcs_kinds(world: &World, run: &str) -> Vec<String> {
     world
@@ -171,8 +196,18 @@ fn a_lifecycle_node_publishes_through_the_real_onevcs_and_the_base_advances() {
     // The node settled on what the sibling actually did, which is the assertion
     // that fails when this crate cannot read the sibling's answer.
     let result = world.run_json("landed", "round-01/result.json");
-    assert_eq!(result["nodes"][0]["status"], "done", "{result}");
-    assert_eq!(result["nodes"][0]["outcome"], "merged", "{result}");
+    assert_eq!(
+        result["nodes"][0]["status"],
+        "done",
+        "{result}\n{}",
+        why(&world, "landed")
+    );
+    assert_eq!(
+        result["nodes"][0]["outcome"],
+        "merged",
+        "{result}\n{}",
+        why(&world, "landed")
+    );
     assert_eq!(result["state"], "complete", "{result}");
 
     // The work reached the origin's base branch. Nothing about a settlement
@@ -237,10 +272,17 @@ fn a_real_gate_that_rejects_the_branch_fails_the_node_and_leaves_the_base_alone(
     });
 
     let result = world.run_json("refused", "round-01/result.json");
-    assert_eq!(result["nodes"][0]["status"], "failed", "{result}");
     assert_eq!(
-        result["nodes"][0]["outcome"], "publication-failed",
-        "{result}"
+        result["nodes"][0]["status"],
+        "failed",
+        "{result}\n{}",
+        why(&world, "refused")
+    );
+    assert_eq!(
+        result["nodes"][0]["outcome"],
+        "publication-failed",
+        "{result}\n{}",
+        why(&world, "refused")
     );
 
     // The one thing a rejected gate has to be true of: nothing landed.

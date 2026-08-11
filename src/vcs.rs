@@ -311,8 +311,8 @@ pub fn follow(token: &str, sink: Box<dyn Fn(Envelope) + Send>) -> Option<Followe
         return None;
     };
 
-    let relayed = Arc::new(AtomicU64::new(0));
-    let counted = Arc::clone(&relayed);
+    let progress = Arc::new(Progress::default());
+    let reached = Arc::clone(&progress);
     let reader = std::thread::Builder::new()
         .name(format!("{}-events", binary()))
         .spawn(move || {
@@ -326,7 +326,7 @@ pub fn follow(token: &str, sink: Box<dyn Fn(Envelope) + Send>) -> Option<Followe
                 }
                 match serde_json::from_str::<Envelope>(&line) {
                     Ok(envelope) => {
-                        counted.fetch_add(1, Ordering::SeqCst);
+                        reached.reached(envelope.seq);
                         sink(envelope);
                     }
                     Err(_) => skipped += 1,
@@ -338,13 +338,44 @@ pub fn follow(token: &str, sink: Box<dyn Fn(Envelope) + Send>) -> Option<Followe
         Ok(reader) => Some(Follower {
             child,
             reader: Some(reader),
-            relayed,
+            progress,
         }),
         Err(error) => {
             stop(&mut child);
             eprintln!("onepipeline: cannot follow session {token}'s events: {error}");
             None
         }
+    }
+}
+
+/// How far into a session's stream a follow got.
+///
+/// The `seq` rather than a count, because that is what says which records are
+/// still unread: `onevcs` numbers a stream monotonically from one and resumes
+/// the series in the next process that writes to it, so the highest `seq`
+/// relayed is exactly the point a second reader continues from.
+#[derive(Debug, Default)]
+struct Progress {
+    /// How many envelopes were relayed.
+    count: AtomicU64,
+    /// The highest `seq` among them.
+    seq: AtomicU64,
+}
+
+impl Progress {
+    /// Record that one envelope was relayed.
+    fn reached(&self, seq: u64) {
+        self.count.fetch_add(1, Ordering::SeqCst);
+        self.seq.fetch_max(seq, Ordering::SeqCst);
+    }
+
+    /// The highest `seq` relayed, or `None` if nothing was.
+    ///
+    /// Not a bare `0`: a producer numbering from zero would then be
+    /// indistinguishable from one that produced nothing, and the caller reading
+    /// on from here would skip that stream's first record.
+    fn reached_through(&self) -> Option<u64> {
+        (self.count.load(Ordering::SeqCst) > 0).then(|| self.seq.load(Ordering::SeqCst))
     }
 }
 
@@ -360,7 +391,7 @@ pub struct Follower {
     /// Taken by [`finish`](Follower::finish), so a drop after one has nothing
     /// left to wait on.
     reader: Option<std::thread::JoinHandle<()>>,
-    relayed: Arc<AtomicU64>,
+    progress: Arc<Progress>,
 }
 
 impl Drop for Follower {
@@ -375,36 +406,41 @@ impl Drop for Follower {
 }
 
 impl Follower {
-    /// Stop following, and report whether anything was relayed.
+    /// Stop following, and say how far into the stream it got.
     ///
     /// Called *after* `session close`, which is what ends the follow: `onevcs
     /// events --follow` prints everything it has not printed yet and only then
     /// returns on a closed session, so waiting for it loses nothing.
     ///
-    /// `false` is the one answer a caller has to act on: the follow neither
-    /// ended cleanly nor relayed a record, so the session's evidence is still
-    /// unread and reading it once leaves no gap rather than a duplicate. A
-    /// follow that *did* end cleanly having read nothing is a session that
-    /// recorded nothing, which is not the same thing.
-    pub fn finish(mut self) -> bool {
+    /// The answer is a **floor, never a promise that the rest is not there**.
+    /// `onevcs session close` marks the session closed and only then writes its
+    /// `session-closed` record, while `onevcs events --follow` prints what the
+    /// file holds and *then* asks whether the session closed — so a follow can
+    /// end cleanly, successfully, with the last record of the session still
+    /// unwritten. Treating a clean end as "everything was relayed" is what
+    /// dropped that record out of the merged store; the caller reads the stream
+    /// once more from this point instead.
+    ///
+    /// `None` when it relayed nothing at all, which is the whole stream still to
+    /// read rather than a stream that held nothing.
+    pub fn finish(mut self) -> Option<u64> {
         let deadline = Instant::now() + FOLLOW_GRACE;
-        let ended = loop {
+        loop {
             match self.child.try_wait() {
-                Ok(Some(status)) => break status.success(),
-                Err(_) => break false,
+                Ok(Some(_)) | Err(_) => break,
                 Ok(None) if Instant::now() >= deadline => {
                     stop(&mut self.child);
-                    break false;
+                    break;
                 }
                 Ok(None) => std::thread::sleep(FOLLOW_POLL),
             }
-        };
+        }
         // The reader ends on its own once the pipe closes, which the wait above
         // has already made true.
         if let Some(reader) = self.reader.take() {
             let _ = reader.join();
         }
-        ended || self.relayed.load(Ordering::SeqCst) > 0
+        self.progress.reached_through()
     }
 }
 
