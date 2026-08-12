@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.8](https://github.com/nickderobertis/onepipeline/compare/v0.1.7...v0.1.8) - 2026-08-12
+
+### Added
+
+- forward per-run graph overrides through start and adopt ([#19](https://github.com/nickderobertis/onepipeline/pull/19))
+
 ## [0.1.7](https://github.com/nickderobertis/onepipeline/compare/v0.1.6...v0.1.7) - 2026-08-12
 
 ### Added
