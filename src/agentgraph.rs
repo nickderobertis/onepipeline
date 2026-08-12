@@ -245,6 +245,7 @@ impl GraphRun {
         dir: Option<&Path>,
         labels: &Labels,
         env: &[(String, String)],
+        sets: &[String],
         output: GraphOutput<'_>,
     ) -> Result<Self> {
         let mut command = Command::new(binary());
@@ -256,6 +257,9 @@ impl GraphRun {
         }
         for label in label_args(labels) {
             command.arg("--label").arg(label);
+        }
+        for value in sets {
+            command.arg("--set").arg(value);
         }
         for (key, value) in env {
             command.env(key, value);

@@ -25,7 +25,16 @@ fn start_launches_the_shipped_dag_scope_graph_and_records_how_to_relaunch_it() {
     let world = World::new("driver-launch");
     world.script("driver.wait", "hold");
     let path = world.plan("launched", &plan_of("launched", vec![agent("build", &[])]));
-    let started = world.run(&["start", &path.to_string_lossy(), "--detach"]);
+    let started = world.run(&[
+        "start",
+        &path.to_string_lossy(),
+        "--detach",
+        "--set",
+        "members.orchestrator.agent.model=first value",
+        "--set=members.check-in.model=second=value",
+        "--node-set",
+        "members.worker.agent.model=node value",
+    ]);
     started.exited(0).out_has("\"run_id\"");
 
     let record = started.json();
@@ -53,6 +62,17 @@ fn start_launches_the_shipped_dag_scope_graph_and_records_how_to_relaunch_it() {
     let launch = world.run_json("launched", "launch.json");
     assert_eq!(launch["round_budget"], 14_400);
     assert_eq!(launch["heartbeat_interval"], 1_800);
+    assert_eq!(
+        launch["dag_sets"],
+        json!([
+            "members.orchestrator.agent.model=first value",
+            "members.check-in.model=second=value"
+        ])
+    );
+    assert_eq!(
+        launch["node_sets"],
+        json!(["members.worker.agent.model=node value"])
+    );
     assert_eq!(launch["launcher"], "e2e");
     assert!(launch["graph"]
         .as_str()
@@ -174,7 +194,20 @@ fn a_parked_run_is_adoptable_as_much_as_a_dead_one_is() {
 #[test]
 fn a_dead_driver_reads_as_driver_dead_and_adopt_is_the_way_back() {
     let world = World::new("driver-dead");
-    let run = start_detached(&world, "orphaned", vec![human("approve", &[])]);
+    let path = world.plan(
+        "orphaned",
+        &plan_of("orphaned", vec![human("approve", &[])]),
+    );
+    world
+        .run(&[
+            "start",
+            &path.to_string_lossy(),
+            "--detach",
+            "--set",
+            "members.orchestrator.agent.model=adopted model",
+        ])
+        .exited(0);
+    let run = "orphaned".to_string();
     world.until("the driver to exit", |world| {
         world.run(&["status", &run]).stdout.contains("DRIVER DEAD")
     });
@@ -186,6 +219,11 @@ fn a_dead_driver_reads_as_driver_dead_and_adopt_is_the_way_back() {
         .out_has("onepipeline adopt orphaned");
 
     // The ledger is intact, so a fresh driver takes it over.
+    let launches_before = world
+        .invocations()
+        .into_iter()
+        .filter(|call| call["tool"] == "oneagentgraph" && call["args"][0] == "run")
+        .count();
     let adopted = world.run(&["adopt", &run]);
     adopted.exited(NOTHING_DRIVING);
     let adoptions = world.events_of(&run, "driver-adopted");
@@ -193,6 +231,21 @@ fn a_dead_driver_reads_as_driver_dead_and_adopt_is_the_way_back() {
     assert_eq!(world.run_json(&run, "launch.json")["adoptions"], 1);
     // The dead driver's evidence moves aside rather than being truncated.
     assert!(world.run_file(&run, "launch.pre-adopt-1.json").exists());
+    let launches = world.invocations();
+    let relaunched = launches
+        .iter()
+        .filter(|call| call["tool"] == "oneagentgraph" && call["args"][0] == "run")
+        .nth(launches_before)
+        .expect("adopt relaunched the dag graph");
+    let args = relaunched["args"].as_array().expect("recorded argv");
+    let set_at = args
+        .iter()
+        .position(|arg| arg == "--set")
+        .expect("the adopted launch retained --set");
+    assert_eq!(
+        args[set_at + 1],
+        "members.orchestrator.agent.model=adopted model"
+    );
 }
 
 #[test]

@@ -703,6 +703,8 @@ mod tests {
             started_at: sys::now_rfc3339(),
             round_budget: 14_400,
             heartbeat_interval: 1_800,
+            dag_sets: Vec::new(),
+            node_sets: Vec::new(),
             adoptions: 0,
         }
     }
