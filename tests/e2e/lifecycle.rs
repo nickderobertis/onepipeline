@@ -690,17 +690,21 @@ fn a_record_written_after_the_follow_ended_still_reaches_the_merged_store_once()
 }
 
 #[test]
-fn a_session_that_cannot_open_is_an_infrastructure_failure_by_name() {
+fn an_unresolvable_repository_is_refused_before_a_run_starts() {
     let world = World::new("lifecycle-nosession");
     // No repository registered, so the node names one `onevcs` has never heard
-    // of — which is the refusal an operator actually meets first.
-    let run = settle(&world, "nosession", vec![lifecycle("service", &[])]);
-
-    // A dispatch that never started failed for a reason that has nothing to do
-    // with the agent, and is reported apart from one that ran and said nothing.
-    let result = world.run_json(&run, "round-01/result.json");
-    assert_eq!(result["nodes"][0]["status"], "failed", "{result}");
-    assert_eq!(result["nodes"][0]["outcome"], "infrastructure-failure");
+    // of. The holders preflight is now the first `onevcs` boundary, so the
+    // launcher refuses before creating a run or dispatching an agent.
+    let path = world.plan(
+        "nosession",
+        &plan_of("nosession", vec![lifecycle("service", &[])]),
+    );
+    world
+        .run(&["start", &path.to_string_lossy(), "--attach"])
+        .exited(2)
+        .err_has("session holders service --json")
+        .err_has("not a registered repository");
+    assert!(!world.run_file("nosession", "launch.json").exists());
 }
 
 #[test]
