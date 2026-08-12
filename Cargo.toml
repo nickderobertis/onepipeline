@@ -14,7 +14,7 @@ resolver = "2"
 # oracle for a build nothing runs.
 [workspace.dependencies]
 oneagentgraph = "0.2.4"
-onevcs = "0.2.4"
+onevcs = "0.2.5"
 
 [package]
 name = "onepipeline"
