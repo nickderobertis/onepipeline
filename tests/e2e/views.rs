@@ -40,13 +40,11 @@ fn driven(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> (String, 
 
 /// How long a held publication phase is kept open, so its bucket is a real
 /// duration on the clock rather than a bucket that merely exists.
-///
 const HELD: std::time::Duration = std::time::Duration::from_millis(400);
 
 /// The floor a held stretch must clear once it has been measured. Below the
 /// hold, because the two records bracketing it are written either side of the
 /// rendezvous rather than exactly on it.
-///
 const FLOOR: u64 = 250;
 
 fn settled(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
