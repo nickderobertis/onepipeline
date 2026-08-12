@@ -536,7 +536,10 @@ impl World {
             Ok(entries) => {
                 for entry in entries.flatten() {
                     let run = entry.file_name().to_string_lossy().to_string();
-                    out.push_str(&format!("  {run}: {:?}\n", self.kinds(&run)));
+                    out.push_str(&format!("  {run}:\n"));
+                    for event in self.journal(&run) {
+                        out.push_str(&format!("    {event}\n"));
+                    }
                 }
             }
         }
