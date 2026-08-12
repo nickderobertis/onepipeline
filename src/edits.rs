@@ -96,13 +96,34 @@ pub enum Operation {
         /// Why.
         reason: String,
     },
-    /// A planner note was attached to a node's next dispatch.
+    /// A planner note reached a node.
     ContextAdded {
         /// The node.
         node: String,
         /// The note.
         note: String,
+        /// Whether it went into the node's running turn or onto its next
+        /// dispatch. Absent from a record written before delivery had modes,
+        /// which is [`Delivery::Deferred`] — the only thing those records did.
+        #[serde(default)]
+        delivery: Delivery,
     },
+}
+
+/// How a planner note actually reached its node.
+///
+/// The fact `edit-committed` records, and what tells replay whether the note is
+/// still owed to a later dispatch: a note the running turn took has been read,
+/// so carrying it into the next round would repeat a correction the worker has
+/// already acted on.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Delivery {
+    /// Into the turn that was running when the edit arrived.
+    Live,
+    /// Onto the node's next dispatch.
+    #[default]
+    Deferred,
 }
 
 /// What the reconciler knows about the run when it judges an edit.
@@ -125,10 +146,27 @@ pub fn compile(
     frontier: &Frontier,
     command: &Command,
 ) -> Result<Vec<Operation>> {
+    compile_with(graph, frontier, command, Delivery::Deferred)
+}
+
+/// [`compile`], for a caller that has already delivered the note.
+///
+/// Only a `context` command reads `delivery`, and only the reconciler has an
+/// answer for it: whether a note reached the running turn is the outcome of an
+/// `oneagentgraph interrupt`, not a judgement about the graph. Every other
+/// caller — the submission check most of all — validates the same command
+/// without pulling that lever, which is why the delivery is a parameter rather
+/// than something this module works out.
+pub fn compile_with(
+    graph: &mut Graph,
+    frontier: &Frontier,
+    command: &Command,
+    delivery: Delivery,
+) -> Result<Vec<Operation>> {
     // Validate against a copy, so a refusal partway through a multi-edge
     // mutation cannot leave the caller's graph in a state nothing submitted.
     let mut candidate = graph.clone();
-    let operations = compile_into(&mut candidate, frontier, command)?;
+    let operations = compile_into(&mut candidate, frontier, command, delivery)?;
     if !matches!(command, Command::Complete { .. } | Command::Attest { .. }) {
         // The resulting graph must still satisfy the normal plan schema.
         let plan = candidate.to_plan(&crate::plan::Plan {
@@ -148,6 +186,7 @@ fn compile_into(
     graph: &mut Graph,
     frontier: &Frontier,
     command: &Command,
+    delivery: Delivery,
 ) -> Result<Vec<Operation>> {
     match command {
         Command::Add { node } => compile_add(graph, node),
@@ -160,7 +199,7 @@ fn compile_into(
         Command::Complete { reason } => Ok(vec![Operation::CompletionRequested {
             reason: reason.clone(),
         }]),
-        Command::Context { id, note } => compile_context(graph, frontier, id, note),
+        Command::Context { id, note, .. } => compile_context(graph, frontier, id, note, delivery),
     }
 }
 
@@ -501,6 +540,7 @@ fn compile_context(
     frontier: &Frontier,
     id: &str,
     note: &str,
+    delivery: Delivery,
 ) -> Result<Vec<Operation>> {
     if !graph.contains(id) {
         return Err(refuse(format!("context: no node '{id}'")));
@@ -508,20 +548,26 @@ fn compile_context(
     if note.trim().is_empty() {
         return Err(refuse("context: the note cannot be empty"));
     }
-    // A note is read by a *later* dispatch of the node. A node that already
-    // settled `done` has none, so the planner is told rather than left believing
-    // it landed.
+    // A note is read by the node's running turn or by a *later* dispatch of it.
+    // A node that already settled `done` has neither, so the planner is told
+    // rather than left believing it landed.
     if frontier.recorded.get(id) == Some(&NodeStatus::Done) {
         return Err(refuse(format!(
             "context: node '{id}' has settled done, so nothing will read the note"
         )));
     }
-    if let Some(node) = graph.get_mut(id) {
-        node.context = Some(note.to_string());
+    // A note the running turn took has been read, so it is not also owed to the
+    // next dispatch: attaching it there too would re-state a correction the
+    // worker has already acted on.
+    if delivery == Delivery::Deferred {
+        if let Some(node) = graph.get_mut(id) {
+            node.context = Some(note.to_string());
+        }
     }
     Ok(vec![Operation::ContextAdded {
         node: id.to_string(),
         note: note.to_string(),
+        delivery,
     }])
 }
 
@@ -576,11 +622,19 @@ pub fn apply(graph: &mut Graph, operation: &Operation) {
                 graph.insert(amended);
             }
         }
-        Operation::ContextAdded { node, note } => {
+        // A live delivery went into a turn rather than onto the graph, so
+        // replay reconstructs it by changing nothing — exactly as the
+        // reconciler did.
+        Operation::ContextAdded {
+            node,
+            note,
+            delivery: Delivery::Deferred,
+        } => {
             if let Some(node) = graph.get_mut(node) {
                 node.context = Some(note.clone());
             }
         }
+        Operation::ContextAdded { .. } => {}
         // Neither mutates the graph: an attestation settles a node and a
         // completion request is journalled for audit, both folded elsewhere.
         Operation::HumanAttested { .. }
@@ -612,6 +666,15 @@ mod tests {
             concurrency: 4,
             tasks: nodes,
         })
+    }
+
+    /// A `context` edit as a planner who says nothing about delivery writes one.
+    fn note_for(id: &str, note: &str) -> Command {
+        Command::Context {
+            id: id.into(),
+            note: note.into(),
+            deliver: crate::channel::Deliver::default(),
+        }
     }
 
     fn frontier(entries: &[(&str, NodeStatus)]) -> Frontier {
@@ -1144,51 +1207,100 @@ mod tests {
     #[test]
     fn context_reaches_a_node_that_can_still_be_dispatched() {
         let mut graph = graph_of(vec![agent("build", &[])]);
-        compile(
+        let operations = compile(
             &mut graph,
             &Frontier::default(),
-            &Command::Context {
-                id: "build".into(),
-                note: "the fixture moved".into(),
-            },
+            &note_for("build", "the fixture moved"),
         )
         .expect("a live node takes a note");
         assert_eq!(
             graph.get("build").expect("build").context.as_deref(),
             Some("the fixture moved")
         );
+        assert!(
+            matches!(
+                &operations[0],
+                Operation::ContextAdded {
+                    delivery: Delivery::Deferred,
+                    ..
+                }
+            ),
+            "a note nobody delivered is owed to the next dispatch: {operations:?}"
+        );
 
         for (frontier_state, command, expected) in [
             (
                 frontier(&[("build", NodeStatus::Done)]),
-                Command::Context {
-                    id: "build".into(),
-                    note: "too late".into(),
-                },
+                note_for("build", "too late"),
                 "settled done",
             ),
             (
                 Frontier::default(),
-                Command::Context {
-                    id: "build".into(),
-                    note: "   ".into(),
-                },
+                note_for("build", "   "),
                 "cannot be empty",
             ),
-            (
-                Frontier::default(),
-                Command::Context {
-                    id: "nowhere".into(),
-                    note: "hello".into(),
-                },
-                "no node",
-            ),
+            (Frontier::default(), note_for("nowhere", "hello"), "no node"),
         ] {
             let message = compile(&mut graph, &frontier_state, &command)
                 .unwrap_err()
                 .to_string();
             assert!(message.contains(expected), "{message:?} lacks {expected:?}");
         }
+    }
+
+    /// A note the running turn took is not also owed to the next dispatch —
+    /// otherwise the round transition would re-state a correction the worker has
+    /// already acted on.
+    #[test]
+    fn a_note_delivered_live_leaves_nothing_on_the_node_for_a_later_dispatch() {
+        let mut graph = graph_of(vec![agent("build", &[])]);
+        let operations = compile_with(
+            &mut graph,
+            &frontier(&[("build", NodeStatus::Running)]),
+            &note_for("build", "the fixture moved"),
+            Delivery::Live,
+        )
+        .expect("a running node takes a note into its turn");
+        assert_eq!(
+            graph.get("build").expect("build").context,
+            None,
+            "a live note was also queued for the next dispatch"
+        );
+        assert!(
+            matches!(
+                &operations[0],
+                Operation::ContextAdded {
+                    delivery: Delivery::Live,
+                    note,
+                    ..
+                } if note == "the fixture moved"
+            ),
+            "{operations:?}"
+        );
+
+        // And replay reconstructs exactly that: nothing on the graph.
+        let mut replayed = graph_of(vec![agent("build", &[])]);
+        apply(&mut replayed, &operations[0]);
+        assert_eq!(replayed.get("build").expect("build").context, None);
+    }
+
+    /// A record written before delivery had modes says nothing about it, and the
+    /// only thing those records ever did is what an absent value must mean.
+    #[test]
+    fn a_context_operation_from_before_this_field_replays_as_deferred() {
+        let operation: Operation = serde_json::from_value(serde_json::json!({
+            "kind": "context-added",
+            "node": "build",
+            "note": "the fixture moved",
+        }))
+        .expect("an operation without a delivery still parses");
+        let mut graph = graph_of(vec![agent("build", &[])]);
+        apply(&mut graph, &operation);
+        assert_eq!(
+            graph.get("build").expect("build").context.as_deref(),
+            Some("the fixture moved"),
+            "an older record stopped attaching its note"
+        );
     }
 
     #[test]
@@ -1220,10 +1332,7 @@ mod tests {
             Command::Add {
                 node: agent("c", &["a"]),
             },
-            Command::Context {
-                id: "b".into(),
-                note: "a note".into(),
-            },
+            note_for("b", "a note"),
             Command::Retry {
                 id: "a".into(),
                 node: agent("a-2", &[]),
@@ -1274,6 +1383,7 @@ mod tests {
             Operation::ContextAdded {
                 node: "gone".into(),
                 note: "n".into(),
+                delivery: Delivery::Deferred,
             },
             Operation::HumanAttested {
                 node: "gone".into(),

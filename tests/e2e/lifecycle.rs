@@ -210,7 +210,11 @@ fn a_lifecycle_node_opens_a_session_works_in_it_and_publishes_through_onevcs() {
     let dispatched = world
         .journal(&run)
         .into_iter()
-        .find(|event| event["source"] == "agentgraph" && event["labels"]["node"] == "service")
+        .find(|event| {
+            event["source"] == "agentgraph"
+                && event["kind"] == "turn-activity"
+                && event["labels"]["node"] == "service"
+        })
         .expect("the lifecycle node dispatched");
     let dir = dispatched["payload"]["dir"].as_str().expect("a directory");
     assert!(

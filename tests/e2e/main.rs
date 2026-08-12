@@ -23,6 +23,7 @@ mod harness;
 
 mod boundary;
 mod channel;
+mod context_delivery;
 mod crossdag;
 mod dispatch;
 mod driver;

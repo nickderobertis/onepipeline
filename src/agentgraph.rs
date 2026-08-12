@@ -640,6 +640,123 @@ pub fn reset_timer(run: &str, member: &str) -> Result<()> {
     )))
 }
 
+/// Where one member's in-flight turn is addressed.
+///
+/// Read off the sibling's own relayed envelopes rather than derived: the graph
+/// run's id and the member within it are labels `oneagentgraph` stamps, and this
+/// crate has no second way to know either. A node whose dispatch has not
+/// produced one yet has no address, which is the same answer as a node with no
+/// turn to reach.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnAddress {
+    /// The `oneagentgraph` run — not this crate's, which is a different run.
+    pub run: String,
+    /// The member within it whose turn is in flight.
+    pub member: String,
+}
+
+/// What one `oneagentgraph interrupt` answered.
+///
+/// The three outcomes are not interchangeable, which is the whole reason that
+/// verb has an exit code of its own for the middle one: a redirection that
+/// landed, a **fact** that there was no controllable turn to land it in, and a
+/// lever that was pulled and broke.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Interrupted {
+    /// The running turn took the redirection.
+    Delivered,
+    /// There was no controllable turn in flight, and this is which reason
+    /// applied. Not an error: the member may be between turns, already settled,
+    /// or running on a harness with no out-of-band control at all.
+    NoTurn(String),
+    /// The delivery was attempted and failed, or was one the sibling refused.
+    Failed(String),
+}
+
+/// The envelopes an `interrupt` produced, and what it answered.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Interrupt {
+    /// Delivered, no turn, or failed.
+    pub outcome: Interrupted,
+    /// The `turn-interrupted` envelope the verb published, for the merged
+    /// store. It is emitted for every interrupt, delivered or not, so "the lever
+    /// was pulled and nothing happened" reaches the run's own record.
+    pub events: Vec<Envelope>,
+}
+
+/// Ask a member's in-flight turn to do something else.
+///
+/// The whole mechanism is `oneagentgraph`'s: which harnesses have a lever, where
+/// the socket is, and what a turn does with a redirection are all decided there,
+/// and nothing about them is rebuilt here. This composes that verb and reads its
+/// exit code — including [`EXIT_NO_CONTROLLABLE_TURN`], which is a fact rather
+/// than a failure and is what the `auto` fall-through and the `live` refusal are
+/// both made of.
+///
+/// [`EXIT_NO_CONTROLLABLE_TURN`]: oneagentgraph::error::EXIT_NO_CONTROLLABLE_TURN
+pub fn interrupt(address: &TurnAddress, input: &str) -> Interrupt {
+    let output = Command::new(binary())
+        .arg("interrupt")
+        .arg(&address.run)
+        .arg(&address.member)
+        .arg("--input")
+        .arg(input)
+        .stdin(Stdio::null())
+        .output();
+    let output = match output {
+        Ok(output) => output,
+        Err(error) => {
+            return Interrupt {
+                outcome: Interrupted::Failed(format!(
+                    "cannot start `{} interrupt`: {error}",
+                    binary()
+                )),
+                events: Vec::new(),
+            }
+        }
+    };
+    let events: Vec<Envelope> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Envelope>(line.trim()).ok())
+        .collect();
+    // The published event's own words first, because that is where the verb puts
+    // the reason a delivery did not land; its exit code says which kind of
+    // answer it is.
+    let reason = || {
+        events
+            .iter()
+            .rev()
+            .find_map(|event| event.payload.get("reason").and_then(|v| v.as_str()))
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                if stderr.is_empty() {
+                    "it said nothing".to_string()
+                } else {
+                    stderr
+                }
+            })
+    };
+    let outcome = match output.status.code() {
+        Some(oneagentgraph::error::EXIT_SUCCESS) => Interrupted::Delivered,
+        Some(oneagentgraph::error::EXIT_NO_CONTROLLABLE_TURN) => Interrupted::NoTurn(reason()),
+        Some(code) => Interrupted::Failed(format!(
+            "`{} interrupt {} {}` exited {code}: {}",
+            binary(),
+            address.run,
+            address.member,
+            reason()
+        )),
+        None => Interrupted::Failed(format!(
+            "`{} interrupt {} {}` was ended by a signal",
+            binary(),
+            address.run,
+            address.member
+        )),
+    };
+    Interrupt { outcome, events }
+}
+
 /// The provider-health block a view reports, sourced from `oneagentgraph
 /// health`.
 ///
@@ -765,6 +882,37 @@ mod tests {
         let untouched = labels.clone();
         adopt_labels(&mut labels);
         assert_eq!(labels, untouched);
+    }
+
+    /// A sibling that is not installed is a delivery that *failed*, not a turn
+    /// that was found to be absent. The two are different exit codes on the
+    /// verb and different answers to the planner: one defers the note under
+    /// `auto`, and this one refuses it.
+    ///
+    /// The seam is named rather than left to `PATH` — `oneagentgraph` is a
+    /// published CLI, so a host that has it installed would otherwise decide
+    /// this assertion. nextest runs each test in its own process, so the
+    /// variable reaches nothing else.
+    #[test]
+    fn an_oneagentgraph_that_cannot_be_started_is_a_failed_delivery() {
+        std::env::set_var(BINARY_ENV, "oneagentgraph-that-is-not-installed");
+        let interrupt = interrupt(
+            &TurnAddress {
+                run: "node-scope-1".into(),
+                member: "worker".into(),
+            },
+            "the fixture moved",
+        );
+        assert!(
+            matches!(&interrupt.outcome, Interrupted::Failed(reason)
+                if reason.contains("oneagentgraph-that-is-not-installed")),
+            "{:?} does not name the binary that could not be started",
+            interrupt.outcome
+        );
+        assert!(
+            interrupt.events.is_empty(),
+            "a delivery nothing ran produced envelopes"
+        );
     }
 
     #[test]

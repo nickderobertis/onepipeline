@@ -288,9 +288,18 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
                     Operation::NodeRequeued { node, .. } => {
                         state.recorded.remove(node);
                     }
-                    Operation::ContextAdded { node, note } => {
+                    // Only a note that is still owed to a dispatch. One the
+                    // running turn already took is read, and carrying it into
+                    // the next round would re-state a correction the worker has
+                    // acted on.
+                    Operation::ContextAdded {
+                        node,
+                        note,
+                        delivery: edits::Delivery::Deferred,
+                    } => {
                         state.notes_this_round.insert(node.clone(), note.clone());
                     }
+                    Operation::ContextAdded { .. } => {}
                     _ => {}
                 }
             }

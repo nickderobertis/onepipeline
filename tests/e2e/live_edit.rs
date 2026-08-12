@@ -75,6 +75,21 @@ fn add_reparent_and_context_are_applied_and_reported_applied() {
         .out_has("\"applied\"");
 
     assert_eq!(committed(&world, &run), vec!["add", "reparent", "context"]);
+    // The note names a node that has never been dispatched, so there is no turn
+    // to deliver it into — which is what every `context` edit written before
+    // delivery had modes relied on. It rides the next dispatch, as it always
+    // did, and the record says so.
+    let context = world
+        .events_of(&run, "edit-committed")
+        .into_iter()
+        .find(|event| event["payload"]["command"]["op"] == "context")
+        .expect("the note was committed");
+    assert_eq!(context["payload"]["operations"][0]["delivery"], "deferred");
+    assert!(
+        world.events_of(&run, "turn-interrupted").is_empty(),
+        "a node with no dispatch had its turn reached for"
+    );
+
     world.release("slow.go");
     world.until("the run to settle", |world| {
         !world.events_of(&run, "round-finished").is_empty()

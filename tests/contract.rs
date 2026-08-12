@@ -690,6 +690,64 @@ fn every_op_deserializes_with_the_fields_the_protocol_requires() {
 }
 
 #[test]
+fn context_carries_the_three_delivery_modes_and_defaults_to_auto() {
+    let prose = CONTRACT.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        prose.contains("`deliver: auto|live|next`, defaulting to `auto`"),
+        "the contract no longer states the delivery modes or which one is the default"
+    );
+    assert!(
+        prose.contains("`edit-committed` records which happened as `delivery: live | deferred`"),
+        "the contract no longer says where the delivery that happened is recorded"
+    );
+    assert!(
+        prose.contains("`oneagentgraph interrupt RUN MEMBER --input`"),
+        "the contract no longer names the verb live delivery goes through"
+    );
+
+    // Every mode the contract lists is one the wire accepts, and each is a
+    // different command than the others.
+    let of = |value: Value| serde_json::from_value::<Edit>(value).expect("the mode parses");
+    let bare = of(json!({"op": "context", "id": "slow", "note": "the fix landed"}));
+    let auto =
+        of(json!({"op": "context", "id": "slow", "note": "the fix landed", "deliver": "auto"}));
+    let live =
+        of(json!({"op": "context", "id": "slow", "note": "the fix landed", "deliver": "live"}));
+    let next =
+        of(json!({"op": "context", "id": "slow", "note": "the fix landed", "deliver": "next"}));
+    assert_eq!(
+        bare, auto,
+        "a `context` edit that says nothing about delivery is not `auto`"
+    );
+    assert_ne!(auto, live);
+    assert_ne!(live, next);
+    assert_ne!(auto, next);
+
+    // The default is omitted again, so an old consumer reading a re-serialized
+    // envelope sees no field it did not have before — which is the same reason
+    // every `context` edit already written keeps working.
+    assert_eq!(
+        serde_json::to_value(&bare).expect("serializes"),
+        json!({"op": "context", "id": "slow", "note": "the fix landed"})
+    );
+    assert_eq!(
+        serde_json::to_value(&live).expect("serializes"),
+        json!({"op": "context", "id": "slow", "note": "the fix landed", "deliver": "live"})
+    );
+
+    // A fourth mode is not one the protocol has, and the refusal names what it
+    // read rather than dropping the field.
+    let err = serde_json::from_value::<Edit>(
+        json!({"op": "context", "id": "slow", "note": "n", "deliver": "eventually"}),
+    )
+    .expect_err("a mode outside the three is refused");
+    assert!(
+        err.to_string().contains("eventually"),
+        "the error names it: {err}"
+    );
+}
+
+#[test]
 fn drop_must_state_the_dependents_fate() {
     let err = serde_json::from_value::<Edit>(json!({"op": "drop", "id": "slow"}))
         .expect_err("`dependents` is required");
