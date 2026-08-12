@@ -10,10 +10,20 @@ fn main() -> ExitCode {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     match args.first().map(String::as_str) {
         Some("wait-for") => wait_for(&args),
+        Some("break-streams") => break_streams(),
         Some("append-future-event") => append_future_event(),
         Some(command) => refuse(&format!("unknown fake-gate command {command:?}")),
         None => refuse("missing fake-gate command"),
     }
+}
+
+fn break_streams() -> ExitCode {
+    let streams = onevcs_home().join("streams");
+    std::fs::remove_dir_all(&streams)
+        .unwrap_or_else(|error| fail(&format!("cannot remove {}: {error}", streams.display())));
+    std::fs::File::create(&streams)
+        .unwrap_or_else(|error| fail(&format!("cannot replace {}: {error}", streams.display())));
+    ExitCode::SUCCESS
 }
 
 fn wait_for(args: &[String]) -> ExitCode {
@@ -28,9 +38,7 @@ fn wait_for(args: &[String]) -> ExitCode {
 }
 
 fn append_future_event() -> ExitCode {
-    let home = std::env::var_os("ONEVCS_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| fail("ONEVCS_HOME is unset"));
+    let home = onevcs_home();
     let worktree = std::env::current_dir().unwrap_or_else(|error| fail(&error.to_string()));
     let token = worktree
         .parent()
@@ -44,4 +52,10 @@ fn append_future_event() -> ExitCode {
     writeln!(file, "{{\"from\":\"a newer onevcs\"}}")
         .unwrap_or_else(|error| fail(&format!("cannot append to {}: {error}", stream.display())));
     ExitCode::SUCCESS
+}
+
+fn onevcs_home() -> PathBuf {
+    std::env::var_os("ONEVCS_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| fail("ONEVCS_HOME is unset"))
 }

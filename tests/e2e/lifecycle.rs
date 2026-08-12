@@ -1102,13 +1102,10 @@ fn a_session_stream_that_cannot_be_read_is_reported_and_does_not_fail_the_node()
     //
     // A file where the streams directory was, so nothing can recreate it:
     // `EventStream::open` then refuses every session by name.
+    let gate = gate(&["break-streams"]);
     world.repository(
         "local-direct",
-        &[
-            "bash",
-            "-c",
-            "rm -rf \"$ONEVCS_HOME/streams\" && : > \"$ONEVCS_HOME/streams\"",
-        ],
+        &gate.iter().map(String::as_str).collect::<Vec<_>>(),
     );
     // llmlint: ignore-end[tests_mirror_real_usage]
     world.script("service.work", "the worker wrote this\n");
