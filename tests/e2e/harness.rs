@@ -138,8 +138,21 @@ impl World {
     /// The `onepipeline` binary, wired to this world.
     pub fn cmd(&self, args: &[&str]) -> Command {
         let mut command = Command::new(binary());
+        let path = std::env::join_paths(
+            std::iter::once(
+                onevcs_binary()
+                    .parent()
+                    .expect("onevcs has a directory")
+                    .to_path_buf(),
+            )
+            .chain(std::env::split_paths(
+                &std::env::var_os("PATH").unwrap_or_default(),
+            )),
+        )
+        .expect("a PATH");
         command
             .args(args)
+            .env("PATH", path)
             .env("ONEPIPELINE_RUNS_DIR", &self.runs)
             .env(
                 "ONEPIPELINE_ONEAGENTGRAPH_BIN",
@@ -748,7 +761,14 @@ impl Run {
     /// because the wait that follows a launch in a test can otherwise only fail
     /// as a bare timeout, with the reason on a descriptor nobody kept.
     pub fn settled(&self) -> &Self {
-        self.out_has("\"settlement\"")
+        assert!(
+            self.stdout.contains("\"settlement\""),
+            "`onepipeline {}` stdout lacks a settlement:\n{}\nstderr:\n{}",
+            self.args,
+            self.stdout,
+            self.stderr
+        );
+        self
     }
 
     /// Assert stderr contains a fragment.
@@ -845,8 +865,12 @@ pub fn oneagentgraph_binary() -> PathBuf {
 /// The released `onevcs` executable whose holders verb the launcher consumes.
 pub fn onevcs_binary() -> PathBuf {
     static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    let held = BUILT.get_or_init(|| build(&["--package", "onevcs", "--bin", "onevcs", "--locked"]));
-    held_copy(held, "onevcs")
+    BUILT
+        .get_or_init(|| {
+            let held = build(&["--package", "onevcs", "--bin", "onevcs", "--locked"]);
+            held_copy(&held, "onevcs")
+        })
+        .clone()
 }
 
 /// Build one package's binaries into the target directory this test's own binary
@@ -893,9 +917,7 @@ fn held_copy(held: &Path, name: &str) -> PathBuf {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         loop {
             let _ = std::fs::remove_file(&mine);
-            match std::fs::hard_link(&published, &mine)
-                .or_else(|_| std::fs::copy(&published, &mine).map(|_| ()))
-            {
+            match std::fs::copy(&published, &mine).map(|_| ()) {
                 Ok(()) => break,
                 Err(error) => assert!(
                     std::time::Instant::now() < deadline,

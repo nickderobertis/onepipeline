@@ -1,29 +1,10 @@
 //! Same-identity launch exclusion through the real `onevcs session holders` verb.
 
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use serde_json::json;
 
-use crate::harness::{onevcs_binary, plan_of, World};
-
-fn command(world: &World, args: &[&str]) -> Command {
-    let onevcs = onevcs_binary();
-    let path = std::env::join_paths(
-        std::iter::once(
-            onevcs
-                .parent()
-                .expect("onevcs has a directory")
-                .to_path_buf(),
-        )
-        .chain(std::env::split_paths(
-            &std::env::var_os("PATH").unwrap_or_default(),
-        )),
-    )
-    .expect("a PATH");
-    let mut command = world.cmd(args);
-    command.env("PATH", path);
-    command
-}
+use crate::harness::{plan_of, World};
 
 #[test]
 fn live_holders_refuse_unless_acknowledged_and_stale_holders_do_not_refuse() {
@@ -43,10 +24,7 @@ fn live_holders_refuse_unless_acknowledged_and_stale_holders_do_not_refuse() {
     let first_plan = world.plan("first", &plan_of("first", vec![lifecycle()]));
     world
         .run_on(
-            command(
-                &world,
-                &["start", &first_plan.to_string_lossy(), "--detach"],
-            ),
+            world.cmd(&["start", &first_plan.to_string_lossy(), "--detach"]),
             "start first",
         )
         .exited(0);
@@ -54,7 +32,7 @@ fn live_holders_refuse_unless_acknowledged_and_stale_holders_do_not_refuse() {
     // Drive the first launch's real lifecycle while its dag-scope driver is
     // paused. This `round run` is the process that asks the linked `onevcs` to
     // open the session, and the held worker keeps both owner and session live.
-    let mut first_owner = command(&world, &["round", "run", "first"]);
+    let mut first_owner = world.cmd(&["round", "run", "first"]);
     let mut first_owner = first_owner
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -81,7 +59,7 @@ fn live_holders_refuse_unless_acknowledged_and_stale_holders_do_not_refuse() {
     let plan = world.plan("second", &plan_of("second", vec![lifecycle()]));
 
     let refused = world.run_on(
-        command(&world, &["start", &plan.to_string_lossy(), "--detach"]),
+        world.cmd(&["start", &plan.to_string_lossy(), "--detach"]),
         "start",
     );
     refused
@@ -92,15 +70,12 @@ fn live_holders_refuse_unless_acknowledged_and_stale_holders_do_not_refuse() {
         .err_has(&format!("owner_pid {owner_pid}"));
 
     let acknowledged = world.run_on(
-        command(
-            &world,
-            &[
-                "start",
-                &plan.to_string_lossy(),
-                "--detach",
-                "--acknowledge-concurrent",
-            ],
-        ),
+        world.cmd(&[
+            "start",
+            &plan.to_string_lossy(),
+            "--detach",
+            "--acknowledge-concurrent",
+        ]),
         "start --acknowledge-concurrent",
     );
     acknowledged
@@ -132,10 +107,7 @@ fn live_holders_refuse_unless_acknowledged_and_stale_holders_do_not_refuse() {
     let stale_plan = world.plan("third", &plan_of("third", vec![lifecycle()]));
     world
         .run_on(
-            command(
-                &world,
-                &["start", &stale_plan.to_string_lossy(), "--detach"],
-            ),
+            world.cmd(&["start", &stale_plan.to_string_lossy(), "--detach"]),
             "start stale",
         )
         .exited(0)

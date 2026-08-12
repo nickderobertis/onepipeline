@@ -305,19 +305,21 @@ fn list(args: &[String]) -> ExitCode {
 
 /// `gh pr view ID --repo R --json …`
 fn view(args: &[String], dir: &Path) -> ExitCode {
+    let fields = match args
+        .windows(2)
+        .find(|pair| pair[0] == "--json")
+        .map(|pair| pair[1].as_str())
+    {
+        Some("headRefOid") => "headRefOid",
+        Some("state,mergeCommit") => "state,mergeCommit",
+        Some("statusCheckRollup") => "statusCheckRollup",
+        _ => "number,state,mergeStateStatus,headRefOid,mergeCommit,statusCheckRollup",
+    };
     if let Err(refusal) = shaped(
         args,
         "pr view",
         3,
-        &[
-            ("--repo", Shape::Named),
-            (
-                "--json",
-                Shape::Exact(
-                    "number,state,mergeStateStatus,headRefOid,mergeCommit,statusCheckRollup",
-                ),
-            ),
-        ],
+        &[("--repo", Shape::Named), ("--json", Shape::Exact(fields))],
         &[],
     ) {
         return refusal;
