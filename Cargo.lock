@@ -282,6 +282,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "dunce"
+version = "1.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
+
+[[package]]
 name = "dyn-clone"
 version = "1.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -921,11 +927,12 @@ dependencies = [
 
 [[package]]
 name = "onevcs"
-version = "0.2.3"
+version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ece9f901d7826856dac76553b69d723e7725ef9636634fb81558406f2e7636f"
+checksum = "9fce58cadcc18bf92c265d3bebc2d9cc8474c99ca604b9316145a5aad9dfce10"
 dependencies = [
  "clap",
+ "dunce",
  "fs4",
  "libc",
  "serde",
