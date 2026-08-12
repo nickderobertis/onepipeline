@@ -90,6 +90,57 @@ fn launch_overrides_reach_the_graphs_that_actually_run() {
     );
 }
 
+/// The plan's persona is a graph setting, not merely a label on the dispatch.
+/// The real sibling's content-addressed run record proves that it resolved the
+/// requested persona while preparing the member that subsequently ran. That is
+/// evidence from the actual graph invocation, not this crate's event label.
+#[test]
+fn a_plan_persona_reaches_the_member_that_actually_runs() {
+    let world = World::new("real-plan-persona");
+    world.write_graphs();
+    std::fs::write(
+        world.graphs().join("requested-reviewer.yaml"),
+        "agent:\n  name: requested-reviewer\n  instructions: Review the change.\nuser:\n  persona: Demand evidence.\n",
+    )
+    .expect("the requested persona is written");
+    let mut node = agent("review", &[]);
+    node["persona"] = Value::from("./requested-reviewer.yaml");
+    let path = world.plan("plan-persona", &plan_of("plan-persona", vec![node]));
+
+    let started = world.run_on_agentgraph(&["start", &path.to_string_lossy(), "--attach"]);
+    started.exited(0).settled();
+
+    let invocations: Vec<Value> = world
+        .invocations()
+        .into_iter()
+        .filter(|call| {
+            call["tool"] == "oneharness-config"
+                && call["args"][0]
+                    .as_str()
+                    .is_some_and(|prompt| prompt.contains("Do review."))
+        })
+        .collect();
+    assert!(
+        !invocations.is_empty(),
+        "the node's member never ran: {invocations:?}"
+    );
+
+    let records: Vec<Value> = std::fs::read_dir(world.root.join("graph-state"))
+        .expect("oneagentgraph wrote its state root")
+        .filter_map(Result::ok)
+        .filter_map(|entry| std::fs::read_to_string(entry.path().join("record.json")).ok())
+        .filter_map(|text| serde_json::from_str(&text).ok())
+        .collect();
+    assert!(
+        records
+            .iter()
+            .any(|record| record["refs"].as_array().is_some_and(|refs| refs
+                .iter()
+                .any(|reference| { reference["origin"] == "./requested-reviewer.yaml" }))),
+        "the graph that dispatched the member did not resolve the plan's persona: {records:?}"
+    );
+}
+
 /// Node-scope overrides survive losing the driver that originally launched the
 /// run. The adopted driver, rather than the original one, dispatches the node.
 #[test]

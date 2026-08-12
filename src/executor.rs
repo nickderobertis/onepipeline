@@ -248,8 +248,13 @@ fn node_sets(labels: &Labels) -> Result<Vec<String>> {
         return Ok(Vec::new());
     };
     let paths = crate::ledger::RunPaths::under(&crate::ledger::runs_root(), run);
-    crate::ledger::read_json::<crate::ledger::LaunchRecord>(&paths.launch())
-        .map(|record| record.node_sets)
+    crate::ledger::read_json::<crate::ledger::LaunchRecord>(&paths.launch()).map(|record| {
+        let mut sets = record.node_sets;
+        if let Some(persona) = &labels.persona {
+            sets.push(format!("members.worker.persona={persona}"));
+        }
+        sets
+    })
 }
 
 /// One dispatch running on this machine.
