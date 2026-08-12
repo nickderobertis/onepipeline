@@ -1,6 +1,7 @@
 //! The repository-identity launch interlock, delegated to `onevcs`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -11,14 +12,14 @@ use crate::plan::Plan;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum Liveness {
+pub(crate) enum Liveness {
     Live,
     Stale,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum State {
+pub(crate) enum State {
     Open,
     Closed,
 }
@@ -26,20 +27,43 @@ pub enum State {
 /// One record returned by `onevcs session holders --json`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Holder {
-    pub token: String,
-    pub identity: String,
-    pub branch: String,
-    pub worktree: PathBuf,
-    pub owner_pid: u32,
-    pub state: State,
-    pub liveness: Liveness,
+pub(crate) struct Holder {
+    pub(crate) token: SessionToken,
+    pub(crate) identity: RepositoryIdentity,
+    pub(crate) branch: Branch,
+    pub(crate) worktree: PathBuf,
+    pub(crate) owner_pid: u32,
+    pub(crate) state: State,
+    pub(crate) liveness: Liveness,
 }
+
+macro_rules! boundary_string {
+    ($name:ident) => {
+        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+        #[serde(transparent)]
+        pub(crate) struct $name(String);
+
+        impl fmt::Display for $name {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                self.0.fmt(formatter)
+            }
+        }
+    };
+}
+
+boundary_string!(SessionToken);
+boundary_string!(RepositoryIdentity);
+boundary_string!(Branch);
 
 /// Ask `onevcs` about every distinct repository named by the plan.
 pub fn holders(plan: &Plan) -> Result<Vec<Holder>> {
-    let mut by_identity = BTreeMap::new();
-    for repo in plan.tasks.iter().filter_map(|node| node.repo.as_deref()) {
+    let repos: BTreeSet<_> = plan
+        .tasks
+        .iter()
+        .filter_map(|node| node.repo.as_deref())
+        .collect();
+    let mut by_identity_and_token = BTreeMap::new();
+    for repo in repos {
         let output = Command::new("onevcs")
             .args(["session", "holders", repo, "--json"])
             .output()
@@ -64,10 +88,10 @@ pub fn holders(plan: &Plan) -> Result<Vec<Holder>> {
             ))
         })?;
         for holder in found {
-            by_identity.insert((holder.identity.clone(), holder.token.clone()), holder);
+            by_identity_and_token.insert((holder.identity.clone(), holder.token.clone()), holder);
         }
     }
-    Ok(by_identity.into_values().collect())
+    Ok(by_identity_and_token.into_values().collect())
 }
 
 fn sibling(message: String) -> Error {

@@ -1,4 +1,8 @@
 //! Same-identity launch exclusion through the real `onevcs session holders` verb.
+// llmlint: ignore-file[e2e_not_mocked] the layer under test is the compiled launcher
+// and its released `onevcs` holders executable, both driven for real. Only the paid
+// model turn behind `oneagentgraph` uses the repository's established subprocess seam;
+// scripting it holds the first real owner process and real `onevcs` session open.
 
 use std::process::Stdio;
 
@@ -91,7 +95,7 @@ fn live_holders_refuse_unless_acknowledged_and_stale_holders_do_not_refuse() {
         audit["payload"]["shared_identities"],
         json!(["github.com/owner/service"])
     );
-    assert!(audit["payload"]["runs"]
+    assert!(audit["payload"]["runs"]["holding_sessions"]
         .as_array()
         .is_some_and(|runs| runs.iter().any(|run| run == &live_token)));
 

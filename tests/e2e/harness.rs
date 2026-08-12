@@ -817,12 +817,11 @@ pub fn binary() -> PathBuf {
 /// The path handed back is **never** the one cargo publishes. Every test runs in
 /// its own process and each builds the doubles, so several cargo invocations
 /// uplift the same `target/debug/<name>` — and an uplift is a remove followed by
-/// a link, so that name is briefly absent. A test that had already looked would
+/// a replacement, so that name is briefly absent. A test that had already looked would
 /// then spawn a binary that vanished under it: on macOS that surfaced both as a
 /// missing double and, worse, as a whole run stuck at `run-started` because the
-/// launcher could not start its driver. Linking each process its own name once
-/// closes the window — a link keeps the inode alive whatever cargo does to the
-/// name it was made from.
+/// launcher could not start its driver. Copying each process its own name once
+/// closes the window because later cargo uplifts do not touch that copy.
 pub fn double(name: &str) -> PathBuf {
     static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     let held = BUILT.get_or_init(|| build(&["--package", "onepipeline-testfakes"]));

@@ -231,22 +231,27 @@ fn start(args: &StartArgs) -> Result<i32> {
                     "shared_identities",
                     json!(live
                         .iter()
-                        .map(|holder| &holder.identity)
+                        .map(|holder| holder.identity.to_string())
                         .collect::<Vec<_>>()),
                 ),
                 (
                     "runs",
-                    json!(std::iter::once(&run)
-                        .chain(live.iter().map(|holder| &holder.token))
-                        .collect::<Vec<_>>()),
+                    json!({
+                        "launching": run,
+                        "holding_sessions": live
+                            .iter()
+                            .map(|holder| holder.token.to_string())
+                            .collect::<Vec<_>>(),
+                    }),
                 ),
                 (
                     "holders",
                     json!(live
                         .iter()
-                        .map(
-                            |holder| json!({"session": holder.token, "owner_pid": holder.owner_pid})
-                        )
+                        .map(|holder| json!({
+                            "session": holder.token.to_string(),
+                            "owner_pid": holder.owner_pid,
+                        }))
                         .collect::<Vec<_>>()),
                 ),
             ]),
