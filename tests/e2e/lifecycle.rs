@@ -10,20 +10,7 @@
 //! it, and, at `onevcs`'s own `ONEVCS_GH` seam, what GitHub does with the change
 //! request it is handed.
 //!
-//! **Not on Windows.** `onevcs` opens no session there at all, for a reason that
-//! is its own to fix; `real_vcs.rs` carries the tripwire that fails when it does,
-//! and that is the signal to drop this attribute.
-//!
 //! Ported from the lifecycle-node composition halves of `test_lifecycle_e2e`.
-
-// llmlint: ignore-file[live_tier_compiles_and_requires_credential] a lifecycle journey
-// cannot compile-and-run on Windows: `onevcs` opens no session there at all, because
-// `register` stores the verbatim `\\?\C:\…` form and `session open` hands it to `git clone`,
-// which reads it as a UNC URL and refuses. Neither half is this crate's to change —
-// divergence 18 in `docs/contract-divergences.md` is the proposal. The Windows leg runs
-// `the_real_onevcs_opens_no_session_on_windows_which_is_why_the_journeys_above_are_not_run_here`
-// instead, which fails when that stops being true and is the signal to delete this.
-#![cfg(not(windows))]
 
 // llmlint: ignore-file[e2e_not_mocked] the crate under test is driven as a real compiled
 // binary and the sibling these journeys are about — `onevcs` — is the real library, over
@@ -33,7 +20,7 @@
 // opened and merged offline. `harness.rs` carries the same suppression and the full
 // rationale.
 
-use crate::harness::{lifecycle, plan_of, Repository, World};
+use crate::harness::{double, lifecycle, plan_of, Repository, World};
 use serde_json::json;
 
 fn settle(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
@@ -76,15 +63,17 @@ fn published_locally(world: &World) -> Repository {
     world.repository("local-direct", &["true"])
 }
 
-/// A shell command a gate can be given, for a journey that needs the gate to do
+/// A command a gate can be given, for a journey that needs the gate to do
 /// something other than pass.
 ///
 /// The gate runs in the session's worktree, which sits at
 /// `$ONEVCS_HOME/<identity>/runs/<token>/worktree` — so the session's own token
 /// is the name of the directory above it, and a gate can address the stream that
 /// session is writing without this crate telling it one.
-fn gate(script: &str) -> Vec<String> {
-    vec!["bash".to_owned(), "-c".to_owned(), script.to_owned()]
+fn gate(args: &[&str]) -> Vec<String> {
+    std::iter::once(double("fake-gate").to_string_lossy().into_owned())
+        .chain(args.iter().map(|arg| (*arg).to_owned()))
+        .collect()
 }
 
 /// Every `onevcs`-produced event one run recorded, by kind.
@@ -552,13 +541,10 @@ fn a_publications_own_records_reach_the_journal_while_it_is_still_publishing() {
     let go = world.fakes.join("gate.go");
     world.repository(
         "local-direct",
-        &gate(&format!(
-            "until [ -f {} ]; do sleep 0.05; done",
-            go.display()
-        ))
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>(),
+        &gate(&["wait-for", &go.to_string_lossy()])
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
     );
     world.script("service.work", "the worker wrote this\n");
     let path = world.plan(
@@ -1169,14 +1155,10 @@ fn a_session_line_this_build_cannot_read_is_reported_and_does_not_fail_the_node(
     // repository's own code can reach it. Everything asserted is through the binary.
     //
     // The token is the name of the directory above the worktree the gate runs in.
+    let gate = gate(&["append-future-event"]);
     world.repository(
         "local-direct",
-        &[
-            "bash",
-            "-c",
-            "printf '%s\\n' '{\"from\":\"a newer onevcs\"}' \
-             >> \"$ONEVCS_HOME/streams/$(basename \"$(dirname \"$PWD\")\").ndjson\"",
-        ],
+        &gate.iter().map(String::as_str).collect::<Vec<_>>(),
     );
     // llmlint: ignore-end[tests_mirror_real_usage]
     world.script("service.work", "the worker wrote this\n");

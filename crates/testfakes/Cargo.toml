@@ -43,6 +43,12 @@ path = "src/bin/fake-gh.rs"
 name = "fake-oneharness"
 path = "src/bin/fake-oneharness.rs"
 
+# A repository-owned gate command. Unlike a shell script, this is the same
+# executable on every platform the lifecycle journeys exercise.
+[[bin]]
+name = "fake-gate"
+path = "src/bin/fake-gate.rs"
+
 [lib]
 name = "onepipeline_testfakes"
 path = "src/lib.rs"
