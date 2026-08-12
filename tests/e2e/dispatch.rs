@@ -90,6 +90,62 @@ fn launch_overrides_reach_the_graphs_that_actually_run() {
     );
 }
 
+/// Node-scope overrides survive losing the driver that originally launched the
+/// run. The adopted driver, rather than the original one, dispatches the node.
+#[test]
+fn adoption_retains_node_overrides_for_later_dispatches() {
+    let world = World::new("real-adopted-node-override");
+    world.write_graphs();
+    world.script("driver.wait", "hold");
+    std::fs::write(
+        world.graphs().join("adopted-node.toml"),
+        "run_mode = \"fallback\"\nharnesses = [\"claude-code\"]\n# ADOPTED_NODE_OVERRIDE\n",
+    )
+    .expect("the adopted node config is written");
+    let path = world.plan(
+        "adopted-override",
+        &plan_of("adopted-override", vec![agent("build", &[])]),
+    );
+    world
+        .run_on_agentgraph(&[
+            "start",
+            &path.to_string_lossy(),
+            "--detach",
+            "--node-set",
+            "members.worker.oneharness_config=./adopted-node.toml",
+        ])
+        .exited(0);
+
+    world.until("the original driver to park before dispatch", |world| {
+        let mut status = world.agentgraph_cmd(&["status", "adopted-override"]);
+        status.env("ONEPIPELINE_PARKED_AFTER_SECONDS", "1");
+        String::from_utf8_lossy(&status.output().expect("status runs").stdout).contains("PARKED")
+    });
+    // Only the original driver saw this rendezvous. Removing its trigger lets
+    // the fresh graph launched by adopt drive immediately, while the original
+    // remains held until the assertion is complete.
+    std::fs::remove_file(world.root.join("fakes/driver.wait")).expect("the adoption is not held");
+    let mut adopt = world.agentgraph_cmd(&["adopt", "adopted-override"]);
+    adopt.env("ONEPIPELINE_PARKED_AFTER_SECONDS", "1");
+    let adopted = world.run_on(adopt, "adopt adopted-override");
+    adopted.exited(0).settled();
+
+    let configs = world.invocations();
+    assert!(
+        configs.iter().any(|call| {
+            call["tool"] == "oneharness-config"
+                && call["args"][0]
+                    .as_str()
+                    .is_some_and(|prompt| prompt.contains("Do build."))
+                && call["args"][1]
+                    .as_str()
+                    .is_some_and(|config| config.contains("ADOPTED_NODE_OVERRIDE"))
+        }),
+        "the node dispatched after adoption did not run under its retained override: {configs:?}"
+    );
+    world.release("driver.go");
+}
+
 /// A whole run, dispatched through the real sibling: the plan is launched, its
 /// driver is a real graph run, the node's dispatch is another, and a member runs
 /// in each.
