@@ -909,7 +909,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
     // undocumented wire; a kind the contract lists and the enum does not carry is
     // a promise nothing keeps. `PIPELINE_KINDS` is what `Journal::emit` accepts,
     // so this is the emitted set and not a second copy of it.
-    assert_eq!(PIPELINE_KINDS.len(), 19, "the closed set changed size");
+    assert_eq!(PIPELINE_KINDS.len(), 20, "the closed set changed size");
     let listed: BTreeSet<String> = backticked()
         .into_iter()
         .filter(|token| {
@@ -962,7 +962,8 @@ fn a_relayed_envelope_keeps_its_producers_own_kind() {
 fn the_driver_contracts_invocation_parses_exactly_as_written() {
     let documented = "onepipeline start plan.json [--attach|--detach] \
                       [--round-budget 14400] [--heartbeat-interval 1800] \
-                      [--set PATH=VALUE]... [--node-set PATH=VALUE]...";
+                      [--set PATH=VALUE]... [--node-set PATH=VALUE]... \
+                      [--acknowledge-concurrent]";
     assert!(CONTRACT.contains(documented), "the driver invocation moved");
 
     let cli = Cli::try_parse_from([
@@ -980,6 +981,7 @@ fn the_driver_contracts_invocation_parses_exactly_as_written() {
         "--node-set",
         "members.worker.agent.model=node one",
         "--node-set=members.worker.judge.model=node=two",
+        "--acknowledge-concurrent",
     ])
     .expect("the documented invocation parses");
     let Command::Start(args) = cli.command else {
@@ -990,6 +992,7 @@ fn the_driver_contracts_invocation_parses_exactly_as_written() {
     assert!(!args.attach);
     assert_eq!(args.round_budget, 14_400);
     assert_eq!(args.heartbeat_interval, 1_800);
+    assert!(args.acknowledge_concurrent);
     assert_eq!(
         args.dag_sets,
         [

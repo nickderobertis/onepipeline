@@ -173,7 +173,30 @@ fn both_example_plans_start_a_real_run() {
     ] {
         let world = World::new(&format!("shipped-{run}"));
         world.script("driver.wait", "hold");
-        let plan = repo_file(&format!("examples/{name}"));
+        let mut parsed: serde_json::Value =
+            serde_json::from_str(&read(&format!("examples/{name}"))).expect("the example parses");
+        let mut repos = std::collections::BTreeMap::new();
+        for task in parsed["tasks"].as_array_mut().into_iter().flatten() {
+            if let Some(repo) = task["repo"].as_str().map(str::to_string) {
+                let checkout = world.root.join(repo.replace('/', "-"));
+                if repos.insert(repo.clone(), checkout.clone()).is_none() {
+                    std::fs::create_dir_all(&checkout).expect("an example checkout");
+                    let initialized = std::process::Command::new("git")
+                        .args(["init", "--initial-branch=main"])
+                        .arg(&checkout)
+                        .output()
+                        .expect("git initializes the example checkout");
+                    assert!(
+                        initialized.status.success(),
+                        "{}",
+                        String::from_utf8_lossy(&initialized.stderr)
+                    );
+                    world.register(&checkout, Some(&format!("https://github.com/{repo}.git")));
+                }
+                task["repo"] = serde_json::Value::String(checkout.to_string_lossy().into_owned());
+            }
+        }
+        let plan = world.plan(name, &parsed);
         world
             .run(&["start", &plan.to_string_lossy(), "--detach"])
             .exited(0)
