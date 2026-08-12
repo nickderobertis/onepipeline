@@ -466,10 +466,11 @@ fn a_worker_that_goes_quiet_is_surfaced_without_blocking_the_round() {
     // non-blocking: the round's other workers are not stopped to ask.
     let surfaced = world.surfaced("quiet", "quiet-worker");
     assert_eq!(surfaced["payload"]["blocking"], false);
-    assert!(surfaced["payload"]["message"]
-        .as_str()
-        .expect("a message")
-        .contains("nothing recorded since it was dispatched"));
+    let message = surfaced["payload"]["message"].as_str().expect("a message");
+    assert!(
+        message.contains("nothing recorded since it was dispatched"),
+        "the quiet-worker surface said: {message:?}"
+    );
 
     // Written before the surface was raised, so it is there once the surface is.
     let reported = world.events_of("quiet", "quiet-worker");
