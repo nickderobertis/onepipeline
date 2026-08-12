@@ -10,20 +10,7 @@
 //! it, and, at `onevcs`'s own `ONEVCS_GH` seam, what GitHub does with the change
 //! request it is handed.
 //!
-//! **Not on Windows.** `onevcs` opens no session there at all, for a reason that
-//! is its own to fix; `real_vcs.rs` carries the tripwire that fails when it does,
-//! and that is the signal to drop this attribute.
-//!
 //! Ported from the lifecycle-node composition halves of `test_lifecycle_e2e`.
-
-// llmlint: ignore-file[live_tier_compiles_and_requires_credential] a lifecycle journey
-// cannot compile-and-run on Windows: `onevcs` opens no session there at all, because
-// `register` stores the verbatim `\\?\C:\…` form and `session open` hands it to `git clone`,
-// which reads it as a UNC URL and refuses. Neither half is this crate's to change —
-// divergence 18 in `docs/contract-divergences.md` is the proposal. The Windows leg runs
-// `the_real_onevcs_opens_no_session_on_windows_which_is_why_the_journeys_above_are_not_run_here`
-// instead, which fails when that stops being true and is the signal to delete this.
-#![cfg(not(windows))]
 
 // llmlint: ignore-file[e2e_not_mocked] the crate under test is driven as a real compiled
 // binary and the sibling these journeys are about — `onevcs` — is the real library, over
