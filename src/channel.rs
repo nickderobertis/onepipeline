@@ -73,8 +73,10 @@ pub enum Dependents {
 
 /// One graph edit.
 ///
-/// The variants and their required fields are the live-edit protocol's table,
-/// unchanged.
+/// The variants and their required fields are the live-edit protocol's table.
+/// `context` carries one field beyond it, [`Deliver`], which is optional and
+/// defaults to what that table's `context` always did — so an edit written
+/// against the table alone is still exactly the edit it was.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "lowercase", deny_unknown_fields)]
 pub enum Command {

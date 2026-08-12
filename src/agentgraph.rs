@@ -647,12 +647,39 @@ pub fn reset_timer(run: &str, member: &str) -> Result<()> {
 /// crate has no second way to know either. A node whose dispatch has not
 /// produced one yet has no address, which is the same answer as a node with no
 /// turn to reach.
+///
+/// The fields are private and [`of`](Self::of) is the only way to build one, so
+/// an address that exists is one the verb can act on: a blank run id or a member
+/// name that would name a path outside the run is not an address this type can
+/// hold. The member is judged by the **sibling's own** predicate, because that
+/// is the rule the verb applies and a second copy of it here would drift.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnAddress {
     /// The `oneagentgraph` run — not this crate's, which is a different run.
-    pub run: String,
+    run: String,
     /// The member within it whose turn is in flight.
-    pub member: String,
+    member: String,
+}
+
+impl TurnAddress {
+    /// One address, or `None` when what was read is not one.
+    pub fn of(run: &str, member: &str) -> Option<Self> {
+        let (run, member) = (run.trim(), member.trim());
+        (!run.is_empty() && oneagentgraph::config::is_member_name(member)).then(|| Self {
+            run: run.to_string(),
+            member: member.to_string(),
+        })
+    }
+
+    /// The graph run this turn belongs to.
+    pub fn run(&self) -> &str {
+        &self.run
+    }
+
+    /// The member within it.
+    pub fn member(&self) -> &str {
+        &self.member
+    }
 }
 
 /// What one `oneagentgraph interrupt` answered.
@@ -697,14 +724,21 @@ pub struct Interrupt {
 pub fn interrupt(address: &TurnAddress, input: &str) -> Interrupt {
     let output = Command::new(binary())
         .arg("interrupt")
-        .arg(&address.run)
-        .arg(&address.member)
+        .arg(address.run())
+        .arg(address.member())
         .arg("--input")
         .arg(input)
         .stdin(Stdio::null())
         .output();
     let output = match output {
         Ok(output) => output,
+        // llmlint: ignore-block[changed_behavior_has_e2e] no invocation a user can type
+        // reaches this arm. The executable is resolved from one variable the whole run
+        // inherits, and a run whose `oneagentgraph` is missing fails at its launch — the
+        // journey would be over before a `context` edit could be submitted to it. The unit
+        // test below drives this function directly, which is the only entry point that
+        // exists for it; `tests/e2e/context_delivery.rs` drives every arm a run can reach,
+        // including a delivery the sibling attempted and failed.
         Err(error) => {
             return Interrupt {
                 outcome: Interrupted::Failed(format!(
@@ -713,12 +747,25 @@ pub fn interrupt(address: &TurnAddress, input: &str) -> Interrupt {
                 )),
                 events: Vec::new(),
             }
-        }
+        } // llmlint: ignore-end[changed_behavior_has_e2e]
     };
+    // A line this build cannot read is skipped rather than ending the read — a
+    // sibling emitting a shape this build does not know must not stop the ones
+    // it does — but never *quietly*: the same rule, and the same report, as the
+    // relayed run stream a few lines up.
+    let mut skipped = 0;
     let events: Vec<Envelope> = String::from_utf8_lossy(&output.stdout)
         .lines()
-        .filter_map(|line| serde_json::from_str::<Envelope>(line.trim()).ok())
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| match serde_json::from_str::<Envelope>(line.trim()) {
+            Ok(envelope) => Some(envelope),
+            Err(_) => {
+                skipped += 1;
+                None
+            }
+        })
         .collect();
+    report_skipped(skipped);
     // The published event's own words first, because that is where the verb puts
     // the reason a delivery did not land; its exit code says which kind of
     // answer it is.
@@ -743,15 +790,15 @@ pub fn interrupt(address: &TurnAddress, input: &str) -> Interrupt {
         Some(code) => Interrupted::Failed(format!(
             "`{} interrupt {} {}` exited {code}: {}",
             binary(),
-            address.run,
-            address.member,
+            address.run(),
+            address.member(),
             reason()
         )),
         None => Interrupted::Failed(format!(
             "`{} interrupt {} {}` was ended by a signal",
             binary(),
-            address.run,
-            address.member
+            address.run(),
+            address.member()
         )),
     };
     Interrupt { outcome, events }

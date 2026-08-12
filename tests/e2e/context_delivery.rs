@@ -22,6 +22,24 @@
 use crate::harness::{agent, plan_of, World, REFUSED};
 use serde_json::{json, Value};
 
+/// Start a run with a held node and a second node that never dispatches at all,
+/// which is the other way a `live` note can find nothing to deliver into.
+fn held_beside_a_pending_node(world: &World, name: &str) -> String {
+    world.script("slow.turn-open", "");
+    world.script("slow.wait", "hold");
+    let path = world.plan(
+        name,
+        &plan_of(name, vec![agent("slow", &[]), agent("later", &["slow"])]),
+    );
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+    world.until("the held node's turn to open", |world| {
+        !world.events_of(name, "turn-started").is_empty()
+    });
+    name.to_string()
+}
+
 /// The note a planner writes at the moment it matters: a correction the worker
 /// has to act on now, not after it has finished the wrong work.
 const NOTE: &str = "the fixture moved to tests/data; stop editing src/old.rs";
@@ -230,6 +248,74 @@ fn live_refuses_with_a_reason_when_the_note_cannot_reach_a_running_turn() {
     assert_eq!(interrupted[0]["payload"]["delivered"], json!(false));
 
     world.release("slow.go");
+}
+
+/// The other way `live` finds nothing to deliver into: a node that has no
+/// dispatch at all, so there is no turn to address and the refusal comes before
+/// the lever is reached for.
+#[test]
+fn live_refuses_a_node_that_has_no_dispatch_without_reaching_for_a_lever() {
+    let world = World::new("context-live-unstarted");
+    let run = held_beside_a_pending_node(&world, "liveunstarted");
+
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([{"op": "context", "id": "later", "note": NOTE, "deliver": "live"}])),
+        )
+        .exited(REFUSED)
+        .err_has("has no controllable turn in flight");
+
+    assert!(
+        !world.was_invoked("oneagentgraph", &["interrupt"]),
+        "a node with no dispatch had an interrupt sent for it: {:?}",
+        world.invocations()
+    );
+    assert!(world.events_of(&run, "turn-interrupted").is_empty());
+
+    world.release("slow.go");
+}
+
+/// A note the running turn took is *delivered*, so the round after it starts
+/// clean: the transition does not re-state a correction the worker has already
+/// acted on.
+#[test]
+fn a_live_note_is_not_carried_into_the_round_after_it() {
+    let world = World::new("context-live-not-carried");
+    // It fails, so the node is carried into a second round — which is exactly
+    // where a note that was still owed would show up.
+    world.script("slow.fail", "1");
+    let run = held(&world, "livecarry", "slow");
+
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([{"op": "context", "id": "slow", "note": NOTE}])),
+        )
+        .exited(0);
+    world.until("the note to be committed", |world| {
+        delivery(world, &run).is_some()
+    });
+    assert_eq!(delivery(&world, &run).as_deref(), Some("live"));
+
+    world.release("slow.go");
+    world.until("the round to finish", |world| {
+        !world.events_of(&run, "round-finished").is_empty()
+    });
+    world.run(&["round", "next", &run]).exited(0);
+
+    let carried = world.run_json(&run, "round-02/plan.json")["tasks"]
+        .as_array()
+        .expect("tasks")
+        .iter()
+        .find(|node| node["id"] == "slow")
+        .expect("the failed node is carried")
+        .clone();
+    assert_eq!(
+        carried["context"],
+        Value::Null,
+        "a note the running turn already read was carried into the next round: {carried}"
+    );
 }
 
 /// A delivery that was attempted and *broke* is neither of the other two

@@ -432,17 +432,10 @@ fn addressed_by(envelope: &Envelope) -> Option<TurnAddress> {
     if envelope.source != crate::event::Source::Agentgraph {
         return None;
     }
-    Some(TurnAddress {
-        run: envelope.labels.run_id.clone()?,
-        member: envelope
-            .labels
-            .extra
-            .get("member")?
-            .as_str()?
-            .trim()
-            .to_string(),
-    })
-    .filter(|address| !address.run.is_empty() && !address.member.is_empty())
+    TurnAddress::of(
+        envelope.labels.run_id.as_deref()?,
+        envelope.labels.extra.get("member")?.as_str()?,
+    )
 }
 
 /// Whether any node could still change state without an edit or an attestation.
@@ -1578,10 +1571,7 @@ mod tests {
                 Some("node-scope-1786304152340-19"),
                 Some("worker")
             )),
-            Some(TurnAddress {
-                run: "node-scope-1786304152340-19".into(),
-                member: "worker".into(),
-            })
+            TurnAddress::of("node-scope-1786304152340-19", "worker")
         );
         for unaddressable in [
             // This crate's own event, whose `run_id` is this run rather than a
@@ -1593,6 +1583,9 @@ mod tests {
             envelope(Source::Agentgraph, None, Some("worker")),
             envelope(Source::Agentgraph, Some("graph-1"), Some("   ")),
             envelope(Source::Agentgraph, Some(""), Some("worker")),
+            // A member name that would name a path outside the run: the
+            // sibling's own predicate refuses it, so this crate never sends it.
+            envelope(Source::Agentgraph, Some("graph-1"), Some("../elsewhere")),
         ] {
             assert_eq!(
                 addressed_by(&unaddressable),
