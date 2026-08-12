@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.7](https://github.com/nickderobertis/onepipeline/compare/v0.1.6...v0.1.7) - 2026-08-12
+
+### Added
+
+- deliver a context note into the running turn ([#17](https://github.com/nickderobertis/onepipeline/pull/17))
+
 ## [0.1.6](https://github.com/nickderobertis/onepipeline/compare/v0.1.5...v0.1.6) - 2026-08-11
 
 ### Changed
