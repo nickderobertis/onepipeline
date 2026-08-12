@@ -104,6 +104,18 @@ fn sibling(message: impl Into<String>) -> Error {
     }
 }
 
+/// How a process of the sibling's ended, in words.
+///
+/// One phrasing for both ways a process can stop, so a caller reporting a
+/// refusal never has to branch on which: a signal leaves no code, and reading
+/// that absence as a code would report `exited 0` for a killed process.
+fn ended(status: &std::process::ExitStatus) -> String {
+    status.code().map_or_else(
+        || "was ended by a signal".to_string(),
+        |code| format!("exited {code}"),
+    )
+}
+
 /// Whether a line the graph wrote is an envelope this build can read.
 ///
 /// What the startup handshake accepts as an announcement, so the bar is the
@@ -460,13 +472,10 @@ impl GraphRun {
 
     /// A launch the graph ended instead of driving.
     fn refused(&mut self, status: std::process::ExitStatus) -> Result<()> {
-        let ended = status.code().map_or_else(
-            || "was ended by a signal".to_string(),
-            |code| format!("exited {code}"),
-        );
         Err(sibling(format!(
-            "`{} run` {ended} instead of driving the run: {}",
+            "`{} run` {} instead of driving the run: {}",
             binary(),
+            ended(&status),
             self.evidence()
         )))
     }
@@ -784,21 +793,20 @@ pub fn interrupt(address: &TurnAddress, input: &str) -> Interrupt {
                 }
             })
     };
+    // Three answers, and everything that is not one of the first two is the
+    // third: a delivery that broke is one outcome however the process ended, so
+    // a signal and a non-zero exit take the same arm and differ only in the
+    // words [`ended`] gives them.
     let outcome = match output.status.code() {
         Some(oneagentgraph::error::EXIT_SUCCESS) => Interrupted::Delivered,
         Some(oneagentgraph::error::EXIT_NO_CONTROLLABLE_TURN) => Interrupted::NoTurn(reason()),
-        Some(code) => Interrupted::Failed(format!(
-            "`{} interrupt {} {}` exited {code}: {}",
+        _ => Interrupted::Failed(format!(
+            "`{} interrupt {} {}` {}: {}",
             binary(),
             address.run(),
             address.member(),
+            ended(&output.status),
             reason()
-        )),
-        None => Interrupted::Failed(format!(
-            "`{} interrupt {} {}` was ended by a signal",
-            binary(),
-            address.run(),
-            address.member()
         )),
     };
     Interrupt { outcome, events }

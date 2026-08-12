@@ -149,6 +149,12 @@ fn interrupt(args: &[String], dir: &std::path::Path) -> ExitCode {
         ),
     };
 
+    // A line from a build whose envelope shape this one cannot read, emitted
+    // *before* the good one, so a reader that stopped at it would lose the
+    // answer that follows.
+    if dir.join("interrupt.unreadable").exists() {
+        println!("{{\"from\":\"a newer oneagentgraph\"}}");
+    }
     println!(
         "{}",
         serde_json::json!({
@@ -406,14 +412,30 @@ fn open_turn(args: &[String], dir: &std::path::Path, key: &str, node: &str, step
     if dir.join(format!("{key}.no-lever")).exists() {
         return;
     }
+    // Written, not attempted: a record this double failed to write reads to
+    // every later `interrupt` as a member with no controllable turn, which is a
+    // real scenario this suite scripts on purpose. A setup failure wearing that
+    // answer's clothes would pass the `auto` fall-through journey while proving
+    // nothing, so it ends the process instead — the same rule `fake::append`
+    // holds for the invocation log.
     let record = turn_record(dir, &graph_run());
     if let Some(parent) = record.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        if let Err(error) = std::fs::create_dir_all(parent) {
+            fake::fail(&format!(
+                "cannot make {} to open a turn in: {error}",
+                parent.display()
+            ));
+        }
     }
-    let _ = std::fs::write(
+    if let Err(error) = std::fs::write(
         &record,
         serde_json::json!({"key": key, "member": "worker"}).to_string(),
-    );
+    ) {
+        fake::fail(&format!(
+            "cannot open a turn at {}: {error}",
+            record.display()
+        ));
+    }
 }
 
 /// The turn is over, so nothing can be delivered into it any more.

@@ -318,6 +318,45 @@ fn a_live_note_is_not_carried_into_the_round_after_it() {
     );
 }
 
+/// A newer sibling's envelope shape on the interrupt stream does not cost the
+/// answer that follows it: the unreadable line is skipped and the delivery
+/// still lands.
+#[test]
+fn a_line_this_build_cannot_read_does_not_lose_the_delivery_behind_it() {
+    let world = World::new("context-unreadable");
+    world.script("interrupt.unreadable", "");
+    let run = held(&world, "unreadable", "slow");
+
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([{"op": "context", "id": "slow", "note": NOTE}])),
+        )
+        .exited(0);
+    world.until("the note to be committed", |world| {
+        delivery(world, &run).is_some()
+    });
+    assert_eq!(
+        delivery(&world, &run).as_deref(),
+        Some("live"),
+        "an unreadable line before the answer lost the answer"
+    );
+    // The readable envelope still reached the merged store, and the one this
+    // build cannot read did not.
+    let interrupted = world.events_of(&run, "turn-interrupted");
+    assert_eq!(interrupted.len(), 1, "{interrupted:?}");
+    assert_eq!(interrupted[0]["payload"]["delivered"], json!(true));
+
+    world.release("slow.go");
+    world.until("the run to settle", |world| {
+        !world.events_of(&run, "round-finished").is_empty()
+    });
+    assert_eq!(
+        activity(&world, &run, "slow")["payload"]["redirected"],
+        NOTE
+    );
+}
+
 /// A delivery that was attempted and *broke* is neither of the other two
 /// answers, and neither mode hides it: a planner told `deferred` when the truth
 /// is that the lever failed has been told something that is not so.
