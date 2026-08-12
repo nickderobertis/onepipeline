@@ -101,6 +101,9 @@ pub struct StartArgs {
     /// node's `oneagentgraph run`, in command-line order.
     #[arg(long = "node-set", value_name = "PATH=VALUE")]
     pub node_sets: Vec<String>,
+    /// Proceed even when another live session holds a targeted repository.
+    #[arg(long)]
+    pub acknowledge_concurrent: bool,
 }
 
 /// The engine verbs, guarded by the run ownership lock: single writer.

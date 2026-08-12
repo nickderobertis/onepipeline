@@ -24,6 +24,7 @@ use crate::cli::{
     AttestArgs, ChannelCommand, Cli, OptionalRunArgs, ReplyArgs, RoundCommand, RunArgs, RunsArgs,
     StartArgs, StopArgs, SurfaceArgs, TelemetryArgs, TranscriptArgs,
 };
+use crate::concurrency::{self, Liveness, State};
 use crate::edits;
 use crate::engine;
 use crate::error::{Error, Result, EXIT_NOTHING_DRIVING, EXIT_QUEUED, EXIT_SUCCESS};
@@ -150,6 +151,50 @@ fn start(args: &StartArgs) -> Result<i32> {
 
     let root = ledger::runs_root();
     let run = mint_run_id(&plan, &args.plan, &root);
+    let holders = concurrency::holders(&plan)?;
+    for holder in holders
+        .iter()
+        .filter(|holder| holder.state == State::Open && holder.liveness == Liveness::Stale)
+    {
+        eprintln!(
+            "onepipeline: stale repository holder: identity '{}' session '{}' owner_pid {}; proceeding",
+            holder.identity, holder.token, holder.owner_pid
+        );
+    }
+    let live: Vec<_> = holders
+        .iter()
+        .filter(|holder| holder.state == State::Open && holder.liveness == Liveness::Live)
+        .collect();
+    if !live.is_empty() && !args.acknowledge_concurrent {
+        let shared = live
+            .iter()
+            .map(|holder| {
+                format!(
+                    "identity '{}' held by session '{}' (owner_pid {})",
+                    holder.identity, holder.token, holder.owner_pid
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(Error::Refused(format!(
+            "concurrent project work refused for run '{run}': {shared}; pass --acknowledge-concurrent to proceed deliberately"
+        )));
+    }
+    if !live.is_empty() {
+        let shared = live
+            .iter()
+            .map(|holder| {
+                format!(
+                    "'{}' with session '{}' (owner_pid {})",
+                    holder.identity, holder.token, holder.owner_pid
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        eprintln!(
+            "onepipeline: --acknowledge-concurrent: launch '{run}' is proceeding alongside live run(s): {shared}"
+        );
+    }
     let paths = RunPaths::under(&root, &run);
     paths.create()?;
     ledger::write_json(&paths.plan(), &plan)?;
@@ -177,6 +222,36 @@ fn start(args: &StartArgs) -> Result<i32> {
     };
 
     let mut open = Journal::open(&paths);
+    if !live.is_empty() {
+        open.emit(
+            journal::PipelineKind::ConcurrentAcknowledged,
+            journal::labels(&run, None, None),
+            journal::payload(&[
+                (
+                    "shared_identities",
+                    json!(live
+                        .iter()
+                        .map(|holder| &holder.identity)
+                        .collect::<Vec<_>>()),
+                ),
+                (
+                    "runs",
+                    json!(std::iter::once(&run)
+                        .chain(live.iter().map(|holder| &holder.token))
+                        .collect::<Vec<_>>()),
+                ),
+                (
+                    "holders",
+                    json!(live
+                        .iter()
+                        .map(
+                            |holder| json!({"session": holder.token, "owner_pid": holder.owner_pid})
+                        )
+                        .collect::<Vec<_>>()),
+                ),
+            ]),
+        )?;
+    }
     open.emit(
         journal::PipelineKind::RunStarted,
         journal::labels(&run, None, None),

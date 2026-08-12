@@ -192,6 +192,7 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
                 state.plan = Some(plan);
             }
         }
+        Some(journal::PipelineKind::ConcurrentAcknowledged) => {}
         Some(journal::PipelineKind::RoundStarted) => {
             state.round = event.labels.round.unwrap_or(state.round + 1);
             state.round_open = true;

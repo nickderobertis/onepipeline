@@ -14,7 +14,7 @@ resolver = "2"
 # oracle for a build nothing runs.
 [workspace.dependencies]
 oneagentgraph = "0.2.4"
-onevcs = "0.2.1"
+onevcs = "0.2.3"
 
 [package]
 name = "onepipeline"
@@ -104,7 +104,7 @@ windows-sys = { version = "0.61", features = [
 # must stay one: what it implements must never be reachable from a release
 # binary.
 [dev-dependencies]
-onevcs-testing = "0.1.1"
+onevcs-testing = "0.1.3"
 
 [[test]]
 name = "e2e"

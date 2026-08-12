@@ -120,6 +120,8 @@ pub struct Labels {
 pub enum PipelineKind {
     /// The run was launched.
     RunStarted,
+    /// A launch deliberately proceeded beside live repository holders.
+    ConcurrentAcknowledged,
     /// A round began executing.
     RoundStarted,
     /// A round stopped executing, with the state it settled in.
@@ -163,6 +165,7 @@ impl PipelineKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::RunStarted => "run-started",
+            Self::ConcurrentAcknowledged => "concurrent-acknowledged",
             Self::RoundStarted => "round-started",
             Self::RoundFinished => "round-finished",
             Self::NodeDispatched => "node-dispatched",
@@ -211,6 +214,7 @@ impl From<PipelineKind> for EventKind {
 /// Every kind, for the lookup above and for the contract's own list.
 pub const PIPELINE_KINDS: &[PipelineKind] = &[
     PipelineKind::RunStarted,
+    PipelineKind::ConcurrentAcknowledged,
     PipelineKind::RoundStarted,
     PipelineKind::RoundFinished,
     PipelineKind::NodeDispatched,

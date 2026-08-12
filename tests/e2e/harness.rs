@@ -842,6 +842,13 @@ pub fn oneagentgraph_binary() -> PathBuf {
     held_copy(held, "oneagentgraph")
 }
 
+/// The released `onevcs` executable whose holders verb the launcher consumes.
+pub fn onevcs_binary() -> PathBuf {
+    static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    let held = BUILT.get_or_init(|| build(&["--package", "onevcs", "--bin", "onevcs", "--locked"]));
+    held_copy(held, "onevcs")
+}
+
 /// Build one package's binaries into the target directory this test's own binary
 /// came out of, and return the per-process directory they are held in.
 fn build(selection: &[&str]) -> PathBuf {
