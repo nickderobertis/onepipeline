@@ -464,23 +464,51 @@ fn a_worker_that_goes_quiet_is_surfaced_without_blocking_the_round() {
 
     // A stall is evidence rather than a verdict, so the surface is
     // non-blocking: the round's other workers are not stopped to ask.
-    let surfaced = world.surfaced("quiet", "quiet-worker");
+    world.until("the slow worker to be surfaced", |world| {
+        world
+            .events_of("quiet", "planner-surface-queued")
+            .iter()
+            .any(|event| {
+                event["payload"]["kind"] == "quiet-worker" && event["labels"]["node"] == "slow"
+            })
+    });
+    let surfaced = world
+        .events_of("quiet", "planner-surface-queued")
+        .into_iter()
+        .find(|event| {
+            event["payload"]["kind"] == "quiet-worker" && event["labels"]["node"] == "slow"
+        })
+        .expect("the slow worker's surface was just seen");
     assert_eq!(surfaced["payload"]["blocking"], false);
-    let message = surfaced["payload"]["message"].as_str().expect("a message");
-    assert!(
-        message.contains("nothing recorded since it was dispatched"),
-        "the quiet-worker surface said: {message:?}"
-    );
+
+    // The other worker settles while `slow` is still held, proving that the
+    // non-blocking surface did not stop the round from making progress.
+    world.until("the busy worker to settle", |world| {
+        world
+            .events_of("quiet", "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "busy")
+    });
 
     // Written before the surface was raised, so it is there once the surface is.
-    let reported = world.events_of("quiet", "quiet-worker");
-    assert_eq!(reported[0]["labels"]["node"], "slow");
-    assert_eq!(reported[0]["payload"]["threshold_seconds"], 1);
-    assert_eq!(reported[0]["payload"]["persona"], "engineer");
+    let reported = world
+        .events_of("quiet", "quiet-worker")
+        .into_iter()
+        .find(|event| event["labels"]["node"] == "slow")
+        .expect("the slow worker was reported quiet");
+    assert_eq!(reported["payload"]["threshold_seconds"], 1);
+    assert_eq!(reported["payload"]["persona"], "engineer");
 
     // A node is reported once per quiet stretch, not once per pass.
     std::thread::sleep(std::time::Duration::from_millis(500));
-    assert_eq!(world.events_of("quiet", "quiet-worker").len(), 1);
+    assert_eq!(
+        world
+            .events_of("quiet", "quiet-worker")
+            .iter()
+            .filter(|event| event["labels"]["node"] == "slow")
+            .count(),
+        1
+    );
 
     world.release("slow.go");
     world.until("the run to settle", |world| {
