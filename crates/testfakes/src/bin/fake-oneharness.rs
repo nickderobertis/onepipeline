@@ -63,6 +63,11 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
             "oneharness run was given --config {config}, which is not a file"
         ));
     }
+    let config_text = match std::fs::read_to_string(&config) {
+        Ok(text) => text,
+        Err(error) => return fake::refuse(&format!("cannot read --config {config}: {error}")),
+    };
+    fake::record(dir, "oneharness-config", &[prompt.clone(), config_text]);
     if !std::path::Path::new(&cwd).is_dir() {
         return fake::refuse(&format!(
             "oneharness run was given --cwd {cwd}, which is not a directory"

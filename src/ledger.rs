@@ -241,6 +241,12 @@ pub struct LaunchRecord {
     pub round_budget: u64,
     /// The pacemaker interval, in seconds.
     pub heartbeat_interval: u64,
+    /// Opaque overrides replayed on the dag-scope graph launch.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dag_sets: Vec<String>,
+    /// Opaque overrides replayed on every node-scope graph launch.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub node_sets: Vec<String>,
     /// How many times a fresh driver has been attached by `adopt`.
     #[serde(default)]
     pub adoptions: u32,
@@ -610,6 +616,8 @@ mod tests {
             started_at: sys::now_rfc3339(),
             round_budget: 1,
             heartbeat_interval: 1,
+            dag_sets: Vec::new(),
+            node_sets: Vec::new(),
             adoptions: 0,
         };
         assert!(!record.owned_by(sys::UNKNOWN_LAUNCHER));
@@ -629,6 +637,8 @@ mod tests {
             started_at: sys::now_rfc3339(),
             round_budget: 1,
             heartbeat_interval: 1,
+            dag_sets: Vec::new(),
+            node_sets: Vec::new(),
             adoptions: 0,
         };
         let label = record.owner_label("mine");

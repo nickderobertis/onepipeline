@@ -171,6 +171,8 @@ fn start(args: &StartArgs) -> Result<i32> {
         started_at: sys::now_rfc3339(),
         round_budget: args.round_budget,
         heartbeat_interval: args.heartbeat_interval,
+        dag_sets: args.dag_sets.clone(),
+        node_sets: args.node_sets.clone(),
         adoptions: 0,
     };
 
@@ -259,6 +261,7 @@ fn launch_graph(
                 ledger::runs_root().to_string_lossy().into_owned(),
             ),
         ],
+        &record.dag_sets,
         output,
     )?;
     // A launcher is the one caller that never waits for what it started, so a

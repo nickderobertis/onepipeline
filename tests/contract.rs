@@ -961,7 +961,8 @@ fn a_relayed_envelope_keeps_its_producers_own_kind() {
 #[test]
 fn the_driver_contracts_invocation_parses_exactly_as_written() {
     let documented = "onepipeline start plan.json [--attach|--detach] \
-                      [--round-budget 14400] [--heartbeat-interval 1800]";
+                      [--round-budget 14400] [--heartbeat-interval 1800] \
+                      [--set PATH=VALUE]... [--node-set PATH=VALUE]...";
     assert!(CONTRACT.contains(documented), "the driver invocation moved");
 
     let cli = Cli::try_parse_from([
@@ -973,6 +974,12 @@ fn the_driver_contracts_invocation_parses_exactly_as_written() {
         "14400",
         "--heartbeat-interval",
         "1800",
+        "--set",
+        "members.orchestrator.agent.model=dag one",
+        "--set=members.check-in.model=dag=two",
+        "--node-set",
+        "members.worker.agent.model=node one",
+        "--node-set=members.worker.judge.model=node=two",
     ])
     .expect("the documented invocation parses");
     let Command::Start(args) = cli.command else {
@@ -983,6 +990,20 @@ fn the_driver_contracts_invocation_parses_exactly_as_written() {
     assert!(!args.attach);
     assert_eq!(args.round_budget, 14_400);
     assert_eq!(args.heartbeat_interval, 1_800);
+    assert_eq!(
+        args.dag_sets,
+        [
+            "members.orchestrator.agent.model=dag one",
+            "members.check-in.model=dag=two"
+        ]
+    );
+    assert_eq!(
+        args.node_sets,
+        [
+            "members.worker.agent.model=node one",
+            "members.worker.judge.model=node=two"
+        ]
+    );
 
     // The document's numbers are this crate's defaults.
     assert_eq!(DEFAULT_ROUND_BUDGET_SECONDS, 14_400);

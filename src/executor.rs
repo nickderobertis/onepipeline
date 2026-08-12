@@ -222,12 +222,14 @@ impl Executor for LocalExecutor {
             }
         };
         // Relayed: this dispatch is read turn by turn into the merged store.
+        let node_sets = node_sets(&req.labels)?;
         let run = GraphRun::start(
             &req.graph.0,
             &req.task,
             Some(&dir),
             &req.labels,
             &[],
+            &node_sets,
             GraphOutput::Relayed,
         )?;
         Ok(Box::new(LocalDispatch {
@@ -237,6 +239,17 @@ impl Executor for LocalExecutor {
             session,
         }))
     }
+}
+
+/// Read the run's opaque node-scope overrides at the last responsible moment.
+/// The labels already identify the launch ledger for every local dispatch.
+fn node_sets(labels: &Labels) -> Result<Vec<String>> {
+    let Some(run) = labels.run_id.as_deref() else {
+        return Ok(Vec::new());
+    };
+    let paths = crate::ledger::RunPaths::under(&crate::ledger::runs_root(), run);
+    crate::ledger::read_json::<crate::ledger::LaunchRecord>(&paths.launch())
+        .map(|record| record.node_sets)
 }
 
 /// One dispatch running on this machine.

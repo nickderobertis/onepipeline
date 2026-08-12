@@ -93,6 +93,14 @@ pub struct StartArgs {
     /// How often the durable planner-update pacemaker comes due, in seconds.
     #[arg(long, value_name = "SECONDS", default_value_t = DEFAULT_HEARTBEAT_INTERVAL_SECONDS)]
     pub heartbeat_interval: u64,
+    /// Override one dag-scope graph config field. Passed opaquely to
+    /// `oneagentgraph run`, in command-line order.
+    #[arg(long = "set", value_name = "PATH=VALUE")]
+    pub dag_sets: Vec<String>,
+    /// Override one node-scope graph config field. Passed opaquely to every
+    /// node's `oneagentgraph run`, in command-line order.
+    #[arg(long = "node-set", value_name = "PATH=VALUE")]
+    pub node_sets: Vec<String>,
 }
 
 /// The engine verbs, guarded by the run ownership lock: single writer.
