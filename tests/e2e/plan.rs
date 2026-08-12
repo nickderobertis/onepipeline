@@ -425,8 +425,8 @@ fn a_json_plan_keeps_json_escape_semantics_all_the_way_to_the_dispatch() {
     let relayed = world
         .journal("emoji")
         .into_iter()
-        .find(|event| event["source"] == "agentgraph")
-        .expect("the dispatch relayed an envelope");
+        .find(|event| event["source"] == "agentgraph" && event["kind"] == "turn-activity")
+        .expect("the dispatch relayed what it was doing");
     let task = relayed["payload"]["task"].as_str().expect("the task prose");
     assert!(
         task.starts_with('\u{1f600}'),

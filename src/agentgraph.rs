@@ -104,6 +104,18 @@ fn sibling(message: impl Into<String>) -> Error {
     }
 }
 
+/// How a process of the sibling's ended, in words.
+///
+/// One phrasing for both ways a process can stop, so a caller reporting a
+/// refusal never has to branch on which: a signal leaves no code, and reading
+/// that absence as a code would report `exited 0` for a killed process.
+fn ended(status: &std::process::ExitStatus) -> String {
+    status.code().map_or_else(
+        || "was ended by a signal".to_string(),
+        |code| format!("exited {code}"),
+    )
+}
+
 /// Whether a line the graph wrote is an envelope this build can read.
 ///
 /// What the startup handshake accepts as an announcement, so the bar is the
@@ -460,13 +472,10 @@ impl GraphRun {
 
     /// A launch the graph ended instead of driving.
     fn refused(&mut self, status: std::process::ExitStatus) -> Result<()> {
-        let ended = status.code().map_or_else(
-            || "was ended by a signal".to_string(),
-            |code| format!("exited {code}"),
-        );
         Err(sibling(format!(
-            "`{} run` {ended} instead of driving the run: {}",
+            "`{} run` {} instead of driving the run: {}",
             binary(),
+            ended(&status),
             self.evidence()
         )))
     }
@@ -640,6 +649,169 @@ pub fn reset_timer(run: &str, member: &str) -> Result<()> {
     )))
 }
 
+/// Where one member's in-flight turn is addressed.
+///
+/// Read off the sibling's own relayed envelopes rather than derived: the graph
+/// run's id and the member within it are labels `oneagentgraph` stamps, and this
+/// crate has no second way to know either. A node whose dispatch has not
+/// produced one yet has no address, which is the same answer as a node with no
+/// turn to reach.
+///
+/// The fields are private and [`of`](Self::of) is the only way to build one, so
+/// an address that exists is one the verb can act on: a blank run id or a member
+/// name that would name a path outside the run is not an address this type can
+/// hold. The member is judged by the **sibling's own** predicate, because that
+/// is the rule the verb applies and a second copy of it here would drift.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnAddress {
+    /// The `oneagentgraph` run — not this crate's, which is a different run.
+    run: String,
+    /// The member within it whose turn is in flight.
+    member: String,
+}
+
+impl TurnAddress {
+    /// One address, or `None` when what was read is not one.
+    pub fn of(run: &str, member: &str) -> Option<Self> {
+        let (run, member) = (run.trim(), member.trim());
+        (!run.is_empty() && oneagentgraph::config::is_member_name(member)).then(|| Self {
+            run: run.to_string(),
+            member: member.to_string(),
+        })
+    }
+
+    /// The graph run this turn belongs to.
+    pub fn run(&self) -> &str {
+        &self.run
+    }
+
+    /// The member within it.
+    pub fn member(&self) -> &str {
+        &self.member
+    }
+}
+
+/// What one `oneagentgraph interrupt` answered.
+///
+/// The three outcomes are not interchangeable, which is the whole reason that
+/// verb has an exit code of its own for the middle one: a redirection that
+/// landed, a **fact** that there was no controllable turn to land it in, and a
+/// lever that was pulled and broke.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Interrupted {
+    /// The running turn took the redirection.
+    Delivered,
+    /// There was no controllable turn in flight, and this is which reason
+    /// applied. Not an error: the member may be between turns, already settled,
+    /// or running on a harness with no out-of-band control at all.
+    NoTurn(String),
+    /// The delivery was attempted and failed, or was one the sibling refused.
+    Failed(String),
+}
+
+/// The envelopes an `interrupt` produced, and what it answered.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Interrupt {
+    /// Delivered, no turn, or failed.
+    pub outcome: Interrupted,
+    /// The `turn-interrupted` envelope the verb published, for the merged
+    /// store. It is emitted for every interrupt, delivered or not, so "the lever
+    /// was pulled and nothing happened" reaches the run's own record.
+    pub events: Vec<Envelope>,
+}
+
+/// Ask a member's in-flight turn to do something else.
+///
+/// The whole mechanism is `oneagentgraph`'s: which harnesses have a lever, where
+/// the socket is, and what a turn does with a redirection are all decided there,
+/// and nothing about them is rebuilt here. This composes that verb and reads its
+/// exit code — including [`EXIT_NO_CONTROLLABLE_TURN`], which is a fact rather
+/// than a failure and is what the `auto` fall-through and the `live` refusal are
+/// both made of.
+///
+/// [`EXIT_NO_CONTROLLABLE_TURN`]: oneagentgraph::error::EXIT_NO_CONTROLLABLE_TURN
+pub fn interrupt(address: &TurnAddress, input: &str) -> Interrupt {
+    let output = Command::new(binary())
+        .arg("interrupt")
+        .arg(address.run())
+        .arg(address.member())
+        .arg("--input")
+        .arg(input)
+        .stdin(Stdio::null())
+        .output();
+    let output = match output {
+        Ok(output) => output,
+        // llmlint: ignore-block[changed_behavior_has_e2e] no invocation a user can type
+        // reaches this arm. The executable is resolved from one variable the whole run
+        // inherits, and a run whose `oneagentgraph` is missing fails at its launch — the
+        // journey would be over before a `context` edit could be submitted to it. The unit
+        // test below drives this function directly, which is the only entry point that
+        // exists for it; `tests/e2e/context_delivery.rs` drives every arm a run can reach,
+        // including a delivery the sibling attempted and failed.
+        Err(error) => {
+            return Interrupt {
+                outcome: Interrupted::Failed(format!(
+                    "cannot start `{} interrupt`: {error}",
+                    binary()
+                )),
+                events: Vec::new(),
+            }
+        } // llmlint: ignore-end[changed_behavior_has_e2e]
+    };
+    // A line this build cannot read is skipped rather than ending the read — a
+    // sibling emitting a shape this build does not know must not stop the ones
+    // it does — but never *quietly*: the same rule, and the same report, as the
+    // relayed run stream a few lines up.
+    let mut skipped = 0;
+    let events: Vec<Envelope> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| match serde_json::from_str::<Envelope>(line.trim()) {
+            Ok(envelope) => Some(envelope),
+            Err(_) => {
+                skipped += 1;
+                None
+            }
+        })
+        .collect();
+    report_skipped(skipped);
+    // The published event's own words first, because that is where the verb puts
+    // the reason a delivery did not land; its exit code says which kind of
+    // answer it is.
+    let reason = || {
+        events
+            .iter()
+            .rev()
+            .find_map(|event| event.payload.get("reason").and_then(|v| v.as_str()))
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                if stderr.is_empty() {
+                    "it said nothing".to_string()
+                } else {
+                    stderr
+                }
+            })
+    };
+    // Three answers, and everything that is not one of the first two is the
+    // third: a delivery that broke is one outcome however the process ended, so
+    // a signal and a non-zero exit take the same arm and differ only in the
+    // words [`ended`] gives them.
+    let outcome = match output.status.code() {
+        Some(oneagentgraph::error::EXIT_SUCCESS) => Interrupted::Delivered,
+        Some(oneagentgraph::error::EXIT_NO_CONTROLLABLE_TURN) => Interrupted::NoTurn(reason()),
+        _ => Interrupted::Failed(format!(
+            "`{} interrupt {} {}` {}: {}",
+            binary(),
+            address.run(),
+            address.member(),
+            ended(&output.status),
+            reason()
+        )),
+    };
+    Interrupt { outcome, events }
+}
+
 /// The provider-health block a view reports, sourced from `oneagentgraph
 /// health`.
 ///
@@ -765,6 +937,37 @@ mod tests {
         let untouched = labels.clone();
         adopt_labels(&mut labels);
         assert_eq!(labels, untouched);
+    }
+
+    /// A sibling that is not installed is a delivery that *failed*, not a turn
+    /// that was found to be absent. The two are different exit codes on the
+    /// verb and different answers to the planner: one defers the note under
+    /// `auto`, and this one refuses it.
+    ///
+    /// The seam is named rather than left to `PATH` — `oneagentgraph` is a
+    /// published CLI, so a host that has it installed would otherwise decide
+    /// this assertion. nextest runs each test in its own process, so the
+    /// variable reaches nothing else.
+    #[test]
+    fn an_oneagentgraph_that_cannot_be_started_is_a_failed_delivery() {
+        std::env::set_var(BINARY_ENV, "oneagentgraph-that-is-not-installed");
+        let interrupt = interrupt(
+            &TurnAddress {
+                run: "node-scope-1".into(),
+                member: "worker".into(),
+            },
+            "the fixture moved",
+        );
+        assert!(
+            matches!(&interrupt.outcome, Interrupted::Failed(reason)
+                if reason.contains("oneagentgraph-that-is-not-installed")),
+            "{:?} does not name the binary that could not be started",
+            interrupt.outcome
+        );
+        assert!(
+            interrupt.events.is_empty(),
+            "a delivery nothing ran produced envelopes"
+        );
     }
 
     #[test]

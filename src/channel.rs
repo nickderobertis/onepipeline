@@ -73,8 +73,10 @@ pub enum Dependents {
 
 /// One graph edit.
 ///
-/// The variants and their required fields are the live-edit protocol's table,
-/// unchanged.
+/// The variants and their required fields are the live-edit protocol's table.
+/// `context` carries one field beyond it, [`Deliver`], which is optional and
+/// defaults to what that table's `context` always did — so an edit written
+/// against the table alone is still exactly the edit it was.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "lowercase", deny_unknown_fields)]
 pub enum Command {
@@ -134,14 +136,45 @@ pub enum Command {
         /// Why the planner considers the run complete.
         reason: String,
     },
-    /// Attach one planner note to the node's next dispatch, without cancelling
-    /// or restarting anything.
+    /// Carry one planner note to the node, without cancelling or restarting
+    /// anything.
     Context {
         /// The node the note is for.
         id: String,
         /// The note. It carries exactly one round.
         note: String,
+        /// When the note reaches the node. Omitted, it is [`Deliver::Auto`],
+        /// which is what every `context` edit written before this field got.
+        #[serde(default, skip_serializing_if = "Deliver::is_auto")]
+        deliver: Deliver,
     },
+}
+
+/// When a `context` note reaches the node it is for.
+///
+/// The default is [`Auto`](Self::Auto), so a `context` edit that says nothing
+/// gains live delivery wherever the harness supports one and behaves exactly as
+/// it always did where it does not. A value outside these three is refused by
+/// serde, naming what it read — this is external input like any other field.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Deliver {
+    /// Into the node's running turn when it has a controllable one, and onto its
+    /// next dispatch when it does not.
+    #[default]
+    Auto,
+    /// Into the node's running turn, or refused with the reason it could not be.
+    /// A planner who needs the correction *now* is not silently deferred.
+    Live,
+    /// Onto the node's next dispatch, and only there.
+    Next,
+}
+
+impl Deliver {
+    /// Whether this is the default, so serialization can omit it.
+    fn is_auto(&self) -> bool {
+        matches!(self, Self::Auto)
+    }
 }
 
 /// What a planner surface is asking about.

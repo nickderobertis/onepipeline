@@ -1,8 +1,8 @@
 //! A real `oneagentgraph` executable, scripted from a directory.
 //!
-//! It speaks the sibling's command surface — `run`, `reset-timer`, `health` —
-//! emits envelope NDJSON on stdout, and records every invocation so a test can
-//! assert on what `onepipeline` actually asked for.
+//! It speaks the sibling's command surface — `run`, `reset-timer`, `interrupt`,
+//! `health` — emits envelope NDJSON on stdout, and records every invocation so a
+//! test can assert on what `onepipeline` actually asked for.
 //!
 //! It stands in for the real `oneagentgraph` so a journey can *state* a scenario
 //! — a node that fails its gate, a dispatch held open, a driver that dies —
@@ -37,6 +37,7 @@ fn main() -> ExitCode {
     match args.first().map(String::as_str) {
         Some("run") => run(&args, &dir),
         Some("reset-timer") => reset_timer(&args, &dir),
+        Some("interrupt") => interrupt(&args, &dir),
         Some("health") => {
             println!("fake-provider: 1 identity bound, 0% utilized");
             ExitCode::SUCCESS
@@ -56,6 +57,124 @@ fn reset_timer(args: &[String], dir: &std::path::Path) -> ExitCode {
     if dir.join("reset-timer.fail").exists() {
         eprintln!("no resettable schedule named that member");
         return ExitCode::from(2);
+    }
+    ExitCode::SUCCESS
+}
+
+/// The exit code the real CLI answers "no controllable turn in flight" with —
+/// its own constant, because that code is a *fact* rather than a failure and is
+/// what this crate's `auto` fall-through and `live` refusal are both built on.
+fn no_controllable_turn() -> ExitCode {
+    ExitCode::from(u8::try_from(oneagentgraph::error::EXIT_NO_CONTROLLABLE_TURN).unwrap_or(1))
+}
+
+/// Where a dispatch records that it has a turn an `interrupt` can reach.
+///
+/// Keyed by the *graph run's* id, because that is the only handle `interrupt`
+/// is given, and holding the member beside it so an interrupt naming another
+/// member of the same run finds no turn — which is the answer the real verb
+/// gives.
+fn turn_record(dir: &std::path::Path, run: &str) -> std::path::PathBuf {
+    dir.join("turns").join(fake::segment(run))
+}
+
+/// `oneagentgraph interrupt RUN MEMBER [--input TEXT]`
+///
+/// Its three answers are the real verb's, and each is scripted by the state a
+/// held dispatch left behind rather than by a file the test writes: a run with a
+/// turn open takes the redirection and exits 0, and one with none — never
+/// opened, closed at settlement, or opened by another member — exits
+/// [`EXIT_NO_CONTROLLABLE_TURN`] with the reason. Both publish the
+/// `turn-interrupted` envelope, because the real verb publishes it either way.
+///
+/// [`EXIT_NO_CONTROLLABLE_TURN`]: oneagentgraph::error::EXIT_NO_CONTROLLABLE_TURN
+fn interrupt(args: &[String], dir: &std::path::Path) -> ExitCode {
+    let run = match fake::required(args, 1, "RUN") {
+        Ok(run) => run,
+        Err(refusal) => return refusal,
+    };
+    let member = match fake::required(args, 2, "MEMBER") {
+        Ok(member) => member,
+        Err(refusal) => return refusal,
+    };
+    // The sibling's own rule, through the sibling's own predicate: the member
+    // becomes a path there, so a name that is not one is refused before
+    // anything is addressed.
+    if !oneagentgraph::config::is_member_name(&member) {
+        eprintln!("oneagentgraph: member {member:?} would name a path outside the run");
+        return invalid_config();
+    }
+    let input = fake::flag(args, "--input");
+    // A blank redirection stops the turn and says nothing, which is `cancel`
+    // spelled the long way round — the real verb refuses it rather than
+    // delivering it.
+    if input.as_deref().is_some_and(|text| text.trim().is_empty()) {
+        eprintln!("oneagentgraph: --input: a redirection with no words in it says nothing");
+        return invalid_config();
+    }
+
+    // A lever that broke: the delivery was attempted and failed, which the real
+    // verb reports on stderr with the member-failed code rather than with the
+    // "no turn" one. The distinction is the whole reason that code exists.
+    if dir.join("interrupt.fail").exists() {
+        eprintln!(
+            "oneagentgraph: {run}: could not interrupt member {member}: the control socket refused"
+        );
+        return ExitCode::from(u8::try_from(oneagentgraph::error::EXIT_MEMBER_FAILED).unwrap_or(1));
+    }
+
+    let open = std::fs::read_to_string(turn_record(dir, &run))
+        .ok()
+        .and_then(|held| serde_json::from_str::<serde_json::Value>(&held).ok());
+    let holding = open
+        .as_ref()
+        .filter(|held| held["member"] == serde_json::Value::String(member.clone()))
+        .and_then(|held| held["key"].as_str().map(str::to_string));
+
+    let reason = match &holding {
+        Some(key) => {
+            // What the running turn was told to do instead. The dispatch reads
+            // it back when it is released, which is what makes a delivered
+            // redirection change what the worker did rather than only what the
+            // ledger says.
+            if let Some(text) = &input {
+                fake::append(&dir.join(format!("{key}.redirect")), text);
+            }
+            None
+        }
+        None => Some(
+            "this member opened no controllable turn: its run is not listening, or the turn \
+             has already ended"
+                .to_string(),
+        ),
+    };
+
+    // A line from a build whose envelope shape this one cannot read, emitted
+    // *before* the good one, so a reader that stopped at it would lose the
+    // answer that follows.
+    if dir.join("interrupt.unreadable").exists() {
+        println!("{{\"from\":\"a newer oneagentgraph\"}}");
+    }
+    println!(
+        "{}",
+        serde_json::json!({
+            "v": 1,
+            "ts": fake::now(),
+            "stream": format!("{run}-interrupt-{}", std::process::id()),
+            "seq": 0,
+            "source": "agentgraph",
+            "kind": "turn-interrupted",
+            "labels": {"run_id": run, "member": member},
+            "payload": {
+                "member": member,
+                "delivered": reason.is_none(),
+                "input_bytes": input.as_ref().map_or(0, String::len),
+                "reason": reason,
+            },
+        })
+    );
+    if reason.is_some() {
+        return no_controllable_turn();
     }
     ExitCode::SUCCESS
 }
@@ -145,15 +264,35 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         (None, _) => node.clone(),
     };
 
+    // A dispatch scripted to produce *nothing* produces nothing at all — not
+    // even the announcement a turn opens with. That is the whole case boundary
+    // retry exists for, and a double that spoke first would turn every one of
+    // those scenarios into an attempt that answered.
+    let silent = dir.join(format!("{key}.silent")).exists();
+
+    // `<key>.turn-open` announces the member and its turn *before* the work,
+    // as the real sibling announces one, and leaves the turn addressable for as
+    // long as the dispatch runs — which is what a live `context` delivery
+    // reaches. A plain hold is the other scenario and stays the default: a
+    // dispatch that has started and recorded nothing yet, which is what the
+    // stall watch and the `UNDRIVEN` node row are about.
+    if !silent && dir.join(format!("{key}.turn-open")).exists() {
+        open_turn(args, dir, &key, &node, step.as_deref());
+    }
+
     // Hold the dispatch open until the test releases it, so an edit, a stall
     // watch, or a driver death can happen while a node is genuinely in flight.
     if dir.join(format!("{key}.wait")).exists() {
         fake::wait_for(&dir.join(format!("{key}.go")));
     }
+    // Whatever an `interrupt` delivered while the turn was held. Read after the
+    // hold, because that is when the running turn would have acted on it.
+    let redirected = fake::node_script(dir, &key, "redirect");
+    close_turn(dir);
 
     // A dispatch that produces nothing and fails is the case boundary retry
     // exists for: the failure carries no work to lose.
-    if dir.join(format!("{key}.silent")).exists() {
+    if silent {
         let attempts = dir.join(format!("{key}.attempts"));
         fake::append(&attempts, "attempt");
         let so_far = std::fs::read_to_string(&attempts)
@@ -184,7 +323,15 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     if dir.join(format!("{key}.unreadable")).exists() {
         println!("{{\"from\":\"a newer oneagentgraph\"}}");
     }
-    emit(args, &node, step.as_deref(), &task);
+    emit(args, &node, step.as_deref(), &task, redirected.as_deref());
+
+    // A redirection the running turn took changes what it *did*, not only what
+    // it said: the work it leaves in the workspace is the redirection's, under a
+    // name a journey can look for. This is the whole difference between a note
+    // that was accepted and one that landed.
+    if let Some(text) = &redirected {
+        write_work(args, &format!("{}-redirected", fake::segment(&key)), text);
+    }
 
     // A dispatch that changed nothing is a branch with nothing to publish, so a
     // journey that means to reach a real publication says what its worker wrote.
@@ -192,24 +339,7 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     // dispatch, and a file appearing in the workspace would be a change nobody
     // asked for.
     if let Some(body) = fake::node_script(dir, &key, "work") {
-        let Some(workspace) = fake::flag(args, "--dir") else {
-            fake::fail("a scripted `work` needs the dispatch's --dir to write into");
-        };
-        // `--dir` is this process's external input, and a scripted write is the
-        // one thing here that touches a path outside its own scratch. The real
-        // `oneagentgraph` resolves a workspace before it prepares a member, so a
-        // value that is not one is a misconfigured test rather than a scenario.
-        let workspace = std::path::Path::new(&workspace);
-        if !workspace.is_dir() {
-            fake::fail(&format!(
-                "a scripted `work` was given --dir {}, which is not a directory",
-                workspace.display()
-            ));
-        }
-        let path = workspace.join(format!("{}.md", fake::segment(&key)));
-        if let Err(error) = std::fs::write(&path, body) {
-            fake::fail(&format!("cannot write {}: {error}", path.display()));
-        }
+        write_work(args, &fake::segment(&key), &body);
     }
 
     if let Some(code) = fake::node_script(dir, &key, "fail") {
@@ -225,6 +355,92 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         return ExitCode::from(code);
     }
     ExitCode::SUCCESS
+}
+
+/// Write one document into the dispatch's workspace.
+///
+/// `--dir` is this process's external input, and these writes are the one thing
+/// here that touches a path outside its own scratch. The real `oneagentgraph`
+/// resolves a workspace before it prepares a member, so a value that is not one
+/// is a misconfigured test rather than a scenario.
+fn write_work(args: &[String], name: &str, body: &str) {
+    let Some(workspace) = fake::flag(args, "--dir") else {
+        fake::fail("writing a dispatch's work needs its --dir to write into");
+    };
+    let workspace = std::path::Path::new(&workspace);
+    if !workspace.is_dir() {
+        fake::fail(&format!(
+            "a dispatch was given --dir {}, which is not a directory",
+            workspace.display()
+        ));
+    }
+    let path = workspace.join(format!("{name}.md"));
+    if let Err(error) = std::fs::write(&path, body) {
+        fake::fail(&format!("cannot write {}: {error}", path.display()));
+    }
+}
+
+/// Announce the member and the turn it is starting, and record where that turn
+/// can be reached.
+///
+/// Two envelopes the real sibling really emits, in the order it emits them, and
+/// both carrying the member — which is half the address an `interrupt` takes.
+/// The other half is the graph run's own id, which every envelope already
+/// carries.
+///
+/// A member with no lever at all is scripted with `<key>.no-lever`: it announces
+/// its turn like any other and records nothing, so an `interrupt` finds no turn
+/// to reach. That is the case a harness without out-of-band control produces,
+/// and it is the one `auto` must fall through on.
+fn open_turn(args: &[String], dir: &std::path::Path, key: &str, node: &str, step: Option<&str>) {
+    let labels = member_labels(args, node, step);
+    for (seq, kind) in [(0, "member-started"), (1, "turn-started")] {
+        println!(
+            "{}",
+            serde_json::json!({
+                "v": 1,
+                "ts": fake::now(),
+                "stream": stream(),
+                "seq": seq,
+                "source": "agentgraph",
+                "kind": kind,
+                "labels": labels,
+                "payload": {},
+            })
+        );
+    }
+    if dir.join(format!("{key}.no-lever")).exists() {
+        return;
+    }
+    // Written, not attempted: a record this double failed to write reads to
+    // every later `interrupt` as a member with no controllable turn, which is a
+    // real scenario this suite scripts on purpose. A setup failure wearing that
+    // answer's clothes would pass the `auto` fall-through journey while proving
+    // nothing, so it ends the process instead — the same rule `fake::append`
+    // holds for the invocation log.
+    let record = turn_record(dir, &graph_run());
+    if let Some(parent) = record.parent() {
+        if let Err(error) = std::fs::create_dir_all(parent) {
+            fake::fail(&format!(
+                "cannot make {} to open a turn in: {error}",
+                parent.display()
+            ));
+        }
+    }
+    if let Err(error) = std::fs::write(
+        &record,
+        serde_json::json!({"key": key, "member": "worker"}).to_string(),
+    ) {
+        fake::fail(&format!(
+            "cannot open a turn at {}: {error}",
+            record.display()
+        ));
+    }
+}
+
+/// The turn is over, so nothing can be delivered into it any more.
+fn close_turn(dir: &std::path::Path) {
+    let _ = std::fs::remove_file(turn_record(dir, &graph_run()));
 }
 
 /// Announce the run, as the sibling's first line does.
@@ -259,6 +475,26 @@ fn stamped(args: &[String]) -> serde_json::Map<String, serde_json::Value> {
     labels
 }
 
+/// The labels every envelope one member produces carries.
+///
+/// The sibling's own — its run and the member within it, which together are what
+/// an `interrupt` addresses a turn by — plus the node and step this run is
+/// acting out. Those two are stated rather than echoed: a node with no `--label`
+/// of its own still belongs to one.
+fn member_labels(
+    args: &[String],
+    node: &str,
+    step: Option<&str>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut labels = stamped(args);
+    labels.insert("member".to_string(), "worker".into());
+    labels.insert("onepipeline.node".to_string(), node.into());
+    if let Some(step) = step {
+        labels.insert("onepipeline.step".to_string(), step.into());
+    }
+    labels
+}
+
 /// This graph run's own id, which is not the id of the run that started it.
 fn graph_run() -> String {
     format!("fake-graph-{}", std::process::id())
@@ -277,16 +513,13 @@ fn stream() -> String {
 /// with a kind of its own would be an oracle for a stream nothing produces —
 /// the same weakness that let every dispatch be refused while this suite stayed
 /// green.
-fn emit(args: &[String], node: &str, step: Option<&str>, task: &str) {
-    let mut labels = stamped(args);
-    labels.insert("member".to_string(), "worker".into());
-    // The node and the step are what the run being acted out is, so they are
-    // stated rather than echoed: a node with no `--label` of its own still
-    // belongs to one.
-    labels.insert("onepipeline.node".to_string(), node.into());
-    if let Some(step) = step {
-        labels.insert("onepipeline.step".to_string(), step.into());
-    }
+///
+/// `redirected` is what an `interrupt` delivered into this turn while it ran, if
+/// anything did. It rides the activity summary because that is where the sibling
+/// reports what the turn is doing, and a turn that took a redirection is doing
+/// something else.
+fn emit(args: &[String], node: &str, step: Option<&str>, task: &str, redirected: Option<&str>) {
+    let labels = member_labels(args, node, step);
     let envelope = |seq: u64, kind: &str, payload: serde_json::Value| {
         println!(
             "{}",
@@ -304,7 +537,7 @@ fn emit(args: &[String], node: &str, step: Option<&str>, task: &str) {
     };
 
     envelope(
-        1,
+        2,
         "turn-activity",
         serde_json::json!({
             "kind": "tool_call",
@@ -317,11 +550,13 @@ fn emit(args: &[String], node: &str, step: Option<&str>, task: &str) {
             "dir": fake::flag(args, "--dir"),
             // A pr-author dispatch answers with the title it drafted.
             "title": drafted_title(task),
+            // What this turn was told to do instead, while it was running.
+            "redirected": redirected,
         }),
     );
     let report = report_of(task);
     envelope(
-        2,
+        3,
         "turn-completed",
         serde_json::json!({"usage": report["usage"]}),
     );
@@ -394,7 +629,7 @@ fn emit(args: &[String], node: &str, step: Option<&str>, task: &str) {
             .then(|| path.clone())
     };
     envelope(
-        3,
+        4,
         "member-settled",
         serde_json::json!({
             "completed": true,

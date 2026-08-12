@@ -13,7 +13,7 @@ resolver = "2"
 # calling its parser — because a double that accepted more than the sibling is an
 # oracle for a build nothing runs.
 [workspace.dependencies]
-oneagentgraph = "0.2.2"
+oneagentgraph = "0.2.3"
 onevcs = "0.2.1"
 
 [package]

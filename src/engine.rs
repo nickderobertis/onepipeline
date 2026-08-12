@@ -19,7 +19,8 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::channel::{ChannelState, Command, CommandOutcome, Surface};
+use crate::agentgraph::{self, Interrupted, TurnAddress};
+use crate::channel::{ChannelState, Command, CommandOutcome, Deliver, Surface};
 use crate::edits;
 use crate::error::{Error, Result};
 use crate::event::{Envelope, Labels};
@@ -238,6 +239,10 @@ struct Dispatch {
     /// worker that wakes up, works, and goes quiet again is reported again; one
     /// that simply stays quiet is not repeated.
     reported_quiet: bool,
+    /// Where this dispatch's in-flight turn is addressed, once its stream has
+    /// said. `None` until then, which is the same answer as a turn there is no
+    /// lever for: a `context` note has nothing to be delivered into.
+    control: Option<TurnAddress>,
 }
 
 /// Execute the run's open round, opening one if none is.
@@ -379,6 +384,9 @@ fn converge(
                     if let Some(dispatch) = in_flight.get_mut(&node) {
                         dispatch.last_activity = Instant::now();
                         dispatch.reported_quiet = false;
+                        if let Some(address) = addressed_by(&envelope) {
+                            dispatch.control = Some(address);
+                        }
                     }
                 }
                 journal.relay(&envelope)?;
@@ -411,6 +419,25 @@ fn converge(
     Ok(graph::state_of(&state.statuses()))
 }
 
+/// Where a relayed envelope says its member's turn can be reached.
+///
+/// `oneagentgraph` stamps its own run id and the member on every envelope one of
+/// its members produces, and those two values are exactly what its `interrupt`
+/// addresses a turn by. This crate has no second way to learn either — a graph
+/// run is not this run, and which member a node's graph runs is the graph's
+/// business — so the address is read off the stream and kept current: the latest
+/// envelope wins, because that is the turn a note aimed at the node now would be
+/// correcting.
+fn addressed_by(envelope: &Envelope) -> Option<TurnAddress> {
+    if envelope.source != crate::event::Source::Agentgraph {
+        return None;
+    }
+    TurnAddress::of(
+        envelope.labels.run_id.as_deref()?,
+        envelope.labels.extra.get("member")?.as_str()?,
+    )
+}
+
 /// Whether any node could still change state without an edit or an attestation.
 ///
 /// A node that is `ready` has not started yet and one that is `running` has not
@@ -438,8 +465,7 @@ fn reconcile_edits(
         let mut applied = true;
         let mut reason = None;
         for command in &envelope.commands {
-            let mut candidate = state.graph.clone();
-            match edits::compile(&mut candidate, &state.frontier(), command) {
+            match compile_and_deliver(journal, state, command, in_flight) {
                 Ok(operations) => {
                     // Dropping or retrying a running node raises its
                     // cooperative cancellation signal: the dispatch stops and,
@@ -517,6 +543,97 @@ fn reconcile_edits(
         })?;
     }
     Ok(())
+}
+
+/// Validate one command, carry a `context` note into the running turn where its
+/// mode asks for that, and compile what actually happened.
+///
+/// The order matters both ways. Validation first, because a note must not be
+/// pushed into a live turn on behalf of an edit the reconciler is about to
+/// refuse; delivery before the compile that is recorded, because *how* the note
+/// reached the node is part of the mutation — a note the turn took is not also
+/// owed to the next dispatch.
+fn compile_and_deliver(
+    journal: &mut Journal,
+    state: &RunState,
+    command: &Command,
+    in_flight: &BTreeMap<String, Dispatch>,
+) -> Result<Vec<edits::Operation>> {
+    let frontier = state.frontier();
+    let mut candidate = state.graph.clone();
+    let operations = edits::compile(&mut candidate, &frontier, command)?;
+    let Command::Context { id, note, deliver } = command else {
+        return Ok(operations);
+    };
+    let delivery = deliver_note(journal, *deliver, id, note, in_flight)?;
+    if delivery == edits::Delivery::Deferred {
+        return Ok(operations);
+    }
+    let mut candidate = state.graph.clone();
+    edits::compile_with(&mut candidate, &frontier, command, delivery)
+}
+
+/// Carry one note into a node's running turn, as far as its mode asks.
+///
+/// `oneagentgraph interrupt`'s exit 3 — no controllable turn in flight — is the
+/// answer this is built around, and it is a **fact** rather than a failure: it
+/// is what `auto` falls through on and what `live` refuses on. A delivery that
+/// was attempted and *broke* is neither, and is refused under both modes: a
+/// planner told `deferred` when the truth is that the lever failed has been told
+/// something that is not so.
+fn deliver_note(
+    journal: &mut Journal,
+    deliver: Deliver,
+    id: &str,
+    note: &str,
+    in_flight: &BTreeMap<String, Dispatch>,
+) -> Result<edits::Delivery> {
+    if deliver == Deliver::Next {
+        return Ok(edits::Delivery::Deferred);
+    }
+    let Some(address) = in_flight
+        .get(id)
+        .and_then(|dispatch| dispatch.control.clone())
+    else {
+        return not_live(
+            deliver,
+            id,
+            "it has no turn this run can address: nothing of its dispatch has \
+             reported a member yet, or it has no dispatch at all",
+        );
+    };
+    let interrupt = agentgraph::interrupt(&address, note);
+    // Whatever it answered, the sibling published an envelope saying the lever
+    // was pulled and what came of it. It belongs in the merged store like any
+    // other envelope this crate's processes produce — stamped with the node it
+    // is about, which its producer could not know.
+    for event in interrupt.events {
+        let mut event = event;
+        if event.labels.node.is_none() {
+            event.labels.node = Some(id.to_string());
+        }
+        journal.relay(&event)?;
+    }
+    match interrupt.outcome {
+        Interrupted::Delivered => Ok(edits::Delivery::Live),
+        Interrupted::NoTurn(reason) => not_live(deliver, id, &reason),
+        Interrupted::Failed(reason) => Err(Error::Refused(format!(
+            "context: delivering the note to node '{id}' failed: {reason}"
+        ))),
+    }
+}
+
+/// What a mode makes of a note that could not go into a running turn.
+fn not_live(deliver: Deliver, id: &str, reason: &str) -> Result<edits::Delivery> {
+    match deliver {
+        Deliver::Live => Err(Error::Refused(format!(
+            "context: node '{id}' has no controllable turn in flight, so the note \
+             cannot be delivered live: {reason}"
+        ))),
+        // `auto` and `next` both mean the note rides the next dispatch, which is
+        // exactly what a `context` edit has always done.
+        Deliver::Auto | Deliver::Next => Ok(edits::Delivery::Deferred),
+    }
 }
 
 /// The nodes whose in-flight dispatch a command stops.
@@ -608,6 +725,7 @@ fn start_ready(
                 started: now,
                 last_activity: now,
                 reported_quiet: false,
+                control: None,
             },
         );
         settled_here = true;
@@ -1415,6 +1533,65 @@ mod tests {
                 .map(|(id, status)| ((*id).to_string(), *status))
                 .collect(),
             ..RunState::default()
+        }
+    }
+
+    /// An envelope only addresses a turn when it carries both halves of the
+    /// address the sibling's `interrupt` takes, and only when the sibling is who
+    /// produced it: this crate's own events name a run that verb has never heard
+    /// of.
+    #[test]
+    fn only_a_siblings_envelope_naming_a_run_and_a_member_addresses_a_turn() {
+        let envelope = |source: crate::event::Source, run: Option<&str>, member: Option<&str>| {
+            let mut labels = Labels {
+                run_id: run.map(str::to_string),
+                node: Some("build".into()),
+                ..Labels::default()
+            };
+            if let Some(member) = member {
+                labels.extra.insert("member".into(), member.into());
+            }
+            Envelope {
+                v: crate::event::ENVELOPE_VERSION,
+                ts: "2026-08-12T00:00:00.000Z".into(),
+                stream: "oneagentgraph-1".into(),
+                seq: 0,
+                source,
+                kind: crate::event::EventKind("turn-started".into()),
+                labels,
+                payload: serde_json::Map::new(),
+                artifacts: Vec::new(),
+            }
+        };
+        use crate::event::Source;
+
+        assert_eq!(
+            addressed_by(&envelope(
+                Source::Agentgraph,
+                Some("node-scope-1786304152340-19"),
+                Some("worker")
+            )),
+            TurnAddress::of("node-scope-1786304152340-19", "worker")
+        );
+        for unaddressable in [
+            // This crate's own event, whose `run_id` is this run rather than a
+            // graph run: sent to `interrupt` it would name a run that does not
+            // exist, or worse, another one that does.
+            envelope(Source::Pipeline, Some("demo"), Some("worker")),
+            // A sibling's envelope missing either half of the address.
+            envelope(Source::Agentgraph, Some("graph-1"), None),
+            envelope(Source::Agentgraph, None, Some("worker")),
+            envelope(Source::Agentgraph, Some("graph-1"), Some("   ")),
+            envelope(Source::Agentgraph, Some(""), Some("worker")),
+            // A member name that would name a path outside the run: the
+            // sibling's own predicate refuses it, so this crate never sends it.
+            envelope(Source::Agentgraph, Some("graph-1"), Some("../elsewhere")),
+        ] {
+            assert_eq!(
+                addressed_by(&unaddressable),
+                None,
+                "{unaddressable:?} was read as an address"
+            );
         }
     }
 
