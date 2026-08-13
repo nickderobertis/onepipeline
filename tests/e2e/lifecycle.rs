@@ -686,8 +686,14 @@ fn an_unresolvable_repository_is_refused_before_a_run_starts() {
     world
         .run(&["start", &path.to_string_lossy(), "--attach"])
         .exited(2)
-        .err_has("session holders service --json")
-        .err_has("not a registered repository");
+        // The sibling's own refusal, reaching the operator whole: the interlock
+        // calls `onevcs::session_holders` rather than spawning the verb, so what
+        // comes back is that library's message — which names the repository, why
+        // it cannot be resolved, and the command that would fix it — instead of
+        // an argv this crate composed.
+        .err_has("cannot read the session holders of service")
+        .err_has("not a registered repository")
+        .err_has("onevcs register PATH");
     assert!(!world.run_file("nosession", "launch.json").exists());
 }
 

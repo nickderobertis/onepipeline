@@ -213,7 +213,7 @@ fn start(args: &StartArgs) -> Result<i32> {
     {
         eprintln!(
             "onepipeline: stale repository holder: identity '{}' session '{}' owner_pid {}; proceeding",
-            holder.identity, holder.token, holder.owner_pid
+            holder.identity, holder.token.0, holder.owner_pid
         );
     }
     let live: Vec<_> = holders
@@ -226,7 +226,7 @@ fn start(args: &StartArgs) -> Result<i32> {
             .map(|holder| {
                 format!(
                     "identity '{}' held by session '{}' (owner_pid {})",
-                    holder.identity, holder.token, holder.owner_pid
+                    holder.identity, holder.token.0, holder.owner_pid
                 )
             })
             .collect::<Vec<_>>()
@@ -241,7 +241,7 @@ fn start(args: &StartArgs) -> Result<i32> {
             .map(|holder| {
                 format!(
                     "'{}' with session '{}' (owner_pid {})",
-                    holder.identity, holder.token, holder.owner_pid
+                    holder.identity, holder.token.0, holder.owner_pid
                 )
             })
             .collect::<Vec<_>>()
@@ -295,7 +295,7 @@ fn start(args: &StartArgs) -> Result<i32> {
                         "launching": run,
                         "holding_sessions": live
                             .iter()
-                            .map(|holder| holder.token.to_string())
+                            .map(|holder| holder.token.0.clone())
                             .collect::<Vec<_>>(),
                     }),
                 ),
@@ -304,7 +304,7 @@ fn start(args: &StartArgs) -> Result<i32> {
                     json!(live
                         .iter()
                         .map(|holder| json!({
-                            "session": holder.token.to_string(),
+                            "session": holder.token.0.clone(),
                             "owner_pid": holder.owner_pid,
                         }))
                         .collect::<Vec<_>>()),
