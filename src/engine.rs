@@ -252,12 +252,17 @@ struct Dispatch {
 pub fn round_run(paths: &RunPaths) -> Result<GraphState> {
     let lock = OwnershipLock::acquire(paths, "round run")?;
     let launch: LaunchRecord = ledger::read_json(&paths.launch())?;
+    // llmlint: ignore-block[boundary_inputs_validated] graph-reference syntax and
+    // contents are oneagentgraph's validation boundary. Here the ledger boundary
+    // validates the launch schema and the one invariant onepipeline owns: a launch must
+    // carry the nonempty reference resolved before any workspace existed.
     if launch.node_graph.is_empty() {
         return Err(Error::Invalid(format!(
             "launch record for run '{}' has no resolved node graph",
             paths.run
         )));
     }
+    // llmlint: ignore-end[boundary_inputs_validated]
     let mut journal = Journal::open(paths);
     let mut state = projection::fold(&journal::read(&paths.journal()));
 
@@ -662,6 +667,10 @@ fn cancelled_by(command: &Command) -> Vec<String> {
 }
 
 /// Start every node whose dependencies have settled, bounded by `concurrency`.
+// llmlint: ignore-block[invalid_states_unrepresentable] the resolved graph stays a
+// string because LaunchRecord is the durable internal schema and oneagentgraph's
+// ConfigRef is transparent/string-valued. A second resolved-graph type across
+// scheduling and threads would add no invariant beyond the launch check above.
 #[allow(
     clippy::too_many_arguments,
     reason = "the reconcile loop's borrowed state, which cannot be bundled without \
@@ -1111,6 +1120,7 @@ pub(crate) fn configured_node_graph() -> String {
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| DEFAULT_NODE_GRAPH.to_string())
 }
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 fn project_dir() -> std::path::PathBuf {
     std::env::var_os(PROJECT_DIR_ENV)

@@ -150,6 +150,72 @@ fn relative_node_and_step_graph_overrides_dispatch_from_the_launch_directory() {
 }
 
 #[test]
+fn lifecycle_and_title_drafting_keep_the_node_graph_resolved_at_launch() {
+    let world = World::new("lifecycle-recorded-default-graph");
+    world.repository("local-direct", &["true"]);
+    world.script("driver.wait", "hold");
+    world.script("service.work", "the worker wrote this\n");
+    let launch_graph = crate::harness::repo_file("graphs/node-scope.yaml");
+    let later_graph = world.root.join("later-node-scope.yaml");
+    std::fs::copy(&launch_graph, &later_graph).expect("the later graph is written");
+    let mut service = crate::harness::lifecycle("service", &["approve"]);
+    service["deps"] = json!(["approve"]);
+    let path = world.plan(
+        "recorded-lifecycle-graph",
+        &plan_of(
+            "recorded-lifecycle-graph",
+            vec![human("approve", &[]), service],
+        ),
+    );
+    let mut start = world.cmd(&["start", &path.to_string_lossy(), "--detach"]);
+    start.env("ONEPIPELINE_NODE_GRAPH", &launch_graph);
+    world
+        .run_on(start, "start recorded lifecycle graph")
+        .exited(0);
+    world
+        .run(&["round", "run", "recorded-lifecycle-graph"])
+        .exited(1);
+    world
+        .run(&["attest", "recorded-lifecycle-graph", "approve"])
+        .exited(0);
+    world
+        .run(&["round", "next", "recorded-lifecycle-graph"])
+        .exited(0);
+    let mut round = world.cmd(&["round", "run", "recorded-lifecycle-graph"]);
+    round.env("ONEPIPELINE_NODE_GRAPH", &later_graph);
+    world
+        .run_on(round, "round with changed live node graph")
+        .exited(0);
+    world.release("driver.go");
+
+    let invocations = world.invocations();
+    let relevant: Vec<&Value> = invocations
+        .iter()
+        .filter(|call| {
+            call["tool"] == "oneagentgraph"
+                && call["args"]
+                    .as_array()
+                    .is_some_and(|args| args.iter().any(|arg| arg == "onepipeline.node=service"))
+        })
+        .collect();
+    assert!(
+        relevant
+            .iter()
+            .any(|call| call["args"].as_array().is_some_and(|args| {
+                args.iter()
+                    .any(|arg| arg == "onepipeline.persona=pr-author")
+            })),
+        "the title drafting dispatch did not run: {relevant:?}"
+    );
+    assert!(
+        relevant
+            .iter()
+            .all(|call| call["args"][1] == launch_graph.to_string_lossy().as_ref()),
+        "a lifecycle dispatch re-read the live graph instead of launch state: {relevant:?}"
+    );
+}
+
+#[test]
 fn an_unreadable_relative_graph_names_its_launch_base() {
     let world = World::new("relative-graph-error");
     let path = world.plan(
@@ -232,6 +298,10 @@ fn unreadable_relative_plan_graphs_name_their_path_and_launch_base() {
 
 #[test]
 fn broken_launch_records_refuse_rounds_before_direct_or_lifecycle_dispatch() {
+    // llmlint: ignore-block[tests_mirror_real_usage] no CLI command corrupts or removes
+    // its own ledger. These are external-state faults (partial write or cleanup), so the
+    // arrangement mutates that persisted boundary; every observation and asserted
+    // refusal still goes through the compiled CLI.
     let direct = World::new("corrupt-launch-direct");
     let mut build = agent("build", &["approve"]);
     build["deps"] = json!(["approve"]);
@@ -256,10 +326,14 @@ fn broken_launch_records_refuse_rounds_before_direct_or_lifecycle_dispatch() {
         .exited(crate::harness::REFUSED)
         .err_has("launch.json");
     lifecycle_world.release("driver.go");
+    // llmlint: ignore-end[tests_mirror_real_usage]
 }
 
 #[test]
 fn a_legacy_launch_without_a_node_graph_fails_instead_of_reading_live_environment() {
+    // llmlint: ignore-block[tests_mirror_real_usage] an older launch-record producer is
+    // not a CLI operation this build can invoke. Writing that historical schema shape is
+    // the necessary fault arrangement; the round and refusal use the compiled CLI.
     let world = World::new("legacy-empty-node-graph");
     let mut build = agent("build", &["approve"]);
     build["deps"] = json!(["approve"]);
@@ -282,6 +356,7 @@ fn a_legacy_launch_without_a_node_graph_fails_instead_of_reading_live_environmen
         .exited(crate::harness::REFUSED)
         .err_has("has no resolved node graph");
     world.release("driver.go");
+    // llmlint: ignore-end[tests_mirror_real_usage]
 }
 
 #[test]

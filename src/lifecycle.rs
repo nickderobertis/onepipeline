@@ -25,6 +25,10 @@ use crate::plan::{Node, NodeKind, Step};
 pub const PR_AUTHOR_PERSONA: &str = "pr-author";
 
 /// Run one lifecycle node to settlement.
+// llmlint: ignore-block[invalid_states_unrepresentable] `default_graph` is the same
+// validated, launch-recorded string carried by the engine. Lifecycle only passes it into
+// oneagentgraph's transparent ConfigRef; another newtype would duplicate that sibling
+// type and widen this path-resolution change across unrelated composition.
 pub fn execute(
     executor: &dyn Executor,
     run: &str,
@@ -322,6 +326,7 @@ fn draft_title(
         _ => fallback,
     }
 }
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 /// The title a change gets when nothing drafted one.
 ///
