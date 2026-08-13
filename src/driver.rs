@@ -13,7 +13,7 @@
 //! is worth more than an override.
 
 use std::io::{BufRead, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use serde_json::json;
@@ -113,6 +113,57 @@ fn dag_graph() -> String {
         .unwrap_or_else(|| DEFAULT_DAG_GRAPH.to_string())
 }
 
+fn launch_dir() -> Result<PathBuf> {
+    std::env::current_dir()
+        .map_err(|error| Error::Invalid(format!("cannot read the launch directory: {error}")))
+}
+
+/// Resolve a relative filesystem graph reference at the launch boundary,
+/// before any session worktree exists. URLs and absolute paths retain their
+/// established oneagentgraph validation semantics and exact spelling.
+// llmlint: ignore-block[invalid_states_unrepresentable] the resolved graph stays a
+// string from this source through LaunchRecord because that durable internal schema and
+// oneagentgraph's transparent ConfigRef are already string-valued. A second newtype would
+// duplicate the sibling type without adding an invariant: relative references are made
+// absolute here, and the nonempty launch-record invariant is checked before every round.
+fn resolve_graph(reference: &str, base: &Path) -> Result<String> {
+    // llmlint: ignore-block[boundary_inputs_validated] absolute paths and URLs are
+    // oneagentgraph's existing input boundary: it reads/fetches them and returns its own
+    // config refusal. This boundary resolves only relative paths because onepipeline is
+    // the sole owner of their launch-directory base; validating absolute references here
+    // would change the documented and e2e-guarded sibling-error contract.
+    if reference.starts_with("https://") || Path::new(reference).is_absolute() {
+        return Ok(reference.to_string());
+    }
+    // llmlint: ignore-end[boundary_inputs_validated]
+    let resolved = base.join(reference);
+    std::fs::File::open(&resolved).map_err(|error| {
+        Error::Invalid(format!(
+            "cannot read graph '{}' resolved against launch directory '{}': {error}",
+            reference,
+            base.display()
+        ))
+    })?;
+    Ok(resolved.to_string_lossy().into_owned())
+}
+// llmlint: ignore-end[invalid_states_unrepresentable]
+
+fn resolve_plan_graphs(plan: &mut Plan, base: &Path) -> Result<()> {
+    for node in &mut plan.tasks {
+        if let Some(reference) = &mut node.agent_graph {
+            reference.0 = resolve_graph(&reference.0, base)?;
+        }
+        if let Some(steps) = &mut node.steps {
+            for step in steps {
+                if let Some(reference) = &mut step.agent_graph {
+                    reference.0 = resolve_graph(&reference.0, base)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Mint a run id from the plan's name or the file's, made unique.
 fn mint_run_id(plan: &Plan, path: &Path, root: &Path) -> String {
     let base = plan
@@ -146,8 +197,12 @@ fn mint_run_id(plan: &Plan, path: &Path, root: &Path) -> String {
 
 /// `onepipeline start`.
 fn start(args: &StartArgs) -> Result<i32> {
-    let plan = Plan::load(&args.plan)?;
+    let mut plan = Plan::load(&args.plan)?;
     graph::validate(&plan)?;
+    let launch_dir = launch_dir()?;
+    let graph_ref = resolve_graph(&dag_graph(), &launch_dir)?;
+    let node_graph_ref = resolve_graph(&engine::configured_node_graph(), &launch_dir)?;
+    resolve_plan_graphs(&mut plan, &launch_dir)?;
 
     let root = ledger::runs_root();
     let run = mint_run_id(&plan, &args.plan, &root);
@@ -199,11 +254,11 @@ fn start(args: &StartArgs) -> Result<i32> {
     paths.create()?;
     ledger::write_json(&paths.plan(), &plan)?;
 
-    let graph_ref = dag_graph();
     let mut record = LaunchRecord {
         run_id: run.clone(),
         plan: args.plan.clone(),
         graph: graph_ref.clone(),
+        node_graph: node_graph_ref,
         launcher: sys::launcher(),
         session: sys::launching_session(),
         // Replaced below by the graph process's own pid. What drives the run

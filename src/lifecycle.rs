@@ -25,10 +25,15 @@ use crate::plan::{Node, NodeKind, Step};
 pub const PR_AUTHOR_PERSONA: &str = "pr-author";
 
 /// Run one lifecycle node to settlement.
+// llmlint: ignore-block[invalid_states_unrepresentable] `default_graph` is the same
+// validated, launch-recorded string carried by the engine. Lifecycle only passes it into
+// oneagentgraph's transparent ConfigRef; another newtype would duplicate that sibling
+// type and widen this path-resolution change across unrelated composition.
 pub fn execute(
     executor: &dyn Executor,
     run: &str,
     round: u64,
+    default_graph: &str,
     node: &Node,
     cancel: &crate::executor::CancellationToken,
     tx: &Sender<Message>,
@@ -115,8 +120,12 @@ pub fn execute(
             Some(dir) => WorkspaceSpec::Path(dir.clone()),
             None => WorkspaceSpec::VcsSession(request.clone()),
         };
+        let graph = engine::node_graph(
+            step.agent_graph.as_ref().or(node.agent_graph.as_ref()),
+            default_graph,
+        );
         let build = || DispatchRequest {
-            graph: engine::node_graph(step.agent_graph.as_ref().or(node.agent_graph.as_ref())),
+            graph: graph.clone(),
             task: step.rendered_task(node.context.as_deref()),
             labels: engine::dispatch_labels(
                 run,
@@ -166,6 +175,7 @@ pub fn execute(
         executor,
         run,
         round,
+        default_graph,
         node,
         worktree.as_deref(),
         cancel,
@@ -189,6 +199,7 @@ fn publish(
     executor: &dyn Executor,
     run: &str,
     round: u64,
+    default_graph: &str,
     node: &Node,
     worktree: Option<&std::path::Path>,
     cancel: &crate::executor::CancellationToken,
@@ -196,10 +207,18 @@ fn publish(
     token: &str,
     branch: Option<String>,
 ) -> Settlement {
-    let title = node
-        .title
-        .clone()
-        .unwrap_or_else(|| draft_title(executor, run, round, node, worktree, cancel, tx));
+    let title = node.title.clone().unwrap_or_else(|| {
+        draft_title(
+            executor,
+            run,
+            round,
+            default_graph,
+            node,
+            worktree,
+            cancel,
+            tx,
+        )
+    });
 
     match crate::vcs::publish(token, node.merge_policy, Some(&title)) {
         Ok(published) => {
@@ -254,10 +273,16 @@ fn publish(
 /// base, carrying nothing this node wrote — and opening one reclaims the session
 /// still holding the work. It used to ask for one, and a scripted double that
 /// answered the same worktree for the same branch is what kept that invisible.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the draft is a dispatch inside one lifecycle execution and needs that execution's \
+              executor, labels, resolved graph, workspace, cancellation, and event stream"
+)]
 fn draft_title(
     executor: &dyn Executor,
     run: &str,
     round: u64,
+    default_graph: &str,
     node: &Node,
     worktree: Option<&std::path::Path>,
     cancel: &crate::executor::CancellationToken,
@@ -275,7 +300,7 @@ fn draft_title(
         }),
     };
     let dispatch = executor.dispatch(DispatchRequest {
-        graph: engine::node_graph(None),
+        graph: engine::node_graph(None, default_graph),
         task: format!(
             "Read this branch's diff and write the change request's title and body, \
              following the repository's own template. The task this branch delivered:\n\n{}",
@@ -301,6 +326,7 @@ fn draft_title(
         _ => fallback,
     }
 }
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 /// The title a change gets when nothing drafted one.
 ///

@@ -18,7 +18,7 @@
 // credential nor a budget for one.
 
 use crate::harness::{agent, human, plan_of, World};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 /// The prose a `member-started` says its member was launched with.
 ///
@@ -29,6 +29,341 @@ fn prompt_of(event: &Value) -> Option<String> {
     let args = event["payload"]["args"].as_array()?;
     let at = args.iter().position(|arg| arg == "--prompt")?;
     args.get(at + 1)?.as_str().map(str::to_string)
+}
+
+fn open_second_round(world: &World, run: &str, node: Value) {
+    world.script("driver.wait", "hold");
+    let path = world.plan(run, &plan_of(run, vec![human("approve", &[]), node]));
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+    world.run(&["round", "run", run]).exited(1);
+    world.run(&["attest", run, "approve"]).exited(0);
+    world
+        .run(&["round", "next", run])
+        .exited(0)
+        .out_has("continuing");
+}
+
+/// Both shipped relative graph paths are bound to the directory `start` was
+/// launched from before either graph can create a workspace. The direct node
+/// proves the second graph was read and its member actually ran.
+#[test]
+fn relative_default_graphs_dispatch_from_the_launch_directory() {
+    let world = World::new("real-relative-defaults");
+    world.write_graphs();
+    let path = world.plan(
+        "relative-defaults",
+        &plan_of("relative-defaults", vec![agent("build", &[])]),
+    );
+    let mut command = world.agentgraph_cmd(&["start", &path.to_string_lossy(), "--attach"]);
+    command
+        .current_dir(&world.root)
+        .env_remove("ONEPIPELINE_DAG_GRAPH")
+        .env_remove("ONEPIPELINE_NODE_GRAPH");
+
+    let started = world.run_on(command, "start relative defaults");
+    started.exited(0).settled();
+    assert!(
+        world
+            .journal("relative-defaults")
+            .iter()
+            .filter_map(prompt_of)
+            .any(|prompt| prompt.contains("Do build.")),
+        "the node-scope graph did not dispatch its member: {}",
+        world.dump()
+    );
+    let launch = world.run_json("relative-defaults", "launch.json");
+    for field in ["graph", "node_graph"] {
+        assert!(
+            std::path::Path::new(launch[field].as_str().expect("a graph path")).is_absolute(),
+            "{field} was not resolved at launch: {launch}"
+        );
+    }
+}
+
+/// Plan-owned graph references have the same launch-directory semantics as
+/// the defaults. Both levels actually dispatch through the real sibling: the
+/// node graph runs the first lifecycle step and the step graph runs the second.
+#[test]
+fn relative_node_and_step_graph_overrides_dispatch_from_the_launch_directory() {
+    let world = World::new("real-relative-plan-overrides");
+    world.write_graphs();
+    world.repository("local-direct", &["true"]);
+    for (source, target) in [
+        ("node-scope.yaml", "node-override.yaml"),
+        ("node-scope.yaml", "step-override.yaml"),
+    ] {
+        std::fs::copy(world.graphs().join(source), world.root.join(target))
+            .expect("the relative graph override is written");
+    }
+    std::fs::copy(
+        world.graphs().join("oneharness.toml"),
+        world.root.join("oneharness.toml"),
+    )
+    .expect("the relative graphs' harness config is written");
+    let node = json!({
+        "id": "service",
+        "repo": "service",
+        "agent_graph": "node-override.yaml",
+        "steps": [
+            {"id": "implement", "persona": "engineer", "task": "## What\nimplement"},
+            {
+                "id": "review",
+                "persona": "reviewer",
+                "task": "## What\nreview",
+                "deps": ["implement"],
+                "agent_graph": "step-override.yaml",
+            },
+        ],
+    });
+    let path = world.plan(
+        "relative-plan-overrides",
+        &plan_of("relative-plan-overrides", vec![node]),
+    );
+    let mut command = world.agentgraph_cmd(&["start", &path.to_string_lossy(), "--attach"]);
+    command.current_dir(&world.root);
+
+    world
+        .run_on(command, "start relative plan graph overrides")
+        .exited(0)
+        .settled();
+
+    for (step, graph) in [
+        ("implement", world.root.join("node-override.yaml")),
+        ("review", world.root.join("step-override.yaml")),
+    ] {
+        let graph = graph
+            .canonicalize()
+            .expect("the expected relative graph path resolves");
+        assert!(
+            world
+                .journal("relative-plan-overrides")
+                .iter()
+                .any(|event| {
+                    event["kind"] == "graph-started"
+                        && event["labels"]["node"] == "service"
+                        && event["labels"]["step"] == step
+                        && event["payload"]["graph"].as_str().is_some_and(|actual| {
+                            std::fs::canonicalize(actual)
+                                .map(|actual| actual == graph)
+                                .unwrap_or(false)
+                        })
+                }),
+            "{step} did not dispatch with its resolved graph: {}",
+            world.dump()
+        );
+    }
+}
+
+#[test]
+fn lifecycle_and_title_drafting_keep_the_node_graph_resolved_at_launch() {
+    let world = World::new("lifecycle-recorded-default-graph");
+    world.repository("local-direct", &["true"]);
+    world.script("driver.wait", "hold");
+    world.script("service.work", "the worker wrote this\n");
+    let launch_graph = crate::harness::repo_file("graphs/node-scope.yaml");
+    let later_graph = world.root.join("later-node-scope.yaml");
+    std::fs::copy(&launch_graph, &later_graph).expect("the later graph is written");
+    let mut service = crate::harness::lifecycle("service", &["approve"]);
+    service["deps"] = json!(["approve"]);
+    let path = world.plan(
+        "recorded-lifecycle-graph",
+        &plan_of(
+            "recorded-lifecycle-graph",
+            vec![human("approve", &[]), service],
+        ),
+    );
+    let mut start = world.cmd(&["start", &path.to_string_lossy(), "--detach"]);
+    start.env("ONEPIPELINE_NODE_GRAPH", &launch_graph);
+    world
+        .run_on(start, "start recorded lifecycle graph")
+        .exited(0);
+    world
+        .run(&["round", "run", "recorded-lifecycle-graph"])
+        .exited(1);
+    world
+        .run(&["attest", "recorded-lifecycle-graph", "approve"])
+        .exited(0);
+    world
+        .run(&["round", "next", "recorded-lifecycle-graph"])
+        .exited(0);
+    let mut round = world.cmd(&["round", "run", "recorded-lifecycle-graph"]);
+    round.env("ONEPIPELINE_NODE_GRAPH", &later_graph);
+    world
+        .run_on(round, "round with changed live node graph")
+        .exited(0);
+    world.release("driver.go");
+
+    let invocations = world.invocations();
+    let relevant: Vec<&Value> = invocations
+        .iter()
+        .filter(|call| {
+            call["tool"] == "oneagentgraph"
+                && call["args"]
+                    .as_array()
+                    .is_some_and(|args| args.iter().any(|arg| arg == "onepipeline.node=service"))
+        })
+        .collect();
+    assert!(
+        relevant
+            .iter()
+            .any(|call| call["args"].as_array().is_some_and(|args| {
+                args.iter()
+                    .any(|arg| arg == "onepipeline.persona=pr-author")
+            })),
+        "the title drafting dispatch did not run: {relevant:?}"
+    );
+    assert!(
+        relevant
+            .iter()
+            .all(|call| call["args"][1] == launch_graph.to_string_lossy().as_ref()),
+        "a lifecycle dispatch re-read the live graph instead of launch state: {relevant:?}"
+    );
+}
+
+#[test]
+fn an_unreadable_relative_graph_names_its_launch_base() {
+    let world = World::new("relative-graph-error");
+    let path = world.plan(
+        "relative-error",
+        &plan_of("relative-error", vec![agent("build", &[])]),
+    );
+    let mut command = world.agentgraph_cmd(&["start", &path.to_string_lossy(), "--attach"]);
+    command
+        .current_dir(&world.root)
+        .env("ONEPIPELINE_DAG_GRAPH", "graphs/missing-dag.yaml");
+
+    let failed = world.run_on(command, "start missing relative graph");
+    failed.exited(crate::harness::REFUSED);
+    failed.err_has("graphs/missing-dag.yaml");
+    failed.err_has(&world.root.to_string_lossy());
+}
+
+#[test]
+fn an_unreadable_relative_node_graph_names_its_launch_base() {
+    let world = World::new("relative-node-graph-error");
+    world.write_graphs();
+    let path = world.plan(
+        "relative-node-error",
+        &plan_of("relative-node-error", vec![agent("build", &[])]),
+    );
+    let mut command = world.agentgraph_cmd(&["start", &path.to_string_lossy(), "--attach"]);
+    command
+        .current_dir(&world.root)
+        .env("ONEPIPELINE_NODE_GRAPH", "graphs/missing-node.yaml");
+
+    let failed = world.run_on(command, "start missing relative node graph");
+    failed.exited(crate::harness::REFUSED);
+    failed.err_has("graphs/missing-node.yaml");
+    failed.err_has(&world.root.to_string_lossy());
+}
+
+#[test]
+fn unreadable_relative_plan_graphs_name_their_path_and_launch_base() {
+    let world = World::new("relative-plan-graph-errors");
+    world.write_graphs();
+    world.repository("local-direct", &["true"]);
+    let cases = [
+        (
+            "missing-node-override",
+            json!({
+                "id": "build",
+                "persona": "engineer",
+                "task": "## What\nbuild",
+                "agent_graph": "graphs/missing-node-override.yaml",
+            }),
+            "graphs/missing-node-override.yaml",
+        ),
+        (
+            "missing-step-override",
+            json!({
+                "id": "service",
+                "repo": "service",
+                "steps": [{
+                    "id": "implement",
+                    "persona": "engineer",
+                    "task": "## What\nimplement",
+                    "agent_graph": "graphs/missing-step-override.yaml",
+                }],
+            }),
+            "graphs/missing-step-override.yaml",
+        ),
+    ];
+
+    for (name, node, missing) in cases {
+        let path = world.plan(name, &plan_of(name, vec![node]));
+        let mut command = world.agentgraph_cmd(&["start", &path.to_string_lossy(), "--attach"]);
+        command.current_dir(&world.root);
+
+        let failed = world.run_on(command, &format!("start {name}"));
+        failed.exited(crate::harness::REFUSED);
+        failed.err_has(missing);
+        failed.err_has(&world.root.to_string_lossy());
+    }
+}
+
+#[test]
+fn broken_launch_records_refuse_rounds_before_direct_or_lifecycle_dispatch() {
+    // llmlint: ignore-block[tests_mirror_real_usage] no CLI command corrupts or removes
+    // its own ledger. These are external-state faults (partial write or cleanup), so the
+    // arrangement mutates that persisted boundary; every observation and asserted
+    // refusal still goes through the compiled CLI.
+    let direct = World::new("corrupt-launch-direct");
+    let mut build = agent("build", &["approve"]);
+    build["deps"] = json!(["approve"]);
+    open_second_round(&direct, "corrupt-direct", build);
+    std::fs::write(direct.run_file("corrupt-direct", "launch.json"), "not json")
+        .expect("the launch record is corrupted");
+    direct
+        .run(&["round", "run", "corrupt-direct"])
+        .exited(crate::harness::REFUSED)
+        .err_has("launch.json");
+    direct.release("driver.go");
+
+    let lifecycle_world = World::new("missing-launch-lifecycle");
+    lifecycle_world.repository("local-direct", &["true"]);
+    let mut service = crate::harness::lifecycle("service", &["approve"]);
+    service["deps"] = json!(["approve"]);
+    open_second_round(&lifecycle_world, "missing-lifecycle", service);
+    std::fs::remove_file(lifecycle_world.run_file("missing-lifecycle", "launch.json"))
+        .expect("the launch record is removed");
+    lifecycle_world
+        .run(&["round", "run", "missing-lifecycle"])
+        .exited(crate::harness::REFUSED)
+        .err_has("launch.json");
+    lifecycle_world.release("driver.go");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+}
+
+#[test]
+fn a_legacy_launch_without_a_node_graph_fails_instead_of_reading_live_environment() {
+    // llmlint: ignore-block[tests_mirror_real_usage] an older launch-record producer is
+    // not a CLI operation this build can invoke. Writing that historical schema shape is
+    // the necessary fault arrangement; the round and refusal use the compiled CLI.
+    let world = World::new("legacy-empty-node-graph");
+    let mut build = agent("build", &["approve"]);
+    build["deps"] = json!(["approve"]);
+    open_second_round(&world, "legacy-empty", build);
+    let path = world.run_file("legacy-empty", "launch.json");
+    let mut launch: Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("the launch record reads"))
+            .expect("the launch record parses");
+    launch["node_graph"] = json!("");
+    std::fs::write(&path, serde_json::to_vec_pretty(&launch).unwrap())
+        .expect("the legacy launch record is written");
+
+    let mut round = world.cmd(&["round", "run", "legacy-empty"]);
+    round.env(
+        "ONEPIPELINE_NODE_GRAPH",
+        world.graphs().join("node-scope.yaml"),
+    );
+    world
+        .run_on(round, "round run legacy-empty")
+        .exited(crate::harness::REFUSED)
+        .err_has("has no resolved node graph");
+    world.release("driver.go");
+    // llmlint: ignore-end[tests_mirror_real_usage]
 }
 
 #[test]
@@ -157,15 +492,18 @@ fn adoption_retains_node_overrides_for_later_dispatches() {
         "adopted-override",
         &plan_of("adopted-override", vec![agent("build", &[])]),
     );
-    world
-        .run_on_agentgraph(&[
-            "start",
-            &path.to_string_lossy(),
-            "--detach",
-            "--node-set",
-            "members.worker.oneharness_config=./adopted-node.toml",
-        ])
-        .exited(0);
+    let mut start = world.agentgraph_cmd(&[
+        "start",
+        &path.to_string_lossy(),
+        "--detach",
+        "--node-set",
+        "members.worker.oneharness_config=./adopted-node.toml",
+    ]);
+    start
+        .current_dir(&world.root)
+        .env("ONEPIPELINE_DAG_GRAPH", "graphs/dag-scope.yaml")
+        .env("ONEPIPELINE_NODE_GRAPH", "graphs/node-scope.yaml");
+    world.run_on(start, "start adopted-override").exited(0);
 
     world.until("the original driver to park before dispatch", |world| {
         let mut status = world.agentgraph_cmd(&["status", "adopted-override"]);
@@ -177,7 +515,11 @@ fn adoption_retains_node_overrides_for_later_dispatches() {
     // remains held until the assertion is complete.
     std::fs::remove_file(world.root.join("fakes/driver.wait")).expect("the adoption is not held");
     let mut adopt = world.agentgraph_cmd(&["adopt", "adopted-override"]);
-    adopt.env("ONEPIPELINE_PARKED_AFTER_SECONDS", "1");
+    adopt
+        .current_dir(&world.project)
+        .env("ONEPIPELINE_DAG_GRAPH", "missing-dag.yaml")
+        .env("ONEPIPELINE_NODE_GRAPH", "missing-node.yaml")
+        .env("ONEPIPELINE_PARKED_AFTER_SECONDS", "1");
     let adopted = world.run_on(adopt, "adopt adopted-override");
     adopted.exited(0).settled();
 

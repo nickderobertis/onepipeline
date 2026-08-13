@@ -252,6 +252,17 @@ struct Dispatch {
 pub fn round_run(paths: &RunPaths) -> Result<GraphState> {
     let lock = OwnershipLock::acquire(paths, "round run")?;
     let launch: LaunchRecord = ledger::read_json(&paths.launch())?;
+    // llmlint: ignore-block[boundary_inputs_validated] graph-reference syntax and
+    // contents are oneagentgraph's validation boundary. Here the ledger boundary
+    // validates the launch schema and the one invariant onepipeline owns: a launch must
+    // carry the nonempty reference resolved before any workspace existed.
+    if launch.node_graph.is_empty() {
+        return Err(Error::Invalid(format!(
+            "launch record for run '{}' has no resolved node graph",
+            paths.run
+        )));
+    }
+    // llmlint: ignore-end[boundary_inputs_validated]
     let mut journal = Journal::open(paths);
     let mut state = projection::fold(&journal::read(&paths.journal()));
 
@@ -360,7 +371,16 @@ fn converge(
         // leave that settlement unrecorded, with nothing for a later `attest`
         // to validate against.
         if !budget_spent {
-            start_ready(paths, journal, state, round, &rules, &tx, &mut in_flight)?;
+            start_ready(
+                paths,
+                journal,
+                state,
+                round,
+                &rules,
+                &launch.node_graph,
+                &tx,
+                &mut in_flight,
+            )?;
         }
 
         if in_flight.is_empty() {
@@ -647,6 +667,10 @@ fn cancelled_by(command: &Command) -> Vec<String> {
 }
 
 /// Start every node whose dependencies have settled, bounded by `concurrency`.
+// llmlint: ignore-block[invalid_states_unrepresentable] the resolved graph stays a
+// string because LaunchRecord is the durable internal schema and oneagentgraph's
+// ConfigRef is transparent/string-valued. A second resolved-graph type across
+// scheduling and threads would add no invariant beyond the launch check above.
 #[allow(
     clippy::too_many_arguments,
     reason = "the reconcile loop's borrowed state, which cannot be bundled without \
@@ -658,6 +682,7 @@ fn start_ready(
     state: &mut RunState,
     round: u64,
     rules: &ExecutorRules,
+    node_graph: &str,
     tx: &Sender<Message>,
     in_flight: &mut BTreeMap<String, Dispatch>,
 ) -> Result<()> {
@@ -715,7 +740,15 @@ fn start_ready(
             journal::labels(&paths.run, Some(round), Some(&node.id)),
             journal::payload(&[("persona", json!(node.persona))]),
         )?;
-        spawn(paths, round, rules, &node, cancel.clone(), tx.clone())?;
+        spawn(
+            paths,
+            round,
+            rules,
+            node_graph,
+            &node,
+            cancel.clone(),
+            tx.clone(),
+        )?;
         let now = Instant::now();
         in_flight.insert(
             node.id.clone(),
@@ -741,6 +774,7 @@ fn spawn(
     paths: &RunPaths,
     round: u64,
     rules: &ExecutorRules,
+    node_graph: &str,
     node: &Node,
     cancel: CancellationToken,
     tx: Sender<Message>,
@@ -765,14 +799,31 @@ fn spawn(
 
     let run = paths.run.clone();
     let node = node.clone();
+    let node_graph = node_graph.to_string();
     std::thread::Builder::new()
         .name(format!("dispatch-{}", node.id))
         .spawn(move || {
             let executor = crate::rules::executor_for(&entry);
             let settlement = if node.repo.is_some() {
-                crate::lifecycle::execute(executor.as_ref(), &run, round, &node, &cancel, &tx)
+                crate::lifecycle::execute(
+                    executor.as_ref(),
+                    &run,
+                    round,
+                    &node_graph,
+                    &node,
+                    &cancel,
+                    &tx,
+                )
             } else {
-                execute_direct(executor.as_ref(), &run, round, &node, &cancel, &tx)
+                execute_direct(
+                    executor.as_ref(),
+                    &run,
+                    round,
+                    &node_graph,
+                    &node,
+                    &cancel,
+                    &tx,
+                )
             };
             let _ = tx.send(Message::Settled(Box::new(settlement)));
         })
@@ -785,12 +836,14 @@ fn execute_direct(
     executor: &dyn Executor,
     run: &str,
     round: u64,
+    default_graph: &str,
     node: &Node,
     cancel: &CancellationToken,
     tx: &Sender<Message>,
 ) -> Settlement {
+    let graph = node_graph(node.agent_graph.as_ref(), default_graph);
     let request = || DispatchRequest {
-        graph: node_graph(node.agent_graph.as_ref()),
+        graph: graph.clone(),
         task: node.rendered_task(),
         labels: dispatch_labels(run, round, &node.id, None, node.persona.as_deref()),
         workspace: WorkspaceSpec::Path(project_dir()),
@@ -1054,16 +1107,20 @@ pub(crate) fn dispatch_labels(
 /// The node-scope agent graph a dispatch runs under.
 pub(crate) fn node_graph(
     override_ref: Option<&oneagentgraph::config::ConfigRef>,
+    default_graph: &str,
 ) -> oneagentgraph::config::ConfigRef {
-    override_ref.cloned().unwrap_or_else(|| {
-        oneagentgraph::config::ConfigRef(
-            std::env::var(NODE_GRAPH_ENV)
-                .ok()
-                .filter(|value| !value.is_empty())
-                .unwrap_or_else(|| DEFAULT_NODE_GRAPH.to_string()),
-        )
-    })
+    override_ref
+        .cloned()
+        .unwrap_or_else(|| oneagentgraph::config::ConfigRef(default_graph.to_string()))
 }
+
+pub(crate) fn configured_node_graph() -> String {
+    std::env::var(NODE_GRAPH_ENV)
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_NODE_GRAPH.to_string())
+}
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 fn project_dir() -> std::path::PathBuf {
     std::env::var_os(PROJECT_DIR_ENV)
@@ -1721,8 +1778,8 @@ mod tests {
     #[test]
     fn a_node_names_its_own_agent_graph_or_takes_the_shipped_default() {
         let pinned = oneagentgraph::config::ConfigRef("./custom.yaml".into());
-        assert_eq!(node_graph(Some(&pinned)), pinned);
-        assert!(!node_graph(None).0.is_empty());
+        assert_eq!(node_graph(Some(&pinned), "default"), pinned);
+        assert_eq!(node_graph(None, "default").0, "default");
     }
 
     #[test]

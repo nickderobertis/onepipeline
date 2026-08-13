@@ -87,6 +87,10 @@ fn a_budget_that_runs_out_settles_the_node_rather_than_retrying_forever() {
     // Named apart from an ordinary task failure: the budget was spent without
     // the agent producing anything, and the two want opposite responses.
     assert_eq!(result["nodes"][0]["outcome"], "no-agent-progress");
+    world
+        .run(&["results", "spent"])
+        .exited(0)
+        .out_has("provider refused before the first turn");
 }
 
 #[test]
