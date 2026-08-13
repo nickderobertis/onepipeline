@@ -140,18 +140,10 @@ impl World {
     /// The `onepipeline` binary, wired to this world.
     pub fn cmd(&self, args: &[&str]) -> Command {
         let mut command = Command::new(binary());
-        let path = std::env::join_paths(
-            std::iter::once(
-                onevcs_binary()
-                    .parent()
-                    .expect("onevcs has a directory")
-                    .to_path_buf(),
-            )
-            .chain(std::env::split_paths(
-                &std::env::var_os("PATH").unwrap_or_default(),
-            )),
-        )
-        .expect("a PATH");
+        let path = path_leading_with(&[onevcs_binary()
+            .parent()
+            .expect("onevcs has a directory")
+            .to_path_buf()]);
         command
             .args(args)
             .env("PATH", path)
@@ -219,10 +211,35 @@ impl World {
     /// the harness it spawns, at that library's own documented
     /// `ONEAGENTGRAPH_ONEHARNESS_BIN` override, which knows nothing about this
     /// crate.
+    ///
+    /// Removing `ONEPIPELINE_ONEAGENTGRAPH_BIN` is what puts these
+    /// journeys on the **default** path, where every verb is a library
+    /// call — with one exception the sibling seam documents: a detached launch
+    /// retains a process, because a scheduler thread cannot outlive the launcher
+    /// that is about to exit. That one resolves `oneagentgraph` **by name**, so
+    /// the name has to lead somewhere this suite chose. Prepending the built
+    /// sibling's directory is what makes it: without it a `--detach` journey
+    /// composes whatever an operator happened to install — and fails outright on
+    /// a machine with none, which is every CI host — where with it, on every
+    /// platform, it composes the build `Cargo.lock` pins, exactly like the
+    /// attached path beside it.
     pub fn agentgraph_cmd(&self, args: &[&str]) -> Command {
         let mut command = self.cmd(args);
         command
             .env_remove("ONEPIPELINE_ONEAGENTGRAPH_BIN")
+            .env(
+                "PATH",
+                path_leading_with(&[
+                    oneagentgraph_binary()
+                        .parent()
+                        .expect("oneagentgraph has a directory")
+                        .to_path_buf(),
+                    onevcs_binary()
+                        .parent()
+                        .expect("onevcs has a directory")
+                        .to_path_buf(),
+                ]),
+            )
             .env("ONEAGENTGRAPH_ONEHARNESS_BIN", double("fake-oneharness"))
             .env("ONEAGENTGRAPH_STATE_DIR", self.root.join("graph-state"))
             .env(
@@ -892,6 +909,20 @@ pub fn onevcs_binary() -> PathBuf {
             held_alias(&held, "onevcs")
         })
         .clone()
+}
+
+/// A `PATH` with `dirs` ahead of the one this process inherited.
+///
+/// Every program this stack resolves *by name* has to resolve to the build
+/// `Cargo.lock` pins rather than to whatever an operator installed — otherwise a
+/// journey composing a sibling proves only that the host had one, and says
+/// nothing about the version this crate is written against. The inherited `PATH`
+/// still follows, because git and the platform's own tools live on it.
+fn path_leading_with(dirs: &[PathBuf]) -> std::ffi::OsString {
+    std::env::join_paths(dirs.iter().cloned().chain(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    )))
+    .expect("a PATH")
 }
 
 /// Where this process holds its own names for the binaries it resolves.
