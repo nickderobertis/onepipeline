@@ -12,7 +12,7 @@
 // `dispatch.rs` is where the real binary is driven instead. `harness.rs` carries the same
 // suppression and the full rationale.
 
-use crate::harness::{agent, double, human, plan_of, Run, World};
+use crate::harness::{agent, gate_script, human, plan_of, Run, World};
 
 use crate::harness::lifecycle;
 
@@ -360,10 +360,10 @@ fn telemetry_separates_gate_and_lock_time_from_agent_time() {
     let go = world.fakes.join("gate.go");
     // The gate is held open for a measurable span, so its bucket is a real
     // duration on the clock rather than a bucket that merely exists.
-    let gate_command = double("fake-gate").to_string_lossy().into_owned();
+    let gate = gate_script(&world, &["wait-for", &go.to_string_lossy()]);
     world.repository(
         "local-direct",
-        &[&gate_command, "wait-for", &go.to_string_lossy()],
+        &gate.iter().map(String::as_str).collect::<Vec<_>>(),
     );
     world.script("service.work", "the worker wrote this\n");
     let path = world.plan("gated", &plan_of("gated", vec![lifecycle("service", &[])]));

@@ -105,6 +105,7 @@ impl World {
     /// names itself; its scratch directory does not have to.
     pub fn new(name: &str) -> Self {
         static NTH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        LIVE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let root = std::env::temp_dir().join(format!(
             "op-{}-{}",
             std::process::id(),
@@ -126,6 +127,7 @@ impl World {
 
     /// The same world seen by another planner's session.
     pub fn as_session(&self, session: &str) -> Self {
+        LIVE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Self {
             root: self.root.clone(),
             runs: self.runs.clone(),
@@ -633,9 +635,24 @@ impl World {
     }
 }
 
+/// How many worlds this process still holds.
+///
+/// The doubles this process linked are shared by all of them, so they are
+/// released when the last one goes — never on the first, which
+/// [`as_session`](World::as_session) makes a real case.
+static LIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 impl Drop for World {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.root);
+        // The links this process made, released with the last world that could
+        // still have spawned through them, so a suite leaves nothing in the
+        // target directory. Best-effort: Windows refuses to unlink a running
+        // image, and a directory left behind there costs a directory entry
+        // rather than a binary, because these are links and not copies.
+        if LIVE.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) == 1 {
+            let _ = std::fs::remove_dir_all(held_dir());
+        }
     }
 }
 
@@ -820,15 +837,17 @@ pub fn binary() -> PathBuf {
 /// The path handed back is **never** the one cargo publishes. Every test runs in
 /// its own process and each builds the doubles, so several cargo invocations
 /// uplift the same `target/debug/<name>` — and an uplift is a remove followed by
-/// a replacement, so that name is briefly absent. A test that had already looked would
-/// then spawn a binary that vanished under it: on macOS that surfaced both as a
-/// missing double and, worse, as a whole run stuck at `run-started` because the
-/// launcher could not start its driver. Copying each process its own name once
-/// closes the window because later cargo uplifts do not touch that copy.
+/// a replacement, so that name is briefly absent. A test that had already looked
+/// would then spawn a binary that vanished under it: on macOS that surfaced both
+/// as a missing double and, worse, as a whole run stuck at `run-started` because
+/// the launcher could not start its driver. Giving each process its own name for
+/// the binary closes the window, because a later uplift replaces the *name* it
+/// published and never touches this one. See [`held_link`] for why that name is
+/// a link rather than a copy.
 pub fn double(name: &str) -> PathBuf {
     static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     let held = BUILT.get_or_init(|| build(&["--package", "onepipeline-testfakes"]));
-    held_copy(held, name)
+    held_link(held, name)
 }
 
 /// Who a commit a journey's `onevcs` makes is attributed to.
@@ -861,7 +880,7 @@ pub fn oneagentgraph_binary() -> PathBuf {
             "--locked",
         ])
     });
-    held_copy(held, "oneagentgraph")
+    held_link(held, "oneagentgraph")
 }
 
 /// The released `onevcs` executable whose holders verb the launcher consumes.
@@ -870,9 +889,22 @@ pub fn onevcs_binary() -> PathBuf {
     BUILT
         .get_or_init(|| {
             let held = build(&["--package", "onevcs", "--bin", "onevcs", "--locked"]);
-            held_copy(&held, "onevcs")
+            held_link(&held, "onevcs")
         })
         .clone()
+}
+
+/// Where this process holds its own names for the binaries it resolves.
+///
+/// Named for the process rather than shared, because the name is what an uplift
+/// replaces — see [`held_link`]. Removed by the last [`World`] this process
+/// drops, so a suite leaves the target directory as it found it.
+fn held_dir() -> PathBuf {
+    binary()
+        .parent()
+        .expect("the binary is in a directory")
+        .join("doubles")
+        .join(std::process::id().to_string())
 }
 
 /// Build one package's binaries into the target directory this test's own binary
@@ -898,13 +930,26 @@ fn build(selection: &[&str]) -> PathBuf {
         "{selection:?} did not build: {}",
         String::from_utf8_lossy(&built.stderr)
     );
-    let held = debug.join("doubles").join(std::process::id().to_string());
+    let held = held_dir();
     std::fs::create_dir_all(&held).expect("a directory for this process's doubles");
     held
 }
 
-/// This process's own name for a built binary, made once and kept.
-fn held_copy(held: &Path, name: &str) -> PathBuf {
+/// This process's own name for a built binary: a **hard link**, made once and
+/// kept.
+///
+/// A link rather than a copy, and the difference is not an optimisation. What
+/// this name has to survive is a concurrent cargo uplift, which is an unlink of
+/// `target/debug/<name>` followed by a replacement — so what a spawn needs is
+/// the *inode* held open under a name nothing else replaces. A hard link is
+/// exactly that, at zero bytes: the suite's own measurement was 162 copies of
+/// one double, 271 MB per process directory and 25 GB across a single coverage
+/// run, which is what exhausted the disk on the host that supervises these runs.
+///
+/// The copy is kept only as the fallback for a filesystem that refuses to link —
+/// a target directory on a mount without hard links, or across a device
+/// boundary. Both paths give the same guarantee; only one of them scales.
+fn held_link(held: &Path, name: &str) -> PathBuf {
     let debug = binary()
         .parent()
         .expect("the binary is in a directory")
@@ -913,13 +958,21 @@ fn held_copy(held: &Path, name: &str) -> PathBuf {
     let published = debug.join(&file);
     let mine = held.join(&file);
     if !mine.is_file() {
+        // Here rather than only in [`build`], which runs once per process: the
+        // last world a process drops takes this directory with it, and a test
+        // that opens a second world afterwards would otherwise link into a
+        // directory that is no longer there — an ENOENT the retry below cannot
+        // outlast, because nothing is going to recreate it.
+        std::fs::create_dir_all(held).expect("a directory for this process's doubles");
         // Bounded, and retried rather than asserted on the first look: the
         // window this closes is another process's uplift, which is short but
         // real, and a bare `is_file` here would only move the flake one line up.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         loop {
             let _ = std::fs::remove_file(&mine);
-            match std::fs::copy(&published, &mine).map(|_| ()) {
+            let held = std::fs::hard_link(&published, &mine)
+                .or_else(|_| std::fs::copy(&published, &mine).map(|_| ()));
+            match held {
                 Ok(()) => break,
                 Err(error) => assert!(
                     std::time::Instant::now() < deadline,
@@ -931,6 +984,55 @@ fn held_copy(held: &Path, name: &str) -> PathBuf {
         }
     }
     mine
+}
+
+/// A repository gate command, written into this world as a script.
+///
+/// A script rather than a compiled binary, and per platform rather than one
+/// artifact, because the alternative was a workspace member shipping a Rust
+/// program to stand in for three shell one-liners. `onevcs` runs the gate as
+/// `Command::new(argv[0])`, which on Windows cannot start a `.bat` directly, so
+/// each platform's interpreter leads its own argv.
+///
+/// The three verbs are what the lifecycle and telemetry journeys state: a gate
+/// that blocks until a file appears, one that breaks the sibling's event stream
+/// under it, and one that appends a line no build of that sibling can read.
+pub fn gate_script(world: &World, args: &[&str]) -> Vec<String> {
+    let mut argv = interpreted(&write_gate_script(world));
+    argv.extend(args.iter().map(|arg| (*arg).to_owned()));
+    argv
+}
+
+/// The interpreter that leads a gate script's argv on this platform.
+#[cfg(windows)]
+fn interpreted(script: &Path) -> Vec<String> {
+    vec![
+        "cmd".to_owned(),
+        "/C".to_owned(),
+        script.to_string_lossy().into_owned(),
+    ]
+}
+
+/// The interpreter that leads a gate script's argv on this platform.
+#[cfg(not(windows))]
+fn interpreted(script: &Path) -> Vec<String> {
+    vec!["sh".to_owned(), script.to_string_lossy().into_owned()]
+}
+
+/// The gate script for this platform, written into the world's own scratch.
+#[cfg(windows)]
+fn write_gate_script(world: &World) -> PathBuf {
+    let path = world.root.join("gate.bat");
+    std::fs::write(&path, include_str!("gate.bat")).expect("the gate script is written");
+    path
+}
+
+/// The gate script for this platform, written into the world's own scratch.
+#[cfg(not(windows))]
+fn write_gate_script(world: &World) -> PathBuf {
+    let path = world.root.join("gate.sh");
+    std::fs::write(&path, include_str!("gate.sh")).expect("the gate script is written");
+    path
 }
 
 /// A file shipped in the repository.

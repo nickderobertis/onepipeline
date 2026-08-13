@@ -37,6 +37,11 @@ categories = ["command-line-utilities", "development-tools"]
 include = [
   "src/**/*.rs",
   "tests/**/*.rs",
+  # The per-platform gate scripts the lifecycle journeys write into their own
+  # scratch. `include_str!`'d, so a packaged crate without them does not compile
+  # its own test binary.
+  "tests/e2e/gate.sh",
+  "tests/e2e/gate.bat",
   # The checked-in telemetry golden, which `src/telemetry.rs` reads at compile
   # time: without it the packaged crate does not build, let alone test.
   "tests/golden/*.json",
