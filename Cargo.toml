@@ -13,7 +13,7 @@ resolver = "2"
 # calling its parser — because a double that accepted more than the sibling is an
 # oracle for a build nothing runs.
 [workspace.dependencies]
-oneagentgraph = "0.2.4"
+oneagentgraph = "0.2.6"
 onevcs = "0.2.5"
 
 [package]
@@ -109,7 +109,7 @@ windows-sys = { version = "0.61", features = [
 # must stay one: what it implements must never be reachable from a release
 # binary.
 [dev-dependencies]
-onevcs-testing = "0.1.3"
+onevcs-testing = "0.1.5"
 
 [[test]]
 name = "e2e"
