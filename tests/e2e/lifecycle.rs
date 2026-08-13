@@ -20,7 +20,7 @@
 // opened and merged offline. `harness.rs` carries the same suppression and the full
 // rationale.
 
-use crate::harness::{double, lifecycle, plan_of, Repository, World};
+use crate::harness::{gate_script, lifecycle, plan_of, Repository, World};
 use serde_json::json;
 
 fn settle(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
@@ -70,10 +70,8 @@ fn published_locally(world: &World) -> Repository {
 /// `$ONEVCS_HOME/<identity>/runs/<token>/worktree` — so the session's own token
 /// is the name of the directory above it, and a gate can address the stream that
 /// session is writing without this crate telling it one.
-fn gate(args: &[&str]) -> Vec<String> {
-    std::iter::once(double("fake-gate").to_string_lossy().into_owned())
-        .chain(args.iter().map(|arg| (*arg).to_owned()))
-        .collect()
+fn gate(world: &World, args: &[&str]) -> Vec<String> {
+    gate_script(world, args)
 }
 
 /// Every `onevcs`-produced event one run recorded, by kind.
@@ -541,7 +539,7 @@ fn a_publications_own_records_reach_the_journal_while_it_is_still_publishing() {
     let go = world.fakes.join("gate.go");
     world.repository(
         "local-direct",
-        &gate(&["wait-for", &go.to_string_lossy()])
+        &gate(&world, &["wait-for", &go.to_string_lossy()])
             .iter()
             .map(String::as_str)
             .collect::<Vec<_>>(),
@@ -688,8 +686,14 @@ fn an_unresolvable_repository_is_refused_before_a_run_starts() {
     world
         .run(&["start", &path.to_string_lossy(), "--attach"])
         .exited(2)
-        .err_has("session holders service --json")
-        .err_has("not a registered repository");
+        // The sibling's own refusal, reaching the operator whole: the interlock
+        // calls `onevcs::session_holders` rather than spawning the verb, so what
+        // comes back is that library's message — which names the repository, why
+        // it cannot be resolved, and the command that would fix it — instead of
+        // an argv this crate composed.
+        .err_has("cannot read the session holders of service")
+        .err_has("not a registered repository")
+        .err_has("onevcs register PATH");
     assert!(!world.run_file("nosession", "launch.json").exists());
 }
 
@@ -1102,7 +1106,7 @@ fn a_session_stream_that_cannot_be_read_is_reported_and_does_not_fail_the_node()
     //
     // A file where the streams directory was, so nothing can recreate it:
     // `EventStream::open` then refuses every session by name.
-    let gate = gate(&["break-streams"]);
+    let gate = gate(&world, &["break-streams"]);
     world.repository(
         "local-direct",
         &gate.iter().map(String::as_str).collect::<Vec<_>>(),
@@ -1152,7 +1156,7 @@ fn a_session_line_this_build_cannot_read_is_reported_and_does_not_fail_the_node(
     // repository's own code can reach it. Everything asserted is through the binary.
     //
     // The token is the name of the directory above the worktree the gate runs in.
-    let gate = gate(&["append-future-event"]);
+    let gate = gate(&world, &["append-future-event"]);
     world.repository(
         "local-direct",
         &gate.iter().map(String::as_str).collect::<Vec<_>>(),

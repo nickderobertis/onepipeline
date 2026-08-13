@@ -828,3 +828,296 @@ fn an_adoption_the_graph_refuses_fails_rather_than_leaving_the_run_undriven() {
         world.events_of("orphaned", "driver-adopted")
     );
 }
+
+/// The environment keys and fallbacks this crate restates are still the ones
+/// the sibling's own CLI applies.
+///
+/// `run::start`, `run::signal`, and `control::interrupt` take their environment
+/// as a parameter, which is what lets a consumer hold two runs on two installs
+/// — but the *names* in it, and the fallbacks around them, are private
+/// `const`s and private functions in the sibling's **binary**. So
+/// `src/agentgraph.rs` restates them, and nothing in the type system says when
+/// they stop being right: renamed upstream, this crate would keep resolving the
+/// old spelling and put a run's state somewhere the sibling's own verbs cannot
+/// find it. Recorded as divergence 20; this is the drift gate that stands in
+/// until it closes.
+///
+/// Held with **both** sides real, which is the only way it gates anything: a
+/// dispatch this crate ran places the run state, and the sibling's own binary
+/// — the one `Cargo.lock` pins — is then asked, through the same variable,
+/// what it can find there. Neither side's answer is written down here.
+///
+/// So a rename lands as a failure whichever side it happens on. Drifted in
+/// `src/agentgraph.rs`, the resolution falls back to `$HOME/.local/state` and
+/// the run is not under the directory the launch named; drifted upstream, the
+/// sibling looks somewhere else for it. Either way `history` lists nothing.
+#[test]
+fn the_run_state_this_crate_places_is_where_the_sibling_looks_for_it() {
+    let world = World::new("state-dir-drift");
+    world.write_graphs();
+    // The directory `agentgraph_cmd` hands the launch at the variable under
+    // test, and the one the sibling is asked about below.
+    let state = world.root.join("graph-state");
+    let path = world.plan(
+        "state-drift",
+        &plan_of("state-drift", vec![agent("build", &[])]),
+    );
+    world
+        .run_on_agentgraph(&["start", &path.to_string_lossy(), "--attach"])
+        .exited(0)
+        .settled();
+
+    let listed = std::process::Command::new(crate::harness::oneagentgraph_binary())
+        .arg("history")
+        // The one variable under test. Everything else is left alone, so a
+        // listing that comes back empty is this directory being empty rather
+        // than the sibling being pointed elsewhere.
+        .env("ONEAGENTGRAPH_STATE_DIR", &state)
+        .output()
+        .expect("the real oneagentgraph runs");
+    let listed = String::from_utf8_lossy(&listed.stdout);
+    // The graph the node dispatch runs, so the line names a run this crate's
+    // own launch created rather than any run that happened to be there.
+    assert!(
+        listed.lines().any(|line| line.contains("node-scope")),
+        "the sibling found no run where this crate placed one — the state-directory variable, \
+         or the fallback around it, has drifted on one side:\n{listed}\n{}",
+        world.dump()
+    );
+}
+
+/// The exit codes this crate maps the sibling's `Error` onto are still the ones
+/// its own CLI exits with.
+///
+/// The subprocess path read a code off a child; the library path is handed an
+/// `Error` and `src/agentgraph.rs`'s `exit_for` turns it into the code the CLI
+/// would have carried. That mapping is a copy of a private function upstream —
+/// the other half of divergence 20 — so a run must not settle differently
+/// depending on which path drove it. Driven against the real binary, so the
+/// left-hand side of the comparison is the sibling's own answer.
+// llmlint: ignore-block[tests_mirror_real_usage] this is a drift gate over a *sibling's*
+// exit codes, not a journey: what it compares is the code the sibling's own binary carries
+// a refusal out on against the constant `src/agentgraph.rs` maps that refusal onto, and
+// only one side of that comparison is reachable through this crate's interface. Driving
+// `onepipeline` here would put its own error handling between the two things being held to
+// each other. The journeys that do drive the binary are every other test in this file, and
+// the two drift gates either side of this one both go through it.
+#[test]
+fn the_siblings_own_refusals_still_exit_with_the_codes_this_crate_maps_onto() {
+    let world = World::new("exit-code-drift");
+    let missing = world.root.join("no-such-graph.yaml");
+    let refused = std::process::Command::new(crate::harness::oneagentgraph_binary())
+        .args(["run", &missing.to_string_lossy(), "--task", "anything"])
+        .env("ONEAGENTGRAPH_STATE_DIR", world.root.join("graph-state"))
+        .output()
+        .expect("the real oneagentgraph runs");
+    assert_eq!(
+        refused.status.code(),
+        Some(oneagentgraph::error::EXIT_INVALID_CONFIG),
+        "an unreadable graph is no longer the invalid-config exit this crate maps \
+         `Error::InvalidConfig` onto: {}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+} // llmlint: ignore-end[tests_mirror_real_usage]
+
+/// The `oneharness` executable the sibling drives is still named by the
+/// variable this crate restates — and reaches an interrupt's delivery too.
+///
+/// The third restated key. Pointed at something that is not there, the sibling
+/// says so, and the failure names what it could not start: that is the variable
+/// having been read. Asked through a real dispatch rather than a probe, because
+/// what has to keep working is a member launch.
+#[test]
+fn the_sibling_still_takes_its_harness_from_the_variable_this_crate_restates() {
+    let world = World::new("harness-bin-drift");
+    world.write_graphs();
+    let path = world.plan(
+        "harness-bin",
+        &plan_of("harness-bin", vec![agent("build", &[])]),
+    );
+    let mut command = world.agentgraph_cmd(&["start", &path.to_string_lossy(), "--attach"]);
+    command.env(
+        "ONEAGENTGRAPH_ONEHARNESS_BIN",
+        "oneharness-that-is-not-installed",
+    );
+    let started = world.run_on(command, "start --attach");
+    started.settled();
+
+    let failed: Vec<_> = world
+        .journal("harness-bin")
+        .into_iter()
+        .filter(|event| {
+            let rendered = event.to_string();
+            rendered.contains("oneharness-that-is-not-installed")
+        })
+        .collect();
+    assert!(
+        !failed.is_empty(),
+        "no event named the harness the graph was told to drive, so the variable was not read \
+         — it has drifted:\n{}",
+        world.dump()
+    );
+}
+
+/// A `context` note reaches the **real** sibling's interrupt, and what it
+/// answers is what the run records.
+///
+/// The other `context` journeys state their scenario at
+/// `ONEPIPELINE_ONEAGENTGRAPH_BIN`, which is the override path; this one takes
+/// the default, so the delivery is `oneagentgraph::control::interrupt` called
+/// in this process. The sibling addresses the turn out of the member's own
+/// scratch and answers for itself.
+///
+/// The answer here is that there is no controllable turn: the member is real
+/// and running, and the harness standing in for its paid turn is not one
+/// oneharness can reach a lever into. That is a genuine case rather than a
+/// contrivance — it is what a harness with no out-of-band control gives — and
+/// it is the one the `auto` fall-through exists for. Both halves are asserted:
+/// the note is deferred onto the next dispatch, and the `turn-interrupted`
+/// envelope saying the lever was pulled and nothing came of it reaches the
+/// merged store, stamped with the node it is about.
+#[test]
+fn a_note_delivered_through_the_real_sibling_records_what_its_lever_answered() {
+    let world = World::new("real-context");
+    world.write_graphs();
+    world.script("turn.hold", "hold");
+    let path = world.plan("noted", &plan_of("noted", vec![agent("build", &[])]));
+    world
+        .run_on_agentgraph(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+    world.until("the dispatch to report a turn", |world| {
+        !world.events_of("noted", "turn-activity").is_empty()
+    });
+
+    let note = "the fixture moved to tests/data; stop editing src/old.rs";
+    let submitted = world.run_with_stdin(
+        &["reply", "noted"],
+        &json!({
+            "version": 1,
+            "commands": [{"op": "context", "id": "build", "note": note}],
+        })
+        .to_string(),
+    );
+    submitted.exited(0);
+
+    world.until("the note to be reconciled", |world| {
+        !world.events_of("noted", "edit-committed").is_empty()
+    });
+    let committed = world.events_of("noted", "edit-committed");
+    assert_eq!(
+        committed[0]["payload"]["operations"][0]["delivery"],
+        json!("deferred"),
+        "a note the sibling could not land live was not deferred onto the next dispatch: {:?}",
+        committed
+    );
+
+    let interrupted = world.events_of("noted", "turn-interrupted");
+    assert_eq!(
+        interrupted.len(),
+        1,
+        "the lever was pulled and the run does not say so: {}",
+        world.dump()
+    );
+    assert_eq!(interrupted[0]["payload"]["delivered"], json!(false));
+    assert_eq!(interrupted[0]["payload"]["member"], json!("worker"));
+    assert_eq!(
+        interrupted[0]["payload"]["input_bytes"],
+        json!(note.len()),
+        "the envelope does not say how much redirection was offered"
+    );
+    assert!(
+        interrupted[0]["payload"]["reason"].is_string(),
+        "an interrupt that did not land carries no reason: {}",
+        interrupted[0]
+    );
+    assert_eq!(
+        interrupted[0]["labels"]["node"],
+        json!("build"),
+        "the envelope is not stamped with the node it is about — its producer cannot know it, \
+         so this crate has to"
+    );
+
+    world.release("turn.go");
+    world.release("turn.settle");
+}
+
+/// Consuming a planner surface asks the **real** sibling to restart the
+/// check-in clock, and says so when it cannot.
+///
+/// `next` is the channel's only consumer, and consumption is what resets the
+/// pacemaker — so this is the one journey that reaches
+/// `oneagentgraph::run::signal` on the default path rather than through the
+/// override.
+///
+/// It is a characterisation, and the thing it characterises is a defect this
+/// crate carries into that call: the reset is addressed with **this** run's id,
+/// and a graph run has an id of its own that `oneagentgraph` mints. The
+/// subprocess path sent the same wrong argument and the double answered `0` to
+/// anything, so nothing ever said so. The library says so, out loud, on the
+/// planner's own stderr — which is the behaviour asserted here until the run
+/// identity is threaded through. The surface itself is still delivered, because
+/// a pacemaker that could not be reset must not cost the planner the update it
+/// asked for.
+#[test]
+fn consuming_a_surface_reaches_the_real_pacemaker_and_reports_what_it_answered() {
+    let world = World::new("real-pacemaker");
+    world.write_graphs();
+    let path = world.plan("paced", &plan_of("paced", vec![human("approve", &[])]));
+    world
+        .run_on_agentgraph(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+    world
+        .run_on_agentgraph(&[
+            "surface",
+            "paced",
+            "--kind",
+            "check-in",
+            "--message",
+            "steady",
+        ])
+        .exited(0);
+
+    let read = world.run_on(world.agentgraph_cmd(&["next", "paced"]), "next paced");
+    read.exited(0).out_has("\"surface\"");
+    read.err_has("could not reset the check-in pacemaker");
+    // The sibling's own refusal, naming the run it was asked about: this crate
+    // handed it a `onepipeline` run id where a `oneagentgraph` one belongs.
+    read.err_has("paced");
+}
+
+/// A view still renders when the provider-health block comes from the library.
+///
+/// `status` asks the sibling what this host's identities are, and on the
+/// default path that ask is `oneagentgraph::health::read` rather than a
+/// process. What the answer *is* depends on the host's own oneharness
+/// configuration and is therefore not something a journey can assert; what the
+/// contract fixes is the other half — a probe that cannot run is silence and
+/// not a failure, so the view reports everything else it knows either way.
+///
+/// That is the half held here, and it is the half that broke when the call
+/// moved: a library read that refused, or that panicked on a host with no
+/// identities configured, would take the whole view down where the old
+/// `Command` merely failed to start. The run is a real one so the rest of the
+/// view has something to render, which is what makes "everything else it knows"
+/// checkable rather than vacuous.
+#[test]
+fn a_view_renders_with_the_health_block_read_through_the_library() {
+    let world = World::new("real-health");
+    world.write_graphs();
+    let path = world.plan("probed", &plan_of("probed", vec![agent("build", &[])]));
+    world
+        .run_on_agentgraph(&["start", &path.to_string_lossy(), "--attach"])
+        .exited(0)
+        .settled();
+
+    // No `ONEPIPELINE_ONEAGENTGRAPH_BIN`, so the probe is the library call.
+    let status = world.run_on(world.agentgraph_cmd(&["status", "probed"]), "status probed");
+    status.exited(0).out_has("probed").out_has("SETTLED");
+    // The override's own answer must not be what came back: that string is the
+    // double's, and seeing it here would mean the default path had not been taken.
+    assert!(
+        !status.stdout.contains("fake-provider"),
+        "the view carried the override's health block on the default path:\n{}",
+        status.stdout
+    );
+}

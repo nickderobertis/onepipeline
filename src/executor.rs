@@ -292,31 +292,18 @@ impl DispatchHandle for LocalDispatch {
 
     fn cancel(&self, mode: CancelMode) {
         self.cancel.cancel();
-        // `cancel` takes `&self`, so the kill goes through the pid rather than
-        // the child handle: the signal is what stops it, and the handle's owner
-        // still collects the status.
+        // llmlint: ignore-block[changed_behavior_has_e2e] no invocation a user can type
+        // reaches this arm, because nothing in this crate constructs `CancelMode::Kill`:
+        // the engine cancels cooperatively, at `engine.rs`'s one call site, and the
+        // variant exists because `docs/contract.md` declares the mode pair. What the arm
+        // does when a producer appears is held instead where it lives —
+        // `agentgraph::GraphRun::cancel` acts on both backends rather than only the
+        // library one, which is what it used to do, and `tests/contract.rs` holds the two
+        // modes distinct.
         if mode == CancelMode::Kill {
-            kill_pid(self.run.pid());
-        }
+            self.run.cancel();
+        } // llmlint: ignore-end[changed_behavior_has_e2e]
     }
-}
-
-#[cfg(unix)]
-fn kill_pid(pid: u32) {
-    if let Ok(raw) = i32::try_from(pid) {
-        // SAFETY: `kill` takes a pid and a signal number and touches no memory
-        // this call owns. A pid that has already exited is an error we ignore.
-        unsafe { libc::kill(raw, libc::SIGKILL) };
-    }
-}
-
-#[cfg(windows)]
-fn kill_pid(pid: u32) {
-    let _ = std::process::Command::new("taskkill")
-        .args(["/PID", &pid.to_string(), "/F", "/T"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
 }
 
 /// This host's one-minute load average, where it can be read.

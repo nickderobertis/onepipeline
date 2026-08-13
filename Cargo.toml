@@ -13,8 +13,8 @@ resolver = "2"
 # calling its parser — because a double that accepted more than the sibling is an
 # oracle for a build nothing runs.
 [workspace.dependencies]
-oneagentgraph = "0.2.4"
-onevcs = "0.2.5"
+oneagentgraph = "0.2.9"
+onevcs = "0.2.6"
 
 [package]
 name = "onepipeline"
@@ -37,6 +37,11 @@ categories = ["command-line-utilities", "development-tools"]
 include = [
   "src/**/*.rs",
   "tests/**/*.rs",
+  # The per-platform gate scripts the lifecycle journeys write into their own
+  # scratch. `include_str!`'d, so a packaged crate without them does not compile
+  # its own test binary.
+  "tests/e2e/gate.sh",
+  "tests/e2e/gate.bat",
   # The checked-in telemetry golden, which `src/telemetry.rs` reads at compile
   # time: without it the packaged crate does not build, let alone test.
   "tests/golden/*.json",
@@ -104,7 +109,7 @@ windows-sys = { version = "0.61", features = [
 # must stay one: what it implements must never be reachable from a release
 # binary.
 [dev-dependencies]
-onevcs-testing = "0.1.3"
+onevcs-testing = "0.1.5"
 
 [[test]]
 name = "e2e"

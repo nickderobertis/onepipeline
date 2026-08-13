@@ -1,18 +1,66 @@
 //! The `oneagentgraph` seam.
 //!
-//! Agent, harness, and model selection stay in that library, so this crate
-//! reaches it the way any other caller does: through its CLI. Composition, not
-//! reimplementation — nothing here decides a harness, a chain, or a model, and
-//! the envelopes it produces are relayed into the merged stream exactly as it
-//! emitted them.
+//! Agent, harness, and model selection stay in that library, so every verb this
+//! crate needs is one of its **library** entry points: [`oneagentgraph::run::start`]
+//! for a graph, [`oneagentgraph::run::signal`] for a pacemaker reset,
+//! [`oneagentgraph::control::interrupt`] for a live redirection, and
+//! [`oneagentgraph::health::read`] for the provider block. Composition, not
+//! reimplementation: nothing here decides a harness, a chain, or a model, and
+//! envelopes cross the same serialized boundary as the former NDJSON relay.
 //!
-//! The binary is resolved from [`BINARY_ENV`] so an operator can point at a
-//! specific build, and so a test can compose against a real executable standing
-//! in for one.
+//! [`BINARY_ENV`] remains an explicit compatibility override, and it is
+//! all-or-nothing: naming an executable sends *every* verb to it, so an operator
+//! pinning an install never gets half a run from one build and half from
+//! another. Detached launches also retain a process, because a library
+//! scheduler thread cannot outlive the process that is about to exit; neither
+//! case changes the default in-process path.
+//!
+//! # What moving in-process changed, and what it did not
+//!
+//! **Isolation.** The process boundary did not disappear — it moved one layer
+//! down, to where the risk is. What can wedge or burn is the *agent turn*, and
+//! `oneagentgraph` spawns that as its own `oneharness` process either way. What
+//! became a thread is the graph *scheduler*, and a scheduler that panics is
+//! reported rather than fatal: [`oneagentgraph::run::Running::wait`] answers a
+//! panicked thread with `InvalidConfig`, which [`exit_for`] turns into the same
+//! exit code the process path carried, and [`GraphRun::wait`] settles the run on
+//! it. A run that must be stopped is stopped through the sibling's own
+//! [`cancel`](oneagentgraph::run::Running::cancel), which writes the run's stop
+//! signal and reaps its member process trees — the same reap the `cancel` verb
+//! performs.
+//!
+//! **The stream.** Envelopes arrive as they occur, and they arrive as the same
+//! value the subprocess path relayed. Both are held by tests:
+//! `a_relayed_envelope_is_the_same_whether_it_crossed_as_a_value_or_as_a_line`
+//! for the content, and, for the timing,
+//! `status_says_what_a_live_dispatch_is_doing_and_the_readout_advances` in
+//! `tests/e2e/dispatch.rs`, which reads a dispatch's tool summary out of the
+//! merged store twice while the node is still in flight.
+//!
+//! **Interrupts and exit codes.** The three answers stay three: a redirection
+//! delivered, the *fact* that there was no controllable turn, and a lever that
+//! broke. The library hands back a [`Delivery`](oneagentgraph::control::Delivery)
+//! where the process path handed back an exit code, so [`interrupt`] applies the
+//! CLI's own mapping — and publishes the `turn-interrupted` envelope the verb
+//! publishes, through the sibling's own emitter.
+//!
+//! **Concurrency.** One thing in the sibling's library path is process-wide and
+//! is therefore *no longer isolated between concurrent nodes*: a graph's `env:`
+//! block is exported into the running process, and `ONEHARNESS_HARNESSES` is
+//! removed from it. That is deliberate upstream — a two-party member is a thread
+//! there, and the `oneharness run` it spawns has to inherit what the contract
+//! promises it — and it was safe while one graph run was one process. This crate
+//! dispatches several nodes at once, so it no longer is.
+//! `a_graphs_env_block_is_exported_into_this_process_and_not_into_the_run_alone`
+//! observes it. The shipped graphs declare no `env:` block, so nothing here
+//! trips it today.
 
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use crate::error::{Error, Result};
@@ -23,6 +71,52 @@ pub const BINARY_ENV: &str = "ONEPIPELINE_ONEAGENTGRAPH_BIN";
 
 /// The executable's name when the environment names none.
 pub const DEFAULT_BINARY: &str = "oneagentgraph";
+
+/// Where `oneagentgraph` keeps its runs.
+///
+/// Restated rather than imported, and that is a duplicated configuration
+/// surface rather than a choice: the sibling declares this name — and the one
+/// below — as a private `const` in its **binary**, so there is no library item
+/// to name. A library entry point that took its environment as a parameter but
+/// left the caller to spell the keys is the gap; `docs/contract-divergences.md`
+/// records the surface that would close it.
+const STATE_DIR_ENV: &str = "ONEAGENTGRAPH_STATE_DIR";
+
+/// The `oneharness` executable a run — and an interrupt's delivery — drives.
+const ONEHARNESS_BIN_ENV: &str = "ONEAGENTGRAPH_ONEHARNESS_BIN";
+
+/// This process's environment, as the sibling's entry points take it.
+///
+/// Every library call below is handed one of these rather than left to read the
+/// process's own: the sibling's surface is written so that a consumer holding
+/// two runs on two installs can give each its own, and taking that parameter
+/// from one place here keeps this crate's default — *this* process's
+/// environment, which is what the subprocess path inherited — stated once.
+fn process_env() -> BTreeMap<String, String> {
+    std::env::vars_os()
+        .filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?)))
+        .collect()
+}
+
+/// Where the sibling keeps its run state, resolved exactly as its CLI resolves
+/// it — `HOME` on every platform, because that is what the sibling reads.
+fn state_dir(env: &BTreeMap<String, String>) -> PathBuf {
+    env.get(STATE_DIR_ENV).map_or_else(
+        || {
+            env.get("HOME")
+                .map_or_else(std::env::temp_dir, PathBuf::from)
+                .join(".local/state/oneagentgraph/runs")
+        },
+        PathBuf::from,
+    )
+}
+
+/// The `oneharness` executable the sibling drives, resolved as its CLI does.
+fn oneharness_bin(env: &BTreeMap<String, String>) -> String {
+    env.get(ONEHARNESS_BIN_ENV)
+        .cloned()
+        .unwrap_or_else(|| "oneharness".into())
+}
 
 /// The environment variable the dag-scope graph substitutes the run id into.
 pub const RUN_ID_ENV: &str = "ONEPIPELINE_RUN_ID";
@@ -80,9 +174,10 @@ const EVIDENCE_CHARS: usize = crate::event::MAX_PAYLOAD_TEXT_BYTES / 4;
 ///
 /// Skipping them is right — a sibling emitting a kind this build does not know
 /// must not stop the ones it does — but skipping them *quietly* turns a schema
-/// mismatch into a run that merely looks uneventful. `oneagentgraph` is reached
-/// as a process and read off its stdout, so its stream is the one place in this
-/// crate where a line can still arrive unreadable.
+/// mismatch into a run that merely looks uneventful. A line can only arrive
+/// unreadable where one is *read* — the [`BINARY_ENV`] override's stdout, and
+/// the serialized hop the library path's envelopes make — so this is what both
+/// of those report through.
 fn report_skipped(skipped: usize) {
     if skipped > 0 {
         eprintln!("onepipeline: skipped {skipped} oneagentgraph line(s) this build cannot read");
@@ -101,6 +196,20 @@ fn sibling(message: impl Into<String>) -> Error {
     Error::Sibling {
         tool: "oneagentgraph",
         message: message.into(),
+    }
+}
+
+/// The exit code the sibling's own CLI carries one of its failures out on.
+///
+/// The subprocess path read a code and the library path is handed an `Error`,
+/// so this is the CLI's rule applied here — including its fall-through, because
+/// `oneagentgraph::error::Error` is `#[non_exhaustive]` and a variant added
+/// later must still settle a run with the code the contract assigns it rather
+/// than fail to compile.
+fn exit_for(error: &oneagentgraph::error::Error) -> i32 {
+    match error {
+        oneagentgraph::error::Error::InvalidConfig(_) => oneagentgraph::error::EXIT_INVALID_CONFIG,
+        _ => oneagentgraph::error::EXIT_MEMBER_FAILED,
     }
 }
 
@@ -188,9 +297,55 @@ pub fn adopt_labels(labels: &mut Labels) {
     labels.persona = labels.persona.take().or(persona);
 }
 
+/// One envelope the sibling handed over, as this crate's own.
+///
+/// The library gives a typed [`oneagentgraph::event::Envelope`] where the
+/// subprocess path gave a line of that type's own NDJSON. Both cross the same
+/// boundary — the sibling's `Serialize` — so an envelope relayed either way is
+/// the same value, and the crossing is kept rather than skipped for exactly
+/// that reason: a direct field-by-field copy would be a second reading of a
+/// schema the sibling owns, and would silently drop the first field it added.
+/// `a_relayed_envelope_is_the_same_whether_it_crossed_as_a_value_or_as_a_line`
+/// holds the two to each other.
+fn relayed(envelope: oneagentgraph::event::Envelope) -> Result<Envelope> {
+    serde_json::to_value(envelope)
+        .map_err(|error| sibling(format!("serializing graph event: {error}")))
+        .and_then(|value| {
+            serde_json::from_value::<Envelope>(value)
+                .map_err(|error| sibling(format!("reading graph event: {error}")))
+        })
+        .map(|mut envelope| {
+            adopt_labels(&mut envelope.labels);
+            envelope
+        })
+}
+
 /// One `oneagentgraph run`, started and streaming.
 #[derive(Debug)]
 pub struct GraphRun {
+    backend: GraphBackend,
+}
+
+#[derive(Debug)]
+enum GraphBackend {
+    Library(LibraryGraphRun),
+    Process(ProcessGraphRun),
+}
+
+#[derive(Debug)]
+struct LibraryGraphRun {
+    events: Option<mpsc::Receiver<Result<Envelope>>>,
+    settled: mpsc::Receiver<Result<Settled>>,
+    cancel: mpsc::Sender<()>,
+    pid: u32,
+    exited: Arc<AtomicBool>,
+}
+
+/// The retained process implementation for detached launches. A scheduler
+/// thread cannot outlive the embedding process, so the SDK cannot implement a
+/// launch whose caller deliberately exits immediately afterward.
+#[derive(Debug)]
+struct ProcessGraphRun {
     child: Child,
     /// Where this launch's output went, and what reads it back.
     output: Output,
@@ -237,7 +392,7 @@ enum Output {
     Logged(PathBuf),
 }
 
-impl GraphRun {
+impl ProcessGraphRun {
     /// Start a graph, with its envelopes going wherever `output` says.
     pub fn start(
         graph: &str,
@@ -614,6 +769,189 @@ impl GraphRun {
     }
 }
 
+impl GraphRun {
+    /// Start a graph through the sibling library. Detached launches retain the
+    /// process boundary because a library scheduler thread cannot survive this
+    /// process exiting.
+    pub fn start(
+        graph: &str,
+        task: &str,
+        dir: Option<&Path>,
+        labels: &Labels,
+        env: &[(String, String)],
+        sets: &[String],
+        output: GraphOutput<'_>,
+    ) -> Result<Self> {
+        if matches!(output, GraphOutput::Logged(_)) || std::env::var_os(BINARY_ENV).is_some() {
+            return ProcessGraphRun::start(graph, task, dir, labels, env, sets, output).map(
+                |run| Self {
+                    backend: GraphBackend::Process(run),
+                },
+            );
+        }
+
+        let mut run_env = process_env();
+        run_env.extend(env.iter().cloned());
+        let labels = label_args(labels)
+            .iter()
+            .map(|label| {
+                oneagentgraph::run::parse_label(label).map_err(|error| sibling(error.to_string()))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let overrides = sets
+            .iter()
+            .map(|value| {
+                oneagentgraph::run::parse_set(value).map_err(|error| sibling(error.to_string()))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let state_dir = state_dir(&run_env);
+        let request = oneagentgraph::run::Request {
+            graph: oneagentgraph::config::ConfigRef(graph.to_string()),
+            task: Some(task.to_string()),
+            dir: dir.map_or_else(
+                || std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+                Path::to_path_buf,
+            ),
+            labels,
+            overrides,
+            state_dir,
+            oneharness_bin: oneharness_bin(&run_env),
+        };
+        let running = oneagentgraph::run::start(&request, &run_env)
+            .map_err(|error| sibling(error.to_string()))?;
+        let pid = running.started().pid;
+        let (events_tx, events_rx) = mpsc::channel();
+        let (settled_tx, settled_rx) = mpsc::channel();
+        let (cancel_tx, cancel_rx) = mpsc::channel();
+        let exited = Arc::new(AtomicBool::new(false));
+        let thread_exited = Arc::clone(&exited);
+        std::thread::Builder::new()
+            .name("oneagentgraph-relay".into())
+            .spawn(move || {
+                loop {
+                    if cancel_rx.try_recv().is_ok() {
+                        let _ = running.cancel();
+                    }
+                    match running.recv_timeout(Duration::from_millis(10)) {
+                        Ok(Some(envelope)) => {
+                            if events_tx.send(relayed(envelope)).is_err() {
+                                let _ = running.cancel();
+                                break;
+                            }
+                        }
+                        // Nothing yet. Round again — which is also what makes
+                        // the cancel above reachable while the graph is quiet,
+                        // so the poll is the design rather than a busy wait.
+                        //
+                        // The sibling reports a timeout as `Ok(None)` and keeps
+                        // `Err` for a channel that is finished, so the second
+                        // arm is what a newer build could start answering with.
+                        // Rounding again is the safe reading of both: a relay
+                        // that panicked here would take a live run down over a
+                        // wait that had simply expired.
+                        Ok(None) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    }
+                }
+                let settled = Ok(match running.wait() {
+                    Ok(code) => Settled {
+                        code: Some(code),
+                        stderr: String::new(),
+                    },
+                    // A refusal, given the code the *process* path would have
+                    // carried for it. The sibling's CLI turns its `Error` into an
+                    // exit code and the library hands the `Error` over instead,
+                    // so a caller of both has to apply that rule itself or the
+                    // two paths settle the same graph differently.
+                    Err(error) => Settled {
+                        code: Some(exit_for(&error)),
+                        stderr: error.to_string(),
+                    },
+                });
+                thread_exited.store(true, Ordering::Release);
+                let _ = settled_tx.send(settled);
+            })
+            .map_err(|error| sibling(format!("cannot start graph relay: {error}")))?;
+        Ok(Self {
+            backend: GraphBackend::Library(LibraryGraphRun {
+                events: Some(events_rx),
+                settled: settled_rx,
+                cancel: cancel_tx,
+                pid,
+                exited,
+            }),
+        })
+    }
+
+    pub fn confirm_started(&mut self) -> Result<()> {
+        match &mut self.backend {
+            GraphBackend::Library(_) => Ok(()),
+            GraphBackend::Process(run) => run.confirm_started(),
+        }
+    }
+
+    pub fn events(&mut self) -> Box<dyn Iterator<Item = Result<Envelope>> + Send> {
+        match &mut self.backend {
+            GraphBackend::Library(run) => run.events.take().map_or_else(
+                || {
+                    Box::new(std::iter::empty())
+                        as Box<dyn Iterator<Item = Result<Envelope>> + Send>
+                },
+                |events| Box::new(events.into_iter()),
+            ),
+            GraphBackend::Process(run) => run.events(),
+        }
+    }
+
+    pub fn wait(&mut self) -> Result<Settled> {
+        match &mut self.backend {
+            GraphBackend::Library(run) => run
+                .settled
+                .recv()
+                .map_err(|error| sibling(format!("waiting for graph run: {error}")))?,
+            GraphBackend::Process(run) => run.wait(),
+        }
+    }
+
+    pub fn pid(&self) -> u32 {
+        match &self.backend {
+            GraphBackend::Library(run) => run.pid,
+            GraphBackend::Process(run) => run.pid(),
+        }
+    }
+
+    pub fn has_exited(&mut self) -> bool {
+        match &mut self.backend {
+            GraphBackend::Library(run) => run.exited.load(Ordering::Acquire),
+            GraphBackend::Process(run) => run.has_exited(),
+        }
+    }
+
+    /// Stop the graph, whichever way it is running.
+    ///
+    /// Both backends, and that is the whole point of the name: a caller asking
+    /// a run to stop must not get silence because of how the run happens to be
+    /// reached. The library backend hands the ask to the relay, which calls the
+    /// sibling's own [`cancel`](oneagentgraph::run::Running::cancel) — the same
+    /// stop signal and process-tree reap the `cancel` verb performs. The
+    /// process backend has no signal file to write, so it is the child that is
+    /// taken down, and its descendants with it: the harness the graph started
+    /// is one of them, and stopping only the parent would leave it holding the
+    /// workspace.
+    ///
+    /// Best-effort and non-blocking in both, because a cancel is a caller
+    /// changing its mind rather than an operation whose failure it can act on.
+    /// [`wait`](Self::wait) is what reports how the run actually ended.
+    pub fn cancel(&self) {
+        match &self.backend {
+            GraphBackend::Library(run) => {
+                let _ = run.cancel.send(());
+            }
+            GraphBackend::Process(run) => crate::sys::stop(run.pid(), crate::sys::Stop::Now),
+        }
+    }
+}
+
 /// How a graph run ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settled {
@@ -635,7 +973,29 @@ impl Settled {
 /// This is the whole pacemaker-reset contract: a surface a planner actually
 /// read is what restarts the check-in clock, so a run that is already reporting
 /// does not also get a pacemaker surface.
+///
+/// [`oneagentgraph::run::signal`] is the same implementation the `reset-timer`
+/// verb runs, so which member names are addressable and where the run watches
+/// are decided once, in the sibling, rather than twice.
 pub fn reset_timer(run: &str, member: &str) -> Result<()> {
+    if std::env::var_os(BINARY_ENV).is_some() {
+        return reset_timer_by_process(run, member);
+    }
+    let run_id = oneagentgraph::run::RunId::parse(run)
+        .map_err(|error| sibling(format!("reset-timer {run} {member}: {error}")))?;
+    let member_name = oneagentgraph::run::MemberName::parse(member)
+        .map_err(|error| sibling(format!("reset-timer {run} {member}: {error}")))?;
+    oneagentgraph::run::signal(
+        &state_dir(&process_env()),
+        &run_id,
+        &member_name,
+        oneagentgraph::run::Signal::Reset,
+    )
+    .map_err(|error| sibling(format!("reset-timer {run} {member}: {error}")))
+}
+
+/// The same reset, through an executable an operator named at [`BINARY_ENV`].
+fn reset_timer_by_process(run: &str, member: &str) -> Result<()> {
     let output = Command::new(binary())
         .arg("reset-timer")
         .arg(run)
@@ -735,6 +1095,200 @@ pub struct Interrupt {
 ///
 /// [`EXIT_NO_CONTROLLABLE_TURN`]: oneagentgraph::error::EXIT_NO_CONTROLLABLE_TURN
 pub fn interrupt(address: &TurnAddress, input: &str) -> Interrupt {
+    if std::env::var_os(BINARY_ENV).is_some() {
+        return interrupt_by_process(address, input);
+    }
+    let env = process_env();
+    let addressed = oneagentgraph::run::RunId::parse(address.run())
+        .map_err(|error| error.to_string())
+        .and_then(|run_id| {
+            oneagentgraph::run::MemberName::parse(address.member())
+                .map_err(|error| error.to_string())
+                .map(|member| (run_id, member))
+        });
+    let (run_id, member) = match addressed {
+        Ok(addressed) => addressed,
+        // Not an address the sibling can act on, so nothing was delivered and
+        // no lever was pulled — the same answer, and the same silence on the
+        // stream, that the verb's own argument refusal gave.
+        Err(reason) => {
+            return Interrupt {
+                outcome: Interrupted::Failed(format!(
+                    "`oneagentgraph interrupt {} {}` was refused: {reason}",
+                    address.run(),
+                    address.member()
+                )),
+                events: Vec::new(),
+            }
+        }
+    };
+    let delivered = oneagentgraph::control::interrupt(
+        &state_dir(&env),
+        &run_id,
+        &member,
+        Some(input),
+        &oneharness_bin(&env),
+    );
+    // llmlint: ignore-block[changed_behavior_has_e2e] three of these five answers cannot
+    // be reached offline, and the reason is the sibling's rather than a gap in the suite.
+    // `Delivered`, `Failed`, and `Invalid` are all what `control::deliver` came back with,
+    // and it is only ever called for a member whose scratch holds an *open* turn — which
+    // `oneagentgraph` writes from `judge.rs` alone, for a `kind: onejudge` member. The
+    // graphs these journeys run declare `kind: oneharness` members, deliberately: the
+    // two-party kind runs its conversation against a provider this repository has no
+    // offline stand-in for, which is divergence 21. So a real dispatch here reaches
+    // `NoTurn`, and `a_note_delivered_through_the_real_sibling_records_what_its_lever_answered`
+    // is the journey that drives it, envelope and all. The other two arms — an address the
+    // sibling cannot parse, and a run it cannot find — are driven directly by this module's
+    // own tests, which is the only entry point either has.
+    let (outcome, reason) = match delivered {
+        Ok(oneagentgraph::control::Delivery::Delivered) => (Interrupted::Delivered, None),
+        Ok(oneagentgraph::control::Delivery::NoTurn(reason)) => {
+            (Interrupted::NoTurn(reason.clone()), Some(reason))
+        }
+        Ok(oneagentgraph::control::Delivery::Failed(reason)) => (
+            Interrupted::Failed(format!(
+                "`oneagentgraph interrupt {} {}` could not deliver: {reason}",
+                address.run(),
+                address.member()
+            )),
+            Some(reason),
+        ),
+        // A redirection the sibling would not take, and a run or member it
+        // cannot address, are both arguments this caller got wrong: the verb
+        // refuses them *before* any event claims a lever was pulled, so neither
+        // publishes one here either.
+        Ok(oneagentgraph::control::Delivery::Invalid(reason)) => {
+            return Interrupt {
+                outcome: Interrupted::Failed(format!("--input: {reason}")),
+                events: Vec::new(),
+            }
+        }
+        Err(error) => {
+            return Interrupt {
+                outcome: Interrupted::Failed(format!(
+                    "`oneagentgraph interrupt {} {}` was refused: {error}",
+                    address.run(),
+                    address.member()
+                )),
+                events: Vec::new(),
+            }
+        }
+    }; // llmlint: ignore-end[changed_behavior_has_e2e]
+    Interrupt {
+        outcome,
+        events: published(&run_id, address.member(), input.len() as u64, reason),
+    }
+}
+
+/// The `turn-interrupted` envelope this interrupt is owed, for the merged store.
+///
+/// The library call hands back the [`Delivery`](oneagentgraph::control::Delivery)
+/// and nothing else, deliberately: the verb's other two halves are an exit code
+/// and an envelope on *a process's* stdout, and a library caller has neither.
+/// So this crate publishes the envelope — but through the sibling's own
+/// [`Emitter`](oneagentgraph::event::Emitter) and its own
+/// [`TurnInterrupted`](oneagentgraph::event::TurnInterrupted) payload, into a
+/// buffer instead of onto stdout. The bytes are the ones the CLI wrote, because
+/// the code that writes them is the same; a hand-rolled JSON object here would
+/// be a second producer of a shape the sibling owns, and the first field it
+/// added or renamed would land only on the process path.
+fn published(
+    run_id: &oneagentgraph::run::RunId,
+    member: &str,
+    input_bytes: u64,
+    reason: Option<String>,
+) -> Vec<Envelope> {
+    let sink = Captured::new();
+    let emitter = oneagentgraph::event::Emitter::new(
+        // The verb's own stream id: an envelope's `stream` is a unique id per
+        // producing process, and this process is the one producing it.
+        format!("{run_id}-interrupt-{}", std::process::id()),
+        Box::new(sink.clone()),
+    )
+    .with_labels(oneagentgraph::event::Labels {
+        run_id: Some(run_id.to_string()),
+        member: Some(member.to_string()),
+        ..oneagentgraph::event::Labels::default()
+    });
+    let payload = oneagentgraph::event::TurnInterrupted {
+        member: member.to_string(),
+        delivered: reason.is_none(),
+        input_bytes,
+        reason,
+    };
+    emitter.emit(
+        oneagentgraph::event::EventKind::TurnInterrupted,
+        match serde_json::to_value(&payload) {
+            Ok(serde_json::Value::Object(map)) => map,
+            _ => serde_json::Map::new(),
+        },
+    );
+    read_envelopes(&sink.written())
+}
+
+/// A sink that keeps what was written to it.
+///
+/// [`Emitter`](oneagentgraph::event::Emitter) takes ownership of its sink and
+/// hands nothing back, so the way to read what it wrote is to write into
+/// something shared. One line is ever emitted through it, and it is read after
+/// the emit returns.
+#[derive(Debug, Clone)]
+struct Captured(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl Captured {
+    fn new() -> Self {
+        Self(Arc::new(std::sync::Mutex::new(Vec::new())))
+    }
+
+    /// What has been written to it so far, as text.
+    fn written(&self) -> String {
+        self.0.lock().map_or_else(
+            |held| String::from_utf8_lossy(&held.into_inner()).into_owned(),
+            |held| String::from_utf8_lossy(&held).into_owned(),
+        )
+    }
+}
+
+impl std::io::Write for Captured {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if let Ok(mut held) = self.0.lock() {
+            held.extend_from_slice(bytes);
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Read a verb's NDJSON into envelopes, saying how many lines were skipped.
+///
+/// A line this build cannot read is skipped rather than ending the read — a
+/// sibling emitting a shape this build does not know must not stop the ones it
+/// does — but never *quietly*: the same rule, and the same report, as the
+/// relayed run stream.
+fn read_envelopes(text: &str) -> Vec<Envelope> {
+    let mut skipped = 0;
+    let envelopes: Vec<Envelope> = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| match serde_json::from_str::<Envelope>(line.trim()) {
+            Ok(envelope) => Some(envelope),
+            Err(_) => {
+                skipped += 1;
+                None
+            }
+        })
+        .collect();
+    report_skipped(skipped);
+    envelopes
+}
+
+/// The same interrupt, through an executable an operator named at
+/// [`BINARY_ENV`].
+fn interrupt_by_process(address: &TurnAddress, input: &str) -> Interrupt {
     let output = Command::new(binary())
         .arg("interrupt")
         .arg(address.run())
@@ -762,23 +1316,7 @@ pub fn interrupt(address: &TurnAddress, input: &str) -> Interrupt {
             }
         } // llmlint: ignore-end[changed_behavior_has_e2e]
     };
-    // A line this build cannot read is skipped rather than ending the read — a
-    // sibling emitting a shape this build does not know must not stop the ones
-    // it does — but never *quietly*: the same rule, and the same report, as the
-    // relayed run stream a few lines up.
-    let mut skipped = 0;
-    let events: Vec<Envelope> = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .filter_map(|line| match serde_json::from_str::<Envelope>(line.trim()) {
-            Ok(envelope) => Some(envelope),
-            Err(_) => {
-                skipped += 1;
-                None
-            }
-        })
-        .collect();
-    report_skipped(skipped);
+    let events = read_envelopes(&String::from_utf8_lossy(&output.stdout));
     // The published event's own words first, because that is where the verb puts
     // the reason a delivery did not land; its exit code says which kind of
     // answer it is.
@@ -822,21 +1360,315 @@ pub fn interrupt(address: &TurnAddress, input: &str) -> Interrupt {
 /// A health probe that cannot run is silence rather than a failure: a view whose
 /// provider block is missing still reports everything else it knows.
 pub fn health() -> Option<String> {
-    let output = Command::new(binary())
-        .arg("health")
-        .stdin(Stdio::null())
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+    if std::env::var_os(BINARY_ENV).is_some() {
+        let output = Command::new(binary())
+            .arg("health")
+            .stdin(Stdio::null())
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        return (!text.is_empty()).then_some(text);
     }
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    (!text.is_empty()).then_some(text)
+    oneagentgraph::health::read()
+        .ok()
+        .and_then(|report| serde_json::to_string_pretty(&report).ok())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A state directory holding one real `oneagentgraph` run record.
+    ///
+    /// The sibling's **own** [`Record`](oneagentgraph::run::Record), serialized
+    /// by the sibling's own `serde` impl into the file name the sibling names,
+    /// so what the calls below read back is the on-disk contract they read in
+    /// production rather than a shape restated here. A record this crate
+    /// hand-wrote as JSON would keep passing against a sibling that had renamed
+    /// a field — the exact drift the subprocess doubles used to hide.
+    ///
+    /// The variable is set rather than passed because these entry points read
+    /// the process's environment, which is what a run of the binary gives them;
+    /// nextest runs each test in its own process, so it reaches nothing else.
+    fn state_dir_holding(run: &str, members: &[&str]) -> PathBuf {
+        static NTH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "op-graphstate-{}-{}",
+            std::process::id(),
+            NTH.fetch_add(1, Ordering::SeqCst)
+        ));
+        let run_id = oneagentgraph::run::RunId::parse(run).expect("a run id the sibling accepts");
+        let dir = root.join(run_id.as_str());
+        std::fs::create_dir_all(&dir).expect("a run directory");
+        let record = oneagentgraph::run::Record {
+            schema_version: oneagentgraph::run::RECORD_SCHEMA_VERSION,
+            run_id,
+            graph: "node-scope.yaml".into(),
+            name: "node-scope".into(),
+            started_ms: 1_786_304_152_340,
+            finished_ms: None,
+            exit_code: None,
+            members: std::collections::BTreeMap::new(),
+            declared_members: members.iter().map(|m| (*m).to_string()).collect(),
+            refs: Vec::new(),
+            events_path: dir
+                .join(oneagentgraph::run::EVENTS_FILE)
+                .display()
+                .to_string(),
+        };
+        std::fs::write(
+            dir.join(oneagentgraph::run::RECORD_FILE),
+            serde_json::to_string(&record).expect("the sibling's record serialises"),
+        )
+        .expect("the run record is written");
+        std::env::set_var(STATE_DIR_ENV, &root);
+        std::env::remove_var(BINARY_ENV);
+        root
+    }
+
+    /// A graph's `env:` block lands in **this** process, which is what stops
+    /// concurrent dispatches from being isolated from one another.
+    ///
+    /// This is the answer to "what in the sibling's library path is
+    /// process-wide", and it is observed rather than argued: the graph below
+    /// declares one variable and removes nothing, and after the launch this
+    /// process is carrying it.
+    ///
+    /// The mechanism is `oneagentgraph::run::run` calling its private `export`,
+    /// which does `std::env::remove_var` and `std::env::set_var` on the running
+    /// process — correct while a graph run *was* a process, and load-bearing
+    /// even now, because a two-party member is a thread here and the
+    /// `oneharness run` it spawns has to inherit what the contract promises it.
+    /// One process per graph made that safe. One thread per graph does not:
+    /// this crate dispatches several nodes at once, so two concurrent runs each
+    /// write the other's members' environment, and `ONEHARNESS_HARNESSES` is
+    /// cleared out from under whichever run did not ask for that. It is also a
+    /// data race — `set_var` is why Rust 2024 made it `unsafe`.
+    ///
+    /// The shipped graphs declare no `env:` block, so nothing in this
+    /// repository trips it today; a graph that adds one would. Held as a test
+    /// rather than as a note so the day upstream confines it, this fails and
+    /// says so.
+    #[test]
+    fn a_graphs_env_block_is_exported_into_this_process_and_not_into_the_run_alone() {
+        let root = state_dir_holding("node-scope-1786304152340-30", &["worker"]);
+        let probe = "ONEPIPELINE_GRAPH_ENV_PROBE";
+        std::env::remove_var(probe);
+        // A harness that is not there, so the member fails immediately: the
+        // export happens before anything launches, which is exactly the point.
+        std::env::set_var(ONEHARNESS_BIN_ENV, "oneharness-that-is-not-installed");
+        std::fs::write(
+            root.join("oneharness.toml"),
+            "run_mode = \"fallback\"\nharnesses = [\"claude-code\"]\n",
+        )
+        .expect("the harness config is written");
+        let graph = root.join("exports.yaml");
+        std::fs::write(
+            &graph,
+            format!(
+                "version: 1\nname: exports\nenv:\n  {probe}: \"from the graph\"\nmembers:\n  \
+                 worker:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n"
+            ),
+        )
+        .expect("the graph config is written");
+
+        // Whether it *ran* is not the claim — the member cannot, by
+        // construction. The claim is what the launch did to this process.
+        let started = GraphRun::start(
+            &graph.to_string_lossy(),
+            "## What\nNothing.\n\n## Why\nThe export is the subject.\n\n## Acceptance criteria\n- \
+             None.",
+            Some(&root),
+            &Labels::default(),
+            &[],
+            &[],
+            GraphOutput::Relayed,
+        );
+        if let Ok(mut run) = started {
+            run.cancel();
+            let _ = run.wait();
+        }
+
+        assert_eq!(
+            std::env::var(probe).ok().as_deref(),
+            Some("from the graph"),
+            "the graph's env block did not reach this process — if upstream has confined it to \
+             the run, this test has done its job and the concurrency note above is stale"
+        );
+        std::env::remove_var(probe);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An envelope is the same value whichever way it crossed.
+    ///
+    /// This is the *content* half of the streaming promise: the subprocess path
+    /// read a line of the sibling's NDJSON and the library path is handed the
+    /// typed envelope that line is written from, so a relay that had drifted
+    /// would put a different value into the merged store depending on which
+    /// path a run took. Held by sending one envelope both ways and comparing —
+    /// the `serde` round-trip is the *same* boundary in both, which is the
+    /// property being kept rather than an implementation detail.
+    ///
+    /// The *timing* half is
+    /// `status_says_what_a_live_dispatch_is_doing_and_the_readout_advances` in
+    /// `tests/e2e/dispatch.rs`, which runs on this path: it reads a live
+    /// dispatch's tool summary out of the merged store while the node is still
+    /// in flight, and then reads it again — advanced — while it still is. An
+    /// envelope buffered to the end of the turn would fail both readings.
+    #[test]
+    fn a_relayed_envelope_is_the_same_whether_it_crossed_as_a_value_or_as_a_line() {
+        let mut labels = oneagentgraph::event::Labels {
+            run_id: Some("node-scope-1786304152340-19".into()),
+            member: Some("worker".into()),
+            ..oneagentgraph::event::Labels::default()
+        };
+        labels
+            .extra
+            .insert("onepipeline.node".into(), "build".into());
+        labels.extra.insert("onepipeline.round".into(), "2".into());
+        let produced = oneagentgraph::event::Envelope {
+            v: 1,
+            ts: "2026-08-13T09:15:00.123Z".into(),
+            stream: "node-scope-1786304152340-19".into(),
+            seq: 7,
+            source: oneagentgraph::event::Source::Agentgraph,
+            kind: oneagentgraph::event::EventKind::TurnActivity,
+            labels,
+            payload: serde_json::Map::new(),
+            artifacts: Vec::new(),
+        };
+
+        // The line the subprocess path read, off the sibling's own serializer.
+        let line = serde_json::to_string(&produced).expect("the sibling's envelope serialises");
+        let [off_the_wire] = &read_envelopes(&line)[..] else {
+            panic!("the sibling's own NDJSON did not read back as one envelope: {line}");
+        };
+        let mut off_the_wire = off_the_wire.clone();
+        adopt_labels(&mut off_the_wire.labels);
+
+        let in_process = relayed(produced).expect("the library path relays it");
+
+        assert_eq!(
+            in_process, off_the_wire,
+            "the same envelope reaches the merged stream differently depending on which path \
+             relayed it"
+        );
+        // Not a vacuous comparison: the enrichment both paths apply really ran.
+        assert_eq!(in_process.labels.node.as_deref(), Some("build"));
+        assert_eq!(in_process.labels.round, Some(2));
+    }
+
+    /// A reset reaches the run's own signal directory, under the name the
+    /// sibling watches for.
+    ///
+    /// The file rather than an `Ok(())`: `signal` answers success for a write it
+    /// made, so asserting only on the return would pass against a call that wrote
+    /// somewhere the run never looks — which is the whole failure mode the
+    /// sibling grew `declared_members` to close.
+    #[test]
+    fn a_reset_leaves_the_signal_the_run_watches_for() {
+        let root = state_dir_holding("node-scope-1786304152340-19", &[CHECK_IN_MEMBER]);
+        reset_timer("node-scope-1786304152340-19", CHECK_IN_MEMBER)
+            .expect("the sibling accepts a reset for a member it declared");
+        assert!(
+            root.join("node-scope-1786304152340-19")
+                .join(oneagentgraph::run::SIGNAL_DIR)
+                .join(format!("{CHECK_IN_MEMBER}.reset"))
+                .is_file(),
+            "the reset left no signal where the run watches for one"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A member the run never declared is refused rather than answered with a
+    /// signal file nothing will read.
+    #[test]
+    fn a_reset_for_a_member_the_run_never_declared_is_refused() {
+        let root = state_dir_holding("node-scope-1786304152340-20", &["worker"]);
+        let refused = reset_timer("node-scope-1786304152340-20", CHECK_IN_MEMBER)
+            .expect_err("a member the run does not have is not resettable");
+        assert!(
+            refused.to_string().contains(CHECK_IN_MEMBER),
+            "{refused} does not name the member that could not be reset"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An interrupt against a run the sibling cannot find is a delivery that
+    /// *failed*, and it publishes nothing.
+    ///
+    /// The silence is the assertion: the verb refuses an address before any
+    /// event claims a lever was pulled, so a `turn-interrupted` here would put
+    /// an interrupt into the merged store that never happened.
+    #[test]
+    fn an_interrupt_against_a_run_that_is_not_there_is_a_failed_delivery_that_publishes_nothing() {
+        let root = state_dir_holding("node-scope-1786304152340-21", &["worker"]);
+        let interrupt = interrupt(
+            &TurnAddress::of("node-scope-1786304152340-99", "worker").expect("an address"),
+            "the fixture moved",
+        );
+        assert!(
+            matches!(&interrupt.outcome, Interrupted::Failed(reason)
+                if reason.contains("node-scope-1786304152340-99")),
+            "{:?} does not name the run that could not be reached",
+            interrupt.outcome
+        );
+        assert!(
+            interrupt.events.is_empty(),
+            "a delivery that was never addressed published an event anyway"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A member with no controllable turn answers `NoTurn` — and still publishes
+    /// the envelope, because "the lever was pulled and nothing happened" is
+    /// exactly what the merged store has to carry.
+    ///
+    /// The envelope is the sibling's, emitted through the sibling's own emitter,
+    /// so this checks the fields the contract names rather than a shape this
+    /// crate composed.
+    #[test]
+    fn an_interrupt_with_no_turn_to_reach_still_publishes_what_the_lever_did() {
+        let root = state_dir_holding("node-scope-1786304152340-22", &["worker"]);
+        let interrupt = interrupt(
+            &TurnAddress::of("node-scope-1786304152340-22", "worker").expect("an address"),
+            "the fixture moved",
+        );
+        let Interrupted::NoTurn(reason) = &interrupt.outcome else {
+            panic!(
+                "{:?} is not the no-controllable-turn answer a member with no lever gives",
+                interrupt.outcome
+            );
+        };
+        assert!(!reason.is_empty(), "the answer carried no reason");
+        let [published] = &interrupt.events[..] else {
+            panic!(
+                "an interrupt published {} envelopes, not the one the contract names",
+                interrupt.events.len()
+            );
+        };
+        assert_eq!(published.kind.0, "turn-interrupted");
+        assert_eq!(published.payload["member"], serde_json::json!("worker"));
+        assert_eq!(published.payload["delivered"], serde_json::json!(false));
+        assert_eq!(
+            published.payload["input_bytes"],
+            serde_json::json!("the fixture moved".len())
+        );
+        assert_eq!(
+            published.payload["reason"],
+            serde_json::json!(reason),
+            "the envelope's reason and the answer's are the same fact"
+        );
+        assert_eq!(
+            published.labels.run_id.as_deref(),
+            Some("node-scope-1786304152340-22"),
+            "the envelope does not say which run's lever was pulled"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn the_binary_comes_from_the_environment_or_falls_back() {

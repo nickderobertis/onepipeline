@@ -90,6 +90,63 @@ pub fn hostname() -> String {
         .unwrap_or_else(|| "localhost".to_string())
 }
 
+/// How firmly a process is asked to stop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stop {
+    /// Ask it to stop and let it record its own abandonment first.
+    Politely,
+    /// Take it down, and its descendants with it.
+    Now,
+}
+
+/// Ask a process on **this** host to stop.
+///
+/// One place, because both callers need the same two `cfg` blocks and a second
+/// copy is a platform that gets fixed in one of them: a driver being asked to
+/// stand down, and a dispatch being killed. Which signal each sends is the
+/// caller's decision and the only thing that differs.
+///
+/// Best-effort by construction. A process that has already exited, or that this
+/// user may not signal, is not an error to report — the caller's next liveness
+/// probe is what decides whether the stop landed.
+pub fn stop(pid: u32, how: Stop) {
+    if pid == 0 || pid == self::pid() {
+        return;
+    }
+    platform_stop(pid, how);
+}
+
+#[cfg(unix)]
+fn platform_stop(pid: u32, how: Stop) {
+    let Ok(raw) = i32::try_from(pid) else {
+        return;
+    };
+    let signal = match how {
+        Stop::Politely => libc::SIGTERM,
+        Stop::Now => libc::SIGKILL,
+    };
+    // SAFETY: `kill` takes a pid and a signal number and touches no memory this
+    // call owns.
+    unsafe { libc::kill(raw, signal) };
+}
+
+#[cfg(windows)]
+fn platform_stop(pid: u32, how: Stop) {
+    // `/T` for the tree in both cases: a harness the graph started is a
+    // descendant, and stopping only the parent leaves it holding the workspace.
+    // `/F` is what makes the difference — without it `taskkill` asks, and a
+    // process that ignores the ask keeps running.
+    let mut command = std::process::Command::new("taskkill");
+    command.args(["/PID", &pid.to_string(), "/T"]);
+    if how == Stop::Now {
+        command.arg("/F");
+    }
+    let _ = command
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
 /// Whether a process *may* be live on this host.
 ///
 /// Deliberately asymmetric: `false` is a proof that the process is gone, and

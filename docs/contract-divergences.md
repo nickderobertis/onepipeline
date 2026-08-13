@@ -487,3 +487,107 @@ leg of CI runs the rest of the suite and this crate's own units, and
 `the_real_onevcs_opens_no_session_on_windows_which_is_why_the_journeys_above_are_not_run_here`
 is what fails when the sibling stops doing it — which is the signal to drop every
 one of those attributes.
+
+## 19. A graph's `env:` block is written into the calling process — OPEN
+
+**Proposal (for `oneagentgraph`): give a member's launch its own environment
+rather than the process's, so two graphs running in one process are isolated.**
+
+`run::run` calls a private `export` before anything launches, and that function
+does `std::env::remove_var` / `std::env::set_var` on the **running process**:
+`ONEHARNESS_HARNESSES` is cleared, and every pair of the graph's `env:` block is
+set. It is deliberate upstream and load-bearing — a two-party member is a thread
+there, so the `oneharness run` it spawns can only inherit what the contract
+promises it if the pairs are on this process — and it was safe while one graph
+run was one process.
+
+It is no longer safe here. This crate dispatches several nodes at once, and each
+is now a `run::start` in this process rather than a child, so two concurrent
+runs each write the other's members' environment and either can clear
+`ONEHARNESS_HARNESSES` out from under the other. `set_var` in a multithreaded
+process is also the operation Rust 2024 made `unsafe`; this crate is edition
+2021, so it compiles, and the race is real either way.
+
+Observed rather than argued, in
+`a_graphs_env_block_is_exported_into_this_process_and_not_into_the_run_alone`:
+after a launch of a graph declaring one variable, this process is carrying it.
+The shipped graphs declare no `env:` block, so nothing in this repository trips
+it today — which is why the test is a characterisation rather than a failure,
+and why it is the thing that will say so when upstream confines it.
+
+What would close it: the member launch already builds a `member_env` map beside
+the export. Handing that to the spawn — and to the in-process side — instead of
+mutating the process would need nothing from this crate.
+
+## 20. The sibling's environment keys have no library spelling — OPEN
+
+**Proposal (for `oneagentgraph`): publish `STATE_DIR_ENV` and
+`ONEHARNESS_BIN_ENV` from the library, beside the entry points that need them.**
+
+`run::start`, `run::signal`, and `control::interrupt` all take their environment
+as a parameter rather than reading the process's — which is right, and is what
+lets a consumer hold two runs on two installs. But the *names* a caller must
+resolve out of that environment — `ONEAGENTGRAPH_STATE_DIR` and
+`ONEAGENTGRAPH_ONEHARNESS_BIN` — and the fallbacks the CLI applies to them are
+private `const`s and private functions in the sibling's **binary**. So every
+library caller restates them, as `src/agentgraph.rs` does, and a rename or a
+changed fallback lands on the CLI alone while the library callers keep resolving
+the old thing without a compile error.
+
+The same shape one step along: `run::run` returns `Result<i32, Error>` and the
+CLI maps that `Error` to an exit code in a private `exit_for`. This crate's
+`exit_for` is a copy of it, kept so a run settles with the code the process path
+carried. A `pub fn exit_for(&Error) -> i32` — or an `Error::exit_code` — would
+make it one rule rather than two.
+
+## 21. There is no upstream double for a member that must run a command — OPEN
+
+**Proposal (for `oneagentgraph`): a sentinel in
+`oneagentgraph-fake-harness` that runs a command and settles on its exit code.**
+
+`crates/testfakes`'s `fake-oneharness` is the one hand-written double this
+repository still needs, and it needs it for exactly one behaviour that no
+upstream double has: the dag-scope graph's `orchestrator` member is an agent
+whose whole job is to run this crate's own engine verbs, so a double standing in
+for that turn has to *run a command*. `oneagentgraph-fake-harness`'s sentinel
+table — `fake:complete-now`, `fake:hold`, `fake:park`, `fake:did-work`, and the
+`FAKE_HARNESS_*` variables — steers what a turn answers and never what it
+executes.
+
+The other two candidate seams were rejected on evidence, not preference:
+
+* **`oneharness run --mock-harness ID`** is unreachable. onejudge 0.3.8 has no
+  passthrough for it, and `oneagentgraph`'s own `src/bin/fake_harness.rs`
+  records the rest of the reason at length: the `MOCK_*` contract fixes one
+  response per process environment, and a member needs several from one binary.
+* **`ONEHARNESS_BIN_<ID>`** is the right seam and is what the sentinel above
+  would be reached through — but it substitutes the *provider* below a real
+  `oneharness`, and this repository has no `oneharness` binary in its dependency
+  graph on any platform. Taking it would add a second `oneharness-core` major to
+  the tree and a provisioning step to three CI legs, to arrive at a double that
+  still could not run the orchestrator's command.
+
+Until one exists, the double stays and is reached at `ONEAGENTGRAPH_ONEHARNESS_BIN`.
+
+## 22. `onevcs-testing`'s providers cannot reach a consumer's subprocess — OPEN
+
+**Proposal (for `onevcs`): a documented way to select a supplied `Hosting` from
+outside the process — or an accepted answer that `ONEVCS_GH` is that way.**
+
+`onevcs-testing`'s own doc names this repository's case: drive a real `onevcs`
+through a real journey "without a real GitHub — and without the scripted fake
+binary that substituting the whole CLI amounts to". `MemoryHost` and `FileHost`
+are supplied through `Providers`, which is a **compile-time** injection, and
+`src/vcs.rs` calls `Providers::real()` because anything else would put a test
+implementation on a path a release binary can reach — which is the invariant
+`onevcs-testing` exists as a separate crate to protect.
+
+Every e2e journey here drives the compiled `onepipeline` as a subprocess, which
+is this repository's own non-negotiable. The two rules do not meet: there is no
+way for a journey to hand `FileHost` to a binary it spawns. `tests/onevcs_seam.rs`
+is where those providers *can* be used, and does.
+
+So the host side of a subprocess journey is still stood in for at `onevcs`'s own
+`ONEVCS_GH` override — that library's documented seam for the `gh` executable —
+by `crates/testfakes`'s `fake-gh`. `tests/smoke/` runs the same publication
+against the real `gh` and is what holds it honest.

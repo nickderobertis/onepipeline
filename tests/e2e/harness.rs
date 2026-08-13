@@ -105,6 +105,7 @@ impl World {
     /// names itself; its scratch directory does not have to.
     pub fn new(name: &str) -> Self {
         static NTH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        LIVE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let root = std::env::temp_dir().join(format!(
             "op-{}-{}",
             std::process::id(),
@@ -126,6 +127,7 @@ impl World {
 
     /// The same world seen by another planner's session.
     pub fn as_session(&self, session: &str) -> Self {
+        LIVE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Self {
             root: self.root.clone(),
             runs: self.runs.clone(),
@@ -138,18 +140,10 @@ impl World {
     /// The `onepipeline` binary, wired to this world.
     pub fn cmd(&self, args: &[&str]) -> Command {
         let mut command = Command::new(binary());
-        let path = std::env::join_paths(
-            std::iter::once(
-                onevcs_binary()
-                    .parent()
-                    .expect("onevcs has a directory")
-                    .to_path_buf(),
-            )
-            .chain(std::env::split_paths(
-                &std::env::var_os("PATH").unwrap_or_default(),
-            )),
-        )
-        .expect("a PATH");
+        let path = path_leading_with(&[onevcs_binary()
+            .parent()
+            .expect("onevcs has a directory")
+            .to_path_buf()]);
         command
             .args(args)
             .env("PATH", path)
@@ -217,10 +211,35 @@ impl World {
     /// the harness it spawns, at that library's own documented
     /// `ONEAGENTGRAPH_ONEHARNESS_BIN` override, which knows nothing about this
     /// crate.
+    ///
+    /// Removing `ONEPIPELINE_ONEAGENTGRAPH_BIN` is what puts these
+    /// journeys on the **default** path, where every verb is a library
+    /// call — with one exception the sibling seam documents: a detached launch
+    /// retains a process, because a scheduler thread cannot outlive the launcher
+    /// that is about to exit. That one resolves `oneagentgraph` **by name**, so
+    /// the name has to lead somewhere this suite chose. Prepending the built
+    /// sibling's directory is what makes it: without it a `--detach` journey
+    /// composes whatever an operator happened to install — and fails outright on
+    /// a machine with none, which is every CI host — where with it, on every
+    /// platform, it composes the build `Cargo.lock` pins, exactly like the
+    /// attached path beside it.
     pub fn agentgraph_cmd(&self, args: &[&str]) -> Command {
         let mut command = self.cmd(args);
         command
-            .env("ONEPIPELINE_ONEAGENTGRAPH_BIN", oneagentgraph_binary())
+            .env_remove("ONEPIPELINE_ONEAGENTGRAPH_BIN")
+            .env(
+                "PATH",
+                path_leading_with(&[
+                    oneagentgraph_binary()
+                        .parent()
+                        .expect("oneagentgraph has a directory")
+                        .to_path_buf(),
+                    onevcs_binary()
+                        .parent()
+                        .expect("onevcs has a directory")
+                        .to_path_buf(),
+                ]),
+            )
             .env("ONEAGENTGRAPH_ONEHARNESS_BIN", double("fake-oneharness"))
             .env("ONEAGENTGRAPH_STATE_DIR", self.root.join("graph-state"))
             .env(
@@ -633,9 +652,24 @@ impl World {
     }
 }
 
+/// How many worlds this process still holds.
+///
+/// The doubles this process linked are shared by all of them, so they are
+/// released when the last one goes — never on the first, which
+/// [`as_session`](World::as_session) makes a real case.
+static LIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 impl Drop for World {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.root);
+        // The links this process made, released with the last world that could
+        // still have spawned through them, so a suite leaves nothing in the
+        // target directory. Best-effort: Windows refuses to unlink a running
+        // image, and a directory left behind there costs a directory entry
+        // rather than a binary, because these are links and not copies.
+        if LIVE.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) == 1 {
+            let _ = std::fs::remove_dir_all(held_dir());
+        }
     }
 }
 
@@ -820,15 +854,17 @@ pub fn binary() -> PathBuf {
 /// The path handed back is **never** the one cargo publishes. Every test runs in
 /// its own process and each builds the doubles, so several cargo invocations
 /// uplift the same `target/debug/<name>` — and an uplift is a remove followed by
-/// a replacement, so that name is briefly absent. A test that had already looked would
-/// then spawn a binary that vanished under it: on macOS that surfaced both as a
-/// missing double and, worse, as a whole run stuck at `run-started` because the
-/// launcher could not start its driver. Copying each process its own name once
-/// closes the window because later cargo uplifts do not touch that copy.
+/// a replacement, so that name is briefly absent. A test that had already looked
+/// would then spawn a binary that vanished under it: on macOS that surfaced both
+/// as a missing double and, worse, as a whole run stuck at `run-started` because
+/// the launcher could not start its driver. Giving each process its own name for
+/// the binary closes the window, because a later uplift replaces the *name* it
+/// published and never touches this one. See [`held_alias`] for why that name is
+/// a link rather than a copy wherever the filesystem allows one.
 pub fn double(name: &str) -> PathBuf {
     static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     let held = BUILT.get_or_init(|| build(&["--package", "onepipeline-testfakes"]));
-    held_copy(held, name)
+    held_alias(held, name)
 }
 
 /// Who a commit a journey's `onevcs` makes is attributed to.
@@ -861,7 +897,7 @@ pub fn oneagentgraph_binary() -> PathBuf {
             "--locked",
         ])
     });
-    held_copy(held, "oneagentgraph")
+    held_alias(held, "oneagentgraph")
 }
 
 /// The released `onevcs` executable whose holders verb the launcher consumes.
@@ -870,9 +906,36 @@ pub fn onevcs_binary() -> PathBuf {
     BUILT
         .get_or_init(|| {
             let held = build(&["--package", "onevcs", "--bin", "onevcs", "--locked"]);
-            held_copy(&held, "onevcs")
+            held_alias(&held, "onevcs")
         })
         .clone()
+}
+
+/// A `PATH` with `dirs` ahead of the one this process inherited.
+///
+/// Every program this stack resolves *by name* has to resolve to the build
+/// `Cargo.lock` pins rather than to whatever an operator installed — otherwise a
+/// journey composing a sibling proves only that the host had one, and says
+/// nothing about the version this crate is written against. The inherited `PATH`
+/// still follows, because git and the platform's own tools live on it.
+fn path_leading_with(dirs: &[PathBuf]) -> std::ffi::OsString {
+    std::env::join_paths(dirs.iter().cloned().chain(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    )))
+    .expect("a PATH")
+}
+
+/// Where this process holds its own names for the binaries it resolves.
+///
+/// Named for the process rather than shared, because the name is what an uplift
+/// replaces — see [`held_alias`]. Removed by the last [`World`] this process
+/// drops, so a suite leaves the target directory as it found it.
+fn held_dir() -> PathBuf {
+    binary()
+        .parent()
+        .expect("the binary is in a directory")
+        .join("doubles")
+        .join(std::process::id().to_string())
 }
 
 /// Build one package's binaries into the target directory this test's own binary
@@ -898,13 +961,26 @@ fn build(selection: &[&str]) -> PathBuf {
         "{selection:?} did not build: {}",
         String::from_utf8_lossy(&built.stderr)
     );
-    let held = debug.join("doubles").join(std::process::id().to_string());
+    let held = held_dir();
     std::fs::create_dir_all(&held).expect("a directory for this process's doubles");
     held
 }
 
 /// This process's own name for a built binary, made once and kept.
-fn held_copy(held: &Path, name: &str) -> PathBuf {
+///
+/// A link rather than a copy, and the difference is not an optimisation. What
+/// this name has to survive is a concurrent cargo uplift, which is an unlink of
+/// `target/debug/<name>` followed by a replacement — so what a spawn needs is
+/// the *inode* held open under a name nothing else replaces. A hard link is
+/// exactly that, at zero bytes: the suite's own measurement was 162 copies of
+/// one double, 271 MB per process directory and 25 GB across a single coverage
+/// run, which is what exhausted the disk on the host that supervises these runs.
+///
+/// A **link** wherever the filesystem allows one, and a copy only where it does
+/// not — a target directory on a mount without hard links, or across a device
+/// boundary. Both give the same guarantee; only one of them scales, which is
+/// why the name says alias rather than promising the link.
+fn held_alias(held: &Path, name: &str) -> PathBuf {
     let debug = binary()
         .parent()
         .expect("the binary is in a directory")
@@ -913,13 +989,21 @@ fn held_copy(held: &Path, name: &str) -> PathBuf {
     let published = debug.join(&file);
     let mine = held.join(&file);
     if !mine.is_file() {
+        // Here rather than only in [`build`], which runs once per process: the
+        // last world a process drops takes this directory with it, and a test
+        // that opens a second world afterwards would otherwise link into a
+        // directory that is no longer there — an ENOENT the retry below cannot
+        // outlast, because nothing is going to recreate it.
+        std::fs::create_dir_all(held).expect("a directory for this process's doubles");
         // Bounded, and retried rather than asserted on the first look: the
         // window this closes is another process's uplift, which is short but
         // real, and a bare `is_file` here would only move the flake one line up.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         loop {
             let _ = std::fs::remove_file(&mine);
-            match std::fs::copy(&published, &mine).map(|_| ()) {
+            let held = std::fs::hard_link(&published, &mine)
+                .or_else(|_| std::fs::copy(&published, &mine).map(|_| ()));
+            match held {
                 Ok(()) => break,
                 Err(error) => assert!(
                     std::time::Instant::now() < deadline,
@@ -931,6 +1015,192 @@ fn held_copy(held: &Path, name: &str) -> PathBuf {
         }
     }
     mine
+}
+
+/// A repository gate command, written into this world as a script.
+///
+/// A script rather than a compiled binary, and per platform rather than one
+/// artifact, because the alternative was a workspace member shipping a Rust
+/// program to stand in for three shell one-liners. `onevcs` runs the gate as
+/// `Command::new(argv[0])`, which on Windows cannot start a `.bat` directly, so
+/// each platform's interpreter leads its own argv.
+///
+/// The three verbs are what the lifecycle and telemetry journeys state: a gate
+/// that blocks until a file appears, one that breaks the sibling's event stream
+/// under it, and one that appends a line no build of that sibling can read.
+pub fn gate_script(world: &World, args: &[&str]) -> Vec<String> {
+    let mut argv = interpreted(&write_gate_script(world));
+    argv.extend(args.iter().map(|arg| (*arg).to_owned()));
+    argv
+}
+
+/// The two halves of the gate answer the same verbs.
+///
+/// One contract in two languages, because no platform runs both — so a verb
+/// added to one and not the other is a journey that passes here and hangs on the
+/// Windows leg, a fortnight later, with nothing pointing at the gate. Held by
+/// reading the scripts rather than by generating one from the other: a generator
+/// would need a third source, and what actually has to agree is the verb each
+/// half dispatches on.
+// llmlint: ignore-block[tests_mirror_real_usage] this is a drift gate over the suite's own
+// scaffolding, not a journey: what it holds is that two files stay in step, and neither
+// file is reachable from any interface a user of this crate has. There is nothing to drive
+// through the binary here — the gate is a command `onevcs` runs on the operator's behalf,
+// and the journeys that exercise it are `lifecycle.rs`'s and `views.rs`'s, which do drive
+// the binary. Reading the two scripts is the only way to compare them, because no platform
+// executes both.
+#[test]
+fn both_gate_scripts_answer_the_same_verbs() {
+    let verb = |candidate: &str| {
+        !candidate.is_empty()
+            && candidate
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c == '-')
+    };
+    // `sh`'s `case` arms, which are the only lines ending in a bare `)` whose
+    // whole body is a verb — `*)` and every expression that happens to close a
+    // parenthesis are filtered out by the alphabet.
+    let shell: Vec<&str> = include_str!("gate.sh")
+        .lines()
+        .map(str::trim)
+        .filter_map(|line| line.strip_suffix(')'))
+        .filter(|candidate| verb(candidate))
+        .collect();
+    // `cmd`'s dispatch, which is one `if "%~1"=="VERB" goto …` per verb.
+    let batch: Vec<&str> = include_str!("gate.bat")
+        .lines()
+        .map(str::trim)
+        .filter_map(|line| line.strip_prefix("if \"%~1\"==\""))
+        .filter_map(|rest| rest.split('"').next())
+        .filter(|candidate| verb(candidate))
+        .collect();
+    assert_eq!(
+        shell, batch,
+        "the gate scripts have drifted: one platform answers verbs the other does not"
+    );
+    // The extraction is only a drift gate while it still finds anything: a
+    // rewrite that changed either dispatch's shape would otherwise compare two
+    // empty lists and pass.
+    assert_eq!(
+        shell,
+        ["wait-for", "break-streams", "append-future-event"],
+        "the gate scripts no longer dispatch the way this reads them"
+    );
+    // The refusal names the verbs, so it is a third statement of the same list
+    // and drifts the same way — and it is the one a person reads when the gate
+    // has just refused them, so a verb missing from it is worse than a verb
+    // missing from a comment.
+    for (script, source) in [
+        ("gate.sh", include_str!("gate.sh")),
+        ("gate.bat", include_str!("gate.bat")),
+    ] {
+        let usage = source
+            .lines()
+            .find(|line| line.contains("the verbs are:"))
+            .unwrap_or_else(|| panic!("{script} refuses without naming the verbs it speaks"));
+        for verb in &shell {
+            assert!(
+                usage.contains(verb),
+                "{script} dispatches {verb} but its refusal does not name it: {usage}"
+            );
+        }
+    }
+} // llmlint: ignore-end[tests_mirror_real_usage]
+
+/// The other half of that contract — what the gate *refuses*, and with what —
+/// held by running this platform's own script.
+///
+/// The verb list is the part two files can be compared on; the exit code and
+/// the refusal message are the part only running proves, and no host runs both
+/// halves. So each platform's leg proves its own: read together across the CI
+/// matrix, the two tests are the whole drift gate.
+///
+/// Run the way `onevcs` runs a gate — `Command::new(argv[0])` with the rest as
+/// arguments — because a refusal that only holds when invoked some other way is
+/// not the one a publication would meet. Only the refusing command lines are
+/// driven: each of them exits before the verb does anything, so this needs no
+/// session and leaves nothing behind.
+///
+/// The state root is handed over even though nothing here reaches it, and that
+/// is the point: without it every one of these would refuse for the *missing*
+/// root, and the test would pass against a script that had lost its argument
+/// checks entirely.
+#[test]
+fn the_gate_refuses_a_command_line_it_does_not_speak() {
+    let world = World::new("gate-refusals");
+    for argv in [
+        vec!["nonsense"],
+        vec!["wait-for"],
+        vec!["wait-for", "one", "two"],
+        vec!["break-streams", "extra"],
+        vec!["append-future-event", "extra"],
+        // Not a session worktree, which is the layout the token is read out of.
+        vec!["append-future-event"],
+    ] {
+        let command = gate_script(&world, &argv);
+        let refused = Command::new(&command[0])
+            .args(&command[1..])
+            .current_dir(&world.root)
+            .env("ONEVCS_HOME", world.onevcs_home())
+            .output()
+            .expect("the gate runs");
+        let said = String::from_utf8_lossy(&refused.stderr).into_owned();
+        assert_eq!(
+            refused.status.code(),
+            Some(64),
+            "the gate answered {argv:?} with {:?}, not the usage refusal: {said}",
+            refused.status.code()
+        );
+        assert!(
+            said.contains("the verbs are:"),
+            "the gate refused {argv:?} without naming the verbs it does speak: {said}"
+        );
+    }
+}
+
+/// The interpreter that leads a gate script's argv on this platform.
+#[cfg(windows)]
+fn interpreted(script: &Path) -> Vec<String> {
+    vec![
+        "cmd".to_owned(),
+        "/C".to_owned(),
+        script.to_string_lossy().into_owned(),
+    ]
+}
+
+/// The interpreter that leads a gate script's argv on this platform.
+#[cfg(not(windows))]
+fn interpreted(script: &Path) -> Vec<String> {
+    vec!["sh".to_owned(), script.to_string_lossy().into_owned()]
+}
+
+/// The gate script for this platform, written into the world's own scratch.
+///
+/// Written with **CRLF**, and that is a correctness requirement rather than a
+/// convention. `cmd.exe` does not read a batch file line by line: it seeks by
+/// byte offset after each command, and the arithmetic assumes two bytes end a
+/// line. Given the LF the repository's `.gitattributes` checks every file out
+/// with, each seek lands one byte earlier than the last, and cmd starts
+/// executing the *middles of words* — the first symptom was `'ows' is not
+/// recognized as an internal or external command`, out of `rem The Windows half`
+/// eight lines above anything this script does. So the conversion happens here,
+/// at the one place the file becomes a program, rather than by excepting `.bat`
+/// from the repository's line-ending policy for a file no editor on this side
+/// ever opens.
+#[cfg(windows)]
+fn write_gate_script(world: &World) -> PathBuf {
+    let path = world.root.join("gate.bat");
+    std::fs::write(&path, include_str!("gate.bat").replace('\n', "\r\n"))
+        .expect("the gate script is written");
+    path
+}
+
+/// The gate script for this platform, written into the world's own scratch.
+#[cfg(not(windows))]
+fn write_gate_script(world: &World) -> PathBuf {
+    let path = world.root.join("gate.sh");
+    std::fs::write(&path, include_str!("gate.sh")).expect("the gate script is written");
+    path
 }
 
 /// A file shipped in the repository.
