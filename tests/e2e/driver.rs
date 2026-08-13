@@ -475,7 +475,11 @@ fn adoption_re_addresses_the_pacemaker_at_the_graph_run_now_driving() {
 // llmlint: ignore-block[tests_mirror_real_usage] the record is written directly for the
 // same reason as above: no build writes a record without this field any more, and a value
 // the sibling would refuse is what an edited or interfered-with record carries. What is
-// asserted is the product's own answer — `next`'s exit code, its surface, and its stderr.
+// mostly asserted is the product's own answer — `next`'s exit code, its surface, and its
+// stderr — but the closing claim is that *nothing was sent*, and the only place a value
+// that never crossed the seam can be observed is the log of what did. A product surface
+// reporting "no reset was attempted" does not exist, and inventing one to make the
+// assertion product-shaped would be a surface nobody asked for.
 #[test]
 fn a_run_with_no_recorded_graph_run_says_why_the_pacemaker_was_not_reset() {
     let world = World::new("driver-no-graph-run");
@@ -516,19 +520,14 @@ fn a_run_with_no_recorded_graph_run_says_why_the_pacemaker_was_not_reset() {
     read.err_has("could not reset the check-in pacemaker")
         .err_has("../elsewhere");
 
-    // llmlint: ignore-block[tests_mirror_real_usage] the claim is that *nothing was sent*,
-    // and the only place a value that never crossed the seam can be observed is the log of
-    // what did. A product surface reporting "no reset was attempted" does not exist and
-    // inventing one to make this assertion product-shaped would be a surface nobody asked
-    // for. `harness.rs` records every double invocation for exactly this.
     assert!(
         !world.was_invoked("oneagentgraph", &["reset-timer"]),
         "a reset was sent with no run to address it to: {:?}",
         world.invocations()
     );
-    // llmlint: ignore-end[tests_mirror_real_usage]
     world.release("build.go");
 }
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 #[test]
 fn adopt_refuses_another_sessions_run_and_has_no_force() {
