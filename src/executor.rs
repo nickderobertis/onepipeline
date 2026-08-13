@@ -226,7 +226,7 @@ impl Executor for LocalExecutor {
         let run = GraphRun::start(
             &req.graph.0,
             &req.task,
-            Some(&dir),
+            &dir,
             &req.labels,
             &[],
             &node_sets,

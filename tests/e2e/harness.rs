@@ -241,7 +241,7 @@ impl World {
                 ]),
             )
             .env("ONEAGENTGRAPH_ONEHARNESS_BIN", double("fake-oneharness"))
-            .env("ONEAGENTGRAPH_STATE_DIR", self.root.join("graph-state"))
+            .env("ONEAGENTGRAPH_STATE_DIR", self.graph_state())
             .env(
                 "ONEPIPELINE_DAG_GRAPH",
                 self.graphs().join("dag-scope.yaml"),
@@ -424,6 +424,15 @@ impl World {
         self.root.join("graphs")
     }
 
+    /// Where the **real** `oneagentgraph` keeps this world's run state.
+    ///
+    /// The same directory [`agentgraph_cmd`](World::agentgraph_cmd) points that
+    /// sibling at, so a journey can look at what a launch left in the sibling's
+    /// own store rather than only at what this crate wrote down.
+    pub fn graph_state(&self) -> PathBuf {
+        self.root.join("graph-state")
+    }
+
     /// Write the graph configs [`agentgraph_cmd`](World::agentgraph_cmd) names.
     ///
     /// Single-sided `kind: oneharness` members: the two-party kind runs a
@@ -432,6 +441,25 @@ impl World {
     /// dispatch reaching the sibling, being accepted, and streaming back — is the
     /// same one either way.
     pub fn write_graphs(&self) {
+        self.write_graphs_with(None);
+    }
+
+    /// The same configs, with the shipped dag-scope graph's **pacemaker** on the
+    /// driver: a `check-in` member on a resettable schedule.
+    ///
+    /// Its own member, because that is the one a planner-visible surface is
+    /// supposed to restart the clock of, and a graph without it answers a reset
+    /// with "no such member" no matter which run id it was addressed by. The
+    /// interval is the shipped one, so nothing fires inside a test — what a
+    /// journey observes is the *reset*, which the sibling announces.
+    pub fn write_graphs_with_pacemaker(&self) {
+        self.write_graphs_with(Some(
+            "  check-in:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n    \
+             schedule: {every: 1800, resettable: true}\n",
+        ));
+    }
+
+    fn write_graphs_with(&self, dag_extra: Option<&str>) {
         let dir = self.graphs();
         std::fs::create_dir_all(&dir).expect("a directory for the graph configs");
         // The identity chain is the operator's own file, which the graph names
@@ -446,11 +474,16 @@ impl World {
             ("dag-scope.yaml", "orchestrator"),
             ("node-scope.yaml", "worker"),
         ] {
+            let extra = if file == "dag-scope.yaml" {
+                dag_extra.unwrap_or_default()
+            } else {
+                ""
+            };
             std::fs::write(
                 dir.join(file),
                 format!(
                     "version: 1\nname: {}\nmembers:\n  {member}:\n    kind: oneharness\n    \
-                     oneharness_config: ./oneharness.toml\n",
+                     oneharness_config: ./oneharness.toml\n{extra}",
                     file.trim_end_matches(".yaml"),
                 ),
             )

@@ -1041,31 +1041,50 @@ fn a_note_delivered_through_the_real_sibling_records_what_its_lever_answered() {
     world.release("turn.settle");
 }
 
-/// Consuming a planner surface asks the **real** sibling to restart the
-/// check-in clock, and says so when it cannot.
+/// Consuming a planner surface restarts the **real** pacemaker's clock.
 ///
 /// `next` is the channel's only consumer, and consumption is what resets the
 /// pacemaker — so this is the one journey that reaches
 /// `oneagentgraph::run::signal` on the default path rather than through the
-/// override.
+/// override, against a real graph that really declares a resettable `check-in`
+/// member.
 ///
-/// It is a characterisation, and the thing it characterises is a defect this
-/// crate carries into that call: the reset is addressed with **this** run's id,
-/// and a graph run has an id of its own that `oneagentgraph` mints. The
-/// subprocess path sent the same wrong argument and the double answered `0` to
-/// anything, so nothing ever said so. The library says so, out loud, on the
-/// planner's own stderr — which is the behaviour asserted here until the run
-/// identity is threaded through. The surface itself is still delivered, because
-/// a pacemaker that could not be reset must not cost the planner the update it
-/// asked for.
+/// It replaces a characterisation of the defect it now holds the fix for: the
+/// reset used to be addressed with **this** run's id, and a graph run has an id
+/// of its own that `oneagentgraph` mints. The subprocess path sent the same
+/// wrong argument and the double answered `0` to anything, so for as long as
+/// that double existed nothing anywhere said so — the reset simply never
+/// happened, and a `resettable` schedule quietly degraded to a fixed interval
+/// that ignores everything the run is already telling the planner.
+///
+/// The reset is carried the whole way to where the sibling's own scheduler
+/// watches for it: `oneagentgraph::run::signal` reads the run's record, refuses
+/// a member that run never declared, and writes the signal under the run's own
+/// directory. All three only work out for the id `oneagentgraph` minted, so a
+/// reset that lands there is a reset that was addressed correctly — which is
+/// exactly what this crate owns.
+///
+/// What happens to the signal *after* it lands is the sibling's half: it starts
+/// a scheduled member's clock only once every member of that member's wave has
+/// settled, and the orchestrator shares the pacemaker's wave and runs for the
+/// whole run. See the report accompanying this change.
 #[test]
-fn consuming_a_surface_reaches_the_real_pacemaker_and_reports_what_it_answered() {
+fn consuming_a_surface_restarts_the_real_pacemakers_clock() {
     let world = World::new("real-pacemaker");
-    world.write_graphs();
+    world.write_graphs_with_pacemaker();
     let path = world.plan("paced", &plan_of("paced", vec![human("approve", &[])]));
     world
         .run_on_agentgraph(&["start", &path.to_string_lossy(), "--detach"])
         .exited(0);
+
+    // The sibling minted this, and it is not this run's id. Everything below
+    // rests on the difference.
+    let graph_run = world.run_json("paced", "launch.json")["graph_run"]
+        .as_str()
+        .expect("the launch record names the graph run driving this run")
+        .to_string();
+    assert_ne!(graph_run, "paced");
+
     world
         .run_on_agentgraph(&[
             "surface",
@@ -1079,10 +1098,28 @@ fn consuming_a_surface_reaches_the_real_pacemaker_and_reports_what_it_answered()
 
     let read = world.run_on(world.agentgraph_cmd(&["next", "paced"]), "next paced");
     read.exited(0).out_has("\"surface\"");
-    read.err_has("could not reset the check-in pacemaker");
-    // The sibling's own refusal, naming the run it was asked about: this crate
-    // handed it a `onepipeline` run id where a `oneagentgraph` one belongs.
-    read.err_has("paced");
+    assert!(
+        !read
+            .stderr
+            .contains("could not reset the check-in pacemaker"),
+        "the real sibling refused the reset: {}",
+        read.stderr
+    );
+
+    // Where the sibling's scheduler watches, derived from the graph run's id and
+    // nothing else. A reset addressed with this crate's run id never reaches it:
+    // `signal` refuses a run its history has no record of, which is the failure
+    // this journey used to characterise.
+    let signalled = world
+        .graph_state()
+        .join(&graph_run)
+        .join("signals")
+        .join("check-in.reset");
+    assert!(
+        signalled.is_file(),
+        "the reset did not reach the run's own signal directory: {}",
+        signalled.display()
+    );
 }
 
 /// A view still renders when the provider-health block comes from the library.

@@ -20,6 +20,31 @@ fn start_detached(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> S
     name.to_string()
 }
 
+/// The directory every dag-scope launch was given, in launch order.
+///
+/// Read off the argv the sibling was actually invoked with, because the value
+/// under test is the one that *crosses the seam* — it becomes the `--cwd` each
+/// member's harness runs in, and a run whose two launch paths disagree about it
+/// is a run whose members move when it is adopted.
+fn dag_launch_dirs(world: &World) -> Vec<String> {
+    world
+        .invocations()
+        .iter()
+        .filter(|call| {
+            call["tool"] == "oneagentgraph"
+                && call["args"][0] == "run"
+                && call["args"][1]
+                    .as_str()
+                    .is_some_and(|graph| graph.ends_with("dag-scope.yaml"))
+        })
+        .filter_map(|call| {
+            let args = call["args"].as_array()?;
+            let at = args.iter().position(|arg| arg == "--dir")?;
+            args.get(at + 1)?.as_str().map(str::to_string)
+        })
+        .collect()
+}
+
 #[test]
 fn start_launches_the_shipped_dag_scope_graph_and_records_how_to_relaunch_it() {
     let world = World::new("driver-launch");
@@ -246,6 +271,77 @@ fn a_dead_driver_reads_as_driver_dead_and_adopt_is_the_way_back() {
         args[set_at + 1],
         "members.orchestrator.agent.model=adopted model"
     );
+}
+
+/// One run, one directory — whichever launch path started the driver.
+///
+/// The two paths used to disagree. Neither passed a directory at all, and the
+/// two backends defaulted an absent one differently: the retained-process path
+/// inherited `oneagentgraph`'s own CLI default of `.`, resolved against whatever
+/// process ends up spawning the graph, and the library path fell back to the
+/// launcher's working directory. Both consequences are silent. That directory
+/// becomes the `--cwd` every member's harness runs in, so a member can start
+/// refusing — or stop refusing — purely because the run was adopted; and
+/// `oneharness` derives its history project from it, so one run's records split
+/// across two project directories with neither holding the whole run.
+///
+/// So the two are driven here and compared at the seam, and the adoption is run
+/// from **another directory** on purpose: the answer must be the directory the
+/// run was launched in, replayed out of the launch record, and not wherever the
+/// operator happened to be standing when they typed `adopt`.
+#[test]
+fn start_and_adopt_give_the_sibling_the_same_directory_for_one_run() {
+    let world = World::new("driver-launch-dir");
+    // A human action nothing can clear: the driver settles the round, finds no
+    // round it could open, and exits — which is what leaves the run adoptable.
+    let path = world.plan(
+        "relocated",
+        &plan_of("relocated", vec![human("approve", &[])]),
+    );
+    let launched_from = world.project.clone();
+    let mut start = world.cmd(&["start", &path.to_string_lossy(), "--detach"]);
+    start.current_dir(&launched_from);
+    world.run_on(start, "start relocated").exited(0);
+    let run = "relocated".to_string();
+    world.until("the driver to exit", |world| {
+        world.run(&["status", &run]).stdout.contains("DRIVER DEAD")
+    });
+
+    // Somewhere else entirely, which is the ordinary case: an operator adopts a
+    // run from whatever shell noticed it was undriven.
+    let adopted_from = world.root.clone();
+    assert_ne!(adopted_from, launched_from);
+    let mut adopt = world.cmd(&["adopt", &run]);
+    adopt.current_dir(&adopted_from);
+    world
+        .run_on(adopt, "adopt relocated")
+        .exited(NOTHING_DRIVING);
+    assert_eq!(world.events_of(&run, "driver-adopted").len(), 1);
+
+    let dirs = dag_launch_dirs(&world);
+    assert_eq!(
+        dirs.len(),
+        2,
+        "expected one launch from `start` and one from `adopt`: {dirs:?}"
+    );
+    assert_eq!(
+        dirs[0], dirs[1],
+        "`start` and `adopt` sent the sibling two different directories for one run"
+    );
+    assert_eq!(
+        std::path::Path::new(&dirs[0]),
+        launched_from,
+        "the run moved to the directory the adoption was typed in"
+    );
+
+    // And a reader of the run's own records can tell which directory it used
+    // without inferring it from whichever process launched the driver.
+    assert_eq!(
+        world.run_json(&run, "launch.json")["dir"],
+        json!(launched_from)
+    );
+    let started = world.events_of(&run, "run-started");
+    assert_eq!(started[0]["payload"]["dir"], json!(launched_from));
 }
 
 #[test]

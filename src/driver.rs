@@ -118,6 +118,19 @@ fn launch_dir() -> Result<PathBuf> {
         .map_err(|error| Error::Invalid(format!("cannot read the launch directory: {error}")))
 }
 
+/// The directory a launch replays, or this process's own when the record
+/// predates the field.
+///
+/// A record written before `dir` existed carries none, and the reading a
+/// driver gave such a run was its own working directory — so that is what it
+/// keeps getting, rather than a directory this build invented for it.
+fn recorded_dir(record: &LaunchRecord) -> Result<PathBuf> {
+    if record.dir.as_os_str().is_empty() {
+        return launch_dir();
+    }
+    Ok(record.dir.clone())
+}
+
 /// Resolve a relative filesystem graph reference at the launch boundary,
 /// before any session worktree exists. URLs and absolute paths retain their
 /// established oneagentgraph validation semantics and exact spelling.
@@ -257,7 +270,15 @@ fn start(args: &StartArgs) -> Result<i32> {
     let mut record = LaunchRecord {
         run_id: run.clone(),
         plan: args.plan.clone(),
+        // Absolute, once, here: this is the only process that knows where the
+        // operator launched from, and every later driver — including the one a
+        // fresh `adopt` starts from some other directory — replays this value
+        // rather than reading its own.
+        dir: launch_dir.clone(),
         graph: graph_ref.clone(),
+        // Replaced below by the graph run's own id, which does not exist until
+        // the launch below has produced it.
+        graph_run: String::new(),
         node_graph: node_graph_ref,
         launcher: sys::launcher(),
         session: sys::launching_session(),
@@ -318,6 +339,10 @@ fn start(args: &StartArgs) -> Result<i32> {
         journal::payload(&[
             ("plan", json!(plan)),
             ("graph", json!(graph_ref)),
+            // Stated on the run's own first record, so a reader never has to
+            // infer which directory a run's members worked in from the process
+            // that happened to launch them.
+            ("dir", json!(launch_dir)),
             ("round_budget", json!(args.round_budget)),
             ("heartbeat_interval", json!(args.heartbeat_interval)),
         ]),
@@ -349,6 +374,7 @@ fn start(args: &StartArgs) -> Result<i32> {
         },
     )?;
     record.pid = launched.pid();
+    record.graph_run = launched.run_id().unwrap_or_default().to_string();
     ledger::write_json(&paths.launch(), &record)?;
 
     if args.detach {
@@ -374,6 +400,11 @@ fn start(args: &StartArgs) -> Result<i32> {
 /// `output` is the launcher's promise about itself: an attaching launcher stays
 /// and relays what the driver produces, and a detaching one is about to exit, so
 /// the driver is given a file instead of a pipe whose reader is going away.
+///
+/// The directory comes from the **record** rather than from this process, which
+/// is what makes `start` and `adopt` name the same place for one run: an
+/// adoption runs wherever the operator happened to be, and the run's members
+/// must not move with it. See [`LaunchRecord::dir`].
 fn launch_graph(
     paths: &RunPaths,
     record: &LaunchRecord,
@@ -387,7 +418,7 @@ fn launch_graph(
     let mut launched = agentgraph::GraphRun::start(
         &record.graph,
         &task,
-        None,
+        &recorded_dir(record)?,
         &journal::labels(&paths.run, None, None),
         &[
             (agentgraph::RUN_ID_ENV.to_string(), paths.run.clone()),
@@ -595,6 +626,11 @@ fn adopt(args: &RunArgs) -> Result<i32> {
 
     // Relayed: an adoption attaches, so this process stays to read it.
     let mut launched = launch_graph(&paths, &record, agentgraph::GraphOutput::Relayed)?;
+    // A fresh driver is a fresh graph run with an id of its own, and the
+    // pacemaker is addressed by that id — so the record names the run that is
+    // driving now rather than the one that died.
+    record.graph_run = launched.run_id().unwrap_or_default().to_string();
+    ledger::write_json(&paths.launch(), &record)?;
     attach(&paths, Some(&mut launched))
 }
 
@@ -686,9 +722,20 @@ fn next(args: &RunArgs) -> Result<i32> {
     )?;
 
     // Consumption is what restarts the check-in clock — the whole pacemaker
-    // reset contract. A failure to reach the sibling is reported and does not
-    // fail the read: the planner has the surface either way.
-    if let Err(error) = agentgraph::reset_timer(&paths.run, agentgraph::CHECK_IN_MEMBER) {
+    // reset contract. Addressed by the **graph** run's id, which is what the
+    // sibling minted and the only id its signals answer to; this run's id names
+    // a run `oneagentgraph` has never heard of. A failure to reach the sibling
+    // is reported and does not fail the read: the planner has the surface either
+    // way.
+    if view.launch.graph_run.is_empty() {
+        eprintln!(
+            "onepipeline: could not reset the check-in pacemaker: run '{}' records no agent-graph \
+             run to address it by",
+            paths.run
+        );
+    } else if let Err(error) =
+        agentgraph::reset_timer(&view.launch.graph_run, agentgraph::CHECK_IN_MEMBER)
+    {
         eprintln!("onepipeline: could not reset the check-in pacemaker: {error}");
     }
 

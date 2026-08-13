@@ -216,6 +216,11 @@ pub fn all_runs(root: &Path) -> Vec<RunPaths> {
     runs
 }
 
+/// Whether a path field carries nothing, for the records that omit it then.
+fn is_unset(path: &Path) -> bool {
+    path.as_os_str().is_empty()
+}
+
 /// What `start` recorded about a run, and what `adopt` replays it from.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -224,8 +229,33 @@ pub struct LaunchRecord {
     pub run_id: String,
     /// The plan file the run was launched with.
     pub plan: PathBuf,
+    /// The directory every member of this run works in.
+    ///
+    /// The launch directory, made absolute once — at `start`, by the process
+    /// the operator ran — and replayed verbatim by `adopt`. It reaches
+    /// `oneagentgraph` as the run's `dir`, which is the `--cwd` each harness is
+    /// given, so a relative value would resolve against whichever process
+    /// happened to spawn the graph rather than against the directory the
+    /// operator launched from, and `start` and `adopt` would name two different
+    /// places for one run.
+    ///
+    /// Empty only on a record written before this field existed; the launcher
+    /// then falls back to its own working directory, which is what it did then.
+    /// Omitted when empty, like every other field added to this record after
+    /// it shipped, so a build that predates it still reads what it wrote.
+    #[serde(default, skip_serializing_if = "is_unset")]
+    pub dir: PathBuf,
     /// The dag-scope agent-graph config the driver launches.
     pub graph: String,
+    /// The `oneagentgraph` run the current driver is, as that library minted
+    /// it — **not** this run's id, which names something else entirely.
+    ///
+    /// Written after the launch that produced it, and rewritten by every
+    /// `adopt`, because an adoption starts a fresh graph run with an id of its
+    /// own. It is how a later `onepipeline next` — a different process, with no
+    /// handle on the driver — addresses the run's pacemaker.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub graph_run: String,
     /// The default node-scope agent-graph config every dispatch launches.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub node_graph: String,
@@ -611,7 +641,9 @@ mod tests {
         let record = LaunchRecord {
             run_id: "demo".into(),
             plan: PathBuf::from("plan.json"),
+            dir: PathBuf::from("/tmp/launch"),
             graph: "graphs/dag-scope.yaml".into(),
+            graph_run: String::new(),
             node_graph: String::new(),
             launcher: sys::UNKNOWN_LAUNCHER.into(),
             session: sys::UNKNOWN_LAUNCHER.into(),
@@ -633,7 +665,9 @@ mod tests {
         let record = LaunchRecord {
             run_id: "demo".into(),
             plan: PathBuf::from("plan.json"),
+            dir: PathBuf::from("/tmp/launch"),
             graph: "graphs/dag-scope.yaml".into(),
+            graph_run: String::new(),
             node_graph: String::new(),
             launcher: "claude-code".into(),
             session: "secret-session-id".into(),
