@@ -121,6 +121,11 @@ fn launch_dir() -> Result<PathBuf> {
 /// Resolve a relative filesystem graph reference at the launch boundary,
 /// before any session worktree exists. URLs and absolute paths retain their
 /// established oneagentgraph validation semantics and exact spelling.
+// llmlint: ignore-block[invalid_states_unrepresentable] the resolved graph stays a
+// string from this source through LaunchRecord because that durable internal schema and
+// oneagentgraph's transparent ConfigRef are already string-valued. A second newtype would
+// duplicate the sibling type without adding an invariant: relative references are made
+// absolute here, and the nonempty launch-record invariant is checked before every round.
 fn resolve_graph(reference: &str, base: &Path) -> Result<String> {
     // llmlint: ignore-block[boundary_inputs_validated] absolute paths and URLs are
     // oneagentgraph's existing input boundary: it reads/fetches them and returns its own
@@ -141,6 +146,7 @@ fn resolve_graph(reference: &str, base: &Path) -> Result<String> {
     })?;
     Ok(resolved.to_string_lossy().into_owned())
 }
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 fn resolve_plan_graphs(plan: &mut Plan, base: &Path) -> Result<()> {
     for node in &mut plan.tasks {
