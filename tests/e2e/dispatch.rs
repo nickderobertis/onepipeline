@@ -85,10 +85,18 @@ fn relative_default_graphs_dispatch_from_the_launch_directory() {
     // inferred, because this is the *library* backend an attached launch takes,
     // and the other one is what the detached journeys exercise.
     assert_eq!(launch["dir"], json!(world.root));
-    let graph_run = launch["graph_run"].as_str().expect("the graph run's id");
-    assert!(
-        world.graph_state().join(graph_run).is_dir(),
-        "the recorded graph run is not one the sibling minted: {graph_run}"
+    // Held against the run's own merged store rather than against anything this
+    // test knows: the driver's `graph-started` carries the run id `oneagentgraph`
+    // stamped on it, so a record naming anything else is a record naming a run
+    // that never drove this one.
+    let announced = world
+        .journal("relative-defaults")
+        .into_iter()
+        .find(|event| event["kind"] == "graph-started" && event["labels"]["node"].is_null())
+        .expect("the driver announced itself into the merged store");
+    assert_eq!(
+        launch["graph_run"], announced["labels"]["run_id"],
+        "the record names a different graph run from the one that drove the run"
     );
 }
 
@@ -1107,6 +1115,14 @@ fn consuming_a_surface_restarts_the_real_pacemakers_clock() {
         read.stderr
     );
 
+    // llmlint: ignore-block[tests_mirror_real_usage] a pacemaker reset has no product-facing
+    // result: `next` returns the surface either way, by design, because a clock that could
+    // not be restarted must not cost the planner the update they asked for. The sibling's
+    // signal directory is where the reset *is*, and it is a documented location its own
+    // `signal`/`cancel` API both derive — so this is the outcome, read where the outcome
+    // lives, and asserting only on the absent error would pass against a reset that went to
+    // the wrong run. The run's own clock restarting is the sibling's half; see the module
+    // note below.
     // Where the sibling's scheduler watches, derived from the graph run's id and
     // nothing else. A reset addressed with this crate's run id never reaches it:
     // `signal` refuses a run its history has no record of, which is the failure
@@ -1121,6 +1137,7 @@ fn consuming_a_surface_restarts_the_real_pacemakers_clock() {
         "the reset did not reach the run's own signal directory: {}",
         signalled.display()
     );
+    // llmlint: ignore-end[tests_mirror_real_usage]
 }
 
 /// A view still renders when the provider-health block comes from the library.

@@ -758,14 +758,8 @@ fn next(args: &RunArgs) -> Result<i32> {
     // a run `oneagentgraph` has never heard of. A failure to reach the sibling
     // is reported and does not fail the read: the planner has the surface either
     // way.
-    if view.launch.graph_run.is_empty() {
-        eprintln!(
-            "onepipeline: could not reset the check-in pacemaker: run '{}' records no agent-graph \
-             run to address it by",
-            paths.run
-        );
-    } else if let Err(error) =
-        agentgraph::reset_timer(&view.launch.graph_run, agentgraph::CHECK_IN_MEMBER)
+    if let Err(error) = agentgraph::recorded_graph_run(&view.launch.graph_run, &paths.run)
+        .and_then(|graph_run| agentgraph::reset_timer(&graph_run, agentgraph::CHECK_IN_MEMBER))
     {
         eprintln!("onepipeline: could not reset the check-in pacemaker: {error}");
     }

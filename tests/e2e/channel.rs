@@ -141,6 +141,11 @@ fn consuming_a_surface_resets_the_check_in_pacemaker() {
     );
 
     world.run(&["next", &run]).exited(0);
+    // llmlint: ignore-block[tests_mirror_real_usage] the id a reset is addressed by never
+    // appears on a product surface — `next` prints the surface whether or not the clock
+    // restarted, deliberately — so the argv the double recorded is where that value exists.
+    // `dispatch.rs` runs the same journey against the real sibling and asserts the outcome
+    // where the sibling puts it; this is the half that names the argument.
     assert!(
         world.was_invoked("oneagentgraph", &["reset-timer", &graph_run, "check-in"]),
         "consumption did not reset the check-in pacemaker by the graph run's own id: {:?}",
@@ -151,6 +156,7 @@ fn consuming_a_surface_resets_the_check_in_pacemaker() {
         "the reset was addressed with this crate's run id, which names no graph run: {:?}",
         world.invocations()
     );
+    // llmlint: ignore-end[tests_mirror_real_usage]
     world.release("build.go");
 }
 

@@ -26,6 +26,11 @@ fn start_detached(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> S
 /// under test is the one that *crosses the seam* — it becomes the `--cwd` each
 /// member's harness runs in, and a run whose two launch paths disagree about it
 /// is a run whose members move when it is adopted.
+// llmlint: ignore-block[tests_mirror_real_usage] the argv the double records *is* the
+// interface under test: what a launch hands `oneagentgraph` is not something any product
+// surface of this crate reports, and it is what decides where a member's harness runs. The
+// launch record's own copy is asserted separately, in the same journey; this is the half
+// that proves the recorded value is the one that actually crossed.
 fn dag_launch_dirs(world: &World) -> Vec<String> {
     world
         .invocations()
@@ -44,6 +49,7 @@ fn dag_launch_dirs(world: &World) -> Vec<String> {
         })
         .collect()
 }
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 #[test]
 fn start_launches_the_shipped_dag_scope_graph_and_records_how_to_relaunch_it() {
@@ -353,6 +359,12 @@ fn start_and_adopt_give_the_sibling_the_same_directory_for_one_run() {
 /// sibling, rather than a directory this build invented for it. The second is
 /// what stops the field from being trusted just because it is there: it is a
 /// file on disk, and it decides where every member of the run works.
+// llmlint: ignore-block[tests_mirror_real_usage] both states are reached by writing the
+// launch record directly because no command of this crate can produce either: the
+// no-directory case is what a *previous build* wrote, and no build writes it any more,
+// while the unusable-directory case is what a moved runs root or an edited record leaves.
+// Every other step here — `start`, `status`, `adopt` — is the real binary, and the record
+// is this crate's own file rather than a sibling's internals.
 #[test]
 fn a_launch_record_without_a_directory_is_replayed_from_the_adopting_process() {
     let world = World::new("driver-legacy-dir");
@@ -401,6 +413,7 @@ fn a_launch_record_without_a_directory_is_replayed_from_the_adopting_process() {
             .err_has(dir);
     }
 }
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 /// An adoption re-addresses the pacemaker at the graph run now driving the run.
 ///
@@ -408,6 +421,11 @@ fn a_launch_record_without_a_directory_is_replayed_from_the_adopting_process() {
 /// record carried is a run `oneagentgraph` has already finished with. A reset
 /// sent there restarts nothing, which is the same silence the original defect
 /// had — the record has to name the run that is driving now.
+// llmlint: ignore-block[tests_mirror_real_usage] the id the reset is *addressed by* is not
+// on any product surface — `next` prints the surface, and a reset that failed is a line on
+// stderr — so the argv the double recorded is the only place the address exists. The
+// record's own two values are read through the product's file, and the claim that the old
+// one was not used has nowhere else to be observed.
 #[test]
 fn adoption_re_addresses_the_pacemaker_at_the_graph_run_now_driving() {
     let world = World::new("driver-adopt-pacemaker");
@@ -445,6 +463,7 @@ fn adoption_re_addresses_the_pacemaker_at_the_graph_run_now_driving() {
         world.invocations()
     );
 }
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 /// A run that records no graph run says why its pacemaker was not reset, and
 /// still hands the planner the surface they asked for.
@@ -453,6 +472,10 @@ fn adoption_re_addresses_the_pacemaker_at_the_graph_run_now_driving() {
 /// address, so there is nothing to send. Saying so is the point — the reset is
 /// best-effort, and a silent no-op here is exactly the failure that went
 /// unnoticed for as long as it did.
+// llmlint: ignore-block[tests_mirror_real_usage] the record is written directly for the
+// same reason as above: no build writes a record without this field any more, and a value
+// the sibling would refuse is what an edited or interfered-with record carries. What is
+// asserted is the product's own answer — `next`'s exit code, its surface, and its stderr.
 #[test]
 fn a_run_with_no_recorded_graph_run_says_why_the_pacemaker_was_not_reset() {
     let world = World::new("driver-no-graph-run");
@@ -477,11 +500,33 @@ fn a_run_with_no_recorded_graph_run_says_why_the_pacemaker_was_not_reset() {
     read.exited(0).out_has("steady");
     read.err_has("could not reset the check-in pacemaker")
         .err_has("records no agent-graph run");
+
+    // And one that carries a value the sibling would never answer to — a run
+    // store is a directory, and this field is joined onto it. Refused with the
+    // value named, not sent, and the surface is still the planner's.
+    let mut record = world.run_json(&run, "launch.json");
+    record["graph_run"] = json!("../elsewhere");
+    std::fs::write(world.run_file(&run, "launch.json"), record.to_string())
+        .expect("the record is rewritten");
+    world
+        .run(&["surface", &run, "--kind", "check-in", "--message", "again"])
+        .exited(0);
+    let read = world.run(&["next", &run]);
+    read.exited(0).out_has("again");
+    read.err_has("could not reset the check-in pacemaker")
+        .err_has("../elsewhere");
+
+    // llmlint: ignore-block[tests_mirror_real_usage] the claim is that *nothing was sent*,
+    // and the only place a value that never crossed the seam can be observed is the log of
+    // what did. A product surface reporting "no reset was attempted" does not exist and
+    // inventing one to make this assertion product-shaped would be a surface nobody asked
+    // for. `harness.rs` records every double invocation for exactly this.
     assert!(
         !world.was_invoked("oneagentgraph", &["reset-timer"]),
         "a reset was sent with no run to address it to: {:?}",
         world.invocations()
     );
+    // llmlint: ignore-end[tests_mirror_real_usage]
     world.release("build.go");
 }
 

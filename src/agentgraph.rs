@@ -255,8 +255,36 @@ fn is_envelope(line: &str) -> bool {
 /// library would answer to rather than whatever string was on the line — an
 /// announcement this build cannot read as one leaves no address at all, which
 /// is the same answer as a graph that never announced itself.
-fn announced_run(envelope: &Envelope) -> Option<oneagentgraph::run::RunId> {
-    oneagentgraph::run::RunId::parse(envelope.labels.run_id.as_deref()?.trim()).ok()
+fn announced_run(envelope: &Envelope) -> Option<GraphRunId> {
+    GraphRunId::parse(envelope.labels.run_id.as_deref()?.trim()).ok()
+}
+
+/// The id `oneagentgraph` minted for one of its runs.
+///
+/// The sibling's own type, not a second copy of it: it is the value that
+/// library's signals are addressed by, and it is what refuses a string that
+/// would name a path outside its run store. Aliased here so the rest of this
+/// crate can name it without naming the sibling's module path everywhere, and
+/// so it is visibly *not* a `onepipeline` run id — the two are different runs
+/// and confusing them is what left the pacemaker reset dead.
+pub type GraphRunId = oneagentgraph::run::RunId;
+
+/// One graph run id read back off this crate's own launch record.
+///
+/// The record is a file on disk that a later, unrelated process re-reads, so
+/// this field is external input like any other: it arrives as a string and only
+/// becomes an address by passing the sibling's parser. Both refusals are
+/// phrased for the operator reading them off `next`'s stderr, because that is
+/// the only place a pacemaker that could not be reset is reported.
+pub fn recorded_graph_run(recorded: &str, run: &str) -> Result<GraphRunId> {
+    let recorded = recorded.trim();
+    if recorded.is_empty() {
+        return Err(Error::Invalid(format!(
+            "run '{run}' records no agent-graph run to address it by"
+        )));
+    }
+    GraphRunId::parse(recorded)
+        .map_err(|error| sibling(format!("run '{run}' records '{recorded}': {error}")))
 }
 
 /// Render the reserved label keys as the `k=v` pairs the CLI takes, each under
@@ -363,7 +391,7 @@ struct LibraryGraphRun {
     cancel: mpsc::Sender<()>,
     pid: u32,
     /// The graph run's own id, as the sibling minted it.
-    run_id: oneagentgraph::run::RunId,
+    run_id: GraphRunId,
     exited: Arc<AtomicBool>,
 }
 
@@ -381,7 +409,7 @@ struct ProcessGraphRun {
     /// handshake.
     started_with: Vec<String>,
     /// The graph run's own id, read off its announcement.
-    run_id: Option<oneagentgraph::run::RunId>,
+    run_id: Option<GraphRunId>,
 }
 
 /// Where a started graph's own stdout and stderr go.
@@ -787,7 +815,7 @@ impl ProcessGraphRun {
     }
 
     /// The graph run's own id, once its announcement has been read.
-    pub fn run_id(&self) -> Option<&oneagentgraph::run::RunId> {
+    pub fn run_id(&self) -> Option<&GraphRunId> {
         self.run_id.as_ref()
     }
 
@@ -972,7 +1000,7 @@ impl GraphRun {
     /// `None` only where the graph started without announcing itself — a run
     /// that succeeded before it said anything — which is the same case that
     /// leaves nothing to address.
-    pub fn run_id(&self) -> Option<&oneagentgraph::run::RunId> {
+    pub fn run_id(&self) -> Option<&GraphRunId> {
         match &self.backend {
             GraphBackend::Library(run) => Some(&run.run_id),
             GraphBackend::Process(run) => run.run_id(),
@@ -1036,17 +1064,15 @@ impl Settled {
 /// [`oneagentgraph::run::signal`] is the same implementation the `reset-timer`
 /// verb runs, so which member names are addressable and where the run watches
 /// are decided once, in the sibling, rather than twice.
-pub fn reset_timer(run: &str, member: &str) -> Result<()> {
+pub fn reset_timer(run: &GraphRunId, member: &str) -> Result<()> {
     if std::env::var_os(BINARY_ENV).is_some() {
         return reset_timer_by_process(run, member);
     }
-    let run_id = oneagentgraph::run::RunId::parse(run)
-        .map_err(|error| sibling(format!("reset-timer {run} {member}: {error}")))?;
     let member_name = oneagentgraph::run::MemberName::parse(member)
         .map_err(|error| sibling(format!("reset-timer {run} {member}: {error}")))?;
     oneagentgraph::run::signal(
         &state_dir(&process_env()),
-        &run_id,
+        run,
         &member_name,
         oneagentgraph::run::Signal::Reset,
     )
@@ -1054,10 +1080,10 @@ pub fn reset_timer(run: &str, member: &str) -> Result<()> {
 }
 
 /// The same reset, through an executable an operator named at [`BINARY_ENV`].
-fn reset_timer_by_process(run: &str, member: &str) -> Result<()> {
+fn reset_timer_by_process(run: &GraphRunId, member: &str) -> Result<()> {
     let output = Command::new(binary())
         .arg("reset-timer")
-        .arg(run)
+        .arg(run.as_str())
         .arg(member)
         .stdin(Stdio::null())
         .output()
@@ -1630,7 +1656,9 @@ mod tests {
     #[test]
     fn a_reset_leaves_the_signal_the_run_watches_for() {
         let root = state_dir_holding("node-scope-1786304152340-19", &[CHECK_IN_MEMBER]);
-        reset_timer("node-scope-1786304152340-19", CHECK_IN_MEMBER)
+        let graph_run = recorded_graph_run("node-scope-1786304152340-19", "demo")
+            .expect("the sibling accepts its own run id");
+        reset_timer(&graph_run, CHECK_IN_MEMBER)
             .expect("the sibling accepts a reset for a member it declared");
         assert!(
             root.join("node-scope-1786304152340-19")
@@ -1642,12 +1670,46 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A graph run read back off a launch record only becomes an address by
+    /// passing the sibling's own parser.
+    ///
+    /// The record is a file a later process re-reads, so this field is a
+    /// stranger's string: one that would name a path outside the sibling's run
+    /// store must not reach a call that joins it onto that store, and an absent
+    /// one is a different answer from a malformed one — the first is a record
+    /// from a build that had no such field, the second is a record that has been
+    /// interfered with.
+    #[test]
+    fn a_recorded_graph_run_is_an_address_only_if_the_sibling_would_answer_to_it() {
+        assert_eq!(
+            recorded_graph_run("node-scope-1786304152340-19", "demo")
+                .expect("the sibling's own alphabet")
+                .as_str(),
+            "node-scope-1786304152340-19"
+        );
+        let absent = recorded_graph_run("   ", "demo").expect_err("no address at all");
+        assert!(
+            absent.to_string().contains("records no agent-graph run"),
+            "{absent} does not say the record named none"
+        );
+        for interfered in ["../elsewhere", "Node-Scope-1", "a/b"] {
+            let refused = recorded_graph_run(interfered, "demo")
+                .expect_err("a string the sibling would not answer to");
+            assert!(
+                refused.to_string().contains(interfered),
+                "{refused} does not name the value it refused"
+            );
+        }
+    }
+
     /// A member the run never declared is refused rather than answered with a
     /// signal file nothing will read.
     #[test]
     fn a_reset_for_a_member_the_run_never_declared_is_refused() {
         let root = state_dir_holding("node-scope-1786304152340-20", &["worker"]);
-        let refused = reset_timer("node-scope-1786304152340-20", CHECK_IN_MEMBER)
+        let graph_run = recorded_graph_run("node-scope-1786304152340-20", "demo")
+            .expect("the sibling accepts its own run id");
+        let refused = reset_timer(&graph_run, CHECK_IN_MEMBER)
             .expect_err("a member the run does not have is not resettable");
         assert!(
             refused.to_string().contains(CHECK_IN_MEMBER),
