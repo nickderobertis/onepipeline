@@ -144,7 +144,11 @@ fn relative_node_and_step_graph_overrides_dispatch_from_the_launch_directory() {
                     event["kind"] == "graph-started"
                         && event["labels"]["node"] == "service"
                         && event["labels"]["step"] == step
-                        && event["payload"]["graph"] == graph.to_string_lossy().as_ref()
+                        && event["payload"]["graph"].as_str().is_some_and(|actual| {
+                            std::fs::canonicalize(actual)
+                                .map(|actual| actual == graph)
+                                .unwrap_or(false)
+                        })
                 }),
             "{step} did not dispatch with its resolved graph: {}",
             world.dump()
