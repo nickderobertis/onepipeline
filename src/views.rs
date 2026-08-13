@@ -51,6 +51,7 @@ use std::path::Path;
 
 use crate::event::{Envelope, Source};
 use crate::graph::{self, NodeStatus};
+use crate::journal::PipelineKind;
 use crate::ledger::{self, LaunchRecord, RunPaths};
 use crate::projection::{self, RunState};
 use crate::sys;
@@ -484,7 +485,7 @@ pub fn results(view: &RunView) -> String {
             .iter()
             .rev()
             .find(|event| {
-                event.kind.0 == "node-settled"
+                event.kind.0 == PipelineKind::NodeSettled.as_str()
                     && event.labels.node.as_deref() == Some(node.id.as_str())
             })
             .and_then(|event| event.payload.get("detail"))

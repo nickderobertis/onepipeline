@@ -18,7 +18,7 @@
 // credential nor a budget for one.
 
 use crate::harness::{agent, human, plan_of, World};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 /// The prose a `member-started` says its member was launched with.
 ///
@@ -68,6 +68,73 @@ fn relative_default_graphs_dispatch_from_the_launch_directory() {
     }
 }
 
+/// Plan-owned graph references have the same launch-directory semantics as
+/// the defaults. Both levels actually dispatch through the real sibling: the
+/// node graph runs the first lifecycle step and the step graph runs the second.
+#[test]
+fn relative_node_and_step_graph_overrides_dispatch_from_the_launch_directory() {
+    let world = World::new("real-relative-plan-overrides");
+    world.write_graphs();
+    world.repository("local-direct", &["true"]);
+    for (source, target) in [
+        ("node-scope.yaml", "node-override.yaml"),
+        ("node-scope.yaml", "step-override.yaml"),
+    ] {
+        std::fs::copy(world.graphs().join(source), world.root.join(target))
+            .expect("the relative graph override is written");
+    }
+    std::fs::copy(
+        world.graphs().join("oneharness.toml"),
+        world.root.join("oneharness.toml"),
+    )
+    .expect("the relative graphs' harness config is written");
+    let node = json!({
+        "id": "service",
+        "repo": "service",
+        "agent_graph": "node-override.yaml",
+        "steps": [
+            {"id": "implement", "persona": "engineer", "task": "## What\nimplement"},
+            {
+                "id": "review",
+                "persona": "reviewer",
+                "task": "## What\nreview",
+                "deps": ["implement"],
+                "agent_graph": "step-override.yaml",
+            },
+        ],
+    });
+    let path = world.plan(
+        "relative-plan-overrides",
+        &plan_of("relative-plan-overrides", vec![node]),
+    );
+    let mut command = world.agentgraph_cmd(&["start", &path.to_string_lossy(), "--attach"]);
+    command.current_dir(&world.root);
+
+    world
+        .run_on(command, "start relative plan graph overrides")
+        .exited(0)
+        .settled();
+
+    for (step, graph) in [
+        ("implement", world.root.join("node-override.yaml")),
+        ("review", world.root.join("step-override.yaml")),
+    ] {
+        assert!(
+            world
+                .journal("relative-plan-overrides")
+                .iter()
+                .any(|event| {
+                    event["kind"] == "graph-started"
+                        && event["labels"]["node"] == "service"
+                        && event["labels"]["step"] == step
+                        && event["payload"]["graph"] == graph.to_string_lossy().as_ref()
+                }),
+            "{step} did not dispatch with its resolved graph: {}",
+            world.dump()
+        );
+    }
+}
+
 #[test]
 fn an_unreadable_relative_graph_names_its_launch_base() {
     let world = World::new("relative-graph-error");
@@ -83,6 +150,25 @@ fn an_unreadable_relative_graph_names_its_launch_base() {
     let failed = world.run_on(command, "start missing relative graph");
     failed.exited(crate::harness::REFUSED);
     failed.err_has("graphs/missing-dag.yaml");
+    failed.err_has(&world.root.to_string_lossy());
+}
+
+#[test]
+fn an_unreadable_relative_node_graph_names_its_launch_base() {
+    let world = World::new("relative-node-graph-error");
+    world.write_graphs();
+    let path = world.plan(
+        "relative-node-error",
+        &plan_of("relative-node-error", vec![agent("build", &[])]),
+    );
+    let mut command = world.agentgraph_cmd(&["start", &path.to_string_lossy(), "--attach"]);
+    command
+        .current_dir(&world.root)
+        .env("ONEPIPELINE_NODE_GRAPH", "graphs/missing-node.yaml");
+
+    let failed = world.run_on(command, "start missing relative node graph");
+    failed.exited(crate::harness::REFUSED);
+    failed.err_has("graphs/missing-node.yaml");
     failed.err_has(&world.root.to_string_lossy());
 }
 
