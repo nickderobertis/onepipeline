@@ -244,20 +244,19 @@ fn is_envelope(line: &str) -> bool {
     envelope_of(line).is_some()
 }
 
-/// The `oneagentgraph` run id an announcement carries.
+/// The `oneagentgraph` run an announcement belongs to.
 ///
 /// The sibling stamps its own run onto every envelope it emits, and this crate
 /// has no second way to learn it: a run of this library is not a run of that
 /// one. [`adopt_labels`] never overwrites a producer's own `run_id`, so the
 /// value read here is the graph's rather than this crate's.
-fn announced_run(envelope: &Envelope) -> Option<String> {
-    envelope
-        .labels
-        .run_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|run| !run.is_empty())
-        .map(str::to_string)
+///
+/// Through the sibling's own parser, so what comes back is a run id that
+/// library would answer to rather than whatever string was on the line — an
+/// announcement this build cannot read as one leaves no address at all, which
+/// is the same answer as a graph that never announced itself.
+fn announced_run(envelope: &Envelope) -> Option<oneagentgraph::run::RunId> {
+    oneagentgraph::run::RunId::parse(envelope.labels.run_id.as_deref()?.trim()).ok()
 }
 
 /// Render the reserved label keys as the `k=v` pairs the CLI takes, each under
@@ -364,7 +363,7 @@ struct LibraryGraphRun {
     cancel: mpsc::Sender<()>,
     pid: u32,
     /// The graph run's own id, as the sibling minted it.
-    run_id: String,
+    run_id: oneagentgraph::run::RunId,
     exited: Arc<AtomicBool>,
 }
 
@@ -382,7 +381,7 @@ struct ProcessGraphRun {
     /// handshake.
     started_with: Vec<String>,
     /// The graph run's own id, read off its announcement.
-    run_id: Option<String>,
+    run_id: Option<oneagentgraph::run::RunId>,
 }
 
 /// Where a started graph's own stdout and stderr go.
@@ -788,8 +787,8 @@ impl ProcessGraphRun {
     }
 
     /// The graph run's own id, once its announcement has been read.
-    pub fn run_id(&self) -> Option<&str> {
-        self.run_id.as_deref()
+    pub fn run_id(&self) -> Option<&oneagentgraph::run::RunId> {
+        self.run_id.as_ref()
     }
 
     /// Whether the graph process has ended, reaping it if it has.
@@ -808,14 +807,12 @@ impl GraphRun {
     /// process boundary because a library scheduler thread cannot survive this
     /// process exiting.
     ///
-    /// `dir` is required rather than optional, and that is the fix for a real
-    /// defect rather than a tightening: the two backends *defaulted* an absent
-    /// directory differently — the CLI's own default is `.`, resolved against
-    /// whatever process ends up spawning the graph, while the library path fell
-    /// back to this process's working directory — so one caller passing nothing
-    /// sent two different `--cwd` values to the harness depending only on
-    /// whether the launch was detached. A caller with a directory in hand
-    /// cannot express that ambiguity here any more.
+    /// `dir` is required: the two backends have no common default for an absent
+    /// one — the CLI's is `.`, resolved against whatever process spawns the
+    /// graph, and the library's would be this process's own — so a caller that
+    /// said nothing would send a different `--cwd` to the harness depending on
+    /// which backend it happened to take. Naming it is the only way a run gets
+    /// one answer.
     pub fn start(
         graph: &str,
         task: &str,
@@ -860,7 +857,7 @@ impl GraphRun {
         let running = oneagentgraph::run::start(&request, &run_env)
             .map_err(|error| sibling(error.to_string()))?;
         let pid = running.started().pid;
-        let run_id = running.started().run_id.as_str().to_string();
+        let run_id = running.started().run_id.clone();
         let (events_tx, events_rx) = mpsc::channel();
         let (settled_tx, settled_rx) = mpsc::channel();
         let (cancel_tx, cancel_rx) = mpsc::channel();
@@ -975,7 +972,7 @@ impl GraphRun {
     /// `None` only where the graph started without announcing itself — a run
     /// that succeeded before it said anything — which is the same case that
     /// leaves nothing to address.
-    pub fn run_id(&self) -> Option<&str> {
+    pub fn run_id(&self) -> Option<&oneagentgraph::run::RunId> {
         match &self.backend {
             GraphBackend::Library(run) => Some(&run.run_id),
             GraphBackend::Process(run) => run.run_id(),

@@ -124,9 +124,34 @@ fn launch_dir() -> Result<PathBuf> {
 /// A record written before `dir` existed carries none, and the reading a
 /// driver gave such a run was its own working directory — so that is what it
 /// keeps getting, rather than a directory this build invented for it.
+///
+/// A recorded one is **external input**: the launch record is a file on disk
+/// that this process re-reads, and this field is the directory every member of
+/// the run works in. Both refusals below are the invariant the field is
+/// documented to hold, checked where it is read rather than assumed: a relative
+/// value would resolve against whichever process spawns the graph — the exact
+/// ambiguity the field exists to remove — and one that is not a directory fails
+/// each member separately, deep inside the sibling, with nothing naming the
+/// record it came from.
 fn recorded_dir(record: &LaunchRecord) -> Result<PathBuf> {
     if record.dir.as_os_str().is_empty() {
         return launch_dir();
+    }
+    if !record.dir.is_absolute() {
+        return Err(Error::Invalid(format!(
+            "run '{}' records the relative working directory '{}'; a run's directory has to be \
+             absolute, because the process that resolves it is not the one that launched it",
+            record.run_id,
+            record.dir.display()
+        )));
+    }
+    if !record.dir.is_dir() {
+        return Err(Error::Invalid(format!(
+            "run '{}' records the working directory '{}', which is not a directory on {}",
+            record.run_id,
+            record.dir.display(),
+            sys::hostname()
+        )));
     }
     Ok(record.dir.clone())
 }
@@ -374,7 +399,10 @@ fn start(args: &StartArgs) -> Result<i32> {
         },
     )?;
     record.pid = launched.pid();
-    record.graph_run = launched.run_id().unwrap_or_default().to_string();
+    record.graph_run = launched
+        .run_id()
+        .map(ToString::to_string)
+        .unwrap_or_default();
     ledger::write_json(&paths.launch(), &record)?;
 
     if args.detach {
@@ -629,7 +657,10 @@ fn adopt(args: &RunArgs) -> Result<i32> {
     // A fresh driver is a fresh graph run with an id of its own, and the
     // pacemaker is addressed by that id — so the record names the run that is
     // driving now rather than the one that died.
-    record.graph_run = launched.run_id().unwrap_or_default().to_string();
+    record.graph_run = launched
+        .run_id()
+        .map(ToString::to_string)
+        .unwrap_or_default();
     ledger::write_json(&paths.launch(), &record)?;
     attach(&paths, Some(&mut launched))
 }

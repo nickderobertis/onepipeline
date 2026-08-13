@@ -1059,25 +1059,16 @@ fn a_note_delivered_through_the_real_sibling_records_what_its_lever_answered() {
 /// override, against a real graph that really declares a resettable `check-in`
 /// member.
 ///
-/// It replaces a characterisation of the defect it now holds the fix for: the
-/// reset used to be addressed with **this** run's id, and a graph run has an id
-/// of its own that `oneagentgraph` mints. The subprocess path sent the same
-/// wrong argument and the double answered `0` to anything, so for as long as
-/// that double existed nothing anywhere said so — the reset simply never
-/// happened, and a `resettable` schedule quietly degraded to a fixed interval
-/// that ignores everything the run is already telling the planner.
+/// The address is what this crate owns, and it is what a real sibling can
+/// judge: `oneagentgraph::run::signal` reads the run's record, refuses a member
+/// that run never declared, and writes the signal under the run's own
+/// directory. All three only work out for the id `oneagentgraph` minted, never
+/// for this crate's, so a reset that lands there was addressed correctly.
 ///
-/// The reset is carried the whole way to where the sibling's own scheduler
-/// watches for it: `oneagentgraph::run::signal` reads the run's record, refuses
-/// a member that run never declared, and writes the signal under the run's own
-/// directory. All three only work out for the id `oneagentgraph` minted, so a
-/// reset that lands there is a reset that was addressed correctly — which is
-/// exactly what this crate owns.
-///
-/// What happens to the signal *after* it lands is the sibling's half: it starts
-/// a scheduled member's clock only once every member of that member's wave has
+/// What happens to the signal *after* it lands is the sibling's: it starts a
+/// scheduled member's clock only once every member of that member's wave has
 /// settled, and the orchestrator shares the pacemaker's wave and runs for the
-/// whole run. See the report accompanying this change.
+/// whole run — so nothing consumes the signal while the run it paces is alive.
 #[test]
 fn consuming_a_surface_restarts_the_real_pacemakers_clock() {
     let world = World::new("real-pacemaker");

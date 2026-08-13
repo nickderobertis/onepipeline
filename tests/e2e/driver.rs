@@ -344,6 +344,147 @@ fn start_and_adopt_give_the_sibling_the_same_directory_for_one_run() {
     assert_eq!(started[0]["payload"]["dir"], json!(launched_from));
 }
 
+/// A run recorded by a build that had no directory field keeps the reading it
+/// had, and one that records an unusable directory is refused by name.
+///
+/// The first is the whole compatibility promise: a record written before the
+/// field existed carries none, and the driver such a run had ran in its own
+/// working directory — so that is what an adoption of it still gives the
+/// sibling, rather than a directory this build invented for it. The second is
+/// what stops the field from being trusted just because it is there: it is a
+/// file on disk, and it decides where every member of the run works.
+#[test]
+fn a_launch_record_without_a_directory_is_replayed_from_the_adopting_process() {
+    let world = World::new("driver-legacy-dir");
+    let run = start_detached(&world, "legacy", vec![human("approve", &[])]);
+    world.until("the driver to exit", |world| {
+        world.run(&["status", &run]).stdout.contains("DRIVER DEAD")
+    });
+
+    let rewrite = |record: &mut serde_json::Value| {
+        let path = world.run_file(&run, "launch.json");
+        std::fs::write(&path, record.to_string()).expect("the record is rewritten");
+    };
+
+    // A record from before the field: no `dir` at all.
+    let mut record = world.run_json(&run, "launch.json");
+    record
+        .as_object_mut()
+        .expect("the record is an object")
+        .remove("dir");
+    rewrite(&mut record);
+
+    let adopted_from = world.project.clone();
+    let mut adopt = world.cmd(&["adopt", &run]);
+    adopt.current_dir(&adopted_from);
+    world.run_on(adopt, "adopt legacy").exited(NOTHING_DRIVING);
+    let dirs = dag_launch_dirs(&world);
+    assert_eq!(
+        std::path::Path::new(dirs.last().expect("the adoption relaunched the graph")),
+        adopted_from,
+        "a record with no directory was not replayed from the adopting process: {dirs:?}"
+    );
+
+    // And a record that carries one it cannot honour is refused by name rather
+    // than handed on for each member to fail against separately.
+    for (dir, reason) in [
+        ("relative/place", "relative working directory"),
+        ("/no/such/place/here", "which is not a directory"),
+    ] {
+        let mut record = world.run_json(&run, "launch.json");
+        record["dir"] = json!(dir);
+        rewrite(&mut record);
+        world
+            .run(&["adopt", &run])
+            .exited(REFUSED)
+            .err_has(reason)
+            .err_has(dir);
+    }
+}
+
+/// An adoption re-addresses the pacemaker at the graph run now driving the run.
+///
+/// An adoption starts a *fresh* graph run with an id of its own, so the id the
+/// record carried is a run `oneagentgraph` has already finished with. A reset
+/// sent there restarts nothing, which is the same silence the original defect
+/// had — the record has to name the run that is driving now.
+#[test]
+fn adoption_re_addresses_the_pacemaker_at_the_graph_run_now_driving() {
+    let world = World::new("driver-adopt-pacemaker");
+    let run = start_detached(&world, "readdressed", vec![human("approve", &[])]);
+    world.until("the driver to exit", |world| {
+        world.run(&["status", &run]).stdout.contains("DRIVER DEAD")
+    });
+    let before = world.run_json(&run, "launch.json")["graph_run"]
+        .as_str()
+        .expect("the first driver's graph run")
+        .to_string();
+
+    world.run(&["adopt", &run]).exited(NOTHING_DRIVING);
+    let after = world.run_json(&run, "launch.json")["graph_run"]
+        .as_str()
+        .expect("the adopted driver's graph run")
+        .to_string();
+    assert_ne!(
+        after, before,
+        "the record still names the graph run that died"
+    );
+
+    world
+        .run(&["surface", &run, "--kind", "check-in", "--message", "steady"])
+        .exited(0);
+    world.run(&["next", &run]).exited(0);
+    assert!(
+        world.was_invoked("oneagentgraph", &["reset-timer", &after, "check-in"]),
+        "the reset was not addressed at the graph run driving the run now: {:?}",
+        world.invocations()
+    );
+    assert!(
+        !world.was_invoked("oneagentgraph", &["reset-timer", &before]),
+        "the reset went to the graph run that had already died: {:?}",
+        world.invocations()
+    );
+}
+
+/// A run that records no graph run says why its pacemaker was not reset, and
+/// still hands the planner the surface they asked for.
+///
+/// The case a record written before the field existed leaves: there is no
+/// address, so there is nothing to send. Saying so is the point — the reset is
+/// best-effort, and a silent no-op here is exactly the failure that went
+/// unnoticed for as long as it did.
+#[test]
+fn a_run_with_no_recorded_graph_run_says_why_the_pacemaker_was_not_reset() {
+    let world = World::new("driver-no-graph-run");
+    world.script("build.wait", "hold");
+    let run = start_detached(&world, "unaddressed", vec![agent("build", &[])]);
+    world.until("the run to open a round", |world| {
+        !world.events_of(&run, "round-started").is_empty()
+    });
+    world
+        .run(&["surface", &run, "--kind", "check-in", "--message", "steady"])
+        .exited(0);
+
+    let mut record = world.run_json(&run, "launch.json");
+    record
+        .as_object_mut()
+        .expect("the record is an object")
+        .remove("graph_run");
+    std::fs::write(world.run_file(&run, "launch.json"), record.to_string())
+        .expect("the record is rewritten");
+
+    let read = world.run(&["next", &run]);
+    read.exited(0).out_has("steady");
+    read.err_has("could not reset the check-in pacemaker")
+        .err_has("records no agent-graph run");
+    assert!(
+        !world.was_invoked("oneagentgraph", &["reset-timer"]),
+        "a reset was sent with no run to address it to: {:?}",
+        world.invocations()
+    );
+    world.release("build.go");
+}
+
 #[test]
 fn adopt_refuses_another_sessions_run_and_has_no_force() {
     let world = World::new("driver-adopt-owner");
