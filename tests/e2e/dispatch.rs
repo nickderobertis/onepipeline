@@ -133,6 +133,9 @@ fn relative_node_and_step_graph_overrides_dispatch_from_the_launch_directory() {
         ("implement", world.root.join("node-override.yaml")),
         ("review", world.root.join("step-override.yaml")),
     ] {
+        let graph = graph
+            .canonicalize()
+            .expect("the expected relative graph path resolves");
         assert!(
             world
                 .journal("relative-plan-overrides")
