@@ -1,13 +1,59 @@
 //! The `oneagentgraph` seam.
 //!
-//! Agent, harness, and model selection stay in that library, so ordinary graph
-//! runs use its nonblocking Rust handle. Composition, not reimplementation:
-//! nothing here decides a harness, a chain, or a model, and envelopes cross the
-//! same serialized boundary as the former NDJSON relay.
+//! Agent, harness, and model selection stay in that library, so every verb this
+//! crate needs is one of its **library** entry points: [`oneagentgraph::run::start`]
+//! for a graph, [`oneagentgraph::run::signal`] for a pacemaker reset,
+//! [`oneagentgraph::control::interrupt`] for a live redirection, and
+//! [`oneagentgraph::health::read`] for the provider block. Composition, not
+//! reimplementation: nothing here decides a harness, a chain, or a model, and
+//! envelopes cross the same serialized boundary as the former NDJSON relay.
 //!
-//! [`BINARY_ENV`] remains an explicit compatibility override. Detached launches
-//! also retain a process because their scheduler must outlive this process;
-//! neither case changes the default in-process path.
+//! [`BINARY_ENV`] remains an explicit compatibility override, and it is
+//! all-or-nothing: naming an executable sends *every* verb to it, so an operator
+//! pinning an install never gets half a run from one build and half from
+//! another. Detached launches also retain a process, because a library
+//! scheduler thread cannot outlive the process that is about to exit; neither
+//! case changes the default in-process path.
+//!
+//! # What moving in-process changed, and what it did not
+//!
+//! **Isolation.** The process boundary did not disappear — it moved one layer
+//! down, to where the risk is. What can wedge or burn is the *agent turn*, and
+//! `oneagentgraph` spawns that as its own `oneharness` process either way. What
+//! became a thread is the graph *scheduler*, and a scheduler that panics is
+//! reported rather than fatal: [`oneagentgraph::run::Running::wait`] answers a
+//! panicked thread with `InvalidConfig`, which [`exit_for`] turns into the same
+//! exit code the process path carried, and [`GraphRun::wait`] settles the run on
+//! it. A run that must be stopped is stopped through the sibling's own
+//! [`cancel`](oneagentgraph::run::Running::cancel), which writes the run's stop
+//! signal and reaps its member process trees — the same reap the `cancel` verb
+//! performs.
+//!
+//! **The stream.** Envelopes arrive as they occur, and they arrive as the same
+//! value the subprocess path relayed. Both are held by tests:
+//! `a_relayed_envelope_is_the_same_whether_it_crossed_as_a_value_or_as_a_line`
+//! for the content, and, for the timing,
+//! `status_says_what_a_live_dispatch_is_doing_and_the_readout_advances` in
+//! `tests/e2e/dispatch.rs`, which reads a dispatch's tool summary out of the
+//! merged store twice while the node is still in flight.
+//!
+//! **Interrupts and exit codes.** The three answers stay three: a redirection
+//! delivered, the *fact* that there was no controllable turn, and a lever that
+//! broke. The library hands back a [`Delivery`](oneagentgraph::control::Delivery)
+//! where the process path handed back an exit code, so [`interrupt`] applies the
+//! CLI's own mapping — and publishes the `turn-interrupted` envelope the verb
+//! publishes, through the sibling's own emitter.
+//!
+//! **Concurrency.** One thing in the sibling's library path is process-wide and
+//! is therefore *no longer isolated between concurrent nodes*: a graph's `env:`
+//! block is exported into the running process, and `ONEHARNESS_HARNESSES` is
+//! removed from it. That is deliberate upstream — a two-party member is a thread
+//! there, and the `oneharness run` it spawns has to inherit what the contract
+//! promises it — and it was safe while one graph run was one process. This crate
+//! dispatches several nodes at once, so it no longer is.
+//! `a_graphs_env_block_is_exported_into_this_process_and_not_into_the_run_alone`
+//! observes it. The shipped graphs declare no `env:` block, so nothing here
+//! trips it today.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader};
@@ -153,6 +199,20 @@ fn sibling(message: impl Into<String>) -> Error {
     }
 }
 
+/// The exit code the sibling's own CLI carries one of its failures out on.
+///
+/// The subprocess path read a code and the library path is handed an `Error`,
+/// so this is the CLI's rule applied here — including its fall-through, because
+/// `oneagentgraph::error::Error` is `#[non_exhaustive]` and a variant added
+/// later must still settle a run with the code the contract assigns it rather
+/// than fail to compile.
+fn exit_for(error: &oneagentgraph::error::Error) -> i32 {
+    match error {
+        oneagentgraph::error::Error::InvalidConfig(_) => oneagentgraph::error::EXIT_INVALID_CONFIG,
+        _ => oneagentgraph::error::EXIT_MEMBER_FAILED,
+    }
+}
+
 /// How a process of the sibling's ended, in words.
 ///
 /// One phrasing for both ways a process can stop, so a caller reporting a
@@ -235,6 +295,29 @@ pub fn adopt_labels(labels: &mut Labels) {
     labels.node = labels.node.take().or(node);
     labels.step = labels.step.take().or(step);
     labels.persona = labels.persona.take().or(persona);
+}
+
+/// One envelope the sibling handed over, as this crate's own.
+///
+/// The library gives a typed [`oneagentgraph::event::Envelope`] where the
+/// subprocess path gave a line of that type's own NDJSON. Both cross the same
+/// boundary — the sibling's `Serialize` — so an envelope relayed either way is
+/// the same value, and the crossing is kept rather than skipped for exactly
+/// that reason: a direct field-by-field copy would be a second reading of a
+/// schema the sibling owns, and would silently drop the first field it added.
+/// `a_relayed_envelope_is_the_same_whether_it_crossed_as_a_value_or_as_a_line`
+/// holds the two to each other.
+fn relayed(envelope: oneagentgraph::event::Envelope) -> Result<Envelope> {
+    serde_json::to_value(envelope)
+        .map_err(|error| sibling(format!("serializing graph event: {error}")))
+        .and_then(|value| {
+            serde_json::from_value::<Envelope>(value)
+                .map_err(|error| sibling(format!("reading graph event: {error}")))
+        })
+        .map(|mut envelope| {
+            adopt_labels(&mut envelope.labels);
+            envelope
+        })
 }
 
 /// One `oneagentgraph run`, started and streaming.
@@ -751,20 +834,7 @@ impl GraphRun {
                     }
                     match running.recv_timeout(Duration::from_millis(10)) {
                         Ok(Some(envelope)) => {
-                            let converted = serde_json::to_value(envelope)
-                                .map_err(|error| {
-                                    sibling(format!("serializing graph event: {error}"))
-                                })
-                                .and_then(|value| {
-                                    serde_json::from_value::<Envelope>(value).map_err(|error| {
-                                        sibling(format!("reading graph event: {error}"))
-                                    })
-                                })
-                                .map(|mut envelope| {
-                                    adopt_labels(&mut envelope.labels);
-                                    envelope
-                                });
-                            if events_tx.send(converted).is_err() {
+                            if events_tx.send(relayed(envelope)).is_err() {
                                 let _ = running.cancel();
                                 break;
                             }
@@ -774,20 +844,21 @@ impl GraphRun {
                         Err(mpsc::RecvTimeoutError::Timeout) => unreachable!(),
                     }
                 }
-                let settled = running.wait().map_or_else(
-                    |error| {
-                        Ok(Settled {
-                            code: Some(oneagentgraph::error::EXIT_MEMBER_FAILED),
-                            stderr: error.to_string(),
-                        })
+                let settled = Ok(match running.wait() {
+                    Ok(code) => Settled {
+                        code: Some(code),
+                        stderr: String::new(),
                     },
-                    |code| {
-                        Ok(Settled {
-                            code: Some(code),
-                            stderr: String::new(),
-                        })
+                    // A refusal, given the code the *process* path would have
+                    // carried for it. The sibling's CLI turns its `Error` into an
+                    // exit code and the library hands the `Error` over instead,
+                    // so a caller of both has to apply that rule itself or the
+                    // two paths settle the same graph differently.
+                    Err(error) => Settled {
+                        code: Some(exit_for(&error)),
+                        stderr: error.to_string(),
                     },
-                );
+                });
                 thread_exited.store(true, Ordering::Release);
                 let _ = settled_tx.send(settled);
             })
@@ -1317,6 +1388,138 @@ mod tests {
         std::env::set_var(STATE_DIR_ENV, &root);
         std::env::remove_var(BINARY_ENV);
         root
+    }
+
+    /// A graph's `env:` block lands in **this** process, which is what stops
+    /// concurrent dispatches from being isolated from one another.
+    ///
+    /// This is the answer to "what in the sibling's library path is
+    /// process-wide", and it is observed rather than argued: the graph below
+    /// declares one variable and removes nothing, and after the launch this
+    /// process is carrying it.
+    ///
+    /// The mechanism is `oneagentgraph::run::run` calling its private `export`,
+    /// which does `std::env::remove_var` and `std::env::set_var` on the running
+    /// process — correct while a graph run *was* a process, and load-bearing
+    /// even now, because a two-party member is a thread here and the
+    /// `oneharness run` it spawns has to inherit what the contract promises it.
+    /// One process per graph made that safe. One thread per graph does not:
+    /// this crate dispatches several nodes at once, so two concurrent runs each
+    /// write the other's members' environment, and `ONEHARNESS_HARNESSES` is
+    /// cleared out from under whichever run did not ask for that. It is also a
+    /// data race — `set_var` is why Rust 2024 made it `unsafe`.
+    ///
+    /// The shipped graphs declare no `env:` block, so nothing in this
+    /// repository trips it today; a graph that adds one would. Held as a test
+    /// rather than as a note so the day upstream confines it, this fails and
+    /// says so.
+    #[test]
+    fn a_graphs_env_block_is_exported_into_this_process_and_not_into_the_run_alone() {
+        let root = state_dir_holding("node-scope-1786304152340-30", &["worker"]);
+        let probe = "ONEPIPELINE_GRAPH_ENV_PROBE";
+        std::env::remove_var(probe);
+        // A harness that is not there, so the member fails immediately: the
+        // export happens before anything launches, which is exactly the point.
+        std::env::set_var(ONEHARNESS_BIN_ENV, "oneharness-that-is-not-installed");
+        std::fs::write(
+            root.join("oneharness.toml"),
+            "run_mode = \"fallback\"\nharnesses = [\"claude-code\"]\n",
+        )
+        .expect("the harness config is written");
+        let graph = root.join("exports.yaml");
+        std::fs::write(
+            &graph,
+            format!(
+                "version: 1\nname: exports\nenv:\n  {probe}: \"from the graph\"\nmembers:\n  \
+                 worker:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n"
+            ),
+        )
+        .expect("the graph config is written");
+
+        // Whether it *ran* is not the claim — the member cannot, by
+        // construction. The claim is what the launch did to this process.
+        let started = GraphRun::start(
+            &graph.to_string_lossy(),
+            "## What\nNothing.\n\n## Why\nThe export is the subject.\n\n## Acceptance criteria\n- \
+             None.",
+            Some(&root),
+            &Labels::default(),
+            &[],
+            &[],
+            GraphOutput::Relayed,
+        );
+        if let Ok(mut run) = started {
+            run.cancel();
+            let _ = run.wait();
+        }
+
+        assert_eq!(
+            std::env::var(probe).ok().as_deref(),
+            Some("from the graph"),
+            "the graph's env block did not reach this process — if upstream has confined it to \
+             the run, this test has done its job and the concurrency note above is stale"
+        );
+        std::env::remove_var(probe);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An envelope is the same value whichever way it crossed.
+    ///
+    /// This is the *content* half of the streaming promise: the subprocess path
+    /// read a line of the sibling's NDJSON and the library path is handed the
+    /// typed envelope that line is written from, so a relay that had drifted
+    /// would put a different value into the merged store depending on which
+    /// path a run took. Held by sending one envelope both ways and comparing —
+    /// the `serde` round-trip is the *same* boundary in both, which is the
+    /// property being kept rather than an implementation detail.
+    ///
+    /// The *timing* half is
+    /// `status_says_what_a_live_dispatch_is_doing_and_the_readout_advances` in
+    /// `tests/e2e/dispatch.rs`, which runs on this path: it reads a live
+    /// dispatch's tool summary out of the merged store while the node is still
+    /// in flight, and then reads it again — advanced — while it still is. An
+    /// envelope buffered to the end of the turn would fail both readings.
+    #[test]
+    fn a_relayed_envelope_is_the_same_whether_it_crossed_as_a_value_or_as_a_line() {
+        let mut labels = oneagentgraph::event::Labels {
+            run_id: Some("node-scope-1786304152340-19".into()),
+            member: Some("worker".into()),
+            ..oneagentgraph::event::Labels::default()
+        };
+        labels
+            .extra
+            .insert("onepipeline.node".into(), "build".into());
+        labels.extra.insert("onepipeline.round".into(), "2".into());
+        let produced = oneagentgraph::event::Envelope {
+            v: 1,
+            ts: "2026-08-13T09:15:00.123Z".into(),
+            stream: "node-scope-1786304152340-19".into(),
+            seq: 7,
+            source: oneagentgraph::event::Source::Agentgraph,
+            kind: oneagentgraph::event::EventKind::TurnActivity,
+            labels,
+            payload: serde_json::Map::new(),
+            artifacts: Vec::new(),
+        };
+
+        // The line the subprocess path read, off the sibling's own serializer.
+        let line = serde_json::to_string(&produced).expect("the sibling's envelope serialises");
+        let [off_the_wire] = &read_envelopes(&line)[..] else {
+            panic!("the sibling's own NDJSON did not read back as one envelope: {line}");
+        };
+        let mut off_the_wire = off_the_wire.clone();
+        adopt_labels(&mut off_the_wire.labels);
+
+        let in_process = relayed(produced).expect("the library path relays it");
+
+        assert_eq!(
+            in_process, off_the_wire,
+            "the same envelope reaches the merged stream differently depending on which path \
+             relayed it"
+        );
+        // Not a vacuous comparison: the enrichment both paths apply really ran.
+        assert_eq!(in_process.labels.node.as_deref(), Some("build"));
+        assert_eq!(in_process.labels.round, Some(2));
     }
 
     /// A reset reaches the run's own signal directory, under the name the
