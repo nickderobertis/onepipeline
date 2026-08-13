@@ -80,6 +80,16 @@ fn relative_default_graphs_dispatch_from_the_launch_directory() {
             "{field} was not resolved at launch: {launch}"
         );
     }
+    // The directory every member of this run worked in, and the sibling's own id
+    // for the graph that drove it — both read back off the record rather than
+    // inferred, because this is the *library* backend an attached launch takes,
+    // and the other one is what the detached journeys exercise.
+    assert_eq!(launch["dir"], json!(world.root));
+    let graph_run = launch["graph_run"].as_str().expect("the graph run's id");
+    assert!(
+        world.graph_state().join(graph_run).is_dir(),
+        "the recorded graph run is not one the sibling minted: {graph_run}"
+    );
 }
 
 /// Plan-owned graph references have the same launch-directory semantics as
