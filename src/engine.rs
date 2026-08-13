@@ -252,6 +252,12 @@ struct Dispatch {
 pub fn round_run(paths: &RunPaths) -> Result<GraphState> {
     let lock = OwnershipLock::acquire(paths, "round run")?;
     let launch: LaunchRecord = ledger::read_json(&paths.launch())?;
+    if launch.node_graph.is_empty() {
+        return Err(Error::Invalid(format!(
+            "launch record for run '{}' has no resolved node graph",
+            paths.run
+        )));
+    }
     let mut journal = Journal::open(paths);
     let mut state = projection::fold(&journal::read(&paths.journal()));
 
@@ -360,7 +366,16 @@ fn converge(
         // leave that settlement unrecorded, with nothing for a later `attest`
         // to validate against.
         if !budget_spent {
-            start_ready(paths, journal, state, round, &rules, &tx, &mut in_flight)?;
+            start_ready(
+                paths,
+                journal,
+                state,
+                round,
+                &rules,
+                &launch.node_graph,
+                &tx,
+                &mut in_flight,
+            )?;
         }
 
         if in_flight.is_empty() {
@@ -658,6 +673,7 @@ fn start_ready(
     state: &mut RunState,
     round: u64,
     rules: &ExecutorRules,
+    node_graph: &str,
     tx: &Sender<Message>,
     in_flight: &mut BTreeMap<String, Dispatch>,
 ) -> Result<()> {
@@ -715,7 +731,15 @@ fn start_ready(
             journal::labels(&paths.run, Some(round), Some(&node.id)),
             journal::payload(&[("persona", json!(node.persona))]),
         )?;
-        spawn(paths, round, rules, &node, cancel.clone(), tx.clone())?;
+        spawn(
+            paths,
+            round,
+            rules,
+            node_graph,
+            &node,
+            cancel.clone(),
+            tx.clone(),
+        )?;
         let now = Instant::now();
         in_flight.insert(
             node.id.clone(),
@@ -741,6 +765,7 @@ fn spawn(
     paths: &RunPaths,
     round: u64,
     rules: &ExecutorRules,
+    node_graph: &str,
     node: &Node,
     cancel: CancellationToken,
     tx: Sender<Message>,
@@ -765,14 +790,31 @@ fn spawn(
 
     let run = paths.run.clone();
     let node = node.clone();
+    let node_graph = node_graph.to_string();
     std::thread::Builder::new()
         .name(format!("dispatch-{}", node.id))
         .spawn(move || {
             let executor = crate::rules::executor_for(&entry);
             let settlement = if node.repo.is_some() {
-                crate::lifecycle::execute(executor.as_ref(), &run, round, &node, &cancel, &tx)
+                crate::lifecycle::execute(
+                    executor.as_ref(),
+                    &run,
+                    round,
+                    &node_graph,
+                    &node,
+                    &cancel,
+                    &tx,
+                )
             } else {
-                execute_direct(executor.as_ref(), &run, round, &node, &cancel, &tx)
+                execute_direct(
+                    executor.as_ref(),
+                    &run,
+                    round,
+                    &node_graph,
+                    &node,
+                    &cancel,
+                    &tx,
+                )
             };
             let _ = tx.send(Message::Settled(Box::new(settlement)));
         })
@@ -785,19 +827,12 @@ fn execute_direct(
     executor: &dyn Executor,
     run: &str,
     round: u64,
+    default_graph: &str,
     node: &Node,
     cancel: &CancellationToken,
     tx: &Sender<Message>,
 ) -> Settlement {
-    let graph = match node_graph(node.agent_graph.as_ref(), run) {
-        Ok(graph) => graph,
-        Err(error) => {
-            return Settlement {
-                detail: Some(error.to_string()),
-                ..failed(&node.id, "invalid-launch-record")
-            };
-        }
-    };
+    let graph = node_graph(node.agent_graph.as_ref(), default_graph);
     let request = || DispatchRequest {
         graph: graph.clone(),
         task: node.rendered_task(),
@@ -1063,20 +1098,11 @@ pub(crate) fn dispatch_labels(
 /// The node-scope agent graph a dispatch runs under.
 pub(crate) fn node_graph(
     override_ref: Option<&oneagentgraph::config::ConfigRef>,
-    run: &str,
-) -> Result<oneagentgraph::config::ConfigRef> {
-    if let Some(reference) = override_ref {
-        return Ok(reference.clone());
-    }
-    let paths = crate::ledger::RunPaths::under(&crate::ledger::runs_root(), run);
-    let record = crate::ledger::read_json::<crate::ledger::LaunchRecord>(&paths.launch())?;
-    Ok(oneagentgraph::config::ConfigRef(
-        if record.node_graph.is_empty() {
-            configured_node_graph()
-        } else {
-            record.node_graph
-        },
-    ))
+    default_graph: &str,
+) -> oneagentgraph::config::ConfigRef {
+    override_ref
+        .cloned()
+        .unwrap_or_else(|| oneagentgraph::config::ConfigRef(default_graph.to_string()))
 }
 
 pub(crate) fn configured_node_graph() -> String {
@@ -1742,7 +1768,8 @@ mod tests {
     #[test]
     fn a_node_names_its_own_agent_graph_or_takes_the_shipped_default() {
         let pinned = oneagentgraph::config::ConfigRef("./custom.yaml".into());
-        assert_eq!(node_graph(Some(&pinned), "missing").unwrap(), pinned);
+        assert_eq!(node_graph(Some(&pinned), "default"), pinned);
+        assert_eq!(node_graph(None, "default").0, "default");
     }
 
     #[test]

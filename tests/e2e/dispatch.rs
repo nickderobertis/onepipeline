@@ -31,6 +31,20 @@ fn prompt_of(event: &Value) -> Option<String> {
     args.get(at + 1)?.as_str().map(str::to_string)
 }
 
+fn open_second_round(world: &World, run: &str, node: Value) {
+    world.script("driver.wait", "hold");
+    let path = world.plan(run, &plan_of(run, vec![human("approve", &[]), node]));
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+    world.run(&["round", "run", run]).exited(1);
+    world.run(&["attest", run, "approve"]).exited(0);
+    world
+        .run(&["round", "next", run])
+        .exited(0)
+        .out_has("continuing");
+}
+
 /// Both shipped relative graph paths are bound to the directory `start` was
 /// launched from before either graph can create a workspace. The direct node
 /// proves the second graph was read and its member actually ran.
@@ -154,6 +168,23 @@ fn an_unreadable_relative_graph_names_its_launch_base() {
 }
 
 #[test]
+fn an_unreadable_absolute_graph_is_rejected_at_launch() {
+    let world = World::new("absolute-graph-error");
+    let path = world.plan(
+        "absolute-error",
+        &plan_of("absolute-error", vec![agent("build", &[])]),
+    );
+    let missing = world.root.join("missing-dag.yaml");
+    let mut command = world.agentgraph_cmd(&["start", &path.to_string_lossy(), "--attach"]);
+    command.env("ONEPIPELINE_DAG_GRAPH", &missing);
+
+    world
+        .run_on(command, "start missing absolute graph")
+        .exited(crate::harness::REFUSED)
+        .err_has(&missing.to_string_lossy());
+}
+
+#[test]
 fn an_unreadable_relative_node_graph_names_its_launch_base() {
     let world = World::new("relative-node-graph-error");
     world.write_graphs();
@@ -214,6 +245,60 @@ fn unreadable_relative_plan_graphs_name_their_path_and_launch_base() {
         failed.err_has(missing);
         failed.err_has(&world.root.to_string_lossy());
     }
+}
+
+#[test]
+fn broken_launch_records_refuse_rounds_before_direct_or_lifecycle_dispatch() {
+    let direct = World::new("corrupt-launch-direct");
+    let mut build = agent("build", &["approve"]);
+    build["deps"] = json!(["approve"]);
+    open_second_round(&direct, "corrupt-direct", build);
+    std::fs::write(direct.run_file("corrupt-direct", "launch.json"), "not json")
+        .expect("the launch record is corrupted");
+    direct
+        .run(&["round", "run", "corrupt-direct"])
+        .exited(crate::harness::REFUSED)
+        .err_has("launch.json");
+    direct.release("driver.go");
+
+    let lifecycle_world = World::new("missing-launch-lifecycle");
+    lifecycle_world.repository("local-direct", &["true"]);
+    let mut service = crate::harness::lifecycle("service", &["approve"]);
+    service["deps"] = json!(["approve"]);
+    open_second_round(&lifecycle_world, "missing-lifecycle", service);
+    std::fs::remove_file(lifecycle_world.run_file("missing-lifecycle", "launch.json"))
+        .expect("the launch record is removed");
+    lifecycle_world
+        .run(&["round", "run", "missing-lifecycle"])
+        .exited(crate::harness::REFUSED)
+        .err_has("launch.json");
+    lifecycle_world.release("driver.go");
+}
+
+#[test]
+fn a_legacy_launch_without_a_node_graph_fails_instead_of_reading_live_environment() {
+    let world = World::new("legacy-empty-node-graph");
+    let mut build = agent("build", &["approve"]);
+    build["deps"] = json!(["approve"]);
+    open_second_round(&world, "legacy-empty", build);
+    let path = world.run_file("legacy-empty", "launch.json");
+    let mut launch: Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("the launch record reads"))
+            .expect("the launch record parses");
+    launch["node_graph"] = json!("");
+    std::fs::write(&path, serde_json::to_vec_pretty(&launch).unwrap())
+        .expect("the legacy launch record is written");
+
+    let mut round = world.cmd(&["round", "run", "legacy-empty"]);
+    round.env(
+        "ONEPIPELINE_NODE_GRAPH",
+        world.graphs().join("node-scope.yaml"),
+    );
+    world
+        .run_on(round, "round run legacy-empty")
+        .exited(crate::harness::REFUSED)
+        .err_has("has no resolved node graph");
+    world.release("driver.go");
 }
 
 #[test]

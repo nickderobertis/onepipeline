@@ -29,6 +29,7 @@ pub fn execute(
     executor: &dyn Executor,
     run: &str,
     round: u64,
+    default_graph: &str,
     node: &Node,
     cancel: &crate::executor::CancellationToken,
     tx: &Sender<Message>,
@@ -115,20 +116,10 @@ pub fn execute(
             Some(dir) => WorkspaceSpec::Path(dir.clone()),
             None => WorkspaceSpec::VcsSession(request.clone()),
         };
-        let graph = match engine::node_graph(
+        let graph = engine::node_graph(
             step.agent_graph.as_ref().or(node.agent_graph.as_ref()),
-            run,
-        ) {
-            Ok(graph) => graph,
-            Err(error) => {
-                return Settlement {
-                    detail: Some(error.to_string()),
-                    branch,
-                    completed_steps: completed,
-                    ..Settlement::plain(&node.id, NodeStatus::Failed, Some("invalid-launch-record"))
-                };
-            }
-        };
+            default_graph,
+        );
         let build = || DispatchRequest {
             graph: graph.clone(),
             task: step.rendered_task(node.context.as_deref()),
@@ -180,6 +171,7 @@ pub fn execute(
         executor,
         run,
         round,
+        default_graph,
         node,
         worktree.as_deref(),
         cancel,
@@ -203,6 +195,7 @@ fn publish(
     executor: &dyn Executor,
     run: &str,
     round: u64,
+    default_graph: &str,
     node: &Node,
     worktree: Option<&std::path::Path>,
     cancel: &crate::executor::CancellationToken,
@@ -210,10 +203,18 @@ fn publish(
     token: &str,
     branch: Option<String>,
 ) -> Settlement {
-    let title = node
-        .title
-        .clone()
-        .unwrap_or_else(|| draft_title(executor, run, round, node, worktree, cancel, tx));
+    let title = node.title.clone().unwrap_or_else(|| {
+        draft_title(
+            executor,
+            run,
+            round,
+            default_graph,
+            node,
+            worktree,
+            cancel,
+            tx,
+        )
+    });
 
     match crate::vcs::publish(token, node.merge_policy, Some(&title)) {
         Ok(published) => {
@@ -268,10 +269,16 @@ fn publish(
 /// base, carrying nothing this node wrote — and opening one reclaims the session
 /// still holding the work. It used to ask for one, and a scripted double that
 /// answered the same worktree for the same branch is what kept that invisible.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the draft is a dispatch inside one lifecycle execution and needs that execution's \
+              executor, labels, resolved graph, workspace, cancellation, and event stream"
+)]
 fn draft_title(
     executor: &dyn Executor,
     run: &str,
     round: u64,
+    default_graph: &str,
     node: &Node,
     worktree: Option<&std::path::Path>,
     cancel: &crate::executor::CancellationToken,
@@ -288,11 +295,8 @@ fn draft_title(
             ..request
         }),
     };
-    let Ok(graph) = engine::node_graph(None, run) else {
-        return fallback;
-    };
     let dispatch = executor.dispatch(DispatchRequest {
-        graph,
+        graph: engine::node_graph(None, default_graph),
         task: format!(
             "Read this branch's diff and write the change request's title and body, \
              following the repository's own template. The task this branch delivered:\n\n{}",

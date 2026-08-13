@@ -119,13 +119,17 @@ fn launch_dir() -> Result<PathBuf> {
 }
 
 /// Resolve a filesystem graph reference at the launch boundary, before any
-/// session worktree exists. URLs and paths that are already absolute retain
-/// the exact spelling the operator supplied.
+/// session worktree exists. URLs remain the sibling's fetch contract; an
+/// absolute filesystem path retains the exact spelling the operator supplied.
 fn resolve_graph(reference: &str, base: &Path) -> Result<String> {
-    if reference.starts_with("https://") || Path::new(reference).is_absolute() {
+    if reference.starts_with("https://") {
         return Ok(reference.to_string());
     }
-    let resolved = base.join(reference);
+    let resolved = if Path::new(reference).is_absolute() {
+        PathBuf::from(reference)
+    } else {
+        base.join(reference)
+    };
     std::fs::File::open(&resolved).map_err(|error| {
         Error::Invalid(format!(
             "cannot read graph '{}' resolved against launch directory '{}': {error}",
@@ -133,7 +137,11 @@ fn resolve_graph(reference: &str, base: &Path) -> Result<String> {
             base.display()
         ))
     })?;
-    Ok(resolved.to_string_lossy().into_owned())
+    Ok(if Path::new(reference).is_absolute() {
+        reference.to_string()
+    } else {
+        resolved.to_string_lossy().into_owned()
+    })
 }
 
 fn resolve_plan_graphs(plan: &mut Plan, base: &Path) -> Result<()> {
