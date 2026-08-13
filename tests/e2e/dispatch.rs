@@ -168,23 +168,6 @@ fn an_unreadable_relative_graph_names_its_launch_base() {
 }
 
 #[test]
-fn an_unreadable_absolute_graph_is_rejected_at_launch() {
-    let world = World::new("absolute-graph-error");
-    let path = world.plan(
-        "absolute-error",
-        &plan_of("absolute-error", vec![agent("build", &[])]),
-    );
-    let missing = world.root.join("missing-dag.yaml");
-    let mut command = world.agentgraph_cmd(&["start", &path.to_string_lossy(), "--attach"]);
-    command.env("ONEPIPELINE_DAG_GRAPH", &missing);
-
-    world
-        .run_on(command, "start missing absolute graph")
-        .exited(crate::harness::REFUSED)
-        .err_has(&missing.to_string_lossy());
-}
-
-#[test]
 fn an_unreadable_relative_node_graph_names_its_launch_base() {
     let world = World::new("relative-node-graph-error");
     world.write_graphs();

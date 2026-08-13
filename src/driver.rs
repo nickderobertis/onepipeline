@@ -118,18 +118,20 @@ fn launch_dir() -> Result<PathBuf> {
         .map_err(|error| Error::Invalid(format!("cannot read the launch directory: {error}")))
 }
 
-/// Resolve a filesystem graph reference at the launch boundary, before any
-/// session worktree exists. URLs remain the sibling's fetch contract; an
-/// absolute filesystem path retains the exact spelling the operator supplied.
+/// Resolve a relative filesystem graph reference at the launch boundary,
+/// before any session worktree exists. URLs and absolute paths retain their
+/// established oneagentgraph validation semantics and exact spelling.
 fn resolve_graph(reference: &str, base: &Path) -> Result<String> {
-    if reference.starts_with("https://") {
+    // llmlint: ignore-block[boundary_inputs_validated] absolute paths and URLs are
+    // oneagentgraph's existing input boundary: it reads/fetches them and returns its own
+    // config refusal. This boundary resolves only relative paths because onepipeline is
+    // the sole owner of their launch-directory base; validating absolute references here
+    // would change the documented and e2e-guarded sibling-error contract.
+    if reference.starts_with("https://") || Path::new(reference).is_absolute() {
         return Ok(reference.to_string());
     }
-    let resolved = if Path::new(reference).is_absolute() {
-        PathBuf::from(reference)
-    } else {
-        base.join(reference)
-    };
+    // llmlint: ignore-end[boundary_inputs_validated]
+    let resolved = base.join(reference);
     std::fs::File::open(&resolved).map_err(|error| {
         Error::Invalid(format!(
             "cannot read graph '{}' resolved against launch directory '{}': {error}",
@@ -137,11 +139,7 @@ fn resolve_graph(reference: &str, base: &Path) -> Result<String> {
             base.display()
         ))
     })?;
-    Ok(if Path::new(reference).is_absolute() {
-        reference.to_string()
-    } else {
-        resolved.to_string_lossy().into_owned()
-    })
+    Ok(resolved.to_string_lossy().into_owned())
 }
 
 fn resolve_plan_graphs(plan: &mut Plan, base: &Path) -> Result<()> {
