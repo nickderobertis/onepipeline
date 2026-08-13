@@ -116,7 +116,7 @@ pub fn execute(
             None => WorkspaceSpec::VcsSession(request.clone()),
         };
         let build = || DispatchRequest {
-            graph: engine::node_graph(step.agent_graph.as_ref().or(node.agent_graph.as_ref())),
+            graph: engine::node_graph(step.agent_graph.as_ref().or(node.agent_graph.as_ref()), run),
             task: step.rendered_task(node.context.as_deref()),
             labels: engine::dispatch_labels(
                 run,
@@ -275,7 +275,7 @@ fn draft_title(
         }),
     };
     let dispatch = executor.dispatch(DispatchRequest {
-        graph: engine::node_graph(None),
+        graph: engine::node_graph(None, run),
         task: format!(
             "Read this branch's diff and write the change request's title and body, \
              following the repository's own template. The task this branch delivered:\n\n{}",

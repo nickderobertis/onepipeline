@@ -790,7 +790,7 @@ fn execute_direct(
     tx: &Sender<Message>,
 ) -> Settlement {
     let request = || DispatchRequest {
-        graph: node_graph(node.agent_graph.as_ref()),
+        graph: node_graph(node.agent_graph.as_ref(), run),
         task: node.rendered_task(),
         labels: dispatch_labels(run, round, &node.id, None, node.persona.as_deref()),
         workspace: WorkspaceSpec::Path(project_dir()),
@@ -1054,15 +1054,23 @@ pub(crate) fn dispatch_labels(
 /// The node-scope agent graph a dispatch runs under.
 pub(crate) fn node_graph(
     override_ref: Option<&oneagentgraph::config::ConfigRef>,
+    run: &str,
 ) -> oneagentgraph::config::ConfigRef {
     override_ref.cloned().unwrap_or_else(|| {
-        oneagentgraph::config::ConfigRef(
-            std::env::var(NODE_GRAPH_ENV)
-                .ok()
-                .filter(|value| !value.is_empty())
-                .unwrap_or_else(|| DEFAULT_NODE_GRAPH.to_string()),
-        )
+        let paths = crate::ledger::RunPaths::under(&crate::ledger::runs_root(), run);
+        let recorded = crate::ledger::read_json::<crate::ledger::LaunchRecord>(&paths.launch())
+            .ok()
+            .map(|record| record.node_graph)
+            .filter(|reference| !reference.is_empty());
+        oneagentgraph::config::ConfigRef(recorded.unwrap_or_else(configured_node_graph))
     })
+}
+
+pub(crate) fn configured_node_graph() -> String {
+    std::env::var(NODE_GRAPH_ENV)
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_NODE_GRAPH.to_string())
 }
 
 fn project_dir() -> std::path::PathBuf {
@@ -1721,8 +1729,8 @@ mod tests {
     #[test]
     fn a_node_names_its_own_agent_graph_or_takes_the_shipped_default() {
         let pinned = oneagentgraph::config::ConfigRef("./custom.yaml".into());
-        assert_eq!(node_graph(Some(&pinned)), pinned);
-        assert!(!node_graph(None).0.is_empty());
+        assert_eq!(node_graph(Some(&pinned), "missing"), pinned);
+        assert!(!node_graph(None, "missing").0.is_empty());
     }
 
     #[test]

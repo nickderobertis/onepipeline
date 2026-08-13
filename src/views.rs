@@ -479,6 +479,19 @@ pub fn results(view: &RunView) -> String {
             out.push_str(&format!(" — {url}"));
         }
         out.push('\n');
+        if let Some(detail) = view
+            .events
+            .iter()
+            .rev()
+            .find(|event| {
+                event.kind.0 == "node-settled"
+                    && event.labels.node.as_deref() == Some(node.id.as_str())
+            })
+            .and_then(|event| event.payload.get("detail"))
+            .and_then(|detail| detail.as_str())
+        {
+            out.push_str(&format!("      detail: {}\n", one_line(detail)));
+        }
         if status == NodeStatus::Waiting {
             if let Some(task) = &node.task {
                 out.push_str(&format!("      action: {task}\n"));
@@ -696,6 +709,7 @@ mod tests {
             run_id: "demo".into(),
             plan: PathBuf::from("plan.json"),
             graph: "graphs/dag-scope.yaml".into(),
+            node_graph: String::new(),
             launcher: "claude-code".into(),
             session: "session-a".into(),
             pid,

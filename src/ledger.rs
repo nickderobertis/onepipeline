@@ -226,6 +226,9 @@ pub struct LaunchRecord {
     pub plan: PathBuf,
     /// The dag-scope agent-graph config the driver launches.
     pub graph: String,
+    /// The default node-scope agent-graph config every dispatch launches.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub node_graph: String,
     /// The launcher, as the environment reported it.
     pub launcher: String,
     /// The launching session. A view labels a foreign one by
@@ -609,6 +612,7 @@ mod tests {
             run_id: "demo".into(),
             plan: PathBuf::from("plan.json"),
             graph: "graphs/dag-scope.yaml".into(),
+            node_graph: String::new(),
             launcher: sys::UNKNOWN_LAUNCHER.into(),
             session: sys::UNKNOWN_LAUNCHER.into(),
             pid: 1,
@@ -630,6 +634,7 @@ mod tests {
             run_id: "demo".into(),
             plan: PathBuf::from("plan.json"),
             graph: "graphs/dag-scope.yaml".into(),
+            node_graph: String::new(),
             launcher: "claude-code".into(),
             session: "secret-session-id".into(),
             pid: 1,

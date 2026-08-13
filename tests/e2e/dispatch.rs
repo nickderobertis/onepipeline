@@ -31,6 +31,61 @@ fn prompt_of(event: &Value) -> Option<String> {
     args.get(at + 1)?.as_str().map(str::to_string)
 }
 
+/// Both shipped relative graph paths are bound to the directory `start` was
+/// launched from before either graph can create a workspace. The direct node
+/// proves the second graph was read and its member actually ran.
+#[test]
+fn relative_default_graphs_dispatch_from_the_launch_directory() {
+    let world = World::new("real-relative-defaults");
+    world.write_graphs();
+    let path = world.plan(
+        "relative-defaults",
+        &plan_of("relative-defaults", vec![agent("build", &[])]),
+    );
+    let mut command = world.agentgraph_cmd(&["start", &path.to_string_lossy(), "--attach"]);
+    command
+        .current_dir(&world.root)
+        .env_remove("ONEPIPELINE_DAG_GRAPH")
+        .env_remove("ONEPIPELINE_NODE_GRAPH");
+
+    let started = world.run_on(command, "start relative defaults");
+    started.exited(0).settled();
+    assert!(
+        world
+            .journal("relative-defaults")
+            .iter()
+            .filter_map(prompt_of)
+            .any(|prompt| prompt.contains("Do build.")),
+        "the node-scope graph did not dispatch its member: {}",
+        world.dump()
+    );
+    let launch = world.run_json("relative-defaults", "launch.json");
+    for field in ["graph", "node_graph"] {
+        assert!(
+            std::path::Path::new(launch[field].as_str().expect("a graph path")).is_absolute(),
+            "{field} was not resolved at launch: {launch}"
+        );
+    }
+}
+
+#[test]
+fn an_unreadable_relative_graph_names_its_launch_base() {
+    let world = World::new("relative-graph-error");
+    let path = world.plan(
+        "relative-error",
+        &plan_of("relative-error", vec![agent("build", &[])]),
+    );
+    let mut command = world.agentgraph_cmd(&["start", &path.to_string_lossy(), "--attach"]);
+    command
+        .current_dir(&world.root)
+        .env("ONEPIPELINE_DAG_GRAPH", "graphs/missing-dag.yaml");
+
+    let failed = world.run_on(command, "start missing relative graph");
+    failed.exited(crate::harness::REFUSED);
+    failed.err_has("graphs/missing-dag.yaml");
+    failed.err_has(&world.root.to_string_lossy());
+}
+
 #[test]
 fn launch_overrides_reach_the_graphs_that_actually_run() {
     let world = World::new("real-overrides");
@@ -157,15 +212,18 @@ fn adoption_retains_node_overrides_for_later_dispatches() {
         "adopted-override",
         &plan_of("adopted-override", vec![agent("build", &[])]),
     );
-    world
-        .run_on_agentgraph(&[
-            "start",
-            &path.to_string_lossy(),
-            "--detach",
-            "--node-set",
-            "members.worker.oneharness_config=./adopted-node.toml",
-        ])
-        .exited(0);
+    let mut start = world.agentgraph_cmd(&[
+        "start",
+        &path.to_string_lossy(),
+        "--detach",
+        "--node-set",
+        "members.worker.oneharness_config=./adopted-node.toml",
+    ]);
+    start
+        .current_dir(&world.root)
+        .env("ONEPIPELINE_DAG_GRAPH", "graphs/dag-scope.yaml")
+        .env("ONEPIPELINE_NODE_GRAPH", "graphs/node-scope.yaml");
+    world.run_on(start, "start adopted-override").exited(0);
 
     world.until("the original driver to park before dispatch", |world| {
         let mut status = world.agentgraph_cmd(&["status", "adopted-override"]);
@@ -177,7 +235,11 @@ fn adoption_retains_node_overrides_for_later_dispatches() {
     // remains held until the assertion is complete.
     std::fs::remove_file(world.root.join("fakes/driver.wait")).expect("the adoption is not held");
     let mut adopt = world.agentgraph_cmd(&["adopt", "adopted-override"]);
-    adopt.env("ONEPIPELINE_PARKED_AFTER_SECONDS", "1");
+    adopt
+        .current_dir(&world.project)
+        .env("ONEPIPELINE_DAG_GRAPH", "missing-dag.yaml")
+        .env("ONEPIPELINE_NODE_GRAPH", "missing-node.yaml")
+        .env("ONEPIPELINE_PARKED_AFTER_SECONDS", "1");
     let adopted = world.run_on(adopt, "adopt adopted-override");
     adopted.exited(0).settled();
 
