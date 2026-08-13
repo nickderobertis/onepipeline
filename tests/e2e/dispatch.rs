@@ -80,6 +80,24 @@ fn relative_default_graphs_dispatch_from_the_launch_directory() {
             "{field} was not resolved at launch: {launch}"
         );
     }
+    // The directory every member of this run worked in, and the sibling's own id
+    // for the graph that drove it — both read back off the record rather than
+    // inferred, because this is the *library* backend an attached launch takes,
+    // and the other one is what the detached journeys exercise.
+    assert_eq!(launch["dir"], json!(world.root));
+    // Held against the run's own merged store rather than against anything this
+    // test knows: the driver's `graph-started` carries the run id `oneagentgraph`
+    // stamped on it, so a record naming anything else is a record naming a run
+    // that never drove this one.
+    let announced = world
+        .journal("relative-defaults")
+        .into_iter()
+        .find(|event| event["kind"] == "graph-started" && event["labels"]["node"].is_null())
+        .expect("the driver announced itself into the merged store");
+    assert_eq!(
+        launch["graph_run"], announced["labels"]["run_id"],
+        "the record names a different graph run from the one that drove the run"
+    );
 }
 
 /// Plan-owned graph references have the same launch-directory semantics as
@@ -1041,31 +1059,41 @@ fn a_note_delivered_through_the_real_sibling_records_what_its_lever_answered() {
     world.release("turn.settle");
 }
 
-/// Consuming a planner surface asks the **real** sibling to restart the
-/// check-in clock, and says so when it cannot.
+/// Consuming a planner surface restarts the **real** pacemaker's clock.
 ///
 /// `next` is the channel's only consumer, and consumption is what resets the
 /// pacemaker — so this is the one journey that reaches
 /// `oneagentgraph::run::signal` on the default path rather than through the
-/// override.
+/// override, against a real graph that really declares a resettable `check-in`
+/// member.
 ///
-/// It is a characterisation, and the thing it characterises is a defect this
-/// crate carries into that call: the reset is addressed with **this** run's id,
-/// and a graph run has an id of its own that `oneagentgraph` mints. The
-/// subprocess path sent the same wrong argument and the double answered `0` to
-/// anything, so nothing ever said so. The library says so, out loud, on the
-/// planner's own stderr — which is the behaviour asserted here until the run
-/// identity is threaded through. The surface itself is still delivered, because
-/// a pacemaker that could not be reset must not cost the planner the update it
-/// asked for.
+/// The address is what this crate owns, and it is what a real sibling can
+/// judge: `oneagentgraph::run::signal` reads the run's record, refuses a member
+/// that run never declared, and writes the signal under the run's own
+/// directory. All three only work out for the id `oneagentgraph` minted, never
+/// for this crate's, so a reset that lands there was addressed correctly.
+///
+/// What happens to the signal *after* it lands is the sibling's: it starts a
+/// scheduled member's clock only once every member of that member's wave has
+/// settled, and the orchestrator shares the pacemaker's wave and runs for the
+/// whole run — so nothing consumes the signal while the run it paces is alive.
 #[test]
-fn consuming_a_surface_reaches_the_real_pacemaker_and_reports_what_it_answered() {
+fn consuming_a_surface_restarts_the_real_pacemakers_clock() {
     let world = World::new("real-pacemaker");
-    world.write_graphs();
+    world.write_graphs_with_pacemaker();
     let path = world.plan("paced", &plan_of("paced", vec![human("approve", &[])]));
     world
         .run_on_agentgraph(&["start", &path.to_string_lossy(), "--detach"])
         .exited(0);
+
+    // The sibling minted this, and it is not this run's id. Everything below
+    // rests on the difference.
+    let graph_run = world.run_json("paced", "launch.json")["graph_run"]
+        .as_str()
+        .expect("the launch record names the graph run driving this run")
+        .to_string();
+    assert_ne!(graph_run, "paced");
+
     world
         .run_on_agentgraph(&[
             "surface",
@@ -1079,10 +1107,37 @@ fn consuming_a_surface_reaches_the_real_pacemaker_and_reports_what_it_answered()
 
     let read = world.run_on(world.agentgraph_cmd(&["next", "paced"]), "next paced");
     read.exited(0).out_has("\"surface\"");
-    read.err_has("could not reset the check-in pacemaker");
-    // The sibling's own refusal, naming the run it was asked about: this crate
-    // handed it a `onepipeline` run id where a `oneagentgraph` one belongs.
-    read.err_has("paced");
+    assert!(
+        !read
+            .stderr
+            .contains("could not reset the check-in pacemaker"),
+        "the real sibling refused the reset: {}",
+        read.stderr
+    );
+
+    // llmlint: ignore-block[tests_mirror_real_usage] a pacemaker reset has no product-facing
+    // result: `next` returns the surface either way, by design, because a clock that could
+    // not be restarted must not cost the planner the update they asked for. The sibling's
+    // signal directory is where the reset *is*, and it is a documented location its own
+    // `signal`/`cancel` API both derive — so this is the outcome, read where the outcome
+    // lives, and asserting only on the absent error would pass against a reset that went to
+    // the wrong run. The run's own clock restarting is the sibling's half; see the module
+    // note below.
+    // Where the sibling's scheduler watches, derived from the graph run's id and
+    // nothing else. A reset addressed with this crate's run id never reaches it:
+    // `signal` refuses a run its history has no record of, which is the failure
+    // this journey used to characterise.
+    let signalled = world
+        .graph_state()
+        .join(&graph_run)
+        .join("signals")
+        .join("check-in.reset");
+    assert!(
+        signalled.is_file(),
+        "the reset did not reach the run's own signal directory: {}",
+        signalled.display()
+    );
+    // llmlint: ignore-end[tests_mirror_real_usage]
 }
 
 /// A view still renders when the provider-health block comes from the library.

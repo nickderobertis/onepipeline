@@ -9,6 +9,8 @@
 // model turns to produce, and `dispatch.rs` is where the real `oneagentgraph` binary is
 // driven instead. `harness.rs` carries the same suppression and the full rationale.
 
+use std::path::{Path, PathBuf};
+
 use crate::harness::{agent, human, plan_of, World, NOTHING_DRIVING, REFUSED};
 use serde_json::json;
 
@@ -19,6 +21,37 @@ fn start_detached(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> S
         .exited(0);
     name.to_string()
 }
+
+/// The directory every dag-scope launch was given, in launch order.
+///
+/// Read off the argv the sibling was actually invoked with, because the value
+/// under test is the one that *crosses the seam* — it becomes the `--cwd` each
+/// member's harness runs in, and a run whose two launch paths disagree about it
+/// is a run whose members move when it is adopted.
+// llmlint: ignore-block[tests_mirror_real_usage] the argv the double records *is* the
+// interface under test: what a launch hands `oneagentgraph` is not something any product
+// surface of this crate reports, and it is what decides where a member's harness runs. The
+// launch record's own copy is asserted separately, in the same journey; this is the half
+// that proves the recorded value is the one that actually crossed.
+fn dag_launch_dirs(world: &World) -> Vec<String> {
+    world
+        .invocations()
+        .iter()
+        .filter(|call| {
+            call["tool"] == "oneagentgraph"
+                && call["args"][0] == "run"
+                && call["args"][1]
+                    .as_str()
+                    .is_some_and(|graph| graph.ends_with("dag-scope.yaml"))
+        })
+        .filter_map(|call| {
+            let args = call["args"].as_array()?;
+            let at = args.iter().position(|arg| arg == "--dir")?;
+            args.get(at + 1)?.as_str().map(str::to_string)
+        })
+        .collect()
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 #[test]
 fn start_launches_the_shipped_dag_scope_graph_and_records_how_to_relaunch_it() {
@@ -248,6 +281,351 @@ fn a_dead_driver_reads_as_driver_dead_and_adopt_is_the_way_back() {
     );
 }
 
+/// One run, one directory — whichever launch path started the driver.
+///
+/// The two paths used to disagree. Neither passed a directory at all, and the
+/// two backends defaulted an absent one differently: the retained-process path
+/// inherited `oneagentgraph`'s own CLI default of `.`, resolved against whatever
+/// process ends up spawning the graph, and the library path fell back to the
+/// launcher's working directory. Both consequences are silent. That directory
+/// becomes the `--cwd` every member's harness runs in, so a member can start
+/// refusing — or stop refusing — purely because the run was adopted; and
+/// `oneharness` derives its history project from it, so one run's records split
+/// across two project directories with neither holding the whole run.
+///
+/// So the two are driven here and compared at the seam, and the adoption is run
+/// from **another directory** on purpose: the answer must be the directory the
+/// run was launched in, replayed out of the launch record, and not wherever the
+/// operator happened to be standing when they typed `adopt`.
+#[test]
+fn start_and_adopt_give_the_sibling_the_same_directory_for_one_run() {
+    let world = World::new("driver-launch-dir");
+    // A human action nothing can clear: the driver settles the round, finds no
+    // round it could open, and exits — which is what leaves the run adoptable.
+    let path = world.plan(
+        "relocated",
+        &plan_of("relocated", vec![human("approve", &[])]),
+    );
+    let launched_from = world.project.clone();
+    let mut start = world.cmd(&["start", &path.to_string_lossy(), "--detach"]);
+    start.current_dir(&launched_from);
+    world.run_on(start, "start relocated").exited(0);
+    let run = "relocated".to_string();
+    world.until("the driver to exit", |world| {
+        world.run(&["status", &run]).stdout.contains("DRIVER DEAD")
+    });
+
+    // Somewhere else entirely, which is the ordinary case: an operator adopts a
+    // run from whatever shell noticed it was undriven.
+    let adopted_from = world.root.clone();
+    assert_ne!(adopted_from, launched_from);
+    let mut adopt = world.cmd(&["adopt", &run]);
+    adopt.current_dir(&adopted_from);
+    world
+        .run_on(adopt, "adopt relocated")
+        .exited(NOTHING_DRIVING);
+    assert_eq!(world.events_of(&run, "driver-adopted").len(), 1);
+
+    let dirs = dag_launch_dirs(&world);
+    assert_eq!(
+        dirs.len(),
+        2,
+        "expected one launch from `start` and one from `adopt`: {dirs:?}"
+    );
+    assert_eq!(
+        dirs[0], dirs[1],
+        "`start` and `adopt` sent the sibling two different directories for one run"
+    );
+    assert_eq!(
+        Path::new(&dirs[0]),
+        launched_from,
+        "the run moved to the directory the adoption was typed in"
+    );
+
+    // And a reader of the run's own records can tell which directory it used
+    // without inferring it from whichever process launched the driver.
+    assert_eq!(
+        world.run_json(&run, "launch.json")["dir"],
+        json!(launched_from)
+    );
+    let started = world.events_of(&run, "run-started");
+    assert_eq!(started[0]["payload"]["dir"], json!(launched_from));
+}
+
+/// A second spelling of one directory: a symlinked route to it.
+///
+/// The shape macOS ships by default — `/var` is a link to `/private/var`, so
+/// every temporary directory there is reached through one — built here because
+/// a symlink is a symlink on Linux too. What matters is only that it is a route
+/// to the directory rather than the directory's own name, and that a process
+/// changed into it reports the directory.
+#[cfg(unix)]
+fn another_spelling_of(dir: &Path) -> PathBuf {
+    let route = dir.with_file_name("routed-through");
+    std::os::unix::fs::symlink(dir, &route).expect("a symlinked route to the directory");
+    route
+}
+
+/// A second spelling of one directory: a detour out through its parent.
+///
+/// Where a directory symlink needs a privilege no CI account is guaranteed to
+/// hold, this is the route every platform offers instead — `SetCurrentDirectory`
+/// resolves it away exactly as `chdir` does, so the process still reports the
+/// directory rather than the way it was reached.
+#[cfg(not(unix))]
+fn another_spelling_of(dir: &Path) -> PathBuf {
+    let leaf = dir.file_name().expect("the directory has a name");
+    dir.join("..").join(leaf)
+}
+
+/// A launch records the directory the process resolves, not the route to it.
+///
+/// One directory has more than one spelling on every platform, and the record
+/// has to carry the one every process agrees on: it is read by a *different*
+/// process at every `adopt`, and it reaches each member's harness as its
+/// `--cwd`, from which `oneharness` derives the project its history is kept
+/// under. Two spellings of one directory is two projects, and a run whose
+/// records do not add up.
+///
+/// So what is recorded is the kernel's own answer — [`std::env::current_dir`],
+/// read once by the process the operator ran — and never the argument that
+/// process was handed. This is the journey that says so: the launch is typed
+/// through a route to the directory, and every place the value lands names the
+/// directory instead.
+#[test]
+fn a_launch_records_the_directory_the_process_resolves_not_the_route_to_it() {
+    let world = World::new("driver-launch-dir-route");
+    let route = another_spelling_of(&world.project);
+    assert_ne!(
+        route, world.project,
+        "the route is not a second spelling, so this journey proves nothing"
+    );
+
+    let path = world.plan("routed", &plan_of("routed", vec![human("approve", &[])]));
+    let mut start = world.cmd(&["start", &path.to_string_lossy(), "--detach"]);
+    start.current_dir(&route);
+    world.run_on(start, "start routed").exited(0);
+    let run = "routed".to_string();
+    world.until("the driver to exit", |world| {
+        world.run(&["status", &run]).stdout.contains("DRIVER DEAD")
+    });
+
+    assert_eq!(
+        world.run_json(&run, "launch.json")["dir"],
+        json!(world.project),
+        "the record kept the route the launch was typed through"
+    );
+    assert_eq!(
+        world.events_of(&run, "run-started")[0]["payload"]["dir"],
+        json!(world.project)
+    );
+    assert_eq!(
+        Path::new(dag_launch_dirs(&world).first().expect("the launch")),
+        world.project,
+        "the sibling was sent the route rather than the directory"
+    );
+}
+
+/// A run recorded by a build that had no directory field keeps the reading it
+/// had, and one that records an unusable directory is refused by name.
+///
+/// The first is the whole compatibility promise: a record written before the
+/// field existed carries none, and the driver such a run had ran in its own
+/// working directory — so that is what an adoption of it still gives the
+/// sibling, rather than a directory this build invented for it. The second is
+/// what stops the field from being trusted just because it is there: it is a
+/// file on disk, and it decides where every member of the run works.
+// llmlint: ignore-block[tests_mirror_real_usage] both states are reached by writing the
+// launch record directly because no command of this crate can produce either: the
+// no-directory case is what a *previous build* wrote, and no build writes it any more,
+// while the unusable-directory case is what a moved runs root or an edited record leaves.
+// Every other step here — `start`, `status`, `adopt` — is the real binary, and the record
+// is this crate's own file rather than a sibling's internals.
+#[test]
+fn a_launch_record_without_a_directory_is_replayed_from_the_adopting_process() {
+    let world = World::new("driver-legacy-dir");
+    let run = start_detached(&world, "legacy", vec![human("approve", &[])]);
+    world.until("the driver to exit", |world| {
+        world.run(&["status", &run]).stdout.contains("DRIVER DEAD")
+    });
+
+    let rewrite = |record: &mut serde_json::Value| {
+        let path = world.run_file(&run, "launch.json");
+        std::fs::write(&path, record.to_string()).expect("the record is rewritten");
+    };
+
+    // A record from before the field: no `dir` at all.
+    let mut record = world.run_json(&run, "launch.json");
+    record
+        .as_object_mut()
+        .expect("the record is an object")
+        .remove("dir");
+    rewrite(&mut record);
+
+    let adopted_from = world.project.clone();
+    let mut adopt = world.cmd(&["adopt", &run]);
+    adopt.current_dir(&adopted_from);
+    world.run_on(adopt, "adopt legacy").exited(NOTHING_DRIVING);
+    let dirs = dag_launch_dirs(&world);
+    assert_eq!(
+        Path::new(dirs.last().expect("the adoption relaunched the graph")),
+        adopted_from,
+        "a record with no directory was not replayed from the adopting process: {dirs:?}"
+    );
+
+    // And a record that carries one it cannot honour is refused by name rather
+    // than handed on for each member to fail against separately. One case per
+    // guard, and each spelled so it means the same thing wherever this runs:
+    // whether a path is absolute is a platform's own rule, so a fixture that
+    // reads as absolute here and relative there reaches a different guard on
+    // each and proves neither. `/no/such/place/here` is exactly that — absolute
+    // on Unix, and relative on Windows, where an absolute path carries a drive.
+    let occupied = world.root.join("not-a-directory");
+    std::fs::write(
+        &occupied,
+        "a file, so the record names something that is not a directory",
+    )
+    .expect("a file for the record to point at");
+    for (dir, absolute, reason) in [
+        (
+            PathBuf::from("relative/place"),
+            false,
+            "relative working directory",
+        ),
+        (occupied, true, "which is not a directory"),
+    ] {
+        assert_eq!(
+            dir.is_absolute(),
+            absolute,
+            "'{}' does not reach the guard this case is written for on this platform",
+            dir.display()
+        );
+        let mut record = world.run_json(&run, "launch.json");
+        record["dir"] = json!(dir);
+        rewrite(&mut record);
+        world
+            .run(&["adopt", &run])
+            .exited(REFUSED)
+            .err_has(reason)
+            .err_has(&dir.to_string_lossy());
+    }
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+/// An adoption re-addresses the pacemaker at the graph run now driving the run.
+///
+/// An adoption starts a *fresh* graph run with an id of its own, so the id the
+/// record carried is a run `oneagentgraph` has already finished with. A reset
+/// sent there restarts nothing, which is the same silence the original defect
+/// had — the record has to name the run that is driving now.
+// llmlint: ignore-block[tests_mirror_real_usage] the id the reset is *addressed by* is not
+// on any product surface — `next` prints the surface, and a reset that failed is a line on
+// stderr — so the argv the double recorded is the only place the address exists. The
+// record's own two values are read through the product's file, and the claim that the old
+// one was not used has nowhere else to be observed.
+#[test]
+fn adoption_re_addresses_the_pacemaker_at_the_graph_run_now_driving() {
+    let world = World::new("driver-adopt-pacemaker");
+    let run = start_detached(&world, "readdressed", vec![human("approve", &[])]);
+    world.until("the driver to exit", |world| {
+        world.run(&["status", &run]).stdout.contains("DRIVER DEAD")
+    });
+    let before = world.run_json(&run, "launch.json")["graph_run"]
+        .as_str()
+        .expect("the first driver's graph run")
+        .to_string();
+
+    world.run(&["adopt", &run]).exited(NOTHING_DRIVING);
+    let after = world.run_json(&run, "launch.json")["graph_run"]
+        .as_str()
+        .expect("the adopted driver's graph run")
+        .to_string();
+    assert_ne!(
+        after, before,
+        "the record still names the graph run that died"
+    );
+
+    world
+        .run(&["surface", &run, "--kind", "check-in", "--message", "steady"])
+        .exited(0);
+    world.run(&["next", &run]).exited(0);
+    assert!(
+        world.was_invoked("oneagentgraph", &["reset-timer", &after, "check-in"]),
+        "the reset was not addressed at the graph run driving the run now: {:?}",
+        world.invocations()
+    );
+    assert!(
+        !world.was_invoked("oneagentgraph", &["reset-timer", &before]),
+        "the reset went to the graph run that had already died: {:?}",
+        world.invocations()
+    );
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+/// A run that records no graph run says why its pacemaker was not reset, and
+/// still hands the planner the surface they asked for.
+///
+/// The case a record written before the field existed leaves: there is no
+/// address, so there is nothing to send. Saying so is the point — the reset is
+/// best-effort, and a silent no-op here is exactly the failure that went
+/// unnoticed for as long as it did.
+// llmlint: ignore-block[tests_mirror_real_usage] the record is written directly for the
+// same reason as above: no build writes a record without this field any more, and a value
+// the sibling would refuse is what an edited or interfered-with record carries. What is
+// mostly asserted is the product's own answer — `next`'s exit code, its surface, and its
+// stderr — but the closing claim is that *nothing was sent*, and the only place a value
+// that never crossed the seam can be observed is the log of what did. A product surface
+// reporting "no reset was attempted" does not exist, and inventing one to make the
+// assertion product-shaped would be a surface nobody asked for.
+#[test]
+fn a_run_with_no_recorded_graph_run_says_why_the_pacemaker_was_not_reset() {
+    let world = World::new("driver-no-graph-run");
+    world.script("build.wait", "hold");
+    let run = start_detached(&world, "unaddressed", vec![agent("build", &[])]);
+    world.until("the run to open a round", |world| {
+        !world.events_of(&run, "round-started").is_empty()
+    });
+    world
+        .run(&["surface", &run, "--kind", "check-in", "--message", "steady"])
+        .exited(0);
+
+    let mut record = world.run_json(&run, "launch.json");
+    record
+        .as_object_mut()
+        .expect("the record is an object")
+        .remove("graph_run");
+    std::fs::write(world.run_file(&run, "launch.json"), record.to_string())
+        .expect("the record is rewritten");
+
+    let read = world.run(&["next", &run]);
+    read.exited(0).out_has("steady");
+    read.err_has("could not reset the check-in pacemaker")
+        .err_has("records no agent-graph run");
+
+    // And one that carries a value the sibling would never answer to — a run
+    // store is a directory, and this field is joined onto it. Refused with the
+    // value named, not sent, and the surface is still the planner's.
+    let mut record = world.run_json(&run, "launch.json");
+    record["graph_run"] = json!("../elsewhere");
+    std::fs::write(world.run_file(&run, "launch.json"), record.to_string())
+        .expect("the record is rewritten");
+    world
+        .run(&["surface", &run, "--kind", "check-in", "--message", "again"])
+        .exited(0);
+    let read = world.run(&["next", &run]);
+    read.exited(0).out_has("again");
+    read.err_has("could not reset the check-in pacemaker")
+        .err_has("../elsewhere");
+
+    assert!(
+        !world.was_invoked("oneagentgraph", &["reset-timer"]),
+        "a reset was sent with no run to address it to: {:?}",
+        world.invocations()
+    );
+    world.release("build.go");
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
 #[test]
 fn adopt_refuses_another_sessions_run_and_has_no_force() {
     let world = World::new("driver-adopt-owner");
@@ -370,7 +748,7 @@ fn the_owner_stops_its_own_run_without_force() {
             .as_u64()
             .expect("a recorded driver");
         world.until("the driver process to end", |_| {
-            !std::path::Path::new(&format!("/proc/{driver}")).exists()
+            !Path::new(&format!("/proc/{driver}")).exists()
         });
     }
     world.release("build.go");

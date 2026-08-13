@@ -163,6 +163,180 @@ fn cancel_parks_a_node_and_requeue_returns_it_to_the_frontier() {
     );
 }
 
+/// A parked node stays parked across the round fold, and `requeue` is the only
+/// way back.
+///
+/// `cancel` is documented as the way to idle a node, and `requeue` as what
+/// resumes it — so a park that lasted only until the round transitioned would
+/// make `cancel` a one-round pause wearing the name of a stop, and there would
+/// be no way at all to say "stop working on this". A planner who cancelled a
+/// node because they were taking the deliverable over themselves would find a
+/// second execution path opened against it on the next round, which is the one
+/// thing the one-path rule exists to prevent.
+///
+/// Both halves are asserted, because a re-dispatch has two possible causes and
+/// they need different fixes: the round plan the transition writes is checked
+/// for the flag — that is the state *surviving the fold* — and the dispatch
+/// record is checked for the node — that is the scheduler *reading* it.
+#[test]
+fn a_parked_node_is_not_dispatched_by_any_later_round() {
+    let world = World::new("edit-park-rounds");
+    // `flaky` fails round one, which is what leaves work for a round two to
+    // carry. `sweep` waits on it, so it is pending rather than running when it
+    // is cancelled — the state a planner reaches for `cancel` in.
+    world.script("flaky.wait", "hold");
+    world.script("flaky.fail", "1");
+    let run = live(
+        &world,
+        "held-back",
+        vec![agent("flaky", &[]), agent("sweep", &["flaky"])],
+        &[],
+    );
+
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([{"op": "cancel", "id": "sweep"}])),
+        )
+        .exited(0);
+    world.until("the park to commit", |world| {
+        committed(world, &run).contains(&"cancel".to_string())
+    });
+
+    world.release("flaky.go");
+    world.until("round one to finish", |world| {
+        !world.events_of(&run, "round-finished").is_empty()
+    });
+
+    // Round two, with `flaky` recovered so the round has something to do. The
+    // transition and the round are the engine verbs the orchestrator drives, and
+    // the planner has issued no `requeue`.
+    std::fs::remove_file(world.fakes.join("flaky.fail")).expect("the failure is disarmed");
+    std::fs::remove_file(world.fakes.join("flaky.wait")).expect("the hold is disarmed");
+    world.run(&["round", "next", &run]).exited(0);
+    world.run(&["round", "run", &run]);
+    world.until("round two to finish", |world| {
+        world.events_of(&run, "round-finished").len() >= 2
+    });
+
+    // The plan of record for the second round: the flag lives on the node
+    // definition, so this is where a park that did not survive the fold shows
+    // up — as a node carried forward with nothing marking it held.
+    let carried = world.run_json(&run, "round-02/plan.json");
+    let sweep = carried["tasks"]
+        .as_array()
+        .expect("the round-two plan lists its tasks")
+        .iter()
+        .find(|node| node["id"] == "sweep")
+        .expect("the parked node is carried into the next round, not dropped");
+    assert_eq!(
+        sweep["parked"],
+        json!(true),
+        "the park did not survive the round fold: {sweep}"
+    );
+
+    // And nothing dispatched it, in that round or any after it.
+    let dispatched: Vec<Value> = world
+        .events_of(&run, "node-dispatched")
+        .into_iter()
+        .filter(|event| event["labels"]["node"] == "sweep")
+        .collect();
+    assert!(
+        dispatched.is_empty(),
+        "a parked node was dispatched again: {dispatched:?}"
+    );
+}
+
+/// The same, for a node that was **in flight** when it was cancelled.
+///
+/// The other half of `cancel`'s stated range, and the one a planner reaches for
+/// under pressure: the node is already running, and stopping it is the point.
+/// Parking a running node also settles its dispatch, so there is a second write
+/// to the node's recorded state after the park — which is exactly where a park
+/// could be overwritten and the node handed back to the next round as ordinary
+/// carried work.
+#[test]
+fn a_node_parked_while_it_was_running_stays_parked_in_the_next_round() {
+    let world = World::new("edit-park-inflight");
+    // `flaky` fails round one, so there is a round two at all; `slow` is held
+    // open so the cancel lands on a dispatch that is genuinely in flight.
+    world.script("flaky.fail", "1");
+    let run = live(
+        &world,
+        "stopped-mid-flight",
+        vec![
+            agent("flaky", &[]),
+            agent("slow", &[]),
+            agent("after", &["slow"]),
+        ],
+        &["slow"],
+    );
+    world.until("the held node to be in flight", |world| {
+        world
+            .events_of(&run, "node-dispatched")
+            .iter()
+            .any(|event| event["labels"]["node"] == "slow")
+    });
+
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([{"op": "cancel", "id": "slow"}])),
+        )
+        .exited(0);
+    world.until("the park to commit", |world| {
+        committed(world, &run).contains(&"cancel".to_string())
+    });
+
+    world.release("slow.go");
+    world.until("round one to finish", |world| {
+        !world.events_of(&run, "round-finished").is_empty()
+    });
+
+    std::fs::remove_file(world.fakes.join("flaky.fail")).expect("the failure is disarmed");
+    world.run(&["round", "next", &run]).exited(0);
+    world.run(&["round", "run", &run]);
+    world.until("round two to finish", |world| {
+        world.events_of(&run, "round-finished").len() >= 2
+    });
+
+    let carried = world.run_json(&run, "round-02/plan.json");
+    let slow = carried["tasks"]
+        .as_array()
+        .expect("the round-two plan lists its tasks")
+        .iter()
+        .find(|node| node["id"] == "slow")
+        .expect("the parked node is carried into the next round, not dropped");
+    assert_eq!(
+        slow["parked"],
+        json!(true),
+        "the park did not survive the round fold: {slow}"
+    );
+
+    let redispatched: Vec<Value> = world
+        .events_of(&run, "node-dispatched")
+        .into_iter()
+        .filter(|event| {
+            event["labels"]["node"] == "slow" && event["labels"]["round"].as_u64() > Some(1)
+        })
+        .collect();
+    assert!(
+        redispatched.is_empty(),
+        "a node parked mid-flight was dispatched again: {redispatched:?}"
+    );
+    // And its dependent stayed behind the gate rather than being freed by the
+    // park, which would be the same second execution path by another route.
+    let dependents: Vec<Value> = world
+        .events_of(&run, "node-dispatched")
+        .into_iter()
+        .filter(|event| event["labels"]["node"] == "after")
+        .collect();
+    assert!(
+        dependents.is_empty(),
+        "a parked node's dependent was dispatched: {dependents:?}"
+    );
+}
+
 #[test]
 fn requeue_refuses_to_rewrite_what_add_and_reparent_own() {
     let world = World::new("edit-requeue-refuse");

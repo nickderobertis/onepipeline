@@ -109,6 +109,14 @@ fn a_surface_left_over_from_a_finished_round_is_discarded_rather_than_delivered(
     second.wait().expect("the round finishes");
 }
 
+/// Consumption resets the pacemaker, addressed by the **graph** run's id.
+///
+/// The two run ids on one run are the whole trap here. `oneagentgraph` mints an
+/// id for the graph it starts, and its signals — a resettable schedule's clock
+/// among them — answer only to that one; this crate's run id names a run that
+/// library has never heard of. Handing over the wrong one is silent, because the
+/// reset is best-effort by design, so the assertion names the id rather than
+/// only the verb.
 #[test]
 fn consuming_a_surface_resets_the_check_in_pacemaker() {
     let world = World::new("channel-pacemaker");
@@ -123,12 +131,32 @@ fn consuming_a_surface_resets_the_check_in_pacemaker() {
         "queuing a surface reset the clock; only reading one does"
     );
 
+    let graph_run = world.run_json(&run, "launch.json")["graph_run"]
+        .as_str()
+        .expect("the launch record names the graph run driving this run")
+        .to_string();
+    assert_ne!(
+        graph_run, run,
+        "the two run ids are the same, so this journey could not tell them apart"
+    );
+
     world.run(&["next", &run]).exited(0);
+    // llmlint: ignore-block[tests_mirror_real_usage] the id a reset is addressed by never
+    // appears on a product surface — `next` prints the surface whether or not the clock
+    // restarted, deliberately — so the argv the double recorded is where that value exists.
+    // `dispatch.rs` runs the same journey against the real sibling and asserts the outcome
+    // where the sibling puts it; this is the half that names the argument.
     assert!(
-        world.was_invoked("oneagentgraph", &["reset-timer", &run, "check-in"]),
-        "consumption did not reset the check-in pacemaker: {:?}",
+        world.was_invoked("oneagentgraph", &["reset-timer", &graph_run, "check-in"]),
+        "consumption did not reset the check-in pacemaker by the graph run's own id: {:?}",
         world.invocations()
     );
+    assert!(
+        !world.was_invoked("oneagentgraph", &["reset-timer", &run]),
+        "the reset was addressed with this crate's run id, which names no graph run: {:?}",
+        world.invocations()
+    );
+    // llmlint: ignore-end[tests_mirror_real_usage]
     world.release("build.go");
 }
 

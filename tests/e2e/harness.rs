@@ -78,6 +78,46 @@ pub const STARTUP_TIMEOUT_ENV: &str = "ONEPIPELINE_STARTUP_TIMEOUT_SECONDS";
 /// [`STARTUP_TIMEOUT_ENV`] would wait instead.
 pub const OVERRIDE_TOOK_EFFECT: std::time::Duration = std::time::Duration::from_secs(15);
 
+/// One directory, in the single spelling the binary under test will report.
+///
+/// A launch directory crosses a process boundary — `start` records where the
+/// operator launched from, and every later `adopt` replays that value — so the
+/// spelling this crate records is the one the *kernel* answers with, which is
+/// what [`std::env::current_dir`] reads and what the record therefore carries.
+/// That answer never names the route taken to a directory: on macOS `/var` is a
+/// symlink to `/private/var`, so a temporary directory hands back one spelling
+/// and a process changed into it reports the other.
+///
+/// Every path a journey compares against the binary's answer is therefore
+/// resolved here first. A journey that compared [`std::env::temp_dir`]'s
+/// spelling directly would be asserting that *this host's* temporary directory
+/// is reached without a symlink — true on Linux, false on macOS, and nothing to
+/// do with the crate under test.
+fn resolved(path: &Path) -> PathBuf {
+    let canonical = std::fs::canonicalize(path)
+        .unwrap_or_else(|error| panic!("{} cannot be resolved: {error}", path.display()));
+    plain(&canonical)
+}
+
+/// A canonical path spelled the way every other API on the platform spells it.
+///
+/// [`std::fs::canonicalize`] answers on Windows with the *verbatim* form — the
+/// `\\?\` prefix that turns path parsing off — and nothing else there spells a
+/// directory that way: `GetCurrentDirectory` does not, so neither does the
+/// launch record, and `SetCurrentDirectory` does not even accept it. Removing
+/// the prefix is what leaves one directory with one spelling. No other platform
+/// produces the prefix, where this is the identity.
+fn plain(path: &Path) -> PathBuf {
+    let text = path.to_string_lossy();
+    if let Some(share) = text.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{share}"));
+    }
+    match text.strip_prefix(r"\\?\") {
+        Some(local) => PathBuf::from(local),
+        None => path.to_path_buf(),
+    }
+}
+
 /// One test's world: a scratch root with everything the binary reads.
 pub struct World {
     /// The scratch root, removed when the test finishes.
@@ -112,6 +152,11 @@ impl World {
             NTH.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
         ));
         let _ = std::fs::remove_dir_all(&root);
+        // Created before it is resolved, because resolving a path asks the
+        // filesystem about it, and in the one spelling the binary will report —
+        // see [`resolved`].
+        std::fs::create_dir_all(&root).expect("a scratch root");
+        let root = resolved(&root);
         let world = Self {
             runs: root.join("runs"),
             fakes: root.join("fakes"),
@@ -241,7 +286,7 @@ impl World {
                 ]),
             )
             .env("ONEAGENTGRAPH_ONEHARNESS_BIN", double("fake-oneharness"))
-            .env("ONEAGENTGRAPH_STATE_DIR", self.root.join("graph-state"))
+            .env("ONEAGENTGRAPH_STATE_DIR", self.graph_state())
             .env(
                 "ONEPIPELINE_DAG_GRAPH",
                 self.graphs().join("dag-scope.yaml"),
@@ -424,6 +469,15 @@ impl World {
         self.root.join("graphs")
     }
 
+    /// Where the **real** `oneagentgraph` keeps this world's run state.
+    ///
+    /// The same directory [`agentgraph_cmd`](World::agentgraph_cmd) points that
+    /// sibling at, so a journey can look at what a launch left in the sibling's
+    /// own store rather than only at what this crate wrote down.
+    pub fn graph_state(&self) -> PathBuf {
+        self.root.join("graph-state")
+    }
+
     /// Write the graph configs [`agentgraph_cmd`](World::agentgraph_cmd) names.
     ///
     /// Single-sided `kind: oneharness` members: the two-party kind runs a
@@ -432,6 +486,25 @@ impl World {
     /// dispatch reaching the sibling, being accepted, and streaming back — is the
     /// same one either way.
     pub fn write_graphs(&self) {
+        self.write_graphs_with(None);
+    }
+
+    /// The same configs, with the shipped dag-scope graph's **pacemaker** on the
+    /// driver: a `check-in` member on a resettable schedule.
+    ///
+    /// Its own member, because that is the one a planner-visible surface is
+    /// supposed to restart the clock of, and a graph without it answers a reset
+    /// with "no such member" no matter which run id it was addressed by. The
+    /// interval is the shipped one, so nothing fires inside a test — what a
+    /// journey observes is the *reset*, which the sibling announces.
+    pub fn write_graphs_with_pacemaker(&self) {
+        self.write_graphs_with(Some(
+            "  check-in:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n    \
+             schedule: {every: 1800, resettable: true}\n",
+        ));
+    }
+
+    fn write_graphs_with(&self, dag_extra: Option<&str>) {
         let dir = self.graphs();
         std::fs::create_dir_all(&dir).expect("a directory for the graph configs");
         // The identity chain is the operator's own file, which the graph names
@@ -446,11 +519,16 @@ impl World {
             ("dag-scope.yaml", "orchestrator"),
             ("node-scope.yaml", "worker"),
         ] {
+            let extra = if file == "dag-scope.yaml" {
+                dag_extra.unwrap_or_default()
+            } else {
+                ""
+            };
             std::fs::write(
                 dir.join(file),
                 format!(
                     "version: 1\nname: {}\nmembers:\n  {member}:\n    kind: oneharness\n    \
-                     oneharness_config: ./oneharness.toml\n",
+                     oneharness_config: ./oneharness.toml\n{extra}",
                     file.trim_end_matches(".yaml"),
                 ),
             )
@@ -1282,4 +1360,69 @@ pub fn plan_of(name: &str, nodes: Vec<Value>) -> Value {
         "goal": {"text": format!("Deliver {name}")},
         "tasks": nodes,
     })
+}
+
+/// A directory reached through a symlink resolves to the directory itself.
+///
+/// The rule [`resolved`] exists for, held where the symlink can be built. macOS
+/// ships this shape by default — `/var` is a link to `/private/var`, so every
+/// temporary directory there is reached through one — and it is what made a
+/// journey compare two spellings of one directory and fail. A symlink is a
+/// symlink on Linux too, so the rule is held here rather than only on the
+/// platform that ships it.
+///
+/// Unix-only because creating a *directory* symlink on Windows needs a
+/// privilege no CI account is guaranteed to hold. What `resolved` has to get
+/// right on Windows is [`plain`]'s rule, and the test below holds that one on
+/// every platform.
+#[cfg(unix)]
+#[test]
+fn a_directory_reached_through_a_symlink_resolves_to_the_directory_itself() {
+    let scratch =
+        resolved(&std::env::temp_dir()).join(format!("op-resolved-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&scratch);
+    let directory = scratch.join("real");
+    std::fs::create_dir_all(&directory).expect("a directory to resolve to");
+    let route = scratch.join("route");
+    std::os::unix::fs::symlink(&directory, &route).expect("a symlinked route to it");
+
+    assert_ne!(
+        route, directory,
+        "the route is not a second spelling at all"
+    );
+    assert_eq!(
+        resolved(&route),
+        directory,
+        "a route to a directory was kept instead of the directory"
+    );
+    std::fs::remove_dir_all(&scratch).ok();
+}
+
+/// A verbatim Windows path is spelled the way the rest of Windows spells it.
+///
+/// [`std::fs::canonicalize`] is the only thing on that platform that produces
+/// the `\\?\` prefix, so holding its answer against a launch record — which
+/// carries `GetCurrentDirectory`'s — would compare two spellings of one
+/// directory. The rule is pure text, so it is held on every platform rather
+/// than only on the one where it fires.
+#[test]
+fn a_verbatim_windows_path_is_spelled_the_way_the_rest_of_windows_spells_it() {
+    assert_eq!(
+        plain(Path::new(r"\\?\C:\Users\op\runs")),
+        PathBuf::from(r"C:\Users\op\runs")
+    );
+    assert_eq!(
+        plain(Path::new(r"\\?\UNC\host\share\runs")),
+        PathBuf::from(r"\\host\share\runs")
+    );
+    // And nothing else is touched: a path that never carried the prefix is
+    // already the spelling everything else uses.
+    assert_eq!(
+        plain(Path::new("/private/var/folders/op")),
+        PathBuf::from("/private/var/folders/op")
+    );
+    assert_eq!(
+        plain(Path::new(r"C:\Users\op\runs")),
+        PathBuf::from(r"C:\Users\op\runs")
+    );
 }

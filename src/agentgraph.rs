@@ -225,14 +225,66 @@ fn ended(status: &std::process::ExitStatus) -> String {
     )
 }
 
-/// Whether a line the graph wrote is an envelope this build can read.
+/// The envelope a line the graph wrote carries, when this build can read one.
 ///
 /// What the startup handshake accepts as an announcement, so the bar is the
 /// schema rather than "some JSON": a graph writes its refusal and its warnings
 /// to the same place, and a newer build's envelope shape is a line this one
 /// cannot read. Neither is a run saying it started.
+///
+/// The parsed value rather than a yes/no, because the announcement is also
+/// where the graph's *own* run id arrives on the retained-process path — the
+/// only place a detached launcher can learn it.
+fn envelope_of(line: &str) -> Option<Envelope> {
+    serde_json::from_str::<Envelope>(line.trim()).ok()
+}
+
+/// Whether a line the graph wrote is an envelope this build can read.
 fn is_envelope(line: &str) -> bool {
-    serde_json::from_str::<Envelope>(line.trim()).is_ok()
+    envelope_of(line).is_some()
+}
+
+/// The `oneagentgraph` run an announcement belongs to.
+///
+/// The sibling stamps its own run onto every envelope it emits, and this crate
+/// has no second way to learn it: a run of this library is not a run of that
+/// one. [`adopt_labels`] never overwrites a producer's own `run_id`, so the
+/// value read here is the graph's rather than this crate's.
+///
+/// Through the sibling's own parser, so what comes back is a run id that
+/// library would answer to rather than whatever string was on the line — an
+/// announcement this build cannot read as one leaves no address at all, which
+/// is the same answer as a graph that never announced itself.
+fn announced_run(envelope: &Envelope) -> Option<GraphRunId> {
+    GraphRunId::parse(envelope.labels.run_id.as_deref()?.trim()).ok()
+}
+
+/// The id `oneagentgraph` minted for one of its runs.
+///
+/// The sibling's own type, not a second copy of it: it is the value that
+/// library's signals are addressed by, and it is what refuses a string that
+/// would name a path outside its run store. Aliased here so the rest of this
+/// crate can name it without naming the sibling's module path everywhere, and
+/// so it is visibly *not* a `onepipeline` run id — the two are different runs
+/// and confusing them is what left the pacemaker reset dead.
+pub type GraphRunId = oneagentgraph::run::RunId;
+
+/// One graph run id read back off this crate's own launch record.
+///
+/// The record is a file on disk that a later, unrelated process re-reads, so
+/// this field is external input like any other: it arrives as a string and only
+/// becomes an address by passing the sibling's parser. Both refusals are
+/// phrased for the operator reading them off `next`'s stderr, because that is
+/// the only place a pacemaker that could not be reset is reported.
+pub fn recorded_graph_run(recorded: &str, run: &str) -> Result<GraphRunId> {
+    let recorded = recorded.trim();
+    if recorded.is_empty() {
+        return Err(Error::Invalid(format!(
+            "run '{run}' records no agent-graph run to address it by"
+        )));
+    }
+    GraphRunId::parse(recorded)
+        .map_err(|error| sibling(format!("run '{run}' records '{recorded}': {error}")))
 }
 
 /// Render the reserved label keys as the `k=v` pairs the CLI takes, each under
@@ -338,6 +390,8 @@ struct LibraryGraphRun {
     settled: mpsc::Receiver<Result<Settled>>,
     cancel: mpsc::Sender<()>,
     pid: u32,
+    /// The graph run's own id, as the sibling minted it.
+    run_id: GraphRunId,
     exited: Arc<AtomicBool>,
 }
 
@@ -354,6 +408,8 @@ struct ProcessGraphRun {
     /// so they are put back at the head of the stream rather than spent on the
     /// handshake.
     started_with: Vec<String>,
+    /// The graph run's own id, read off its announcement.
+    run_id: Option<GraphRunId>,
 }
 
 /// Where a started graph's own stdout and stderr go.
@@ -397,7 +453,7 @@ impl ProcessGraphRun {
     pub fn start(
         graph: &str,
         task: &str,
-        dir: Option<&Path>,
+        dir: &Path,
         labels: &Labels,
         env: &[(String, String)],
         sets: &[String],
@@ -407,9 +463,7 @@ impl ProcessGraphRun {
         command.arg("run").arg(graph);
         command.arg("--task").arg(task);
         command.arg("--output").arg("json");
-        if let Some(dir) = dir {
-            command.arg("--dir").arg(dir);
-        }
+        command.arg("--dir").arg(dir);
         for label in label_args(labels) {
             command.arg("--label").arg(label);
         }
@@ -457,6 +511,7 @@ impl ProcessGraphRun {
             child,
             output,
             started_with: Vec::new(),
+            run_id: None,
         })
     }
 
@@ -541,7 +596,9 @@ impl ProcessGraphRun {
             // `events` reports as skipped, and a handshake that ate it would
             // hide the gap it leaves.
             Ok((error, read, reader)) => {
-                let announced = read.last().is_some_and(|line| is_envelope(line));
+                let announcement = read.last().and_then(|line| envelope_of(line));
+                let announced = announcement.is_some();
+                self.run_id = announcement.as_ref().and_then(announced_run);
                 self.output = Output::Relayed(Some(reader));
                 self.started_with = read;
                 match error {
@@ -570,7 +627,8 @@ impl ProcessGraphRun {
     fn await_logged_line(&mut self) -> Result<()> {
         let deadline = Instant::now() + startup_timeout();
         loop {
-            if self.logged_an_envelope() {
+            if let Some(announcement) = self.logged_envelope() {
+                self.run_id = announced_run(&announcement);
                 return Ok(());
             }
             match self.child.try_wait() {
@@ -591,22 +649,20 @@ impl ProcessGraphRun {
         }
     }
 
-    /// Whether this launch has written a whole envelope into its log yet.
+    /// The first whole envelope this launch has written into its log, if any.
     ///
     /// A *complete* line — one the writer has terminated — that the envelope
     /// schema accepts. Both streams share the file, so this looks past whatever
     /// the graph said on stderr, and past a line from a build whose shape this
     /// one cannot read, rather than taking either for an announcement.
-    fn logged_an_envelope(&self) -> bool {
+    fn logged_envelope(&self) -> Option<Envelope> {
         let Output::Logged(path) = &self.output else {
-            return false;
+            return None;
         };
-        let Ok(text) = std::fs::read_to_string(path) else {
-            return false;
-        };
+        let text = std::fs::read_to_string(path).ok()?;
         text.split_inclusive('\n')
             .filter(|line| line.ends_with('\n'))
-            .any(is_envelope)
+            .find_map(envelope_of)
     }
 
     /// The graph closed its stream without announcing itself: report whatever it
@@ -758,6 +814,11 @@ impl ProcessGraphRun {
         self.child.id()
     }
 
+    /// The graph run's own id, once its announcement has been read.
+    pub fn run_id(&self) -> Option<&GraphRunId> {
+        self.run_id.as_ref()
+    }
+
     /// Whether the graph process has ended, reaping it if it has.
     ///
     /// Reaping is the point. A child nobody waits on stays a zombie, and a
@@ -773,10 +834,17 @@ impl GraphRun {
     /// Start a graph through the sibling library. Detached launches retain the
     /// process boundary because a library scheduler thread cannot survive this
     /// process exiting.
+    ///
+    /// `dir` is required: the two backends have no common default for an absent
+    /// one — the CLI's is `.`, resolved against whatever process spawns the
+    /// graph, and the library's would be this process's own — so a caller that
+    /// said nothing would send a different `--cwd` to the harness depending on
+    /// which backend it happened to take. Naming it is the only way a run gets
+    /// one answer.
     pub fn start(
         graph: &str,
         task: &str,
-        dir: Option<&Path>,
+        dir: &Path,
         labels: &Labels,
         env: &[(String, String)],
         sets: &[String],
@@ -808,10 +876,7 @@ impl GraphRun {
         let request = oneagentgraph::run::Request {
             graph: oneagentgraph::config::ConfigRef(graph.to_string()),
             task: Some(task.to_string()),
-            dir: dir.map_or_else(
-                || std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-                Path::to_path_buf,
-            ),
+            dir: dir.to_path_buf(),
             labels,
             overrides,
             state_dir,
@@ -820,6 +885,7 @@ impl GraphRun {
         let running = oneagentgraph::run::start(&request, &run_env)
             .map_err(|error| sibling(error.to_string()))?;
         let pid = running.started().pid;
+        let run_id = running.started().run_id.clone();
         let (events_tx, events_rx) = mpsc::channel();
         let (settled_tx, settled_rx) = mpsc::channel();
         let (cancel_tx, cancel_rx) = mpsc::channel();
@@ -878,6 +944,7 @@ impl GraphRun {
                 settled: settled_rx,
                 cancel: cancel_tx,
                 pid,
+                run_id,
                 exited,
             }),
         })
@@ -917,6 +984,26 @@ impl GraphRun {
         match &self.backend {
             GraphBackend::Library(run) => run.pid,
             GraphBackend::Process(run) => run.pid(),
+        }
+    }
+
+    /// The `oneagentgraph` run id this launch minted, whichever way it ran.
+    ///
+    /// **Not this crate's run id**, and that distinction is the whole reason
+    /// this exists: the sibling addresses a run's signals — a pacemaker reset
+    /// among them — by the id it minted, and a caller that handed it a
+    /// `onepipeline` run id would be naming a run the sibling has never heard
+    /// of. The library backend is told at startup; the retained-process backend
+    /// reads it off the announcement its handshake already waits for, so a
+    /// detached launch knows it too.
+    ///
+    /// `None` only where the graph started without announcing itself — a run
+    /// that succeeded before it said anything — which is the same case that
+    /// leaves nothing to address.
+    pub fn run_id(&self) -> Option<&GraphRunId> {
+        match &self.backend {
+            GraphBackend::Library(run) => Some(&run.run_id),
+            GraphBackend::Process(run) => run.run_id(),
         }
     }
 
@@ -977,17 +1064,15 @@ impl Settled {
 /// [`oneagentgraph::run::signal`] is the same implementation the `reset-timer`
 /// verb runs, so which member names are addressable and where the run watches
 /// are decided once, in the sibling, rather than twice.
-pub fn reset_timer(run: &str, member: &str) -> Result<()> {
+pub fn reset_timer(run: &GraphRunId, member: &str) -> Result<()> {
     if std::env::var_os(BINARY_ENV).is_some() {
         return reset_timer_by_process(run, member);
     }
-    let run_id = oneagentgraph::run::RunId::parse(run)
-        .map_err(|error| sibling(format!("reset-timer {run} {member}: {error}")))?;
     let member_name = oneagentgraph::run::MemberName::parse(member)
         .map_err(|error| sibling(format!("reset-timer {run} {member}: {error}")))?;
     oneagentgraph::run::signal(
         &state_dir(&process_env()),
-        &run_id,
+        run,
         &member_name,
         oneagentgraph::run::Signal::Reset,
     )
@@ -995,10 +1080,10 @@ pub fn reset_timer(run: &str, member: &str) -> Result<()> {
 }
 
 /// The same reset, through an executable an operator named at [`BINARY_ENV`].
-fn reset_timer_by_process(run: &str, member: &str) -> Result<()> {
+fn reset_timer_by_process(run: &GraphRunId, member: &str) -> Result<()> {
     let output = Command::new(binary())
         .arg("reset-timer")
-        .arg(run)
+        .arg(run.as_str())
         .arg(member)
         .stdin(Stdio::null())
         .output()
@@ -1481,7 +1566,7 @@ mod tests {
             &graph.to_string_lossy(),
             "## What\nNothing.\n\n## Why\nThe export is the subject.\n\n## Acceptance criteria\n- \
              None.",
-            Some(&root),
+            &root,
             &Labels::default(),
             &[],
             &[],
@@ -1571,7 +1656,9 @@ mod tests {
     #[test]
     fn a_reset_leaves_the_signal_the_run_watches_for() {
         let root = state_dir_holding("node-scope-1786304152340-19", &[CHECK_IN_MEMBER]);
-        reset_timer("node-scope-1786304152340-19", CHECK_IN_MEMBER)
+        let graph_run = recorded_graph_run("node-scope-1786304152340-19", "demo")
+            .expect("the sibling accepts its own run id");
+        reset_timer(&graph_run, CHECK_IN_MEMBER)
             .expect("the sibling accepts a reset for a member it declared");
         assert!(
             root.join("node-scope-1786304152340-19")
@@ -1583,12 +1670,46 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A graph run read back off a launch record only becomes an address by
+    /// passing the sibling's own parser.
+    ///
+    /// The record is a file a later process re-reads, so this field is a
+    /// stranger's string: one that would name a path outside the sibling's run
+    /// store must not reach a call that joins it onto that store, and an absent
+    /// one is a different answer from a malformed one — the first is a record
+    /// from a build that had no such field, the second is a record that has been
+    /// interfered with.
+    #[test]
+    fn a_recorded_graph_run_is_an_address_only_if_the_sibling_would_answer_to_it() {
+        assert_eq!(
+            recorded_graph_run("node-scope-1786304152340-19", "demo")
+                .expect("the sibling's own alphabet")
+                .as_str(),
+            "node-scope-1786304152340-19"
+        );
+        let absent = recorded_graph_run("   ", "demo").expect_err("no address at all");
+        assert!(
+            absent.to_string().contains("records no agent-graph run"),
+            "{absent} does not say the record named none"
+        );
+        for interfered in ["../elsewhere", "Node-Scope-1", "a/b"] {
+            let refused = recorded_graph_run(interfered, "demo")
+                .expect_err("a string the sibling would not answer to");
+            assert!(
+                refused.to_string().contains(interfered),
+                "{refused} does not name the value it refused"
+            );
+        }
+    }
+
     /// A member the run never declared is refused rather than answered with a
     /// signal file nothing will read.
     #[test]
     fn a_reset_for_a_member_the_run_never_declared_is_refused() {
         let root = state_dir_holding("node-scope-1786304152340-20", &["worker"]);
-        let refused = reset_timer("node-scope-1786304152340-20", CHECK_IN_MEMBER)
+        let graph_run = recorded_graph_run("node-scope-1786304152340-20", "demo")
+            .expect("the sibling accepts its own run id");
+        let refused = reset_timer(&graph_run, CHECK_IN_MEMBER)
             .expect_err("a member the run does not have is not resettable");
         assert!(
             refused.to_string().contains(CHECK_IN_MEMBER),

@@ -709,7 +709,9 @@ mod tests {
         LaunchRecord {
             run_id: "demo".into(),
             plan: PathBuf::from("plan.json"),
+            dir: PathBuf::from("/tmp/launch"),
             graph: "graphs/dag-scope.yaml".into(),
+            graph_run: String::new(),
             node_graph: String::new(),
             launcher: "claude-code".into(),
             session: "session-a".into(),
