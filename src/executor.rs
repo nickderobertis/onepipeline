@@ -292,9 +292,17 @@ impl DispatchHandle for LocalDispatch {
 
     fn cancel(&self, mode: CancelMode) {
         self.cancel.cancel();
+        // llmlint: ignore-block[changed_behavior_has_e2e] no invocation a user can type
+        // reaches this arm, because nothing in this crate constructs `CancelMode::Kill`:
+        // the engine cancels cooperatively, at `engine.rs`'s one call site, and the
+        // variant exists because `docs/contract.md` declares the mode pair. What the arm
+        // does when a producer appears is held instead where it lives —
+        // `agentgraph::GraphRun::cancel` acts on both backends rather than only the
+        // library one, which is what it used to do, and `tests/contract.rs` holds the two
+        // modes distinct.
         if mode == CancelMode::Kill {
             self.run.cancel();
-        }
+        } // llmlint: ignore-end[changed_behavior_has_e2e]
     }
 }
 

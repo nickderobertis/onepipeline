@@ -839,9 +839,18 @@ impl GraphRun {
                                 break;
                             }
                         }
-                        Ok(None) => {}
+                        // Nothing yet. Round again — which is also what makes
+                        // the cancel above reachable while the graph is quiet,
+                        // so the poll is the design rather than a busy wait.
+                        //
+                        // The sibling reports a timeout as `Ok(None)` and keeps
+                        // `Err` for a channel that is finished, so the second
+                        // arm is what a newer build could start answering with.
+                        // Rounding again is the safe reading of both: a relay
+                        // that panicked here would take a live run down over a
+                        // wait that had simply expired.
+                        Ok(None) | Err(mpsc::RecvTimeoutError::Timeout) => {}
                         Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                        Err(mpsc::RecvTimeoutError::Timeout) => unreachable!(),
                     }
                 }
                 let settled = Ok(match running.wait() {
@@ -918,9 +927,27 @@ impl GraphRun {
         }
     }
 
+    /// Stop the graph, whichever way it is running.
+    ///
+    /// Both backends, and that is the whole point of the name: a caller asking
+    /// a run to stop must not get silence because of how the run happens to be
+    /// reached. The library backend hands the ask to the relay, which calls the
+    /// sibling's own [`cancel`](oneagentgraph::run::Running::cancel) — the same
+    /// stop signal and process-tree reap the `cancel` verb performs. The
+    /// process backend has no signal file to write, so it is the child that is
+    /// taken down, and its descendants with it: the harness the graph started
+    /// is one of them, and stopping only the parent would leave it holding the
+    /// workspace.
+    ///
+    /// Best-effort and non-blocking in both, because a cancel is a caller
+    /// changing its mind rather than an operation whose failure it can act on.
+    /// [`wait`](Self::wait) is what reports how the run actually ended.
     pub fn cancel(&self) {
-        if let GraphBackend::Library(run) = &self.backend {
-            let _ = run.cancel.send(());
+        match &self.backend {
+            GraphBackend::Library(run) => {
+                let _ = run.cancel.send(());
+            }
+            GraphBackend::Process(run) => crate::sys::stop(run.pid(), crate::sys::Stop::Now),
         }
     }
 }

@@ -635,25 +635,16 @@ fn stop(args: &StopArgs) -> Result<i32> {
 }
 
 /// Ask the recorded driver to stop, on the host its pid means something on.
+///
+/// Politely: the driver takes the ask first so it records its own abandonment
+/// rather than vanishing. The host check is this caller's alone — a pid means
+/// nothing across machines, and the ledger's record names which one it was
+/// taken on.
 fn terminate(pid: u32, host: &str) {
-    if host != sys::hostname() || pid == 0 || pid == sys::pid() {
+    if host != sys::hostname() {
         return;
     }
-    #[cfg(unix)]
-    if let Ok(raw) = i32::try_from(pid) {
-        // SAFETY: `kill` takes a pid and a signal number and touches no memory
-        // this call owns. The driver takes SIGTERM first so it records its own
-        // abandonment rather than vanishing.
-        unsafe { libc::kill(raw, libc::SIGTERM) };
-    }
-    #[cfg(windows)]
-    {
-        let _ = std::process::Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/T"])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-    }
+    sys::stop(pid, sys::Stop::Politely);
 }
 
 /// `onepipeline next` — the channel's only consumer.

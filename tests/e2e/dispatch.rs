@@ -828,3 +828,126 @@ fn an_adoption_the_graph_refuses_fails_rather_than_leaving_the_run_undriven() {
         world.events_of("orphaned", "driver-adopted")
     );
 }
+
+/// The environment keys and fallbacks this crate restates are still the ones
+/// the sibling's own CLI applies.
+///
+/// `run::start`, `run::signal`, and `control::interrupt` take their environment
+/// as a parameter, which is what lets a consumer hold two runs on two installs
+/// — but the *names* in it, and the fallbacks around them, are private
+/// `const`s and private functions in the sibling's **binary**. So
+/// `src/agentgraph.rs` restates them, and nothing in the type system says when
+/// they stop being right: renamed upstream, this crate would keep resolving the
+/// old spelling and put a run's state somewhere the sibling's own verbs cannot
+/// find it. Recorded as divergence 20; this is the drift gate that stands in
+/// until it closes.
+///
+/// Held with **both** sides real, which is the only way it gates anything: a
+/// dispatch this crate ran places the run state, and the sibling's own binary
+/// — the one `Cargo.lock` pins — is then asked, through the same variable,
+/// what it can find there. Neither side's answer is written down here.
+///
+/// So a rename lands as a failure whichever side it happens on. Drifted in
+/// `src/agentgraph.rs`, the resolution falls back to `$HOME/.local/state` and
+/// the run is not under the directory the launch named; drifted upstream, the
+/// sibling looks somewhere else for it. Either way `history` lists nothing.
+#[test]
+fn the_run_state_this_crate_places_is_where_the_sibling_looks_for_it() {
+    let world = World::new("state-dir-drift");
+    world.write_graphs();
+    // The directory `agentgraph_cmd` hands the launch at the variable under
+    // test, and the one the sibling is asked about below.
+    let state = world.root.join("graph-state");
+    let path = world.plan(
+        "state-drift",
+        &plan_of("state-drift", vec![agent("build", &[])]),
+    );
+    world
+        .run_on_agentgraph(&["start", &path.to_string_lossy(), "--attach"])
+        .exited(0)
+        .settled();
+
+    let listed = std::process::Command::new(crate::harness::oneagentgraph_binary())
+        .arg("history")
+        // The one variable under test. Everything else is left alone, so a
+        // listing that comes back empty is this directory being empty rather
+        // than the sibling being pointed elsewhere.
+        .env("ONEAGENTGRAPH_STATE_DIR", &state)
+        .output()
+        .expect("the real oneagentgraph runs");
+    let listed = String::from_utf8_lossy(&listed.stdout);
+    // The graph the node dispatch runs, so the line names a run this crate's
+    // own launch created rather than any run that happened to be there.
+    assert!(
+        listed.lines().any(|line| line.contains("node-scope")),
+        "the sibling found no run where this crate placed one — the state-directory variable, \
+         or the fallback around it, has drifted on one side:\n{listed}\n{}",
+        world.dump()
+    );
+}
+
+/// The exit codes this crate maps the sibling's `Error` onto are still the ones
+/// its own CLI exits with.
+///
+/// The subprocess path read a code off a child; the library path is handed an
+/// `Error` and `src/agentgraph.rs`'s `exit_for` turns it into the code the CLI
+/// would have carried. That mapping is a copy of a private function upstream —
+/// the other half of divergence 20 — so a run must not settle differently
+/// depending on which path drove it. Driven against the real binary, so the
+/// left-hand side of the comparison is the sibling's own answer.
+#[test]
+fn the_siblings_own_refusals_still_exit_with_the_codes_this_crate_maps_onto() {
+    let world = World::new("exit-code-drift");
+    let missing = world.root.join("no-such-graph.yaml");
+    let refused = std::process::Command::new(crate::harness::oneagentgraph_binary())
+        .args(["run", &missing.to_string_lossy(), "--task", "anything"])
+        .env("ONEAGENTGRAPH_STATE_DIR", world.root.join("graph-state"))
+        .output()
+        .expect("the real oneagentgraph runs");
+    assert_eq!(
+        refused.status.code(),
+        Some(oneagentgraph::error::EXIT_INVALID_CONFIG),
+        "an unreadable graph is no longer the invalid-config exit this crate maps \
+         `Error::InvalidConfig` onto: {}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+}
+
+/// The `oneharness` executable the sibling drives is still named by the
+/// variable this crate restates — and reaches an interrupt's delivery too.
+///
+/// The third restated key. Pointed at something that is not there, the sibling
+/// says so, and the failure names what it could not start: that is the variable
+/// having been read. Asked through a real dispatch rather than a probe, because
+/// what has to keep working is a member launch.
+#[test]
+fn the_sibling_still_takes_its_harness_from_the_variable_this_crate_restates() {
+    let world = World::new("harness-bin-drift");
+    world.write_graphs();
+    let path = world.plan(
+        "harness-bin",
+        &plan_of("harness-bin", vec![agent("build", &[])]),
+    );
+    let mut command = world.agentgraph_cmd(&["start", &path.to_string_lossy(), "--attach"]);
+    command.env(
+        "ONEAGENTGRAPH_ONEHARNESS_BIN",
+        "oneharness-that-is-not-installed",
+    );
+    let started = world.run_on(command, "start --attach");
+    started.settled();
+
+    let failed: Vec<_> = world
+        .journal("harness-bin")
+        .into_iter()
+        .filter(|event| {
+            let rendered = event.to_string();
+            rendered.contains("oneharness-that-is-not-installed")
+        })
+        .collect();
+    assert!(
+        !failed.is_empty(),
+        "no event named the harness the graph was told to drive, so the variable was not read \
+         — it has drifted:\n{}",
+        world.dump()
+    );
+}

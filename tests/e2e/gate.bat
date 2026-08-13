@@ -61,7 +61,10 @@ if not defined ONEVCS_HOME (
   exit /b 64
 )
 rem The working directory is `onevcs`'s to choose, so the layout this reads a
-rem token out of is checked rather than assumed — see `gate.sh` for why.
+rem token out of is checked rather than assumed: run anywhere else, the
+rem derivation would name some other directory's basename and this would create
+rem a stream file no session is writing — a line appended where nothing reads
+rem it, and a journey that passes having proved nothing.
 for %%i in ("%CD%") do set "here=%%~nxi"
 if /i not "!here!"=="worktree" (
   call :fail "append-future-event runs in a session worktree; this is %CD%"
