@@ -173,6 +173,50 @@ fn an_unreadable_relative_node_graph_names_its_launch_base() {
 }
 
 #[test]
+fn unreadable_relative_plan_graphs_name_their_path_and_launch_base() {
+    let world = World::new("relative-plan-graph-errors");
+    world.write_graphs();
+    world.repository("local-direct", &["true"]);
+    let cases = [
+        (
+            "missing-node-override",
+            json!({
+                "id": "build",
+                "persona": "engineer",
+                "task": "## What\nbuild",
+                "agent_graph": "graphs/missing-node-override.yaml",
+            }),
+            "graphs/missing-node-override.yaml",
+        ),
+        (
+            "missing-step-override",
+            json!({
+                "id": "service",
+                "repo": "service",
+                "steps": [{
+                    "id": "implement",
+                    "persona": "engineer",
+                    "task": "## What\nimplement",
+                    "agent_graph": "graphs/missing-step-override.yaml",
+                }],
+            }),
+            "graphs/missing-step-override.yaml",
+        ),
+    ];
+
+    for (name, node, missing) in cases {
+        let path = world.plan(name, &plan_of(name, vec![node]));
+        let mut command = world.agentgraph_cmd(&["start", &path.to_string_lossy(), "--attach"]);
+        command.current_dir(&world.root);
+
+        let failed = world.run_on(command, &format!("start {name}"));
+        failed.exited(crate::harness::REFUSED);
+        failed.err_has(missing);
+        failed.err_has(&world.root.to_string_lossy());
+    }
+}
+
+#[test]
 fn launch_overrides_reach_the_graphs_that_actually_run() {
     let world = World::new("real-overrides");
     world.write_graphs();

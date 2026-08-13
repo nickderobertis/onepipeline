@@ -789,8 +789,17 @@ fn execute_direct(
     cancel: &CancellationToken,
     tx: &Sender<Message>,
 ) -> Settlement {
+    let graph = match node_graph(node.agent_graph.as_ref(), run) {
+        Ok(graph) => graph,
+        Err(error) => {
+            return Settlement {
+                detail: Some(error.to_string()),
+                ..failed(&node.id, "invalid-launch-record")
+            };
+        }
+    };
     let request = || DispatchRequest {
-        graph: node_graph(node.agent_graph.as_ref(), run),
+        graph: graph.clone(),
         task: node.rendered_task(),
         labels: dispatch_labels(run, round, &node.id, None, node.persona.as_deref()),
         workspace: WorkspaceSpec::Path(project_dir()),
@@ -1055,15 +1064,19 @@ pub(crate) fn dispatch_labels(
 pub(crate) fn node_graph(
     override_ref: Option<&oneagentgraph::config::ConfigRef>,
     run: &str,
-) -> oneagentgraph::config::ConfigRef {
-    override_ref.cloned().unwrap_or_else(|| {
-        let paths = crate::ledger::RunPaths::under(&crate::ledger::runs_root(), run);
-        let recorded = crate::ledger::read_json::<crate::ledger::LaunchRecord>(&paths.launch())
-            .ok()
-            .map(|record| record.node_graph)
-            .filter(|reference| !reference.is_empty());
-        oneagentgraph::config::ConfigRef(recorded.unwrap_or_else(configured_node_graph))
-    })
+) -> Result<oneagentgraph::config::ConfigRef> {
+    if let Some(reference) = override_ref {
+        return Ok(reference.clone());
+    }
+    let paths = crate::ledger::RunPaths::under(&crate::ledger::runs_root(), run);
+    let record = crate::ledger::read_json::<crate::ledger::LaunchRecord>(&paths.launch())?;
+    Ok(oneagentgraph::config::ConfigRef(
+        if record.node_graph.is_empty() {
+            configured_node_graph()
+        } else {
+            record.node_graph
+        },
+    ))
 }
 
 pub(crate) fn configured_node_graph() -> String {
@@ -1729,8 +1742,7 @@ mod tests {
     #[test]
     fn a_node_names_its_own_agent_graph_or_takes_the_shipped_default() {
         let pinned = oneagentgraph::config::ConfigRef("./custom.yaml".into());
-        assert_eq!(node_graph(Some(&pinned), "missing"), pinned);
-        assert!(!node_graph(None, "missing").0.is_empty());
+        assert_eq!(node_graph(Some(&pinned), "missing").unwrap(), pinned);
     }
 
     #[test]

@@ -115,8 +115,22 @@ pub fn execute(
             Some(dir) => WorkspaceSpec::Path(dir.clone()),
             None => WorkspaceSpec::VcsSession(request.clone()),
         };
+        let graph = match engine::node_graph(
+            step.agent_graph.as_ref().or(node.agent_graph.as_ref()),
+            run,
+        ) {
+            Ok(graph) => graph,
+            Err(error) => {
+                return Settlement {
+                    detail: Some(error.to_string()),
+                    branch,
+                    completed_steps: completed,
+                    ..Settlement::plain(&node.id, NodeStatus::Failed, Some("invalid-launch-record"))
+                };
+            }
+        };
         let build = || DispatchRequest {
-            graph: engine::node_graph(step.agent_graph.as_ref().or(node.agent_graph.as_ref()), run),
+            graph: graph.clone(),
             task: step.rendered_task(node.context.as_deref()),
             labels: engine::dispatch_labels(
                 run,
@@ -274,8 +288,11 @@ fn draft_title(
             ..request
         }),
     };
+    let Ok(graph) = engine::node_graph(None, run) else {
+        return fallback;
+    };
     let dispatch = executor.dispatch(DispatchRequest {
-        graph: engine::node_graph(None, run),
+        graph,
         task: format!(
             "Read this branch's diff and write the change request's title and body, \
              following the repository's own template. The task this branch delivered:\n\n{}",
