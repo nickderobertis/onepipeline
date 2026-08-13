@@ -76,6 +76,16 @@ case "${1-}" in
   break-streams)
     takes "$#" 1 "break-streams takes no arguments"
     require_home
+    # `ONEVCS_HOME` is this script's external input and the next line removes a
+    # tree under it, so being *set* is not enough to act on: a variable holding
+    # a root, a home directory, or a typo would have this delete a `streams`
+    # somewhere nobody meant. What makes it the state root is that `onevcs` has
+    # already written the store this verb exists to break — so the store is what
+    # is checked, and a path that does not hold one is refused rather than
+    # destroyed.
+    if [ ! -d "$ONEVCS_HOME/streams" ]; then
+      fail "ONEVCS_HOME=$ONEVCS_HOME holds no streams directory, so it is not the state root onevcs wrote; there is nothing here to break"
+    fi
     rm -rf "$ONEVCS_HOME/streams"
     if ! : >"$ONEVCS_HOME/streams"; then
       broke "cannot leave a file where $ONEVCS_HOME/streams was"

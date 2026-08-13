@@ -1129,6 +1129,18 @@ pub fn interrupt(address: &TurnAddress, input: &str) -> Interrupt {
         Some(input),
         &oneharness_bin(&env),
     );
+    // llmlint: ignore-block[changed_behavior_has_e2e] three of these five answers cannot
+    // be reached offline, and the reason is the sibling's rather than a gap in the suite.
+    // `Delivered`, `Failed`, and `Invalid` are all what `control::deliver` came back with,
+    // and it is only ever called for a member whose scratch holds an *open* turn — which
+    // `oneagentgraph` writes from `judge.rs` alone, for a `kind: onejudge` member. The
+    // graphs these journeys run declare `kind: oneharness` members, deliberately: the
+    // two-party kind runs its conversation against a provider this repository has no
+    // offline stand-in for, which is divergence 21. So a real dispatch here reaches
+    // `NoTurn`, and `a_note_delivered_through_the_real_sibling_records_what_its_lever_answered`
+    // is the journey that drives it, envelope and all. The other two arms — an address the
+    // sibling cannot parse, and a run it cannot find — are driven directly by this module's
+    // own tests, which is the only entry point either has.
     let (outcome, reason) = match delivered {
         Ok(oneagentgraph::control::Delivery::Delivered) => (Interrupted::Delivered, None),
         Ok(oneagentgraph::control::Delivery::NoTurn(reason)) => {
@@ -1162,7 +1174,7 @@ pub fn interrupt(address: &TurnAddress, input: &str) -> Interrupt {
                 events: Vec::new(),
             }
         }
-    };
+    }; // llmlint: ignore-end[changed_behavior_has_e2e]
     Interrupt {
         outcome,
         events: published(&run_id, address.member(), input.len() as u64, reason),
@@ -1187,12 +1199,12 @@ fn published(
     input_bytes: u64,
     reason: Option<String>,
 ) -> Vec<Envelope> {
-    let written = Captured::new();
+    let sink = Captured::new();
     let emitter = oneagentgraph::event::Emitter::new(
         // The verb's own stream id: an envelope's `stream` is a unique id per
         // producing process, and this process is the one producing it.
         format!("{run_id}-interrupt-{}", std::process::id()),
-        Box::new(written.clone()),
+        Box::new(sink.clone()),
     )
     .with_labels(oneagentgraph::event::Labels {
         run_id: Some(run_id.to_string()),
@@ -1212,7 +1224,7 @@ fn published(
             _ => serde_json::Map::new(),
         },
     );
-    read_envelopes(&written.taken())
+    read_envelopes(&sink.written())
 }
 
 /// A sink that keeps what was written to it.
@@ -1229,8 +1241,8 @@ impl Captured {
         Self(Arc::new(std::sync::Mutex::new(Vec::new())))
     }
 
-    /// What has been written so far, as text.
-    fn taken(&self) -> String {
+    /// What has been written to it so far, as text.
+    fn written(&self) -> String {
         self.0.lock().map_or_else(
             |held| String::from_utf8_lossy(&held.into_inner()).into_owned(),
             |held| String::from_utf8_lossy(&held).into_owned(),

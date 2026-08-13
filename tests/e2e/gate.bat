@@ -41,8 +41,17 @@ if not defined ONEVCS_HOME (
   call :fail "ONEVCS_HOME is unset, so there is no session stream to reach; set it to the state root this world gave onevcs, the way World::cmd does"
   exit /b 64
 )
-rem `rmdir` on a directory that is not there is not a failure here: what this
-rem verb promises is a file where the directory was, so only that is checked.
+rem `ONEVCS_HOME` is this script's external input and the next line removes a
+rem tree under it, so being *defined* is not enough to act on: a variable holding
+rem a drive root, a profile directory, or a typo would have this delete a
+rem `streams` somewhere nobody meant. What makes it the state root is that
+rem `onevcs` has already written the store this verb exists to break — so the
+rem store is what is checked, and a path that does not hold one is refused
+rem rather than destroyed.
+if not exist "%ONEVCS_HOME%\streams\" (
+  call :fail "ONEVCS_HOME=%ONEVCS_HOME% holds no streams directory, so it is not the state root onevcs wrote; there is nothing here to break"
+  exit /b 64
+)
 rmdir /s /q "%ONEVCS_HOME%\streams" 2>nul
 type nul >"%ONEVCS_HOME%\streams"
 if errorlevel 1 (
