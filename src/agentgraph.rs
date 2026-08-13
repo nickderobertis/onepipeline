@@ -1,18 +1,20 @@
 //! The `oneagentgraph` seam.
 //!
-//! Agent, harness, and model selection stay in that library, so this crate
-//! reaches it the way any other caller does: through its CLI. Composition, not
-//! reimplementation — nothing here decides a harness, a chain, or a model, and
-//! the envelopes it produces are relayed into the merged stream exactly as it
-//! emitted them.
+//! Agent, harness, and model selection stay in that library, so ordinary graph
+//! runs use its nonblocking Rust handle. Composition, not reimplementation:
+//! nothing here decides a harness, a chain, or a model, and envelopes cross the
+//! same serialized boundary as the former NDJSON relay.
 //!
-//! The binary is resolved from [`BINARY_ENV`] so an operator can point at a
-//! specific build, and so a test can compose against a real executable standing
-//! in for one.
+//! [`BINARY_ENV`] remains an explicit compatibility override. Detached launches
+//! also retain a process because their scheduler must outlive this process;
+//! neither case changes the default in-process path.
 
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use crate::error::{Error, Result};
@@ -191,6 +193,29 @@ pub fn adopt_labels(labels: &mut Labels) {
 /// One `oneagentgraph run`, started and streaming.
 #[derive(Debug)]
 pub struct GraphRun {
+    backend: GraphBackend,
+}
+
+#[derive(Debug)]
+enum GraphBackend {
+    Library(LibraryGraphRun),
+    Process(ProcessGraphRun),
+}
+
+#[derive(Debug)]
+struct LibraryGraphRun {
+    events: Option<mpsc::Receiver<Result<Envelope>>>,
+    settled: mpsc::Receiver<Result<Settled>>,
+    cancel: mpsc::Sender<()>,
+    pid: u32,
+    exited: Arc<AtomicBool>,
+}
+
+/// The retained process implementation for detached launches. A scheduler
+/// thread cannot outlive the embedding process, so the SDK cannot implement a
+/// launch whose caller deliberately exits immediately afterward.
+#[derive(Debug)]
+struct ProcessGraphRun {
     child: Child,
     /// Where this launch's output went, and what reads it back.
     output: Output,
@@ -237,7 +262,7 @@ enum Output {
     Logged(PathBuf),
 }
 
-impl GraphRun {
+impl ProcessGraphRun {
     /// Start a graph, with its envelopes going wherever `output` says.
     pub fn start(
         graph: &str,
@@ -614,6 +639,187 @@ impl GraphRun {
     }
 }
 
+impl GraphRun {
+    /// Start a graph through the sibling library. Detached launches retain the
+    /// process boundary because a library scheduler thread cannot survive this
+    /// process exiting.
+    pub fn start(
+        graph: &str,
+        task: &str,
+        dir: Option<&Path>,
+        labels: &Labels,
+        env: &[(String, String)],
+        sets: &[String],
+        output: GraphOutput<'_>,
+    ) -> Result<Self> {
+        if matches!(output, GraphOutput::Logged(_)) || std::env::var_os(BINARY_ENV).is_some() {
+            return ProcessGraphRun::start(graph, task, dir, labels, env, sets, output).map(
+                |run| Self {
+                    backend: GraphBackend::Process(run),
+                },
+            );
+        }
+
+        let mut run_env: BTreeMap<String, String> = std::env::vars_os()
+            .filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?)))
+            .collect();
+        run_env.extend(env.iter().cloned());
+        let labels = label_args(labels)
+            .iter()
+            .map(|label| {
+                oneagentgraph::run::parse_label(label).map_err(|error| sibling(error.to_string()))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let overrides = sets
+            .iter()
+            .map(|value| {
+                oneagentgraph::run::parse_set(value).map_err(|error| sibling(error.to_string()))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let state_dir = run_env.get("ONEAGENTGRAPH_STATE_DIR").map_or_else(
+            || {
+                run_env
+                    .get("HOME")
+                    .map_or_else(std::env::temp_dir, PathBuf::from)
+                    .join(".local/state/oneagentgraph/runs")
+            },
+            PathBuf::from,
+        );
+        let request = oneagentgraph::run::Request {
+            graph: oneagentgraph::config::ConfigRef(graph.to_string()),
+            task: Some(task.to_string()),
+            dir: dir.map_or_else(
+                || std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+                Path::to_path_buf,
+            ),
+            labels,
+            overrides,
+            state_dir,
+            oneharness_bin: run_env
+                .get("ONEAGENTGRAPH_ONEHARNESS_BIN")
+                .cloned()
+                .unwrap_or_else(|| "oneharness".into()),
+        };
+        let running = oneagentgraph::run::start(&request, &run_env)
+            .map_err(|error| sibling(error.to_string()))?;
+        let pid = running.started().pid;
+        let (events_tx, events_rx) = mpsc::channel();
+        let (settled_tx, settled_rx) = mpsc::channel();
+        let (cancel_tx, cancel_rx) = mpsc::channel();
+        let exited = Arc::new(AtomicBool::new(false));
+        let thread_exited = Arc::clone(&exited);
+        std::thread::Builder::new()
+            .name("oneagentgraph-relay".into())
+            .spawn(move || {
+                loop {
+                    if cancel_rx.try_recv().is_ok() {
+                        let _ = running.cancel();
+                    }
+                    match running.recv_timeout(Duration::from_millis(10)) {
+                        Ok(Some(envelope)) => {
+                            let converted = serde_json::to_value(envelope)
+                                .map_err(|error| {
+                                    sibling(format!("serializing graph event: {error}"))
+                                })
+                                .and_then(|value| {
+                                    serde_json::from_value::<Envelope>(value).map_err(|error| {
+                                        sibling(format!("reading graph event: {error}"))
+                                    })
+                                })
+                                .map(|mut envelope| {
+                                    adopt_labels(&mut envelope.labels);
+                                    envelope
+                                });
+                            if events_tx.send(converted).is_err() {
+                                let _ = running.cancel();
+                                break;
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                        Err(mpsc::RecvTimeoutError::Timeout) => unreachable!(),
+                    }
+                }
+                let settled = running.wait().map_or_else(
+                    |error| {
+                        Ok(Settled {
+                            code: Some(oneagentgraph::error::EXIT_MEMBER_FAILED),
+                            stderr: error.to_string(),
+                        })
+                    },
+                    |code| {
+                        Ok(Settled {
+                            code: Some(code),
+                            stderr: String::new(),
+                        })
+                    },
+                );
+                thread_exited.store(true, Ordering::Release);
+                let _ = settled_tx.send(settled);
+            })
+            .map_err(|error| sibling(format!("cannot start graph relay: {error}")))?;
+        Ok(Self {
+            backend: GraphBackend::Library(LibraryGraphRun {
+                events: Some(events_rx),
+                settled: settled_rx,
+                cancel: cancel_tx,
+                pid,
+                exited,
+            }),
+        })
+    }
+
+    pub fn confirm_started(&mut self) -> Result<()> {
+        match &mut self.backend {
+            GraphBackend::Library(_) => Ok(()),
+            GraphBackend::Process(run) => run.confirm_started(),
+        }
+    }
+
+    pub fn events(&mut self) -> Box<dyn Iterator<Item = Result<Envelope>> + Send> {
+        match &mut self.backend {
+            GraphBackend::Library(run) => run.events.take().map_or_else(
+                || {
+                    Box::new(std::iter::empty())
+                        as Box<dyn Iterator<Item = Result<Envelope>> + Send>
+                },
+                |events| Box::new(events.into_iter()),
+            ),
+            GraphBackend::Process(run) => run.events(),
+        }
+    }
+
+    pub fn wait(&mut self) -> Result<Settled> {
+        match &mut self.backend {
+            GraphBackend::Library(run) => run
+                .settled
+                .recv()
+                .map_err(|error| sibling(format!("waiting for graph run: {error}")))?,
+            GraphBackend::Process(run) => run.wait(),
+        }
+    }
+
+    pub fn pid(&self) -> u32 {
+        match &self.backend {
+            GraphBackend::Library(run) => run.pid,
+            GraphBackend::Process(run) => run.pid(),
+        }
+    }
+
+    pub fn has_exited(&mut self) -> bool {
+        match &mut self.backend {
+            GraphBackend::Library(run) => run.exited.load(Ordering::Acquire),
+            GraphBackend::Process(run) => run.has_exited(),
+        }
+    }
+
+    pub fn cancel(&self) {
+        if let GraphBackend::Library(run) = &self.backend {
+            let _ = run.cancel.send(());
+        }
+    }
+}
+
 /// How a graph run ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settled {
@@ -822,16 +1028,21 @@ pub fn interrupt(address: &TurnAddress, input: &str) -> Interrupt {
 /// A health probe that cannot run is silence rather than a failure: a view whose
 /// provider block is missing still reports everything else it knows.
 pub fn health() -> Option<String> {
-    let output = Command::new(binary())
-        .arg("health")
-        .stdin(Stdio::null())
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+    if std::env::var_os(BINARY_ENV).is_some() {
+        let output = Command::new(binary())
+            .arg("health")
+            .stdin(Stdio::null())
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        return (!text.is_empty()).then_some(text);
     }
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    (!text.is_empty()).then_some(text)
+    oneagentgraph::health::read()
+        .ok()
+        .and_then(|report| serde_json::to_string_pretty(&report).ok())
 }
 
 #[cfg(test)]

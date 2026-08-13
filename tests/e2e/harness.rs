@@ -222,7 +222,7 @@ impl World {
     pub fn agentgraph_cmd(&self, args: &[&str]) -> Command {
         let mut command = self.cmd(args);
         command
-            .env("ONEPIPELINE_ONEAGENTGRAPH_BIN", oneagentgraph_binary())
+            .env_remove("ONEPIPELINE_ONEAGENTGRAPH_BIN")
             .env("ONEAGENTGRAPH_ONEHARNESS_BIN", double("fake-oneharness"))
             .env("ONEAGENTGRAPH_STATE_DIR", self.root.join("graph-state"))
             .env(
