@@ -1175,10 +1175,23 @@ fn interpreted(script: &Path) -> Vec<String> {
 }
 
 /// The gate script for this platform, written into the world's own scratch.
+///
+/// Written with **CRLF**, and that is a correctness requirement rather than a
+/// convention. `cmd.exe` does not read a batch file line by line: it seeks by
+/// byte offset after each command, and the arithmetic assumes two bytes end a
+/// line. Given the LF the repository's `.gitattributes` checks every file out
+/// with, each seek lands one byte earlier than the last, and cmd starts
+/// executing the *middles of words* — the first symptom was `'ows' is not
+/// recognized as an internal or external command`, out of `rem The Windows half`
+/// eight lines above anything this script does. So the conversion happens here,
+/// at the one place the file becomes a program, rather than by excepting `.bat`
+/// from the repository's line-ending policy for a file no editor on this side
+/// ever opens.
 #[cfg(windows)]
 fn write_gate_script(world: &World) -> PathBuf {
     let path = world.root.join("gate.bat");
-    std::fs::write(&path, include_str!("gate.bat")).expect("the gate script is written");
+    std::fs::write(&path, include_str!("gate.bat").replace('\n', "\r\n"))
+        .expect("the gate script is written");
     path
 }
 
