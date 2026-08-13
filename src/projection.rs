@@ -34,6 +34,20 @@ pub struct RunState {
     /// from this map has not started, which is what `reparent` and `cancel`
     /// test for.
     pub recorded: BTreeMap<String, NodeStatus>,
+    /// The nodes a `retry` replaced *in the current round*.
+    ///
+    /// Per-round, like [`recorded`](Self::recorded). A superseded node stays in
+    /// the executed graph so the round's own record still names it, and the
+    /// transition then removes it exactly as an explicit `drop` would — this is
+    /// what tells the transition which nodes those are.
+    ///
+    /// Kept as its own set rather than read back off a `cancelled` status,
+    /// because that status is not only supersession's: a `cancel` parks a node
+    /// **and** stops its dispatch, so a node parked while it was running settles
+    /// `cancelled` too. Read off the status, the transition deleted the node a
+    /// `requeue` was supposed to bring back, and freed its dependents behind it
+    /// by taking their gate away with it.
+    pub superseded: BTreeSet<String>,
     /// Each settled node's outcome, when it recorded one.
     pub outcomes: BTreeMap<String, String>,
     /// The branch each settled node left behind, as its dispatch reported it.
@@ -200,6 +214,7 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
             // settlements are folded into the graph it was handed, not carried
             // as live frontier state.
             state.recorded.clear();
+            state.superseded.clear();
             state.outcomes.clear();
             state.notes_this_round.clear();
             state.activity.clear();
@@ -280,8 +295,10 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
                     Operation::RetryRequested { node, .. } => {
                         // The superseded node stays in the executed graph,
                         // cancelled, so the transition removes it exactly as an
-                        // explicit `drop` would.
+                        // explicit `drop` would — and it is named here rather
+                        // than inferred from that status, which a park shares.
                         state.recorded.insert(node.clone(), NodeStatus::Cancelled);
+                        state.superseded.insert(node.clone());
                     }
                     Operation::NodeParked { node } => {
                         state.recorded.insert(node.clone(), NodeStatus::Parked);

@@ -1459,7 +1459,12 @@ pub(crate) fn derive_next(state: &RunState) -> Graph {
         .filter(|id| statuses.get(*id).copied() != Some(NodeStatus::Done))
         // A node the reconciler superseded stays in the executed graph,
         // cancelled, so the transition removes it exactly as a `drop` would.
-        .filter(|id| state.recorded.get(*id) != Some(&NodeStatus::Cancelled))
+        // Named by the retry that replaced it, not read off its `cancelled`
+        // status: a `cancel` parks a node *and* stops its dispatch, so a node
+        // parked mid-flight settles `cancelled` too, and reading the status
+        // deleted the very node `requeue` exists to bring back — along with the
+        // gate it was holding over its dependents, which then ran.
+        .filter(|id| !state.superseded.contains(*id))
         .cloned()
         .collect();
 
@@ -1665,16 +1670,44 @@ mod tests {
 
     #[test]
     fn a_superseded_node_is_removed_exactly_as_a_drop_would_remove_it() {
-        let state = state_of(
+        let mut state = state_of(
             vec![agent("build", &[]), agent("build-2", &[])],
             &[("build", NodeStatus::Cancelled)],
         );
+        state.superseded.insert("build".into());
         let next = derive_next(&state);
         assert!(
             !next.contains("build"),
             "the superseded node was carried forward"
         );
         assert!(next.contains("build-2"));
+    }
+
+    /// A node parked while it was running is *not* a superseded node.
+    ///
+    /// `cancel` parks the node and stops its dispatch, and a stopped dispatch
+    /// settles `cancelled` — the same status a `retry` leaves on the node it
+    /// replaced. Read off that status, the transition deleted a node no `retry`
+    /// had replaced: `requeue` then had nothing to bring back, and the
+    /// dependents the park was holding lost their gate along with it and ran.
+    #[test]
+    fn a_node_parked_while_it_was_running_is_carried_rather_than_removed() {
+        let mut parked = agent("sweep", &[]);
+        parked.parked = true;
+        let state = state_of(
+            vec![parked, agent("after", &["sweep"])],
+            &[("sweep", NodeStatus::Cancelled)],
+        );
+        let next = derive_next(&state);
+        assert!(
+            next.get("sweep").is_some_and(|node| node.parked),
+            "a node parked mid-flight was removed instead of carried"
+        );
+        assert_eq!(
+            next.get("after").expect("after").deps,
+            vec!["sweep".to_string()],
+            "the parked node's dependent lost the gate it was held behind"
+        );
     }
 
     #[test]
