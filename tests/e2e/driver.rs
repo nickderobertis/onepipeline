@@ -9,6 +9,8 @@
 // model turns to produce, and `dispatch.rs` is where the real `oneagentgraph` binary is
 // driven instead. `harness.rs` carries the same suppression and the full rationale.
 
+use std::path::{Path, PathBuf};
+
 use crate::harness::{agent, human, plan_of, World, NOTHING_DRIVING, REFUSED};
 use serde_json::json;
 
@@ -335,7 +337,7 @@ fn start_and_adopt_give_the_sibling_the_same_directory_for_one_run() {
         "`start` and `adopt` sent the sibling two different directories for one run"
     );
     assert_eq!(
-        std::path::Path::new(&dirs[0]),
+        Path::new(&dirs[0]),
         launched_from,
         "the run moved to the directory the adoption was typed in"
     );
@@ -348,6 +350,80 @@ fn start_and_adopt_give_the_sibling_the_same_directory_for_one_run() {
     );
     let started = world.events_of(&run, "run-started");
     assert_eq!(started[0]["payload"]["dir"], json!(launched_from));
+}
+
+/// A second spelling of one directory: a symlinked route to it.
+///
+/// The shape macOS ships by default — `/var` is a link to `/private/var`, so
+/// every temporary directory there is reached through one — built here because
+/// a symlink is a symlink on Linux too. What matters is only that it is a route
+/// to the directory rather than the directory's own name, and that a process
+/// changed into it reports the directory.
+#[cfg(unix)]
+fn another_spelling_of(dir: &Path) -> PathBuf {
+    let route = dir.with_file_name("routed-through");
+    std::os::unix::fs::symlink(dir, &route).expect("a symlinked route to the directory");
+    route
+}
+
+/// A second spelling of one directory: a detour out through its parent.
+///
+/// Where a directory symlink needs a privilege no CI account is guaranteed to
+/// hold, this is the route every platform offers instead — `SetCurrentDirectory`
+/// resolves it away exactly as `chdir` does, so the process still reports the
+/// directory rather than the way it was reached.
+#[cfg(not(unix))]
+fn another_spelling_of(dir: &Path) -> PathBuf {
+    let leaf = dir.file_name().expect("the directory has a name");
+    dir.join("..").join(leaf)
+}
+
+/// A launch records the directory the process resolves, not the route to it.
+///
+/// One directory has more than one spelling on every platform, and the record
+/// has to carry the one every process agrees on: it is read by a *different*
+/// process at every `adopt`, and it reaches each member's harness as its
+/// `--cwd`, from which `oneharness` derives the project its history is kept
+/// under. Two spellings of one directory is two projects, and a run whose
+/// records do not add up.
+///
+/// So what is recorded is the kernel's own answer — [`std::env::current_dir`],
+/// read once by the process the operator ran — and never the argument that
+/// process was handed. This is the journey that says so: the launch is typed
+/// through a route to the directory, and every place the value lands names the
+/// directory instead.
+#[test]
+fn a_launch_records_the_directory_the_process_resolves_not_the_route_to_it() {
+    let world = World::new("driver-launch-dir-route");
+    let route = another_spelling_of(&world.project);
+    assert_ne!(
+        route, world.project,
+        "the route is not a second spelling, so this journey proves nothing"
+    );
+
+    let path = world.plan("routed", &plan_of("routed", vec![human("approve", &[])]));
+    let mut start = world.cmd(&["start", &path.to_string_lossy(), "--detach"]);
+    start.current_dir(&route);
+    world.run_on(start, "start routed").exited(0);
+    let run = "routed".to_string();
+    world.until("the driver to exit", |world| {
+        world.run(&["status", &run]).stdout.contains("DRIVER DEAD")
+    });
+
+    assert_eq!(
+        world.run_json(&run, "launch.json")["dir"],
+        json!(world.project),
+        "the record kept the route the launch was typed through"
+    );
+    assert_eq!(
+        world.events_of(&run, "run-started")[0]["payload"]["dir"],
+        json!(world.project)
+    );
+    assert_eq!(
+        Path::new(dag_launch_dirs(&world).first().expect("the launch")),
+        world.project,
+        "the sibling was sent the route rather than the directory"
+    );
 }
 
 /// A run recorded by a build that had no directory field keeps the reading it
@@ -392,17 +468,38 @@ fn a_launch_record_without_a_directory_is_replayed_from_the_adopting_process() {
     world.run_on(adopt, "adopt legacy").exited(NOTHING_DRIVING);
     let dirs = dag_launch_dirs(&world);
     assert_eq!(
-        std::path::Path::new(dirs.last().expect("the adoption relaunched the graph")),
+        Path::new(dirs.last().expect("the adoption relaunched the graph")),
         adopted_from,
         "a record with no directory was not replayed from the adopting process: {dirs:?}"
     );
 
     // And a record that carries one it cannot honour is refused by name rather
-    // than handed on for each member to fail against separately.
-    for (dir, reason) in [
-        ("relative/place", "relative working directory"),
-        ("/no/such/place/here", "which is not a directory"),
+    // than handed on for each member to fail against separately. One case per
+    // guard, and each spelled so it means the same thing wherever this runs:
+    // whether a path is absolute is a platform's own rule, so a fixture that
+    // reads as absolute here and relative there reaches a different guard on
+    // each and proves neither. `/no/such/place/here` is exactly that — absolute
+    // on Unix, and relative on Windows, where an absolute path carries a drive.
+    let occupied = world.root.join("not-a-directory");
+    std::fs::write(
+        &occupied,
+        "a file, so the record names something that is not a directory",
+    )
+    .expect("a file for the record to point at");
+    for (dir, absolute, reason) in [
+        (
+            PathBuf::from("relative/place"),
+            false,
+            "relative working directory",
+        ),
+        (occupied, true, "which is not a directory"),
     ] {
+        assert_eq!(
+            dir.is_absolute(),
+            absolute,
+            "'{}' does not reach the guard this case is written for on this platform",
+            dir.display()
+        );
         let mut record = world.run_json(&run, "launch.json");
         record["dir"] = json!(dir);
         rewrite(&mut record);
@@ -410,7 +507,7 @@ fn a_launch_record_without_a_directory_is_replayed_from_the_adopting_process() {
             .run(&["adopt", &run])
             .exited(REFUSED)
             .err_has(reason)
-            .err_has(dir);
+            .err_has(&dir.to_string_lossy());
     }
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
@@ -651,7 +748,7 @@ fn the_owner_stops_its_own_run_without_force() {
             .as_u64()
             .expect("a recorded driver");
         world.until("the driver process to end", |_| {
-            !std::path::Path::new(&format!("/proc/{driver}")).exists()
+            !Path::new(&format!("/proc/{driver}")).exists()
         });
     }
     world.release("build.go");
