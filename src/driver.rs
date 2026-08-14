@@ -699,7 +699,8 @@ fn stop(args: &StopArgs) -> Result<i32> {
     let established = match teardown {
         None => journal::StopTeardown::Elsewhere,
         Some(sys::Teardown::Signalled) => journal::StopTeardown::Signalled,
-        Some(sys::Teardown::Undetermined) => journal::StopTeardown::Undetermined,
+        Some(sys::Teardown::NotAttempted) => journal::StopTeardown::NotAttempted,
+        Some(sys::Teardown::PartlySignalled) => journal::StopTeardown::PartlySignalled,
     };
     let mut journal = Journal::open(&paths);
     journal.emit(
@@ -711,17 +712,29 @@ fn stop(args: &StopArgs) -> Result<i32> {
             (journal::STOP_TEARDOWN, json!(established)),
         ]),
     )?;
-    if teardown == Some(sys::Teardown::Undetermined) {
-        // Deliberately neither `stopped: true` nor exit 0: nothing was
-        // signalled, so the run is still running exactly as it was. Reporting
-        // that as a clean stop is the false completion this refusal removes.
-        return Err(Error::Refused(format!(
-            "run '{run}' was not stopped: this host gave no process listing its tree \
-             could be read from, so the processes the run started could not be found, and \
-             ending its driver alone would have orphaned them. The run is untouched — run \
-             `onepipeline stop {run}` again once `ps` answers",
-            run = paths.run
-        )));
+    // Deliberately neither `stopped: true` nor exit 0 for either of these: a run
+    // whose processes were not all reached is still running, and reporting that
+    // as a clean stop is the false completion this refusal removes. The two say
+    // different things because they leave the operator in different places.
+    let run = &paths.run;
+    match teardown {
+        Some(sys::Teardown::NotAttempted) => {
+            return Err(Error::Refused(format!(
+                "run '{run}' was not stopped: this host gave no process listing its tree \
+                 could be read from, so the processes the run started could not be found, \
+                 and ending its driver alone would have orphaned them. The run is \
+                 untouched — run `onepipeline stop {run}` again once `ps` answers"
+            )));
+        }
+        Some(sys::Teardown::PartlySignalled) => {
+            return Err(Error::Refused(format!(
+                "run '{run}' was only partly stopped: part of its process tree was \
+                 signalled and at least one process in it could not be, so that one is \
+                 still running and is not this session's to end. Find it with `ps` and \
+                 end it as the user that owns it"
+            )));
+        }
+        None | Some(sys::Teardown::Signalled) => {}
     }
     // `teardown` qualifies `stopped`: the ledger record is what stops a run, and
     // it is written either way, but only this host can say what became of the

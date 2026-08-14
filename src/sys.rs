@@ -92,28 +92,35 @@ pub fn hostname() -> String {
 
 /// What a teardown established about the processes it was aimed at.
 ///
-/// Two answers, not a scale: anything short of "nothing can have survived this"
-/// reaches the caller as a question. A stop that reports a success it did not
-/// achieve is how a paid worker keeps running with the run's own record saying
-/// it was ended.
+/// Three outcomes because they call for three different things from the caller,
+/// and collapsing any two of them is how a stop reports a completion nobody
+/// achieved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Teardown {
-    /// The tree was listed in full and every process in it was signalled — or
-    /// there was no process to aim at.
+    /// Every process in the tree was reached — or there was no process to aim
+    /// at.
     ///
-    /// Signalled, not *proved gone*: `kill` reports only that the signal was
-    /// delivered, and a process may take a moment or ignore a polite one. What
-    /// this rules out is the failure that matters — a descendant nobody aimed
-    /// at. The caller's next liveness probe is what confirms the rest.
+    /// Signalled, not *proved gone*: `kill` reports that the signal was
+    /// delivered, and a process may take a moment over it. What this rules out
+    /// is the failure that matters — a process nobody aimed at. The caller's
+    /// next liveness probe confirms the rest.
     Signalled,
-    /// It could not be established, and **nothing was signalled**.
+    /// The tree could not be listed, so **nothing** was signalled and the run is
+    /// exactly as it was.
     ///
-    /// This host gave no listing that could be trusted, so the tree was never
-    /// enumerated. Deliberately not a half-teardown: a descendant is reparented
-    /// the moment its parent dies, so signalling the root alone would put
-    /// everything under it permanently beyond descent — the only handle a later
-    /// stop has on them. Untouched, the same ask works once the host answers.
-    Undetermined,
+    /// Deliberately not a half-teardown: a descendant is reparented the moment
+    /// its parent dies, so signalling the root alone would put everything under
+    /// it permanently beyond descent — the only handle a later stop has on them.
+    /// Untouched, the same ask works once the host answers.
+    NotAttempted,
+    /// The tree was listed and part of it was signalled; at least one process in
+    /// it was not.
+    ///
+    /// The run is *not* untouched and retrying will not necessarily help: what
+    /// could not be signalled is a process this user may not touch, and it is
+    /// still running. The caller has to say so rather than report either of the
+    /// other two.
+    PartlySignalled,
 }
 
 /// How firmly a process is asked to stop.
@@ -143,7 +150,7 @@ pub enum Stop {
 /// Best-effort about *individual* processes: one already gone, or one this user
 /// may not signal, is not an error here — the caller's next liveness probe
 /// decides whether the stop landed. It is **not** best-effort about the tree: a
-/// host that gives no trustworthy listing gets [`Teardown::Undetermined`] and no
+/// host that gives no trustworthy listing gets [`Teardown::NotAttempted`] and no
 /// signals at all, because a teardown that cannot see what it must end has to
 /// say so rather than end half of it.
 ///
@@ -168,7 +175,7 @@ fn platform_stop(pid: u32, how: Stop) -> Teardown {
     // has died is reparented at once, so a table read after the root is gone no
     // longer descends to any of them.
     let Some(tree) = descendants(pid) else {
-        return Teardown::Undetermined;
+        return Teardown::NotAttempted;
     };
     // The root first, so what is left has stopped growing while its members are
     // taken down. Every answer is kept: one process this user may not signal is
@@ -181,7 +188,7 @@ fn platform_stop(pid: u32, how: Stop) -> Teardown {
     if reached {
         Teardown::Signalled
     } else {
-        Teardown::Undetermined
+        Teardown::PartlySignalled
     }
 }
 
@@ -317,7 +324,9 @@ fn platform_stop(pid: u32, how: Stop) -> Teardown {
     // for the same reason, as a `ps` that will not answer.
     match status {
         Ok(status) if status.success() => Teardown::Signalled,
-        _ => Teardown::Undetermined,
+        // `taskkill` was never started, or refused: it walks the tree itself, so
+        // a run of it that failed leaves nothing this can claim to have reached.
+        _ => Teardown::NotAttempted,
     }
 }
 

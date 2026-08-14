@@ -568,6 +568,29 @@ impl World {
         )
     }
 
+    /// A `PATH` whose `ps` answers with the real listing plus a child of `parent`
+    /// that no signal can reach.
+    ///
+    /// The invented id is `u32::MAX`, which is not a pid any kernel issues and
+    /// does not fit the signed integer `kill` takes — so the teardown refuses to
+    /// send to it and reports that it did not reach it, which is the case under
+    /// test. Deliberately a number rather than a real process: the honest way to
+    /// produce "a process this user may not signal" would be to name one owned by
+    /// somebody else, and a suite that signalled those would be a worse bug than
+    /// any it was checking for.
+    #[cfg(unix)]
+    pub fn path_whose_ps_invents_an_unreachable_child(&self, parent: u32) -> PathBuf {
+        let real = real_ps();
+        self.path_with_ps(
+            "unreachable-child-ps",
+            &format!(
+                "echo '{} {parent}'\nexec {} \"$@\"",
+                u32::MAX,
+                real.display()
+            ),
+        )
+    }
+
     /// A `PATH` holding one `ps` stand-in that behaves like `script`.
     ///
     /// Unix-only: the fixture is a shell script, and the Windows arm reaches the

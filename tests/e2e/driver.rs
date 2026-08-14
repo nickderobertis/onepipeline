@@ -1267,7 +1267,7 @@ fn a_stop_that_cannot_read_the_process_table_refuses_and_leaves_the_run_retryabl
         assert_eq!(stopped.len(), 1, "the attempt went unrecorded");
         assert_eq!(
             stopped[0]["payload"]["teardown"],
-            json!("undetermined"),
+            json!("not-attempted"),
             "a stop that established nothing was recorded as a clean one: {}",
             stopped[0]
         );
@@ -1364,5 +1364,66 @@ fn a_stop_aimed_at_another_hosts_driver_reports_that_it_reached_nothing() {
         .exited(0)
         .out_has("\"teardown\":\"signalled\"");
     world.until("the driver to end", |_| !still_listed(driver));
+    world.release("build.go");
+}
+
+/// A stop that reaches part of a tree says so, and does not call it clean.
+///
+/// The third answer a teardown can give, and the one that is neither of the
+/// others: the tree *was* listed, so this is not a run left untouched, and part
+/// of it was signalled, so it is not a clean stop either. Something in it could
+/// not be signalled and is still running — a process belonging to somebody else,
+/// in the case this stands in for — and no retry of `stop` will change that.
+///
+/// The stand-in adds one child to the real listing under an id no signal can be
+/// sent to, so the case is produced without this suite ever signalling a process
+/// it does not own.
+#[cfg(unix)]
+#[test]
+fn a_stop_that_reaches_part_of_the_tree_refuses_and_names_what_it_left() {
+    let world = World::new("driver-stop-partial");
+    world.script("build.wait", "hold");
+    let (run, driver) = start_detached_announcing(&world, "partial", vec![agent("build", &[])]);
+    world.until("a node to be in flight", |world| {
+        !world.events_of(&run, "node-dispatched").is_empty()
+    });
+    world.until("the dispatch to be more than one process", |_| {
+        descendants(driver).len() > 1
+    });
+    let tree: Vec<u32> = std::iter::once(driver).chain(descendants(driver)).collect();
+
+    let mut command = world.cmd(&["stop", &run]);
+    command.env(
+        "PATH",
+        world.path_whose_ps_invents_an_unreachable_child(driver),
+    );
+    let refused = world.run_on(command, "stop with an unreachable child in the listing");
+    refused.exited(REFUSED).err_has("only partly stopped");
+    assert!(
+        !refused.stdout.contains("\"stopped\":true"),
+        "a partly stopped run was announced as a clean stop:\n{}",
+        refused.stdout
+    );
+
+    // The record says which of the three it was, so a reader is not left to
+    // guess between "untouched" and "ended".
+    let stopped = world.events_of(&run, "run-stopped");
+    assert_eq!(stopped.len(), 1);
+    assert_eq!(
+        stopped[0]["payload"]["teardown"],
+        json!("partly-signalled"),
+        "a partial teardown was recorded as something else: {}",
+        stopped[0]
+    );
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("worker may still be running");
+
+    // The processes it *could* reach were still reached: this is a report about
+    // what was left, not a teardown that gave up.
+    world.until("the processes it could reach to end", |_| {
+        tree.iter().all(|pid| !still_listed(*pid))
+    });
     world.release("build.go");
 }

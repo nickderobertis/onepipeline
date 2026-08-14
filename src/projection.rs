@@ -368,9 +368,9 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
         Some(journal::PipelineKind::RunStopped) => {
             state.stop = match journal::StopTeardown::of(payload) {
                 journal::StopTeardown::Signalled => StopState::WorkersSignalled,
-                journal::StopTeardown::Undetermined | journal::StopTeardown::Elsewhere => {
-                    StopState::WorkersUndetermined
-                }
+                journal::StopTeardown::NotAttempted
+                | journal::StopTeardown::PartlySignalled
+                | journal::StopTeardown::Elsewhere => StopState::WorkersUndetermined,
             };
             state.round_open = false;
         }

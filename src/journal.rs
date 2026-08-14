@@ -224,7 +224,10 @@ pub enum StopTeardown {
     Signalled,
     /// This host gave no listing the tree could be read from, so nothing was
     /// signalled and the run was left as it was.
-    Undetermined,
+    NotAttempted,
+    /// The tree was listed and part of it was signalled; at least one process in
+    /// it could not be, and is still running.
+    PartlySignalled,
     /// The run's driver is on another host, so this one attempted nothing and
     /// has nothing to say about its processes.
     Elsewhere,
@@ -237,12 +240,12 @@ impl StopTeardown {
     /// stops signalled a tree they had read: [`Signalled`](Self::Signalled). A
     /// record that *has* the field and says something this build does not know
     /// is a newer writer describing an outcome this one cannot interpret, and
-    /// the safe reading of an uninterpretable teardown is that nothing was
-    /// established — never that the run's workers were ended.
+    /// the safe reading of an uninterpretable teardown is the most cautious one
+    /// this build has — never that the run's workers were reached.
     pub fn of(payload: &Map<String, Value>) -> Self {
         match payload.get(STOP_TEARDOWN) {
             None => Self::Signalled,
-            Some(value) => serde_json::from_value(value.clone()).unwrap_or(Self::Undetermined),
+            Some(value) => serde_json::from_value(value.clone()).unwrap_or(Self::NotAttempted),
         }
     }
 }
@@ -289,7 +292,7 @@ mod tests {
         ] {
             assert_eq!(
                 StopTeardown::of(&payload(&[(STOP_TEARDOWN, said)])),
-                StopTeardown::Undetermined,
+                StopTeardown::NotAttempted,
                 "{name} was read as an outcome this build understands"
             );
         }
