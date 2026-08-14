@@ -697,9 +697,9 @@ fn stop(args: &StopArgs) -> Result<i32> {
     // the projection reads back. An attempt that established nothing is still
     // recorded — it happened — but it is not recorded as a clean stop.
     let established = match teardown {
-        None => journal::TEARDOWN_ELSEWHERE,
-        Some(sys::Teardown::Ended) => journal::TEARDOWN_ENDED,
-        Some(sys::Teardown::Undetermined) => journal::TEARDOWN_UNDETERMINED,
+        None => journal::StopTeardown::Elsewhere,
+        Some(sys::Teardown::Signalled) => journal::StopTeardown::Signalled,
+        Some(sys::Teardown::Undetermined) => journal::StopTeardown::Undetermined,
     };
     let mut journal = Journal::open(&paths);
     journal.emit(

@@ -21,7 +21,6 @@ use crate::graph::{Graph, NodeStatus};
 use crate::journal;
 use crate::plan::Plan;
 
-/// Everything the journal says about a run.
 /// How a run's `stop` left it.
 ///
 /// One value rather than a pair of flags, because two booleans admit a state
@@ -42,6 +41,7 @@ pub enum StopState {
     WorkersUndetermined,
 }
 
+/// Everything the journal says about a run.
 #[derive(Debug, Clone, Default)]
 pub struct RunState {
     /// The desired graph the current round is converging toward, with every
@@ -366,13 +366,11 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
             state.last_surface_at = millis_of(&event.ts);
         }
         Some(journal::PipelineKind::RunStopped) => {
-            // A record written before the field existed reads as `Ended`: those
-            // stops signalled a tree they had read, which is what that means.
-            state.stop = match payload.get(journal::STOP_TEARDOWN).and_then(Value::as_str) {
-                Some(journal::TEARDOWN_UNDETERMINED) | Some(journal::TEARDOWN_ELSEWHERE) => {
+            state.stop = match journal::StopTeardown::of(payload) {
+                journal::StopTeardown::Signalled => StopState::Ended,
+                journal::StopTeardown::Undetermined | journal::StopTeardown::Elsewhere => {
                     StopState::WorkersUndetermined
                 }
-                _ => StopState::Ended,
             };
             state.round_open = false;
         }

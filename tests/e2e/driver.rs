@@ -1293,7 +1293,7 @@ fn a_stop_that_cannot_read_the_process_table_refuses_and_leaves_the_run_retryabl
             .run(&["stop", &run])
             .exited(0)
             .out_has("\"stopped\":true")
-            .out_has("\"teardown\":\"ended\"");
+            .out_has("\"teardown\":\"signalled\"");
         world.until("every process the run started to end", |_| {
             tree.iter().all(|pid| !still_listed(*pid))
         });
@@ -1303,4 +1303,66 @@ fn a_stop_that_cannot_read_the_process_table_refuses_and_leaves_the_run_retryabl
             .out_has("worker ended when the run was stopped");
         world.release("build.go");
     }
+}
+
+/// A stop aimed at another host's driver says it reached nothing.
+///
+/// A pid means nothing across machines, so this host will not signal one it did
+/// not start. The ledger record is still written — that is what stops a run
+/// across hosts — but the teardown says `elsewhere`, and no view claims the
+/// worker was ended, because nothing here established that.
+///
+/// The same run then stops properly from the host its driver is recorded on,
+/// which is both the contrast and this journey's cleanup.
+#[cfg(unix)]
+#[test]
+fn a_stop_aimed_at_another_hosts_driver_reports_that_it_reached_nothing() {
+    const ELSEWHERE: &str = "a-host-this-is-not";
+    let world = World::new("driver-stop-elsewhere");
+    world.script("build.wait", "hold");
+
+    let path = world.plan("afar", &plan_of("afar", vec![agent("build", &[])]));
+    let mut launch = world.cmd(&["start", &path.to_string_lossy(), "--detach"]);
+    launch.env("HOSTNAME", ELSEWHERE);
+    let started = world.run_on(launch, "start recorded on another host");
+    started.exited(0);
+    let driver = u32::try_from(
+        serde_json::from_str::<serde_json::Value>(started.stdout.trim())
+            .expect("a detached launch announces itself")["pid"]
+            .as_u64()
+            .expect("a driver pid"),
+    )
+    .expect("a pid");
+    world.until("a node to be in flight", |world| {
+        !world.events_of("afar", "node-dispatched").is_empty()
+    });
+
+    // From this host, which is not the one the driver is recorded on.
+    world
+        .run(&["stop", "afar"])
+        .exited(0)
+        .out_has("\"teardown\":\"elsewhere\"");
+    assert!(
+        still_listed(driver),
+        "a stop signalled a pid recorded on another host, where it means nothing"
+    );
+    let status = world.run(&["status", "afar"]);
+    status.exited(0).out_has("worker may still be running");
+    assert!(
+        !status
+            .stdout
+            .contains("worker ended when the run was stopped"),
+        "a view claimed a worker on another host was ended:\n{}",
+        status.stdout
+    );
+
+    // And from the host it *is* recorded on, which ends it for real.
+    let mut here = world.cmd(&["stop", "afar"]);
+    here.env("HOSTNAME", ELSEWHERE);
+    world
+        .run_on(here, "stop from the recorded host")
+        .exited(0)
+        .out_has("\"teardown\":\"signalled\"");
+    world.until("the driver to end", |_| !still_listed(driver));
+    world.release("build.go");
 }

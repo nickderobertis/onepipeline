@@ -207,19 +207,45 @@ fn merged_order(events: &[Envelope]) -> Vec<usize> {
 ///
 /// Named once because `stop` writes it and the projection reads it, and a run
 /// whose two sides disagree about this field reports work as ended that is still
-/// running. The values below are the whole of what it may say.
+/// running.
 pub const STOP_TEARDOWN: &str = "teardown";
 
-/// [`STOP_TEARDOWN`] when the stop ended everything the run had started.
-pub const TEARDOWN_ENDED: &str = "ended";
+/// What a `run-stopped` record says its teardown established about the run's
+/// processes.
+///
+/// A closed set on the wire as well as in the code: an unknown value is not a
+/// fourth meaning to guess at, and [`StopTeardown::of`] reads one as the
+/// conservative answer rather than the convenient one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StopTeardown {
+    /// The run's process tree was listed in full and every process in it was
+    /// signalled.
+    Signalled,
+    /// This host gave no listing the tree could be read from, so nothing was
+    /// signalled and the run was left as it was.
+    Undetermined,
+    /// The run's driver is on another host, so this one attempted nothing and
+    /// has nothing to say about its processes.
+    Elsewhere,
+}
 
-/// [`STOP_TEARDOWN`] when this host gave no listing the tree could be read from,
-/// so nothing was signalled and the run was left as it was.
-pub const TEARDOWN_UNDETERMINED: &str = "undetermined";
-
-/// [`STOP_TEARDOWN`] when the run's driver is on another host, so this one
-/// attempted nothing and has nothing to say about its processes.
-pub const TEARDOWN_ELSEWHERE: &str = "elsewhere";
+impl StopTeardown {
+    /// What a `run-stopped` payload says, read defensively.
+    ///
+    /// A record with no such field is one written before it existed, and those
+    /// stops signalled a tree they had read: [`Signalled`](Self::Signalled). A
+    /// record that *has* the field and says something this build does not know
+    /// is a newer writer describing an outcome this one cannot interpret, and
+    /// the safe reading of an uninterpretable teardown is that nothing was
+    /// established — never that the run's workers were ended.
+    pub fn of(payload: &Map<String, Value>) -> Self {
+        match payload.get(STOP_TEARDOWN) {
+            None => Self::Signalled,
+            Some(value) => serde_json::from_value(value.clone()).unwrap_or(Self::Undetermined),
+        }
+    }
+}
 
 /// The payload of a `node-settled` event, as the projection folds it.
 pub fn settled_payload(
@@ -239,6 +265,40 @@ pub fn settled_payload(
 
 #[cfg(test)]
 mod tests {
+
+    /// What a `run-stopped` record this build cannot interpret is taken to mean.
+    ///
+    /// The three cases are deliberately not one default. An absent field is a
+    /// record older than the field, and those stops signalled a tree they had
+    /// read. A value this build does not know is a *newer* writer describing
+    /// something else, and the only safe reading of a teardown nobody here can
+    /// interpret is that nothing was established — reading it as `Signalled`
+    /// would report a worker as ended on the strength of a word this build had
+    /// never seen.
+    #[test]
+    fn an_uninterpretable_teardown_is_never_read_as_a_clean_stop() {
+        assert_eq!(
+            StopTeardown::of(&payload(&[])),
+            StopTeardown::Signalled,
+            "a record written before the field existed should read as the stop it was"
+        );
+        for (name, said) in [
+            ("a kind this build has never seen", json!("swept")),
+            ("a value of the wrong shape", json!(true)),
+            ("nothing at all", json!(null)),
+        ] {
+            assert_eq!(
+                StopTeardown::of(&payload(&[(STOP_TEARDOWN, said)])),
+                StopTeardown::Undetermined,
+                "{name} was read as an outcome this build understands"
+            );
+        }
+        assert_eq!(
+            StopTeardown::of(&payload(&[(STOP_TEARDOWN, json!("elsewhere"))])),
+            StopTeardown::Elsewhere
+        );
+    }
+
     use super::*;
     use crate::event::EventKind;
     use std::fs;

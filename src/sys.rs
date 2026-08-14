@@ -98,9 +98,14 @@ pub fn hostname() -> String {
 /// it was ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Teardown {
-    /// Nothing can have survived it: the tree was listed in full and every
-    /// process in it was signalled, or there was no process to aim at.
-    Ended,
+    /// The tree was listed in full and every process in it was signalled — or
+    /// there was no process to aim at.
+    ///
+    /// Signalled, not *proved gone*: `kill` reports only that the signal was
+    /// delivered, and a process may take a moment or ignore a polite one. What
+    /// this rules out is the failure that matters — a descendant nobody aimed
+    /// at. The caller's next liveness probe is what confirms the rest.
+    Signalled,
     /// It could not be established, and **nothing was signalled**.
     ///
     /// This host gave no listing that could be trusted, so the tree was never
@@ -148,7 +153,7 @@ pub enum Stop {
 pub fn stop(pid: u32, how: Stop) -> Teardown {
     if pid == 0 || pid == self::pid() {
         // No process was aimed at, so there is no tree and nothing to miss.
-        return Teardown::Ended;
+        return Teardown::Signalled;
     }
     platform_stop(pid, how)
 }
@@ -171,7 +176,7 @@ fn platform_stop(pid: u32, how: Stop) -> Teardown {
     for descendant in tree {
         signal_one(descendant, signal);
     }
-    Teardown::Ended
+    Teardown::Signalled
 }
 
 /// Signal one process, and refuse every id that is not one.
@@ -276,7 +281,7 @@ fn parse_table(listed: &str) -> Option<Vec<(u32, u32)>> {
 }
 
 #[cfg(windows)]
-fn platform_stop(pid: u32, how: Stop) {
+fn platform_stop(pid: u32, how: Stop) -> Teardown {
     // `/T` for the tree in both cases — the same boundary the Unix arm walks the
     // process table for, which this platform offers outright. `/F` is what makes
     // the difference between the two modes: without it `taskkill` asks, and a
@@ -286,10 +291,18 @@ fn platform_stop(pid: u32, how: Stop) {
     if how == Stop::Now {
         command.arg("/F");
     }
-    let _ = command
+    let status = command
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status();
+    // `taskkill` walks the tree itself, so a run of it that succeeded reached
+    // the same boundary the Unix arm enumerates. One that could not run, or that
+    // failed, establishes nothing about the descendants — the same answer, and
+    // for the same reason, as a `ps` that will not answer.
+    match status {
+        Ok(status) if status.success() => Teardown::Signalled,
+        _ => Teardown::Undetermined,
+    }
 }
 
 /// Whether a process *may* be live on this host.
