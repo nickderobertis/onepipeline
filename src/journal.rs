@@ -203,6 +203,24 @@ fn merged_order(events: &[Envelope]) -> Vec<usize> {
     order
 }
 
+/// The `run-stopped` payload field naming what its teardown established.
+///
+/// Named once because `stop` writes it and the projection reads it, and a run
+/// whose two sides disagree about this field reports work as ended that is still
+/// running. The values below are the whole of what it may say.
+pub const STOP_TEARDOWN: &str = "teardown";
+
+/// [`STOP_TEARDOWN`] when the stop ended everything the run had started.
+pub const TEARDOWN_ENDED: &str = "ended";
+
+/// [`STOP_TEARDOWN`] when this host gave no listing the tree could be read from,
+/// so nothing was signalled and the run was left as it was.
+pub const TEARDOWN_UNDETERMINED: &str = "undetermined";
+
+/// [`STOP_TEARDOWN`] when the run's driver is on another host, so this one
+/// attempted nothing and has nothing to say about its processes.
+pub const TEARDOWN_ELSEWHERE: &str = "elsewhere";
+
 /// The payload of a `node-settled` event, as the projection folds it.
 pub fn settled_payload(
     status: &str,

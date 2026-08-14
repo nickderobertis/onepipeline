@@ -77,21 +77,20 @@ pub const PARKED_AFTER_ENV: &str = "ONEPIPELINE_PARKED_AFTER_SECONDS";
 /// on takes that for a node that produced nothing.
 const ENDED_BY_THE_STOP: &str = "worker ended when the run was stopped";
 
-/// How the same node reads when that stop could not reach it.
+/// How the same node reads when nothing established what became of its worker.
 ///
-/// The opposite claim, and it has to be a different sentence: a stop that could
-/// not read this host's process table signalled the driver and nothing under it,
-/// so this worker is very likely *still running* — still holding quota, still
-/// writing into whatever checkout it was given. "Ended" there is the false
-/// completion the stop itself refuses to report.
+/// The opposite claim, and it has to be a different sentence: the stop that was
+/// recorded never enumerated this run's processes, so the worker is very likely
+/// *still running* — still holding quota, still writing into whatever checkout it
+/// was given. "Ended" there is the false completion `stop` itself refuses to
+/// report.
 const OUTLIVED_THE_STOP: &str = "worker may still be running: the stop could not reach it";
 
 /// Which of the two a stopped run's in-flight node gets.
 fn became_of_the_worker(state: &crate::projection::RunState) -> &'static str {
-    if state.stop_left_processes_behind {
-        OUTLIVED_THE_STOP
-    } else {
-        ENDED_BY_THE_STOP
+    match state.stop {
+        crate::projection::StopState::WorkersUndetermined => OUTLIVED_THE_STOP,
+        _ => ENDED_BY_THE_STOP,
     }
 }
 
@@ -131,7 +130,7 @@ pub fn parked_after_seconds() -> u64 {
 /// host is exactly such an unknown — a pid means nothing across machines — so a
 /// run another driver is holding reads as the live work it is.
 pub fn liveness(launch: &LaunchRecord, state: &RunState) -> DriverLiveness {
-    if state.stopped {
+    if state.stopped() {
         return DriverLiveness::DriverDead;
     }
     let ours = launch.host == sys::hostname();
@@ -347,7 +346,7 @@ pub fn status(views: &[RunView]) -> String {
                 .get(id)
                 .map(|at| sys::now_millis().saturating_sub(*at));
             let age = crate::telemetry::duration(age.unwrap_or(0));
-            if view.state.stopped {
+            if view.state.stopped() {
                 // What this node last did stays on the record and is
                 // deliberately not repeated here — see [`ENDED_BY_THE_STOP`].
                 let became = became_of_the_worker(&view.state);
@@ -494,7 +493,7 @@ pub fn results(view: &RunView) -> String {
         if let Some(outcome) = view.state.outcomes.get(&node.id) {
             out.push_str(&format!(" ({outcome})"));
         }
-        if status == NodeStatus::Running && view.state.stopped {
+        if status == NodeStatus::Running && view.state.stopped() {
             out.push_str(&format!(" — {}", became_of_the_worker(&view.state)));
         }
         // What the dispatch reported, before what the plan asked for: an

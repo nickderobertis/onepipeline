@@ -22,6 +22,26 @@ use crate::journal;
 use crate::plan::Plan;
 
 /// Everything the journal says about a run.
+/// How a run's `stop` left it.
+///
+/// One value rather than a pair of flags, because two booleans admit a state
+/// nothing can mean — a run not stopped whose workers outlived the stop — and
+/// every view that reports an in-flight node has to choose exactly one of these
+/// sentences about it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum StopState {
+    /// No stop has been recorded.
+    #[default]
+    NotStopped,
+    /// A stop was recorded and it ended everything the run had started.
+    Ended,
+    /// A stop was recorded, but nothing established what became of the run's
+    /// workers: this host gave no listing its process tree could be read from,
+    /// or the driver is on a host this one cannot reach. They may still be
+    /// running.
+    WorkersUndetermined,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct RunState {
     /// The desired graph the current round is converging toward, with every
@@ -84,17 +104,8 @@ pub struct RunState {
     /// The last event of any kind, in epoch milliseconds — the run's own
     /// evidence that something is still writing to it.
     pub last_write_at: Option<u64>,
-    /// Whether `stop` ended the run.
-    pub stopped: bool,
-    /// Whether that stop left processes it could not reach.
-    ///
-    /// A stop that could not read this host's process table signalled the driver
-    /// and nothing below it, so the run's workers may still be running. Every
-    /// view that says what became of an in-flight node has to tell that from a
-    /// stop that ended the whole tree, or it reports work as ended that is still
-    /// writing. Stated this way round so the default — and a record written
-    /// before the field existed — is the quiet case rather than the alarming one.
-    pub stop_left_processes_behind: bool,
+    /// What `stop` left the run as.
+    pub stop: StopState,
     /// Whether the fold met a line it could not read. Strict replay reports
     /// rather than silently folding an incomplete graph.
     pub strict: bool,
@@ -159,6 +170,11 @@ pub struct NodeActivity {
 const TURN_ACTIVITY: &str = "turn-activity";
 
 impl RunState {
+    /// Whether a stop has been recorded at all, however it went.
+    pub fn stopped(&self) -> bool {
+        self.stop != StopState::NotStopped
+    }
+
     /// The frontier an edit is judged against.
     pub fn frontier(&self) -> Frontier {
         Frontier {
@@ -350,14 +366,14 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
             state.last_surface_at = millis_of(&event.ts);
         }
         Some(journal::PipelineKind::RunStopped) => {
-            state.stopped = true;
-            // Absent on records written before the field existed, and those
-            // stops did reach the tree they knew about — the incomplete case is
-            // the one that has to be stated.
-            state.stop_left_processes_behind = !payload
-                .get("complete")
-                .and_then(Value::as_bool)
-                .unwrap_or(true);
+            // A record written before the field existed reads as `Ended`: those
+            // stops signalled a tree they had read, which is what that means.
+            state.stop = match payload.get(journal::STOP_TEARDOWN).and_then(Value::as_str) {
+                Some(journal::TEARDOWN_UNDETERMINED) | Some(journal::TEARDOWN_ELSEWHERE) => {
+                    StopState::WorkersUndetermined
+                }
+                _ => StopState::Ended,
+            };
             state.round_open = false;
         }
         Some(journal::PipelineKind::CrossDagSatisfied) => {
@@ -781,7 +797,7 @@ mod tests {
         assert_eq!(state.recorded["approve"], NodeStatus::Done);
         assert_eq!(state.completion_requests, vec!["verified".to_string()]);
         assert_eq!(state.cross_dag_watches["run:o#n"], 1);
-        assert!(state.stopped);
+        assert!(state.stopped());
         assert!(!state.round_open);
     }
 

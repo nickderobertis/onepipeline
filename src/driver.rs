@@ -692,8 +692,15 @@ fn stop(args: &StopArgs) -> Result<i32> {
     let view = RunView::open(&paths)?;
     // Attempted before the record is written, so what the record says about the
     // teardown is what actually happened rather than what was about to be tried.
-    let reached = terminate(record.pid, &record.host);
-    let complete = reached != Some(sys::Teardown::DescendantsUnknown);
+    let teardown = terminate(record.pid, &record.host);
+    // What this host established about the run's processes, in the one spelling
+    // the projection reads back. An attempt that established nothing is still
+    // recorded — it happened — but it is not recorded as a clean stop.
+    let established = match teardown {
+        None => journal::TEARDOWN_ELSEWHERE,
+        Some(sys::Teardown::Ended) => journal::TEARDOWN_ENDED,
+        Some(sys::Teardown::Undetermined) => journal::TEARDOWN_UNDETERMINED,
+    };
     let mut journal = Journal::open(&paths);
     journal.emit(
         journal::PipelineKind::RunStopped,
@@ -701,31 +708,32 @@ fn stop(args: &StopArgs) -> Result<i32> {
         journal::payload(&[
             ("owner", json!(owner)),
             ("forced", json!(args.force)),
-            // Whether the stop reached everything the run started. A stop that
-            // could not is still recorded — it happened, and the driver did take
-            // the signal — but it is not a clean one, and every reader of this
-            // run has to be able to tell the two apart.
-            ("complete", json!(complete)),
+            (journal::STOP_TEARDOWN, json!(established)),
         ]),
     )?;
-    if !complete {
-        // Deliberately not `stopped: true` and not exit 0. This host would not
-        // list its processes, so nothing was signalled and the run is still
-        // running exactly as it was — the recoverable end of this, and far
-        // better than a driver killed out from under descendants no later stop
-        // could find. Reporting it as a clean stop is the false completion this
-        // refusal exists to remove.
+    if teardown == Some(sys::Teardown::Undetermined) {
+        // Deliberately neither `stopped: true` nor exit 0: nothing was
+        // signalled, so the run is still running exactly as it was. Reporting
+        // that as a clean stop is the false completion this refusal removes.
         return Err(Error::Refused(format!(
-            "run '{run}' was not stopped: this host would not list its processes, so the \
-             processes the run started could not be found, and ending its driver alone \
-             would have orphaned them. The run is untouched — run `onepipeline stop \
-             {run}` again once `ps` works",
+            "run '{run}' was not stopped: this host gave no process listing its tree \
+             could be read from, so the processes the run started could not be found, and \
+             ending its driver alone would have orphaned them. The run is untouched — run \
+             `onepipeline stop {run}` again once `ps` answers",
             run = paths.run
         )));
     }
+    // `teardown` qualifies `stopped`: the ledger record is what stops a run, and
+    // it is written either way, but only this host can say what became of the
+    // processes — and when the driver is another host's, it cannot.
     println!(
         "{}",
-        json!({"run_id": paths.run, "stopped": true, "owner": owner})
+        json!({
+            "run_id": paths.run,
+            "stopped": true,
+            "owner": owner,
+            journal::STOP_TEARDOWN: established,
+        })
     );
     Ok(EXIT_SUCCESS)
 }

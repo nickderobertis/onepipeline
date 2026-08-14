@@ -90,27 +90,25 @@ pub fn hostname() -> String {
         .unwrap_or_else(|| "localhost".to_string())
 }
 
-/// What a teardown could promise about the processes it was aimed at.
+/// What a teardown established about the processes it was aimed at.
 ///
-/// A teardown that could not enumerate the tree is **not** a teardown that
-/// succeeded on a smaller scope: the descendants it could not find are the
-/// expensive ones, and they are now orphaned and still writing. A caller that
-/// reported such a stop as clean would be recreating the defect this walk
-/// exists to prevent, so the distinction is carried out to the caller rather
-/// than swallowed here.
+/// Two answers, not a scale: anything short of "nothing can have survived this"
+/// reaches the caller as a question. A stop that reports a success it did not
+/// achieve is how a paid worker keeps running with the run's own record saying
+/// it was ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Teardown {
-    /// The process and every descendant it had were signalled.
-    Complete,
-    /// The process table could not be read, so **nothing** was signalled and the
-    /// run is exactly as it was.
+    /// Nothing can have survived it: the tree was listed in full and every
+    /// process in it was signalled, or there was no process to aim at.
+    Ended,
+    /// It could not be established, and **nothing was signalled**.
     ///
-    /// Deliberately not a half-teardown. Signalling the driver and not its
-    /// descendants is what orphans the expensive processes — they are reparented
-    /// the moment their parent dies, so they stop being descendants and no later
-    /// stop can find them by descent. Leaving the tree whole is what keeps the
-    /// ask retryable once this host will answer.
-    DescendantsUnknown,
+    /// This host gave no listing that could be trusted, so the tree was never
+    /// enumerated. Deliberately not a half-teardown: a descendant is reparented
+    /// the moment its parent dies, so signalling the root alone would put
+    /// everything under it permanently beyond descent — the only handle a later
+    /// stop has on them. Untouched, the same ask works once the host answers.
+    Undetermined,
 }
 
 /// How firmly a process is asked to stop.
@@ -139,18 +137,18 @@ pub enum Stop {
 ///
 /// Best-effort about *individual* processes: one already gone, or one this user
 /// may not signal, is not an error here — the caller's next liveness probe
-/// decides whether the stop landed. It is **not** best-effort about the tree. A
-/// host that will not list its processes gets [`Teardown::DescendantsUnknown`]
-/// and no signals at all, because a teardown that cannot see what it must end
-/// has to say so rather than end half of it.
+/// decides whether the stop landed. It is **not** best-effort about the tree: a
+/// host that gives no trustworthy listing gets [`Teardown::Undetermined`] and no
+/// signals at all, because a teardown that cannot see what it must end has to
+/// say so rather than end half of it.
 ///
 /// The table is read a moment before the signals go out, so a child started
 /// inside that moment is missed; signalling the root first is what closes that
 /// in practice.
 pub fn stop(pid: u32, how: Stop) -> Teardown {
     if pid == 0 || pid == self::pid() {
-        // Nothing was aimed at, so nothing was missed.
-        return Teardown::Complete;
+        // No process was aimed at, so there is no tree and nothing to miss.
+        return Teardown::Ended;
     }
     platform_stop(pid, how)
 }
@@ -165,11 +163,7 @@ fn platform_stop(pid: u32, how: Stop) -> Teardown {
     // has died is reparented at once, so a table read after the root is gone no
     // longer descends to any of them.
     let Some(tree) = descendants(pid) else {
-        // And nothing is signalled at all. Killing the root here would orphan
-        // everything under it — permanently, since descent is the only handle
-        // this has on them — to report a stop that did not happen. Left whole,
-        // the same ask works the moment `ps` does.
-        return Teardown::DescendantsUnknown;
+        return Teardown::Undetermined;
     };
     // The root first, so what is left has stopped growing while its members are
     // taken down.
@@ -177,7 +171,7 @@ fn platform_stop(pid: u32, how: Stop) -> Teardown {
     for descendant in tree {
         signal_one(descendant, signal);
     }
-    Teardown::Complete
+    Teardown::Ended
 }
 
 /// Signal one process, and refuse every id that is not one.
@@ -228,20 +222,19 @@ fn descendants(pid: u32) -> Option<Vec<u32>> {
     Some(found)
 }
 
-/// This host's `(pid, parent pid)` pairs, or `None` when it would not list them.
+/// This host's `(pid, parent pid)` pairs, or `None` when it gave no listing this
+/// can be trusted to have read.
 ///
 /// Through `ps`, the one answer every Unix gives — Linux has `/proc` and macOS
 /// does not, and a second implementation is a platform fixed in only one of them.
 ///
-/// External input deciding who gets signalled, so it is read strictly, and the
-/// three faults cost different amounts. A `ps` that cannot run, or that exits
-/// non-zero, is no answer about any process at all: that is `None`, and a
-/// teardown given it cannot claim to have reached a tree. One unreadable row is
-/// one process this teardown cannot place: that row is dropped and its
-/// neighbours kept, because discarding the listing there would strand every
-/// process it named. A row claiming pid `0` is dropped outright — to `kill` that
-/// id means the caller's whole process group, which would turn a walk down one
-/// tree into a broadcast.
+/// External input deciding who gets signalled, so nothing about it is read
+/// leniently. A `ps` that cannot run, that exits non-zero, that writes bytes
+/// this cannot decode, or that writes a row this cannot read is not a listing:
+/// the answer is `None`, and the caller is told the tree is unknown rather than
+/// handed part of one. A dropped row could be the descendant that matters, and
+/// the whole point of the walk is that the process it misses is the expensive
+/// one.
 #[cfg(unix)]
 fn process_table() -> Option<Vec<(u32, u32)>> {
     let listed = std::process::Command::new("ps")
@@ -252,23 +245,32 @@ fn process_table() -> Option<Vec<(u32, u32)>> {
     if !listed.status.success() {
         return None;
     }
-    Some(parse_table(&String::from_utf8_lossy(&listed.stdout)))
+    parse_table(&String::from_utf8(listed.stdout).ok()?)
 }
 
-/// The `(pid, parent pid)` pairs in a listing this host produced.
+/// The `(pid, parent pid)` pairs a listing holds, or `None` if any line of it is
+/// not one.
 ///
 /// Separate from running `ps` so the rows can be read without a process and
 /// without a `PATH`: what a listing may contain is a question about text, and
 /// answering it by rewriting this process's environment would race every other
 /// test that spawns something.
+///
+/// `pid=,ppid=` suppresses the headers, so every non-blank line is meant to be
+/// exactly two ids and anything else means this is not the listing that was
+/// asked for. A row claiming pid `0` counts as unreadable too: no process a
+/// teardown may signal has that id — to `kill` it means the caller's whole
+/// process group — so a listing offering one is not describing this host.
 #[cfg(unix)]
-fn parse_table(listed: &str) -> Vec<(u32, u32)> {
+fn parse_table(listed: &str) -> Option<Vec<(u32, u32)>> {
     listed
         .lines()
-        .filter_map(|line| {
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
             let mut columns = line.split_whitespace();
-            let pair = (columns.next()?.parse().ok()?, columns.next()?.parse().ok()?);
-            (pair.0 != 0).then_some(pair)
+            let pid: u32 = columns.next()?.parse().ok()?;
+            let parent: u32 = columns.next()?.parse().ok()?;
+            (columns.next().is_none() && pid != 0).then_some((pid, parent))
         })
         .collect()
 }
@@ -638,39 +640,60 @@ mod tests {
         false
     }
 
-    /// A row that is not two ids costs that row and no more.
+    /// A listing this cannot read in full is not a listing it may act on.
     ///
-    /// The two faults a listing can have are not the same size. A `ps` that
-    /// *failed* said nothing about any process, and [`process_table`] answers
-    /// `None` for it so a teardown cannot claim to have reached a tree. A `ps`
-    /// that succeeded and wrote one unreadable line — a header a platform adds,
-    /// two columns run together — said something about every other line on it,
-    /// and discarding the listing there would strand every process it named.
+    /// `pid=,ppid=` suppresses the headers, so every non-blank line is meant to
+    /// be exactly two ids. Anything else means the answer is not the one that
+    /// was asked for, and the caller is told the tree is unknown rather than
+    /// handed part of one — a row that was dropped could be the descendant that
+    /// matters, and the process a teardown misses is the expensive one.
     #[cfg(unix)]
     #[test]
-    fn one_unreadable_row_costs_that_row_rather_than_the_whole_listing() {
+    fn a_listing_with_a_row_it_cannot_read_is_no_listing_at_all() {
         assert_eq!(
-            parse_table("  PID  PPID\n11 10\nnot-a-pid also-not\n13 11\n14\n"),
-            vec![(11, 10), (13, 11)],
-            "the readable rows did not survive a listing with unreadable ones in it"
+            parse_table("11 10\n13 11\n"),
+            Some(vec![(11, 10), (13, 11)]),
+            "a listing every line of which is two ids was not read"
+        );
+        for unreadable in [
+            "11 10\nnot-a-pid also-not\n13 11\n",
+            "11 10\n14\n",
+            "  PID  PPID\n11 10\n",
+            "11 10 and-a-third\n",
+        ] {
+            assert_eq!(
+                parse_table(unreadable),
+                None,
+                "a listing holding {unreadable:?} was read as a tree anyway"
+            );
+        }
+    }
+
+    /// Blank lines are not rows and cost nothing.
+    #[cfg(unix)]
+    #[test]
+    fn a_blank_line_is_not_a_row_it_failed_to_read() {
+        assert_eq!(
+            parse_table("11 10\n\n13 11\n   \n"),
+            Some(vec![(11, 10), (13, 11)])
         );
     }
 
-    /// A listing that claims pid `0` never offers one to `kill`.
+    /// A listing that claims pid `0` is not describing this host.
     ///
     /// `kill(0, ...)` is not "no process" — it is the caller's **entire process
     /// group**, which here means the launcher and whatever it was started
     /// beside. The ids come from parsing external input, so a row claiming `0`
-    /// is a row that would turn a teardown of one tree into a broadcast.
+    /// is a row that would turn a teardown of one tree into a broadcast, and a
+    /// listing offering one is not one this may act on.
     #[cfg(unix)]
     #[test]
-    fn a_listing_that_claims_pid_zero_never_offers_it_to_a_signal() {
-        let read = parse_table("0 7\n7 1\n");
-        assert!(
-            !read.iter().any(|(child, _)| *child == 0),
-            "a row claiming pid 0 was admitted to the table: {read:?}"
+    fn a_listing_that_claims_pid_zero_is_not_acted_on() {
+        assert_eq!(
+            parse_table("0 7\n7 1\n"),
+            None,
+            "a listing claiming pid 0 was read as a tree"
         );
-        assert_eq!(read, vec![(7, 1)], "its neighbours were dropped with it");
     }
 
     #[test]

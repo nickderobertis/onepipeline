@@ -1202,20 +1202,14 @@ fn a_forced_stop_ends_the_whole_dispatch_tree_of_another_sessions_run() {
     world.release("build.go");
 }
 
-/// A stop still stops the run when this host will not list its processes.
-///
-/// The table is external input and `ps` can fail — a stripped container image, a
-/// host without it, a `ps` that refuses. What must not follow is that the
-/// operator's stop fails with it: with no table there are no descendants, so the
-/// walk degrades to exactly the pid it reached before it ever walked a tree, and
-/// the run is ended and recorded as ended either way.
-///
 /// A stop that cannot see what it must end refuses, changes nothing, and works
 /// on the retry.
 ///
-/// Both ways a listing can be no listing: a `ps` that cannot be spawned, and one
-/// that runs and exits non-zero. A reader checking only the first would parse the
-/// second's stdout as a table.
+/// All three ways this host can fail to say what the run is running: a `ps` that
+/// cannot be spawned, one that runs and exits non-zero, and one that answers with
+/// a listing holding a row nobody can read. The third is the subtle one — the
+/// rows around it look fine, and reading them as the whole tree would signal
+/// some of it and call that done.
 ///
 /// The refusal is the whole point. Reporting a clean stop here would be the
 /// original defect wearing a success code — the expensive processes left running
@@ -1229,6 +1223,10 @@ fn a_stop_that_cannot_read_the_process_table_refuses_and_leaves_the_run_retryabl
     for (fault, path) in [
         ("no ps to spawn", World::empty_path as fn(&World) -> PathBuf),
         ("a ps that fails", World::path_whose_ps_fails),
+        (
+            "a ps whose listing has a row nobody can read",
+            World::path_whose_ps_garbles_a_row,
+        ),
     ] {
         let world = World::new(&format!("driver-stop-blind-{}", fault.replace(' ', "-")));
         world.script("build.wait", "hold");
@@ -1268,9 +1266,9 @@ fn a_stop_that_cannot_read_the_process_table_refuses_and_leaves_the_run_retryabl
         let stopped = world.events_of(&run, "run-stopped");
         assert_eq!(stopped.len(), 1, "the attempt went unrecorded");
         assert_eq!(
-            stopped[0]["payload"]["complete"],
-            json!(false),
-            "an incomplete stop was recorded as a clean one: {}",
+            stopped[0]["payload"]["teardown"],
+            json!("undetermined"),
+            "a stop that established nothing was recorded as a clean one: {}",
             stopped[0]
         );
 
@@ -1294,7 +1292,8 @@ fn a_stop_that_cannot_read_the_process_table_refuses_and_leaves_the_run_retryabl
         world
             .run(&["stop", &run])
             .exited(0)
-            .out_has("\"stopped\":true");
+            .out_has("\"stopped\":true")
+            .out_has("\"teardown\":\"ended\"");
         world.until("every process the run started to end", |_| {
             tree.iter().all(|pid| !still_listed(*pid))
         });
@@ -1304,38 +1303,4 @@ fn a_stop_that_cannot_read_the_process_table_refuses_and_leaves_the_run_retryabl
             .out_has("worker ended when the run was stopped");
         world.release("build.go");
     }
-}
-
-/// One unreadable row in a good listing costs that row and nothing else.
-///
-/// The third fault a listing can have, and the one that must cost the least: a
-/// header a platform adds, two columns run together. Every process the listing
-/// named is still named, so the walk still reaches the whole tree — where a
-/// reader that discarded the listing over that row would strand every one of
-/// them, which is the orphan this walk exists to prevent.
-///
-/// The stand-in prepends the bad row and then hands off to the host's real `ps`,
-/// so the rows the walk depends on are the kernel's own.
-#[cfg(unix)]
-#[test]
-fn a_stop_ends_the_whole_tree_when_the_listing_carries_a_row_it_cannot_read() {
-    let world = World::new("driver-stop-garbled-ps");
-    world.script("build.wait", "hold");
-    let (run, driver) = start_detached_announcing(&world, "garbled", vec![agent("build", &[])]);
-    world.until("a node to be in flight", |world| {
-        !world.events_of(&run, "node-dispatched").is_empty()
-    });
-    world.until("the dispatch to be more than one process", |_| {
-        descendants(driver).len() > 1
-    });
-    let tree: Vec<u32> = std::iter::once(driver).chain(descendants(driver)).collect();
-
-    let mut command = world.cmd(&["stop", &run]);
-    command.env("PATH", world.path_whose_ps_garbles_a_row());
-    world.run_on(command, "stop with a garbled row").exited(0);
-
-    world.until("every process the run started to end", |_| {
-        tree.iter().all(|pid| !still_listed(*pid))
-    });
-    world.release("build.go");
 }
