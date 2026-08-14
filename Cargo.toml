@@ -12,8 +12,14 @@ resolver = "2"
 # out of the real crate's own types — it refuses what the real CLI refuses by
 # calling its parser — because a double that accepted more than the sibling is an
 # oracle for a build nothing runs.
+#
+# `oneagentgraph`'s floor is a **requirement**, not a preference: this build's own
+# copy is the single parser deciding what a graph document may contain, so the
+# floor is the oldest one that accepts everything a launch must accept. 0.2.10 is
+# where a per-member `task` and graph schema 3 exist, and a lock resolved below it
+# refuses a document the runner accepts — the defect that blocked a consumer.
 [workspace.dependencies]
-oneagentgraph = "0.2.9"
+oneagentgraph = "0.2.10"
 onevcs = "0.2.6"
 
 [package]
