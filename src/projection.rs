@@ -32,8 +32,8 @@ pub enum StopState {
     /// No stop has been recorded.
     #[default]
     NotStopped,
-    /// A stop was recorded and it ended everything the run had started.
-    Ended,
+    /// A stop was recorded and every process the run had started was signalled.
+    WorkersSignalled,
     /// A stop was recorded, but nothing established what became of the run's
     /// workers: this host gave no listing its process tree could be read from,
     /// or the driver is on a host this one cannot reach. They may still be
@@ -367,7 +367,7 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
         }
         Some(journal::PipelineKind::RunStopped) => {
             state.stop = match journal::StopTeardown::of(payload) {
-                journal::StopTeardown::Signalled => StopState::Ended,
+                journal::StopTeardown::Signalled => StopState::WorkersSignalled,
                 journal::StopTeardown::Undetermined | journal::StopTeardown::Elsewhere => {
                     StopState::WorkersUndetermined
                 }

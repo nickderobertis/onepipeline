@@ -171,15 +171,22 @@ fn platform_stop(pid: u32, how: Stop) -> Teardown {
         return Teardown::Undetermined;
     };
     // The root first, so what is left has stopped growing while its members are
-    // taken down.
-    signal_one(pid, signal);
+    // taken down. Every answer is kept: one process this user may not signal is
+    // one still running, and a teardown that reported the tree as reached
+    // anyway would be the same false completion in a smaller place.
+    let mut reached = signal_one(pid, signal);
     for descendant in tree {
-        signal_one(descendant, signal);
+        reached = signal_one(descendant, signal) && reached;
     }
-    Teardown::Signalled
+    if reached {
+        Teardown::Signalled
+    } else {
+        Teardown::Undetermined
+    }
 }
 
-/// Signal one process, and refuse every id that is not one.
+/// Signal one process, and refuse every id that is not one. `true` when this
+/// user's signal reached it, or when there was no longer anything to reach.
 ///
 /// `kill` reads a non-positive pid as a **broadcast**: `0` is the caller's whole
 /// process group, `-1` is every process it may signal, and a negative id is
@@ -188,17 +195,26 @@ fn platform_stop(pid: u32, how: Stop) -> Teardown {
 /// whatever started it. The walk's ids come from parsing a `ps` listing, which
 /// is external input, so the guard is here at the one place a signal is sent
 /// rather than only where the ids are read.
+///
+/// The answer is what makes the teardown's own answer honest. `ESRCH` — no such
+/// process — is the outcome that was wanted: it exited between the listing and
+/// the signal. Anything else, `EPERM` above all, is a process still running that
+/// this user may not touch, and a teardown reporting that as reached would be
+/// claiming a completion it was refused.
 #[cfg(unix)]
-fn signal_one(pid: u32, signal: i32) {
+fn signal_one(pid: u32, signal: i32) -> bool {
     let Ok(raw) = i32::try_from(pid) else {
-        return;
+        return false;
     };
     if raw <= 0 {
-        return;
+        return false;
     }
     // SAFETY: `kill` takes a pid and a signal number and touches no memory this
     // call owns. `raw` is positive, so this addresses one process.
-    unsafe { libc::kill(raw, signal) };
+    if unsafe { libc::kill(raw, signal) } == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
 }
 
 /// Every process descended from `pid`, however deep, or `None` when this host
@@ -651,6 +667,28 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         false
+    }
+
+    /// A process that is already gone counts as reached; an id that is not a
+    /// process never does.
+    ///
+    /// The distinction the teardown's own answer rests on. `ESRCH` means the
+    /// process exited between the listing and the signal, which is the outcome
+    /// that was wanted — treating it as a failure would make every ordinary race
+    /// report an incomplete stop. A non-positive id is not a process at all: to
+    /// `kill` it is a broadcast, so it is refused rather than sent, and refusing
+    /// to send is not reaching anything.
+    #[cfg(unix)]
+    #[test]
+    fn a_signal_reports_a_process_already_gone_as_reached_and_a_broadcast_as_not() {
+        assert!(
+            signal_one(reaped_pid(), libc::SIGTERM),
+            "a process that had already exited was reported as unreached"
+        );
+        assert!(
+            !signal_one(0, libc::SIGTERM),
+            "pid 0 was reported as reached, and to `kill` it is a whole process group"
+        );
     }
 
     /// A listing this cannot read in full is not a listing it may act on.
