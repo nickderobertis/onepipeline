@@ -1321,3 +1321,58 @@ fn a_retained_driver_that_cannot_write_its_relay_refuses() {
     );
     refused.err_has("relaying graph event");
 }
+
+/// A graph whose member fails reaches the launcher as its own code and its own
+/// words.
+///
+/// The retained driver is the only thing between a failing graph and the launch
+/// log an operator reads afterwards, and it must not improve on what it saw: the
+/// exit status is the graph's own answer rather than a second opinion about it,
+/// and what the graph said goes to stderr, where the binary prints every other
+/// refusal. A driver that exited 0 here would hand the launcher a run that
+/// started and settled — the silent total failure this whole change is about.
+///
+/// The member fails *after* it has started and streamed, which is the case the
+/// settlement decides: a graph that refuses before it runs never reaches the
+/// settlement at all, because the relay carries that refusal out of the event
+/// loop instead.
+#[test]
+fn a_retained_driver_carries_a_failing_graphs_code_and_words() {
+    let world = World::new("drive-failed");
+    world.write_graphs();
+    let graph = world.graphs().join("node-scope.yaml");
+    let dir = world.root.join("driven-failed");
+    std::fs::create_dir_all(&dir).expect("a directory for the driven graph");
+
+    // A turn that ran and did not get there: it starts, streams, and settles on
+    // a non-zero exit paired with a `turn_failed` report, which is the shape a
+    // caller reading the graph's settlement actually sees.
+    world.script("harness.fail", "the turn did not get there");
+    let failed = world.run_on(
+        world.agentgraph_cmd(&[
+            "drive",
+            &graph.to_string_lossy(),
+            "--task",
+            "Do the work and settle.",
+            "--dir",
+            &dir.to_string_lossy(),
+        ]),
+        "drive a graph whose member fails",
+    );
+    assert_ne!(
+        failed.code, 0,
+        "a driver whose graph failed reported success:\nstdout: {}\nstderr: {}",
+        failed.stdout, failed.stderr
+    );
+    // It really ran: the member started and streamed before it failed, so this
+    // is the settlement's answer rather than a refusal on the way in.
+    assert!(
+        failed
+            .stdout
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .any(|event| event["kind"] == "member-started"),
+        "the graph never started a member, so its code is not a settlement:\n{}",
+        failed.stdout
+    );
+}

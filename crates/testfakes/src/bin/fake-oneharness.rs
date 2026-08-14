@@ -97,7 +97,17 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     // The turn itself. The orchestrator member's prompt names the engine verbs
     // it is to drive the run with, so this turn drives them — the same work the
     // `oneagentgraph` double does when it is standing in for the whole sibling.
-    let outcome = if driving && fake::drive(dir) != ExitCode::SUCCESS {
+    //
+    // `harness.fail` is the other way a turn ends: it did the work and did not
+    // get there. Scripted rather than inferred, because a turn that fails
+    // *after* it has started and streamed is its own case — a member settles on
+    // the pair of a non-zero exit and a `turn_failed` report, and that pair is
+    // what a caller reading the graph's settlement sees. Without it the only
+    // failing member this suite could produce was one that refused on the way
+    // in, which never reaches a settlement at all.
+    let outcome = if fake::node_script(dir, "harness", "fail").is_some() {
+        Outcome::TurnFailed
+    } else if driving && fake::drive(dir) != ExitCode::SUCCESS {
         Outcome::TurnFailed
     } else {
         Outcome::DoneWhenMet
