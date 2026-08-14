@@ -69,7 +69,111 @@ fn dag_launch_dirs(world: &World) -> Vec<String> {
         })
         .collect()
 }
+
+/// The `--task` every dag-scope launch was given, in launch order.
+///
+/// The same reading as [`dag_launch_dirs`] and for the same reason: this value
+/// only exists on the wire. `oneagentgraph` hands it to every member of the
+/// graph that carries none of its own, so what a launch put on this flag is what
+/// a member whose job is not the driver's was told — and that is where the
+/// defect was found, in a launched run's member argv.
+fn dag_launch_tasks(world: &World) -> Vec<String> {
+    world
+        .invocations()
+        .iter()
+        .filter(|call| {
+            call["tool"] == "oneagentgraph"
+                && call["args"][0] == "run"
+                && call["args"][1]
+                    .as_str()
+                    .is_some_and(|graph| graph.ends_with("dag-scope.yaml"))
+        })
+        .filter_map(|call| {
+            let args = call["args"].as_array()?;
+            let at = args.iter().position(|arg| arg == "--task")?;
+            args.get(at + 1)?.as_str().map(str::to_string)
+        })
+        .collect()
+}
 // llmlint: ignore-end[tests_mirror_real_usage]
+
+/// The role prose the launcher's task is now free of.
+///
+/// It once carried all of it, and the shipped pacemaker — a scheduled member
+/// given the same task, because it carries none of its own — obeyed it: it took
+/// the round and the run's ownership lock, and its own per-turn deadline then
+/// killed the worker dispatched inside that turn.
+const ROLE_PROSE: &[&str] = &[
+    "Drive",
+    "to settlement",
+    "onepipeline round run",
+    "onepipeline round next",
+    "nothing else",
+    "run state",
+];
+
+fn assert_says_only_what_the_run_is(task: &str, run: &str, goal: &str) {
+    assert!(
+        task.contains(run) && task.contains(goal),
+        "the launched graph's task does not name the run and its goal: {task}"
+    );
+    for prose in ROLE_PROSE {
+        assert!(
+            !task.contains(prose),
+            "the launched graph's task tells a member what to do ({prose:?}): {task}"
+        );
+    }
+}
+
+/// What the dag-scope graph is launched with names the run and its goal, at
+/// `start` and again at `adopt`.
+///
+/// The adoption half is the one a launch cannot state for itself: a fresh driver
+/// composes the description from the run's **projected** plan rather than from
+/// the plan file the launch named, because the planner may have edited the graph
+/// since and that file may not be there at all.
+#[test]
+fn the_launched_graphs_task_names_the_run_and_its_goal_at_start_and_at_adoption() {
+    let world = World::new("driver-task");
+    let run = start_detached(&world, "described", vec![human("approve", &[])]);
+    // `plan_of` states this goal, so a task without it is one the plan never
+    // reached.
+    let goal = "Deliver described";
+    let launched = dag_launch_tasks(&world);
+    assert_eq!(launched.len(), 1, "{launched:?}");
+    assert_says_only_what_the_run_is(&launched[0], &run, goal);
+
+    world.until("the driver to exit", |world| {
+        world.run(&["status", &run]).stdout.contains("DRIVER DEAD")
+    });
+    world.run(&["adopt", &run]).exited(NOTHING_DRIVING);
+    let relaunched = dag_launch_tasks(&world);
+    assert_eq!(relaunched.len(), 2, "{relaunched:?}");
+    assert_says_only_what_the_run_is(&relaunched[1], &run, goal);
+}
+
+/// A goal is optional in the plan schema, and the task's shape is not.
+///
+/// A member composing `{task}` plus its own prose reads the same document either
+/// way, so a plan that states no goal says *that* rather than leaving the line
+/// out — and it still says nothing about who does what.
+#[test]
+fn a_run_whose_plan_states_no_goal_is_launched_saying_so() {
+    let world = World::new("driver-task-goalless");
+    let mut plan = plan_of("goalless", vec![human("approve", &[])]);
+    plan.as_object_mut()
+        .expect("a plan object")
+        .remove("goal")
+        .expect("the shared plan states a goal to remove");
+    let path = world.plan("goalless", &plan);
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+
+    let launched = dag_launch_tasks(&world);
+    assert_eq!(launched.len(), 1, "{launched:?}");
+    assert_says_only_what_the_run_is(&launched[0], "goalless", "(no goal stated)");
+}
 
 #[test]
 fn start_launches_the_shipped_dag_scope_graph_and_records_how_to_relaunch_it() {
