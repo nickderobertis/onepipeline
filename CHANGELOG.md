@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/nickderobertis/onepipeline/compare/v0.1.15...v0.2.0) - 2026-08-14
+
+### Added
+
+- [**breaking**] say what the run is, not who drives it ([#40](https://github.com/nickderobertis/onepipeline/pull/40))
+
 ## [0.1.15](https://github.com/nickderobertis/onepipeline/compare/v0.1.14...v0.1.15) - 2026-08-14
 
 ### Fixed
