@@ -490,18 +490,42 @@ impl World {
     }
 
     /// The same configs, with the shipped dag-scope graph's **pacemaker** on the
-    /// driver: a `check-in` member on a resettable schedule.
+    /// driver: the member a planner-visible surface restarts the clock of.
     ///
-    /// Its own member, because that is the one a planner-visible surface is
-    /// supposed to restart the clock of, and a graph without it answers a reset
-    /// with "no such member" no matter which run id it was addressed by. The
-    /// interval is the shipped one, so nothing fires inside a test — what a
-    /// journey observes is the *reset*, which the sibling announces.
+    /// Its own member, because that is the one a reset addresses, and a graph
+    /// without it answers with "no such member" no matter which run id it was
+    /// addressed by.
+    ///
+    /// Its name and its schedule are read out of `graphs/dag-scope.yaml` rather
+    /// than restated, so the two have one source. A stand-in carrying its own
+    /// copy would keep passing against a shipped graph that had renamed the
+    /// member or made its clock unresettable — the two facts these journeys
+    /// exist to reset. Only the harness config is this world's own: the shipped
+    /// one names an operator file no scratch graph directory has. The interval
+    /// comes over with the rest, and it is long enough that nothing fires
+    /// inside a test — what a journey observes is the *reset*.
     pub fn write_graphs_with_pacemaker(&self) {
-        self.write_graphs_with(Some(
-            "  check-in:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n    \
-             schedule: {every: 1800, resettable: true}\n",
-        ));
+        use oneagentgraph::config::Member;
+
+        let shipped = repo_file("graphs/dag-scope.yaml");
+        let config: oneagentgraph::config::GraphConfig = serde_norway::from_str(
+            &std::fs::read_to_string(&shipped).expect("the shipped dag-scope graph"),
+        )
+        .expect("the shipped dag-scope graph is a valid oneagentgraph config");
+        let (member, schedule) = config
+            .members
+            .iter()
+            .find_map(|(name, member)| match member {
+                Member::Oneharness(member) => member.schedule.map(|schedule| (name, schedule)),
+                _ => None,
+            })
+            .expect("the shipped dag-scope graph declares a pacemaker");
+        let pacemaker = format!(
+            "  {member}:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n    \
+             schedule: {{every: {}, resettable: {}}}\n",
+            schedule.every, schedule.resettable
+        );
+        self.write_graphs_with(Some(&pacemaker));
     }
 
     fn write_graphs_with(&self, dag_extra: Option<&str>) {
