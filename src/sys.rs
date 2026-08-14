@@ -584,10 +584,27 @@ mod tests {
     /// A stop reaches the leaf, not just the process whose pid it was given.
     ///
     /// The tree here is the shape a run actually makes — a driver, the graph it
-    /// starts, and the paid agent that graph's harness starts — and the leaf
-    /// puts itself in a **process group of its own**, which is what a real one
-    /// does and what made a teardown aimed at the group miss it. Every process
-    /// is real and every pid is read off the kernel rather than assumed.
+    /// starts, and the paid agent that graph's harness starts. Every process is
+    /// real and every pid is read off the kernel rather than assumed.
+    ///
+    /// The boundary is pinned from both sides by where the two bystanders sit.
+    /// The tree is given a **process group of its own**, led by its root, and one
+    /// bystander is started inside that group without being descended from it:
+    /// a teardown that swept the group — the defect this exists to fix, which
+    /// reached the group and left the leaf running — takes that bystander and is
+    /// caught by it. The other bystander is outside the group as well as outside
+    /// the tree, so a teardown that widened past the group is caught too. What
+    /// gets through both is descent, which is the boundary [`stop`] promises.
+    ///
+    /// The group is made here rather than by the leaf detaching itself, which is
+    /// what the real paid process does. That reads better and cost this suite
+    /// the platform it most needed: detaching means `setsid`, `setsid(1)` is
+    /// util-linux's, and macOS does not ship one — so the third level never
+    /// started there, silently, and the whole tree this journey is about went
+    /// unproven on the platform whose consumers were still being orphaned.
+    /// `setpgid` through [`std::os::unix::process::CommandExt::process_group`]
+    /// is POSIX, needs no program on the host, and leaves `stop` answering the
+    /// same question.
     ///
     /// Unix-only because the tree is built with `sh` and read back through the
     /// process table. The Windows arm hands the same boundary to `taskkill /T`,
@@ -600,39 +617,55 @@ mod tests {
     /// takes — proved nowhere.
     #[cfg(unix)]
     fn a_stop_reaches_the_whole_descendant_tree_and_not_the_process_beside_it(how: Stop) {
-        // `setsid` on the leaf is the point: a new session is a new process
-        // group, so the leaf is outside the group of everything above it. Each
-        // level prints its pid and then waits, so the test learns the tree from
-        // the kernel.
+        use std::os::unix::process::CommandExt;
+
+        // Each level prints its pid and then waits, so the test learns the tree
+        // from the kernel. `exec 2>&1` folds the tree's own diagnostics into the
+        // stream those pids arrive on: a level that cannot start is then a line
+        // this fails on and quotes, rather than a level that never appears and
+        // says nothing about why.
         let mut tree = std::process::Command::new("sh")
             .args([
                 "-c",
-                "echo $$; sh -c 'echo $$; setsid sh -c \"echo \\$\\$; sleep 120\" & \
+                "exec 2>&1; echo $$; sh -c 'echo $$; sh -c \"echo \\$\\$; sleep 120\" & \
                  sleep 120' & sleep 120",
             ])
+            .process_group(0)
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
             .spawn()
             .expect("a process tree");
-        // A process started beside the tree rather than under it. A teardown
-        // that widened until the leaf was included would take this too.
+        let group = i32::try_from(tree.id()).expect("a pid is a process group id");
+        // A process started beside the tree rather than under it, and outside
+        // its process group as well. A teardown that widened past the group
+        // would take this too.
         let mut beside = std::process::Command::new("sh")
             .args(["-c", "sleep 120"])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
             .expect("a process beside the tree");
+        // And one in the tree's own process group that the tree did not start.
+        // This is the one a group teardown cannot avoid: it is what the group
+        // holds beyond the run, and ending it would be ending work this run does
+        // not own.
+        let mut beside_in_group = std::process::Command::new("sh")
+            .args(["-c", "sleep 120"])
+            .process_group(group)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("a process in the tree's process group");
 
         let mut pids = Vec::new();
         {
             use std::io::BufRead;
             let out = std::io::BufReader::new(tree.stdout.take().expect("the tree reports itself"));
             for line in out.lines().take(3) {
+                let line = line.expect("a reported pid");
                 pids.push(
-                    line.expect("a reported pid")
-                        .trim()
+                    line.trim()
                         .parse::<u32>()
-                        .expect("a pid"),
+                        .unwrap_or_else(|_| panic!("the tree said {line:?} where a pid was due")),
                 );
             }
         }
@@ -671,12 +704,25 @@ mod tests {
             surviving.is_empty(),
             "a stop left {surviving:?} of the tree {pids:?} running — the leaf is the paid one"
         );
+        // Asked of the child handle rather than of [`process_may_be_live`], and
+        // that is what makes these two assertions able to fail at all: these
+        // bystanders are this process's own children, so one a stop signalled is
+        // a zombie nobody has collected, and a zombie answers a liveness probe as
+        // alive. Read that way, a teardown that took them both would still be
+        // reported here as having left them alone.
         assert!(
-            process_may_be_live(beside.id()),
+            still_running(&mut beside),
             "a stop took a process that was beside the tree rather than under it"
         );
-        let _ = beside.kill();
-        let _ = beside.wait();
+        assert!(
+            still_running(&mut beside_in_group),
+            "a stop took a process that shared the tree's process group without being descended \
+             from it — the boundary a teardown ends is descent, not the group"
+        );
+        for bystander in [&mut beside, &mut beside_in_group] {
+            let _ = bystander.kill();
+            let _ = bystander.wait();
+        }
     }
 
     /// The mode an operator's `stop` takes.
@@ -691,6 +737,17 @@ mod tests {
     #[test]
     fn a_forceful_stop_reaches_the_whole_descendant_tree() {
         a_stop_reaches_the_whole_descendant_tree_and_not_the_process_beside_it(Stop::Now);
+    }
+
+    /// Whether a child of this process has not ended, without waiting for it to.
+    ///
+    /// The bystanders' oracle. `try_wait` reaps, so it separates a process that
+    /// is still running from one that was signalled and is lying about it as a
+    /// zombie — which [`process_may_be_live`] cannot do, because a zombie is
+    /// exactly a pid `kill(pid, 0)` still succeeds on.
+    #[cfg(unix)]
+    fn still_running(child: &mut std::process::Child) -> bool {
+        matches!(child.try_wait(), Ok(None))
     }
 
     /// Whether `child` ends inside `patience`, reaping it if it does.
@@ -734,6 +791,48 @@ mod tests {
         assert!(
             !signal_one(0, libc::SIGTERM),
             "pid 0 was reported as reached, and to `kill` it is a whole process group"
+        );
+    }
+
+    /// A `taskkill` that ran and failed is a partial teardown, and only one that
+    /// never ran leaves the run untouched.
+    ///
+    /// The distinction this platform's answer rests on, and the reason
+    /// [`Teardown::PartlySignalled`] is reachable here rather than scoped to the
+    /// arm that walks a process table. `taskkill /T` ends the tree as it walks
+    /// it, so a failed run of it has in general ended part of that tree — and
+    /// calling that untouched would send an operator back to retry a stop
+    /// against a run that is already half down, with the rest of it still
+    /// writing. The root already being gone is the exception, and it is the same
+    /// answer `ESRCH` gets on the other platform: nothing to reach is reached.
+    #[cfg(windows)]
+    #[test]
+    fn a_taskkill_that_ran_and_failed_is_a_partial_teardown_not_an_untouched_run() {
+        use std::os::windows::process::ExitStatusExt;
+
+        let exited = |code: u32| Ok(std::process::ExitStatus::from_raw(code));
+        assert_eq!(
+            taskkill_established(exited(0), true),
+            Teardown::Signalled,
+            "a taskkill that walked the tree was not reported as having reached it"
+        );
+        assert_eq!(
+            taskkill_established(
+                Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
+                true
+            ),
+            Teardown::NotAttempted,
+            "a taskkill that never ran was reported as having touched the tree"
+        );
+        assert_eq!(
+            taskkill_established(exited(1), true),
+            Teardown::PartlySignalled,
+            "a taskkill refused part of a live tree was reported as leaving the run untouched"
+        );
+        assert_eq!(
+            taskkill_established(exited(1), false),
+            Teardown::Signalled,
+            "a root that was already gone was reported as a process still to be found"
         );
     }
 
@@ -790,48 +889,6 @@ mod tests {
             parse_table("0 7\n7 1\n"),
             None,
             "a listing claiming pid 0 was read as a tree"
-        );
-    }
-
-    /// A `taskkill` that ran and failed is a partial teardown, and only one that
-    /// never ran leaves the run untouched.
-    ///
-    /// The distinction this platform's answer rests on, and the reason
-    /// [`Teardown::PartlySignalled`] is reachable here rather than scoped to the
-    /// arm that walks a process table. `taskkill /T` ends the tree as it walks
-    /// it, so a failed run of it has in general ended part of that tree — and
-    /// calling that untouched would send an operator back to retry a stop
-    /// against a run that is already half down, with the rest of it still
-    /// writing. The root already being gone is the exception, and it is the same
-    /// answer `ESRCH` gets on the other platform: nothing to reach is reached.
-    #[cfg(windows)]
-    #[test]
-    fn a_taskkill_that_ran_and_failed_is_a_partial_teardown_not_an_untouched_run() {
-        use std::os::windows::process::ExitStatusExt;
-
-        let exited = |code: u32| Ok(std::process::ExitStatus::from_raw(code));
-        assert_eq!(
-            taskkill_established(exited(0), true),
-            Teardown::Signalled,
-            "a taskkill that walked the tree was not reported as having reached it"
-        );
-        assert_eq!(
-            taskkill_established(
-                Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
-                true
-            ),
-            Teardown::NotAttempted,
-            "a taskkill that never ran was reported as having touched the tree"
-        );
-        assert_eq!(
-            taskkill_established(exited(1), true),
-            Teardown::PartlySignalled,
-            "a taskkill refused part of a live tree was reported as leaving the run untouched"
-        );
-        assert_eq!(
-            taskkill_established(exited(1), false),
-            Teardown::Signalled,
-            "a root that was already gone was reported as a process still to be found"
         );
     }
 
