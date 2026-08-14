@@ -82,6 +82,9 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
         Verb::Goals(args) => report(&args, views::goals),
         Verb::Transcript(args) => transcript(&args),
         Verb::Telemetry(args) => report_telemetry(&args),
+        Verb::Drive(args) => {
+            agentgraph::drive(&args.graph, &args.task, &args.dir, &args.labels, &args.sets)
+        }
     }
 }
 
@@ -687,16 +690,59 @@ fn stop(args: &StopArgs) -> Result<i32> {
     }
 
     let view = RunView::open(&paths)?;
+    // Attempted before the record is written, so the record says what happened
+    // rather than what was about to be tried.
+    let teardown = terminate(record.pid, &record.host);
+    let established = match teardown {
+        None => journal::StopTeardown::Elsewhere,
+        Some(sys::Teardown::Signalled) => journal::StopTeardown::Signalled,
+        Some(sys::Teardown::NotAttempted) => journal::StopTeardown::NotAttempted,
+        Some(sys::Teardown::PartlySignalled) => journal::StopTeardown::PartlySignalled,
+    };
     let mut journal = Journal::open(&paths);
     journal.emit(
         journal::PipelineKind::RunStopped,
         journal::labels(&paths.run, Some(view.state.round), None),
-        journal::payload(&[("owner", json!(owner)), ("forced", json!(args.force))]),
+        journal::payload(&[
+            ("owner", json!(owner)),
+            ("forced", json!(args.force)),
+            (journal::STOP_TEARDOWN, json!(established)),
+        ]),
     )?;
-    terminate(record.pid, &record.host);
+    // Deliberately neither `stopped: true` nor exit 0 for either of these: a run
+    // whose processes were not all reached is still running, and reporting that
+    // as a clean stop is the false completion this refusal removes. The two say
+    // different things because they leave the operator in different places.
+    let run = &paths.run;
+    match teardown {
+        Some(sys::Teardown::NotAttempted) => {
+            return Err(Error::Refused(format!(
+                "run '{run}' was not stopped: this host gave no process listing its tree \
+                 could be read from, so the processes the run started could not be found, \
+                 and ending its driver alone would have orphaned them. The run is \
+                 untouched — run `onepipeline stop {run}` again once `ps` answers"
+            )));
+        }
+        Some(sys::Teardown::PartlySignalled) => {
+            return Err(Error::Refused(format!(
+                "run '{run}' was only partly stopped: part of its process tree was \
+                 signalled and at least one process in it could not be, so that one is \
+                 still running and is not this session's to end. Find it in this host's \
+                 process list and end it as the user that owns it"
+            )));
+        }
+        None | Some(sys::Teardown::Signalled) => {}
+    }
+    // `teardown` qualifies `stopped`: the ledger record is what stops a run, and
+    // it is written either way.
     println!(
         "{}",
-        json!({"run_id": paths.run, "stopped": true, "owner": owner})
+        json!({
+            "run_id": paths.run,
+            "stopped": true,
+            "owner": owner,
+            journal::STOP_TEARDOWN: established,
+        })
     );
     Ok(EXIT_SUCCESS)
 }
@@ -707,11 +753,13 @@ fn stop(args: &StopArgs) -> Result<i32> {
 /// rather than vanishing. The host check is this caller's alone — a pid means
 /// nothing across machines, and the ledger's record names which one it was
 /// taken on.
-fn terminate(pid: u32, host: &str) {
+/// `None` when the pid is another host's, where nothing was attempted and this
+/// host has nothing to promise either way.
+fn terminate(pid: u32, host: &str) -> Option<sys::Teardown> {
     if host != sys::hostname() {
-        return;
+        return None;
     }
-    sys::stop(pid, sys::Stop::Politely);
+    Some(sys::stop(pid, sys::Stop::Politely))
 }
 
 /// `onepipeline next` — the channel's only consumer.

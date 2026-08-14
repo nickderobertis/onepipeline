@@ -11,9 +11,12 @@
 //! [`BINARY_ENV`] remains an explicit compatibility override, and it is
 //! all-or-nothing: naming an executable sends *every* verb to it, so an operator
 //! pinning an install never gets half a run from one build and half from
-//! another. Detached launches also retain a process, because a library
-//! scheduler thread cannot outlive the process that is about to exit; neither
-//! case changes the default in-process path.
+//! another. Detached launches still retain a process, because a library
+//! scheduler thread cannot outlive the process that is about to exit — but the
+//! process they retain is **this executable**, at [`DRIVE_VERB`], composing this
+//! build's own `oneagentgraph`. So the override is the only way an installed
+//! sibling is composed, and one build decides what a graph document may contain
+//! whichever way a run was launched. See [`retained_command`].
 //!
 //! # What moving in-process changed, and what it did not
 //!
@@ -71,6 +74,13 @@ pub const BINARY_ENV: &str = "ONEPIPELINE_ONEAGENTGRAPH_BIN";
 
 /// The executable's name when the environment names none.
 pub const DEFAULT_BINARY: &str = "oneagentgraph";
+
+/// The verb this executable retains a detached launch's driver with.
+///
+/// Named once, because [`retained_command`] spells it into a command line and
+/// [`crate::cli`] parses it back off one; the two spellings agreeing is what
+/// makes a detached launch start at all.
+pub const DRIVE_VERB: &str = "drive";
 
 /// Where `oneagentgraph` keeps its runs.
 ///
@@ -186,10 +196,25 @@ fn report_skipped(skipped: usize) {
 
 /// The executable this process invokes.
 pub fn binary() -> String {
+    overriding_binary().unwrap_or_else(|| DEFAULT_BINARY.to_string())
+}
+
+/// Whether [`BINARY_ENV`] names an executable to compose instead of this build's.
+///
+/// One predicate, because two callers ask it: [`binary`] resolves the name and
+/// [`retained_command`] chooses a whole launch shape from it. Asked as
+/// "is the variable set", an empty or unreadable value sends the launch down the
+/// override path and then resolves to the default executable anyway — half a run
+/// from each answer, which is the skew the override exists to make deliberate.
+fn overridden() -> bool {
+    overriding_binary().is_some()
+}
+
+/// The executable [`BINARY_ENV`] names, when it names a usable one.
+fn overriding_binary() -> Option<String> {
     std::env::var(BINARY_ENV)
         .ok()
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| DEFAULT_BINARY.to_string())
 }
 
 fn sibling(message: impl Into<String>) -> Error {
@@ -448,6 +473,50 @@ enum Output {
     Logged(PathBuf),
 }
 
+/// The command a retained launch runs its graph with: *this executable*, asked
+/// to [`drive`] the graph.
+///
+/// Self-exec rather than resolving `oneagentgraph` by name, which would compose
+/// whatever the host installed — a second parser that can refuse what the
+/// attached path accepts. [`BINARY_ENV`] is the explicit, all-or-nothing
+/// override, and the only way an installed sibling is composed instead.
+fn retained_command(
+    graph: &str,
+    task: &str,
+    dir: &Path,
+    labels: &[String],
+    sets: &[String],
+) -> Result<Command> {
+    let mut command = match overridden() {
+        true => {
+            let mut command = Command::new(binary());
+            command.arg("run").arg(graph);
+            // The override's own CLI has to be told which of its renderings to
+            // emit; this build's `drive` has only the one.
+            command.arg("--output").arg("json");
+            command
+        }
+        false => {
+            let mut command = Command::new(std::env::current_exe().map_err(|e| {
+                sibling(format!(
+                    "cannot find this executable to retain a driver: {e}"
+                ))
+            })?);
+            command.arg(DRIVE_VERB).arg(graph);
+            command
+        }
+    };
+    command.arg("--task").arg(task);
+    command.arg("--dir").arg(dir);
+    for label in labels {
+        command.arg("--label").arg(label);
+    }
+    for value in sets {
+        command.arg("--set").arg(value);
+    }
+    Ok(command)
+}
+
 impl ProcessGraphRun {
     /// Start a graph, with its envelopes going wherever `output` says.
     pub fn start(
@@ -459,17 +528,7 @@ impl ProcessGraphRun {
         sets: &[String],
         output: GraphOutput<'_>,
     ) -> Result<Self> {
-        let mut command = Command::new(binary());
-        command.arg("run").arg(graph);
-        command.arg("--task").arg(task);
-        command.arg("--output").arg("json");
-        command.arg("--dir").arg(dir);
-        for label in label_args(labels) {
-            command.arg("--label").arg(label);
-        }
-        for value in sets {
-            command.arg("--set").arg(value);
-        }
+        let mut command = retained_command(graph, task, dir, &label_args(labels), sets)?;
         for (key, value) in env {
             command.env(key, value);
         }
@@ -857,10 +916,27 @@ impl GraphRun {
                 },
             );
         }
+        Self::in_library(graph, task, dir, &label_args(labels), env, sets)
+    }
 
+    /// Start a graph through the sibling library, in this process.
+    ///
+    /// Takes the labels already rendered as the `k=v` pairs the sibling parses,
+    /// because [`drive`] receives them that way: it is the retained process, and
+    /// what reached it came off a command line. [`start`](Self::start) renders
+    /// its own with [`label_args`], so both callers hand the sibling's parser
+    /// the same spelling.
+    fn in_library(
+        graph: &str,
+        task: &str,
+        dir: &Path,
+        labels: &[String],
+        env: &[(String, String)],
+        sets: &[String],
+    ) -> Result<Self> {
         let mut run_env = process_env();
         run_env.extend(env.iter().cloned());
-        let labels = label_args(labels)
+        let labels = labels
             .iter()
             .map(|label| {
                 oneagentgraph::run::parse_label(label).map_err(|error| sibling(error.to_string()))
@@ -1034,9 +1110,60 @@ impl GraphRun {
             GraphBackend::Library(run) => {
                 let _ = run.cancel.send(());
             }
-            GraphBackend::Process(run) => crate::sys::stop(run.pid(), crate::sys::Stop::Now),
+            GraphBackend::Process(run) => {
+                // A cancel is best-effort by contract — the caller has changed
+                // its mind rather than asked a question — so how far the
+                // teardown reached is not reported back here. `wait` is what
+                // says how the run actually ended.
+                let _ = crate::sys::stop(run.pid(), crate::sys::Stop::Now);
+            }
         }
     }
+}
+
+/// Run a graph in **this** process, streaming its envelopes as NDJSON on stdout.
+///
+/// The retained half of [`retained_command`]. What it writes is the same NDJSON
+/// `oneagentgraph run --output json` writes, because both cross the sibling's
+/// own `Serialize`, so a launcher's handshake reads either the same way.
+///
+/// Each line is flushed as it is written: a launcher is waiting on the
+/// announcement, and a buffered one arrives after the launch has given up on it.
+///
+/// A refusal is left to the caller — printed by the binary with every other one,
+/// into the launch log the launcher reads its evidence from.
+pub fn drive(
+    graph: &str,
+    task: &str,
+    dir: &Path,
+    labels: &[String],
+    sets: &[String],
+) -> Result<i32> {
+    use std::io::Write;
+
+    let mut run = GraphRun::in_library(graph, task, dir, labels, &[], sets)?;
+    let mut out = std::io::stdout();
+    for envelope in run.events() {
+        let envelope = envelope?;
+        let line = serde_json::to_string(&envelope)
+            .map_err(|error| sibling(format!("rendering graph event: {error}")))?;
+        writeln!(out, "{line}")
+            .map_err(|error| sibling(format!("relaying graph event: {error}")))?;
+        out.flush()
+            .map_err(|error| sibling(format!("relaying graph event: {error}")))?;
+    }
+    let settled = run.wait()?;
+    let said = settled.stderr.trim();
+    if !said.is_empty() {
+        eprintln!("{said}");
+    }
+    // The graph's own code, so a launcher reading this process's exit reads the
+    // sibling's answer rather than a second opinion about it. A run ended by a
+    // signal carries none, and the sibling's own CLI reports that as the
+    // member-failed code.
+    Ok(settled
+        .code
+        .unwrap_or(oneagentgraph::error::EXIT_MEMBER_FAILED))
 }
 
 /// How a graph run ended.

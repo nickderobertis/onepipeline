@@ -21,6 +21,26 @@ use crate::graph::{Graph, NodeStatus};
 use crate::journal;
 use crate::plan::Plan;
 
+/// How a run's `stop` left it.
+///
+/// One value rather than a pair of flags, because two booleans admit a state
+/// nothing can mean — a run not stopped whose workers outlived the stop — and
+/// every view that reports an in-flight node has to choose exactly one of these
+/// sentences about it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum StopState {
+    /// No stop has been recorded.
+    #[default]
+    NotStopped,
+    /// A stop was recorded and every process the run had started was signalled.
+    WorkersSignalled,
+    /// A stop was recorded, but nothing established what became of the run's
+    /// workers: this host gave no listing its process tree could be read from,
+    /// or the driver is on a host this one cannot reach. They may still be
+    /// running.
+    WorkersUndetermined,
+}
+
 /// Everything the journal says about a run.
 #[derive(Debug, Clone, Default)]
 pub struct RunState {
@@ -84,8 +104,8 @@ pub struct RunState {
     /// The last event of any kind, in epoch milliseconds — the run's own
     /// evidence that something is still writing to it.
     pub last_write_at: Option<u64>,
-    /// Whether `stop` ended the run.
-    pub stopped: bool,
+    /// What `stop` left the run as.
+    pub stop: StopState,
     /// Whether the fold met a line it could not read. Strict replay reports
     /// rather than silently folding an incomplete graph.
     pub strict: bool,
@@ -150,6 +170,14 @@ pub struct NodeActivity {
 const TURN_ACTIVITY: &str = "turn-activity";
 
 impl RunState {
+    /// Whether a stop has been recorded at all, however it went.
+    ///
+    /// Not "the run's work has ended": a recorded stop may have reached nothing.
+    /// [`stop`](Self::stop) is what says which.
+    pub fn stop_recorded(&self) -> bool {
+        self.stop != StopState::NotStopped
+    }
+
     /// The frontier an edit is judged against.
     pub fn frontier(&self) -> Frontier {
         Frontier {
@@ -341,7 +369,12 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
             state.last_surface_at = millis_of(&event.ts);
         }
         Some(journal::PipelineKind::RunStopped) => {
-            state.stopped = true;
+            state.stop = match journal::StopTeardown::of(payload) {
+                journal::StopTeardown::Signalled => StopState::WorkersSignalled,
+                journal::StopTeardown::NotAttempted
+                | journal::StopTeardown::PartlySignalled
+                | journal::StopTeardown::Elsewhere => StopState::WorkersUndetermined,
+            };
             state.round_open = false;
         }
         Some(journal::PipelineKind::CrossDagSatisfied) => {
@@ -765,7 +798,7 @@ mod tests {
         assert_eq!(state.recorded["approve"], NodeStatus::Done);
         assert_eq!(state.completion_requests, vec!["verified".to_string()]);
         assert_eq!(state.cross_dag_watches["run:o#n"], 1);
-        assert!(state.stopped);
+        assert!(state.stop_recorded());
         assert!(!state.round_open);
     }
 

@@ -1176,3 +1176,198 @@ fn a_view_renders_with_the_health_block_read_through_the_library() {
         status.stdout
     );
 }
+
+/// The launcher has one answer about what a graph document may contain,
+/// whichever way a run is launched.
+///
+/// A launcher holding a second, staler parser refused a document the runner
+/// accepted — the same file, one flag apart. So the document declares
+/// [`oneagentgraph::config::SCHEMA_VERSION`](oneagentgraph::config::SCHEMA_VERSION)
+/// and uses a field only that version allows, read off the runner rather than
+/// written down here, and `PATH` is emptied so neither form can resolve a
+/// sibling by name.
+///
+/// What the document *means* is the runner's business; this crate's claim is
+/// only that it holds one parser, so the journey ends there.
+#[test]
+fn a_document_the_runner_accepts_launches_whichever_way_it_is_asked_for() {
+    for form in ["--attach", "--detach"] {
+        let world = World::new(&format!("runner-schema-{}", form.trim_start_matches("--")));
+        world.write_graphs_at_the_runners_schema();
+        let path = world.plan("schema", &plan_of("schema", vec![agent("build", &[])]));
+
+        let mut command = world.agentgraph_cmd(&["start", &path.to_string_lossy(), form]);
+        command.env("PATH", world.empty_path());
+        let started = world.run_on(command, &format!("start {form}"));
+        // The whole of the defect, in one exit code: the launch that refused
+        // this document refused it here, naming a field list that predates the
+        // one it carries.
+        started.exited(0);
+
+        // And it is a launch rather than a parse: the run reaches settlement,
+        // which takes the graph running, its driver driving, and the node it
+        // dispatched reporting back. Read through `status`, where an operator
+        // reads it.
+        world.until("the run to settle", |world| {
+            world.run(&["status", "schema"]).stdout.contains("SETTLED")
+        });
+        let results = world.run(&["results", "schema"]);
+        results.exited(0).out_has("build");
+    }
+}
+
+/// The retained driver relays its graph's stream and answers with its code.
+///
+/// `drive` is what `start --detach` spawns of this binary, and it is the whole
+/// reason a detached launch composes the same `oneagentgraph` an attached one
+/// does. Nothing but the launcher types it, so `--help` gives no one a reason to
+/// notice it broke — and a launcher reads two things off it: the NDJSON on its
+/// stdout, which is how the announcement and every later envelope arrive, and
+/// its exit status, which is the graph's own answer rather than a second opinion
+/// about it.
+#[test]
+fn the_retained_driver_relays_its_graphs_stream_and_exits_with_its_code() {
+    let world = World::new("drive-relay");
+    world.write_graphs();
+    let graph = world.graphs().join("node-scope.yaml");
+    let dir = world.root.join("driven");
+    std::fs::create_dir_all(&dir).expect("a directory for the driven graph");
+
+    let driven = world.run_on(
+        world.agentgraph_cmd(&[
+            "drive",
+            &graph.to_string_lossy(),
+            "--task",
+            "Do the work and settle.",
+            "--dir",
+            &dir.to_string_lossy(),
+        ]),
+        "drive node-scope",
+    );
+    driven.exited(0);
+
+    let relayed: Vec<Value> = driven
+        .stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            serde_json::from_str(line).unwrap_or_else(|error| {
+                panic!("`drive` wrote a line that is not an envelope: {error}\n{line}")
+            })
+        })
+        .collect();
+    assert!(
+        relayed
+            .iter()
+            .any(|event| event["kind"] == "member-started"),
+        "the relay carried no member-started:\n{}",
+        driven.stdout
+    );
+    assert!(
+        relayed
+            .iter()
+            .all(|event| event["source"] == "agentgraph" && event["v"] == 1),
+        "the relay rewrote the envelopes it was given:\n{}",
+        driven.stdout
+    );
+}
+
+/// A relay that cannot write says so, rather than reporting a run that settled.
+///
+/// The launcher points a retained driver's stdout at a file and reads its
+/// evidence back out of it, so a write that fails is a full disk under a live
+/// run. What must not happen is that the driver swallows it and exits 0: the
+/// launcher would record a graph that ran and said nothing, which is
+/// indistinguishable from one that had nothing to say.
+///
+/// `/dev/full` is the deterministic version of a full disk — every write to it
+/// fails with `ENOSPC` — and it is Linux's, which is why this is scoped to it.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_retained_driver_that_cannot_write_its_relay_refuses() {
+    let world = World::new("drive-nospace");
+    world.write_graphs();
+    let graph = world.graphs().join("node-scope.yaml");
+    let dir = world.root.join("driven");
+    std::fs::create_dir_all(&dir).expect("a directory for the driven graph");
+
+    let mut command = world.agentgraph_cmd(&[
+        "drive",
+        &graph.to_string_lossy(),
+        "--task",
+        "Do the work and settle.",
+        "--dir",
+        &dir.to_string_lossy(),
+    ]);
+    command.stdout(
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/full")
+            .expect("/dev/full"),
+    );
+    let refused = world.run_on(command, "drive onto a full disk");
+    assert_ne!(
+        refused.code, 0,
+        "a driver that could not relay its own stream reported success:\n{}",
+        refused.stderr
+    );
+    refused.err_has("relaying graph event");
+}
+
+/// A graph whose member fails reaches the launcher as its own exit code.
+///
+/// The retained driver is the only thing between a failing graph and the launch
+/// log an operator reads afterwards, and it must not improve on what it saw: the
+/// exit status is the graph's own answer rather than a second opinion about it.
+/// A driver that exited 0 here would hand the launcher a run that started and
+/// settled — the silent total failure this whole change is about.
+///
+/// The member fails *after* it has started and streamed, which is the case the
+/// settlement decides: a graph that refuses before it runs never reaches the
+/// settlement at all, because the relay carries that refusal out of the event
+/// loop instead.
+#[test]
+fn a_retained_driver_carries_a_failing_graphs_own_exit_code() {
+    let world = World::new("drive-failed");
+    world.write_graphs();
+    let graph = world.graphs().join("node-scope.yaml");
+    let dir = world.root.join("driven-failed");
+    std::fs::create_dir_all(&dir).expect("a directory for the driven graph");
+
+    // A turn that ran and did not get there: it starts, streams, and settles on
+    // a non-zero exit paired with a `turn_failed` report, which is the shape a
+    // caller reading the graph's settlement actually sees.
+    world.script("harness.fail", "the turn did not get there");
+    let failed = world.run_on(
+        world.agentgraph_cmd(&[
+            "drive",
+            &graph.to_string_lossy(),
+            "--task",
+            "Do the work and settle.",
+            "--dir",
+            &dir.to_string_lossy(),
+        ]),
+        "drive a graph whose member fails",
+    );
+    // The graph's *own* code, not merely "not success": a launcher reading this
+    // process's exit reads the sibling's answer, and the sibling answers a member
+    // that failed with this one.
+    assert_eq!(
+        failed.code,
+        oneagentgraph::error::EXIT_MEMBER_FAILED,
+        "a driver did not carry its graph's own exit code:\nstdout: {}\nstderr: {}",
+        failed.stdout,
+        failed.stderr
+    );
+    // It really ran: the member started and streamed before it failed, so this
+    // is the settlement's answer rather than a refusal on the way in.
+    assert!(
+        failed
+            .stdout
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .any(|event| event["kind"] == "member-started"),
+        "the graph never started a member, so its code is not a settlement:\n{}",
+        failed.stdout
+    );
+}

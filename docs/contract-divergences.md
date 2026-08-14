@@ -591,3 +591,42 @@ So the host side of a subprocess journey is still stood in for at `onevcs`'s own
 `ONEVCS_GH` override — that library's documented seam for the `gh` executable —
 by `crates/testfakes`'s `fake-gh`. `tests/smoke/` runs the same publication
 against the real `gh` and is what holds it honest.
+
+## 23. The retained driver a detached launch spawns is a verb the contract does not name — OPEN
+
+**Proposal (for the planner who owns the contract): name `start --detach`'s
+retained driver in the driver contract, or accept a hidden verb outside the
+documented surface.**
+
+The contract's driver contract declares `start ... [--attach|--detach]` and says
+the launch "launches the dag-scope agent graph ... via oneagentgraph". It does
+not say *how* a detached launch keeps driving after its launcher exits, and the
+two answers are not equivalent.
+
+An attached launch composes `oneagentgraph` as a **library**, in this process.
+A detached one cannot: a library scheduler thread does not outlive the launcher
+that is about to exit, so something has to be retained. Retaining
+`oneagentgraph` **by name** is what this replaced, and it made the launcher two
+parsers rather than one — it validated with the sibling this crate is compiled
+against and ran with whichever the host had installed, so a graph document the
+runner accepted was refused by the default attached launch, one flag apart:
+
+```text
+unknown field `task`, expected one of `oneharness_config`, `persona`, `schedule`, `deps`
+```
+
+So the retained process is now *this executable*, at `onepipeline drive GRAPH
+--task ... --dir ... [--label ...] [--set ...]` — the same arguments
+`oneagentgraph run` takes, composed by this build's own copy of that library. One
+build decides what a graph document may contain, whichever launch mode asked.
+`ONEPIPELINE_ONEAGENTGRAPH_BIN` remains the explicit, all-or-nothing override and
+is now the only way an installed sibling is composed instead.
+
+The verb is `hide = true`, so it is absent from `--help` and from every list the
+contract's surface is checked against; `scripts/smoke-published.sh` reaches it
+directly, and `tests/contract.rs` requires that of every hidden verb, because a
+published artifact without it cannot launch a detached run at all.
+
+What is open is only whether the contract should *say* this: a launcher that
+spawns itself is a fact about the driver contract, and it is currently recorded
+here rather than there.

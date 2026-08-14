@@ -9,6 +9,7 @@
 //! is unlocked and takes no lock a writer needs, which is what lets every view
 //! run beside a live round.
 
+use std::collections::{BTreeMap, VecDeque};
 use std::path::Path;
 
 use serde_json::{json, Map, Value};
@@ -139,17 +140,111 @@ pub fn has_unreadable_lines(path: &Path) -> bool {
         .any(|line| serde_json::from_str::<Envelope>(line).is_err())
 }
 
-/// Merge order across streams: `(ts, stream, seq)`.
+/// Merge order: each stream in its own `seq`, interleaved between streams by
+/// `ts`.
 ///
-/// There are no cross-stream ordering promises beyond the timestamps, so the
-/// stream id and sequence break a tie deterministically rather than
-/// meaningfully.
+/// `seq` is the producer's own statement of the order it wrote things in, and
+/// the only ordering promise an envelope carries. `ts` is a wall clock — not
+/// this process's, and not monotonic, since a host clock can be stepped under a
+/// running producer — so ordering a stream by it swaps that stream's own records
+/// against the only party that knew. Between streams nothing is promised beyond
+/// the timestamps, so a `ts` tie there is broken by stream id: deterministic
+/// rather than meaningful.
 pub fn merge_order(events: &mut [Envelope]) {
-    events.sort_by(|a, b| {
-        a.ts.cmp(&b.ts)
-            .then_with(|| a.stream.cmp(&b.stream))
-            .then_with(|| a.seq.cmp(&b.seq))
-    });
+    let mut merged: Vec<Envelope> = merged_order(events)
+        .into_iter()
+        .map(|index| events[index].clone())
+        .collect();
+    events.swap_with_slice(&mut merged);
+}
+
+/// Where each record belongs in the merged order, as indices into `events`.
+///
+/// A k-way merge rather than one sort: the order [`merge_order`] states is not a
+/// total order over the fields — `seq` within a stream, `ts` between them — and
+/// `sort_by` given an inconsistent comparator produces an order nobody
+/// specified.
+fn merged_order(events: &[Envelope]) -> Vec<usize> {
+    let mut streams: BTreeMap<&str, VecDeque<usize>> = BTreeMap::new();
+    for (index, event) in events.iter().enumerate() {
+        streams
+            .entry(event.stream.as_str())
+            .or_default()
+            .push_back(index);
+    }
+    for queue in streams.values_mut() {
+        let mut ordered: Vec<usize> = queue.iter().copied().collect();
+        // Stable, so two records of one stream claiming one `seq` — which only
+        // a producer in error emits — keep the order they were appended in
+        // rather than being reordered by a tie-break that means nothing.
+        ordered.sort_by_key(|index| events[*index].seq);
+        *queue = ordered.into();
+    }
+
+    let mut order = Vec::with_capacity(events.len());
+    // Each round takes the earliest record still at the head of any stream. A
+    // stream's head is its next `seq`, so its own order is never in question;
+    // what this decides is only which stream goes next.
+    while let Some(stream) = streams
+        .iter()
+        .filter_map(|(stream, queued)| queued.front().map(|index| (&events[*index].ts, *stream)))
+        .min()
+        .map(|(_, stream)| stream)
+    {
+        let index = streams
+            .get_mut(stream)
+            .and_then(VecDeque::pop_front)
+            .expect("the stream this round chose has a head");
+        order.push(index);
+    }
+    order
+}
+
+/// The `run-stopped` payload field naming what its teardown established.
+///
+/// Named once because `stop` writes it and the projection reads it, and a run
+/// whose two sides disagree about this field reports work as ended that is still
+/// running.
+pub const STOP_TEARDOWN: &str = "teardown";
+
+/// What a `run-stopped` record says its teardown established about the run's
+/// processes.
+///
+/// A closed set on the wire as well as in the code: an unknown value is not a
+/// fourth meaning to guess at, and [`StopTeardown::of`] reads one as the
+/// conservative answer rather than the convenient one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StopTeardown {
+    /// The run's process tree was listed in full and every process in it was
+    /// signalled.
+    Signalled,
+    /// This host gave no listing the tree could be read from, so nothing was
+    /// signalled and the run was left as it was.
+    NotAttempted,
+    /// The tree was listed and part of it was signalled; at least one process in
+    /// it could not be, and is still running.
+    PartlySignalled,
+    /// The run's driver is on another host, so this one attempted nothing and
+    /// has nothing to say about its processes.
+    Elsewhere,
+}
+
+impl StopTeardown {
+    /// What a `run-stopped` payload says, read defensively.
+    ///
+    /// A record with no such field is one written before it existed, and those
+    /// stops signalled a tree they had read: [`Signalled`](Self::Signalled). A
+    /// record that *has* the field and says something this build does not know
+    /// is a newer writer describing an outcome this one cannot interpret, and
+    /// the safe reading of an uninterpretable teardown is the most cautious one
+    /// this build has — never that the run's workers were reached.
+    pub fn of(payload: &Map<String, Value>) -> Self {
+        match payload.get(STOP_TEARDOWN) {
+            None => Self::Signalled,
+            Some(value) => serde_json::from_value(value.clone()).unwrap_or(Self::NotAttempted),
+        }
+    }
 }
 
 /// The payload of a `node-settled` event, as the projection folds it.
@@ -170,6 +265,32 @@ pub fn settled_payload(
 
 #[cfg(test)]
 mod tests {
+
+    /// What a `run-stopped` record this build cannot interpret is taken to mean.
+    #[test]
+    fn an_uninterpretable_teardown_is_never_read_as_a_clean_stop() {
+        assert_eq!(
+            StopTeardown::of(&payload(&[])),
+            StopTeardown::Signalled,
+            "a record written before the field existed should read as the stop it was"
+        );
+        for (name, said) in [
+            ("a kind this build has never seen", json!("swept")),
+            ("a value of the wrong shape", json!(true)),
+            ("nothing at all", json!(null)),
+        ] {
+            assert_eq!(
+                StopTeardown::of(&payload(&[(STOP_TEARDOWN, said)])),
+                StopTeardown::NotAttempted,
+                "{name} was read as an outcome this build understands"
+            );
+        }
+        assert_eq!(
+            StopTeardown::of(&payload(&[(STOP_TEARDOWN, json!("elsewhere"))])),
+            StopTeardown::Elsewhere
+        );
+    }
+
     use super::*;
     use crate::event::EventKind;
     use std::fs;
@@ -262,9 +383,8 @@ mod tests {
         fs::remove_dir_all(&root).ok();
     }
 
-    #[test]
-    fn the_merge_orders_by_timestamp_then_stream_then_sequence() {
-        let event = |ts: &str, stream: &str, seq: u64| Envelope {
+    fn event(ts: &str, stream: &str, seq: u64) -> Envelope {
+        Envelope {
             v: ENVELOPE_VERSION,
             ts: ts.into(),
             stream: stream.into(),
@@ -274,24 +394,107 @@ mod tests {
             labels: Labels::default(),
             payload: Map::new(),
             artifacts: Vec::new(),
-        };
-        let mut events = vec![
-            event("2026-08-08T00:00:01.000Z", "b", 0),
-            event("2026-08-08T00:00:00.000Z", "b", 1),
-            event("2026-08-08T00:00:00.000Z", "b", 0),
-            event("2026-08-08T00:00:00.000Z", "a", 9),
-        ];
+        }
+    }
+
+    fn merged(mut events: Vec<Envelope>) -> Vec<(String, u64)> {
         merge_order(&mut events);
-        let seen: Vec<(String, u64)> = events.iter().map(|e| (e.stream.clone(), e.seq)).collect();
+        events
+            .into_iter()
+            .map(|event| (event.stream, event.seq))
+            .collect()
+    }
+
+    #[test]
+    fn the_merge_interleaves_streams_by_timestamp() {
         assert_eq!(
-            seen,
+            merged(vec![
+                event("2026-08-08T00:00:02.000Z", "b", 1),
+                event("2026-08-08T00:00:03.000Z", "a", 1),
+                event("2026-08-08T00:00:00.000Z", "a", 0),
+                event("2026-08-08T00:00:01.000Z", "b", 0),
+            ]),
             vec![
-                ("a".to_string(), 9),
+                ("a".to_string(), 0),
                 ("b".to_string(), 0),
                 ("b".to_string(), 1),
+                ("a".to_string(), 1),
+            ],
+            "the streams did not interleave by the clock"
+        );
+    }
+
+    #[test]
+    fn a_timestamp_collision_between_streams_is_broken_by_the_stream_id() {
+        // Nothing promises anything about the order of two records from
+        // different producers written inside one clock tick, so the tie-break is
+        // deterministic rather than meaningful — but it does have to be *some*
+        // one order, or two readings of one store disagree.
+        let tick = "2026-08-08T00:00:00.000Z";
+        assert_eq!(
+            merged(vec![
+                event(tick, "b", 0),
+                event(tick, "a", 0),
+                event(tick, "a", 1),
+                event(tick, "b", 1),
+            ]),
+            vec![
+                ("a".to_string(), 0),
+                ("a".to_string(), 1),
                 ("b".to_string(), 0),
+                ("b".to_string(), 1),
             ]
         );
+    }
+
+    /// A stream's own sequence survives timestamps that do not agree with it.
+    ///
+    /// `ts` is a wall clock, and a wall clock is neither monotonic nor this
+    /// process's: a host clock stepped under a running producer stamps a later
+    /// record with an earlier reading. `seq` is that producer saying what order
+    /// it wrote things in, and ordering its records by anything else discards
+    /// the only ordering fact the envelope actually carries.
+    #[test]
+    fn a_streams_own_sequence_outranks_its_timestamps() {
+        assert_eq!(
+            merged(vec![
+                event("2026-08-08T00:00:02.000Z", "a", 0),
+                // The clock went backwards between these two, and between these
+                // two only. Ordered by `ts` the stream reads 1, 2, 0.
+                event("2026-08-08T00:00:00.000Z", "a", 1),
+                event("2026-08-08T00:00:01.000Z", "a", 2),
+            ]),
+            vec![
+                ("a".to_string(), 0),
+                ("a".to_string(), 1),
+                ("a".to_string(), 2),
+            ],
+            "the merge reordered a stream against the sequence its producer stamped"
+        );
+    }
+
+    #[test]
+    fn two_records_of_one_stream_claiming_one_sequence_keep_the_order_they_arrived_in() {
+        // A producer in error, so there is nothing to be right about beyond
+        // being stable: the store must not shuffle under a second reading.
+        let mut events = vec![
+            event("2026-08-08T00:00:01.000Z", "a", 0),
+            event("2026-08-08T00:00:00.000Z", "a", 0),
+        ];
+        merge_order(&mut events);
+        let timestamps: Vec<String> = events.iter().map(|event| event.ts.clone()).collect();
+        assert_eq!(
+            timestamps,
+            vec![
+                "2026-08-08T00:00:01.000Z".to_string(),
+                "2026-08-08T00:00:00.000Z".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn merging_nothing_is_nothing() {
+        assert!(merged(Vec::new()).is_empty());
     }
 
     #[test]

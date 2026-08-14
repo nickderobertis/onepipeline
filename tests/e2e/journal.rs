@@ -327,3 +327,75 @@ fn a_rounds_result_is_written_atomically_and_read_back_whole() {
         .collect();
     assert!(leftovers.is_empty(), "a temporary survived: {leftovers:?}");
 }
+
+/// One stream's records are read back in the order their producer wrote them,
+/// whatever its clock said.
+///
+/// The producer here is the `oneagentgraph` stand-in, scripted to do what a real
+/// one does when its host clock is corrected under it: keep counting its `seq`
+/// forward while stamping a later record with an earlier reading. Everything
+/// below that is real — the sibling's NDJSON crosses the launcher's own relay,
+/// is merged by the merge under test, is written to the run's own store, and is
+/// read back by `monitor`, which is where a person sees the order.
+///
+/// A dispatch reports its `turn-activity` before its `turn-completed`, always,
+/// because that is the order the turn happened in. Sorted by the clock this
+/// producer stamped, it reads the other way round.
+#[test]
+fn a_streams_own_order_survives_a_clock_that_disagrees_with_it() {
+    let world = World::new("journal-clock");
+    world.script("build.clock-stepped", "the turn's clock steps back");
+    let path = world.plan("stepped", &plan_of("stepped", vec![agent("build", &[])]));
+    world
+        .run(&["start", &path.to_string_lossy(), "--attach"])
+        .exited(0);
+
+    let rendered = world.run(&["monitor", "stepped"]);
+    rendered.exited(0);
+    let at = |kind: &str| {
+        rendered
+            .stdout
+            .lines()
+            .position(|line| line.contains(kind))
+            .unwrap_or_else(|| panic!("`monitor` never rendered {kind}:\n{}", rendered.stdout))
+    };
+    assert!(
+        at("turn-activity") < at("turn-completed"),
+        "the merge reordered one stream against the sequence its producer stamped:\n{}",
+        rendered.stdout
+    );
+}
+
+/// Two records of one stream claiming one `seq` keep the order they arrived in.
+///
+/// Only a producer in error stamps one sequence twice, so there is nothing to be
+/// *right* about here beyond being stable — which is exactly why it needs saying.
+/// A store that shuffled these under a second reading would be a run whose record
+/// changed when it was reread, and a reader comparing two readings of it would be
+/// chasing a difference nobody made.
+///
+/// Read through `monitor`, like every other claim about the merged order.
+#[test]
+fn two_records_of_one_stream_claiming_one_sequence_keep_arriving_order() {
+    let world = World::new("journal-dup-seq");
+    world.script("build.duplicate-seq", "one seq, stamped twice");
+    let path = world.plan("twice", &plan_of("twice", vec![agent("build", &[])]));
+    world
+        .run(&["start", &path.to_string_lossy(), "--attach"])
+        .exited(0);
+
+    let rendered = world.run(&["monitor", "twice"]);
+    rendered.exited(0);
+    let at = |text: &str| {
+        rendered
+            .stdout
+            .lines()
+            .position(|line| line.contains(text))
+            .unwrap_or_else(|| panic!("`monitor` never rendered {text}:\n{}", rendered.stdout))
+    };
+    assert!(
+        at("the dispatch ran") < at("the dispatch ran again"),
+        "the merge reordered two records that arrived under one sequence:\n{}",
+        rendered.stdout
+    );
+}

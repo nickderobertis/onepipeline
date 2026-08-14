@@ -73,6 +73,15 @@ pub enum Command {
     Transcript(TranscriptArgs),
     /// Session timing and usage.
     Telemetry(TelemetryArgs),
+    /// Drive one agent graph in this process, relaying its envelopes as NDJSON.
+    ///
+    /// Not part of the documented surface and hidden from `--help`: it is how
+    /// `start --detach` retains a driver that composes the **same**
+    /// `oneagentgraph` an attached launch validates and runs with. Nothing but
+    /// this crate's own launcher spells it, and it names no run — it is a graph
+    /// and a task, exactly as the sibling's own `run` takes them.
+    #[command(hide = true, name = crate::agentgraph::DRIVE_VERB)]
+    Drive(DriveArgs),
 }
 
 /// `onepipeline start`.
@@ -104,6 +113,29 @@ pub struct StartArgs {
     /// Proceed even when another live session holds a targeted repository.
     #[arg(long)]
     pub acknowledge_concurrent: bool,
+}
+
+/// `onepipeline drive` — the retained driver a detached launch starts.
+///
+/// The arguments a graph run needs and no more, spelled as `oneagentgraph run`
+/// spells them: this is the same launch, made by this build's own copy of that
+/// library rather than by whichever one the host has installed.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct DriveArgs {
+    /// The agent-graph config to run.
+    pub graph: String,
+    /// The task prose every member without its own is given.
+    #[arg(long, value_name = "TEXT")]
+    pub task: String,
+    /// The directory the graph's members work in.
+    #[arg(long, value_name = "DIR")]
+    pub dir: PathBuf,
+    /// One `k=v` label stamped on every envelope, repeatable.
+    #[arg(long = "label", value_name = "KEY=VALUE")]
+    pub labels: Vec<String>,
+    /// One opaque graph-config override, repeatable, applied in order.
+    #[arg(long = "set", value_name = "PATH=VALUE")]
+    pub sets: Vec<String>,
 }
 
 /// The engine verbs, guarded by the run ownership lock: single writer.

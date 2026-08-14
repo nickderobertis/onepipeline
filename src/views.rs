@@ -66,6 +66,31 @@ pub const DEFAULT_PARKED_AFTER_SECONDS: u64 = 1_800;
 /// The environment variable that moves that threshold.
 pub const PARKED_AFTER_ENV: &str = "ONEPIPELINE_PARKED_AFTER_SECONDS";
 
+/// How a node whose dispatch a `stop` ended is reported.
+///
+/// One phrasing, in the two views that report an in-flight node, because they
+/// are read together and a run that says two things about one node is a run
+/// nobody trusts. It says what happened to the *worker* rather than what the
+/// node produced: a stop ends the run's whole dispatch tree, and the process
+/// that would have settled the node was in that tree — so the last thing the
+/// record holds for it is that it started, and a reader with nothing else to go
+/// on takes that for a node that produced nothing.
+const ENDED_BY_THE_STOP: &str = "worker ended when the run was stopped";
+
+/// How the same node reads when nothing established what became of its worker.
+///
+/// It has to be a different sentence: the worker is very likely still running,
+/// and "ended" there is the false completion `stop` itself refuses to report.
+const OUTLIVED_THE_STOP: &str = "worker may still be running: the stop could not reach it";
+
+/// Which of the two a stopped run's in-flight node gets.
+fn became_of_the_worker(state: &crate::projection::RunState) -> &'static str {
+    match state.stop {
+        crate::projection::StopState::WorkersUndetermined => OUTLIVED_THE_STOP,
+        _ => ENDED_BY_THE_STOP,
+    }
+}
+
 impl DriverLiveness {
     /// The word a view prints for this verdict.
     pub fn as_str(self) -> &'static str {
@@ -102,7 +127,7 @@ pub fn parked_after_seconds() -> u64 {
 /// host is exactly such an unknown — a pid means nothing across machines — so a
 /// run another driver is holding reads as the live work it is.
 pub fn liveness(launch: &LaunchRecord, state: &RunState) -> DriverLiveness {
-    if state.stopped {
+    if state.stop_recorded() {
         return DriverLiveness::DriverDead;
     }
     let ours = launch.host == sys::hostname();
@@ -317,10 +342,15 @@ pub fn status(views: &[RunView]) -> String {
                 .dispatched_at
                 .get(id)
                 .map(|at| sys::now_millis().saturating_sub(*at));
-            out.push_str(&format!(
-                "  {id}: running for {}",
-                crate::telemetry::duration(age.unwrap_or(0)),
-            ));
+            let age = crate::telemetry::duration(age.unwrap_or(0));
+            if view.state.stop_recorded() {
+                // What this node last did stays on the record and is
+                // deliberately not repeated here — see [`ENDED_BY_THE_STOP`].
+                let became = became_of_the_worker(&view.state);
+                out.push_str(&format!("  {id}: {became}, {age} in\n"));
+                continue;
+            }
+            out.push_str(&format!("  {id}: running for {age}"));
             match view.state.activity.get(id) {
                 // A node the ledger records as running that no live dispatch is
                 // driving is `UNDRIVEN`. Deliberately not `parked`: that word
@@ -459,6 +489,9 @@ pub fn results(view: &RunView) -> String {
         out.push_str(&format!("  {:<24} {}", node.id, status.as_str()));
         if let Some(outcome) = view.state.outcomes.get(&node.id) {
             out.push_str(&format!(" ({outcome})"));
+        }
+        if status == NodeStatus::Running && view.state.stop_recorded() {
+            out.push_str(&format!(" — {}", became_of_the_worker(&view.state)));
         }
         // What the dispatch reported, before what the plan asked for: an
         // unpinned lifecycle node's branch is named by the sibling that cut it,

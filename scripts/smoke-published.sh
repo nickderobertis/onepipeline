@@ -80,6 +80,28 @@ for command in start adopt round channel next reply surface attest stop runs sta
   esac
 done
 
+# The retained driver, which is deliberately absent from the list above: it is
+# hidden from `--help`, because it is not a surface a user types. `start
+# --detach` spawns *this binary* at it — that is what makes a detached launch
+# compose the same `oneagentgraph` an attached one validates and runs with — so
+# a published artifact without it cannot launch a detached run at all, and
+# `--help` gives nothing to notice that in.
+#
+# What the binary actually said is carried into the failure rather than
+# discarded: "no such subcommand" is the artifact predating the verb, and
+# anything else is a build that has it and could not run it — two different
+# faults, and a probe that reported them identically would send the reader after
+# the wrong one.
+if ! drive_said="$(onepipeline drive --help 2>&1)"; then
+  case "${drive_said}" in
+    *"unrecognized subcommand"* | *"unknown subcommand"* | *"not found"*)
+      drive_action="the installed binary predates the verb — reinstall the version under test" ;;
+    *)
+      drive_action="the verb is present and would not run — run 'onepipeline drive --help' by hand against the $label and fix what it reports; do not publish, because every detached launch spawns it" ;;
+  esac
+  fail "the 'drive' command a detached launch retains did not run: ${drive_said}" "${drive_action}"
+fi
+
 # Reading a run nobody recorded is the smallest command that reaches the ledger,
 # and its answer is fixed: exit 2, naming the run. A build that exited 0 here
 # would be reporting a surface it never read, and one that exited 3 would be
