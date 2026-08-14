@@ -15,11 +15,29 @@ use crate::harness::{agent, human, plan_of, World, NOTHING_DRIVING, REFUSED};
 use serde_json::json;
 
 fn start_detached(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
+    start_detached_announcing(world, name, nodes).0
+}
+
+/// The same launch, with the driver pid it announced.
+///
+/// A detached launch prints its run and the pid it retained, which is how an
+/// operator addresses the driver of a run nobody is attached to — so a journey
+/// about what that driver's teardown reaches asks for it the same way.
+fn start_detached_announcing(
+    world: &World,
+    name: &str,
+    nodes: Vec<serde_json::Value>,
+) -> (String, u32) {
     let path = world.plan(name, &plan_of(name, nodes));
-    world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
-    name.to_string()
+    let started = world.run(&["start", &path.to_string_lossy(), "--detach"]);
+    started.exited(0);
+    let announced: serde_json::Value = serde_json::from_str(started.stdout.trim())
+        .unwrap_or_else(|error| panic!("a detached launch announces itself: {error}"));
+    let pid = announced["pid"]
+        .as_u64()
+        .and_then(|pid| u32::try_from(pid).ok())
+        .unwrap_or_else(|| panic!("the launch announced no driver: {announced}"));
+    (name.to_string(), pid)
 }
 
 /// The directory every dag-scope launch was given, in launch order.
@@ -1069,7 +1087,6 @@ fn process_table() -> Vec<(u32, u32)> {
         .collect()
 }
 
-/// Every process descended from `pid`, however deep.
 #[cfg(unix)]
 fn descendants(pid: u32) -> Vec<u32> {
     let table = process_table();
@@ -1086,21 +1103,9 @@ fn descendants(pid: u32) -> Vec<u32> {
     found
 }
 
-/// Whether this host's process table still lists that id.
 #[cfg(unix)]
 fn still_listed(pid: u32) -> bool {
     process_table().iter().any(|(listed, _)| *listed == pid)
-}
-
-/// The recorded driver of a run.
-#[cfg(unix)]
-fn recorded_driver(world: &World, run: &str) -> u32 {
-    u32::try_from(
-        world.run_json(run, "launch.json")["pid"]
-            .as_u64()
-            .expect("the launch records a driver"),
-    )
-    .expect("a pid")
 }
 
 /// Ending a run ends everything it started, and nothing beside it.
@@ -1119,22 +1124,21 @@ fn recorded_driver(world: &World, run: &str) -> u32 {
 fn stopping_a_run_ends_its_whole_dispatch_tree_and_leaves_the_run_beside_it_alone() {
     let world = World::new("driver-stop-tree");
     world.script("build.wait", "hold");
-    let run = start_detached(&world, "treed", vec![agent("build", &[])]);
-    let beside = start_detached(&world, "untouched", vec![agent("build", &[])]);
+    let (run, driver) = start_detached_announcing(&world, "treed", vec![agent("build", &[])]);
+    let (beside, untouched) =
+        start_detached_announcing(&world, "untouched", vec![agent("build", &[])]);
     for run in [&run, &beside] {
         world.until("a node to be in flight", |world| {
             !world.events_of(run, "node-dispatched").is_empty()
         });
     }
 
-    let driver = recorded_driver(&world, &run);
     // Read before the stop, and only once the dispatch has actually grown: a
     // tree of one process is a journey that would pass without the fix.
     world.until("the dispatch to be more than one process", |_| {
         descendants(driver).len() > 1
     });
     let tree: Vec<u32> = std::iter::once(driver).chain(descendants(driver)).collect();
-    let untouched = recorded_driver(&world, &beside);
     assert!(
         !tree.contains(&untouched),
         "the run beside it is inside the tree, so this journey proves nothing: {tree:?}"

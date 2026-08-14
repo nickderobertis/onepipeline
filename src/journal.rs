@@ -337,7 +337,6 @@ mod tests {
         }
     }
 
-    /// The order the merge produces, as `(stream, seq)` pairs.
     fn merged(mut events: Vec<Envelope>) -> Vec<(String, u64)> {
         merge_order(&mut events);
         events

@@ -31,26 +31,25 @@ fn prompt_of(event: &Value) -> Option<String> {
     args.get(at + 1)?.as_str().map(str::to_string)
 }
 
-/// Every prose a dag-scope member of `run` was launched with, wherever the
-/// launch put its driver's stream.
+/// Every prose a member's harness was actually invoked with, in this world.
 ///
-/// Both places, because the two launch forms differ in where the *driver's* own
-/// envelopes go and in nothing else: an attaching launcher stays and merges them
-/// into the run's store, and a detaching one hands its driver a log file and
-/// exits. A journey about what the driver was given has to read the one the
-/// launch it made actually wrote.
-fn driver_member_prompts(world: &World, run: &str) -> Vec<String> {
-    let logged = std::fs::read_to_string(world.run_file(run, "driver.log")).unwrap_or_default();
+/// Read off the harness double's own record rather than an event stream,
+/// because that argv *is* where a member's task arrives: `oneagentgraph`
+/// composes it and spawns the harness with it, and a member given the wrong one
+/// is given it here. It is also the one place both launch forms write — an
+/// attaching launcher merges its driver's envelopes into the run's store and a
+/// detaching one hands its driver a log file, but either way the member below
+/// them is spawned the same way.
+fn member_prompts(world: &World) -> Vec<String> {
     world
-        .journal(run)
-        .into_iter()
-        .chain(
-            logged
-                .lines()
-                .filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok()),
-        )
-        .filter(|event| event["kind"] == "member-started")
-        .filter_map(|event| prompt_of(&event))
+        .invocations()
+        .iter()
+        .filter(|call| call["tool"] == "oneharness")
+        .filter_map(|call| {
+            let args = call["args"].as_array()?;
+            let at = args.iter().position(|arg| arg == "--prompt")?;
+            args.get(at + 1)?.as_str().map(str::to_string)
+        })
         .collect()
 }
 
@@ -1236,13 +1235,13 @@ fn a_document_the_runner_accepts_launches_whichever_way_it_is_asked_for() {
         // `task` was launched with that prose *instead of* the graph's, which is
         // the whole point of the field: the launcher composes one task for the
         // whole graph, and a member whose job is not the run's must not be given
-        // it. Read off `member-started`'s own argv, in the run's merged store.
+        // it. Read off the argv the member's harness was spawned with.
         world.until("the reporting member to be launched", |world| {
-            driver_member_prompts(world, "schema")
+            member_prompts(world)
                 .iter()
                 .any(|prompt| prompt.contains(crate::harness::MEMBER_TASK))
         });
-        let prompts = driver_member_prompts(&world, "schema");
+        let prompts = member_prompts(&world);
         let claimed: Vec<&String> = prompts
             .iter()
             .filter(|prompt| prompt.contains(crate::harness::MEMBER_TASK))

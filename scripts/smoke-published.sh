@@ -86,9 +86,16 @@ done
 # compose the same `oneagentgraph` an attached one validates and runs with — so
 # a published artifact without it cannot launch a detached run at all, and
 # `--help` gives nothing to notice that in.
-onepipeline drive --help >/dev/null 2>&1 || fail \
-  "the 'drive' command a detached launch retains is missing" \
-  "the installed binary predates it — reinstall the version under test"
+#
+# What the binary actually said is carried into the failure rather than
+# discarded: "no such subcommand" is the artifact predating the verb, and
+# anything else is a build that has it and could not run it — two different
+# faults, and a probe that reported them identically would send the reader after
+# the wrong one.
+if ! drive_said="$(onepipeline drive --help 2>&1)"; then
+  fail "the 'drive' command a detached launch retains did not run: ${drive_said}" \
+    "if it is an unknown subcommand the installed binary predates it — reinstall the version under test"
+fi
 
 # Reading a run nobody recorded is the smallest command that reaches the ledger,
 # and its answer is fixed: exit 2, naming the run. A build that exited 0 here

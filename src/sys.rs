@@ -156,7 +156,6 @@ fn platform_stop(pid: u32, how: Stop) {
     }
 }
 
-/// Send one signal to one process, best-effort.
 #[cfg(unix)]
 fn signal_one(pid: u32, signal: i32) {
     let Ok(raw) = i32::try_from(pid) else {
