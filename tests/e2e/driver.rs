@@ -1086,9 +1086,9 @@ fn descendants(pid: u32) -> Vec<u32> {
     found
 }
 
-/// Whether this host still reports a process under that id.
+/// Whether this host's process table still lists that id.
 #[cfg(unix)]
-fn still_running(pid: u32) -> bool {
+fn still_listed(pid: u32) -> bool {
     process_table().iter().any(|(listed, _)| *listed == pid)
 }
 
@@ -1105,22 +1105,15 @@ fn recorded_driver(world: &World, run: &str) -> u32 {
 
 /// Ending a run ends everything it started, and nothing beside it.
 ///
-/// A run's expensive process is never the one whose pid the ledger holds: the
-/// driver starts a graph, the graph starts a round, and the round dispatches a
-/// node into a graph of its own. Measured live, the paid leaf of that tree puts
-/// itself in a **process group of its own** — so a teardown that reached the
-/// group swept the middle and left the leaf reparented to init, running for
-/// another twenty-five minutes, still writing into a real checkout with nobody
-/// reading its output. A teardown that reached one pid left all of it.
-///
-/// So the boundary is descent, and both halves of that are stated here: every
-/// descendant of the recorded driver is gone, and a run beside it — which is
-/// nobody's descendant — is untouched.
+/// The pid the ledger holds is the driver's; the expensive process is several
+/// levels below it, and the run beside this one is nobody's descendant. Both
+/// halves of the boundary are stated here because a teardown can be wrong in
+/// either direction.
 ///
 /// Unix-only because the tree is read back through the process table. The
-/// Windows arm hands the same boundary to `taskkill /T`, which has always
-/// walked it; `the_owner_stops_its_own_run_without_force` is where the ledger
-/// half of a stop is held on every platform.
+/// Windows arm hands the same boundary to `taskkill /T`, and
+/// `the_owner_stops_its_own_run_without_force` holds the ledger half of a stop
+/// on every platform.
 #[cfg(unix)]
 #[test]
 fn stopping_a_run_ends_its_whole_dispatch_tree_and_leaves_the_run_beside_it_alone() {
@@ -1150,10 +1143,10 @@ fn stopping_a_run_ends_its_whole_dispatch_tree_and_leaves_the_run_beside_it_alon
     world.run(&["stop", &run]).exited(0);
 
     world.until("every process the run started to end", |_| {
-        tree.iter().all(|pid| !still_running(*pid))
+        tree.iter().all(|pid| !still_listed(*pid))
     });
     assert!(
-        still_running(untouched),
+        still_listed(untouched),
         "stopping one run ended the driver of another: pid {untouched}"
     );
 

@@ -329,19 +329,8 @@ fn a_rounds_result_is_written_atomically_and_read_back_whole() {
 }
 
 /// One stream's records are read back in the order their producer wrote them,
-/// whatever the clock said.
-///
-/// The merged store interleaves several producers, and it used to do it by
-/// sorting the whole of it by timestamp. A timestamp is a wall clock — the
-/// producer's, not this reader's — recorded to the millisecond, so it collides
-/// whenever two records are written inside one tick and it runs backwards
-/// whenever a host clock is stepped. Sorted by it, one stream's own records
-/// swapped places: the run's record contradicting the only party that knew what
-/// order it wrote them in.
-///
-/// `seq` is that party saying so, and it is what the merge now orders a stream
-/// by. Between streams there is still nothing to promise, so the timestamps
-/// decide the interleaving and a collision is broken by the stream id.
+/// whatever the clock said — and a second producer colliding on that clock is
+/// still interleaved by it.
 ///
 /// Read through `monitor`, which is where a person sees the merged order.
 #[test]

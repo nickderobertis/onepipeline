@@ -330,12 +330,8 @@ pub fn status(views: &[RunView]) -> String {
                 .map(|at| sys::now_millis().saturating_sub(*at));
             let age = crate::telemetry::duration(age.unwrap_or(0));
             if view.state.stopped {
-                // A stop ends the run's whole dispatch tree, so this node's
-                // worker was ended with it. What it *last* did is still on the
-                // record and is deliberately not repeated here: a line reporting
-                // it would read as a worker still working, which is how a node
-                // killed mid-edit gets taken for one that simply produced
-                // nothing.
+                // What this node last did stays on the record and is
+                // deliberately not repeated here — see [`ENDED_BY_THE_STOP`].
                 out.push_str(&format!("  {id}: {ENDED_BY_THE_STOP}, {age} in\n"));
                 continue;
             }
@@ -479,12 +475,8 @@ pub fn results(view: &RunView) -> String {
         if let Some(outcome) = view.state.outcomes.get(&node.id) {
             out.push_str(&format!(" ({outcome})"));
         }
-        // A node still recorded as running in a run that was stopped is not
-        // running: the stop ended the run's whole dispatch tree, and the process
-        // that would have settled this node was in it. Saying so is what
-        // separates a worker that was **ended** from one that produced nothing —
-        // the reading a killed dispatch otherwise gets, because the last thing
-        // the record holds for it is that it started.
+        // A node still recorded as running in a stopped run is not running — see
+        // [`ENDED_BY_THE_STOP`].
         if status == NodeStatus::Running && view.state.stopped {
             out.push_str(&format!(" — {ENDED_BY_THE_STOP}"));
         }

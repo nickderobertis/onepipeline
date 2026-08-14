@@ -169,11 +169,11 @@ fn signal_one(pid: u32, signal: i32) {
 
 /// Every process descended from `pid`, however deep.
 ///
-/// Breadth-first over a single snapshot of the process table, so a tree that
-/// changed shape while it was being walked cannot be walked twice or leave this
-/// looping: a pid already found is never queued again, which is also what makes
-/// a table reporting a cycle — which the kernel does not produce, but a parse of
-/// one might — terminate rather than hang a teardown.
+/// Walked over a single snapshot of the process table, and in whatever order
+/// the frontier happens to give: what a caller needs is the *set*, and every
+/// member of it is signalled. A pid already found is never queued again, which
+/// is what makes a table reporting a cycle — which the kernel does not produce,
+/// but a parse of one might — terminate rather than hang a teardown.
 #[cfg(unix)]
 fn descendants(pid: u32) -> Vec<u32> {
     let table = process_table();

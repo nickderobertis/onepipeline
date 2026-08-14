@@ -1200,34 +1200,18 @@ fn a_view_renders_with_the_health_block_read_through_the_library() {
     );
 }
 
-/// A graph document the runner accepts is accepted by an **attached** launch,
-/// and by a detached one that can resolve nothing by name.
+/// The launcher has one answer about what a graph document may contain,
+/// whichever way a run is launched.
 ///
-/// This is the launcher having one answer about what a graph document may
-/// contain. It used to have two: the attached path composed the
-/// `oneagentgraph` this build was compiled against, and the detached path
-/// resolved `oneagentgraph` by name and composed whatever the host had
-/// installed. So the same file, in the same directory, one flag apart, was
-/// refused by the default launch and run correctly by the other —
-///
-/// ```text
-/// unknown field `task`, expected one of `oneharness_config`, `persona`, `schedule`, `deps`
-/// ```
-///
-/// — a field list that predates a per-member `task` entirely. Which of the two
-/// parsers was newer only decided which way the disagreement landed; that there
-/// were two is the defect.
-///
-/// So the document here declares
+/// The document declares
 /// [`oneagentgraph::config::SCHEMA_VERSION`](oneagentgraph::config::SCHEMA_VERSION)
 /// and uses a field only that version allows, read off the runner rather than
-/// written down — a second parser reintroduced at any version fails here rather
-/// than at an operator's launch.
+/// written down here — so a second parser at any version fails here rather than
+/// at an operator's launch.
 ///
-/// And `PATH` is emptied for both forms, which is the other half: a detached
-/// launch that still needed an installed sibling could not start at all, and a
-/// detached launch that found one would be composing it. Neither is what an
-/// attached launch does.
+/// `PATH` is emptied for both forms: a launch that resolved `oneagentgraph` by
+/// name would be composing whatever the host had installed, which is that second
+/// parser.
 #[test]
 fn a_document_the_runner_accepts_launches_whichever_way_it_is_asked_for() {
     for form in ["--attach", "--detach"] {

@@ -458,26 +458,18 @@ enum Output {
     Logged(PathBuf),
 }
 
-/// The command a retained launch runs its graph with.
+/// The command a retained launch runs its graph with: *this executable*, asked
+/// to [`drive`] the graph.
 ///
-/// The retained process exists because a library scheduler thread cannot
-/// outlive the launcher that is about to exit — **not** because a detached
-/// graph should be composed differently from an attached one. So the process it
-/// retains is *this executable*, asked to [`drive`] the graph through the same
-/// compiled-in `oneagentgraph` the attached path runs: one build decides what a
-/// graph document may contain, whichever launch mode asked.
+/// A retained process is needed because a library scheduler thread cannot
+/// outlive the launcher that is about to exit — not because a detached graph
+/// should be composed differently from an attached one. Resolving
+/// `oneagentgraph` by name would compose whatever the host has installed, which
+/// is a second parser of one document and can refuse what the attached path
+/// accepts.
 ///
-/// Resolving `oneagentgraph` by name instead is what this replaced, and the
-/// gap it left was not theoretical: the launcher validated with the sibling it
-/// was built against and ran with whatever the host had installed, so a graph
-/// document the runner accepted was refused by the default attached launch —
-/// the same document, the same directory, one flag apart. Two parsers that can
-/// disagree is the defect; which of them is newer only decides which way the
-/// disagreement lands.
-///
-/// [`BINARY_ENV`] is still the explicit, all-or-nothing override, and it is now
-/// the only way an installed sibling is composed instead of this build's. An
-/// operator naming an executable is choosing that skew deliberately.
+/// [`BINARY_ENV`] is the explicit, all-or-nothing override, and the only way an
+/// installed sibling is composed instead.
 fn retained_command(
     graph: &str,
     task: &str,
@@ -1115,21 +1107,15 @@ impl GraphRun {
 
 /// Run a graph in **this** process, streaming its envelopes as NDJSON on stdout.
 ///
-/// The retained half of [`retained_command`], and deliberately nothing more than
-/// a relay: it composes `oneagentgraph` exactly as the attached path does, and
-/// writes out what that composition produces. What the launcher then reads back
-/// off this process's stdout is the same NDJSON `oneagentgraph run --output
-/// json` writes, because both cross the sibling's own `Serialize` — so the
-/// handshake, the announcement, and the merged store are unchanged by which of
-/// the two wrote the line.
+/// The retained half of [`retained_command`]. What it writes is the same NDJSON
+/// `oneagentgraph run --output json` writes, because both cross the sibling's
+/// own `Serialize`, so a launcher's handshake reads either the same way.
 ///
-/// A refusal is left to the caller: it arrives as this crate's error, is printed
-/// by the binary with every other one, and lands in the launch log the
-/// launcher reads its evidence from.
+/// Each line is flushed as it is written: a launcher is waiting on the
+/// announcement, and a buffered one arrives after the launch has given up on it.
 ///
-/// Each line is flushed as it is written. A driver's output is read by a
-/// launcher waiting for the announcement, and a buffered announcement is one
-/// that arrives after the launch has already given up on it.
+/// A refusal is left to the caller — printed by the binary with every other one,
+/// into the launch log the launcher reads its evidence from.
 pub fn drive(
     graph: &str,
     task: &str,
