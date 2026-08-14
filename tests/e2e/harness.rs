@@ -544,6 +544,32 @@ impl World {
         dir
     }
 
+    /// A `PATH` whose `ps` runs and **fails**, for the journeys about what a
+    /// teardown does when it cannot read the process table.
+    ///
+    /// Distinct from [`empty_path`](Self::empty_path), and both are needed: a
+    /// `ps` that cannot be spawned at all and a `ps` that answers with a
+    /// non-zero exit are different faults, and a reader that checked only the
+    /// first would parse the second one's stdout as if it were a listing. This
+    /// one writes to stdout precisely so that a reader ignoring the exit status
+    /// would see a plausible-looking table with this world's own processes
+    /// absent from it — which is a teardown deciding it has no descendants.
+    ///
+    /// Unix-only: the fixture is a shell script, and the Windows arm reaches the
+    /// tree through `taskkill /T` rather than through any table this could
+    /// stand in for.
+    #[cfg(unix)]
+    pub fn path_whose_ps_fails(&self) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = self.root.join("failing-ps");
+        std::fs::create_dir_all(&dir).expect("a directory for the failing ps");
+        let ps = dir.join("ps");
+        std::fs::write(&ps, "#!/bin/sh\necho '1 0'\nexit 1\n").expect("the failing ps is written");
+        std::fs::set_permissions(&ps, std::fs::Permissions::from_mode(0o755))
+            .expect("the failing ps is executable");
+        dir
+    }
+
     /// The same configs, with the shipped dag-scope graph's **pacemaker** on the
     /// driver: the member a planner-visible surface restarts the clock of.
     ///

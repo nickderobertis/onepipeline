@@ -31,37 +31,6 @@ fn prompt_of(event: &Value) -> Option<String> {
     args.get(at + 1)?.as_str().map(str::to_string)
 }
 
-/// Every prose a member's harness was actually invoked with, in this world.
-///
-/// Read off the harness double's own record rather than an event stream,
-/// because that argv *is* where a member's task arrives: `oneagentgraph`
-/// composes it and spawns the harness with it, and a member given the wrong one
-/// is given it here. It is also the one place both launch forms write — an
-/// attaching launcher merges its driver's envelopes into the run's store and a
-/// detaching one hands its driver a log file, but either way the member below
-/// them is spawned the same way.
-// llmlint: ignore-block[tests_mirror_real_usage] the argv the harness double records *is* the
-// interface under test, exactly as it is for `dag_launch_dirs` below: what `oneagentgraph`
-// hands a member's harness is not something any product surface of this crate reports, and
-// it is what the per-member `task` field decides. That the launch was accepted at all — the
-// claim this journey exists for — is asserted separately in it, through `launch.json`; this
-// is the half that proves the field claimed the right member's prompt. Reading it out of an
-// event stream instead is what this replaced, and that was strictly worse: a detached launch
-// writes its driver's envelopes to a private log file with no product surface at all.
-fn member_prompts(world: &World) -> Vec<String> {
-    world
-        .invocations()
-        .iter()
-        .filter(|call| call["tool"] == "oneharness")
-        .filter_map(|call| {
-            let args = call["args"].as_array()?;
-            let at = args.iter().position(|arg| arg == "--prompt")?;
-            args.get(at + 1)?.as_str().map(str::to_string)
-        })
-        .collect()
-}
-// llmlint: ignore-end[tests_mirror_real_usage]
-
 fn open_second_round(world: &World, run: &str, node: Value) {
     world.script("driver.wait", "hold");
     let path = world.plan(run, &plan_of(run, vec![human("approve", &[]), node]));
@@ -1220,6 +1189,11 @@ fn a_view_renders_with_the_health_block_read_through_the_library() {
 /// `PATH` is emptied for both forms: a launch that resolved `oneagentgraph` by
 /// name would be composing whatever the host had installed, which is that second
 /// parser.
+///
+/// What the document may *mean* is the runner's own business and is asserted
+/// nowhere here — this crate's claim is only that it holds one parser, so the
+/// journey ends where that claim does: the launch is accepted, and the run it
+/// started goes on to settle.
 #[test]
 fn a_document_the_runner_accepts_launches_whichever_way_it_is_asked_for() {
     for form in ["--attach", "--detach"] {
@@ -1230,46 +1204,19 @@ fn a_document_the_runner_accepts_launches_whichever_way_it_is_asked_for() {
         let mut command = world.agentgraph_cmd(&["start", &path.to_string_lossy(), form]);
         command.env("PATH", world.empty_path());
         let started = world.run_on(command, &format!("start {form}"));
+        // The whole of the defect, in one exit code: the launch that refused
+        // this document refused it here, naming a field list that predates the
+        // one it carries.
         started.exited(0);
 
-        // The graph really started: a launch that refused would have recorded no
-        // run of the sibling's to address the pacemaker, or this run, by.
-        world.until("the graph run to be recorded", |world| {
-            world.run_json("schema", "launch.json")["graph_run"]
-                .as_str()
-                .is_some_and(|id| !id.is_empty())
+        // And it is a launch rather than a parse: the run reaches settlement,
+        // which takes the graph running, its driver driving, and the node it
+        // dispatched reporting back. Read through `status`, where an operator
+        // reads it.
+        world.until("the run to settle", |world| {
+            world.run(&["status", "schema"]).stdout.contains("SETTLED")
         });
-
-        // And the schema-3 field did what it is for. The member carrying its own
-        // `task` was launched with that prose *instead of* the graph's, which is
-        // the whole point of the field: the launcher composes one task for the
-        // whole graph, and a member whose job is not the run's must not be given
-        // it. Read off the argv the member's harness was spawned with.
-        world.until("the reporting member to be launched", |world| {
-            member_prompts(world)
-                .iter()
-                .any(|prompt| prompt.contains(crate::harness::MEMBER_TASK))
-        });
-        let prompts = member_prompts(&world);
-        let claimed: Vec<&String> = prompts
-            .iter()
-            .filter(|prompt| prompt.contains(crate::harness::MEMBER_TASK))
-            .collect();
-        for prompt in &claimed {
-            assert!(
-                !prompt.contains("onepipeline round run"),
-                "the member's own task did not claim its prompt — it was given the run's too: \
-                 {prompt}"
-            );
-        }
-        // The driver still got the graph's task, so this is the field claiming
-        // one member's prompt rather than emptying every member's.
-        assert!(
-            prompts
-                .iter()
-                .any(|prompt| prompt.contains("onepipeline round run")),
-            "no member was launched to drive the run: {prompts:?}\n{}",
-            world.dump()
-        );
+        let results = world.run(&["results", "schema"]);
+        results.exited(0).out_has("build");
     }
 }

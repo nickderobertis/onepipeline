@@ -138,15 +138,6 @@ pub fn stop(pid: u32, how: Stop) {
     platform_stop(pid, how);
 }
 
-// llmlint: ignore-block[changed_behavior_has_e2e] the two modes are one code path and one
-// tree walk, differing only in the signal constant chosen on the next line, and the walk is
-// driven end-to-end through the CLI by
-// `stopping_a_run_ends_its_whole_dispatch_tree_and_leaves_the_run_beside_it_alone` — which
-// reaches `Stop::Now` inside itself, because a stopped driver cancels its dispatches and a
-// dispatch's graph run is the process-backed one. `Stop::Now` is additionally driven
-// directly, over a real three-level tree whose leaf `setsid`s into a process group of its
-// own, by `a_stop_reaches_the_whole_descendant_tree_and_not_the_process_beside_it`. A second
-// journey differing only in a signal number would assert the same walk twice.
 #[cfg(unix)]
 fn platform_stop(pid: u32, how: Stop) {
     let signal = match how {
@@ -164,7 +155,6 @@ fn platform_stop(pid: u32, how: Stop) {
         signal_one(descendant, signal);
     }
 }
-// llmlint: ignore-end[changed_behavior_has_e2e]
 
 #[cfg(unix)]
 fn signal_one(pid: u32, signal: i32) {
@@ -216,12 +206,6 @@ fn descendants(pid: u32) -> Vec<u32> {
 /// unreadable row is one process this teardown cannot place. Dropping it leaves
 /// that one unreached; letting it empty the table would leave every one of them
 /// unreached, which is the orphan this function exists to prevent.
-// llmlint: ignore-block[changed_behavior_has_e2e] the empty-table path is a degradation, not
-// a behaviour: with no table there are no descendants, so a teardown reaches exactly the one
-// process it reached before this change — which is what
-// `the_owner_stops_its_own_run_without_force` already asserts through the CLI, on every
-// platform. Forcing it would mean removing `ps` from the host running the suite, and a
-// journey that could do that could not be trusted to put it back.
 #[cfg(unix)]
 fn process_table() -> Vec<(u32, u32)> {
     let Ok(listed) = std::process::Command::new("ps")
@@ -243,7 +227,6 @@ fn process_table() -> Vec<(u32, u32)> {
         })
         .collect()
 }
-// llmlint: ignore-end[changed_behavior_has_e2e]
 
 #[cfg(windows)]
 fn platform_stop(pid: u32, how: Stop) {
@@ -434,6 +417,14 @@ pub(crate) fn reaped_pid() -> u32 {
 mod tests {
     use super::*;
 
+    /// Held by every test in this module that depends on resolving `ps`.
+    ///
+    /// `PATH` is process-wide and these run as threads of one process, so the
+    /// test that empties it to prove the degraded walk would otherwise empty it
+    /// under the tests that are reading a real table beside it.
+    #[cfg(unix)]
+    static PATH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn the_epoch_renders_as_rfc3339_millis() {
         assert_eq!(rfc3339_from_millis(0), "1970-01-01T00:00:00.000Z");
@@ -487,9 +478,19 @@ mod tests {
     /// Unix-only because the tree is built with `sh` and read back through the
     /// process table. The Windows arm hands the same boundary to `taskkill /T`,
     /// which has always walked it.
+    ///
+    /// Driven for **each** mode by the two tests below rather than for one of
+    /// them, because the mode decides the signal and a signal decides whether a
+    /// process that is ignoring `SIGTERM` actually goes: asserting the tree only
+    /// under `SIGKILL` would leave the polite walk — the one an operator's `stop`
+    /// takes — proved nowhere.
     #[cfg(unix)]
-    #[test]
-    fn a_stop_reaches_the_whole_descendant_tree_and_not_the_process_beside_it() {
+    fn a_stop_reaches_the_whole_descendant_tree_and_not_the_process_beside_it(how: Stop) {
+        // This walk reads the table, so it is held against the test that empties
+        // `PATH` to prove what happens when the table cannot be read.
+        let _guard = PATH_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         // `setsid` on the leaf is the point: a new session is a new process
         // group, so the leaf is outside the group of everything above it. Each
         // level prints its pid and then waits, so the test learns the tree from
@@ -532,19 +533,25 @@ mod tests {
             "the tree was not running before it was stopped: {pids:?}"
         );
 
-        stop(pids[0], Stop::Now);
-        // Collected here rather than at the end, because a signalled child
-        // nobody has waited on is a zombie, and a zombie answers a liveness
-        // probe as alive. The two below it are this process's grandchildren, so
-        // nothing here can wait on them — init collects those.
-        let _ = tree.wait();
-        // Signalled is not reaped: the kernel takes a moment.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        stop(pids[0], how);
+        // Reaped rather than waited on: a signalled child nobody has collected
+        // is a zombie and a zombie answers a liveness probe as alive, but a
+        // *blocking* wait on a root the stop missed would return only when the
+        // fixture finished on its own — turning this journey's own failure into
+        // a slow pass. The two below it are this process's grandchildren, so
+        // nothing here can collect those; init does.
+        let patience = std::time::Duration::from_secs(10);
+        let reaped = ended_within(&mut tree, patience);
+        let deadline = std::time::Instant::now() + patience;
         while std::time::Instant::now() < deadline
             && pids.iter().any(|pid| process_may_be_live(*pid))
         {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
+        assert!(
+            reaped,
+            "the stop never reached the root of the tree {pids:?}"
+        );
 
         let surviving: Vec<u32> = pids
             .iter()
@@ -561,6 +568,133 @@ mod tests {
         );
         let _ = beside.kill();
         let _ = beside.wait();
+    }
+
+    /// The mode an operator's `stop` takes.
+    #[cfg(unix)]
+    #[test]
+    fn a_polite_stop_reaches_the_whole_descendant_tree() {
+        a_stop_reaches_the_whole_descendant_tree_and_not_the_process_beside_it(Stop::Politely);
+    }
+
+    /// The mode a cancelled dispatch takes, where the leaf is the paid process.
+    #[cfg(unix)]
+    #[test]
+    fn a_forceful_stop_reaches_the_whole_descendant_tree() {
+        a_stop_reaches_the_whole_descendant_tree_and_not_the_process_beside_it(Stop::Now);
+    }
+
+    /// A teardown that cannot read the process table still stops what it was
+    /// given.
+    ///
+    /// The table is external input, and `ps` can fail — on a host without it, in
+    /// a container with a stripped image, under a `ps` that refuses. What must
+    /// not happen then is that the teardown fails too: with no table there are no
+    /// descendants, so the stop degrades to exactly the one process it reached
+    /// before it ever walked a tree, rather than reaching nothing.
+    ///
+    /// `PATH` is emptied for the duration, which is what makes `ps` unresolvable
+    /// — the same seam the journeys use, taken here in-process so the degraded
+    /// walk itself is what is measured rather than a binary's behaviour around
+    /// it.
+    #[cfg(unix)]
+    #[test]
+    fn a_teardown_that_cannot_read_the_table_still_stops_the_process_it_was_given() {
+        let mut alone = std::process::Command::new("sh")
+            .args(["-c", "sleep 120"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("a process to stop");
+
+        // Serialised against the other tests in this module that read the table,
+        // because `PATH` is process-wide and this deliberately breaks it.
+        let _guard = PATH_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let restore = std::env::var_os("PATH");
+        std::env::set_var("PATH", "");
+        assert!(
+            process_table().is_empty(),
+            "`ps` still answered with `PATH` emptied, so this proves nothing about a table \
+             that cannot be read"
+        );
+        assert!(
+            descendants(alone.id()).is_empty(),
+            "a table that cannot be read still reported descendants"
+        );
+        stop(alone.id(), Stop::Now);
+        match restore {
+            Some(path) => std::env::set_var("PATH", path),
+            None => std::env::remove_var("PATH"),
+        }
+        drop(_guard);
+
+        assert!(
+            ended_within(&mut alone, std::time::Duration::from_secs(10)),
+            "a teardown that could not read the table stopped nothing at all"
+        );
+    }
+
+    /// Whether `child` ends inside `patience`, reaping it if it does.
+    ///
+    /// Polled rather than waited on, and that is the point: a blocking `wait`
+    /// on a process the stop failed to signal returns when the process finishes
+    /// *on its own*, so the assertion after it passes — late, and for a reason
+    /// that has nothing to do with the stop. Every one of these fixtures sleeps
+    /// far longer than any teardown should take, so ending inside `patience` is
+    /// only ever the signal landing.
+    #[cfg(unix)]
+    fn ended_within(child: &mut std::process::Child, patience: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + patience;
+        while std::time::Instant::now() < deadline {
+            // Reaped here, because a signalled child nobody has waited on is a
+            // zombie and a zombie answers a liveness probe as alive.
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        false
+    }
+
+    /// A `ps` that runs and fails is not a listing, whatever it wrote.
+    ///
+    /// The other half of reading the table strictly, and the half an exit status
+    /// is the only evidence for: this `ps` writes a plausible row and *then*
+    /// fails, so a reader that took stdout on its own would come away with a
+    /// table — a confident, wrong account of which processes exist, used to
+    /// decide who gets signalled. An empty table is the honest answer, and it
+    /// degrades the walk to the root rather than misdirecting it.
+    #[cfg(unix)]
+    #[test]
+    fn a_process_listing_that_exits_nonzero_is_not_read_as_a_listing() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("onepipeline-ps-{}", pid()));
+        std::fs::create_dir_all(&dir).expect("a directory for the failing ps");
+        let ps = dir.join("ps");
+        std::fs::write(&ps, "#!/bin/sh\necho '1 0'\necho '2 1'\nexit 1\n")
+            .expect("the failing ps is written");
+        std::fs::set_permissions(&ps, std::fs::Permissions::from_mode(0o755))
+            .expect("the failing ps is executable");
+
+        let _guard = PATH_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let restore = std::env::var_os("PATH");
+        std::env::set_var("PATH", &dir);
+        let read = process_table();
+        match restore {
+            Some(path) => std::env::set_var("PATH", path),
+            None => std::env::remove_var("PATH"),
+        }
+        drop(_guard);
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert!(
+            read.is_empty(),
+            "a `ps` that exited non-zero was read as a listing anyway: {read:?}"
+        );
     }
 
     #[test]

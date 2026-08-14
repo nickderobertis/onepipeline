@@ -1175,3 +1175,90 @@ fn stopping_a_run_ends_its_whole_dispatch_tree_and_leaves_the_run_beside_it_alon
     world.run(&["stop", &beside]).exited(0);
     world.release("build.go");
 }
+
+/// A **forced** stop reaches the tree too.
+///
+/// `--force` is the other way an operator ends a run: it overrides ownership, so
+/// it is the one a person reaches for when the session that launched the run is
+/// gone — which is exactly when nobody is left watching what the run started.
+/// The ownership half is held by
+/// `stop_refuses_another_sessions_run_and_force_names_the_owner`; this is the
+/// half that says the override ends the same tree the owner's own stop does,
+/// rather than only the pid the ledger holds.
+#[cfg(unix)]
+#[test]
+fn a_forced_stop_ends_the_whole_dispatch_tree_of_another_sessions_run() {
+    let world = World::new("driver-stop-tree-forced");
+    world.script("build.wait", "hold");
+    let (run, driver) = start_detached_announcing(&world, "forced", vec![agent("build", &[])]);
+    world.until("a node to be in flight", |world| {
+        !world.events_of(&run, "node-dispatched").is_empty()
+    });
+    world.until("the dispatch to be more than one process", |_| {
+        descendants(driver).len() > 1
+    });
+    let tree: Vec<u32> = std::iter::once(driver).chain(descendants(driver)).collect();
+
+    let stranger = world.as_session("session-forcing");
+    stranger
+        .run(&["stop", &run, "--force"])
+        .exited(0)
+        .err_has("belongs to");
+
+    world.until("every process the forced stop was aimed at to end", |_| {
+        tree.iter().all(|pid| !still_listed(*pid))
+    });
+    world.release("build.go");
+}
+
+/// A stop still stops the run when this host will not list its processes.
+///
+/// The table is external input and `ps` can fail — a stripped container image, a
+/// host without it, a `ps` that refuses. What must not follow is that the
+/// operator's stop fails with it: with no table there are no descendants, so the
+/// walk degrades to exactly the pid it reached before it ever walked a tree, and
+/// the run is ended and recorded as ended either way.
+///
+/// `PATH` carries only a `ps` that fails, so the degradation is the real one
+/// rather than a mode nothing enters. What such a stop cannot reach — the
+/// processes below the driver — is this journey's own mess to clear, and it
+/// clears it rather than asserting it: an orphan is what the walk exists to
+/// prevent, not a promise to keep.
+#[cfg(unix)]
+#[test]
+fn a_stop_ends_its_run_even_where_the_process_table_cannot_be_read() {
+    let world = World::new("driver-stop-no-ps");
+    world.script("build.wait", "hold");
+    let (run, driver) = start_detached_announcing(&world, "blind", vec![agent("build", &[])]);
+    world.until("a node to be in flight", |world| {
+        !world.events_of(&run, "node-dispatched").is_empty()
+    });
+    world.until("the dispatch to be more than one process", |_| {
+        descendants(driver).len() > 1
+    });
+    let below: Vec<u32> = descendants(driver);
+
+    let mut command = world.cmd(&["stop", &run]);
+    command.env("PATH", world.path_whose_ps_fails());
+    world
+        .run_on(command, "stop with a failing ps")
+        .exited(0)
+        .out_has("\"stopped\":true");
+
+    // The pid the stop was given is gone, and the run says so — the two things
+    // an operator asked for.
+    world.until("the driver to end", |_| !still_listed(driver));
+    assert_eq!(
+        world.events_of(&run, "run-stopped").len(),
+        1,
+        "a stop that could not read the table did not record the run as stopped"
+    );
+
+    for pid in below.iter().filter(|pid| still_listed(**pid)) {
+        std::process::Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .status()
+            .expect("this host can end a process this journey started");
+    }
+    world.release("build.go");
+}
