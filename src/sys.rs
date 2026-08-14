@@ -324,8 +324,6 @@ fn platform_stop(pid: u32, how: Stop) -> Teardown {
     // for the same reason, as a `ps` that will not answer.
     match status {
         Ok(status) if status.success() => Teardown::Signalled,
-        // `taskkill` was never started, or refused: it walks the tree itself, so
-        // a run of it that failed leaves nothing this can claim to have reached.
         _ => Teardown::NotAttempted,
     }
 }
