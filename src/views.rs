@@ -79,11 +79,8 @@ const ENDED_BY_THE_STOP: &str = "worker ended when the run was stopped";
 
 /// How the same node reads when nothing established what became of its worker.
 ///
-/// The opposite claim, and it has to be a different sentence: the stop that was
-/// recorded never enumerated this run's processes, so the worker is very likely
-/// *still running* — still holding quota, still writing into whatever checkout it
-/// was given. "Ended" there is the false completion `stop` itself refuses to
-/// report.
+/// It has to be a different sentence: the worker is very likely still running,
+/// and "ended" there is the false completion `stop` itself refuses to report.
 const OUTLIVED_THE_STOP: &str = "worker may still be running: the stop could not reach it";
 
 /// Which of the two a stopped run's in-flight node gets.

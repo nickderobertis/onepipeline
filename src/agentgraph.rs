@@ -487,9 +487,6 @@ fn retained_command(
     labels: &[String],
     sets: &[String],
 ) -> Result<Command> {
-    // The same predicate `binary()` resolves with, so an override set to an empty
-    // or unreadable value takes the same branch there and here rather than sending
-    // this half of the launch down the override path and that half to the default.
     let mut command = match overridden() {
         true => {
             let mut command = Command::new(binary());

@@ -160,13 +160,10 @@ pub fn merge_order(events: &mut [Envelope]) {
 
 /// Where each record belongs in the merged order, as indices into `events`.
 ///
-/// A k-way merge over the streams rather than one sort, because the ordering
-/// [`merge_order`] states is not a total order over the records' fields: within
-/// a stream it is `seq`, and between streams it is `ts`. A comparator cannot
-/// say that — asked about two records of one stream it would have to ignore the
-/// timestamps, and asked about two of different streams it would have to ignore
-/// the sequences, and a `sort_by` given an inconsistent comparator produces an
-/// order nobody specified.
+/// A k-way merge rather than one sort: the order [`merge_order`] states is not a
+/// total order over the fields — `seq` within a stream, `ts` between them — and
+/// `sort_by` given an inconsistent comparator produces an order nobody
+/// specified.
 fn merged_order(events: &[Envelope]) -> Vec<usize> {
     let mut streams: BTreeMap<&str, VecDeque<usize>> = BTreeMap::new();
     for (index, event) in events.iter().enumerate() {
@@ -270,14 +267,6 @@ pub fn settled_payload(
 mod tests {
 
     /// What a `run-stopped` record this build cannot interpret is taken to mean.
-    ///
-    /// The three cases are deliberately not one default. An absent field is a
-    /// record older than the field, and those stops signalled a tree they had
-    /// read. A value this build does not know is a *newer* writer describing
-    /// something else, and the only safe reading of a teardown nobody here can
-    /// interpret is that nothing was established — reading it as `Signalled`
-    /// would report a worker as ended on the strength of a word this build had
-    /// never seen.
     #[test]
     fn an_uninterpretable_teardown_is_never_read_as_a_clean_stop() {
         assert_eq!(

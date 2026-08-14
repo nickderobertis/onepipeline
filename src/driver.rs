@@ -690,12 +690,9 @@ fn stop(args: &StopArgs) -> Result<i32> {
     }
 
     let view = RunView::open(&paths)?;
-    // Attempted before the record is written, so what the record says about the
-    // teardown is what actually happened rather than what was about to be tried.
+    // Attempted before the record is written, so the record says what happened
+    // rather than what was about to be tried.
     let teardown = terminate(record.pid, &record.host);
-    // What this host established about the run's processes, in the one spelling
-    // the projection reads back. An attempt that established nothing is still
-    // recorded — it happened — but it is not recorded as a clean stop.
     let established = match teardown {
         None => journal::StopTeardown::Elsewhere,
         Some(sys::Teardown::Signalled) => journal::StopTeardown::Signalled,
@@ -737,8 +734,7 @@ fn stop(args: &StopArgs) -> Result<i32> {
         None | Some(sys::Teardown::Signalled) => {}
     }
     // `teardown` qualifies `stopped`: the ledger record is what stops a run, and
-    // it is written either way, but only this host can say what became of the
-    // processes — and when the driver is another host's, it cannot.
+    // it is written either way.
     println!(
         "{}",
         json!({
