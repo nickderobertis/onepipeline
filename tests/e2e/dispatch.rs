@@ -1180,20 +1180,15 @@ fn a_view_renders_with_the_health_block_read_through_the_library() {
 /// The launcher has one answer about what a graph document may contain,
 /// whichever way a run is launched.
 ///
-/// The document declares
+/// A launcher holding a second, staler parser refused a document the runner
+/// accepted — the same file, one flag apart. So the document declares
 /// [`oneagentgraph::config::SCHEMA_VERSION`](oneagentgraph::config::SCHEMA_VERSION)
 /// and uses a field only that version allows, read off the runner rather than
-/// written down here — so a second parser at any version fails here rather than
-/// at an operator's launch.
+/// written down here, and `PATH` is emptied so neither form can resolve a
+/// sibling by name.
 ///
-/// `PATH` is emptied for both forms: a launch that resolved `oneagentgraph` by
-/// name would be composing whatever the host had installed, which is that second
-/// parser.
-///
-/// What the document may *mean* is the runner's own business and is asserted
-/// nowhere here — this crate's claim is only that it holds one parser, so the
-/// journey ends where that claim does: the launch is accepted, and the run it
-/// started goes on to settle.
+/// What the document *means* is the runner's business; this crate's claim is
+/// only that it holds one parser, so the journey ends there.
 #[test]
 fn a_document_the_runner_accepts_launches_whichever_way_it_is_asked_for() {
     for form in ["--attach", "--detach"] {

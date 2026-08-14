@@ -104,33 +104,21 @@ pub enum Stop {
 
 /// Ask a process on **this** host, and everything it started, to stop.
 ///
-/// One place, because both callers need the same two `cfg` blocks and a second
-/// copy is a platform that gets fixed in one of them: a driver being asked to
-/// stand down, and a dispatch being killed. Which signal each sends is the
-/// caller's decision and the only thing that differs.
+/// One place for both callers, so a platform is not fixed in only one of them;
+/// the signal is the caller's decision and the only difference.
 ///
-/// # The tree, and only the tree
+/// The boundary is **descent** — every process this one started, however deep,
+/// and nothing else. Not the process group: the paid agent puts itself in one of
+/// its own, so a group teardown sweeps the middle of the tree and leaves the leaf
+/// orphaned and still writing. Not one pid, for the same reason. And nothing
+/// wider: a round that is legitimately a child of something else is not a
+/// descendant, and ending it would be ending work this run does not own.
 ///
-/// A run's expensive process is never the one whose pid anything recorded. The
-/// driver spawns a graph, the graph spawns a harness, and the harness spawns the
-/// paid agent — and that agent puts itself in a process group of its own, so a
-/// teardown aimed at the *group* sweeps the middle of the tree and leaves the
-/// leaf running, reparented to init, still writing into a real checkout with
-/// nobody reading its output. That costs quota, it costs correctness, and it
-/// costs diagnosis: an orphan carries no run attribution and is invisible to
-/// every view that reports what is live.
-///
-/// So the boundary here is **descent**, which is neither the group's nor one
-/// pid's: every process this one started, however deep, and nothing else. A
-/// round that is legitimately a *child of something else* is not a descendant of
-/// this pid and is not touched — a teardown that reached one would be ending
-/// work it does not own, which is the other half of the same mistake.
-///
-/// Best-effort by construction. A process that has already exited, or that this
-/// user may not signal, is not an error to report — the caller's next liveness
-/// probe is what decides whether the stop landed. The process table is read a
-/// moment before the signals go out, so a child started inside that moment is
-/// missed; the root is signalled first, which is what closes it in practice.
+/// Best-effort: a process already gone, or one this user may not signal, is not
+/// an error here — the caller's next liveness probe decides whether the stop
+/// landed. The table is read a moment before the signals go out, so a child
+/// started inside that moment is missed; signalling the root first is what closes
+/// that in practice.
 pub fn stop(pid: u32, how: Stop) {
     if pid == 0 || pid == self::pid() {
         return;
@@ -203,27 +191,17 @@ fn descendants(pid: u32) -> Vec<u32> {
 
 /// This host's `(pid, parent pid)` pairs.
 ///
-/// Read through `ps`, which is the one answer every Unix gives: Linux has
-/// `/proc` and macOS does not, and a second implementation is a platform that
-/// gets fixed in one of them — the thing this module exists to avoid. A `ps`
-/// that cannot be run — or that runs and fails — leaves the table empty, which
-/// degrades a teardown to the single process it was already reaching rather than
-/// failing it.
+/// Through `ps`, the one answer every Unix gives — Linux has `/proc` and macOS
+/// does not, and a second implementation is a platform fixed in only one of them.
 ///
-/// This is external input deciding who gets signalled, so it is read strictly: a
-/// non-zero exit means the listing is not a listing, whatever landed on stdout,
-/// and a row without two parsable ids is not a `(pid, ppid)` pair. A row that
-/// does not parse is dropped rather than emptying the table, because the two are
-/// different failures — `ps` refusing is no answer about any process, while an
-/// unreadable row is one process this teardown cannot place. Dropping it leaves
-/// that one unreached; letting it empty the table would leave every one of them
-/// unreached, which is the orphan this function exists to prevent.
-///
-/// A row claiming pid `0` is dropped outright. No process a teardown may signal
-/// has that id — to `kill` it means the caller's whole process group — so such a
-/// row is either a listing this reader does not understand or something wearing
-/// one's clothes, and admitting it would turn a walk down one run's tree into a
-/// broadcast at everything the launcher was started beside.
+/// External input deciding who gets signalled, so it is read strictly, and the
+/// three faults cost different amounts. A `ps` that cannot run, or that exits
+/// non-zero, is no answer about any process: the table is empty and the teardown
+/// degrades to the pid it was given. One unreadable row is one process this
+/// teardown cannot place: that row is dropped and its neighbours kept, because
+/// emptying the table there would strand every process the listing named. A row
+/// claiming pid `0` is dropped outright — to `kill` that id means the caller's
+/// whole process group, which would turn a walk down one tree into a broadcast.
 #[cfg(unix)]
 fn process_table() -> Vec<(u32, u32)> {
     let Ok(listed) = std::process::Command::new("ps")

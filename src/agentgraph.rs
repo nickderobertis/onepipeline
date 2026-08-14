@@ -461,15 +461,10 @@ enum Output {
 /// The command a retained launch runs its graph with: *this executable*, asked
 /// to [`drive`] the graph.
 ///
-/// A retained process is needed because a library scheduler thread cannot
-/// outlive the launcher that is about to exit — not because a detached graph
-/// should be composed differently from an attached one. Resolving
-/// `oneagentgraph` by name would compose whatever the host has installed, which
-/// is a second parser of one document and can refuse what the attached path
-/// accepts.
-///
-/// [`BINARY_ENV`] is the explicit, all-or-nothing override, and the only way an
-/// installed sibling is composed instead.
+/// Self-exec rather than resolving `oneagentgraph` by name, which would compose
+/// whatever the host installed — a second parser that can refuse what the
+/// attached path accepts. [`BINARY_ENV`] is the explicit, all-or-nothing
+/// override, and the only way an installed sibling is composed instead.
 fn retained_command(
     graph: &str,
     task: &str,

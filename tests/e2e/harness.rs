@@ -507,23 +507,14 @@ impl World {
         self.write_graphs_with(None, FIRST_GRAPH_SCHEMA);
     }
 
-    /// The same configs, written at the **runner's own current schema version**
-    /// with a second dag-scope member carrying its own [`MEMBER_TASK`].
+    /// The same configs at the **runner's own** schema version, with a second
+    /// dag-scope member carrying its own [`MEMBER_TASK`].
     ///
-    /// A per-member `task` is the newest thing a graph document may contain, and
-    /// the field list an older reader would refuse it against —
-    /// `oneharness_config`, `persona`, `schedule`, `deps` — is exactly what a
-    /// launcher validating with a second, staler parser answered with. So this
-    /// is the document that tells the two apart, and the version it declares is
-    /// [`oneagentgraph::config::SCHEMA_VERSION`] rather than a number written
-    /// here: read off the runner, it moves with the runner, and a build that
-    /// stopped composing its own would fail here rather than at an operator's
-    /// launch.
-    ///
-    /// The member is a second one rather than the driver, because the driver's
-    /// prompt is what makes the run advance at all — this world's `oneharness`
-    /// stand-in drives the engine verbs when it is given them, exactly as a real
-    /// orchestrator would.
+    /// A per-member `task` is what a staler parser refuses, so this is the
+    /// document that tells two parsers apart. The version is read off
+    /// [`oneagentgraph::config::SCHEMA_VERSION`] rather than written here, so it
+    /// moves with the runner. A second member rather than the driver, whose
+    /// prompt is what makes the run advance at all.
     pub fn write_graphs_at_the_runners_schema(&self) {
         let extra = format!(
             "  {REPORTING_MEMBER}:\n    kind: oneharness\n    \

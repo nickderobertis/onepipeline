@@ -1066,18 +1066,12 @@ fn a_graph_that_finished_before_announcing_anything_is_a_launch_that_worked() {
         .out_has("\"settlement\":\"unattended\"");
 }
 
-/// The `(pid, parent pid)` pairs this host reports, read the way an operator
-/// would.
+/// The `(pid, parent pid)` pairs this host reports.
 ///
-/// The test's own oracle, deliberately not the crate's: what is under test is
-/// whether a teardown reached a tree, and asking it to describe the tree it
-/// reached would be asking the answer of the thing being questioned.
-///
-/// Strict where the crate's own reader degrades. A teardown that cannot read the
-/// table has to carry on reaching what it can, but an *oracle* that quietly
-/// returned a short table would report a surviving process as gone — the
-/// assertion this journey exists to make, passing for the reason it was written
-/// to catch. So a `ps` that fails, and a row that is not two ids, end the test.
+/// The test's own oracle, deliberately not the crate's: asking the teardown to
+/// describe the tree it reached would be asking the answer of the thing under
+/// test. Strict where the crate's reader degrades, because an oracle that
+/// silently returned a short table would report a survivor as gone.
 #[cfg(unix)]
 fn process_table() -> Vec<(u32, u32)> {
     let listed = std::process::Command::new("ps")
@@ -1128,15 +1122,12 @@ fn still_listed(pid: u32) -> bool {
 
 /// Ending a run ends everything it started, and nothing beside it.
 ///
-/// The pid the ledger holds is the driver's; the expensive process is several
-/// levels below it, and the run beside this one is nobody's descendant. Both
-/// halves of the boundary are stated here because a teardown can be wrong in
-/// either direction.
+/// Both halves, because a teardown can be wrong in either direction: the
+/// expensive process is levels below the pid the ledger holds, and the run
+/// beside this one is nobody's descendant.
 ///
-/// Unix-only because the tree is read back through the process table. The
-/// Windows arm hands the same boundary to `taskkill /T`, and
-/// `the_owner_stops_its_own_run_without_force` holds the ledger half of a stop
-/// on every platform.
+/// Unix-only; the Windows arm hands the same boundary to `taskkill /T`, and
+/// `the_owner_stops_its_own_run_without_force` holds the ledger half everywhere.
 #[cfg(unix)]
 #[test]
 fn stopping_a_run_ends_its_whole_dispatch_tree_and_leaves_the_run_beside_it_alone() {
@@ -1219,14 +1210,12 @@ fn a_forced_stop_ends_the_whole_dispatch_tree_of_another_sessions_run() {
 /// walk degrades to exactly the pid it reached before it ever walked a tree, and
 /// the run is ended and recorded as ended either way.
 ///
-/// Both ways a listing can be no listing at all, because they are different
-/// faults: a `ps` that cannot be spawned, and a `ps` that runs and exits
-/// non-zero. A reader that checked only the first would parse the second one's
-/// stdout as though it were a table.
+/// Both ways a listing can be no listing: a `ps` that cannot be spawned, and one
+/// that runs and exits non-zero. A reader checking only the first would parse the
+/// second's stdout as a table.
 ///
-/// What such a stop cannot reach — the processes below the driver — is this
-/// journey's own mess to clear, and it clears it rather than asserting it: an
-/// orphan is what the walk exists to prevent, not a promise to keep.
+/// What such a stop cannot reach is cleared rather than asserted — an orphan is
+/// what the walk exists to prevent, not a promise to keep.
 #[cfg(unix)]
 #[test]
 fn a_stop_ends_its_run_even_where_the_process_table_cannot_be_read() {

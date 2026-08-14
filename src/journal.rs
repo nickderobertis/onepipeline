@@ -143,23 +143,13 @@ pub fn has_unreadable_lines(path: &Path) -> bool {
 /// Merge order: each stream in its own `seq`, interleaved between streams by
 /// `ts`.
 ///
-/// The two halves are different kinds of fact, and the merge treats them as
-/// such. A `seq` is the producer's own statement of the order it produced
-/// things in, and it is the only ordering promise an envelope carries. A `ts`
-/// is a wall clock — the producer's, not this process's — recorded to the
-/// millisecond: it collides whenever two records are written inside one tick,
-/// which is most of a round with several members reporting at once, and it is
-/// not monotonic, because a host clock can be stepped under a running process.
-///
-/// So a stream is ordered by its own `seq` and by nothing else, and the
-/// timestamps decide only how the streams interleave with each other. Sorting
-/// the whole merged store by `ts` first is what this replaced: it let one
-/// stream's records swap places whenever their clock readings disagreed with
-/// the order their producer wrote them in, which is a run's record contradicting
-/// the only party that knew. Between streams there is nothing to contradict —
-/// there are no cross-stream ordering promises beyond the timestamps — so the
-/// stream id breaks a `ts` tie there, deterministically rather than
-/// meaningfully.
+/// `seq` is the producer's own statement of the order it wrote things in, and
+/// the only ordering promise an envelope carries. `ts` is a wall clock — not
+/// this process's, and not monotonic, since a host clock can be stepped under a
+/// running producer — so ordering a stream by it swaps that stream's own records
+/// against the only party that knew. Between streams nothing is promised beyond
+/// the timestamps, so a `ts` tie there is broken by stream id: deterministic
+/// rather than meaningful.
 pub fn merge_order(events: &mut [Envelope]) {
     let mut merged: Vec<Envelope> = merged_order(events)
         .into_iter()
