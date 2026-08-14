@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.15](https://github.com/nickderobertis/onepipeline/compare/v0.1.14...v0.1.15) - 2026-08-14
+
+### Fixed
+
+- classify a Windows teardown from what it can check ([#38](https://github.com/nickderobertis/onepipeline/pull/38))
+
 ## [0.1.13](https://github.com/nickderobertis/onepipeline/compare/v0.1.12...v0.1.13) - 2026-08-13
 
 ### Fixed
