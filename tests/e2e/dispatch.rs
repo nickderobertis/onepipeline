@@ -1219,17 +1219,13 @@ fn a_document_the_runner_accepts_launches_whichever_way_it_is_asked_for() {
 /// Every dag-scope member is handed what the run *is*, and its own job around
 /// it.
 ///
-/// `oneagentgraph` gives the launcher's one `--task` to every member of the
-/// graph that carries none of its own. So a task that said "drive this run, with
-/// these verbs, and change nothing else" said it to the scheduled pacemaker too
-/// — which took the round and the run's ownership lock, and whose own turn
-/// deadline then killed the worker dispatched inside that turn. The launcher now
-/// names the run and its goal and stops; a member that must be told what to do
-/// about it says so in its own `task` composed from `{task}`.
+/// The launcher's one `--task` reaches every member of the graph carrying none
+/// of its own, so it names the run and its goal and stops; a member that must be
+/// told what to do about it composes its own `task` from `{task}`.
 ///
 /// Read off the argv `oneagentgraph` published for each member, which is what
-/// the process was *actually* launched with rather than anything this crate
-/// wrote down about it — the same reading that found the defect.
+/// those processes were actually launched with rather than anything this crate
+/// wrote down about it.
 #[test]
 fn every_dag_scope_member_is_given_the_runs_description_and_its_own_job() {
     let world = World::new("neutral-run-task");
@@ -1276,9 +1272,8 @@ fn every_dag_scope_member_is_given_the_runs_description_and_its_own_job() {
             );
         }
     }
-    // And each member's job is its own. The reporter carrying the driver's verbs
-    // is the defect, in one assertion: it is the member with a deadline of its
-    // own, and the round it took was the one the driver was running.
+    // And each member's job is its own: the reporter carrying the driver's verbs
+    // is the defect.
     assert!(
         driver.contains("onepipeline round run") && driver.contains("onepipeline round next"),
         "the driver was not given its own job: {driver}"

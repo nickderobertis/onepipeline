@@ -73,10 +73,8 @@ fn dag_launch_dirs(world: &World) -> Vec<String> {
 /// The `--task` every dag-scope launch was given, in launch order.
 ///
 /// The same reading as [`dag_launch_dirs`] and for the same reason: this value
-/// only exists on the wire. `oneagentgraph` hands it to every member of the
-/// graph that carries none of its own, so what a launch put on this flag is what
-/// a member whose job is not the driver's was told — and that is where the
-/// defect was found, in a launched run's member argv.
+/// only exists on the wire, and `oneagentgraph` hands it to every member of the
+/// graph carrying none of its own.
 fn dag_launch_tasks(world: &World) -> Vec<String> {
     world
         .invocations()
@@ -97,12 +95,7 @@ fn dag_launch_tasks(world: &World) -> Vec<String> {
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 
-/// The role prose the launcher's task is now free of.
-///
-/// It once carried all of it, and the shipped pacemaker — a scheduled member
-/// given the same task, because it carries none of its own — obeyed it: it took
-/// the round and the run's ownership lock, and its own per-turn deadline then
-/// killed the worker dispatched inside that turn.
+/// The role prose the launcher's task is free of, whichever way it is composed.
 const ROLE_PROSE: &[&str] = &[
     "Drive",
     "to settlement",
@@ -156,7 +149,8 @@ fn the_launched_graphs_task_names_the_run_and_its_goal_at_start_and_at_adoption(
 ///
 /// A member composing `{task}` plus its own prose reads the same document either
 /// way, so a plan that states no goal says *that* rather than leaving the line
-/// out — and it still says nothing about who does what.
+/// out. The absent field is the only case to answer for: a goal that is present
+/// and blank never gets this far, because `start` refuses the plan.
 #[test]
 fn a_run_whose_plan_states_no_goal_is_launched_saying_so() {
     let world = World::new("driver-task-goalless");
