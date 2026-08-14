@@ -130,7 +130,7 @@ pub fn parked_after_seconds() -> u64 {
 /// host is exactly such an unknown — a pid means nothing across machines — so a
 /// run another driver is holding reads as the live work it is.
 pub fn liveness(launch: &LaunchRecord, state: &RunState) -> DriverLiveness {
-    if state.stopped() {
+    if state.stop_recorded() {
         return DriverLiveness::DriverDead;
     }
     let ours = launch.host == sys::hostname();
@@ -346,7 +346,7 @@ pub fn status(views: &[RunView]) -> String {
                 .get(id)
                 .map(|at| sys::now_millis().saturating_sub(*at));
             let age = crate::telemetry::duration(age.unwrap_or(0));
-            if view.state.stopped() {
+            if view.state.stop_recorded() {
                 // What this node last did stays on the record and is
                 // deliberately not repeated here — see [`ENDED_BY_THE_STOP`].
                 let became = became_of_the_worker(&view.state);
@@ -493,7 +493,7 @@ pub fn results(view: &RunView) -> String {
         if let Some(outcome) = view.state.outcomes.get(&node.id) {
             out.push_str(&format!(" ({outcome})"));
         }
-        if status == NodeStatus::Running && view.state.stopped() {
+        if status == NodeStatus::Running && view.state.stop_recorded() {
             out.push_str(&format!(" — {}", became_of_the_worker(&view.state)));
         }
         // What the dispatch reported, before what the plan asked for: an

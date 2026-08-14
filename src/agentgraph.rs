@@ -196,10 +196,25 @@ fn report_skipped(skipped: usize) {
 
 /// The executable this process invokes.
 pub fn binary() -> String {
+    overriding_binary().unwrap_or_else(|| DEFAULT_BINARY.to_string())
+}
+
+/// Whether [`BINARY_ENV`] names an executable to compose instead of this build's.
+///
+/// One predicate, because two callers ask it: [`binary`] resolves the name and
+/// [`retained_command`] chooses a whole launch shape from it. Asked as
+/// "is the variable set", an empty or unreadable value sends the launch down the
+/// override path and then resolves to the default executable anyway — half a run
+/// from each answer, which is the skew the override exists to make deliberate.
+fn overridden() -> bool {
+    overriding_binary().is_some()
+}
+
+/// The executable [`BINARY_ENV`] names, when it names a usable one.
+fn overriding_binary() -> Option<String> {
     std::env::var(BINARY_ENV)
         .ok()
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| DEFAULT_BINARY.to_string())
 }
 
 fn sibling(message: impl Into<String>) -> Error {
@@ -472,8 +487,11 @@ fn retained_command(
     labels: &[String],
     sets: &[String],
 ) -> Result<Command> {
-    let mut command = match std::env::var_os(BINARY_ENV) {
-        Some(_) => {
+    // The same predicate `binary()` resolves with, so an override set to an empty
+    // or unreadable value takes the same branch there and here rather than sending
+    // this half of the launch down the override path and that half to the default.
+    let mut command = match overridden() {
+        true => {
             let mut command = Command::new(binary());
             command.arg("run").arg(graph);
             // The override's own CLI has to be told which of its renderings to
@@ -481,7 +499,7 @@ fn retained_command(
             command.arg("--output").arg("json");
             command
         }
-        None => {
+        false => {
             let mut command = Command::new(std::env::current_exe().map_err(|e| {
                 sibling(format!(
                     "cannot find this executable to retain a driver: {e}"

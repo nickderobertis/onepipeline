@@ -1083,8 +1083,9 @@ fn process_table() -> Vec<(u32, u32)> {
         "`ps` refused to list this host's processes: {}",
         String::from_utf8_lossy(&listed.stderr)
     );
-    String::from_utf8_lossy(&listed.stdout)
-        .lines()
+    let text = String::from_utf8(listed.stdout).expect("`ps` wrote a listing this host can decode");
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
         .map(|line| {
             let mut columns = line.split_whitespace();
             let mut id = |what: &str| {
@@ -1094,7 +1095,12 @@ fn process_table() -> Vec<(u32, u32)> {
                     .parse::<u32>()
                     .unwrap_or_else(|_| panic!("`ps` wrote an unreadable {what}: {line:?}"))
             };
-            (id("pid"), id("parent pid"))
+            let pair = (id("pid"), id("parent pid"));
+            assert!(
+                columns.next().is_none(),
+                "`ps` wrote a row with more than the two ids it was asked for: {line:?}"
+            );
+            pair
         })
         .collect()
 }

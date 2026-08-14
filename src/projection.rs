@@ -171,7 +171,10 @@ const TURN_ACTIVITY: &str = "turn-activity";
 
 impl RunState {
     /// Whether a stop has been recorded at all, however it went.
-    pub fn stopped(&self) -> bool {
+    ///
+    /// Not "the run's work has ended": a recorded stop may have reached nothing.
+    /// [`stop`](Self::stop) is what says which.
+    pub fn stop_recorded(&self) -> bool {
         self.stop != StopState::NotStopped
     }
 
@@ -795,7 +798,7 @@ mod tests {
         assert_eq!(state.recorded["approve"], NodeStatus::Done);
         assert_eq!(state.completion_requests, vec!["verified".to_string()]);
         assert_eq!(state.cross_dag_watches["run:o#n"], 1);
-        assert!(state.stopped());
+        assert!(state.stop_recorded());
         assert!(!state.round_open);
     }
 

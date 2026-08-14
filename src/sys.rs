@@ -158,8 +158,10 @@ pub enum Stop {
 /// inside that moment is missed; signalling the root first is what closes that
 /// in practice.
 pub fn stop(pid: u32, how: Stop) -> Teardown {
+    // `0` is no process, and this process is one a teardown must never turn on
+    // itself: `stop` is called from the command doing the stopping. Neither
+    // leaves a tree unreached, which is what the answer is about.
     if pid == 0 || pid == self::pid() {
-        // No process was aimed at, so there is no tree and nothing to miss.
         return Teardown::Signalled;
     }
     platform_stop(pid, how)
