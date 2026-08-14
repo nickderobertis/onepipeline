@@ -323,7 +323,14 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     if dir.join(format!("{key}.unreadable")).exists() {
         println!("{{\"from\":\"a newer oneagentgraph\"}}");
     }
-    emit(args, &node, step.as_deref(), &task, redirected.as_deref());
+    emit(
+        args,
+        &node,
+        step.as_deref(),
+        &task,
+        redirected.as_deref(),
+        dir.join(format!("{key}.clock-stepped")).exists(),
+    );
 
     // A redirection the running turn took changes what it *did*, not only what
     // it said: the work it leaves in the workspace is the redirection's, under a
@@ -518,14 +525,36 @@ fn stream() -> String {
 /// anything did. It rides the activity summary because that is where the sibling
 /// reports what the turn is doing, and a turn that took a redirection is doing
 /// something else.
-fn emit(args: &[String], node: &str, step: Option<&str>, task: &str, redirected: Option<&str>) {
+fn emit(
+    args: &[String],
+    node: &str,
+    step: Option<&str>,
+    task: &str,
+    redirected: Option<&str>,
+    stepped_clock: bool,
+) {
     let labels = member_labels(args, node, step);
+    // A producer whose host clock was stepped **backwards** between two records
+    // it wrote: its `seq` still runs forward, because a producer knows what
+    // order it wrote things in, but its timestamps no longer agree with that.
+    // Real, and not rare — a clock correction under a running process does it —
+    // and it is the case a consumer sorting by `ts` gets wrong. Only when
+    // scripted; every other journey wants an ordinary clock.
+    //
+    // The earlier stamp is far enough back to be unambiguous: a reader ordering
+    // by the clock puts this record before everything, which is exactly the
+    // reordering the merge must not do inside one stream.
+    const STEPPED_BACK: &str = "2001-01-01T00:00:00.000Z";
+    let stamp = move |seq: u64| match (stepped_clock, seq) {
+        (true, 3) => STEPPED_BACK.to_string(),
+        _ => fake::now(),
+    };
     let envelope = |seq: u64, kind: &str, payload: serde_json::Value| {
         println!(
             "{}",
             serde_json::json!({
                 "v": 1,
-                "ts": fake::now(),
+                "ts": stamp(seq),
                 "stream": stream(),
                 "seq": seq,
                 "source": "agentgraph",

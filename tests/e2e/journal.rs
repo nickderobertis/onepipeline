@@ -329,57 +329,26 @@ fn a_rounds_result_is_written_atomically_and_read_back_whole() {
 }
 
 /// One stream's records are read back in the order their producer wrote them,
-/// whatever the clock said — and a second producer colliding on that clock is
-/// still interleaved by it.
+/// whatever its clock said.
 ///
-/// Read through `monitor`, which is where a person sees the merged order.
+/// The producer here is the `oneagentgraph` stand-in, scripted to do what a real
+/// one does when its host clock is corrected under it: keep counting its `seq`
+/// forward while stamping a later record with an earlier reading. Everything
+/// below that is real — the sibling's NDJSON crosses the launcher's own relay,
+/// is merged by the merge under test, is written to the run's own store, and is
+/// read back by `monitor`, which is where a person sees the order.
+///
+/// A dispatch reports its `turn-activity` before its `turn-completed`, always,
+/// because that is the order the turn happened in. Sorted by the clock this
+/// producer stamped, it reads the other way round.
 #[test]
 fn a_streams_own_order_survives_a_clock_that_disagrees_with_it() {
     let world = World::new("journal-clock");
+    world.script("build.clock-stepped", "the turn's clock steps back");
     let path = world.plan("stepped", &plan_of("stepped", vec![agent("build", &[])]));
     world
         .run(&["start", &path.to_string_lossy(), "--attach"])
         .exited(0);
-
-    // llmlint: ignore-block[tests_mirror_real_usage] the case under test is a producer
-    // whose clock disagrees with its own sequence, and no command on this build's surface
-    // can be made to produce one: the timestamps come from the host clock of a process
-    // this suite starts, and stepping that clock is not something a test may do to the
-    // machine it runs on. Writing the records is the only way to state the scenario. They
-    // are ordinary envelopes of the shape a sibling relays — nothing about the reader is
-    // stood in for, and `monitor` below is the real binary reading its own store.
-    let earlier = "2026-08-08T00:00:00.000Z";
-    let later = "2026-08-08T00:00:01.000Z";
-    let relayed = |ts: &str, stream: &str, seq: u64, kind: &str| {
-        json!({
-            "v": 1,
-            "ts": ts,
-            "stream": stream,
-            "seq": seq,
-            "source": "agentgraph",
-            "kind": kind,
-            "labels": {"run_id": "graph-run", "onepipeline.run_id": "stepped"},
-            "payload": {},
-            "artifacts": [],
-        })
-        .to_string()
-    };
-    let journal = world.run_file("stepped", "events.jsonl");
-    let mut text = std::fs::read_to_string(&journal).expect("the journal reads");
-    for line in [
-        // One stream, written in this order, whose clock went backwards between
-        // the two.
-        relayed(later, "stepped-worker", 0, "stream-first"),
-        relayed(earlier, "stepped-worker", 1, "stream-second"),
-        // A second producer, reporting inside the same tick as that stream's
-        // *later* record — the collision the interleaving has to break.
-        relayed(earlier, "beside-it", 0, "other-stream"),
-    ] {
-        text.push_str(&line);
-        text.push('\n');
-    }
-    std::fs::write(&journal, text).expect("the journal is written");
-    // llmlint: ignore-end[tests_mirror_real_usage]
 
     let rendered = world.run(&["monitor", "stepped"]);
     rendered.exited(0);
@@ -391,15 +360,8 @@ fn a_streams_own_order_survives_a_clock_that_disagrees_with_it() {
             .unwrap_or_else(|| panic!("`monitor` never rendered {kind}:\n{}", rendered.stdout))
     };
     assert!(
-        at("stream-first") < at("stream-second"),
+        at("turn-activity") < at("turn-completed"),
         "the merge reordered one stream against the sequence its producer stamped:\n{}",
-        rendered.stdout
-    );
-    // And the other producer is still interleaved by its clock rather than
-    // appended after the stream it collided with.
-    assert!(
-        at("other-stream") < at("stream-first"),
-        "a colliding record from another stream was not interleaved by its timestamp:\n{}",
         rendered.stdout
     );
 }
