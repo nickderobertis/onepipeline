@@ -127,7 +127,10 @@ pub enum Teardown {
 /// How firmly a process is asked to stop.
 ///
 /// Both reach the whole descendant tree; the difference is only how firmly each
-/// asks. See [`stop`].
+/// asks — and only where the host has two ways of asking. Unix does: `SIGTERM`
+/// and `SIGKILL`. Windows does not, for the processes a run is made of, so the
+/// Windows arm reads this as one mode; the `platform_stop` there records what it
+/// checked before deciding that.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stop {
     /// Ask it to stop and let it record its own abandonment first.
@@ -306,54 +309,75 @@ fn parse_table(listed: &str) -> Option<Vec<(u32, u32)>> {
         .collect()
 }
 
+/// `how` is deliberately unread here; see the note on `/F` below.
 #[cfg(windows)]
-fn platform_stop(pid: u32, how: Stop) -> Teardown {
-    // `/T` for the tree in both cases — the same boundary the Unix arm walks the
-    // process table for, which this platform offers outright. `/F` is what makes
-    // the difference between the two modes: without it `taskkill` asks, and a
-    // process that ignores the ask keeps running.
-    let mut command = std::process::Command::new("taskkill");
-    command.args(["/PID", &pid.to_string(), "/T"]);
-    if how == Stop::Now {
-        command.arg("/F");
-    }
-    // Asked before the teardown, because afterwards there is no telling apart a
-    // `taskkill` that failed because it was refused a process still running from
-    // one that failed because there was nothing there to end.
-    let root_was_live = platform_process_may_be_live(pid);
-    let ran = command
+fn platform_stop(pid: u32, _how: Stop) -> Teardown {
+    // `/T` for the tree — the same boundary the Unix arm walks the process table
+    // for, which this platform offers outright.
+    //
+    // `/F` in **both** modes, which is not the distinction the other platform
+    // draws, and the reason is a property of this one. Without `/F` `taskkill`
+    // asks by posting `WM_CLOSE` to the target's top-level windows, and nothing
+    // a run is made of has one: the driver, the graph it starts, and the harness
+    // under that are console processes. Asked that way they answer `This process
+    // can only be terminated forcefully (with /F option)` and every one of them
+    // keeps running — which leaves a stop on this platform with no outcome that
+    // is not a false report. Calling that a reached tree is the completion
+    // nobody achieved that this seam exists to remove; calling it an unreached
+    // one refuses every stop the platform can make. The test named
+    // `a_polite_taskkill_cannot_end_a_console_process` holds that fact against
+    // the real program.
+    //
+    // Nothing is given up by asking forcefully. The polite mode's promise is
+    // that a process may record its own abandonment first, and it is `SIGTERM`
+    // that carries it — a signal whose default action is to terminate, which
+    // nothing in this crate installs a handler for. So the grace this drops is
+    // grace no process here was taking.
+    let ran = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status();
-    taskkill_established(ran, root_was_live)
+    taskkill_established(ran, || platform_process_may_be_live(pid))
 }
 
-/// What a run of `taskkill /T` established about the tree it was aimed at.
+/// What a run of `taskkill /T /F` established about the tree it was aimed at.
 ///
-/// Separate from running it so the three answers can be proved without a
-/// process: what a `taskkill` that ran and *failed* means is a question about
-/// this mapping alone, and it is not a case a suite can produce on demand — it
-/// needs a process this user may not end, which is not a thing to go and make.
+/// Separate from running it so all four answers can be proved without a process:
+/// what a `taskkill` that ran and *failed* means is a question about this
+/// mapping alone, and one of its cases is not one a suite can produce on demand
+/// — it needs a process this user may not end, which is not a thing to go and
+/// make.
+///
+/// The failure is read from `still_live` rather than from the exit status, and
+/// that is the whole point of this mapping. `taskkill` answers **the same**
+/// non-zero status for a process it was refused and for one that was not there
+/// to end — `128` for both on the host
+/// `a_taskkill_failure_does_not_say_which_failure_it_was` checks it on. So the
+/// status can say *that* the teardown did not complete cleanly and can never say
+/// which of the two it was, and the two call for opposite answers: a stop that
+/// raced its own tree to exit reached everything there was to reach, while one
+/// that was refused left a process running. Asking the platform afterwards
+/// answers the question the variant actually poses, where reading the status
+/// only guesses at it.
 ///
 /// This platform reaches [`Teardown::PartlySignalled`] deliberately, rather than
-/// leaving it a variant only the Unix arm constructs. `taskkill /T` terminates
-/// the tree *as it walks it*, so a run of it that failed has in general already
-/// ended part of that tree and been refused the rest — which is the one thing
-/// [`Teardown::NotAttempted`] promises is not so. Reporting it as untouched
-/// would tell an operator the run is intact and worth retrying when it is
-/// neither, and that false report is the whole defect this seam exists to
-/// remove. The only Windows outcome that establishes "nothing was touched" is a
-/// `taskkill` that never ran at all.
+/// leaving it a variant only the Unix arm constructs: `taskkill /T` ends the
+/// tree as it walks it, so a run of it that was refused has in general ended
+/// part of that tree, which is the one thing [`Teardown::NotAttempted`] promises
+/// is not so. The only Windows outcome that establishes "nothing was touched" is
+/// a `taskkill` that never ran at all.
 ///
-/// A root that was already gone is the exception, and it is the rule the Unix
-/// arm applies to `ESRCH`: there was no process to reach, so the tree is
-/// reached. Nothing is orphaned by saying so — the descendants of a root that
-/// has already died were reparented when it died, and are beyond descent on
-/// either platform.
+/// The liveness asked about is the **root's**, which is the pid the ledger holds
+/// and the only handle a later stop has. A root that is gone took its tree's
+/// reachability with it — a descendant that outlived it is beyond descent on
+/// either platform — so what this cannot separate is a refusal deeper in a tree
+/// whose root died anyway, and no answer available here would give an operator a
+/// different next step for it.
 #[cfg(windows)]
 fn taskkill_established(
     ran: std::io::Result<std::process::ExitStatus>,
-    root_was_live: bool,
+    still_live: impl FnOnce() -> bool,
 ) -> Teardown {
     match ran {
         // `taskkill` walks the tree itself, so a run of it that succeeded
@@ -362,8 +386,12 @@ fn taskkill_established(
         // It never ran, so nothing in the tree was touched — the same answer,
         // and for the same reason, as a `ps` that will not answer.
         Err(_) => Teardown::NotAttempted,
-        Ok(_) if !root_was_live => Teardown::Signalled,
-        Ok(_) => Teardown::PartlySignalled,
+        // It ran and did not complete. Still there is a process this teardown
+        // was refused; gone is the race every teardown runs against its own
+        // tree, and the rule the Unix arm applies to `ESRCH`: nothing left to
+        // reach is reached.
+        Ok(_) if still_live() => Teardown::PartlySignalled,
+        Ok(_) => Teardown::Signalled,
     }
 }
 
@@ -794,45 +822,288 @@ mod tests {
         );
     }
 
-    /// A `taskkill` that ran and failed is a partial teardown, and only one that
-    /// never ran leaves the run untouched.
+    /// A console process tree, and the pids of both its levels.
     ///
-    /// The distinction this platform's answer rests on, and the reason
-    /// [`Teardown::PartlySignalled`] is reachable here rather than scoped to the
-    /// arm that walks a process table. `taskkill /T` ends the tree as it walks
-    /// it, so a failed run of it has in general ended part of that tree — and
-    /// calling that untouched would send an operator back to retry a stop
-    /// against a run that is already half down, with the rest of it still
-    /// writing. The root already being gone is the exception, and it is the same
-    /// answer `ESRCH` gets on the other platform: nothing to reach is reached.
+    /// `cmd` runs `ping`, so the root has a real descendant to be reached
+    /// through — the shape a run makes, and the shape a teardown that stopped at
+    /// the root would leave half of. Both levels are console processes with no
+    /// window between them, which is the property every Windows fact below turns
+    /// on.
+    ///
+    /// The child's pid is read through `Win32_Process`, which is this test's own
+    /// oracle and deliberately not the crate's: `platform_stop` hands the tree to
+    /// `taskkill /T` and never enumerates one, so a fixture that asked the crate
+    /// where the leaf was would be asking the code under test to grade itself.
+    #[cfg(windows)]
+    fn console_tree() -> (std::process::Child, u32) {
+        let mut root = std::process::Command::new("cmd")
+            .args(["/C", "ping -n 120 127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("a console process tree");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let mut leaf = None;
+        while leaf.is_none() && std::time::Instant::now() < deadline {
+            leaf = child_of(root.id());
+            if leaf.is_none() {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+        match leaf {
+            Some(leaf) => (root, leaf),
+            None => {
+                let pid = root.id();
+                let _ = root.kill();
+                let _ = root.wait();
+                panic!("the tree under {pid} never started its leaf");
+            }
+        }
+    }
+
+    /// The pid of one child of `parent`, or `None` while it has none.
+    #[cfg(windows)]
+    fn child_of(parent: u32) -> Option<u32> {
+        let listed = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                &format!(
+                    "(Get-CimInstance Win32_Process -Filter 'ParentProcessId={parent}').ProcessId"
+                ),
+            ])
+            .output()
+            .expect("this host lists its processes");
+        String::from_utf8_lossy(&listed.stdout)
+            .lines()
+            .find_map(|line| line.trim().parse::<u32>().ok())
+    }
+
+    /// Whether every pid in `tree` is gone inside `patience`.
+    #[cfg(windows)]
+    fn all_ended_within(tree: &[u32], patience: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + patience;
+        while std::time::Instant::now() < deadline {
+            if tree.iter().all(|pid| !platform_process_may_be_live(*pid)) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        false
+    }
+
+    /// `taskkill` without `/F` cannot end a console process, and says so.
+    ///
+    /// The fact `platform_stop` asks forcefully in **both** modes on the
+    /// strength of. The polite ask is `WM_CLOSE` to a top-level window, and a
+    /// run is made entirely of processes that have none — so asking that way
+    /// ends nothing at all, rather than ending it less abruptly. Held against
+    /// the real program because it is the whole reason this platform does not
+    /// draw the distinction the other one does, and a reasoned answer to it was
+    /// wrong once already.
     #[cfg(windows)]
     #[test]
-    fn a_taskkill_that_ran_and_failed_is_a_partial_teardown_not_an_untouched_run() {
+    fn a_polite_taskkill_cannot_end_a_console_process() {
+        let (mut root, leaf) = console_tree();
+        let pid = root.id();
+
+        let asked = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T"])
+            .output()
+            .expect("taskkill runs");
+        let said = String::from_utf8_lossy(&asked.stderr).into_owned();
+        assert!(
+            !asked.status.success(),
+            "a polite taskkill reported that it ended a console tree: {said}"
+        );
+        assert!(
+            platform_process_may_be_live(pid) && platform_process_may_be_live(leaf),
+            "the polite ask ended part of the console tree {pid}/{leaf} after all, so the \
+             forceful ask below is not the only one that reaches it: {said}"
+        );
+
+        assert_eq!(
+            stop(pid, Stop::Now),
+            Teardown::Signalled,
+            "the forceful ask did not reach the tree the polite one could not"
+        );
+        assert!(all_ended_within(
+            &[pid, leaf],
+            std::time::Duration::from_secs(10)
+        ));
+        let _ = root.wait();
+    }
+
+    /// A failed `taskkill` does not say *which* failure it was, so the answer
+    /// cannot be read from its status.
+    ///
+    /// The reason [`taskkill_established`] asks the platform what is still
+    /// running instead. These two outcomes call for opposite answers — a tree
+    /// that had already exited was wholly reached, a process this teardown was
+    /// refused was not — and this holds them side by side to show the exit
+    /// status is the same for both. Asserted as an equality rather than against
+    /// the literal `128`, because what makes the status unusable is that it does
+    /// not separate them, not the particular number it collapses them onto.
+    #[cfg(windows)]
+    #[test]
+    fn a_taskkill_failure_does_not_say_which_failure_it_was() {
+        let (mut root, leaf) = console_tree();
+        let pid = root.id();
+
+        // A process still running that this ask cannot end.
+        let refused = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T"])
+            .output()
+            .expect("taskkill runs");
+        assert!(
+            platform_process_may_be_live(pid),
+            "the tree ended by itself"
+        );
+
+        // And one this host has proved is gone. Proved *before* the ask, not
+        // after: a pid the host had already reissued would make this fixture
+        // send a forceful teardown at whatever now holds it.
+        let dead = reaped_pid();
+        assert!(
+            !platform_process_may_be_live(dead),
+            "the reaped pid {dead} was still live"
+        );
+        let absent = std::process::Command::new("taskkill")
+            .args(["/PID", &dead.to_string(), "/T", "/F"])
+            .output()
+            .expect("taskkill runs");
+
+        assert!(
+            !refused.status.success() && !absent.status.success(),
+            "a taskkill reported success for a tree it did not end"
+        );
+        assert_eq!(
+            refused.status.code(),
+            absent.status.code(),
+            "a taskkill that was refused a running process and one that found nothing to end \
+             report different statuses, so the teardown could read the difference off the \
+             status after all"
+        );
+
+        stop(pid, Stop::Now);
+        assert!(all_ended_within(
+            &[pid, leaf],
+            std::time::Duration::from_secs(10)
+        ));
+        let _ = root.wait();
+    }
+
+    /// A stop reaches the leaf, not just the process whose pid it was given —
+    /// on this platform too.
+    ///
+    /// The Windows half of the journey the Unix arm proves by walking a process
+    /// table, and the one this fix is for: until it, a stop here ended nothing,
+    /// because the only ask it made was one no console process could receive.
+    /// Driven for **each** mode, because the mode used to decide whether the ask
+    /// was deliverable at all, and the polite one — the mode an operator's `stop`
+    /// takes — is the one that reached nothing.
+    ///
+    /// There is no bystander here as there is on Unix. `taskkill /T` is handed
+    /// descent rather than given a set this walked, so what pins the boundary on
+    /// this platform is the program's own contract, and the tree is what the
+    /// teardown has to be shown to reach.
+    #[cfg(windows)]
+    fn a_stop_reaches_the_whole_console_tree(how: Stop) {
+        let (mut root, leaf) = console_tree();
+        let pid = root.id();
+        assert!(
+            platform_process_may_be_live(pid) && platform_process_may_be_live(leaf),
+            "the tree {pid}/{leaf} was not running before it was stopped"
+        );
+
+        assert_eq!(
+            stop(pid, how),
+            Teardown::Signalled,
+            "a stop that reached the tree {pid}/{leaf} did not report reaching it"
+        );
+        assert!(
+            all_ended_within(&[pid, leaf], std::time::Duration::from_secs(10)),
+            "a stop left part of the tree {pid}/{leaf} running — the leaf is the paid one"
+        );
+        let _ = root.wait();
+    }
+
+    /// The mode an operator's `stop` takes.
+    #[cfg(windows)]
+    #[test]
+    fn a_polite_stop_reaches_the_whole_console_tree() {
+        a_stop_reaches_the_whole_console_tree(Stop::Politely);
+    }
+
+    /// The mode a cancelled dispatch takes, where the leaf is the paid process.
+    #[cfg(windows)]
+    #[test]
+    fn a_forceful_stop_reaches_the_whole_console_tree() {
+        a_stop_reaches_the_whole_console_tree(Stop::Now);
+    }
+
+    /// A teardown aimed at a tree that has already gone reports a complete one.
+    ///
+    /// The ordinary race, driven through the real program rather than the
+    /// mapping: `taskkill` fails because there is nothing left to end, and the
+    /// stop that raced its own tree to exit reached everything there was to
+    /// reach. Reporting it as partial would send an operator to hunt a process
+    /// that does not exist.
+    #[cfg(windows)]
+    #[test]
+    fn a_stop_aimed_at_a_tree_that_has_already_gone_is_a_complete_teardown() {
+        let dead = reaped_pid();
+        assert!(
+            !platform_process_may_be_live(dead),
+            "the reaped pid {dead} was still live, so this is not the race under test"
+        );
+        assert_eq!(
+            stop(dead, Stop::Politely),
+            Teardown::Signalled,
+            "a stop that raced its own tree to exit was reported as having left one running"
+        );
+    }
+
+    /// The four answers a `taskkill` can establish, including both directions of
+    /// the one its exit status cannot tell apart.
+    ///
+    /// The seam is a mapping so the case that matters is provable at all: a
+    /// teardown genuinely refused a process needs one this user may not end, and
+    /// going and making one would be a worse thing than the bug being checked
+    /// for. Driven here instead, from the same failed status the ordinary race
+    /// produces, so the two are separated by the one thing that does separate
+    /// them — whether the process is still there.
+    #[cfg(windows)]
+    #[test]
+    fn a_failed_taskkill_is_read_from_what_is_still_running_not_from_its_status() {
         use std::os::windows::process::ExitStatusExt;
 
         let exited = |code: u32| Ok(std::process::ExitStatus::from_raw(code));
+        let never_asked = || panic!("liveness was asked about a teardown that settled without it");
         assert_eq!(
-            taskkill_established(exited(0), true),
+            taskkill_established(exited(0), never_asked),
             Teardown::Signalled,
             "a taskkill that walked the tree was not reported as having reached it"
         );
         assert_eq!(
             taskkill_established(
                 Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
-                true
+                never_asked
             ),
             Teardown::NotAttempted,
             "a taskkill that never ran was reported as having touched the tree"
         );
+        // The same status, and the opposite answer, on the strength of what the
+        // platform says afterwards.
         assert_eq!(
-            taskkill_established(exited(1), true),
+            taskkill_established(exited(128), || true),
             Teardown::PartlySignalled,
-            "a taskkill refused part of a live tree was reported as leaving the run untouched"
+            "a teardown that left a process running was reported as a clean stop"
         );
         assert_eq!(
-            taskkill_established(exited(1), false),
+            taskkill_established(exited(128), || false),
             Teardown::Signalled,
-            "a root that was already gone was reported as a process still to be found"
+            "a tree that was already gone was reported as a process still to be found"
         );
     }
 
