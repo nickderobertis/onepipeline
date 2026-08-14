@@ -1252,8 +1252,6 @@ fn a_stop_ends_its_run_even_where_the_process_table_cannot_be_read() {
             .exited(0)
             .out_has("\"stopped\":true");
 
-        // The pid the stop was given is gone, and the run says so — the two
-        // things an operator asked for.
         world.until("the driver to end", |_| !still_listed(driver));
         assert_eq!(
             world.events_of(&run, "run-stopped").len(),

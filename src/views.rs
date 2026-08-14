@@ -475,8 +475,6 @@ pub fn results(view: &RunView) -> String {
         if let Some(outcome) = view.state.outcomes.get(&node.id) {
             out.push_str(&format!(" ({outcome})"));
         }
-        // A node still recorded as running in a stopped run is not running — see
-        // [`ENDED_BY_THE_STOP`].
         if status == NodeStatus::Running && view.state.stopped {
             out.push_str(&format!(" — {ENDED_BY_THE_STOP}"));
         }

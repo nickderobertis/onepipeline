@@ -1251,9 +1251,6 @@ fn the_retained_driver_relays_its_graphs_stream_and_exits_with_its_code() {
     );
     driven.exited(0);
 
-    // Every line is an envelope, and the member the graph names reports through
-    // it — which is the relay carrying the sibling's own stream rather than a
-    // summary of it.
     let relayed: Vec<Value> = driven
         .stdout
         .lines()
@@ -1322,22 +1319,20 @@ fn a_retained_driver_that_cannot_write_its_relay_refuses() {
     refused.err_has("relaying graph event");
 }
 
-/// A graph whose member fails reaches the launcher as its own code and its own
-/// words.
+/// A graph whose member fails reaches the launcher as its own exit code.
 ///
 /// The retained driver is the only thing between a failing graph and the launch
 /// log an operator reads afterwards, and it must not improve on what it saw: the
-/// exit status is the graph's own answer rather than a second opinion about it,
-/// and what the graph said goes to stderr, where the binary prints every other
-/// refusal. A driver that exited 0 here would hand the launcher a run that
-/// started and settled — the silent total failure this whole change is about.
+/// exit status is the graph's own answer rather than a second opinion about it.
+/// A driver that exited 0 here would hand the launcher a run that started and
+/// settled — the silent total failure this whole change is about.
 ///
 /// The member fails *after* it has started and streamed, which is the case the
 /// settlement decides: a graph that refuses before it runs never reaches the
 /// settlement at all, because the relay carries that refusal out of the event
 /// loop instead.
 #[test]
-fn a_retained_driver_carries_a_failing_graphs_code_and_words() {
+fn a_retained_driver_carries_a_failing_graphs_own_exit_code() {
     let world = World::new("drive-failed");
     world.write_graphs();
     let graph = world.graphs().join("node-scope.yaml");
@@ -1359,10 +1354,15 @@ fn a_retained_driver_carries_a_failing_graphs_code_and_words() {
         ]),
         "drive a graph whose member fails",
     );
-    assert_ne!(
-        failed.code, 0,
-        "a driver whose graph failed reported success:\nstdout: {}\nstderr: {}",
-        failed.stdout, failed.stderr
+    // The graph's *own* code, not merely "not success": a launcher reading this
+    // process's exit reads the sibling's answer, and the sibling answers a member
+    // that failed with this one.
+    assert_eq!(
+        failed.code,
+        oneagentgraph::error::EXIT_MEMBER_FAILED,
+        "a driver did not carry its graph's own exit code:\nstdout: {}\nstderr: {}",
+        failed.stdout,
+        failed.stderr
     );
     // It really ran: the member started and streamed before it failed, so this
     // is the settlement's answer rather than a refusal on the way in.
