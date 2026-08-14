@@ -91,24 +91,46 @@ pub fn hostname() -> String {
 }
 
 /// How firmly a process is asked to stop.
+///
+/// Both reach the whole descendant tree; the difference is only how firmly each
+/// asks. See [`stop`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stop {
     /// Ask it to stop and let it record its own abandonment first.
     Politely,
-    /// Take it down, and its descendants with it.
+    /// Take it down.
     Now,
 }
 
-/// Ask a process on **this** host to stop.
+/// Ask a process on **this** host, and everything it started, to stop.
 ///
 /// One place, because both callers need the same two `cfg` blocks and a second
 /// copy is a platform that gets fixed in one of them: a driver being asked to
 /// stand down, and a dispatch being killed. Which signal each sends is the
 /// caller's decision and the only thing that differs.
 ///
+/// # The tree, and only the tree
+///
+/// A run's expensive process is never the one whose pid anything recorded. The
+/// driver spawns a graph, the graph spawns a harness, and the harness spawns the
+/// paid agent — and that agent puts itself in a process group of its own, so a
+/// teardown aimed at the *group* sweeps the middle of the tree and leaves the
+/// leaf running, reparented to init, still writing into a real checkout with
+/// nobody reading its output. That costs quota, it costs correctness, and it
+/// costs diagnosis: an orphan carries no run attribution and is invisible to
+/// every view that reports what is live.
+///
+/// So the boundary here is **descent**, which is neither the group's nor one
+/// pid's: every process this one started, however deep, and nothing else. A
+/// round that is legitimately a *child of something else* is not a descendant of
+/// this pid and is not touched — a teardown that reached one would be ending
+/// work it does not own, which is the other half of the same mistake.
+///
 /// Best-effort by construction. A process that has already exited, or that this
 /// user may not signal, is not an error to report — the caller's next liveness
-/// probe is what decides whether the stop landed.
+/// probe is what decides whether the stop landed. The process table is read a
+/// moment before the signals go out, so a child started inside that moment is
+/// missed; the root is signalled first, which is what closes it in practice.
 pub fn stop(pid: u32, how: Stop) {
     if pid == 0 || pid == self::pid() {
         return;
@@ -118,23 +140,86 @@ pub fn stop(pid: u32, how: Stop) {
 
 #[cfg(unix)]
 fn platform_stop(pid: u32, how: Stop) {
-    let Ok(raw) = i32::try_from(pid) else {
-        return;
-    };
     let signal = match how {
         Stop::Politely => libc::SIGTERM,
         Stop::Now => libc::SIGKILL,
+    };
+    // The tree is read **before** anything is signalled, and that ordering is
+    // the whole of it: a process whose parent has died is reparented to init at
+    // once, so a table read after the root is gone no longer descends to any of
+    // them. The root is then signalled first, so what is left is a tree that has
+    // stopped growing while its own members are taken down.
+    let tree = descendants(pid);
+    signal_one(pid, signal);
+    for descendant in tree {
+        signal_one(descendant, signal);
+    }
+}
+
+/// Send one signal to one process, best-effort.
+#[cfg(unix)]
+fn signal_one(pid: u32, signal: i32) {
+    let Ok(raw) = i32::try_from(pid) else {
+        return;
     };
     // SAFETY: `kill` takes a pid and a signal number and touches no memory this
     // call owns.
     unsafe { libc::kill(raw, signal) };
 }
 
+/// Every process descended from `pid`, however deep.
+///
+/// Breadth-first over a single snapshot of the process table, so a tree that
+/// changed shape while it was being walked cannot be walked twice or leave this
+/// looping: a pid already found is never queued again, which is also what makes
+/// a table reporting a cycle — which the kernel does not produce, but a parse of
+/// one might — terminate rather than hang a teardown.
+#[cfg(unix)]
+fn descendants(pid: u32) -> Vec<u32> {
+    let table = process_table();
+    let mut found: Vec<u32> = Vec::new();
+    let mut frontier = vec![pid];
+    while let Some(parent) = frontier.pop() {
+        for (child, _) in table.iter().filter(|(_, ppid)| *ppid == parent) {
+            if *child != pid && !found.contains(child) {
+                found.push(*child);
+                frontier.push(*child);
+            }
+        }
+    }
+    found
+}
+
+/// This host's `(pid, parent pid)` pairs.
+///
+/// Read through `ps`, which is the one answer every Unix gives: Linux has
+/// `/proc` and macOS does not, and a second implementation is a platform that
+/// gets fixed in one of them — the thing this module exists to avoid. A `ps`
+/// that cannot be run leaves the table empty, which degrades a teardown to the
+/// single process it was already reaching rather than failing it.
+#[cfg(unix)]
+fn process_table() -> Vec<(u32, u32)> {
+    let Ok(listed) = std::process::Command::new("ps")
+        .args(["-A", "-o", "pid=,ppid="])
+        .stderr(std::process::Stdio::null())
+        .output()
+    else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&listed.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut columns = line.split_whitespace();
+            Some((columns.next()?.parse().ok()?, columns.next()?.parse().ok()?))
+        })
+        .collect()
+}
+
 #[cfg(windows)]
 fn platform_stop(pid: u32, how: Stop) {
-    // `/T` for the tree in both cases: a harness the graph started is a
-    // descendant, and stopping only the parent leaves it holding the workspace.
-    // `/F` is what makes the difference — without it `taskkill` asks, and a
+    // `/T` for the tree in both cases — the same boundary the Unix arm walks the
+    // process table for, which this platform offers outright. `/F` is what makes
+    // the difference between the two modes: without it `taskkill` asks, and a
     // process that ignores the ask keeps running.
     let mut command = std::process::Command::new("taskkill");
     command.args(["/PID", &pid.to_string(), "/T"]);
@@ -359,6 +444,93 @@ mod tests {
     fn a_reaped_process_is_proved_gone() {
         let dead = reaped_pid();
         assert!(!process_may_be_live(dead), "pid {dead} was reaped");
+    }
+
+    /// A stop reaches the leaf, not just the process whose pid it was given.
+    ///
+    /// The tree here is the shape a run actually makes — a driver, the graph it
+    /// starts, and the paid agent that graph's harness starts — and the leaf
+    /// puts itself in a **process group of its own**, which is what a real one
+    /// does and what made a teardown aimed at the group miss it. Every process
+    /// is real and every pid is read off the kernel rather than assumed.
+    ///
+    /// Unix-only because the tree is built with `sh` and read back through the
+    /// process table. The Windows arm hands the same boundary to `taskkill /T`,
+    /// which has always walked it.
+    #[cfg(unix)]
+    #[test]
+    fn a_stop_reaches_the_whole_descendant_tree_and_not_the_process_beside_it() {
+        // `setsid` on the leaf is the point: a new session is a new process
+        // group, so the leaf is outside the group of everything above it. Each
+        // level prints its pid and then waits, so the test learns the tree from
+        // the kernel.
+        let mut tree = std::process::Command::new("sh")
+            .args([
+                "-c",
+                "echo $$; sh -c 'echo $$; setsid sh -c \"echo \\$\\$; sleep 120\" & \
+                 sleep 120' & sleep 120",
+            ])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("a process tree");
+        // A process started beside the tree rather than under it. A teardown
+        // that widened until the leaf was included would take this too.
+        let mut beside = std::process::Command::new("sh")
+            .args(["-c", "sleep 120"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("a process beside the tree");
+
+        let mut pids = Vec::new();
+        {
+            use std::io::BufRead;
+            let out = std::io::BufReader::new(tree.stdout.take().expect("the tree reports itself"));
+            for line in out.lines().take(3) {
+                pids.push(
+                    line.expect("a reported pid")
+                        .trim()
+                        .parse::<u32>()
+                        .expect("a pid"),
+                );
+            }
+        }
+        assert_eq!(pids.len(), 3, "the tree did not report three levels");
+        assert!(
+            pids.iter().all(|pid| process_may_be_live(*pid)),
+            "the tree was not running before it was stopped: {pids:?}"
+        );
+
+        stop(pids[0], Stop::Now);
+        // Collected here rather than at the end, because a signalled child
+        // nobody has waited on is a zombie, and a zombie answers a liveness
+        // probe as alive. The two below it are this process's grandchildren, so
+        // nothing here can wait on them — init collects those.
+        let _ = tree.wait();
+        // Signalled is not reaped: the kernel takes a moment.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline
+            && pids.iter().any(|pid| process_may_be_live(*pid))
+        {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        let surviving: Vec<u32> = pids
+            .iter()
+            .copied()
+            .filter(|pid| process_may_be_live(*pid))
+            .collect();
+        assert!(
+            surviving.is_empty(),
+            "a stop left {surviving:?} of the tree {pids:?} running — the leaf is the paid one"
+        );
+        assert!(
+            process_may_be_live(beside.id()),
+            "a stop took a process that was beside the tree rather than under it"
+        );
+        let _ = beside.kill();
+        let _ = beside.wait();
     }
 
     #[test]

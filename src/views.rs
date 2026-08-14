@@ -66,6 +66,17 @@ pub const DEFAULT_PARKED_AFTER_SECONDS: u64 = 1_800;
 /// The environment variable that moves that threshold.
 pub const PARKED_AFTER_ENV: &str = "ONEPIPELINE_PARKED_AFTER_SECONDS";
 
+/// How a node whose dispatch a `stop` ended is reported.
+///
+/// One phrasing, in the two views that report an in-flight node, because they
+/// are read together and a run that says two things about one node is a run
+/// nobody trusts. It says what happened to the *worker* rather than what the
+/// node produced: a stop ends the run's whole dispatch tree, and the process
+/// that would have settled the node was in that tree — so the last thing the
+/// record holds for it is that it started, and a reader with nothing else to go
+/// on takes that for a node that produced nothing.
+const ENDED_BY_THE_STOP: &str = "worker ended when the run was stopped";
+
 impl DriverLiveness {
     /// The word a view prints for this verdict.
     pub fn as_str(self) -> &'static str {
@@ -317,10 +328,18 @@ pub fn status(views: &[RunView]) -> String {
                 .dispatched_at
                 .get(id)
                 .map(|at| sys::now_millis().saturating_sub(*at));
-            out.push_str(&format!(
-                "  {id}: running for {}",
-                crate::telemetry::duration(age.unwrap_or(0)),
-            ));
+            let age = crate::telemetry::duration(age.unwrap_or(0));
+            if view.state.stopped {
+                // A stop ends the run's whole dispatch tree, so this node's
+                // worker was ended with it. What it *last* did is still on the
+                // record and is deliberately not repeated here: a line reporting
+                // it would read as a worker still working, which is how a node
+                // killed mid-edit gets taken for one that simply produced
+                // nothing.
+                out.push_str(&format!("  {id}: {ENDED_BY_THE_STOP}, {age} in\n"));
+                continue;
+            }
+            out.push_str(&format!("  {id}: running for {age}"));
             match view.state.activity.get(id) {
                 // A node the ledger records as running that no live dispatch is
                 // driving is `UNDRIVEN`. Deliberately not `parked`: that word
@@ -459,6 +478,15 @@ pub fn results(view: &RunView) -> String {
         out.push_str(&format!("  {:<24} {}", node.id, status.as_str()));
         if let Some(outcome) = view.state.outcomes.get(&node.id) {
             out.push_str(&format!(" ({outcome})"));
+        }
+        // A node still recorded as running in a run that was stopped is not
+        // running: the stop ended the run's whole dispatch tree, and the process
+        // that would have settled this node was in it. Saying so is what
+        // separates a worker that was **ended** from one that produced nothing —
+        // the reading a killed dispatch otherwise gets, because the last thing
+        // the record holds for it is that it started.
+        if status == NodeStatus::Running && view.state.stopped {
+            out.push_str(&format!(" — {ENDED_BY_THE_STOP}"));
         }
         // What the dispatch reported, before what the plan asked for: an
         // unpinned lifecycle node's branch is named by the sibling that cut it,

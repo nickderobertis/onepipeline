@@ -733,10 +733,24 @@ fn the_owner_stops_its_own_run_without_force() {
     // Recording the stop is not stopping it. The ledger says stopped either
     // way — `status` reads `run-stopped` and reports the run undriven without
     // ever looking at a process — so the ledger cannot be the evidence here.
+    let status = world.run(&["status", &run]);
+    status.exited(0).out_has("nothing is driving this run");
+
+    // And what became of the work in flight is said, in both views that report
+    // it. A stop ends the run's whole dispatch tree, and the process that would
+    // have settled this node was in that tree — so the last thing the record
+    // holds for it is that it started, and a reader with nothing else to go on
+    // takes a worker that was *ended mid-edit* for one that produced nothing.
+    status.out_has("build: worker ended when the run was stopped");
+    assert!(
+        !status.stdout.contains("build: running for"),
+        "a node whose worker the stop ended is still reported as working:\n{}",
+        status.stdout
+    );
     world
-        .run(&["status", &run])
+        .run(&["results", &run])
         .exited(0)
-        .out_has("nothing is driving this run");
+        .out_has("worker ended when the run was stopped");
 
     // The process itself, where this host can see one. Asserted under `cfg`
     // rather than through a path that simply does not exist elsewhere: a probe
@@ -1032,4 +1046,117 @@ fn a_graph_that_finished_before_announcing_anything_is_a_launch_that_worked() {
         .run(&["start", &path.to_string_lossy(), "--attach"])
         .exited(NOTHING_DRIVING)
         .out_has("\"settlement\":\"unattended\"");
+}
+
+/// The `(pid, parent pid)` pairs this host reports, read the way an operator
+/// would.
+///
+/// The test's own oracle, deliberately not the crate's: what is under test is
+/// whether a teardown reached a tree, and asking it to describe the tree it
+/// reached would be asking the answer of the thing being questioned.
+#[cfg(unix)]
+fn process_table() -> Vec<(u32, u32)> {
+    let listed = std::process::Command::new("ps")
+        .args(["-A", "-o", "pid=,ppid="])
+        .output()
+        .expect("this host lists its processes");
+    String::from_utf8_lossy(&listed.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut columns = line.split_whitespace();
+            Some((columns.next()?.parse().ok()?, columns.next()?.parse().ok()?))
+        })
+        .collect()
+}
+
+/// Every process descended from `pid`, however deep.
+#[cfg(unix)]
+fn descendants(pid: u32) -> Vec<u32> {
+    let table = process_table();
+    let mut found: Vec<u32> = Vec::new();
+    let mut frontier = vec![pid];
+    while let Some(parent) = frontier.pop() {
+        for (child, _) in table.iter().filter(|(_, ppid)| *ppid == parent) {
+            if *child != pid && !found.contains(child) {
+                found.push(*child);
+                frontier.push(*child);
+            }
+        }
+    }
+    found
+}
+
+/// Whether this host still reports a process under that id.
+#[cfg(unix)]
+fn still_running(pid: u32) -> bool {
+    process_table().iter().any(|(listed, _)| *listed == pid)
+}
+
+/// The recorded driver of a run.
+#[cfg(unix)]
+fn recorded_driver(world: &World, run: &str) -> u32 {
+    u32::try_from(
+        world.run_json(run, "launch.json")["pid"]
+            .as_u64()
+            .expect("the launch records a driver"),
+    )
+    .expect("a pid")
+}
+
+/// Ending a run ends everything it started, and nothing beside it.
+///
+/// A run's expensive process is never the one whose pid the ledger holds: the
+/// driver starts a graph, the graph starts a round, and the round dispatches a
+/// node into a graph of its own. Measured live, the paid leaf of that tree puts
+/// itself in a **process group of its own** — so a teardown that reached the
+/// group swept the middle and left the leaf reparented to init, running for
+/// another twenty-five minutes, still writing into a real checkout with nobody
+/// reading its output. A teardown that reached one pid left all of it.
+///
+/// So the boundary is descent, and both halves of that are stated here: every
+/// descendant of the recorded driver is gone, and a run beside it — which is
+/// nobody's descendant — is untouched.
+///
+/// Unix-only because the tree is read back through the process table. The
+/// Windows arm hands the same boundary to `taskkill /T`, which has always
+/// walked it; `the_owner_stops_its_own_run_without_force` is where the ledger
+/// half of a stop is held on every platform.
+#[cfg(unix)]
+#[test]
+fn stopping_a_run_ends_its_whole_dispatch_tree_and_leaves_the_run_beside_it_alone() {
+    let world = World::new("driver-stop-tree");
+    world.script("build.wait", "hold");
+    let run = start_detached(&world, "treed", vec![agent("build", &[])]);
+    let beside = start_detached(&world, "untouched", vec![agent("build", &[])]);
+    for run in [&run, &beside] {
+        world.until("a node to be in flight", |world| {
+            !world.events_of(run, "node-dispatched").is_empty()
+        });
+    }
+
+    let driver = recorded_driver(&world, &run);
+    // Read before the stop, and only once the dispatch has actually grown: a
+    // tree of one process is a journey that would pass without the fix.
+    world.until("the dispatch to be more than one process", |_| {
+        descendants(driver).len() > 1
+    });
+    let tree: Vec<u32> = std::iter::once(driver).chain(descendants(driver)).collect();
+    let untouched = recorded_driver(&world, &beside);
+    assert!(
+        !tree.contains(&untouched),
+        "the run beside it is inside the tree, so this journey proves nothing: {tree:?}"
+    );
+
+    world.run(&["stop", &run]).exited(0);
+
+    world.until("every process the run started to end", |_| {
+        tree.iter().all(|pid| !still_running(*pid))
+    });
+    assert!(
+        still_running(untouched),
+        "stopping one run ended the driver of another: pid {untouched}"
+    );
+
+    world.run(&["stop", &beside]).exited(0);
+    world.release("build.go");
 }
