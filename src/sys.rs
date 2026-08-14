@@ -669,14 +669,53 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_process_listing_that_exits_nonzero_is_not_read_as_a_listing() {
+        let read = table_from_ps("nonzero", "echo '1 0'\necho '2 1'\nexit 1");
+        assert!(
+            read.is_empty(),
+            "a `ps` that exited non-zero was read as a listing anyway: {read:?}"
+        );
+    }
+
+    /// A row that is not two ids costs that row and no more.
+    ///
+    /// The two faults a listing can have are not the same size, and reading them
+    /// the same way gets one of them wrong. A `ps` that *failed* said nothing
+    /// about any process, so the table is empty. A `ps` that succeeded and wrote
+    /// one unreadable line — a header a platform adds, two columns that ran
+    /// together — said something about every other line on it, and throwing the
+    /// whole listing away there would strand every process it named. So the bad
+    /// row is dropped and its neighbours are kept: one process this teardown
+    /// cannot place, rather than all of them.
+    #[cfg(unix)]
+    #[test]
+    fn one_unreadable_row_costs_that_row_rather_than_the_whole_listing() {
+        let read = table_from_ps(
+            "malformed",
+            "echo '  PID  PPID'\necho '11 10'\necho 'not-a-pid also-not'\necho '13 11'\n\
+             echo '14'\nexit 0",
+        );
+        assert_eq!(
+            read,
+            vec![(11, 10), (13, 11)],
+            "the readable rows did not survive a listing with unreadable ones in it"
+        );
+    }
+
+    /// What [`process_table`] makes of a `ps` that behaves like `script`.
+    ///
+    /// The script is installed under the one name `process_table` resolves, and
+    /// `PATH` is pointed at it alone — the same seam the journeys use, taken
+    /// in-process so what is measured is the reader rather than a binary's
+    /// behaviour around it.
+    #[cfg(unix)]
+    fn table_from_ps(name: &str, script: &str) -> Vec<(u32, u32)> {
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("onepipeline-ps-{}", pid()));
-        std::fs::create_dir_all(&dir).expect("a directory for the failing ps");
+        let dir = std::env::temp_dir().join(format!("onepipeline-ps-{name}-{}", pid()));
+        std::fs::create_dir_all(&dir).expect("a directory for the ps stand-in");
         let ps = dir.join("ps");
-        std::fs::write(&ps, "#!/bin/sh\necho '1 0'\necho '2 1'\nexit 1\n")
-            .expect("the failing ps is written");
+        std::fs::write(&ps, format!("#!/bin/sh\n{script}\n")).expect("the ps stand-in is written");
         std::fs::set_permissions(&ps, std::fs::Permissions::from_mode(0o755))
-            .expect("the failing ps is executable");
+            .expect("the ps stand-in is executable");
 
         let _guard = PATH_LOCK
             .lock()
@@ -690,11 +729,7 @@ mod tests {
         }
         drop(_guard);
         std::fs::remove_dir_all(&dir).ok();
-
-        assert!(
-            read.is_empty(),
-            "a `ps` that exited non-zero was read as a listing anyway: {read:?}"
-        );
+        read
     }
 
     #[test]
