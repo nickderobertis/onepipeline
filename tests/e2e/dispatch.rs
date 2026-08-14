@@ -1220,3 +1220,104 @@ fn a_document_the_runner_accepts_launches_whichever_way_it_is_asked_for() {
         results.exited(0).out_has("build");
     }
 }
+
+/// The retained driver relays its graph's stream and answers with its code.
+///
+/// `drive` is what `start --detach` spawns of this binary, and it is the whole
+/// reason a detached launch composes the same `oneagentgraph` an attached one
+/// does. Nothing but the launcher types it, so `--help` gives no one a reason to
+/// notice it broke — and a launcher reads two things off it: the NDJSON on its
+/// stdout, which is how the announcement and every later envelope arrive, and
+/// its exit status, which is the graph's own answer rather than a second opinion
+/// about it.
+#[test]
+fn the_retained_driver_relays_its_graphs_stream_and_exits_with_its_code() {
+    let world = World::new("drive-relay");
+    world.write_graphs();
+    let graph = world.graphs().join("node-scope.yaml");
+    let dir = world.root.join("driven");
+    std::fs::create_dir_all(&dir).expect("a directory for the driven graph");
+
+    let driven = world.run_on(
+        world.agentgraph_cmd(&[
+            "drive",
+            &graph.to_string_lossy(),
+            "--task",
+            "Do the work and settle.",
+            "--dir",
+            &dir.to_string_lossy(),
+        ]),
+        "drive node-scope",
+    );
+    driven.exited(0);
+
+    // Every line is an envelope, and the member the graph names reports through
+    // it — which is the relay carrying the sibling's own stream rather than a
+    // summary of it.
+    let relayed: Vec<Value> = driven
+        .stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            serde_json::from_str(line).unwrap_or_else(|error| {
+                panic!("`drive` wrote a line that is not an envelope: {error}\n{line}")
+            })
+        })
+        .collect();
+    assert!(
+        relayed
+            .iter()
+            .any(|event| event["kind"] == "member-started"),
+        "the relay carried no member-started:\n{}",
+        driven.stdout
+    );
+    assert!(
+        relayed
+            .iter()
+            .all(|event| event["source"] == "agentgraph" && event["v"] == 1),
+        "the relay rewrote the envelopes it was given:\n{}",
+        driven.stdout
+    );
+}
+
+/// A relay that cannot write says so, rather than reporting a run that settled.
+///
+/// The launcher points a retained driver's stdout at a file and reads its
+/// evidence back out of it, so a write that fails is a full disk under a live
+/// run. What must not happen is that the driver swallows it and exits 0: the
+/// launcher would record a graph that ran and said nothing, which is
+/// indistinguishable from one that had nothing to say.
+///
+/// `/dev/full` is the deterministic version of a full disk — every write to it
+/// fails with `ENOSPC` — and it is Linux's, which is why this is scoped to it.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_retained_driver_that_cannot_write_its_relay_refuses() {
+    let world = World::new("drive-nospace");
+    world.write_graphs();
+    let graph = world.graphs().join("node-scope.yaml");
+    let dir = world.root.join("driven");
+    std::fs::create_dir_all(&dir).expect("a directory for the driven graph");
+
+    let mut command = world.agentgraph_cmd(&[
+        "drive",
+        &graph.to_string_lossy(),
+        "--task",
+        "Do the work and settle.",
+        "--dir",
+        &dir.to_string_lossy(),
+    ]);
+    command.stdout(
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/full")
+            .expect("/dev/full"),
+    );
+    let refused = world.run_on(command, "drive onto a full disk");
+    assert_ne!(
+        refused.code, 0,
+        "a driver that could not relay its own stream reported success:\n{}",
+        refused.stderr
+    );
+    refused.err_has("relaying graph event");
+}
