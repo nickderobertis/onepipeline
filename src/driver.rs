@@ -727,8 +727,8 @@ fn stop(args: &StopArgs) -> Result<i32> {
             return Err(Error::Refused(format!(
                 "run '{run}' was only partly stopped: part of its process tree was \
                  signalled and at least one process in it could not be, so that one is \
-                 still running and is not this session's to end. Find it with `ps` and \
-                 end it as the user that owns it"
+                 still running and is not this session's to end. Find it in this host's \
+                 process list and end it as the user that owns it"
             )));
         }
         None | Some(sys::Teardown::Signalled) => {}

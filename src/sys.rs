@@ -105,16 +105,17 @@ pub enum Teardown {
     /// is the failure that matters — a process nobody aimed at. The caller's
     /// next liveness probe confirms the rest.
     Signalled,
-    /// The tree could not be listed, so **nothing** was signalled and the run is
-    /// exactly as it was.
+    /// The teardown never began — this host gave no listing the tree could be
+    /// read from, or the program that ends it could not be run — so **nothing**
+    /// was signalled and the run is exactly as it was.
     ///
     /// Deliberately not a half-teardown: a descendant is reparented the moment
     /// its parent dies, so signalling the root alone would put everything under
     /// it permanently beyond descent — the only handle a later stop has on them.
     /// Untouched, the same ask works once the host answers.
     NotAttempted,
-    /// The tree was listed and part of it was signalled; at least one process in
-    /// it was not.
+    /// The teardown began and reached part of the tree; at least one process in
+    /// it was not reached.
     ///
     /// The run is *not* untouched and retrying will not necessarily help: what
     /// could not be signalled is a process this user may not touch, and it is
@@ -316,17 +317,53 @@ fn platform_stop(pid: u32, how: Stop) -> Teardown {
     if how == Stop::Now {
         command.arg("/F");
     }
-    let status = command
+    // Asked before the teardown, because afterwards there is no telling apart a
+    // `taskkill` that failed because it was refused a process still running from
+    // one that failed because there was nothing there to end.
+    let root_was_live = platform_process_may_be_live(pid);
+    let ran = command
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status();
-    // `taskkill` walks the tree itself, so a run of it that succeeded reached
-    // the same boundary the Unix arm enumerates. One that could not run, or that
-    // failed, establishes nothing about the descendants — the same answer, and
-    // for the same reason, as a `ps` that will not answer.
-    match status {
+    taskkill_established(ran, root_was_live)
+}
+
+/// What a run of `taskkill /T` established about the tree it was aimed at.
+///
+/// Separate from running it so the three answers can be proved without a
+/// process: what a `taskkill` that ran and *failed* means is a question about
+/// this mapping alone, and it is not a case a suite can produce on demand — it
+/// needs a process this user may not end, which is not a thing to go and make.
+///
+/// This platform reaches [`Teardown::PartlySignalled`] deliberately, rather than
+/// leaving it a variant only the Unix arm constructs. `taskkill /T` terminates
+/// the tree *as it walks it*, so a run of it that failed has in general already
+/// ended part of that tree and been refused the rest — which is the one thing
+/// [`Teardown::NotAttempted`] promises is not so. Reporting it as untouched
+/// would tell an operator the run is intact and worth retrying when it is
+/// neither, and that false report is the whole defect this seam exists to
+/// remove. The only Windows outcome that establishes "nothing was touched" is a
+/// `taskkill` that never ran at all.
+///
+/// A root that was already gone is the exception, and it is the rule the Unix
+/// arm applies to `ESRCH`: there was no process to reach, so the tree is
+/// reached. Nothing is orphaned by saying so — the descendants of a root that
+/// has already died were reparented when it died, and are beyond descent on
+/// either platform.
+#[cfg(windows)]
+fn taskkill_established(
+    ran: std::io::Result<std::process::ExitStatus>,
+    root_was_live: bool,
+) -> Teardown {
+    match ran {
+        // `taskkill` walks the tree itself, so a run of it that succeeded
+        // reached the same boundary the Unix arm enumerates.
         Ok(status) if status.success() => Teardown::Signalled,
-        _ => Teardown::NotAttempted,
+        // It never ran, so nothing in the tree was touched — the same answer,
+        // and for the same reason, as a `ps` that will not answer.
+        Err(_) => Teardown::NotAttempted,
+        Ok(_) if !root_was_live => Teardown::Signalled,
+        Ok(_) => Teardown::PartlySignalled,
     }
 }
 
@@ -753,6 +790,48 @@ mod tests {
             parse_table("0 7\n7 1\n"),
             None,
             "a listing claiming pid 0 was read as a tree"
+        );
+    }
+
+    /// A `taskkill` that ran and failed is a partial teardown, and only one that
+    /// never ran leaves the run untouched.
+    ///
+    /// The distinction this platform's answer rests on, and the reason
+    /// [`Teardown::PartlySignalled`] is reachable here rather than scoped to the
+    /// arm that walks a process table. `taskkill /T` ends the tree as it walks
+    /// it, so a failed run of it has in general ended part of that tree — and
+    /// calling that untouched would send an operator back to retry a stop
+    /// against a run that is already half down, with the rest of it still
+    /// writing. The root already being gone is the exception, and it is the same
+    /// answer `ESRCH` gets on the other platform: nothing to reach is reached.
+    #[cfg(windows)]
+    #[test]
+    fn a_taskkill_that_ran_and_failed_is_a_partial_teardown_not_an_untouched_run() {
+        use std::os::windows::process::ExitStatusExt;
+
+        let exited = |code: u32| Ok(std::process::ExitStatus::from_raw(code));
+        assert_eq!(
+            taskkill_established(exited(0), true),
+            Teardown::Signalled,
+            "a taskkill that walked the tree was not reported as having reached it"
+        );
+        assert_eq!(
+            taskkill_established(
+                Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
+                true
+            ),
+            Teardown::NotAttempted,
+            "a taskkill that never ran was reported as having touched the tree"
+        );
+        assert_eq!(
+            taskkill_established(exited(1), true),
+            Teardown::PartlySignalled,
+            "a taskkill refused part of a live tree was reported as leaving the run untouched"
+        );
+        assert_eq!(
+            taskkill_established(exited(1), false),
+            Teardown::Signalled,
+            "a root that was already gone was reported as a process still to be found"
         );
     }
 
