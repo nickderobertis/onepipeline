@@ -395,6 +395,7 @@ fn start(args: &StartArgs) -> Result<i32> {
     let mut launched = launch_graph(
         &paths,
         &record,
+        plan.goal.as_ref().map(|goal| goal.text.as_str()),
         if args.detach {
             agentgraph::GraphOutput::Logged(&log)
         } else {
@@ -436,16 +437,16 @@ fn start(args: &StartArgs) -> Result<i32> {
 /// is what makes `start` and `adopt` name the same place for one run: an
 /// adoption runs wherever the operator happened to be, and the run's members
 /// must not move with it. See [`LaunchRecord::dir`].
+///
+/// `goal` is the plan's, and it is the only thing besides the run id that
+/// reaches the graph's task — see [`run_description`] for why that is all of it.
 fn launch_graph(
     paths: &RunPaths,
     record: &LaunchRecord,
+    goal: Option<&str>,
     output: agentgraph::GraphOutput<'_>,
 ) -> Result<agentgraph::GraphRun> {
-    let task = format!(
-        "Drive run {} to settlement. Use `onepipeline round run {}` and \
-         `onepipeline round next {}` and nothing else to change run state.",
-        paths.run, paths.run, paths.run
-    );
+    let task = run_description(&paths.run, goal);
     let mut launched = agentgraph::GraphRun::start(
         &record.graph,
         &task,
@@ -466,6 +467,32 @@ fn launch_graph(
     // driver — an exit 0 and a pid for a process that is already gone.
     launched.confirm_started()?;
     Ok(launched)
+}
+
+/// What the run is, for the one `--task` the dag-scope graph is launched with.
+///
+/// **Role-neutral on purpose.** `oneagentgraph` hands that one task to *every*
+/// member of the graph that does not carry its own, so anything said here about
+/// what to do is said to members whose job is not the driver's. It once said
+/// "drive this run, with these verbs, and change nothing else", and the shipped
+/// graph's scheduled pacemaker did exactly that: it took the round and the run's
+/// ownership lock, and its own turn deadline then killed the worker dispatched
+/// inside that turn — silently, because the process it killed was the one that
+/// would have recorded it.
+///
+/// So this names the run and what the run is for, and stops. Which member
+/// drives, and with which verbs, is the consuming graph's to say: in that
+/// member's persona, as the shipped `orchestrator` does, or in that member's own
+/// `task` composed from `{task}` — which `oneagentgraph` expands to exactly this
+/// text from graph schema
+/// [`FIRST_TASK_TOKEN_VERSION`](oneagentgraph::config::FIRST_TASK_TOKEN_VERSION)
+/// onwards.
+fn run_description(run: &str, goal: Option<&str>) -> String {
+    let goal = goal
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .unwrap_or(crate::plan::NO_GOAL);
+    format!("onepipeline run `{run}`.\n\nGoal: {goal}")
 }
 
 /// How an attach ended.
@@ -655,8 +682,20 @@ fn adopt(args: &RunArgs) -> Result<i32> {
         ]),
     )?;
 
-    // Relayed: an adoption attaches, so this process stays to read it.
-    let mut launched = launch_graph(&paths, &record, agentgraph::GraphOutput::Relayed)?;
+    // Relayed: an adoption attaches, so this process stays to read it. The goal
+    // comes off the run's own projected plan rather than off the plan file the
+    // launch named: a run whose graph the planner has edited since is still the
+    // run this driver is adopting, and that file may no longer exist at all.
+    let mut launched = launch_graph(
+        &paths,
+        &record,
+        view.state
+            .plan
+            .as_ref()
+            .and_then(|plan| plan.goal.as_ref())
+            .map(|goal| goal.text.as_str()),
+        agentgraph::GraphOutput::Relayed,
+    )?;
     // A fresh driver is a fresh graph run with an id of its own, and the
     // pacemaker is addressed by that id — so the record names the run that is
     // driving now rather than the one that died.
@@ -1224,6 +1263,67 @@ mod tests {
                 task: Some("## What\ndo it".into()),
                 ..Node::default()
             }],
+        }
+    }
+
+    /// The role prose the launcher's task used to carry, and the verb names it
+    /// used to name.
+    ///
+    /// Asserted *out* of the composed task rather than left to a reviewer:
+    /// `oneagentgraph` hands one `--task` to every member of the graph that
+    /// carries none of its own, so a line on this list reaching that task is an
+    /// instruction delivered to members whose job it is not. One of them obeyed
+    /// it — a scheduled pacemaker took the run's round and its ownership lock,
+    /// and its own turn deadline then killed the worker dispatched inside that
+    /// turn. This is where prose put back here fails, rather than in a consumer
+    /// twelve hours later.
+    const ROLE_PROSE: &[&str] = &[
+        "Drive",
+        "drive",
+        "to settlement",
+        "onepipeline round run",
+        "onepipeline round next",
+        "round next",
+        "nothing else",
+        "run state",
+        "you",
+        "You",
+    ];
+
+    fn assert_role_neutral(task: &str) {
+        for prose in ROLE_PROSE {
+            assert!(
+                !task.contains(prose),
+                "the launched graph's task tells a member what to do ({prose:?}): {task}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_launched_graphs_task_names_the_run_and_its_goal_and_no_role() {
+        let task = run_description("tracked-release", Some("close the coverage gap"));
+        assert!(
+            task.contains("tracked-release"),
+            "the task does not name the run: {task}"
+        );
+        assert!(
+            task.contains("close the coverage gap"),
+            "the task does not say what the run is for: {task}"
+        );
+        assert_role_neutral(&task);
+    }
+
+    /// A goal is optional in the schema, and the task's shape is not: a member
+    /// composing `{task}` plus its own prose reads the same document either way.
+    #[test]
+    fn a_run_whose_plan_states_no_goal_says_so_in_the_same_shape() {
+        for stated in [None, Some("   \n  ")] {
+            let task = run_description("nameless", stated);
+            assert!(
+                task.contains("nameless") && task.contains(crate::plan::NO_GOAL),
+                "the task for a goalless run ({stated:?}) reads: {task}"
+            );
+            assert_role_neutral(&task);
         }
     }
 

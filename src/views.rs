@@ -678,7 +678,7 @@ pub fn goals(views: &[RunView]) -> String {
             .as_ref()
             .and_then(|plan| plan.goal.as_ref())
             .map(|goal| goal.text.clone())
-            .unwrap_or_else(|| "(no goal stated)".to_string());
+            .unwrap_or_else(|| crate::plan::NO_GOAL.to_string());
         out.push_str(&format!(
             "{}  {}\n  {}\n  {}\n",
             view.paths.run,

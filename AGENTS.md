@@ -87,6 +87,12 @@ consuming `project.json` — an undeclared one silently drops that project out o
   laptop pays nothing for it, and run by CI's `smoke` job through that same
   recipe. A journey that needs a credential belongs in the second tier and
   **refuses** when it is missing — a skip is a pass nobody earned.
+- **The task a graph is launched with says what the run *is*, never who does
+  what.** `oneagentgraph` hands that one `--task` to every member carrying none
+  of its own, so role prose in it reaches members whose job it is not — a
+  scheduled pacemaker once took the round on it and killed the worker inside its
+  own turn. Roles live in a member's persona or in its own `task` composed from
+  `{task}`, which is the consuming graph's business.
 - **Validate external input at its trust boundary.** Plan files, executor-rules
   files, and reply envelopes are external input: the schema structs reject
   unknown fields, so a typo fails loudly instead of being silently dropped.
