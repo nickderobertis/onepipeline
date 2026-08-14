@@ -327,3 +327,90 @@ fn a_rounds_result_is_written_atomically_and_read_back_whole() {
         .collect();
     assert!(leftovers.is_empty(), "a temporary survived: {leftovers:?}");
 }
+
+/// One stream's records are read back in the order their producer wrote them,
+/// whatever the clock said.
+///
+/// The merged store interleaves several producers, and it used to do it by
+/// sorting the whole of it by timestamp. A timestamp is a wall clock — the
+/// producer's, not this reader's — recorded to the millisecond, so it collides
+/// whenever two records are written inside one tick and it runs backwards
+/// whenever a host clock is stepped. Sorted by it, one stream's own records
+/// swapped places: the run's record contradicting the only party that knew what
+/// order it wrote them in.
+///
+/// `seq` is that party saying so, and it is what the merge now orders a stream
+/// by. Between streams there is still nothing to promise, so the timestamps
+/// decide the interleaving and a collision is broken by the stream id.
+///
+/// Read through `monitor`, which is where a person sees the merged order.
+#[test]
+fn a_streams_own_order_survives_a_clock_that_disagrees_with_it() {
+    let world = World::new("journal-clock");
+    let path = world.plan("stepped", &plan_of("stepped", vec![agent("build", &[])]));
+    world
+        .run(&["start", &path.to_string_lossy(), "--attach"])
+        .exited(0);
+
+    // llmlint: ignore-block[tests_mirror_real_usage] the case under test is a producer
+    // whose clock disagrees with its own sequence, and no command on this build's surface
+    // can be made to produce one: the timestamps come from the host clock of a process
+    // this suite starts, and stepping that clock is not something a test may do to the
+    // machine it runs on. Writing the records is the only way to state the scenario. They
+    // are ordinary envelopes of the shape a sibling relays — nothing about the reader is
+    // stood in for, and `monitor` below is the real binary reading its own store.
+    let earlier = "2026-08-08T00:00:00.000Z";
+    let later = "2026-08-08T00:00:01.000Z";
+    let relayed = |ts: &str, stream: &str, seq: u64, kind: &str| {
+        json!({
+            "v": 1,
+            "ts": ts,
+            "stream": stream,
+            "seq": seq,
+            "source": "agentgraph",
+            "kind": kind,
+            "labels": {"run_id": "graph-run", "onepipeline.run_id": "stepped"},
+            "payload": {},
+            "artifacts": [],
+        })
+        .to_string()
+    };
+    let journal = world.run_file("stepped", "events.jsonl");
+    let mut text = std::fs::read_to_string(&journal).expect("the journal reads");
+    for line in [
+        // One stream, written in this order, whose clock went backwards between
+        // the two.
+        relayed(later, "stepped-worker", 0, "stream-first"),
+        relayed(earlier, "stepped-worker", 1, "stream-second"),
+        // A second producer, reporting inside the same tick as that stream's
+        // *later* record — the collision the interleaving has to break.
+        relayed(earlier, "beside-it", 0, "other-stream"),
+    ] {
+        text.push_str(&line);
+        text.push('\n');
+    }
+    std::fs::write(&journal, text).expect("the journal is written");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    let rendered = world.run(&["monitor", "stepped"]);
+    rendered.exited(0);
+    let at = |kind: &str| {
+        rendered
+            .stdout
+            .lines()
+            .position(|line| line.contains(kind))
+            .unwrap_or_else(|| panic!("`monitor` never rendered {kind}:\n{}", rendered.stdout))
+    };
+    assert!(
+        at("stream-first") < at("stream-second"),
+        "the merge reordered one stream against the sequence its producer stamped:\n{}",
+        rendered.stdout
+    );
+    // And the other producer is still interleaved by its clock rather than
+    // appended after the stream it collided with.
+    assert!(
+        at("other-stream") < at("stream-first"),
+        "a colliding record from another stream was not interleaved by its timestamp:\n{}",
+        rendered.stdout
+    );
+}

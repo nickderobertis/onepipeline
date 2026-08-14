@@ -9,6 +9,7 @@
 //! is unlocked and takes no lock a writer needs, which is what lets every view
 //! run beside a live round.
 
+use std::collections::{BTreeMap, VecDeque};
 use std::path::Path;
 
 use serde_json::{json, Map, Value};
@@ -139,17 +140,77 @@ pub fn has_unreadable_lines(path: &Path) -> bool {
         .any(|line| serde_json::from_str::<Envelope>(line).is_err())
 }
 
-/// Merge order across streams: `(ts, stream, seq)`.
+/// Merge order: each stream in its own `seq`, interleaved between streams by
+/// `ts`.
 ///
-/// There are no cross-stream ordering promises beyond the timestamps, so the
-/// stream id and sequence break a tie deterministically rather than
+/// The two halves are different kinds of fact, and the merge treats them as
+/// such. A `seq` is the producer's own statement of the order it produced
+/// things in, and it is the only ordering promise an envelope carries. A `ts`
+/// is a wall clock — the producer's, not this process's — recorded to the
+/// millisecond: it collides whenever two records are written inside one tick,
+/// which is most of a round with several members reporting at once, and it is
+/// not monotonic, because a host clock can be stepped under a running process.
+///
+/// So a stream is ordered by its own `seq` and by nothing else, and the
+/// timestamps decide only how the streams interleave with each other. Sorting
+/// the whole merged store by `ts` first is what this replaced: it let one
+/// stream's records swap places whenever their clock readings disagreed with
+/// the order their producer wrote them in, which is a run's record contradicting
+/// the only party that knew. Between streams there is nothing to contradict —
+/// there are no cross-stream ordering promises beyond the timestamps — so the
+/// stream id breaks a `ts` tie there, deterministically rather than
 /// meaningfully.
 pub fn merge_order(events: &mut [Envelope]) {
-    events.sort_by(|a, b| {
-        a.ts.cmp(&b.ts)
-            .then_with(|| a.stream.cmp(&b.stream))
-            .then_with(|| a.seq.cmp(&b.seq))
-    });
+    let mut merged: Vec<Envelope> = merged_order(events)
+        .into_iter()
+        .map(|index| events[index].clone())
+        .collect();
+    events.swap_with_slice(&mut merged);
+}
+
+/// Where each record belongs in the merged order, as indices into `events`.
+///
+/// A k-way merge over the streams rather than one sort, because the ordering
+/// [`merge_order`] states is not a total order over the records' fields: within
+/// a stream it is `seq`, and between streams it is `ts`. A comparator cannot
+/// say that — asked about two records of one stream it would have to ignore the
+/// timestamps, and asked about two of different streams it would have to ignore
+/// the sequences, and a `sort_by` given an inconsistent comparator produces an
+/// order nobody specified.
+fn merged_order(events: &[Envelope]) -> Vec<usize> {
+    let mut streams: BTreeMap<&str, VecDeque<usize>> = BTreeMap::new();
+    for (index, event) in events.iter().enumerate() {
+        streams
+            .entry(event.stream.as_str())
+            .or_default()
+            .push_back(index);
+    }
+    for queue in streams.values_mut() {
+        let mut ordered: Vec<usize> = queue.iter().copied().collect();
+        // Stable, so two records of one stream claiming one `seq` — which only
+        // a producer in error emits — keep the order they were appended in
+        // rather than being reordered by a tie-break that means nothing.
+        ordered.sort_by_key(|index| events[*index].seq);
+        *queue = ordered.into();
+    }
+
+    let mut order = Vec::with_capacity(events.len());
+    // Each round takes the earliest record still at the head of any stream. A
+    // stream's head is its next `seq`, so its own order is never in question;
+    // what this decides is only which stream goes next.
+    while let Some(stream) = streams
+        .iter()
+        .filter_map(|(stream, queued)| queued.front().map(|index| (&events[*index].ts, *stream)))
+        .min()
+        .map(|(_, stream)| stream)
+    {
+        let index = streams
+            .get_mut(stream)
+            .and_then(VecDeque::pop_front)
+            .expect("the stream this round chose has a head");
+        order.push(index);
+    }
+    order
 }
 
 /// The payload of a `node-settled` event, as the projection folds it.
@@ -262,9 +323,8 @@ mod tests {
         fs::remove_dir_all(&root).ok();
     }
 
-    #[test]
-    fn the_merge_orders_by_timestamp_then_stream_then_sequence() {
-        let event = |ts: &str, stream: &str, seq: u64| Envelope {
+    fn event(ts: &str, stream: &str, seq: u64) -> Envelope {
+        Envelope {
             v: ENVELOPE_VERSION,
             ts: ts.into(),
             stream: stream.into(),
@@ -274,24 +334,108 @@ mod tests {
             labels: Labels::default(),
             payload: Map::new(),
             artifacts: Vec::new(),
-        };
-        let mut events = vec![
-            event("2026-08-08T00:00:01.000Z", "b", 0),
-            event("2026-08-08T00:00:00.000Z", "b", 1),
-            event("2026-08-08T00:00:00.000Z", "b", 0),
-            event("2026-08-08T00:00:00.000Z", "a", 9),
-        ];
+        }
+    }
+
+    /// The order the merge produces, as `(stream, seq)` pairs.
+    fn merged(mut events: Vec<Envelope>) -> Vec<(String, u64)> {
         merge_order(&mut events);
-        let seen: Vec<(String, u64)> = events.iter().map(|e| (e.stream.clone(), e.seq)).collect();
+        events
+            .into_iter()
+            .map(|event| (event.stream, event.seq))
+            .collect()
+    }
+
+    #[test]
+    fn the_merge_interleaves_streams_by_timestamp() {
         assert_eq!(
-            seen,
+            merged(vec![
+                event("2026-08-08T00:00:02.000Z", "b", 1),
+                event("2026-08-08T00:00:03.000Z", "a", 1),
+                event("2026-08-08T00:00:00.000Z", "a", 0),
+                event("2026-08-08T00:00:01.000Z", "b", 0),
+            ]),
             vec![
-                ("a".to_string(), 9),
+                ("a".to_string(), 0),
                 ("b".to_string(), 0),
                 ("b".to_string(), 1),
+                ("a".to_string(), 1),
+            ],
+            "the streams did not interleave by the clock"
+        );
+    }
+
+    #[test]
+    fn a_timestamp_collision_between_streams_is_broken_by_the_stream_id() {
+        // Nothing promises anything about the order of two records from
+        // different producers written inside one clock tick, so the tie-break is
+        // deterministic rather than meaningful — but it does have to be *some*
+        // one order, or two readings of one store disagree.
+        let tick = "2026-08-08T00:00:00.000Z";
+        assert_eq!(
+            merged(vec![
+                event(tick, "b", 0),
+                event(tick, "a", 0),
+                event(tick, "a", 1),
+                event(tick, "b", 1),
+            ]),
+            vec![
+                ("a".to_string(), 0),
+                ("a".to_string(), 1),
                 ("b".to_string(), 0),
+                ("b".to_string(), 1),
             ]
         );
+    }
+
+    /// A stream's own sequence survives timestamps that do not agree with it.
+    ///
+    /// `ts` is a wall clock, and a wall clock is neither monotonic nor this
+    /// process's: a host clock stepped under a running producer stamps a later
+    /// record with an earlier reading. `seq` is that producer saying what order
+    /// it wrote things in, and ordering its records by anything else discards
+    /// the only ordering fact the envelope actually carries.
+    #[test]
+    fn a_streams_own_sequence_outranks_its_timestamps() {
+        assert_eq!(
+            merged(vec![
+                event("2026-08-08T00:00:02.000Z", "a", 0),
+                // The clock went backwards between these two, and between these
+                // two only. Ordered by `ts` the stream reads 1, 2, 0.
+                event("2026-08-08T00:00:00.000Z", "a", 1),
+                event("2026-08-08T00:00:01.000Z", "a", 2),
+            ]),
+            vec![
+                ("a".to_string(), 0),
+                ("a".to_string(), 1),
+                ("a".to_string(), 2),
+            ],
+            "the merge reordered a stream against the sequence its producer stamped"
+        );
+    }
+
+    #[test]
+    fn two_records_of_one_stream_claiming_one_sequence_keep_the_order_they_arrived_in() {
+        // A producer in error, so there is nothing to be right about beyond
+        // being stable: the store must not shuffle under a second reading.
+        let mut events = vec![
+            event("2026-08-08T00:00:01.000Z", "a", 0),
+            event("2026-08-08T00:00:00.000Z", "a", 0),
+        ];
+        merge_order(&mut events);
+        let timestamps: Vec<String> = events.iter().map(|event| event.ts.clone()).collect();
+        assert_eq!(
+            timestamps,
+            vec![
+                "2026-08-08T00:00:01.000Z".to_string(),
+                "2026-08-08T00:00:00.000Z".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn merging_nothing_is_nothing() {
+        assert!(merged(Vec::new()).is_empty());
     }
 
     #[test]

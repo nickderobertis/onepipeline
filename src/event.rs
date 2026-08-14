@@ -34,9 +34,11 @@ pub const MAX_PAYLOAD_TEXT_BYTES: usize = 4096;
 
 /// One NDJSON event.
 ///
-/// Merge order across streams is `(ts, stream, seq)`. A consumer detects loss
-/// through per-stream [`seq`](Self::seq) gaps; there are no cross-stream
-/// ordering promises beyond the timestamps.
+/// A stream is merged in its own [`seq`](Self::seq) — the producer's statement
+/// of the order it wrote things in, and the only ordering promise an envelope
+/// carries — and the streams interleave with each other by [`ts`](Self::ts). A
+/// consumer detects loss through per-stream `seq` gaps; there are no
+/// cross-stream ordering promises beyond the timestamps.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Envelope {
     /// Envelope version; [`ENVELOPE_VERSION`] for anything this crate writes.
