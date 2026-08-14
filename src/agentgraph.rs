@@ -1095,7 +1095,13 @@ impl GraphRun {
             GraphBackend::Library(run) => {
                 let _ = run.cancel.send(());
             }
-            GraphBackend::Process(run) => crate::sys::stop(run.pid(), crate::sys::Stop::Now),
+            GraphBackend::Process(run) => {
+                // A cancel is best-effort by contract — the caller has changed
+                // its mind rather than asked a question — so how far the
+                // teardown reached is not reported back here. `wait` is what
+                // says how the run actually ended.
+                let _ = crate::sys::stop(run.pid(), crate::sys::Stop::Now);
+            }
         }
     }
 }

@@ -690,13 +690,39 @@ fn stop(args: &StopArgs) -> Result<i32> {
     }
 
     let view = RunView::open(&paths)?;
+    // Attempted before the record is written, so what the record says about the
+    // teardown is what actually happened rather than what was about to be tried.
+    let reached = terminate(record.pid, &record.host);
+    let complete = reached != Some(sys::Teardown::DescendantsUnknown);
     let mut journal = Journal::open(&paths);
     journal.emit(
         journal::PipelineKind::RunStopped,
         journal::labels(&paths.run, Some(view.state.round), None),
-        journal::payload(&[("owner", json!(owner)), ("forced", json!(args.force))]),
+        journal::payload(&[
+            ("owner", json!(owner)),
+            ("forced", json!(args.force)),
+            // Whether the stop reached everything the run started. A stop that
+            // could not is still recorded — it happened, and the driver did take
+            // the signal — but it is not a clean one, and every reader of this
+            // run has to be able to tell the two apart.
+            ("complete", json!(complete)),
+        ]),
     )?;
-    terminate(record.pid, &record.host);
+    if !complete {
+        // Deliberately not `stopped: true` and not exit 0. This host would not
+        // list its processes, so nothing was signalled and the run is still
+        // running exactly as it was — the recoverable end of this, and far
+        // better than a driver killed out from under descendants no later stop
+        // could find. Reporting it as a clean stop is the false completion this
+        // refusal exists to remove.
+        return Err(Error::Refused(format!(
+            "run '{run}' was not stopped: this host would not list its processes, so the \
+             processes the run started could not be found, and ending its driver alone \
+             would have orphaned them. The run is untouched — run `onepipeline stop \
+             {run}` again once `ps` works",
+            run = paths.run
+        )));
+    }
     println!(
         "{}",
         json!({"run_id": paths.run, "stopped": true, "owner": owner})
@@ -710,11 +736,13 @@ fn stop(args: &StopArgs) -> Result<i32> {
 /// rather than vanishing. The host check is this caller's alone — a pid means
 /// nothing across machines, and the ledger's record names which one it was
 /// taken on.
-fn terminate(pid: u32, host: &str) {
+/// `None` when the pid is another host's, where nothing was attempted and this
+/// host has nothing to promise either way.
+fn terminate(pid: u32, host: &str) -> Option<sys::Teardown> {
     if host != sys::hostname() {
-        return;
+        return None;
     }
-    sys::stop(pid, sys::Stop::Politely);
+    Some(sys::stop(pid, sys::Stop::Politely))
 }
 
 /// `onepipeline next` — the channel's only consumer.

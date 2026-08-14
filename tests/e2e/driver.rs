@@ -1210,20 +1210,27 @@ fn a_forced_stop_ends_the_whole_dispatch_tree_of_another_sessions_run() {
 /// walk degrades to exactly the pid it reached before it ever walked a tree, and
 /// the run is ended and recorded as ended either way.
 ///
+/// A stop that cannot see what it must end refuses, changes nothing, and works
+/// on the retry.
+///
 /// Both ways a listing can be no listing: a `ps` that cannot be spawned, and one
 /// that runs and exits non-zero. A reader checking only the first would parse the
 /// second's stdout as a table.
 ///
-/// What such a stop cannot reach is cleared rather than asserted — an orphan is
-/// what the walk exists to prevent, not a promise to keep.
+/// The refusal is the whole point. Reporting a clean stop here would be the
+/// original defect wearing a success code — the expensive processes left running
+/// and writing, with the run's own record saying they were ended. And nothing is
+/// signalled, so the tree is intact and the same ask works once the host answers:
+/// killing the driver alone would have orphaned everything under it permanently,
+/// since descent is the only handle a later stop has on them.
 #[cfg(unix)]
 #[test]
-fn a_stop_ends_its_run_even_where_the_process_table_cannot_be_read() {
+fn a_stop_that_cannot_read_the_process_table_refuses_and_leaves_the_run_retryable() {
     for (fault, path) in [
         ("no ps to spawn", World::empty_path as fn(&World) -> PathBuf),
         ("a ps that fails", World::path_whose_ps_fails),
     ] {
-        let world = World::new(&format!("driver-stop-no-ps-{}", fault.replace(' ', "-")));
+        let world = World::new(&format!("driver-stop-blind-{}", fault.replace(' ', "-")));
         world.script("build.wait", "hold");
         let (run, driver) = start_detached_announcing(&world, "blind", vec![agent("build", &[])]);
         world.until("a node to be in flight", |world| {
@@ -1232,28 +1239,69 @@ fn a_stop_ends_its_run_even_where_the_process_table_cannot_be_read() {
         world.until("the dispatch to be more than one process", |_| {
             descendants(driver).len() > 1
         });
-        let below: Vec<u32> = descendants(driver);
+        let tree: Vec<u32> = std::iter::once(driver).chain(descendants(driver)).collect();
 
         let mut command = world.cmd(&["stop", &run]);
         command.env("PATH", path(&world));
-        world
-            .run_on(command, &format!("stop with {fault}"))
-            .exited(0)
-            .out_has("\"stopped\":true");
+        let refused = world.run_on(command, &format!("stop with {fault}"));
 
-        world.until("the driver to end", |_| !still_listed(driver));
-        assert_eq!(
-            world.events_of(&run, "run-stopped").len(),
-            1,
-            "a stop with {fault} did not record the run as stopped"
+        // Not a success, and not a claim to have stopped anything.
+        refused.exited(REFUSED).err_has("was not stopped");
+        assert!(
+            !refused.stdout.contains("\"stopped\":true"),
+            "a stop that reached nothing still announced a clean stop:\n{}",
+            refused.stdout
         );
 
-        for pid in below.iter().filter(|pid| still_listed(**pid)) {
-            std::process::Command::new("kill")
-                .args(["-9", &pid.to_string()])
-                .status()
-                .expect("this host can end a process this journey started");
+        // And it really did leave the run alone — every process, driver
+        // included. This is what makes the refusal honest rather than merely
+        // pessimistic, and what makes the retry below possible at all.
+        for pid in &tree {
+            assert!(
+                still_listed(*pid),
+                "a refused stop signalled pid {pid} anyway, orphaning what it could not find"
+            );
         }
+
+        // The run's own record says a stop happened and says it was not a clean
+        // one, so no reader takes this for a run whose work was ended.
+        let stopped = world.events_of(&run, "run-stopped");
+        assert_eq!(stopped.len(), 1, "the attempt went unrecorded");
+        assert_eq!(
+            stopped[0]["payload"]["complete"],
+            json!(false),
+            "an incomplete stop was recorded as a clean one: {}",
+            stopped[0]
+        );
+
+        // Neither view claims the worker was ended, because it is still running.
+        let status = world.run(&["status", &run]);
+        status.exited(0).out_has("worker may still be running");
+        assert!(
+            !status
+                .stdout
+                .contains("worker ended when the run was stopped"),
+            "a view reported a worker as ended while it was still running:\n{}",
+            status.stdout
+        );
+        world
+            .run(&["results", &run])
+            .exited(0)
+            .out_has("worker may still be running");
+
+        // The recovery: the same ask, on a host that answers, ends the whole
+        // tree and reports the clean stop it actually made.
+        world
+            .run(&["stop", &run])
+            .exited(0)
+            .out_has("\"stopped\":true");
+        world.until("every process the run started to end", |_| {
+            tree.iter().all(|pid| !still_listed(*pid))
+        });
+        world
+            .run(&["status", &run])
+            .exited(0)
+            .out_has("worker ended when the run was stopped");
         world.release("build.go");
     }
 }

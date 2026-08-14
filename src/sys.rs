@@ -90,6 +90,29 @@ pub fn hostname() -> String {
         .unwrap_or_else(|| "localhost".to_string())
 }
 
+/// What a teardown could promise about the processes it was aimed at.
+///
+/// A teardown that could not enumerate the tree is **not** a teardown that
+/// succeeded on a smaller scope: the descendants it could not find are the
+/// expensive ones, and they are now orphaned and still writing. A caller that
+/// reported such a stop as clean would be recreating the defect this walk
+/// exists to prevent, so the distinction is carried out to the caller rather
+/// than swallowed here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Teardown {
+    /// The process and every descendant it had were signalled.
+    Complete,
+    /// The process table could not be read, so **nothing** was signalled and the
+    /// run is exactly as it was.
+    ///
+    /// Deliberately not a half-teardown. Signalling the driver and not its
+    /// descendants is what orphans the expensive processes — they are reparented
+    /// the moment their parent dies, so they stop being descendants and no later
+    /// stop can find them by descent. Leaving the tree whole is what keeps the
+    /// ask retryable once this host will answer.
+    DescendantsUnknown,
+}
+
 /// How firmly a process is asked to stop.
 ///
 /// Both reach the whole descendant tree; the difference is only how firmly each
@@ -114,34 +137,47 @@ pub enum Stop {
 /// wider: a round that is legitimately a child of something else is not a
 /// descendant, and ending it would be ending work this run does not own.
 ///
-/// Best-effort: a process already gone, or one this user may not signal, is not
-/// an error here — the caller's next liveness probe decides whether the stop
-/// landed. The table is read a moment before the signals go out, so a child
-/// started inside that moment is missed; signalling the root first is what closes
-/// that in practice.
-pub fn stop(pid: u32, how: Stop) {
+/// Best-effort about *individual* processes: one already gone, or one this user
+/// may not signal, is not an error here — the caller's next liveness probe
+/// decides whether the stop landed. It is **not** best-effort about the tree. A
+/// host that will not list its processes gets [`Teardown::DescendantsUnknown`]
+/// and no signals at all, because a teardown that cannot see what it must end
+/// has to say so rather than end half of it.
+///
+/// The table is read a moment before the signals go out, so a child started
+/// inside that moment is missed; signalling the root first is what closes that
+/// in practice.
+pub fn stop(pid: u32, how: Stop) -> Teardown {
     if pid == 0 || pid == self::pid() {
-        return;
+        // Nothing was aimed at, so nothing was missed.
+        return Teardown::Complete;
     }
-    platform_stop(pid, how);
+    platform_stop(pid, how)
 }
 
 #[cfg(unix)]
-fn platform_stop(pid: u32, how: Stop) {
+fn platform_stop(pid: u32, how: Stop) -> Teardown {
     let signal = match how {
         Stop::Politely => libc::SIGTERM,
         Stop::Now => libc::SIGKILL,
     };
-    // The tree is read **before** anything is signalled, and that ordering is
-    // the whole of it: a process whose parent has died is reparented to init at
-    // once, so a table read after the root is gone no longer descends to any of
-    // them. The root is then signalled first, so what is left is a tree that has
-    // stopped growing while its own members are taken down.
-    let tree = descendants(pid);
+    // The tree is read **before** anything is signalled: a process whose parent
+    // has died is reparented at once, so a table read after the root is gone no
+    // longer descends to any of them.
+    let Some(tree) = descendants(pid) else {
+        // And nothing is signalled at all. Killing the root here would orphan
+        // everything under it — permanently, since descent is the only handle
+        // this has on them — to report a stop that did not happen. Left whole,
+        // the same ask works the moment `ps` does.
+        return Teardown::DescendantsUnknown;
+    };
+    // The root first, so what is left has stopped growing while its members are
+    // taken down.
     signal_one(pid, signal);
     for descendant in tree {
         signal_one(descendant, signal);
     }
+    Teardown::Complete
 }
 
 /// Signal one process, and refuse every id that is not one.
@@ -166,16 +202,19 @@ fn signal_one(pid: u32, signal: i32) {
     unsafe { libc::kill(raw, signal) };
 }
 
-/// Every process descended from `pid`, however deep.
+/// Every process descended from `pid`, however deep, or `None` when this host
+/// would not say.
 ///
-/// Walked over a single snapshot of the process table, and in whatever order
-/// the frontier happens to give: what a caller needs is the *set*, and every
-/// member of it is signalled. A pid already found is never queued again, which
-/// is what makes a table reporting a cycle — which the kernel does not produce,
-/// but a parse of one might — terminate rather than hang a teardown.
+/// The two are not the same answer and the caller must not read them as one: an
+/// empty set means the process started nothing, while `None` means the tree is
+/// unknown and anything under it is about to be orphaned.
+///
+/// Walked over a single snapshot, in whatever order the frontier gives — the
+/// caller needs the *set*. A pid already found is never queued again, which is
+/// what makes a table reporting a cycle terminate rather than hang a teardown.
 #[cfg(unix)]
-fn descendants(pid: u32) -> Vec<u32> {
-    let table = process_table();
+fn descendants(pid: u32) -> Option<Vec<u32>> {
+    let table = process_table()?;
     let mut found: Vec<u32> = Vec::new();
     let mut frontier = vec![pid];
     while let Some(parent) = frontier.pop() {
@@ -186,35 +225,45 @@ fn descendants(pid: u32) -> Vec<u32> {
             }
         }
     }
-    found
+    Some(found)
 }
 
-/// This host's `(pid, parent pid)` pairs.
+/// This host's `(pid, parent pid)` pairs, or `None` when it would not list them.
 ///
 /// Through `ps`, the one answer every Unix gives — Linux has `/proc` and macOS
 /// does not, and a second implementation is a platform fixed in only one of them.
 ///
 /// External input deciding who gets signalled, so it is read strictly, and the
 /// three faults cost different amounts. A `ps` that cannot run, or that exits
-/// non-zero, is no answer about any process: the table is empty and the teardown
-/// degrades to the pid it was given. One unreadable row is one process this
-/// teardown cannot place: that row is dropped and its neighbours kept, because
-/// emptying the table there would strand every process the listing named. A row
-/// claiming pid `0` is dropped outright — to `kill` that id means the caller's
-/// whole process group, which would turn a walk down one tree into a broadcast.
+/// non-zero, is no answer about any process at all: that is `None`, and a
+/// teardown given it cannot claim to have reached a tree. One unreadable row is
+/// one process this teardown cannot place: that row is dropped and its
+/// neighbours kept, because discarding the listing there would strand every
+/// process it named. A row claiming pid `0` is dropped outright — to `kill` that
+/// id means the caller's whole process group, which would turn a walk down one
+/// tree into a broadcast.
 #[cfg(unix)]
-fn process_table() -> Vec<(u32, u32)> {
-    let Ok(listed) = std::process::Command::new("ps")
+fn process_table() -> Option<Vec<(u32, u32)>> {
+    let listed = std::process::Command::new("ps")
         .args(["-A", "-o", "pid=,ppid="])
         .stderr(std::process::Stdio::null())
         .output()
-    else {
-        return Vec::new();
-    };
+        .ok()?;
     if !listed.status.success() {
-        return Vec::new();
+        return None;
     }
-    String::from_utf8_lossy(&listed.stdout)
+    Some(parse_table(&String::from_utf8_lossy(&listed.stdout)))
+}
+
+/// The `(pid, parent pid)` pairs in a listing this host produced.
+///
+/// Separate from running `ps` so the rows can be read without a process and
+/// without a `PATH`: what a listing may contain is a question about text, and
+/// answering it by rewriting this process's environment would race every other
+/// test that spawns something.
+#[cfg(unix)]
+fn parse_table(listed: &str) -> Vec<(u32, u32)> {
+    listed
         .lines()
         .filter_map(|line| {
             let mut columns = line.split_whitespace();
@@ -413,14 +462,6 @@ pub(crate) fn reaped_pid() -> u32 {
 mod tests {
     use super::*;
 
-    /// Held by every test in this module that depends on resolving `ps`.
-    ///
-    /// `PATH` is process-wide and these run as threads of one process, so the
-    /// test that empties it to prove the degraded walk would otherwise empty it
-    /// under the tests that are reading a real table beside it.
-    #[cfg(unix)]
-    static PATH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     #[test]
     fn the_epoch_renders_as_rfc3339_millis() {
         assert_eq!(rfc3339_from_millis(0), "1970-01-01T00:00:00.000Z");
@@ -482,11 +523,6 @@ mod tests {
     /// takes — proved nowhere.
     #[cfg(unix)]
     fn a_stop_reaches_the_whole_descendant_tree_and_not_the_process_beside_it(how: Stop) {
-        // This walk reads the table, so it is held against the test that empties
-        // `PATH` to prove what happens when the table cannot be read.
-        let _guard = PATH_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         // `setsid` on the leaf is the point: a new session is a new process
         // group, so the leaf is outside the group of everything above it. Each
         // level prints its pid and then waits, so the test learns the tree from
@@ -580,58 +616,6 @@ mod tests {
         a_stop_reaches_the_whole_descendant_tree_and_not_the_process_beside_it(Stop::Now);
     }
 
-    /// A teardown that cannot read the process table still stops what it was
-    /// given.
-    ///
-    /// The table is external input, and `ps` can fail — on a host without it, in
-    /// a container with a stripped image, under a `ps` that refuses. What must
-    /// not happen then is that the teardown fails too: with no table there are no
-    /// descendants, so the stop degrades to exactly the one process it reached
-    /// before it ever walked a tree, rather than reaching nothing.
-    ///
-    /// `PATH` is emptied for the duration, which is what makes `ps` unresolvable
-    /// — the same seam the journeys use, taken here in-process so the degraded
-    /// walk itself is what is measured rather than a binary's behaviour around
-    /// it.
-    #[cfg(unix)]
-    #[test]
-    fn a_teardown_that_cannot_read_the_table_still_stops_the_process_it_was_given() {
-        let mut alone = std::process::Command::new("sh")
-            .args(["-c", "sleep 120"])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .expect("a process to stop");
-
-        // Serialised against the other tests in this module that read the table,
-        // because `PATH` is process-wide and this deliberately breaks it.
-        let _guard = PATH_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let restore = std::env::var_os("PATH");
-        std::env::set_var("PATH", "");
-        assert!(
-            process_table().is_empty(),
-            "`ps` still answered with `PATH` emptied, so this proves nothing about a table \
-             that cannot be read"
-        );
-        assert!(
-            descendants(alone.id()).is_empty(),
-            "a table that cannot be read still reported descendants"
-        );
-        stop(alone.id(), Stop::Now);
-        match restore {
-            Some(path) => std::env::set_var("PATH", path),
-            None => std::env::remove_var("PATH"),
-        }
-        drop(_guard);
-
-        assert!(
-            ended_within(&mut alone, std::time::Duration::from_secs(10)),
-            "a teardown that could not read the table stopped nothing at all"
-        );
-    }
-
     /// Whether `child` ends inside `patience`, reaping it if it does.
     ///
     /// Polled rather than waited on, and that is the point: a blocking `wait`
@@ -654,115 +638,39 @@ mod tests {
         false
     }
 
-    /// A `ps` that runs and fails is not a listing, whatever it wrote.
-    ///
-    /// The other half of reading the table strictly, and the half an exit status
-    /// is the only evidence for: this `ps` writes a plausible row and *then*
-    /// fails, so a reader that took stdout on its own would come away with a
-    /// table — a confident, wrong account of which processes exist, used to
-    /// decide who gets signalled. An empty table is the honest answer, and it
-    /// degrades the walk to the root rather than misdirecting it.
-    #[cfg(unix)]
-    #[test]
-    fn a_process_listing_that_exits_nonzero_is_not_read_as_a_listing() {
-        let read = table_from_ps("nonzero", "echo '1 0'\necho '2 1'\nexit 1");
-        assert!(
-            read.is_empty(),
-            "a `ps` that exited non-zero was read as a listing anyway: {read:?}"
-        );
-    }
-
     /// A row that is not two ids costs that row and no more.
     ///
-    /// The two faults a listing can have are not the same size, and reading them
-    /// the same way gets one of them wrong. A `ps` that *failed* said nothing
-    /// about any process, so the table is empty. A `ps` that succeeded and wrote
-    /// one unreadable line — a header a platform adds, two columns that ran
-    /// together — said something about every other line on it, and throwing the
-    /// whole listing away there would strand every process it named. So the bad
-    /// row is dropped and its neighbours are kept: one process this teardown
-    /// cannot place, rather than all of them.
+    /// The two faults a listing can have are not the same size. A `ps` that
+    /// *failed* said nothing about any process, and [`process_table`] answers
+    /// `None` for it so a teardown cannot claim to have reached a tree. A `ps`
+    /// that succeeded and wrote one unreadable line — a header a platform adds,
+    /// two columns run together — said something about every other line on it,
+    /// and discarding the listing there would strand every process it named.
     #[cfg(unix)]
     #[test]
     fn one_unreadable_row_costs_that_row_rather_than_the_whole_listing() {
-        let read = table_from_ps(
-            "malformed",
-            "echo '  PID  PPID'\necho '11 10'\necho 'not-a-pid also-not'\necho '13 11'\n\
-             echo '14'\nexit 0",
-        );
         assert_eq!(
-            read,
+            parse_table("  PID  PPID\n11 10\nnot-a-pid also-not\n13 11\n14\n"),
             vec![(11, 10), (13, 11)],
             "the readable rows did not survive a listing with unreadable ones in it"
         );
     }
 
-    /// A listing that claims pid `0` never gets one signalled.
+    /// A listing that claims pid `0` never offers one to `kill`.
     ///
     /// `kill(0, ...)` is not "no process" — it is the caller's **entire process
-    /// group**, which on this walk means the launcher and whatever it was
-    /// started beside. The ids come from parsing external input, so a row
-    /// claiming `0` is a row that turns a teardown of one run's tree into a
-    /// broadcast. This asks for the descendants of *this* process against a
-    /// listing that names `0` as its child, which is the shape that would do it.
+    /// group**, which here means the launcher and whatever it was started
+    /// beside. The ids come from parsing external input, so a row claiming `0`
+    /// is a row that would turn a teardown of one tree into a broadcast.
     #[cfg(unix)]
     #[test]
-    fn a_listing_that_claims_pid_zero_never_offers_it_as_a_descendant() {
-        let mine = pid();
-        let script = format!("echo '0 {mine}'\necho '{mine} 1'");
-        let read = table_from_ps("pid-zero", &script);
+    fn a_listing_that_claims_pid_zero_never_offers_it_to_a_signal() {
+        let read = parse_table("0 7\n7 1\n");
         assert!(
             !read.iter().any(|(child, _)| *child == 0),
             "a row claiming pid 0 was admitted to the table: {read:?}"
         );
-        let walked = under_ps("pid-zero-walk", &script, || descendants(mine));
-        assert!(
-            !walked.contains(&0),
-            "pid 0 was offered as a descendant, and `kill` reads it as a process group: \
-             {walked:?}"
-        );
-    }
-
-    /// What [`process_table`] makes of a `ps` that behaves like `script`.
-    ///
-    /// The script is installed under the one name `process_table` resolves, and
-    /// `PATH` is pointed at it alone — the same seam the journeys use, taken
-    /// in-process so what is measured is the reader rather than a binary's
-    /// behaviour around it.
-    #[cfg(unix)]
-    fn table_from_ps(name: &str, script: &str) -> Vec<(u32, u32)> {
-        under_ps(name, script, process_table)
-    }
-
-    /// Run `read` with `ps` resolving to a stand-in that behaves like `script`.
-    ///
-    /// The stand-in is installed under the one name the reader resolves and
-    /// `PATH` is pointed at it alone, so what is measured is this module's own
-    /// walk over a listing the test chose — including listings no real `ps` on
-    /// this host will produce, which is where the interesting faults live.
-    #[cfg(unix)]
-    fn under_ps<T>(name: &str, script: &str, read: impl FnOnce() -> T) -> T {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("onepipeline-ps-{name}-{}", pid()));
-        std::fs::create_dir_all(&dir).expect("a directory for the ps stand-in");
-        let ps = dir.join("ps");
-        std::fs::write(&ps, format!("#!/bin/sh\n{script}\n")).expect("the ps stand-in is written");
-        std::fs::set_permissions(&ps, std::fs::Permissions::from_mode(0o755))
-            .expect("the ps stand-in is executable");
-
-        let _guard = PATH_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let restore = std::env::var_os("PATH");
-        std::env::set_var("PATH", &dir);
-        let answer = read();
-        match restore {
-            Some(path) => std::env::set_var("PATH", path),
-            None => std::env::remove_var("PATH"),
-        }
-        drop(_guard);
-        std::fs::remove_dir_all(&dir).ok();
-        answer
+        assert_eq!(read, vec![(7, 1)], "its neighbours were dropped with it");
     }
 
     #[test]

@@ -86,6 +86,15 @@ pub struct RunState {
     pub last_write_at: Option<u64>,
     /// Whether `stop` ended the run.
     pub stopped: bool,
+    /// Whether that stop left processes it could not reach.
+    ///
+    /// A stop that could not read this host's process table signalled the driver
+    /// and nothing below it, so the run's workers may still be running. Every
+    /// view that says what became of an in-flight node has to tell that from a
+    /// stop that ended the whole tree, or it reports work as ended that is still
+    /// writing. Stated this way round so the default — and a record written
+    /// before the field existed — is the quiet case rather than the alarming one.
+    pub stop_left_processes_behind: bool,
     /// Whether the fold met a line it could not read. Strict replay reports
     /// rather than silently folding an incomplete graph.
     pub strict: bool,
@@ -342,6 +351,13 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
         }
         Some(journal::PipelineKind::RunStopped) => {
             state.stopped = true;
+            // Absent on records written before the field existed, and those
+            // stops did reach the tree they knew about — the incomplete case is
+            // the one that has to be stated.
+            state.stop_left_processes_behind = !payload
+                .get("complete")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
             state.round_open = false;
         }
         Some(journal::PipelineKind::CrossDagSatisfied) => {

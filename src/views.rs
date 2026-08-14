@@ -77,6 +77,24 @@ pub const PARKED_AFTER_ENV: &str = "ONEPIPELINE_PARKED_AFTER_SECONDS";
 /// on takes that for a node that produced nothing.
 const ENDED_BY_THE_STOP: &str = "worker ended when the run was stopped";
 
+/// How the same node reads when that stop could not reach it.
+///
+/// The opposite claim, and it has to be a different sentence: a stop that could
+/// not read this host's process table signalled the driver and nothing under it,
+/// so this worker is very likely *still running* — still holding quota, still
+/// writing into whatever checkout it was given. "Ended" there is the false
+/// completion the stop itself refuses to report.
+const OUTLIVED_THE_STOP: &str = "worker may still be running: the stop could not reach it";
+
+/// Which of the two a stopped run's in-flight node gets.
+fn became_of_the_worker(state: &crate::projection::RunState) -> &'static str {
+    if state.stop_left_processes_behind {
+        OUTLIVED_THE_STOP
+    } else {
+        ENDED_BY_THE_STOP
+    }
+}
+
 impl DriverLiveness {
     /// The word a view prints for this verdict.
     pub fn as_str(self) -> &'static str {
@@ -332,7 +350,8 @@ pub fn status(views: &[RunView]) -> String {
             if view.state.stopped {
                 // What this node last did stays on the record and is
                 // deliberately not repeated here — see [`ENDED_BY_THE_STOP`].
-                out.push_str(&format!("  {id}: {ENDED_BY_THE_STOP}, {age} in\n"));
+                let became = became_of_the_worker(&view.state);
+                out.push_str(&format!("  {id}: {became}, {age} in\n"));
                 continue;
             }
             out.push_str(&format!("  {id}: running for {age}"));
@@ -476,7 +495,7 @@ pub fn results(view: &RunView) -> String {
             out.push_str(&format!(" ({outcome})"));
         }
         if status == NodeStatus::Running && view.state.stopped {
-            out.push_str(&format!(" — {ENDED_BY_THE_STOP}"));
+            out.push_str(&format!(" — {}", became_of_the_worker(&view.state)));
         }
         // What the dispatch reported, before what the plan asked for: an
         // unpinned lifecycle node's branch is named by the sibling that cut it,
