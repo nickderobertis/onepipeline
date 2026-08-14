@@ -31,6 +31,29 @@ fn prompt_of(event: &Value) -> Option<String> {
     args.get(at + 1)?.as_str().map(str::to_string)
 }
 
+/// Every prose a dag-scope member of `run` was launched with, wherever the
+/// launch put its driver's stream.
+///
+/// Both places, because the two launch forms differ in where the *driver's* own
+/// envelopes go and in nothing else: an attaching launcher stays and merges them
+/// into the run's store, and a detaching one hands its driver a log file and
+/// exits. A journey about what the driver was given has to read the one the
+/// launch it made actually wrote.
+fn driver_member_prompts(world: &World, run: &str) -> Vec<String> {
+    let logged = std::fs::read_to_string(world.run_file(run, "driver.log")).unwrap_or_default();
+    world
+        .journal(run)
+        .into_iter()
+        .chain(
+            logged
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok()),
+        )
+        .filter(|event| event["kind"] == "member-started")
+        .filter_map(|event| prompt_of(&event))
+        .collect()
+}
+
 fn open_second_round(world: &World, run: &str, node: Value) {
     world.script("driver.wait", "hold");
     let path = world.plan(run, &plan_of(run, vec![human("approve", &[]), node]));
@@ -1175,4 +1198,86 @@ fn a_view_renders_with_the_health_block_read_through_the_library() {
         "the view carried the override's health block on the default path:\n{}",
         status.stdout
     );
+}
+
+/// A graph document the runner accepts is accepted by an **attached** launch,
+/// and by a detached one that can resolve nothing by name.
+///
+/// This is the launcher having one answer about what a graph document may
+/// contain. It used to have two: the attached path composed the
+/// `oneagentgraph` this build was compiled against, and the detached path
+/// resolved `oneagentgraph` by name and composed whatever the host had
+/// installed. So the same file, in the same directory, one flag apart, was
+/// refused by the default launch and run correctly by the other —
+///
+/// ```text
+/// unknown field `task`, expected one of `oneharness_config`, `persona`, `schedule`, `deps`
+/// ```
+///
+/// — a field list that predates a per-member `task` entirely. Which of the two
+/// parsers was newer only decided which way the disagreement landed; that there
+/// were two is the defect.
+///
+/// So the document here declares
+/// [`oneagentgraph::config::SCHEMA_VERSION`](oneagentgraph::config::SCHEMA_VERSION)
+/// and uses a field only that version allows, read off the runner rather than
+/// written down — a second parser reintroduced at any version fails here rather
+/// than at an operator's launch.
+///
+/// And `PATH` is emptied for both forms, which is the other half: a detached
+/// launch that still needed an installed sibling could not start at all, and a
+/// detached launch that found one would be composing it. Neither is what an
+/// attached launch does.
+#[test]
+fn a_document_the_runner_accepts_launches_whichever_way_it_is_asked_for() {
+    for form in ["--attach", "--detach"] {
+        let world = World::new(&format!("runner-schema-{}", form.trim_start_matches("--")));
+        world.write_graphs_at_the_runners_schema();
+        let path = world.plan("schema", &plan_of("schema", vec![agent("build", &[])]));
+
+        let mut command = world.agentgraph_cmd(&["start", &path.to_string_lossy(), form]);
+        command.env("PATH", world.empty_path());
+        let started = world.run_on(command, &format!("start {form}"));
+        started.exited(0);
+
+        // The graph really started: a launch that refused would have recorded no
+        // run of the sibling's to address the pacemaker, or this run, by.
+        world.until("the graph run to be recorded", |world| {
+            world.run_json("schema", "launch.json")["graph_run"]
+                .as_str()
+                .is_some_and(|id| !id.is_empty())
+        });
+
+        // And the schema-3 field did what it is for. The member carrying its own
+        // `task` was launched with that prose *instead of* the graph's, which is
+        // the whole point of the field: the launcher composes one task for the
+        // whole graph, and a member whose job is not the run's must not be given
+        // it. Read off `member-started`'s own argv, in the run's merged store.
+        world.until("the reporting member to be launched", |world| {
+            driver_member_prompts(world, "schema")
+                .iter()
+                .any(|prompt| prompt.contains(crate::harness::MEMBER_TASK))
+        });
+        let prompts = driver_member_prompts(&world, "schema");
+        let claimed: Vec<&String> = prompts
+            .iter()
+            .filter(|prompt| prompt.contains(crate::harness::MEMBER_TASK))
+            .collect();
+        for prompt in &claimed {
+            assert!(
+                !prompt.contains("onepipeline round run"),
+                "the member's own task did not claim its prompt — it was given the run's too: \
+                 {prompt}"
+            );
+        }
+        // The driver still got the graph's task, so this is the field claiming
+        // one member's prompt rather than emptying every member's.
+        assert!(
+            prompts
+                .iter()
+                .any(|prompt| prompt.contains("onepipeline round run")),
+            "no member was launched to drive the run: {prompts:?}\n{}",
+            world.dump()
+        );
+    }
 }

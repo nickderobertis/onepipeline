@@ -80,6 +80,16 @@ for command in start adopt round channel next reply surface attest stop runs sta
   esac
 done
 
+# The retained driver, which is deliberately absent from the list above: it is
+# hidden from `--help`, because it is not a surface a user types. `start
+# --detach` spawns *this binary* at it — that is what makes a detached launch
+# compose the same `oneagentgraph` an attached one validates and runs with — so
+# a published artifact without it cannot launch a detached run at all, and
+# `--help` gives nothing to notice that in.
+onepipeline drive --help >/dev/null 2>&1 || fail \
+  "the 'drive' command a detached launch retains is missing" \
+  "the installed binary predates it — reinstall the version under test"
+
 # Reading a run nobody recorded is the smallest command that reaches the ledger,
 # and its answer is fixed: exit 2, naming the run. A build that exited 0 here
 # would be reporting a surface it never read, and one that exited 3 would be

@@ -78,6 +78,24 @@ pub const STARTUP_TIMEOUT_ENV: &str = "ONEPIPELINE_STARTUP_TIMEOUT_SECONDS";
 /// [`STARTUP_TIMEOUT_ENV`] would wait instead.
 pub const OVERRIDE_TOOK_EFFECT: std::time::Duration = std::time::Duration::from_secs(15);
 
+/// The graph schema version this world's ordinary configs declare.
+///
+/// The floor rather than the ceiling, so every journey that is not *about* the
+/// schema states nothing about it — and so the one that is
+/// ([`World::write_graphs_at_the_runners_schema`]) is the only place a version
+/// moves.
+const FIRST_GRAPH_SCHEMA: u32 = oneagentgraph::config::FIRST_SCHEMA_VERSION;
+
+/// The dag-scope member whose job is not the graph's.
+pub const REPORTING_MEMBER: &str = "reporter";
+
+/// The prose [`REPORTING_MEMBER`] carries as its own `task`.
+///
+/// Deliberately not the graph's: what a per-member `task` is *for* is a member
+/// whose job is not the run's, and the launcher composes one task for the whole
+/// graph. A member given this instead of that is the schema feature working.
+pub const MEMBER_TASK: &str = "Report on the run and change nothing.";
+
 /// One directory, in the single spelling the binary under test will report.
 ///
 /// A launch directory crosses a process boundary — `start` records where the
@@ -258,16 +276,16 @@ impl World {
     /// crate.
     ///
     /// Removing `ONEPIPELINE_ONEAGENTGRAPH_BIN` is what puts these
-    /// journeys on the **default** path, where every verb is a library
-    /// call — with one exception the sibling seam documents: a detached launch
-    /// retains a process, because a scheduler thread cannot outlive the launcher
-    /// that is about to exit. That one resolves `oneagentgraph` **by name**, so
-    /// the name has to lead somewhere this suite chose. Prepending the built
-    /// sibling's directory is what makes it: without it a `--detach` journey
-    /// composes whatever an operator happened to install — and fails outright on
-    /// a machine with none, which is every CI host — where with it, on every
-    /// platform, it composes the build `Cargo.lock` pins, exactly like the
-    /// attached path beside it.
+    /// journeys on the **default** path, where every verb is a library call —
+    /// including the detached launch, which retains a process because a
+    /// scheduler thread cannot outlive the launcher that is about to exit, and
+    /// retains *this binary* at its own `drive` verb so that process composes
+    /// the same build. Nothing here resolves `oneagentgraph` by name any more.
+    ///
+    /// The sibling's directory still leads the `PATH` because two journeys ask
+    /// that binary a question of their own, and because a host with an install
+    /// of its own must not be able to answer one. What a journey states about
+    /// resolving *nothing* by name says so with [`World::empty_path`].
     pub fn agentgraph_cmd(&self, args: &[&str]) -> Command {
         let mut command = self.cmd(args);
         command
@@ -486,7 +504,44 @@ impl World {
     /// dispatch reaching the sibling, being accepted, and streaming back — is the
     /// same one either way.
     pub fn write_graphs(&self) {
-        self.write_graphs_with(None);
+        self.write_graphs_with(None, FIRST_GRAPH_SCHEMA);
+    }
+
+    /// The same configs, written at the **runner's own current schema version**
+    /// with a second dag-scope member carrying its own [`MEMBER_TASK`].
+    ///
+    /// A per-member `task` is the newest thing a graph document may contain, and
+    /// the field list an older reader would refuse it against —
+    /// `oneharness_config`, `persona`, `schedule`, `deps` — is exactly what a
+    /// launcher validating with a second, staler parser answered with. So this
+    /// is the document that tells the two apart, and the version it declares is
+    /// [`oneagentgraph::config::SCHEMA_VERSION`] rather than a number written
+    /// here: read off the runner, it moves with the runner, and a build that
+    /// stopped composing its own would fail here rather than at an operator's
+    /// launch.
+    ///
+    /// The member is a second one rather than the driver, because the driver's
+    /// prompt is what makes the run advance at all — this world's `oneharness`
+    /// stand-in drives the engine verbs when it is given them, exactly as a real
+    /// orchestrator would.
+    pub fn write_graphs_at_the_runners_schema(&self) {
+        let extra = format!(
+            "  {REPORTING_MEMBER}:\n    kind: oneharness\n    \
+             oneharness_config: ./oneharness.toml\n    task: {MEMBER_TASK}\n"
+        );
+        self.write_graphs_with(Some(&extra), oneagentgraph::config::SCHEMA_VERSION);
+    }
+
+    /// A `PATH` with nothing on it, in this world.
+    ///
+    /// For the journeys whose claim is that a launch resolves *nothing* by name.
+    /// Prepending a directory cannot state that: the inherited `PATH` stays
+    /// behind it, so a host with the sibling installed would answer the launch
+    /// out of that install and the journey would pass for the wrong reason.
+    pub fn empty_path(&self) -> PathBuf {
+        let dir = self.root.join("empty-path");
+        std::fs::create_dir_all(&dir).expect("a directory with nothing in it");
+        dir
     }
 
     /// The same configs, with the shipped dag-scope graph's **pacemaker** on the
@@ -525,10 +580,10 @@ impl World {
              schedule: {{every: {}, resettable: {}}}\n",
             schedule.every, schedule.resettable
         );
-        self.write_graphs_with(Some(&pacemaker));
+        self.write_graphs_with(Some(&pacemaker), FIRST_GRAPH_SCHEMA);
     }
 
-    fn write_graphs_with(&self, dag_extra: Option<&str>) {
+    fn write_graphs_with(&self, dag_extra: Option<&str>, version: u32) {
         let dir = self.graphs();
         std::fs::create_dir_all(&dir).expect("a directory for the graph configs");
         // The identity chain is the operator's own file, which the graph names
@@ -551,8 +606,8 @@ impl World {
             std::fs::write(
                 dir.join(file),
                 format!(
-                    "version: 1\nname: {}\nmembers:\n  {member}:\n    kind: oneharness\n    \
-                     oneharness_config: ./oneharness.toml\n{extra}",
+                    "version: {version}\nname: {}\nmembers:\n  {member}:\n    \
+                     kind: oneharness\n    oneharness_config: ./oneharness.toml\n{extra}",
                     file.trim_end_matches(".yaml"),
                 ),
             )

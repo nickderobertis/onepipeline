@@ -82,6 +82,9 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
         Verb::Goals(args) => report(&args, views::goals),
         Verb::Transcript(args) => transcript(&args),
         Verb::Telemetry(args) => report_telemetry(&args),
+        Verb::Drive(args) => {
+            agentgraph::drive(&args.graph, &args.task, &args.dir, &args.labels, &args.sets)
+        }
     }
 }
 

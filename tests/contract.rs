@@ -1351,15 +1351,38 @@ fn the_smoke_scripts_command_list_is_the_binarys_whole_surface() {
         .map(str::to_string)
         .collect::<BTreeSet<String>>();
 
-    let surface = Cli::command()
+    let (documented, hidden): (BTreeSet<String>, BTreeSet<String>) = Cli::command()
         .get_subcommands()
-        .map(|sub| sub.get_name().to_string())
-        .collect::<BTreeSet<String>>();
+        .map(|sub| (sub.get_name().to_string(), sub.is_hide_set()))
+        .fold(
+            Default::default(),
+            |(mut shown, mut hidden), (name, hide)| {
+                if hide {
+                    hidden.insert(name);
+                } else {
+                    shown.insert(name);
+                }
+                (shown, hidden)
+            },
+        );
 
     assert_eq!(
-        listed, surface,
+        listed, documented,
         "scripts/smoke-published.sh checks a different command set than the CLI offers"
     );
+
+    // A hidden verb is not on `--help`, so the loop above has nothing to find it
+    // in — and it is exactly the kind a published artifact could lack without
+    // anything noticing, because no user types it. `drive` is what `start
+    // --detach` spawns of *itself*, so a build without it cannot launch a
+    // detached run at all. The script reaches each one directly instead.
+    for command in &hidden {
+        assert!(
+            script.contains(&format!("onepipeline {command} ")),
+            "scripts/smoke-published.sh never runs the hidden `{command}` command, which \
+             `--help` does not list for it to check"
+        );
+    }
 }
 
 /// The `name: Type` pairs a struct in `src/executor.rs` declares.
