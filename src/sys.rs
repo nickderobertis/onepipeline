@@ -156,13 +156,25 @@ fn platform_stop(pid: u32, how: Stop) {
     }
 }
 
+/// Signal one process, and refuse every id that is not one.
+///
+/// `kill` reads a non-positive pid as a **broadcast**: `0` is the caller's whole
+/// process group, `-1` is every process it may signal, and a negative id is
+/// another group. None of those is a process this walk found, and any of them
+/// would take down far more than the run — the launcher's own group includes
+/// whatever started it. The walk's ids come from parsing a `ps` listing, which
+/// is external input, so the guard is here at the one place a signal is sent
+/// rather than only where the ids are read.
 #[cfg(unix)]
 fn signal_one(pid: u32, signal: i32) {
     let Ok(raw) = i32::try_from(pid) else {
         return;
     };
+    if raw <= 0 {
+        return;
+    }
     // SAFETY: `kill` takes a pid and a signal number and touches no memory this
-    // call owns.
+    // call owns. `raw` is positive, so this addresses one process.
     unsafe { libc::kill(raw, signal) };
 }
 
@@ -206,6 +218,12 @@ fn descendants(pid: u32) -> Vec<u32> {
 /// unreadable row is one process this teardown cannot place. Dropping it leaves
 /// that one unreached; letting it empty the table would leave every one of them
 /// unreached, which is the orphan this function exists to prevent.
+///
+/// A row claiming pid `0` is dropped outright. No process a teardown may signal
+/// has that id — to `kill` it means the caller's whole process group — so such a
+/// row is either a listing this reader does not understand or something wearing
+/// one's clothes, and admitting it would turn a walk down one run's tree into a
+/// broadcast at everything the launcher was started beside.
 #[cfg(unix)]
 fn process_table() -> Vec<(u32, u32)> {
     let Ok(listed) = std::process::Command::new("ps")
@@ -223,7 +241,7 @@ fn process_table() -> Vec<(u32, u32)> {
         .filter_map(|line| {
             let mut columns = line.split_whitespace();
             let pair = (columns.next()?.parse().ok()?, columns.next()?.parse().ok()?);
-            Some(pair)
+            (pair.0 != 0).then_some(pair)
         })
         .collect()
 }
@@ -701,6 +719,32 @@ mod tests {
         );
     }
 
+    /// A listing that claims pid `0` never gets one signalled.
+    ///
+    /// `kill(0, ...)` is not "no process" — it is the caller's **entire process
+    /// group**, which on this walk means the launcher and whatever it was
+    /// started beside. The ids come from parsing external input, so a row
+    /// claiming `0` is a row that turns a teardown of one run's tree into a
+    /// broadcast. This asks for the descendants of *this* process against a
+    /// listing that names `0` as its child, which is the shape that would do it.
+    #[cfg(unix)]
+    #[test]
+    fn a_listing_that_claims_pid_zero_never_offers_it_as_a_descendant() {
+        let mine = pid();
+        let script = format!("echo '0 {mine}'\necho '{mine} 1'");
+        let read = table_from_ps("pid-zero", &script);
+        assert!(
+            !read.iter().any(|(child, _)| *child == 0),
+            "a row claiming pid 0 was admitted to the table: {read:?}"
+        );
+        let walked = under_ps("pid-zero-walk", &script, || descendants(mine));
+        assert!(
+            !walked.contains(&0),
+            "pid 0 was offered as a descendant, and `kill` reads it as a process group: \
+             {walked:?}"
+        );
+    }
+
     /// What [`process_table`] makes of a `ps` that behaves like `script`.
     ///
     /// The script is installed under the one name `process_table` resolves, and
@@ -709,6 +753,17 @@ mod tests {
     /// behaviour around it.
     #[cfg(unix)]
     fn table_from_ps(name: &str, script: &str) -> Vec<(u32, u32)> {
+        under_ps(name, script, process_table)
+    }
+
+    /// Run `read` with `ps` resolving to a stand-in that behaves like `script`.
+    ///
+    /// The stand-in is installed under the one name the reader resolves and
+    /// `PATH` is pointed at it alone, so what is measured is this module's own
+    /// walk over a listing the test chose — including listings no real `ps` on
+    /// this host will produce, which is where the interesting faults live.
+    #[cfg(unix)]
+    fn under_ps<T>(name: &str, script: &str, read: impl FnOnce() -> T) -> T {
         use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("onepipeline-ps-{name}-{}", pid()));
         std::fs::create_dir_all(&dir).expect("a directory for the ps stand-in");
@@ -722,14 +777,14 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let restore = std::env::var_os("PATH");
         std::env::set_var("PATH", &dir);
-        let read = process_table();
+        let answer = read();
         match restore {
             Some(path) => std::env::set_var("PATH", path),
             None => std::env::remove_var("PATH"),
         }
         drop(_guard);
         std::fs::remove_dir_all(&dir).ok();
-        read
+        answer
     }
 
     #[test]

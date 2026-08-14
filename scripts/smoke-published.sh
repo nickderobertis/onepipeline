@@ -93,8 +93,13 @@ done
 # faults, and a probe that reported them identically would send the reader after
 # the wrong one.
 if ! drive_said="$(onepipeline drive --help 2>&1)"; then
-  fail "the 'drive' command a detached launch retains did not run: ${drive_said}" \
-    "if it is an unknown subcommand the installed binary predates it — reinstall the version under test"
+  case "${drive_said}" in
+    *"unrecognized subcommand"* | *"unknown subcommand"* | *"not found"*)
+      drive_action="the installed binary predates the verb — reinstall the version under test" ;;
+    *)
+      drive_action="the verb is present and would not run — run 'onepipeline drive --help' by hand against the $label and fix what it reports; do not publish, because every detached launch spawns it" ;;
+  esac
+  fail "the 'drive' command a detached launch retains did not run: ${drive_said}" "${drive_action}"
 fi
 
 # Reading a run nobody recorded is the smallest command that reaches the ledger,
