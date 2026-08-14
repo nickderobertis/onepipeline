@@ -15,11 +15,14 @@ resolver = "2"
 #
 # `oneagentgraph`'s floor is a **requirement**, not a preference: this build's own
 # copy is the single parser deciding what a graph document may contain, so the
-# floor is the oldest one that accepts everything a launch must accept. 0.2.10 is
-# where a per-member `task` and graph schema 3 exist, and a lock resolved below it
-# refuses a document the runner accepts — the defect that blocked a consumer.
+# floor is the oldest one that accepts everything a launch must accept. 0.2.11 is
+# where `{task}` in a member's own `task` expands to the run's, which is what a
+# dag-scope graph now composes its members' roles out of: the launcher's task says
+# only what the run *is*, so a member that must be told what to do about it says
+# so itself. Below that floor those six characters stand for themselves and every
+# member is handed the bare run description with no job attached.
 [workspace.dependencies]
-oneagentgraph = "0.2.10"
+oneagentgraph = "0.2.11"
 onevcs = "0.2.6"
 
 [package]

@@ -17,7 +17,7 @@
 // provider turn, and these journeys run inside `just check`, which has neither a
 // credential nor a budget for one.
 
-use crate::harness::{agent, human, plan_of, World};
+use crate::harness::{agent, human, plan_of, World, REPORTING_MEMBER};
 use serde_json::{json, Value};
 
 /// The prose a `member-started` says its member was launched with.
@@ -1214,6 +1214,80 @@ fn a_document_the_runner_accepts_launches_whichever_way_it_is_asked_for() {
         let results = world.run(&["results", "schema"]);
         results.exited(0).out_has("build");
     }
+}
+
+/// Every dag-scope member is handed what the run *is*, and its own job around
+/// it.
+///
+/// The launcher's one `--task` reaches every member of the graph carrying none
+/// of its own, so it names the run and its goal and stops; a member that must be
+/// told what to do about it composes its own `task` from `{task}`.
+///
+/// Read off the argv `oneagentgraph` published for each member, which is what
+/// those processes were actually launched with rather than anything this crate
+/// wrote down about it.
+#[test]
+fn every_dag_scope_member_is_given_the_runs_description_and_its_own_job() {
+    let world = World::new("neutral-run-task");
+    world.write_graphs_at_the_runners_schema();
+    let path = world.plan("neutral", &plan_of("neutral", vec![agent("build", &[])]));
+    world
+        .run_on(
+            world.agentgraph_cmd(&["start", &path.to_string_lossy(), "--attach"]),
+            "start neutral",
+        )
+        .exited(0)
+        .settled();
+
+    // The dag-scope members only: a node's dispatch carries the node label and
+    // is given that node's task, which is a different composition entirely.
+    let prompts: Vec<(String, String)> = world
+        .journal("neutral")
+        .iter()
+        .filter(|event| event["kind"] == "member-started" && event["labels"]["node"].is_null())
+        .filter_map(|event| {
+            Some((
+                event["labels"]["member"].as_str()?.to_string(),
+                prompt_of(event)?,
+            ))
+        })
+        .collect();
+    let given = |member: &str| {
+        prompts
+            .iter()
+            .find(|(name, _)| name == member)
+            .map(|(_, prompt)| prompt.clone())
+            .unwrap_or_else(|| panic!("no member '{member}' was started: {prompts:?}"))
+    };
+    let driver = given("orchestrator");
+    let reporter = given(REPORTING_MEMBER);
+
+    for (member, prompt) in [("orchestrator", &driver), (REPORTING_MEMBER, &reporter)] {
+        // What the run is, and what it is for. `plan_of` states the goal, so a
+        // member that never received it is one the run description did not reach.
+        for expected in ["neutral", "Deliver neutral"] {
+            assert!(
+                prompt.contains(expected),
+                "member '{member}' was not told {expected:?}: {prompt}"
+            );
+        }
+    }
+    // And each member's job is its own: the reporter carrying the driver's verbs
+    // is the defect.
+    assert!(
+        driver.contains("onepipeline round run") && driver.contains("onepipeline round next"),
+        "the driver was not given its own job: {driver}"
+    );
+    for verb in ["onepipeline round run", "onepipeline round next"] {
+        assert!(
+            !reporter.contains(verb),
+            "a member whose job is not the driver's was told to {verb}: {reporter}"
+        );
+    }
+    assert!(
+        reporter.contains("Report on this run"),
+        "the reporter was not given its own job: {reporter}"
+    );
 }
 
 /// The retained driver relays its graph's stream and answers with its code.

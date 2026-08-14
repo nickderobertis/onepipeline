@@ -33,6 +33,14 @@ pub const PLAN_SCHEMA_VERSION: u32 = 1;
 /// The heading a carried planner note is rendered under.
 pub const PLANNER_CONTEXT_HEADING: &str = "## Planner context";
 
+/// What stands in for a [`Goal`] a plan states none of.
+///
+/// One spelling for both readers of it — the `goals` view a planner reads, and
+/// the task the dag-scope graph is launched with — because a run with no goal
+/// reads the same either way, and two spellings of it would drift apart.
+/// Crate-private: it is a rendering, not part of the published surface.
+pub(crate) const NO_GOAL: &str = "(no goal stated)";
+
 /// One plan: the task DAG a run executes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

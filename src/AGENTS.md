@@ -17,6 +17,11 @@ Rules:
   quietly relax one to make a plan or a rules file parse.
 - **`#![warn(missing_docs)]` with `clippy -D warnings` means undocumented public
   items fail the gate.**
+- **The task a graph is launched with says what the run *is*, never who does
+  what.** `oneagentgraph` gives that one `--task` to every member carrying none
+  of its own, so a role stated there is stated to members whose job it is not.
+  Roles belong to the consuming graph: a member's persona, or its own `task`
+  composed from `{task}`.
 - **Exit codes are spent.** `0` / `1` / `2` are `reply`'s applied / queued /
   refused verdicts, `3` is "nothing is driving the run", and a round carries `0`
   for a complete graph and `1` for one that settled unfinished. Do not mint a

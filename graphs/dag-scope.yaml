@@ -5,6 +5,13 @@
 # The two `*_config` paths are the operator's own onejudge and oneharness
 # configs — this graph names them, it does not ship them, exactly as the
 # oneagentgraph contract's own example does.
+#
+# The task `onepipeline start` composes says what the run *is* and nothing about
+# who does what with it, because `oneagentgraph` gives it to every member here
+# that carries none of its own. Each member's job is stated in its persona
+# instead — a graph replacing this one says it there, or in a member `task`
+# composed from `{task}`, which needs the schema version `oneagentgraph`
+# documents as `config::FIRST_TASK_TOKEN_VERSION`. This one needs neither.
 version: 1
 name: dag-scope
 members:

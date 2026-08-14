@@ -80,21 +80,34 @@ pub const OVERRIDE_TOOK_EFFECT: std::time::Duration = std::time::Duration::from_
 
 /// The graph schema version this world's ordinary configs declare.
 ///
-/// The floor rather than the ceiling, so every journey that is not *about* the
-/// schema states nothing about it — and so the one that is
-/// ([`World::write_graphs_at_the_runners_schema`]) is the only place a version
-/// moves.
-const FIRST_GRAPH_SCHEMA: u32 = oneagentgraph::config::FIRST_SCHEMA_VERSION;
+/// The oldest schema a **consumer** of this crate can be written against, rather
+/// than the oldest the runner parses: the launcher's task says what the run is
+/// and nothing about who does what with it, so a dag-scope member that must
+/// drive says so in its own `task` composed from `{task}` — and those six
+/// characters stand for themselves under every schema below this one.
+const CONSUMER_GRAPH_SCHEMA: u32 = oneagentgraph::config::FIRST_TASK_TOKEN_VERSION;
 
-/// The dag-scope member whose job is not the graph's.
+/// The dag-scope driver's own `task`, in this world's graph configs.
+///
+/// `{task}` is the run description the launcher composed — what the run is and
+/// what it is for — and the rest is what *this* member does about it. The
+/// shipped graph says the same thing in the `orchestrator` persona, which a
+/// world with no persona files of its own cannot; either way it is the graph
+/// that says it, because the launcher no longer does.
+pub const DRIVER_TASK: &str = "{task}\n\nDrive this run to settlement: \
+                               `onepipeline round run` to run each round and \
+                               `onepipeline round next` to transition between them.";
+
+/// The dag-scope member whose job is not the driver's.
 pub const REPORTING_MEMBER: &str = "reporter";
 
 /// The prose [`REPORTING_MEMBER`] carries as its own `task`.
 ///
-/// Deliberately not the graph's: what a per-member `task` is *for* is a member
-/// whose job is not the run's, and the launcher composes one task for the whole
-/// graph. A member given this instead of that is the schema feature working.
-pub const MEMBER_TASK: &str = "Report on the run and change nothing.";
+/// Composed the same way [`DRIVER_TASK`] is, and deliberately a different job:
+/// the launcher hands one task to the whole graph, so what tells these two
+/// members apart is the prose each carries around it. A member given the
+/// driver's job instead of this one is the defect these journeys exist for.
+pub const MEMBER_TASK: &str = "{task}\n\nReport on this run and change nothing about it.";
 
 /// One directory, in the single spelling the binary under test will report.
 ///
@@ -504,7 +517,7 @@ impl World {
     /// dispatch reaching the sibling, being accepted, and streaming back — is the
     /// same one either way.
     pub fn write_graphs(&self) {
-        self.write_graphs_with(None, FIRST_GRAPH_SCHEMA);
+        self.write_graphs_with(None, CONSUMER_GRAPH_SCHEMA);
     }
 
     /// The same configs at the **runner's own** schema version, with a second
@@ -513,12 +526,13 @@ impl World {
     /// A per-member `task` is what a staler parser refuses, so this is the
     /// document that tells two parsers apart. The version is read off
     /// [`oneagentgraph::config::SCHEMA_VERSION`] rather than written here, so it
-    /// moves with the runner. A second member rather than the driver, whose
+    /// moves with the runner. A second member beside the driver, whose own
     /// prompt is what makes the run advance at all.
     pub fn write_graphs_at_the_runners_schema(&self) {
         let extra = format!(
             "  {REPORTING_MEMBER}:\n    kind: oneharness\n    \
-             oneharness_config: ./oneharness.toml\n    task: {MEMBER_TASK}\n"
+             oneharness_config: ./oneharness.toml\n    task: {}\n",
+            yaml_scalar(MEMBER_TASK)
         );
         self.write_graphs_with(Some(&extra), oneagentgraph::config::SCHEMA_VERSION);
     }
@@ -644,7 +658,7 @@ impl World {
              schedule: {{every: {}, resettable: {}}}\n",
             schedule.every, schedule.resettable
         );
-        self.write_graphs_with(Some(&pacemaker), FIRST_GRAPH_SCHEMA);
+        self.write_graphs_with(Some(&pacemaker), CONSUMER_GRAPH_SCHEMA);
     }
 
     fn write_graphs_with(&self, dag_extra: Option<&str>, version: u32) {
@@ -662,16 +676,23 @@ impl World {
             ("dag-scope.yaml", "orchestrator"),
             ("node-scope.yaml", "worker"),
         ] {
-            let extra = if file == "dag-scope.yaml" {
-                dag_extra.unwrap_or_default()
+            // The dag-scope driver carries [`DRIVER_TASK`]; the node-scope
+            // worker carries none, because the task a *node* is dispatched with
+            // is that member's whole job and the launcher composes it per
+            // dispatch.
+            let (extra, task) = if file == "dag-scope.yaml" {
+                (
+                    dag_extra.unwrap_or_default(),
+                    format!("    task: {}\n", yaml_scalar(DRIVER_TASK)),
+                )
             } else {
-                ""
+                ("", String::new())
             };
             std::fs::write(
                 dir.join(file),
                 format!(
                     "version: {version}\nname: {}\nmembers:\n  {member}:\n    \
-                     kind: oneharness\n    oneharness_config: ./oneharness.toml\n{extra}",
+                     kind: oneharness\n    oneharness_config: ./oneharness.toml\n{task}{extra}",
                     file.trim_end_matches(".yaml"),
                 ),
             )
@@ -1470,6 +1491,17 @@ fn read_jsonl(path: &Path) -> Vec<Value> {
             ),
         })
         .collect()
+}
+
+/// One string as a YAML scalar that survives being read back.
+///
+/// A member `task` carries newlines and braces, and both change meaning
+/// unquoted: `{task}` on its own opens a flow mapping, so a config written
+/// plainly would be refused by the runner rather than handed to the member. JSON
+/// string syntax is valid YAML double-quoted syntax, so the serializer that
+/// already knows every escape does the quoting.
+fn yaml_scalar(text: &str) -> String {
+    serde_json::to_string(text).expect("a string serializes")
 }
 
 /// A direct agent node.
