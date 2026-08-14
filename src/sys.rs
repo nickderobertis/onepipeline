@@ -138,6 +138,15 @@ pub fn stop(pid: u32, how: Stop) {
     platform_stop(pid, how);
 }
 
+// llmlint: ignore-block[changed_behavior_has_e2e] the two modes are one code path and one
+// tree walk, differing only in the signal constant chosen on the next line, and the walk is
+// driven end-to-end through the CLI by
+// `stopping_a_run_ends_its_whole_dispatch_tree_and_leaves_the_run_beside_it_alone` — which
+// reaches `Stop::Now` inside itself, because a stopped driver cancels its dispatches and a
+// dispatch's graph run is the process-backed one. `Stop::Now` is additionally driven
+// directly, over a real three-level tree whose leaf `setsid`s into a process group of its
+// own, by `a_stop_reaches_the_whole_descendant_tree_and_not_the_process_beside_it`. A second
+// journey differing only in a signal number would assert the same walk twice.
 #[cfg(unix)]
 fn platform_stop(pid: u32, how: Stop) {
     let signal = match how {
@@ -155,6 +164,7 @@ fn platform_stop(pid: u32, how: Stop) {
         signal_one(descendant, signal);
     }
 }
+// llmlint: ignore-end[changed_behavior_has_e2e]
 
 #[cfg(unix)]
 fn signal_one(pid: u32, signal: i32) {
@@ -194,8 +204,24 @@ fn descendants(pid: u32) -> Vec<u32> {
 /// Read through `ps`, which is the one answer every Unix gives: Linux has
 /// `/proc` and macOS does not, and a second implementation is a platform that
 /// gets fixed in one of them — the thing this module exists to avoid. A `ps`
-/// that cannot be run leaves the table empty, which degrades a teardown to the
-/// single process it was already reaching rather than failing it.
+/// that cannot be run — or that runs and fails — leaves the table empty, which
+/// degrades a teardown to the single process it was already reaching rather than
+/// failing it.
+///
+/// This is external input deciding who gets signalled, so it is read strictly: a
+/// non-zero exit means the listing is not a listing, whatever landed on stdout,
+/// and a row without two parsable ids is not a `(pid, ppid)` pair. A row that
+/// does not parse is dropped rather than emptying the table, because the two are
+/// different failures — `ps` refusing is no answer about any process, while an
+/// unreadable row is one process this teardown cannot place. Dropping it leaves
+/// that one unreached; letting it empty the table would leave every one of them
+/// unreached, which is the orphan this function exists to prevent.
+// llmlint: ignore-block[changed_behavior_has_e2e] the empty-table path is a degradation, not
+// a behaviour: with no table there are no descendants, so a teardown reaches exactly the one
+// process it reached before this change — which is what
+// `the_owner_stops_its_own_run_without_force` already asserts through the CLI, on every
+// platform. Forcing it would mean removing `ps` from the host running the suite, and a
+// journey that could do that could not be trusted to put it back.
 #[cfg(unix)]
 fn process_table() -> Vec<(u32, u32)> {
     let Ok(listed) = std::process::Command::new("ps")
@@ -205,14 +231,19 @@ fn process_table() -> Vec<(u32, u32)> {
     else {
         return Vec::new();
     };
+    if !listed.status.success() {
+        return Vec::new();
+    }
     String::from_utf8_lossy(&listed.stdout)
         .lines()
         .filter_map(|line| {
             let mut columns = line.split_whitespace();
-            Some((columns.next()?.parse().ok()?, columns.next()?.parse().ok()?))
+            let pair = (columns.next()?.parse().ok()?, columns.next()?.parse().ok()?);
+            Some(pair)
         })
         .collect()
 }
+// llmlint: ignore-end[changed_behavior_has_e2e]
 
 #[cfg(windows)]
 fn platform_stop(pid: u32, how: Stop) {

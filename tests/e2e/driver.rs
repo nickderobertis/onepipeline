@@ -1072,17 +1072,35 @@ fn a_graph_that_finished_before_announcing_anything_is_a_launch_that_worked() {
 /// The test's own oracle, deliberately not the crate's: what is under test is
 /// whether a teardown reached a tree, and asking it to describe the tree it
 /// reached would be asking the answer of the thing being questioned.
+///
+/// Strict where the crate's own reader degrades. A teardown that cannot read the
+/// table has to carry on reaching what it can, but an *oracle* that quietly
+/// returned a short table would report a surviving process as gone — the
+/// assertion this journey exists to make, passing for the reason it was written
+/// to catch. So a `ps` that fails, and a row that is not two ids, end the test.
 #[cfg(unix)]
 fn process_table() -> Vec<(u32, u32)> {
     let listed = std::process::Command::new("ps")
         .args(["-A", "-o", "pid=,ppid="])
         .output()
         .expect("this host lists its processes");
+    assert!(
+        listed.status.success(),
+        "`ps` refused to list this host's processes: {}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
     String::from_utf8_lossy(&listed.stdout)
         .lines()
-        .filter_map(|line| {
+        .map(|line| {
             let mut columns = line.split_whitespace();
-            Some((columns.next()?.parse().ok()?, columns.next()?.parse().ok()?))
+            let mut id = |what: &str| {
+                columns
+                    .next()
+                    .unwrap_or_else(|| panic!("`ps` wrote a row with no {what}: {line:?}"))
+                    .parse::<u32>()
+                    .unwrap_or_else(|_| panic!("`ps` wrote an unreadable {what}: {line:?}"))
+            };
+            (id("pid"), id("parent pid"))
         })
         .collect()
 }

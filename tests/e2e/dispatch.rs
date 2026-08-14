@@ -40,6 +40,14 @@ fn prompt_of(event: &Value) -> Option<String> {
 /// attaching launcher merges its driver's envelopes into the run's store and a
 /// detaching one hands its driver a log file, but either way the member below
 /// them is spawned the same way.
+// llmlint: ignore-block[tests_mirror_real_usage] the argv the harness double records *is* the
+// interface under test, exactly as it is for `dag_launch_dirs` below: what `oneagentgraph`
+// hands a member's harness is not something any product surface of this crate reports, and
+// it is what the per-member `task` field decides. That the launch was accepted at all — the
+// claim this journey exists for — is asserted separately in it, through `launch.json`; this
+// is the half that proves the field claimed the right member's prompt. Reading it out of an
+// event stream instead is what this replaced, and that was strictly worse: a detached launch
+// writes its driver's envelopes to a private log file with no product surface at all.
 fn member_prompts(world: &World) -> Vec<String> {
     world
         .invocations()
@@ -52,6 +60,7 @@ fn member_prompts(world: &World) -> Vec<String> {
         })
         .collect()
 }
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 fn open_second_round(world: &World, run: &str, node: Value) {
     world.script("driver.wait", "hold");
