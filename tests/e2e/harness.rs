@@ -554,19 +554,43 @@ impl World {
     /// one writes to stdout precisely so that a reader ignoring the exit status
     /// would see a plausible-looking table with this world's own processes
     /// absent from it — which is a teardown deciding it has no descendants.
-    ///
-    /// Unix-only: the fixture is a shell script, and the Windows arm reaches the
-    /// tree through `taskkill /T` rather than through any table this could
-    /// stand in for.
     #[cfg(unix)]
     pub fn path_whose_ps_fails(&self) -> PathBuf {
+        self.path_with_ps("failing-ps", "echo '1 0'\nexit 1")
+    }
+
+    /// A `PATH` whose `ps` answers with the **real** listing and one row nobody
+    /// can read.
+    ///
+    /// The third fault, and the one that must cost the least: the listing is
+    /// good, and one line of it is not — a header a platform adds, two columns
+    /// run together. Every process it named is still named, so a teardown that
+    /// threw the whole listing away over that row would strand all of them. The
+    /// real `ps` is invoked by absolute path, because this stand-in holds the
+    /// name `ps` on the `PATH` the process under test was given.
+    #[cfg(unix)]
+    pub fn path_whose_ps_garbles_a_row(&self) -> PathBuf {
+        let real = real_ps();
+        self.path_with_ps(
+            "garbled-ps",
+            &format!("echo 'not-a-pid also-not'\nexec {} \"$@\"", real.display()),
+        )
+    }
+
+    /// A `PATH` holding one `ps` stand-in that behaves like `script`.
+    ///
+    /// Unix-only: the fixture is a shell script, and the Windows arm reaches the
+    /// tree through `taskkill /T` rather than through any table this could stand
+    /// in for.
+    #[cfg(unix)]
+    fn path_with_ps(&self, name: &str, script: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
-        let dir = self.root.join("failing-ps");
-        std::fs::create_dir_all(&dir).expect("a directory for the failing ps");
+        let dir = self.root.join(name);
+        std::fs::create_dir_all(&dir).expect("a directory for the ps stand-in");
         let ps = dir.join("ps");
-        std::fs::write(&ps, "#!/bin/sh\necho '1 0'\nexit 1\n").expect("the failing ps is written");
+        std::fs::write(&ps, format!("#!/bin/sh\n{script}\n")).expect("the ps stand-in is written");
         std::fs::set_permissions(&ps, std::fs::Permissions::from_mode(0o755))
-            .expect("the failing ps is executable");
+            .expect("the ps stand-in is executable");
         dir
     }
 
@@ -1092,6 +1116,19 @@ pub fn onevcs_binary() -> PathBuf {
             held_alias(&held, "onevcs")
         })
         .clone()
+}
+
+/// This host's own `ps`, found the way a shell finds it.
+///
+/// Resolved here rather than written down, because it is `/bin/ps` on some hosts
+/// and `/usr/bin/ps` on others, and a stand-in that shadowed the name would
+/// recurse into itself if it called `ps` by name.
+#[cfg(unix)]
+fn real_ps() -> PathBuf {
+    std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .map(|dir| dir.join("ps"))
+        .find(|candidate| candidate.is_file())
+        .expect("this host has a ps")
 }
 
 /// A `PATH` with `dirs` ahead of the one this process inherited.

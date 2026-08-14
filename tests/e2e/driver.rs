@@ -1219,46 +1219,88 @@ fn a_forced_stop_ends_the_whole_dispatch_tree_of_another_sessions_run() {
 /// walk degrades to exactly the pid it reached before it ever walked a tree, and
 /// the run is ended and recorded as ended either way.
 ///
-/// `PATH` carries only a `ps` that fails, so the degradation is the real one
-/// rather than a mode nothing enters. What such a stop cannot reach — the
-/// processes below the driver — is this journey's own mess to clear, and it
-/// clears it rather than asserting it: an orphan is what the walk exists to
-/// prevent, not a promise to keep.
+/// Both ways a listing can be no listing at all, because they are different
+/// faults: a `ps` that cannot be spawned, and a `ps` that runs and exits
+/// non-zero. A reader that checked only the first would parse the second one's
+/// stdout as though it were a table.
+///
+/// What such a stop cannot reach — the processes below the driver — is this
+/// journey's own mess to clear, and it clears it rather than asserting it: an
+/// orphan is what the walk exists to prevent, not a promise to keep.
 #[cfg(unix)]
 #[test]
 fn a_stop_ends_its_run_even_where_the_process_table_cannot_be_read() {
-    let world = World::new("driver-stop-no-ps");
+    for (fault, path) in [
+        ("no ps to spawn", World::empty_path as fn(&World) -> PathBuf),
+        ("a ps that fails", World::path_whose_ps_fails),
+    ] {
+        let world = World::new(&format!("driver-stop-no-ps-{}", fault.replace(' ', "-")));
+        world.script("build.wait", "hold");
+        let (run, driver) = start_detached_announcing(&world, "blind", vec![agent("build", &[])]);
+        world.until("a node to be in flight", |world| {
+            !world.events_of(&run, "node-dispatched").is_empty()
+        });
+        world.until("the dispatch to be more than one process", |_| {
+            descendants(driver).len() > 1
+        });
+        let below: Vec<u32> = descendants(driver);
+
+        let mut command = world.cmd(&["stop", &run]);
+        command.env("PATH", path(&world));
+        world
+            .run_on(command, &format!("stop with {fault}"))
+            .exited(0)
+            .out_has("\"stopped\":true");
+
+        // The pid the stop was given is gone, and the run says so — the two
+        // things an operator asked for.
+        world.until("the driver to end", |_| !still_listed(driver));
+        assert_eq!(
+            world.events_of(&run, "run-stopped").len(),
+            1,
+            "a stop with {fault} did not record the run as stopped"
+        );
+
+        for pid in below.iter().filter(|pid| still_listed(**pid)) {
+            std::process::Command::new("kill")
+                .args(["-9", &pid.to_string()])
+                .status()
+                .expect("this host can end a process this journey started");
+        }
+        world.release("build.go");
+    }
+}
+
+/// One unreadable row in a good listing costs that row and nothing else.
+///
+/// The third fault a listing can have, and the one that must cost the least: a
+/// header a platform adds, two columns run together. Every process the listing
+/// named is still named, so the walk still reaches the whole tree — where a
+/// reader that discarded the listing over that row would strand every one of
+/// them, which is the orphan this walk exists to prevent.
+///
+/// The stand-in prepends the bad row and then hands off to the host's real `ps`,
+/// so the rows the walk depends on are the kernel's own.
+#[cfg(unix)]
+#[test]
+fn a_stop_ends_the_whole_tree_when_the_listing_carries_a_row_it_cannot_read() {
+    let world = World::new("driver-stop-garbled-ps");
     world.script("build.wait", "hold");
-    let (run, driver) = start_detached_announcing(&world, "blind", vec![agent("build", &[])]);
+    let (run, driver) = start_detached_announcing(&world, "garbled", vec![agent("build", &[])]);
     world.until("a node to be in flight", |world| {
         !world.events_of(&run, "node-dispatched").is_empty()
     });
     world.until("the dispatch to be more than one process", |_| {
         descendants(driver).len() > 1
     });
-    let below: Vec<u32> = descendants(driver);
+    let tree: Vec<u32> = std::iter::once(driver).chain(descendants(driver)).collect();
 
     let mut command = world.cmd(&["stop", &run]);
-    command.env("PATH", world.path_whose_ps_fails());
-    world
-        .run_on(command, "stop with a failing ps")
-        .exited(0)
-        .out_has("\"stopped\":true");
+    command.env("PATH", world.path_whose_ps_garbles_a_row());
+    world.run_on(command, "stop with a garbled row").exited(0);
 
-    // The pid the stop was given is gone, and the run says so — the two things
-    // an operator asked for.
-    world.until("the driver to end", |_| !still_listed(driver));
-    assert_eq!(
-        world.events_of(&run, "run-stopped").len(),
-        1,
-        "a stop that could not read the table did not record the run as stopped"
-    );
-
-    for pid in below.iter().filter(|pid| still_listed(**pid)) {
-        std::process::Command::new("kill")
-            .args(["-9", &pid.to_string()])
-            .status()
-            .expect("this host can end a process this journey started");
-    }
+    world.until("every process the run started to end", |_| {
+        tree.iter().all(|pid| !still_listed(*pid))
+    });
     world.release("build.go");
 }
