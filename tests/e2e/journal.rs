@@ -365,3 +365,37 @@ fn a_streams_own_order_survives_a_clock_that_disagrees_with_it() {
         rendered.stdout
     );
 }
+
+/// Two records of one stream claiming one `seq` keep the order they arrived in.
+///
+/// Only a producer in error stamps one sequence twice, so there is nothing to be
+/// *right* about here beyond being stable — which is exactly why it needs saying.
+/// A store that shuffled these under a second reading would be a run whose record
+/// changed when it was reread, and a reader comparing two readings of it would be
+/// chasing a difference nobody made.
+///
+/// Read through `monitor`, like every other claim about the merged order.
+#[test]
+fn two_records_of_one_stream_claiming_one_sequence_keep_arriving_order() {
+    let world = World::new("journal-dup-seq");
+    world.script("build.duplicate-seq", "one seq, stamped twice");
+    let path = world.plan("twice", &plan_of("twice", vec![agent("build", &[])]));
+    world
+        .run(&["start", &path.to_string_lossy(), "--attach"])
+        .exited(0);
+
+    let rendered = world.run(&["monitor", "twice"]);
+    rendered.exited(0);
+    let at = |text: &str| {
+        rendered
+            .stdout
+            .lines()
+            .position(|line| line.contains(text))
+            .unwrap_or_else(|| panic!("`monitor` never rendered {text}:\n{}", rendered.stdout))
+    };
+    assert!(
+        at("the dispatch ran") < at("the dispatch ran again"),
+        "the merge reordered two records that arrived under one sequence:\n{}",
+        rendered.stdout
+    );
+}

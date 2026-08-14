@@ -330,6 +330,7 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         &task,
         redirected.as_deref(),
         dir.join(format!("{key}.clock-stepped")).exists(),
+        dir.join(format!("{key}.duplicate-seq")).exists(),
     );
 
     // A redirection the running turn took changes what it *did*, not only what
@@ -532,6 +533,7 @@ fn emit(
     task: &str,
     redirected: Option<&str>,
     stepped_clock: bool,
+    duplicate_seq: bool,
 ) {
     let labels = member_labels(args, node, step);
     // A producer whose host clock was stepped **backwards** between two records
@@ -583,6 +585,22 @@ fn emit(
             "redirected": redirected,
         }),
     );
+    // A producer that stamps one `seq` on two records. Only a producer in error
+    // does it, and the merge has nothing to be right about beyond being stable —
+    // which is exactly why it needs saying: a store that shuffled these under a
+    // second reading would be a run whose record changed when it was reread.
+    if duplicate_seq {
+        envelope(
+            2,
+            "turn-activity",
+            serde_json::json!({
+                "kind": "tool_call",
+                "name": "bash",
+                "detail": "echo the turn ran again",
+                "message": "the dispatch ran again",
+            }),
+        );
+    }
     let report = report_of(task);
     envelope(
         3,
