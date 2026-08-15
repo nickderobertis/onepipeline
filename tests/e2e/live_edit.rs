@@ -393,15 +393,12 @@ fn retry_supersedes_a_running_node_and_redirects_its_dependents() {
         "the replacement is missing: {ids:?}"
     );
 
-    // The superseded node stays in the graph, cancelled, so the run's own record
-    // still names what was replaced — and nothing dispatched it again.
-    let superseded = result["nodes"]
-        .as_array()
-        .expect("nodes")
-        .iter()
-        .find(|node| node["id"] == "flaky")
-        .expect("the superseded node is still named");
-    assert_eq!(superseded["status"], "cancelled", "{superseded}");
+    // The superseded node left the graph with the same edit that replaced it,
+    // exactly as a `drop` would take it — and nothing dispatched it again.
+    assert!(
+        !ids.contains(&"flaky"),
+        "the superseded node is still in the graph: {ids:?}"
+    );
     let dispatched: Vec<Value> = world
         .events_of(&run, "node-dispatched")
         .into_iter()

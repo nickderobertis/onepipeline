@@ -105,7 +105,7 @@ pub const EXIT_SUCCESS: i32 = 0;
 
 /// The reply's edits are accepted and durable but not yet reconciled.
 ///
-/// It is also a round's own "unfinished": a graph that is waiting or has a
+/// It is also a run's own "unfinished": a graph that is waiting or has a
 /// failed node has not settled, and the two readings agree — neither is an
 /// error, and neither is completion.
 pub const EXIT_QUEUED: i32 = 1;
@@ -156,11 +156,11 @@ mod tests {
             run: "demo".into(),
             pid: 4321,
             host: "builder".into(),
-            verb: "round run".into(),
+            verb: "drive".into(),
         }
         .to_string();
         assert!(rendered.contains("4321"), "{rendered}");
         assert!(rendered.contains("builder"), "{rendered}");
-        assert!(rendered.contains("round run"), "{rendered}");
+        assert!(rendered.contains("drive"), "{rendered}");
     }
 }

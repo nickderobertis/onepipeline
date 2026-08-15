@@ -6,8 +6,9 @@ streams into one.
 
 `onepipeline` is the composition layer. It owns the plan — a dependency graph
 mixing direct agent nodes, repository lifecycle nodes, and explicit human actions
-— schedules it in rounds, dispatches each node through a pluggable **executor
-seam**, and keeps a live channel open to the planner supervising the run. The
+— executes it continuously, dispatching each node the moment its dependencies
+settle, through a pluggable **executor seam**, and keeps a live channel open to
+the planner supervising the run. The
 agents come from `oneagentgraph`; the clones, worktrees, gates, and change
 requests come from `onevcs`. Dependency direction is one-way: neither sibling
 depends on this crate.
@@ -42,13 +43,22 @@ Windows (x86-64) are attached to every release, with `sha256` checksums.
 ## What it does
 
 ```bash
-onepipeline start plan.json --round-budget 14400 --heartbeat-interval 1800
+onepipeline start plan.json --heartbeat-interval 1800
 ```
 
-`start` launches the run's **dag-scope agent graph** — a shipped default of an
-`orchestrator` member driving the engine, and a resettable-cron `check-in` member
-that surfaces a status when nobody has reported one for a while. Attached, it
-returns when the run settles; exit `3` means nothing is driving the run, and
+`start` **drives the run itself**: a node — and each step within a lifecycle
+node — dispatches the moment its dependencies settle, and settlement triggers
+integration and publication immediately. No agent is required. The only pauses
+are decision points: a ready `kind: human` node, or any surface declared
+blocking, holds back the subtree that depends on it while every other branch
+carries on, and clearing it with `attest` or `reply` resumes that subtree inside
+the running loop.
+
+`--dag-graph REF` attaches an agent graph as an **observer** — the shipped one is
+a `monitor` member that watches the stream and raises what does not line up, plus
+a resettable-cron `check-in` member that surfaces a status when nobody has
+reported one for a while. It never drives the engine. Attached, `start` returns
+when the run settles; exit `3` means nothing is driving the run, and
 `onepipeline adopt RUN` attaches a fresh driver to the intact ledger.
 
 The planner supervises over the channel:

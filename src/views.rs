@@ -476,7 +476,14 @@ fn summarize(event: &Envelope) -> String {
 
 /// `onepipeline results` — per-node outcomes, with each node's own evidence.
 pub fn results(view: &RunView) -> String {
-    let mut out = format!("{}  {}\n", view.paths.run, view.summary());
+    // The run and how its graph stands — deliberately not the node tally the
+    // other views carry, because every line under this one is a node's own
+    // status and a header that also said `done` would read as one of them.
+    let mut out = format!(
+        "{}  {}\n",
+        view.paths.run,
+        graph::state_of(&view.state.statuses()).as_str()
+    );
     let statuses = view.state.statuses();
     for node in view.state.graph.iter() {
         let status = statuses

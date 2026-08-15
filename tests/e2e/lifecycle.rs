@@ -570,7 +570,7 @@ fn a_publications_own_records_reach_the_journal_while_it_is_still_publishing() {
 
     world.release("gate.go");
     world.until("the run to settle", |world| {
-        world.run(&["results", "watched"]).stdout.contains("done")
+        world.run_file("watched", "result.json").is_file()
     });
     // And the rest of the publication landed too, exactly once each: `monitor`
     // renders one line per event, so a record relayed twice — by a follow and by
@@ -792,7 +792,7 @@ fn a_node_whose_publication_failed_continues_the_branch_it_preserved() {
                 "commands": [{
                     "op": "retry",
                     "id": "service",
-                    "node": {"id": "service-2", "repo": "service",
+                    "node": {"id": "service-2", "repo": "service", "persona": "engineer",
                              "task": "## What\nPublish again.\n\n## Why\nIt failed.\n\n\
                                       ## Acceptance criteria\n- published."},
                 }],
@@ -977,7 +977,7 @@ fn an_explicit_pin_the_planner_wrote_wins_over_a_branch_a_dispatch_preserved() {
                 "commands": [{
                     "op": "retry",
                     "id": "service",
-                    "node": {"id": "service-2", "repo": "service",
+                    "node": {"id": "service-2", "repo": "service", "persona": "engineer",
                              "task": "## What\nPublish again.\n\n## Why\nIt failed.\n\n\
                                       ## Acceptance criteria\n- published."},
                 }],
@@ -1305,14 +1305,19 @@ fn a_continuation_skips_the_steps_the_preserved_branch_already_carries() {
         "a resume with completed steps but no branch: {resume}"
     );
 
+    // The run had already settled on the failure, so nothing was driving it when
+    // the retry landed: a fresh driver picks the edited graph up and runs it.
     // `implement` is on the branch already, so re-running it would redo work —
     // only `review` goes out.
-    world.until("the continuation to settle", |world| {
+    world.run(&["adopt", &run]).exited(0);
+    assert!(
         world
             .events_of(&run, "node-settled")
             .iter()
-            .any(|event| event["labels"]["node"] == "service-2")
-    });
+            .any(|event| event["labels"]["node"] == "service-2"),
+        "the continuation never ran:\n{}",
+        why(&world, &run)
+    );
     let dispatched = steps_dispatched(&world);
     assert_eq!(
         dispatched

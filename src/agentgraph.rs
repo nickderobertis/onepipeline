@@ -314,14 +314,14 @@ pub fn recorded_graph_run(recorded: &str, run: &str) -> Result<GraphRunId> {
 
 /// Render the reserved label keys as the `k=v` pairs the CLI takes, each under
 /// [`LABEL_PREFIX`].
+///
+/// `round` is not among them and never is: execution is continuous, so nothing
+/// this crate writes stamps one.
 pub fn label_args(labels: &Labels) -> Vec<String> {
     let mut args = Vec::new();
     let mut push = |key: &str, value: String| args.push(format!("{LABEL_PREFIX}{key}={value}"));
     if let Some(run) = &labels.run_id {
         push("run_id", run.clone());
-    }
-    if let Some(round) = labels.round {
-        push("round", round.to_string());
     }
     if let Some(node) = &labels.node {
         push("node", node.clone());
@@ -347,11 +347,12 @@ pub fn label_args(labels: &Labels) -> Vec<String> {
 /// `extra` beside it rather than being consumed. That is what keeps the two
 /// `run_id`s — the graph run's and this run's — both readable on the one line.
 ///
-/// It is also why a namespaced value this crate cannot read — a `round` that is
-/// not a number — is left rather than reported: nothing is dropped, because the
-/// value stays under its own key exactly as it arrived. The envelope's *own*
-/// boundary is [`GraphRun::events`], which parses the line or skips it; a label
-/// the schema does not name has already crossed it.
+/// It is also why a namespaced key this crate no longer reads — the retired
+/// `round`, which an older build's envelopes carry — is left rather than
+/// reported: nothing is dropped, because the value stays under its own key
+/// exactly as it arrived. The envelope's *own* boundary is
+/// [`GraphRun::events`], which parses the line or skips it; a label the schema
+/// does not name has already crossed it.
 pub fn adopt_labels(labels: &mut Labels) {
     let stamped = |key: &str| {
         labels
@@ -360,15 +361,13 @@ pub fn adopt_labels(labels: &mut Labels) {
             .and_then(|value| value.as_str())
             .map(str::to_string)
     };
-    let (run, round, node, step, persona) = (
+    let (run, node, step, persona) = (
         stamped("run_id"),
-        stamped("round"),
         stamped("node"),
         stamped("step"),
         stamped("persona"),
     );
     labels.run_id = labels.run_id.take().or(run);
-    labels.round = labels.round.or_else(|| round.and_then(|r| r.parse().ok()));
     labels.node = labels.node.take().or(node);
     labels.step = labels.step.take().or(step);
     labels.persona = labels.persona.take().or(persona);
@@ -1734,7 +1733,9 @@ mod tests {
         labels
             .extra
             .insert("onepipeline.node".into(), "build".into());
-        labels.extra.insert("onepipeline.round".into(), "2".into());
+        labels
+            .extra
+            .insert("onepipeline.step".into(), "implement".into());
         let produced = oneagentgraph::event::Envelope {
             v: 1,
             ts: "2026-08-13T09:15:00.123Z".into(),
@@ -1764,7 +1765,7 @@ mod tests {
         );
         // Not a vacuous comparison: the enrichment both paths apply really ran.
         assert_eq!(in_process.labels.node.as_deref(), Some("build"));
-        assert_eq!(in_process.labels.round, Some(2));
+        assert_eq!(in_process.labels.step.as_deref(), Some("implement"));
     }
 
     /// A reset reaches the run's own signal directory, under the name the
@@ -1929,6 +1930,9 @@ mod tests {
     fn only_the_reserved_labels_the_contract_names_are_rendered_and_each_is_namespaced() {
         let labels = Labels {
             run_id: Some("demo".into()),
+            // Set, and deliberately not rendered: the key is retired, so a
+            // value that reached this type from an older record must not be
+            // sent on as a label the contract no longer names.
             round: Some(2),
             node: Some("build".into()),
             step: Some("implement".into()),
@@ -1939,7 +1943,6 @@ mod tests {
             label_args(&labels),
             vec![
                 "onepipeline.run_id=demo",
-                "onepipeline.round=2",
                 "onepipeline.node=build",
                 "onepipeline.step=implement",
                 "onepipeline.persona=engineer",
@@ -1955,11 +1958,10 @@ mod tests {
     fn every_label_this_crate_sends_is_one_oneagentgraph_accepts() {
         let labels = Labels {
             run_id: Some("demo".into()),
-            round: Some(2),
             node: Some("build".into()),
             step: Some("implement".into()),
             persona: Some("engineer".into()),
-            extra: serde_json::Map::new(),
+            ..Labels::default()
         };
         for arg in label_args(&labels) {
             let parsed = oneagentgraph::run::parse_label(&arg)
@@ -1995,7 +1997,6 @@ mod tests {
             Some("node-scope-1786304152340-19"),
             "the graph run's own id was overwritten"
         );
-        assert_eq!(labels.round, Some(2));
         assert_eq!(labels.node.as_deref(), Some("build"));
         assert_eq!(labels.step.as_deref(), Some("implement"));
         assert_eq!(labels.persona.as_deref(), Some("engineer"));
@@ -2003,6 +2004,10 @@ mod tests {
             labels.extra["onepipeline.run_id"], "demo",
             "the namespaced copy is what tells the two runs apart"
         );
+        // The retired key is neither read nor dropped: an older build's
+        // envelopes carry it, and it stays exactly where it arrived.
+        assert_eq!(labels.round, None, "a retired label was adopted");
+        assert_eq!(labels.extra["onepipeline.round"], "2");
     }
 
     #[test]
