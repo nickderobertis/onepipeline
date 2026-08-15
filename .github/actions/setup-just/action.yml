@@ -1,0 +1,33 @@
+name: Set up just
+description: Restore a pinned just binary, or build it from crates.io on a cache miss
+
+# Repository-local rather than a marketplace action: a required check that
+# downloads a third-party action at run time is down whenever that download is,
+# and an infrastructure outage on a release-blocking pull request reads as a
+# broken change. Ported from onevcs's action of the same name — same cache key,
+# same locked cold-cache build, same exact-version check — so the two
+# repositories cannot drift into different notions of "set up just".
+
+runs:
+  using: composite
+  steps:
+    # The version is part of the immutable key: once one run has built this exact
+    # binary, a crates.io outage cannot take later required checks down. OS and
+    # architecture keep native executables from crossing runner boundaries.
+    - name: Restore just
+      id: cache
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/bin/just
+          ~/.cargo/bin/just.exe
+        key: just-${{ runner.os }}-${{ runner.arch }}-1.53.0
+    - name: Install just from crates.io
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      # rust-cache may have restored a different `just` into Cargo's bin dir.
+      # A miss in this action's versioned cache must replace it deterministically.
+      run: cargo install just --locked --version 1.53.0 --force
+    - name: Verify just is available
+      shell: bash
+      run: test "$(just --version)" = "just 1.53.0"
