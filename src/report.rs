@@ -55,7 +55,8 @@ pub const REPORT_PATH: &str = "report_path";
 /// The most of a report this run copies into its own storage.
 ///
 /// A bound rather than a promise about size: the copy happens on the engine's
-/// single-writer thread while a round is converging, and a producer that named
+/// single-writer thread, on the reconcile pass that ingests the settlement, and
+/// that thread is what drives every other node in the run — so a producer that named
 /// something enormous must not be able to stall it or fill the runs root. Well
 /// past a real report, which is a transcript and its verdicts.
 pub const MAX_REPORT_BYTES: u64 = 32 * 1024 * 1024;
@@ -540,7 +541,7 @@ mod tests {
     }
 
     /// A report past the bound is refused rather than copied: the copy happens
-    /// on the engine's single-writer thread, mid-round.
+    /// on the engine's single-writer thread, mid-pass.
     #[test]
     fn ingest_refuses_a_report_past_its_bound() {
         let root = scratch("oversize");

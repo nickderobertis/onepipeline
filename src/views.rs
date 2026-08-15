@@ -176,7 +176,7 @@ impl RunView {
         let mut events = crate::journal::read(&paths.journal());
         crate::journal::merge_order(&mut events);
         let mut state = projection::fold(&events);
-        // A view resolves cross-DAG edges the same way the round does, so a
+        // A view resolves cross-DAG edges the same way the loop does, so a
         // consumer this run is about to dispatch is not reported blocked to the
         // person deciding whether to intervene. Reading only: rendering a run
         // records nothing about it.

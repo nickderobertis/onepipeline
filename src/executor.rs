@@ -76,7 +76,7 @@ pub struct DispatchRequest {
     /// The task prose.
     pub task: String,
     /// Where in the run this dispatch sits. The reserved keys are `run_id`,
-    /// `round`, `node`, `step`, and `persona`.
+    /// `node`, `step`, and `persona`.
     pub labels: Labels,
     /// The per-node controls this dispatch runs under.
     ///
@@ -104,9 +104,9 @@ pub enum WorkspaceSpec {
 
 /// The cooperative cancellation signal a [`DispatchRequest`] carries.
 ///
-/// Shared rather than copied: the round raises it on one side while the dispatch
-/// observes it on the other, which is what makes a `drop`, a `retry`, or a
-/// spent round budget stop in-flight work without killing it.
+/// Shared rather than copied: the engine's loop raises it on one side while the
+/// dispatch observes it on the other, which is what makes a `drop`, a `retry`,
+/// or a `stop` end in-flight work without killing it.
 #[derive(Debug, Clone, Default)]
 pub struct CancellationToken(Arc<AtomicBool>);
 
