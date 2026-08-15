@@ -457,6 +457,158 @@ fn platform_process_may_be_live(pid: u32) -> bool {
     waited != WAIT_OBJECT_0
 }
 
+/// What a host says about when one process started, kept as the opaque thing it
+/// is.
+///
+/// A newtype rather than a `String` because there is exactly one operation on
+/// it — asking whether a *recorded* token is this same process's — and every
+/// other thing a string invites is a bug: it is not a time to parse, not an
+/// order to sort by, and not text to render. The one comparison also carries the
+/// rule that makes it a proof, which a bare `==` between two strings does not:
+/// an **empty** recorded token never matches. Empty is what a lock written
+/// before this field existed carries, and what a host that would not answer
+/// leaves behind, and reading either as agreement would let two absences prove
+/// each other.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartToken(String);
+
+impl StartToken {
+    /// The token as a record on disk carries it.
+    pub fn recorded(&self) -> &str {
+        &self.0
+    }
+
+    /// Whether a token recorded earlier is this same process's.
+    ///
+    /// The empty one is never anybody's, for the reason on the type.
+    pub fn matches(&self, recorded: &str) -> bool {
+        !recorded.is_empty() && self.0 == recorded
+    }
+}
+
+/// When a process started, as an opaque token this host can compare a later
+/// reading against.
+///
+/// The half of a liveness proof a pid alone cannot give. A pid is reused, so a
+/// record naming one is evidence about the process that took it only while that
+/// process is still the one holding it — and a record that has been sitting on
+/// disk for two days is exactly where that stops being true. Recorded beside the
+/// pid and compared for equality afterwards: the same host, asking the same way,
+/// gets the same answer for the same process and a different one for its
+/// successor.
+///
+/// Opaque on purpose — never parsed, never ordered, never rendered as a time.
+/// What makes it a proof is that two readings agree, not what either one says.
+///
+/// `None` is "this host would not say", which is **neither** verdict: a caller
+/// has an unproven row rather than a live one or a dead one, and reporting it as
+/// either is the misreading this exists to stop.
+pub fn process_start_token(pid: u32) -> Option<StartToken> {
+    if pid == 0 {
+        return None;
+    }
+    platform_process_start_token(pid).map(StartToken)
+}
+
+/// Through `ps`, for the same reason [`process_table`] is: Linux has `/proc` and
+/// macOS does not, and a second implementation is a platform fixed in only one
+/// of them. `lstart` is the process's own start time, which the kernel fixes
+/// when the process is created and nothing afterwards changes.
+///
+/// Read strictly. A `ps` that cannot run, exits non-zero, or writes bytes this
+/// cannot decode is not an answer, and neither is an empty line — a token
+/// nothing produced would compare equal to another one nothing produced, which
+/// would make two different processes prove each other.
+#[cfg(unix)]
+fn platform_process_start_token(pid: u32) -> Option<String> {
+    let listed = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "lstart="])
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !listed.status.success() {
+        return None;
+    }
+    let token = String::from_utf8(listed.stdout).ok()?.trim().to_string();
+    (!token.is_empty()).then_some(token)
+}
+
+/// The creation time this platform keeps on the process itself, which is the
+/// same fact `lstart` reports on the other one — asked together with whether the
+/// process has actually exited, because here the creation time alone is not a
+/// liveness proof.
+///
+/// A Windows process *object* outlives the process: while any handle to it is
+/// still open, the pid keeps resolving and `GetProcessTimes` keeps answering
+/// with the creation time of the run that has already ended. So the creation
+/// time on its own says "a process by this pid was created then", not "a process
+/// by this pid is running" — and a caller comparing it against a recorded token
+/// would get a match for a dispatch that died two days ago. That is the exact
+/// misreading this token exists to stop, so the exit is checked here rather than
+/// left to the caller: a signalled handle means the process has terminated, and
+/// a terminated process has no start to give.
+///
+/// The two rights are asked for together and a refusal of either is no answer at
+/// all. Downgrading to whichever right was granted would hand back a creation
+/// time this cannot pair with an exit check, which is the unproven half on its
+/// own — and `None` is already the honest way to say a host will not answer.
+#[cfg(windows)]
+fn platform_process_start_token(pid: u32) -> Option<String> {
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, WAIT_TIMEOUT};
+    use windows_sys::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION,
+        PROCESS_SYNCHRONIZE,
+    };
+
+    // SAFETY: `OpenProcess` returns a null handle on failure and a handle this
+    // function closes on success; no borrowed memory crosses the boundary.
+    let handle = unsafe {
+        OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+            0,
+            pid,
+        )
+    };
+    if handle.is_null() {
+        return None;
+    }
+    let mut created = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let mut exited = created;
+    let mut kernel = created;
+    let mut user = created;
+    // SAFETY: `handle` is a live handle and every out-parameter is a `FILETIME`
+    // this frame owns for the duration of the call.
+    let read = unsafe {
+        GetProcessTimes(
+            handle,
+            &raw mut created,
+            &raw mut exited,
+            &raw mut kernel,
+            &raw mut user,
+        )
+    };
+    // Asked after the times and not before, so the last thing this knows about
+    // the process is that it had not exited. Asked the way `process_may_be_live`
+    // asks it, and for that function's reason: a process handle becomes signalled
+    // when and only when the process has terminated, which `GetExitCodeProcess`
+    // cannot say as cleanly because its "still running" sentinel `STILL_ACTIVE`
+    // is also the genuine exit code 259.
+    //
+    // SAFETY: `handle` is a live handle and a zero timeout returns immediately.
+    let waited = unsafe { WaitForSingleObject(handle, 0) };
+    // SAFETY: the handle came from `OpenProcess` above and is closed once.
+    unsafe { CloseHandle(handle) };
+    // `WAIT_TIMEOUT` — still running — is the only answer that leaves a start to
+    // report. `WAIT_OBJECT_0` is a process that has exited, and `WAIT_FAILED` is
+    // a question this host would not take; neither is a proof of a live process,
+    // and both resolve to "this host will not say".
+    (read != 0 && waited == WAIT_TIMEOUT)
+        .then(|| format!("{}:{}", created.dwHighDateTime, created.dwLowDateTime))
+}
+
 /// Stop the processes this one starts from inheriting *its own* standard
 /// handles.
 ///
@@ -607,6 +759,76 @@ mod tests {
     fn a_reaped_process_is_proved_gone() {
         let dead = reaped_pid();
         assert!(!process_may_be_live(dead), "pid {dead} was reaped");
+    }
+
+    /// The two things a start token has to do to be a proof: give one process
+    /// the same answer twice, and give no answer at all for a pid nothing holds.
+    ///
+    /// The second is what stops a record two days old from proving a live
+    /// dispatch: a pid the kernel has handed to something else answers with that
+    /// process's start, which is not the one the record was written against.
+    #[test]
+    fn a_start_token_is_stable_for_one_process_and_absent_for_a_pid_nothing_holds() {
+        let mine = process_start_token(pid()).expect("this host says when a process started");
+        assert!(!mine.recorded().is_empty());
+        assert_eq!(
+            process_start_token(pid()),
+            Some(mine.clone()),
+            "one process gave two different start tokens"
+        );
+        assert!(mine.matches(mine.recorded()));
+        // The two absences that must never prove each other.
+        assert!(!mine.matches(""));
+        assert!(!mine.matches("some other process's start"));
+        let dead = reaped_pid();
+        assert!(
+            process_start_token(dead).is_none(),
+            "pid {dead} was reaped and still answered with a start"
+        );
+        assert!(process_start_token(0).is_none());
+    }
+
+    /// The same absence, held under the one condition that makes a pid keep
+    /// answering after its process is gone: a handle to the exited process still
+    /// open.
+    ///
+    /// This is where the creation time stops being a liveness proof. Windows
+    /// keeps the process *object* alive for as long as any handle to it is, so
+    /// the pid still resolves and still reports the creation time of the run that
+    /// already ended — a start token that matches the one recorded at launch, for
+    /// a dispatch that is dead. [`reaped_pid`] does not pin that on its own: it
+    /// drops its handle, and whether the pid is still answerable afterwards is
+    /// the operating system's business rather than the test's. Here the handle is
+    /// deliberately held for the whole assertion, so the exited process is
+    /// guaranteed to be openable and the answer has to come from the exit check
+    /// rather than from the pid having gone away.
+    ///
+    /// Not `#[cfg(windows)]`: the contract is the same everywhere — a process
+    /// that has exited has no start to give — and a Unix host that started
+    /// keeping something around after `wait` should fail here too.
+    #[test]
+    fn an_exited_process_gives_no_start_even_while_a_handle_to_it_is_held() {
+        let mut child = std::process::Command::new(
+            std::env::current_exe().expect("the test binary knows its own path"),
+        )
+        .args(["--list", "--format", "terse"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("the test binary starts");
+        let dead = child.id();
+        child.wait().expect("it exits");
+        // `child` is *not* dropped before the assertions: on Windows dropping it
+        // closes the last handle, which is exactly the crutch this test refuses.
+        assert!(
+            process_start_token(dead).is_none(),
+            "pid {dead} has exited and still answered with a start"
+        );
+        assert!(
+            !process_may_be_live(dead),
+            "pid {dead} has exited and still read as live"
+        );
+        drop(child);
     }
 
     /// A stop reaches the leaf, not just the process whose pid it was given.

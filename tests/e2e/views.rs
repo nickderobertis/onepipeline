@@ -775,6 +775,329 @@ fn runs_summarises_every_recorded_run_and_says_whose_it_is() {
         .out_has("done");
 }
 
+/// A directory under the runs root that records no launch is a **rejection**,
+/// and every whole-root view names it.
+///
+/// The reading it replaces: the views listed what they could open and said
+/// nothing at all about the rest, so an operator on a host holding thirty run
+/// roots read `no runs recorded` and took it for an idle machine.
+#[test]
+fn a_run_root_the_views_refuse_is_named_with_its_reason() {
+    let world = World::new("views-skipped");
+    let run = settled(&world, "readable", vec![agent("build", &[])]);
+    // llmlint: ignore-block[tests_mirror_real_usage] a run root with no launch record is a
+    // state of the *filesystem* — a crash between the directory and the record, or a
+    // directory an operator left beside the runs — and no command makes one, which is why
+    // the views met it in the first place. The run beside it is launched through the CLI,
+    // and every claim is read off the CLI.
+    // A run root left half-written: the directory is there and the launch record
+    // that says who owns it is not.
+    std::fs::create_dir_all(world.runs.join("half-written")).expect("a run root with no launch");
+    // And one whose launch record carries a field this build does not accept,
+    // which is the refusal `results` already words: the file, the offending
+    // field, and what was expected.
+    std::fs::create_dir_all(world.runs.join("typo")).expect("a run root");
+    std::fs::write(
+        world.runs.join("typo").join("launch.json"),
+        r#"{"oops": true}"#,
+    )
+    .expect("a launch record this build refuses");
+    // And one whose launch record is there and is not a record at all: absent
+    // and "present as something else" are different things to tell a reader.
+    std::fs::create_dir_all(world.runs.join("impostor").join("launch.json"))
+        .expect("a launch record that is a directory");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    for view in [vec!["runs"], vec!["status"], vec!["goals"]] {
+        world
+            .run(&view)
+            .exited(0)
+            .out_has(&run)
+            .out_has("3 run root(s) skipped")
+            .out_has("half-written")
+            .out_has("launch.json")
+            .out_has("unknown field `oops`")
+            .out_has("is not a file");
+    }
+    // `host` lists dispatches rather than runs, so the run it read is not on it
+    // — but a root it could not read is a dispatch it cannot see, and it says so.
+    world
+        .run(&["host"])
+        .exited(0)
+        .out_has("3 run root(s) skipped")
+        .out_has("half-written");
+}
+
+/// A root whose every run was refused is not a root with nothing in it.
+///
+/// The two used to render identically, and only one of them means there is
+/// nothing running — which is the reading a planner acts on by starting more
+/// work on a machine that is already full.
+#[test]
+fn a_root_whose_every_run_is_refused_does_not_read_as_an_empty_one() {
+    let world = World::new("views-allrefused");
+    // llmlint: ignore-block[tests_mirror_real_usage] the same filesystem state as the
+    // journey above, and for the same reason: no command makes a run root with no launch
+    // record. What is asserted is the CLI's answer to it.
+    std::fs::create_dir_all(world.runs.join("half-written")).expect("a run root with no launch");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    for view in [vec!["runs"], vec!["status"], vec!["goals"]] {
+        let rendered = world.run(&view);
+        rendered
+            .exited(0)
+            .out_has("no run under")
+            .out_has("1 run root(s) skipped")
+            .out_has("half-written");
+        assert!(
+            !rendered.stdout.contains("no runs recorded"),
+            "a rejected run root was reported as an absence:\n{}",
+            rendered.stdout
+        );
+    }
+}
+
+/// A run another planner owns is not this one's, and `--mine` filtering it out
+/// is not the same fact as a root that could not be read.
+///
+/// The empty view has to say which of the two it met: `no runs recorded` for a
+/// listing nothing matched, and the roots it refused named beside it either way.
+#[test]
+fn mine_filtering_everything_out_is_not_the_same_as_a_root_that_could_not_be_read() {
+    let world = World::new("views-mine-skipped");
+    // The run belongs to another planner's session, so `--mine` has nothing to
+    // list — while the root beside it is still one this build refused.
+    let stranger = world.as_session("session-other");
+    settled(&stranger, "theirs", vec![agent("build", &[])]);
+    // llmlint: ignore-block[tests_mirror_real_usage] as above: a run root with no launch
+    // record is a filesystem state no command produces. The run beside it is another
+    // planner's, launched through the CLI as that planner would.
+    std::fs::create_dir_all(world.runs.join("half-written")).expect("a run root with no launch");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    let rendered = world.run(&["runs", "--mine"]);
+    rendered
+        .exited(0)
+        // A run was read; it was simply not this session's.
+        .out_has("no runs recorded")
+        .out_has("1 run root(s) skipped")
+        .out_has("half-written");
+    assert!(
+        !rendered.stdout.contains("no run under"),
+        "a run that read was reported as one that could not:\n{}",
+        rendered.stdout
+    );
+}
+
+/// A stopped run's dispatches are not live dispatches.
+///
+/// The one proof that does not depend on a process at all: the run's own ledger
+/// records that it was ended, and a row rendered from it afterwards claims a
+/// worker the stop was aimed at.
+#[test]
+fn host_never_renders_a_dispatch_of_a_run_that_was_stopped() {
+    let world = World::new("views-stopped");
+    world.script("build.wait", "hold");
+    let path = world.plan("halted", &plan_of("halted", vec![agent("build", &[])]));
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+    world.until("the dispatch to be in flight", |world| {
+        !world.events_of("halted", "node-dispatched").is_empty()
+    });
+    world.run(&["host"]).exited(0).out_has("build");
+
+    world.run(&["stop", "halted"]).exited(0);
+    world
+        .run(&["host"])
+        .exited(0)
+        .out_has("no live dispatches")
+        .out_has("1 stale registry entry ignored")
+        .out_has("halted/build")
+        .out_has("the run was stopped");
+    world.release("build.go");
+}
+
+// llmlint: ignore-block[tests_mirror_real_usage] one fact is written by hand: the pid
+// inside the run's ownership lock. That is a driver that died without releasing what it
+// held, and no command produces it on demand — one that could would be one that kills a
+// live driver. The run is real, its dispatch is genuinely in flight, and every claim
+// afterwards is read off the CLI.
+/// A `host` row is a claim that a dispatch exists **now**, and it is acted on —
+/// an operator leaves the work alone, or ends it. So the row is rendered only
+/// while this host can prove the run behind it is still being driven: the
+/// ownership lock's pid, and the start token that says the pid is still the
+/// process that took it.
+#[test]
+fn host_never_renders_a_dispatch_whose_driver_this_host_can_prove_is_gone() {
+    let world = World::new("views-ghosted");
+    world.script("build.wait", "hold");
+    let path = world.plan("ghosted", &plan_of("ghosted", vec![agent("build", &[])]));
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+    world.until("the dispatch to be in flight", |world| {
+        !world.events_of("ghosted", "node-dispatched").is_empty()
+    });
+
+    // A driver is holding the run, so the dispatch is exactly what the row says.
+    world.run(&["host"]).exited(0).out_has("build");
+
+    // Now the driver dies without releasing what it held, which is the only
+    // thing that changes.
+    let lock = world.run_file("ghosted", "owner.lock");
+    // The lock exactly as the live driver took it, kept so each answer below
+    // changes one fact about it and nothing else.
+    let held = world.run_json("ghosted", "owner.lock");
+    let rewrite = |edit: &dyn Fn(&mut serde_json::Value)| {
+        let mut record = held.clone();
+        edit(&mut record);
+        std::fs::write(&lock, record.to_string()).expect("the lock is rewritten");
+    };
+    rewrite(&|record| record["pid"] = serde_json::json!(reaped_pid()));
+
+    world
+        .run(&["host"])
+        .exited(0)
+        .out_has("no live dispatches")
+        .out_has("1 stale registry entry ignored")
+        .out_has("ghosted/build")
+        .out_has("is gone")
+        // And the scope of the claim, because this scan cannot see a run
+        // recorded under another runs root.
+        .out_has(&world.runs.display().to_string());
+
+    // A pid the host has since handed to something else: the pid is live and it
+    // is not the process that took the lock. Proved stale, for a different
+    // reason — and the reason a pid alone was never enough.
+    rewrite(&|record| {
+        record["started"] = serde_json::json!("the process that took it, which is not this one");
+    });
+    world
+        .run(&["host"])
+        .exited(0)
+        .out_has("1 stale registry entry ignored")
+        .out_has("different process");
+
+    // The three answers this host does not have. None of them renders as a live
+    // dispatch, and none is dropped either: a dispatch that may be running is
+    // the other error, and the row says outright that nothing backs it.
+    let unproven = |why: &str| {
+        let rendered = world.run(&["host"]);
+        rendered.exited(0).out_has("UNPROVEN").out_has(why);
+        assert!(
+            !rendered.stdout.contains("stale registry"),
+            "an answer this host does not have was reported as a proof:\n{}",
+            rendered.stdout
+        );
+    };
+    // A lock taken on another machine, where a pid means nothing.
+    rewrite(&|record| record["host"] = serde_json::json!("some-other-host"));
+    unproven("some-other-host");
+    // A lock from a build that predates the start token.
+    rewrite(&|record| {
+        record
+            .as_object_mut()
+            .expect("a lock record")
+            .remove("started");
+    });
+    unproven("no start token");
+    // A lock this build cannot read at all. Still a claim — it is what stops a
+    // second writer — but it proves nothing about a *dispatch*, and a row is a
+    // claim that one exists.
+    std::fs::write(&lock, "not json at all").expect("the lock is rewritten");
+    unproven("cannot be read");
+    // A lock that is there and is not a lock: absent is a proof that nothing
+    // drives the run, and this is not absence.
+    std::fs::remove_file(&lock).expect("the lock is removed");
+    std::fs::create_dir_all(&lock).expect("a lock that is a directory");
+    unproven("is not a file");
+    std::fs::remove_dir_all(&lock).expect("the lock is removed");
+
+    // And with nothing holding the run at all, nothing is driving it.
+    world
+        .run(&["host"])
+        .exited(0)
+        .out_has("no live dispatches")
+        .out_has("1 stale registry entry ignored")
+        .out_has("nothing holds the run's ownership lock");
+    world.release("build.go");
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+/// A pid this host can prove is gone: a real process, started and reaped.
+///
+/// Picked out of the air it would not be one — the kernel may have handed it to
+/// something else — and the whole journey above turns on the difference.
+fn reaped_pid() -> u32 {
+    let mut child = std::process::Command::new(crate::harness::binary())
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("the binary starts");
+    let pid = child.id();
+    child.wait().expect("it exits");
+    pid
+}
+
+/// A node that failed because its identity chains ran out says which side asked
+/// and which identity refused.
+///
+/// Both sides, because that is the fact: a two-party member runs one chain per
+/// side and they prefer different identities, so a fix aimed at the wrong one
+/// changes nothing and the run fails the same way again.
+#[test]
+fn a_provider_refusal_names_the_side_and_the_identity_in_results_and_status() {
+    let world = World::new("views-refused");
+    world.script(
+        "build.refused",
+        // The judge side's chain refuses twice over, which is one fact recorded
+        // twice rather than two facts.
+        "agent claude-code quota\njudge codex rate_limit\njudge codex rate_limit\n",
+    );
+    world.script("build.fail", "1");
+    let run = settled(&world, "refused", vec![agent("build", &[])]);
+
+    world
+        .run(&["results", &run])
+        .exited(0)
+        .out_has("failed")
+        .out_has("provider: the agent side: identity 'claude-code' refused (quota)")
+        .out_has(
+            "provider: the judge side: identity 'codex' refused (rate_limit), recorded 2 times",
+        );
+
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("build: failed —")
+        .out_has("the judge side")
+        .out_has("codex");
+}
+
+/// A single-sided member has one side and stamps no role, so the member it ran
+/// under is what names the side. It is never given one it did not carry.
+#[test]
+fn a_refusal_that_names_no_side_is_attributed_to_its_member_rather_than_invented() {
+    let world = World::new("views-refused-side");
+    world.script("build.refused", "- codex auth\n");
+    world.script("build.fail", "1");
+    let run = settled(&world, "sideless", vec![agent("build", &[])]);
+
+    let results = world.run(&["results", &run]);
+    results
+        .exited(0)
+        .out_has("provider: member 'worker': identity 'codex' refused (auth)");
+    for invented in ["the agent side", "the judge side"] {
+        assert!(
+            !results.stdout.contains(invented),
+            "a side the record never carried was invented:\n{}",
+            results.stdout
+        );
+    }
+}
+
 #[test]
 fn a_view_of_a_run_with_no_events_still_renders() {
     let world = World::new("views-empty");
