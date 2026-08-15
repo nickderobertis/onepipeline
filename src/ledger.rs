@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::filter::Filters;
 use crate::sys;
 
 /// The environment variable that moves the runs root.
@@ -282,6 +283,17 @@ pub struct LaunchRecord {
     /// How many times a fresh driver has been attached by `adopt`.
     #[serde(default)]
     pub adoptions: u32,
+    /// What this launch said about its run's events: the two source filters it
+    /// passes through, and the read-time profiles it defines.
+    ///
+    /// Retained here rather than derived per command because both halves outlive
+    /// the launching process: `adopt` replays the source filters onto the graphs
+    /// it restarts, and every later `next` and `monitor` — different processes,
+    /// with no handle on the launch — reads through the profiles this run was
+    /// given. Omitted when empty, like every other field added to this record
+    /// after it shipped, so a build that predates it still reads what it wrote.
+    #[serde(default, skip_serializing_if = "Filters::is_empty")]
+    pub filters: Filters,
 }
 
 impl LaunchRecord {
@@ -524,6 +536,104 @@ mod tests {
         dir
     }
 
+    /// The record a launch that declared no filters writes is the record every
+    /// build before the block existed wrote.
+    ///
+    /// Checked at the wire rather than through the types: `Filters::default()`
+    /// and an explicit `"filters": {}` are the same value in Rust whatever the
+    /// serializer does, but writing the empty block out would make a record this
+    /// build wrote unreadable to a build that predates the field — which is the
+    /// one thing an added field must not do — and would have every reader
+    /// branching on a key that is always present and usually meaningless.
+    #[test]
+    fn a_launch_that_declared_no_filters_writes_the_record_it_always_wrote() {
+        let record = LaunchRecord {
+            filters: Filters::default(),
+            ..a_record()
+        };
+        let text = serde_json::to_string(&record).expect("it serialises");
+        assert!(
+            !text.contains("filters"),
+            "an empty filters block reached the record: {text}"
+        );
+        assert_eq!(
+            serde_json::from_str::<LaunchRecord>(&text).expect("it re-parses"),
+            record
+        );
+
+        // Which is the same thing as saying a record written *before* the field
+        // existed still reads, as the launch it was: nothing filtered, and the
+        // shipped profiles to read through. Spelled as its own document rather
+        // than inferred from the omission above, because that is the file on
+        // disk this build has to keep opening.
+        let older = serde_json::json!({
+            "run_id": "demo",
+            "plan": "plan.json",
+            "node_graph": "graphs/node-scope.yaml",
+            "launcher": "claude-code",
+            "session": "a-session",
+            "pid": 1,
+            "host": "h",
+            "started_at": "2026-08-15T00:00:00.000Z",
+            "heartbeat_interval": 1800,
+        });
+        let read: LaunchRecord =
+            serde_json::from_value(older).expect("a record predating the field still reads");
+        assert!(read.filters.is_empty());
+    }
+
+    /// A record that *did* declare filters carries every one of them back.
+    #[test]
+    fn a_launchs_filters_survive_the_record_they_are_retained_in() {
+        let declared = Filters {
+            agentgraph: Some(
+                crate::filter::EventFilter::parse(r#"{"exclude": [{"kind": "turn-*"}]}"#)
+                    .expect("a filter"),
+            ),
+            vcs: Some(
+                crate::filter::EventFilter::parse(r#"{"include": [{"kind": "gate-*"}]}"#)
+                    .expect("a filter"),
+            ),
+            profiles: [(
+                "planner".to_string(),
+                crate::filter::EventFilter::parse(r#"{"include": [{"source": "pipeline"}]}"#)
+                    .expect("a filter"),
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let record = LaunchRecord {
+            filters: declared.clone(),
+            ..a_record()
+        };
+        let text = serde_json::to_string(&record).expect("it serialises");
+        let read: LaunchRecord = serde_json::from_str(&text).expect("it re-parses");
+        assert_eq!(read.filters, declared);
+        assert_eq!(read, record);
+    }
+
+    /// A launch record with nothing said about its events.
+    fn a_record() -> LaunchRecord {
+        LaunchRecord {
+            run_id: "demo".into(),
+            plan: PathBuf::from("plan.json"),
+            dir: PathBuf::from("/tmp/launch"),
+            graph: String::new(),
+            graph_run: String::new(),
+            node_graph: "graphs/node-scope.yaml".into(),
+            launcher: "claude-code".into(),
+            session: "a-session".into(),
+            pid: 1,
+            host: "h".into(),
+            started_at: sys::now_rfc3339(),
+            heartbeat_interval: 1_800,
+            dag_sets: Vec::new(),
+            node_sets: Vec::new(),
+            adoptions: 0,
+            filters: Filters::default(),
+        }
+    }
+
     /// A run's journal has several appenders at once — the launcher relaying its
     /// driver's stream, and the engine loop's own writer — so a record has to reach the
     /// file whole. Written as concurrent appenders because that is the only way
@@ -664,6 +774,7 @@ mod tests {
             dag_sets: Vec::new(),
             node_sets: Vec::new(),
             adoptions: 0,
+            filters: Filters::default(),
         };
         assert!(!record.owned_by(sys::UNKNOWN_LAUNCHER));
         assert_eq!(record.owner_label("anyone"), "[unknown]");
@@ -687,6 +798,7 @@ mod tests {
             dag_sets: Vec::new(),
             node_sets: Vec::new(),
             adoptions: 0,
+            filters: Filters::default(),
         };
         let label = record.owner_label("mine");
         assert!(!label.contains("secret-session-id"), "{label} leaks the id");

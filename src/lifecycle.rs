@@ -19,6 +19,7 @@ use crate::controls::NodeControls;
 use crate::engine::{self, Message, Settlement};
 use crate::event::{Envelope, Labels};
 use crate::executor::{DispatchRequest, Executor, WorkspaceSpec};
+use crate::filter::EventFilter;
 use crate::graph::NodeStatus;
 use crate::plan::{Node, NodeKind, Step};
 
@@ -37,6 +38,7 @@ pub fn execute(
     node: &Node,
     cancel: &crate::executor::CancellationToken,
     tx: &Sender<Message>,
+    vcs_filter: Option<&EventFilter>,
 ) -> Settlement {
     let Some(request) = crate::vcs::request_for(node) else {
         return Settlement {
@@ -158,11 +160,11 @@ pub fn execute(
         if stream.is_none() {
             if let Some(token) = &session {
                 worktree = crate::vcs::worktree_of(token);
-                stream = crate::vcs::follow(token, relay_into(tx, whose.clone()));
+                stream = crate::vcs::follow(token, vcs_filter, relay_into(tx, whose.clone()));
             }
         }
         if drained.settlement.status != NodeStatus::Done {
-            end_session(stream, tx, session.as_deref(), &whose);
+            end_session(stream, tx, session.as_deref(), &whose, vcs_filter);
             return Settlement {
                 branch,
                 completed_steps: completed,
@@ -194,7 +196,7 @@ pub fn execute(
         &token,
         branch,
     );
-    end_session(stream, tx, Some(&token), &whose);
+    end_session(stream, tx, Some(&token), &whose, vcs_filter);
     settlement
 }
 
@@ -385,12 +387,13 @@ fn end_session(
     tx: &Sender<Message>,
     token: Option<&str>,
     node: &Labels,
+    filter: Option<&EventFilter>,
 ) {
     close(token);
     // `None` from either side is the whole stream still to read: no follow was
     // started, or one was and relayed nothing.
     let followed_through = stream.and_then(crate::vcs::Follower::finish);
-    relay_session_events(tx, token, node, followed_through);
+    relay_session_events(tx, token, node, followed_through, filter);
 }
 
 /// Fold the part of the session's stream nothing has relayed into the merged one.
@@ -406,10 +409,15 @@ fn relay_session_events(
     token: Option<&str>,
     node: &Labels,
     followed_through: Option<u64>,
+    filter: Option<&EventFilter>,
 ) {
     let Some(token) = token else { return };
     let relay = relay_into(tx, node.clone());
-    for envelope in beyond(crate::vcs::events(token), followed_through) {
+    // The same filter the follow was opened with: the read-once fallback covers
+    // the tail of the *same* stream, so a run that filtered what it followed and
+    // not what it caught up on would relay events it said it did not want, for
+    // no reason but which side of a settlement they landed on.
+    for envelope in beyond(crate::vcs::events(token, filter), followed_through) {
         relay(envelope);
     }
 }
@@ -552,6 +560,7 @@ mod tests {
             &node,
             &crate::executor::CancellationToken::new(),
             &tx,
+            None,
         );
         assert_eq!(settlement.status, NodeStatus::Failed);
         assert_eq!(settlement.outcome.as_deref(), Some("invalid-node"));

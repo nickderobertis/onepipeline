@@ -283,7 +283,7 @@ fn a_streams_own_order_survives_a_clock_that_disagrees_with_it() {
         .run(&["start", &path.to_string_lossy(), "--attach"])
         .exited(0);
 
-    let rendered = world.run(&["monitor", "stepped"]);
+    let rendered = world.run(&["monitor", "stepped", "--all"]);
     rendered.exited(0);
     let at = |kind: &str| {
         rendered
@@ -317,7 +317,7 @@ fn two_records_of_one_stream_claiming_one_sequence_keep_arriving_order() {
         .run(&["start", &path.to_string_lossy(), "--attach"])
         .exited(0);
 
-    let rendered = world.run(&["monitor", "twice"]);
+    let rendered = world.run(&["monitor", "twice", "--all"]);
     rendered.exited(0);
     let at = |text: &str| {
         rendered

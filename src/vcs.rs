@@ -36,6 +36,7 @@ use onevcs::{
 
 use crate::error::{Error, Result};
 use crate::event::Envelope;
+use crate::filter::EventFilter;
 
 fn sibling(message: impl Into<String>) -> Error {
     Error::Sibling {
@@ -200,8 +201,15 @@ pub fn session_close(token: &str) -> Result<Session> {
 /// happen — the node's own settlement stands — but a silent gap in the merged
 /// store is what makes a later reader think nothing happened, so it is said out
 /// loud.
-fn opened(token: &str) -> Option<EventStream> {
-    match EventStream::open(&SessionToken(token.to_owned())) {
+fn opened(token: &str, filter: Option<&EventFilter>) -> Option<EventStream> {
+    let filter = match filter.map(sibling_filter).transpose() {
+        Ok(filter) => filter.unwrap_or_default(),
+        Err(error) => {
+            eprintln!("onepipeline: cannot follow session {token}'s events: {error}");
+            return None;
+        }
+    };
+    match EventStream::open_filtered(&SessionToken(token.to_owned()), filter) {
         Ok(stream) => Some(stream),
         Err(error) => {
             eprintln!("onepipeline: cannot read session {token}'s events: {error}");
@@ -228,11 +236,29 @@ fn next_batch(stream: &mut EventStream, token: &str) -> Vec<Envelope> {
 }
 
 /// A session's own event stream, for relaying into the merged one.
-pub fn events(token: &str) -> Vec<Envelope> {
-    let Some(mut stream) = opened(token) else {
+pub fn events(token: &str, filter: Option<&EventFilter>) -> Vec<Envelope> {
+    let Some(mut stream) = opened(token, filter) else {
         return Vec::new();
     };
     next_batch(&mut stream, token)
+}
+
+/// This crate's filter, as the sibling's own type.
+///
+/// The filter is handed to `onevcs` as a **value** rather than as a spec each
+/// source parses again, which is what its filtered constructor takes — so this
+/// is the one conversion, and it crosses at the wire shape the two types share
+/// by contract rather than field by field, so a field one of them grows and the
+/// other has not is a refusal here rather than a value silently dropped.
+fn sibling_filter(filter: &EventFilter) -> Result<onevcs::EventFilter> {
+    let document = serde_json::to_string(filter).map_err(|error| Error::Sibling {
+        tool: "onevcs",
+        message: format!("rendering the event filter: {error}"),
+    })?;
+    serde_json::from_str(&document).map_err(|error| Error::Sibling {
+        tool: "onevcs",
+        message: format!("`onevcs` refused the event filter: {error}"),
+    })
 }
 
 /// One of the sibling's envelopes, as one of this crate's.
@@ -333,8 +359,12 @@ const FOLLOW_POLL: Duration = Duration::from_millis(20);
 /// `None` when the session's stream cannot be opened at all. That is a
 /// publication nobody is watching rather than a publication with no record, so
 /// it is said out loud and the caller reads the stream once instead.
-pub fn follow(token: &str, sink: Box<dyn Fn(Envelope) + Send>) -> Option<Follower> {
-    let mut stream = opened(token)?;
+pub fn follow(
+    token: &str,
+    filter: Option<&EventFilter>,
+    sink: Box<dyn Fn(Envelope) + Send>,
+) -> Option<Follower> {
+    let mut stream = opened(token, filter)?;
     let session = SessionToken(token.to_owned());
 
     let progress = Arc::new(Progress::default());
@@ -740,7 +770,7 @@ mod tests {
                 record(torn, 2, "push")
             ),
         );
-        let mut stream = opened(torn).expect("the stream opens");
+        let mut stream = opened(torn, None).expect("the stream opens");
         assert_eq!(
             seqs(&next_batch(&mut stream, torn)),
             vec![1, 2],
@@ -772,7 +802,7 @@ mod tests {
         let partial = record(cut, 2, "push");
         write(cut, format!("{whole}\n{}", &partial[..20]));
         assert!(
-            events(cut).is_empty(),
+            events(cut, None).is_empty(),
             "the typed reader now hands back the whole records before a torn one; \
              narrow this assertion to the torn record alone"
         );
@@ -780,7 +810,7 @@ mod tests {
         // And a stream nothing wrote at all is not an empty one: it is refused
         // by name, which is what stops a token nobody opened reading as a
         // session that recorded nothing.
-        assert!(events("s-neverwritten").is_empty());
+        assert!(events("s-neverwritten", None).is_empty());
 
         let _ = std::fs::remove_dir_all(&root);
     }

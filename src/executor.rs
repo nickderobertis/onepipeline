@@ -31,7 +31,7 @@ use std::sync::Arc;
 use oneagentgraph::config::ConfigRef;
 use onevcs::SessionRequest;
 
-use crate::agentgraph::{GraphOutput, GraphRun};
+use crate::agentgraph::{GraphOutput, GraphRun, Launch};
 use crate::controls::{NodeControls, WORKER_MEMBER};
 use crate::error::{Error, Result};
 use crate::event::{Envelope, Labels};
@@ -231,15 +231,24 @@ impl Executor for LocalExecutor {
         };
         // Relayed: this dispatch is read turn by turn into the merged store.
         let node_sets = node_sets(&req.labels, &req.controls)?;
-        let run = GraphRun::start(
-            &req.graph.0,
-            &req.task,
-            &dir,
-            &req.labels,
-            &[],
-            &node_sets,
-            GraphOutput::Relayed,
-        )?;
+        // Every node-scope launch a run starts is one of that run's
+        // `oneagentgraph` sources, so it carries the same source filter the
+        // observer graph does. Read from the launch record beside the overrides
+        // above, for the same reason: the labels are what identify the run, and
+        // this is the last responsible moment.
+        let filters = launched_with(&req.labels)?
+            .map(|record| record.filters)
+            .unwrap_or_default();
+        let run = GraphRun::start(&Launch {
+            graph: &req.graph.0,
+            task: &req.task,
+            dir: &dir,
+            labels: &req.labels,
+            env: &[],
+            sets: &node_sets,
+            filter: filters.agentgraph.as_ref(),
+            output: GraphOutput::Relayed,
+        })?;
         Ok(Box::new(LocalDispatch {
             run,
             cancel: req.cancel,
@@ -257,13 +266,7 @@ impl Executor for LocalExecutor {
 /// `--node-set` is run-wide, and a control the plan wrote against one node is the
 /// more specific of the two.
 fn node_sets(labels: &Labels, controls: &NodeControls) -> Result<Vec<String>> {
-    let mut sets = match labels.run_id.as_deref() {
-        Some(run) => {
-            let paths = crate::ledger::RunPaths::under(&crate::ledger::runs_root(), run);
-            crate::ledger::read_json::<crate::ledger::LaunchRecord>(&paths.launch())?.node_sets
-        }
-        None => Vec::new(),
-    };
+    let mut sets = launched_with(labels)?.map_or_else(Vec::new, |record| record.node_sets);
     if let Some(persona) = &labels.persona {
         sets.push(format!("members.{WORKER_MEMBER}.persona={persona}"));
     }
@@ -271,6 +274,19 @@ fn node_sets(labels: &Labels, controls: &NodeControls) -> Result<Vec<String>> {
     // validation, so no path composes a launch that drops one on the floor.
     sets.extend(controls.overrides().map_err(Error::Invalid)?);
     Ok(sets)
+}
+
+/// The launch record of the run this dispatch belongs to, when it belongs to one.
+///
+/// A dispatch built outside a run — the contract's own example, and the seam's
+/// tests — carries no `run_id` and so has no launch to read: it takes the
+/// defaults rather than being refused, because nothing about it is wrong.
+fn launched_with(labels: &Labels) -> Result<Option<crate::ledger::LaunchRecord>> {
+    let Some(run) = labels.run_id.as_deref() else {
+        return Ok(None);
+    };
+    let paths = crate::ledger::RunPaths::under(&crate::ledger::runs_root(), run);
+    crate::ledger::read_json::<crate::ledger::LaunchRecord>(&paths.launch()).map(Some)
 }
 
 /// One dispatch running on this machine.

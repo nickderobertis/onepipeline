@@ -30,9 +30,29 @@ resolver = "2"
 #
 # `tests/e2e/dispatch.rs` holds the first end to end: it fails against 0.2.11
 # rather than merely reading differently.
+#
+# **Pinned to a git revision, and carrying a `version` beside it.** The filter
+# grammar this crate passes through to both siblings is a *cross-repository*
+# contract with no shared crate, so what must be pinned is the revision each
+# sibling's copy of it was merged at — a registry release is a moving target the
+# moment either repository cuts another. `rev` is what a build resolves; the
+# `version` beside it is what `cargo publish` records, which a git-only
+# dependency would make impossible for a crate that ships on crates.io. The two
+# must name the same release: `7854b19` *is* `oneagentgraph` v0.2.13 and
+# `d3c495d` *is* `onevcs` v0.2.7, each the release commit of the pull request
+# that merged that sibling's filter support (`oneagentgraph` #40, `onevcs` #26).
+# `tests/e2e/dispatch.rs` and `tests/e2e/real_vcs.rs` drive those two surfaces
+# against the real siblings, so a pin moved to a revision without them fails
+# rather than reads differently.
 [workspace.dependencies]
-oneagentgraph = "0.2.12"
-onevcs = "0.2.6"
+oneagentgraph = { git = "https://github.com/nickderobertis/oneagentgraph", rev = "7854b1941b235e05afaa9cbaa69a2daf63de722e", version = "0.2.13" }
+onevcs = { git = "https://github.com/nickderobertis/onevcs", rev = "d3c495d050c5d5e70a56d1fac50b8a0f27150cc8", version = "0.2.7" }
+# The sibling's own test-support crate, from the **same** revision as the library
+# it implements: resolved from the registry instead it would pull a second
+# `onevcs` beside the git one, and `tests/onevcs_seam.rs` — whose whole job is to
+# drive this crate's seam against those providers — would not compile, because
+# the two copies' types are different types.
+onevcs-testing = { git = "https://github.com/nickderobertis/onevcs", rev = "d3c495d050c5d5e70a56d1fac50b8a0f27150cc8", version = "0.1.7" }
 
 [package]
 name = "onepipeline"
@@ -93,9 +113,9 @@ serde_json = { version = "1", features = ["preserve_order"] }
 serde_norway = "0.9"
 thiserror = "2"
 
-# The siblings this crate composes. Both are on crates.io, so they resolve from
-# the registry like any other dependency — no git source, so a clone of this repo
-# builds from the registries alone.
+# The siblings this crate composes, at the workspace's own pins — a git revision
+# each, with the registry version beside it that publishing records. See
+# `[workspace.dependencies]` for why the revision rather than the release.
 oneagentgraph = { workspace = true }
 onevcs = { workspace = true }
 
@@ -127,7 +147,7 @@ windows-sys = { version = "0.61", features = [
 # must stay one: what it implements must never be reachable from a release
 # binary.
 [dev-dependencies]
-onevcs-testing = "0.1.5"
+onevcs-testing = { workspace = true }
 
 [[test]]
 name = "e2e"

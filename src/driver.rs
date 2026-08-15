@@ -22,13 +22,14 @@ use serde_json::json;
 use crate::agentgraph;
 use crate::channel::{Author, ChannelState, Command, Reply, Surface, SurfaceKind};
 use crate::cli::{
-    AttestArgs, ChannelCommand, Cli, OptionalRunArgs, ReplyArgs, RunArgs, RunsArgs, StartArgs,
-    StopArgs, SurfaceArgs, TelemetryArgs, TranscriptArgs, DAG_GRAPH_OFF,
+    AttestArgs, ChannelCommand, Cli, OptionalRunArgs, ReadArgs, ReplyArgs, RunArgs, RunsArgs,
+    StartArgs, StopArgs, SurfaceArgs, TelemetryArgs, TranscriptArgs, DAG_GRAPH_OFF,
 };
 use crate::concurrency::{self, Liveness, State};
 use crate::edits;
 use crate::engine;
 use crate::error::{Error, Result, EXIT_NOTHING_DRIVING, EXIT_QUEUED, EXIT_SUCCESS};
+use crate::filter::{self, EventFilter};
 use crate::graph::{self, GraphState};
 use crate::journal::{self, Journal};
 use crate::ledger::{self, LaunchRecord, RunPaths};
@@ -75,7 +76,9 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
         Verb::Status(args) => report(&args, views::status),
         Verb::Host => report(&OptionalRunArgs { run: None }, views::host),
         Verb::Monitor(args) => {
-            print!("{}", views::monitor(&RunView::open(&resolve(&args.run)?)?));
+            let view = RunView::open(&resolve(&args.run)?)?;
+            let filter = read_filter(&view, &args)?;
+            print!("{}", views::monitor(&view, &filter));
             Ok(EXIT_SUCCESS)
         }
         Verb::Results(args) => {
@@ -85,9 +88,14 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
         Verb::Goals(args) => report(&args, views::goals),
         Verb::Transcript(args) => transcript(&args),
         Verb::Telemetry(args) => report_telemetry(&args),
-        Verb::Drive(args) => {
-            agentgraph::drive(&args.graph, &args.task, &args.dir, &args.labels, &args.sets)
-        }
+        Verb::Drive(args) => agentgraph::drive(
+            &args.graph,
+            &args.task,
+            &args.dir,
+            &args.labels,
+            &args.sets,
+            args.event_filter.as_deref(),
+        ),
     }
 }
 
@@ -232,6 +240,82 @@ fn mint_run_id(plan: &Plan, path: &Path, root: &Path) -> String {
         .unwrap_or(base)
 }
 
+/// The `filters:` block one launch declared, read and checked at its boundary.
+///
+/// The launch config is the base and each flag overrides the part of it that it
+/// names — the two source filters wholesale, and a profile *by name*, so a
+/// config holding a team's five profiles beside a plan can have one of them
+/// replaced for one launch without restating the other four. A launch naming no
+/// config is the same code path with an empty base, which is what makes the two
+/// surfaces the same block rather than two blocks that have to agree.
+///
+/// Every spec is read where the operator wrote it and refused there, with the
+/// offending matcher named — the two source filters because a launch cannot
+/// honour a spec its sources will not take, and the profiles because a profile
+/// only refused at read time would be refused to a planner who did not write it,
+/// long after the launch that did.
+fn declared_filters(args: &StartArgs) -> Result<crate::filter::Filters> {
+    let mut filters = match &args.launch_config {
+        Some(path) => crate::filter::LaunchConfig::load(path)?.filters,
+        None => crate::filter::Filters::default(),
+    };
+    for declaration in &args.filter_profiles {
+        let (name, spec) = declaration.split_once('=').ok_or_else(|| {
+            Error::Invalid(format!(
+                "--filter-profile takes NAME=SPEC; '{declaration}' names no profile"
+            ))
+        })?;
+        if name.trim().is_empty() {
+            return Err(Error::Invalid(format!(
+                "--filter-profile takes NAME=SPEC; '{declaration}' has an empty name"
+            )));
+        }
+        filters
+            .profiles
+            .insert(name.to_string(), EventFilter::read(spec)?);
+    }
+    if let Some(spec) = args.filter_agentgraph.as_deref() {
+        filters.agentgraph = Some(EventFilter::read(spec)?);
+    }
+    if let Some(spec) = args.filter_vcs.as_deref() {
+        filters.vcs = Some(EventFilter::read(spec)?);
+    }
+    Ok(filters)
+}
+
+/// The filter a read verb shapes its event view with.
+///
+/// `--all` is no filter at all, `--filter` is a profile this run has or a spec
+/// spelled inline, and naming neither is the shipped default profile — which is
+/// what makes `next` and `monitor` the planner's view unless a reader says
+/// otherwise.
+///
+/// A name is tried as a profile *first*: a profile name and a filter spec cannot
+/// be confused for one another — a spec is a mapping and starts with `{`, and a
+/// profile name is a bare word — so the only ambiguity would be a file on disk
+/// named `planner`, and a run's own vocabulary is what a reader of that run
+/// means.
+fn read_filter(view: &RunView, args: &ReadArgs) -> Result<EventFilter> {
+    if args.all {
+        return Ok(EventFilter::default());
+    }
+    let named = args.filter.as_deref().unwrap_or(filter::DEFAULT_PROFILE);
+    if named.trim_start().starts_with('{') {
+        return EventFilter::read(named);
+    }
+    match view.launch.filters.profile(named) {
+        Ok(filter) => Ok(filter),
+        // A spec named as a path is still a spec: the profile lookup is what
+        // failed, and this is the second reading rather than a fallback that
+        // hides it — a name that is neither a profile nor a readable file is
+        // answered with the profile refusal, which names the ones this run has.
+        Err(unknown) => match Path::new(named).is_file() {
+            true => EventFilter::read(named),
+            false => Err(unknown),
+        },
+    }
+}
+
 /// `onepipeline start`.
 fn start(args: &StartArgs) -> Result<i32> {
     let mut plan = Plan::load(&args.plan)?;
@@ -245,6 +329,10 @@ fn start(args: &StartArgs) -> Result<i32> {
     };
     let node_graph_ref = resolve_graph(&engine::configured_node_graph(), &launch_dir)?;
     resolve_plan_graphs(&mut plan, &launch_dir)?;
+    // Before the run directory exists. A spec that could not be honoured is the
+    // exit 2 it is, rather than a launch that has already minted a run and cut
+    // sessions for it before a source refuses the filter it was handed.
+    let filters = declared_filters(args)?;
 
     let root = ledger::runs_root();
     let run = mint_run_id(&plan, &args.plan, &root);
@@ -323,6 +411,7 @@ fn start(args: &StartArgs) -> Result<i32> {
         dag_sets: args.dag_sets.clone(),
         node_sets: args.node_sets.clone(),
         adoptions: 0,
+        filters,
     };
 
     let mut open = Journal::open(&paths);
@@ -598,21 +687,26 @@ fn launch_graph(
     output: agentgraph::GraphOutput<'_>,
 ) -> Result<agentgraph::GraphRun> {
     let task = run_description(&paths.run, goal);
-    let mut launched = agentgraph::GraphRun::start(
-        &record.graph,
-        &task,
-        &recorded_dir(record)?,
-        &journal::labels(&paths.run, None),
-        &[
+    let mut launched = agentgraph::GraphRun::start(&agentgraph::Launch {
+        graph: &record.graph,
+        task: &task,
+        dir: &recorded_dir(record)?,
+        labels: &journal::labels(&paths.run, None),
+        env: &[
             (agentgraph::RUN_ID_ENV.to_string(), paths.run.clone()),
             (
                 ledger::RUNS_DIR_ENV.to_string(),
                 ledger::runs_root().to_string_lossy().into_owned(),
             ),
         ],
-        &record.dag_sets,
+        sets: &record.dag_sets,
+        // The observer graph is an `oneagentgraph` launch this run starts, so
+        // the run's own say over that source reaches it like any other: the
+        // launch is what does not relay, rather than this process reading the
+        // firehose and dropping most of it.
+        filter: record.filters.agentgraph.as_ref(),
         output,
-    )?;
+    })?;
     // A launcher is the one caller that never waits for what it started, so a
     // graph that refused this launch would otherwise be reported as a running
     // observer — an exit 0 and a pid for a process that is already gone.
@@ -763,7 +857,13 @@ fn attach(
         // record a caller parses. Keeping them on separate descriptors is what
         // lets a script read `stdout` as JSON while a terminal still follows
         // the run.
-        let lines: Vec<String> = views::monitor(&view).lines().map(str::to_string).collect();
+        // Unfiltered: an attached launch is streaming its own run's progress to
+        // the person who started it, and a profile is what a *reader* of a run
+        // chooses. There is nobody else here to have chosen one.
+        let lines: Vec<String> = views::monitor(&view, &EventFilter::default())
+            .lines()
+            .map(str::to_string)
+            .collect();
         for line in lines.iter().skip(reported) {
             eprintln!("{line}");
         }
@@ -1027,20 +1127,22 @@ fn terminate(pid: u32, host: &str) -> Option<sys::Teardown> {
 ///
 /// Rendering is not reading: `monitor` shows a pending surface without
 /// consuming it, and this is what advances the queue and resets the pacemaker.
-fn next(args: &RunArgs) -> Result<i32> {
+fn next(args: &ReadArgs) -> Result<i32> {
     let paths = resolve(&args.run)?;
     let view = RunView::open(&paths)?;
+    // Read before anything is claimed, so a spec this run cannot honour refuses
+    // the read rather than consuming a surface into an output that then fails to
+    // render.
+    let filter = read_filter(&view, args)?;
+    let events = views::shaped(&view, &filter);
     let channel = ChannelState::new(&paths);
 
     let Some(surface) = channel.claim()? else {
         let settled = view.liveness().is_undriven();
+        let status = if settled { "finished" } else { "running" };
         println!(
             "{}",
-            if settled {
-                json!({"status": "finished", "surface": null})
-            } else {
-                json!({"status": "running", "surface": null})
-            }
+            json!({"status": status, "surface": null, "events": events})
         );
         return Ok(EXIT_SUCCESS);
     };
@@ -1069,7 +1171,14 @@ fn next(args: &RunArgs) -> Result<i32> {
         eprintln!("onepipeline: could not reset the check-in pacemaker: {error}");
     }
 
-    println!("{}", json!({"status": "surface", "surface": surface}));
+    // The surface is delivered whatever the profile said. A profile shapes the
+    // **event view** and nothing else: which surfaces exist, and the unread
+    // accounting over them, belong to the channel, so a blocking surface reaches
+    // its planner under the narrowest profile a run has.
+    println!(
+        "{}",
+        json!({"status": "surface", "surface": surface, "events": events})
+    );
     Ok(EXIT_SUCCESS)
 }
 
