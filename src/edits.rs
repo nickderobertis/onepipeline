@@ -114,8 +114,8 @@ pub enum Operation {
 ///
 /// The fact `edit-committed` records, and what tells replay whether the note is
 /// still owed to a later dispatch: a note the running turn took has been read,
-/// so carrying it into the next round would repeat a correction the worker has
-/// already acted on.
+/// so carrying it onto the node's next dispatch would repeat a correction the
+/// worker has already acted on.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Delivery {
@@ -481,7 +481,7 @@ fn compile_cancel(graph: &mut Graph, frontier: &Frontier, id: &str) -> Result<Ve
         return Err(refuse(format!("cancel: no node '{id}'")));
     };
     // The definition is the authoritative record of parking, not the frontier: a
-    // node carried into a later round is parked with nothing journalled about it
+    // node parked before it was ever dispatched has nothing journalled about it
     // there, so a frontier lookup alone would let the same node be parked twice.
     if node.parked {
         return Err(refuse(format!("cancel: node '{id}' is already parked")));
@@ -1325,7 +1325,7 @@ mod tests {
     }
 
     /// A note the running turn took is not also owed to the next dispatch —
-    /// otherwise the round transition would re-state a correction the worker has
+    /// otherwise that dispatch would re-state a correction the worker has
     /// already acted on.
     #[test]
     fn a_note_delivered_live_leaves_nothing_on_the_node_for_a_later_dispatch() {

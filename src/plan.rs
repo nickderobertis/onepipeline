@@ -283,7 +283,7 @@ pub struct Node {
     /// One planner note carried to the node's next dispatch, and only that one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<String>,
-    /// Held out of every later round until a `requeue`.
+    /// Held out of every later reconcile pass until a `requeue`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub parked: bool,
     /// Which executor dispatches this node. Omitted, the executor rules decide.

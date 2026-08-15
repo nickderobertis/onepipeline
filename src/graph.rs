@@ -39,11 +39,11 @@ pub enum NodeStatus {
     Waiting,
     /// Transitively gated by a waiting human or a parked dependency.
     Blocked,
-    /// A planner `cancel` idled it. No later round dispatches it until a
+    /// A planner `cancel` idled it. No later pass dispatches it until a
     /// `requeue`.
     Parked,
     /// A `drop` or `retry` stopped its dispatch cooperatively. Deliberately not
-    /// [`Parked`](Self::Parked): the round took this stop, so the harness
+    /// [`Parked`](Self::Parked): the engine took this stop, so the harness
     /// finishes what it started, while a park is the planner's own idle.
     Cancelled,
     /// It executed and completed.
@@ -88,7 +88,7 @@ impl NodeStatus {
         })
     }
 
-    /// Whether this round is finished with the node.
+    /// Whether the loop is finished with the node.
     pub fn is_settled(self) -> bool {
         matches!(
             self,
@@ -102,7 +102,7 @@ impl NodeStatus {
         )
     }
 
-    /// Whether a later round may still dispatch the node.
+    /// Whether a later pass may still dispatch the node.
     ///
     /// A `done` node is never rescheduled; a parked one waits for a `requeue`.
     pub fn is_dispatchable(self) -> bool {
@@ -141,10 +141,11 @@ impl GraphState {
     }
 }
 
-/// The desired graph: the nodes a round is converging toward.
+/// The desired graph: the nodes the loop is converging toward.
 ///
-/// Insertion-ordered so a plan, a round's launch record, and the graph a
-/// transition folds all render their nodes in the order the planner wrote them.
+/// Insertion-ordered so a plan, a run's launch record, and the graph a
+/// reconcile pass folds all render their nodes in the order the planner wrote
+/// them.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Graph {
     order: Vec<String>,
@@ -243,9 +244,9 @@ impl Graph {
 /// Whether a dependency reference names another run's node rather than this
 /// graph's.
 ///
-/// A cross-DAG reference names no node of this graph, so it was never in the
-/// round to be satisfied: it is never removed as a satisfied dependency, and it
-/// is carried to whatever depends on a consumer the transition carried out.
+/// A cross-DAG reference names no node of this graph, so nothing here can
+/// satisfy it: it is never removed as a satisfied dependency, and it is
+/// re-resolved against the referenced run's ledger on every reconcile pass.
 pub fn is_cross_dag(reference: &str) -> bool {
     crate::crossdag::is_reference(reference)
 }
@@ -706,7 +707,7 @@ pub fn state_of(statuses: &BTreeMap<String, NodeStatus>) -> GraphState {
     }
 }
 
-/// Whether every node has settled, so the round has nothing left to converge.
+/// Whether every node has settled, so the loop has nothing left to converge.
 pub fn is_terminal(statuses: &BTreeMap<String, NodeStatus>) -> bool {
     statuses.values().all(|s| s.is_settled())
 }
@@ -721,7 +722,7 @@ mod tests {
     use super::*;
     use crate::plan::{Goal, PLAN_SCHEMA_VERSION};
 
-    /// The journal writes these words through `as_str` and the round ledger
+    /// The journal writes these words through `as_str` and the run's ledger
     /// writes them through serde. Two spellings of one vocabulary is exactly how
     /// a projection quietly stops recognising what the ledger recorded, so the
     /// two are held equal here rather than by eye.
