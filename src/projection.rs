@@ -305,23 +305,14 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
             if let Some(url) = payload.get("change_url").and_then(Value::as_str) {
                 state.change_urls.insert(node.clone(), url.to_string());
             }
-            // Only a word this build can interpret. A record carrying a landing
-            // it cannot read leaves the node with none, which reads as "this run
-            // observed nothing about where that change got to" — the one honest
-            // answer, and never the convenient one.
+            // Only a word this build can interpret: an unreadable landing leaves
+            // the node with none, which reads as nothing observed.
             //
-            // llmlint: ignore-block[changed_behavior_has_e2e] neither half of this arm is
-            // reachable from an invocation a user can type. The unreadable-value path needs a
-            // journal a *newer build* wrote, and this suite could produce one only by writing
-            // that line by hand — which proves the fixture rather than the fold, the same
-            // reasoning `engine.rs` and `lifecycle.rs` already carry for their own
-            // unreachable arms. The cross-round retention needs a node that settles once and
-            // is not dispatched again, and the round transition does not produce one: a `done`
-            // node is carried into the next round whenever the attached driver has already
-            // opened it, so the node re-settles and records its landing afresh. What a user
-            // *can* reach — a landing written, folded, and rendered — is held end to end in
-            // `tests/e2e/lifecycle.rs`; both facts above are held by this module's own fold
-            // test, which is the only place they exist.
+            // llmlint: ignore-block[changed_behavior_has_e2e] no invocation a user can type
+            // reaches either half — an unreadable value needs a journal a *newer build* wrote,
+            // and the cross-round retention needs a node the transition does not re-dispatch.
+            // Held by this module's fold test instead; what a user can reach is held in
+            // `tests/e2e/lifecycle.rs`.
             if let Some(landing) = payload
                 .get(journal::SETTLED_LANDING)
                 .and_then(Value::as_str)

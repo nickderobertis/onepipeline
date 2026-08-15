@@ -877,6 +877,15 @@ fn a_publication_that_had_nothing_to_publish_says_so_rather_than_claiming_it_lan
     // so "landed" would say work reached the base that never existed and "not
     // landed" would send a planner looking for a change request nobody opened.
     assert_eq!(node["landing"], json!(null), "{node}");
+    // The sibling's own record of the publication claims nothing either.
+    let published = world.events_of(&run, "published");
+    assert_eq!(published.len(), 1, "{}", why(&world, &run));
+    assert_eq!(
+        published[0]["payload"]["landing"],
+        json!(null),
+        "{}",
+        published[0]
+    );
     let results = world.run(&["results", &run]);
     results.exited(0).out_has("no-changes");
     assert!(
@@ -990,6 +999,22 @@ fn a_settled_node_and_a_landed_node_are_told_apart_by_what_the_host_did_not_by_t
     // this journey is about.
     let open = settle(&world, "heldopen", vec![lifecycle("service", &[])]);
 
+    // The sibling's own record of the publication says it too, so a reader
+    // watching the merged stream sees where the change got to at the moment it
+    // was published rather than only in the settlement folded from it.
+    let published = world.events_of(&open, "published");
+    assert_eq!(
+        published.len(),
+        1,
+        "the publication is missing from the merged store\n{}",
+        why(&world, &open)
+    );
+    assert_eq!(
+        published[0]["payload"]["landing"], "unlanded",
+        "{}",
+        published[0]
+    );
+
     let settled = world.events_of(&open, "node-settled");
     let record = settled
         .iter()
@@ -1037,6 +1062,12 @@ fn a_settled_node_and_a_landed_node_are_told_apart_by_what_the_host_did_not_by_t
         node["landing"],
         "landed",
         "a change the host was observed landing is not reported as landed: {node}\n{}",
+        why(&world, &landed)
+    );
+    assert_eq!(
+        world.events_of(&landed, "published")[0]["payload"]["landing"],
+        "landed",
+        "{}",
         why(&world, &landed)
     );
     let results = world.run(&["results", &landed]);
