@@ -398,7 +398,23 @@ fn converge(
     // What the loop has already said out loud, so each fact is announced once
     // and again only when it becomes true again.
     let mut announced_ready: BTreeSet<String> = BTreeSet::new();
-    let mut held: BTreeMap<DecisionRef, Decision> = BTreeMap::new();
+    // Seeded from the journal, not started empty: a decision outlives the
+    // driver that reported it, and a fresh loop that did not know what its
+    // predecessor was holding would release it without saying so.
+    let mut held: BTreeMap<DecisionRef, Decision> = state
+        .decisions_pending
+        .iter()
+        .map(|(reference, pending)| {
+            (
+                DecisionRef::of_wire(reference),
+                Decision {
+                    reference: DecisionRef::of_wire(reference),
+                    kind: pending.kind.clone(),
+                    unblocks: pending.unblocks.clone(),
+                },
+            )
+        })
+        .collect();
 
     loop {
         reconcile_edits(paths, journal, state, &channel, &mut in_flight)?;
@@ -516,10 +532,12 @@ fn report_unreadable_records(paths: &RunPaths, state: &RunState) {
 /// One decision point: a blocking surface, and the dependents it holds back.
 ///
 /// Two things are decision points, and they are the only things that pause
-/// anything. A ready `kind: human` node is one — it waits for a person, and its
-/// dependents wait for it. A **blocking** planner surface is the other, and it
-/// holds whatever depends on the node that raised it. A non-blocking surface is
-/// a report and holds nothing.
+/// anything. A node waiting on a person is one — a `kind: human` node, or a
+/// lifecycle node held at a human *step*, which settles the same way and is
+/// cleared by the same `attest` — and its dependents wait with it. A
+/// **blocking** planner surface is the other, and it holds whatever depends on
+/// the node that raised it. A non-blocking surface is a report and holds
+/// nothing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Decision {
     /// What clears it.
@@ -539,8 +557,14 @@ struct Decision {
 /// reference can only be a node's.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum DecisionRef {
-    /// A ready `kind: human` node, cleared by `attest`.
-    Human(String),
+    /// A node waiting on a person, cleared by `attest`.
+    ///
+    /// Named for what clears it rather than for the node's kind, because two
+    /// shapes reach it: a `kind: human` node, and a lifecycle node whose
+    /// workstream stopped at a human step. Both settle `waiting`, both are
+    /// attested by the reference below, and neither is a thing the harness may
+    /// infer happened.
+    Attestation(String),
     /// A blocking surface, cleared by the reply that answers it.
     Surface(u64),
 }
@@ -549,9 +573,20 @@ impl DecisionRef {
     /// The reference as the journal and the node label spell it.
     fn as_wire(&self) -> String {
         match self {
-            Self::Human(node) => node.clone(),
+            Self::Attestation(node) => node.clone(),
             Self::Surface(id) => format!("surface:{id}"),
         }
+    }
+
+    /// The reference a journal record spelled, read back.
+    ///
+    /// A node id cannot contain the separator — `graph::validate` refuses one —
+    /// so the two spellings cannot be confused for each other.
+    fn of_wire(reference: &str) -> Self {
+        reference
+            .strip_prefix("surface:")
+            .and_then(|id| id.parse().ok())
+            .map_or_else(|| Self::Attestation(reference.to_string()), Self::Surface)
     }
 }
 
@@ -567,10 +602,10 @@ fn decisions_now(
             continue;
         }
         decisions.insert(
-            DecisionRef::Human(id.clone()),
+            DecisionRef::Attestation(id.clone()),
             Decision {
-                reference: DecisionRef::Human(id.clone()),
-                kind: "human".to_string(),
+                reference: DecisionRef::Attestation(id.clone()),
+                kind: "attestation".to_string(),
                 unblocks: descendants(&state.graph, std::slice::from_ref(id)),
             },
         );
@@ -1928,9 +1963,9 @@ mod tests {
             )),
         );
         let held = decisions
-            .get(&DecisionRef::Human("approve".into()))
+            .get(&DecisionRef::Attestation("approve".into()))
             .expect("the human action holds");
-        assert_eq!(held.kind, "human");
+        assert_eq!(held.kind, "attestation");
         assert_eq!(
             held.unblocks,
             vec!["ship".to_string(), "after".to_string()],
@@ -1953,8 +1988,29 @@ mod tests {
     /// own id, and a node reference can only be a node's.
     #[test]
     fn a_decision_reference_spells_which_of_the_two_things_clears_it() {
-        assert_eq!(DecisionRef::Human("approve".into()).as_wire(), "approve");
+        assert_eq!(
+            DecisionRef::Attestation("approve".into()).as_wire(),
+            "approve"
+        );
         assert_eq!(DecisionRef::Surface(7).as_wire(), "surface:7");
+    }
+
+    /// A reference read back off a journal record is the one that was written.
+    #[test]
+    fn a_decision_reference_reads_back_as_the_thing_that_wrote_it() {
+        for reference in [
+            DecisionRef::Attestation("approve".into()),
+            DecisionRef::Surface(7),
+        ] {
+            assert_eq!(DecisionRef::of_wire(&reference.as_wire()), reference);
+        }
+        // A node whose name merely starts like the other spelling is still a
+        // node: the id would have to carry the separator, which validation
+        // refuses.
+        assert_eq!(
+            DecisionRef::of_wire("surface-check"),
+            DecisionRef::Attestation("surface-check".into())
+        );
     }
 
     #[test]
@@ -1966,13 +2022,16 @@ mod tests {
         let mut journal = Journal::open(&paths);
 
         let decision = Decision {
-            reference: DecisionRef::Human("approve".into()),
-            kind: "human".into(),
+            reference: DecisionRef::Attestation("approve".into()),
+            kind: "attestation".into(),
             unblocks: vec!["ship".into()],
         };
         let mut held = BTreeMap::new();
-        let pending: BTreeMap<DecisionRef, Decision> =
-            [(DecisionRef::Human("approve".to_string()), decision.clone())].into();
+        let pending: BTreeMap<DecisionRef, Decision> = [(
+            DecisionRef::Attestation("approve".to_string()),
+            decision.clone(),
+        )]
+        .into();
 
         report_decisions(&paths, &mut journal, &pending, &mut held).expect("reported");
         // Reported once: a decision that has not changed is not re-announced on
