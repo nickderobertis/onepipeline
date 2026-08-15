@@ -19,6 +19,7 @@
 use crate::harness::{agent, human, plan_of, World, REFUSED};
 
 use crate::harness::lifecycle;
+use onevcs::provenance::SUBJECT_LIMIT;
 use serde_json::{json, Value};
 
 /// Start a run whose nodes are held open, so edits land against a live loop.
@@ -490,6 +491,38 @@ fn an_edit_carrying_the_retired_bar_is_refused_by_name_at_both_boundaries() {
         )
         .exited(REFUSED)
         .err_has("`done_when` is no longer a plan field");
+
+    world.release("slow.go");
+}
+
+/// A title `onevcs` will not commit under is refused wherever it enters.
+///
+/// The plan file is one way in and the channel is the other: an `add` naming a
+/// repository carries the same publication subject a plan file would, and a
+/// planner who wrote one too long is told so while nothing has been dispatched
+/// for it, rather than by the publication at the end of the node's own run.
+#[test]
+fn an_edit_adding_an_unpublishable_title_is_refused_with_the_limit_it_broke() {
+    let world = World::new("edit-longtitle");
+    let run = live(&world, "edittitle", vec![agent("slow", &[])], &["slow"]);
+
+    let over = "t".repeat(SUBJECT_LIMIT + 1);
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([{"op": "add", "node": {
+                "id": "publish", "persona": "engineer", "task": "## What\npublish",
+                "repo": "service", "title": over}}])),
+        )
+        .exited(REFUSED)
+        .err_has("node 'publish'")
+        .err_has(&format!("{} characters", SUBJECT_LIMIT + 1))
+        .err_has(&format!("{SUBJECT_LIMIT}-character limit"));
+
+    assert!(
+        committed(&world, &run).is_empty(),
+        "a refused edit reached the graph"
+    );
 
     world.release("slow.go");
 }

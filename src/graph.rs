@@ -509,12 +509,7 @@ pub fn validate_node(node: &Node) -> Result<()> {
 /// refused here that would have published. Blank is its own refusal because a
 /// title that is only spacing publishes a commit with no subject at all, which
 /// is the one shape a length check reads as fine.
-// llmlint: ignore[invalid_states_unrepresentable] the validated form of a title is
-// `onevcs::Subject`, which the sibling owns and `crate::vcs::publish` builds where the
-// publication request is; a second newtype here would be this crate restating a rule it
-// does not own. What reaches this function is the plain `String` a plan *document* wrote,
-// which serde has to read before any type could constrain it — the same reason
-// `plan.rs` states for the schema as a whole — so this is the boundary that makes it safe.
+// llmlint: ignore[invalid_states_unrepresentable] the validated title is `onevcs::Subject`, which the sibling owns and builds at the publication request; this reads the plain `String` a plan document wrote, which serde parses before any type could constrain it.
 fn validate_title(title: &str) -> std::result::Result<(), String> {
     let title = title.trim();
     if title.is_empty() {
