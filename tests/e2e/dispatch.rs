@@ -1563,6 +1563,92 @@ fn a_nodes_turn_budget_reaches_its_dispatch_and_outranks_the_run_wide_one() {
     );
 }
 
+/// Every directory a harness this run spawned was told to work in, in order.
+///
+/// Read off the double's own record of what it was invoked with, because
+/// `oneharness run --cwd` is the only place this fact exists: the harness is
+/// spawned by `oneagentgraph`'s own process — for a two-party member, by onejudge
+/// inside it — so no argv this crate builds carries it and no envelope publishes
+/// it.
+fn harness_directories(world: &World) -> Vec<String> {
+    world
+        .invocations()
+        .iter()
+        .filter(|invocation| invocation["tool"] == "oneharness")
+        .filter_map(|invocation| {
+            let args = invocation["args"].as_array()?;
+            let at = args.iter().position(|arg| arg == "--cwd")?;
+            args.get(at + 1)?.as_str().map(str::to_string)
+        })
+        .collect()
+}
+
+/// A two-party member's harness works in the directory the graph was given.
+///
+/// The whole of what a `kind: onejudge` member is *for* rests on this. Its agent
+/// side is the one doing the node's work, and the node's work is in a repository
+/// — so a member started anywhere else has to guess where its checkout is, and
+/// whatever it commits to the one it guesses is discarded at publication, which
+/// reads only the session's own branch. `oneagentgraph` below 0.2.12 started that
+/// side in the member's own scratch, `<state>/runs/<graph run>/members/<member>`,
+/// which is not a repository at all.
+///
+/// Held against the **session's own worktree**, which is what this crate hands
+/// the sibling for a lifecycle node — not against a directory this test names, so
+/// the assertion is about the composition rather than about a literal. Nothing
+/// here is scripted: the double records the `--cwd` it was really spawned with,
+/// and the sibling is real, so a dependency that is merely *pinned* rather than
+/// linked cannot pass this.
+#[test]
+fn a_two_party_members_harness_works_in_the_directory_the_graph_was_given() {
+    let world = World::new("real-two-party-cwd");
+    world.write_graphs();
+    write_supervised_node_graph(&world);
+    write_persona(&world, "engineer");
+    world.repository("local-direct", &["true"]);
+
+    let node = json!({
+        "id": "service",
+        "repo": "service",
+        "persona": "./engineer.yaml",
+        "task": "## What\nship the thing",
+        // Its own title, so the run spends no `pr-author` dispatch: that one has
+        // nothing to say about where a member works.
+        "title": "feat: land what the member made",
+    });
+    let path = world.plan("twoparty", &plan_of("twoparty", vec![node]));
+    world
+        .run_on_agentgraph(&["start", &path.to_string_lossy(), "--attach"])
+        .settled();
+
+    // Where `onevcs` cut this node's worktree, read off the run's own record of
+    // opening the session rather than reconstructed from the sibling's layout.
+    // Compared as the two sides spell it rather than as the filesystem resolves
+    // it: the session is closed by the time this runs and its worktree is gone,
+    // so there is nothing left to canonicalise. Both spellings descend from the
+    // world root, which `World::new` already resolved, so there is one spelling
+    // of this directory on every platform.
+    let worktree = world
+        .journal("twoparty")
+        .into_iter()
+        .filter(|event| event["source"] == "vcs" && event["kind"] == "session-opened")
+        .find_map(|event| event["payload"]["worktree"].as_str().map(str::to_string))
+        .expect("the lifecycle node's session opened a worktree");
+
+    let directories = harness_directories(&world);
+    assert!(
+        !directories.is_empty(),
+        "no harness was spawned at all, so nothing here is about where one worked"
+    );
+    assert!(
+        directories.iter().any(|dir| dir == &worktree),
+        "the two-party member's harness never ran in the directory the graph was given.\n  \
+         given:  {worktree}\n  ran in: {directories:#?}\nA member started in its own scratch \
+         has no repository to work in, and the work it commits elsewhere is discarded as \
+         `no-changes`."
+    );
+}
+
 /// A step's turn budget reaches that step's own dispatch.
 ///
 /// A workstream's steps are dispatched one at a time on one branch, each with its

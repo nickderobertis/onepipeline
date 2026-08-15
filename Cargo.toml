@@ -13,16 +13,33 @@ resolver = "2"
 # calling its parser — because a double that accepted more than the sibling is an
 # oracle for a build nothing runs.
 #
-# `oneagentgraph`'s floor is a **requirement**, not a preference: this build's own
-# copy is the single parser deciding what a graph document may contain, so the
-# floor is the oldest one that accepts everything a launch must accept. 0.2.11 is
-# where `{task}` in a member's own `task` expands to the run's, which is what a
-# dag-scope graph now composes its members' roles out of: the launcher's task says
-# only what the run *is*, so a member that must be told what to do about it says
-# so itself. Below that floor those six characters stand for themselves and every
-# member is handed the bare run description with no job attached.
+# `oneagentgraph`'s floor is a **requirement**, not a preference, and it is a
+# requirement about *this* build rather than about any install: the dispatch path
+# links the crate, so the copy resolved here is the one that parses every graph
+# document and prepares every member. A version pinned anywhere else — a CLI
+# wheel, an installed binary — decides nothing, which is exactly how a fix that
+# had shipped went four hours undiagnosed while the defect it fixed was still in
+# production.
+#
+# 0.2.12 is the floor because it is where a two-party (`kind: onejudge`) member's
+# harness runs in the directory the graph was given rather than in the member's
+# own scratch. Below it, that member's `oneharness run --cwd` is
+# `<state>/runs/<graph run>/members/<member>` — no repository, no work in
+# progress — so a lifecycle node's agent has to guess where its checkout is, and
+# whatever it commits somewhere else is discarded as `no-changes`. The fix pins
+# the agent side's config by *file* instead, which is what freed the worktree to
+# be the operator's directory. `tests/e2e/dispatch.rs`'s
+# `a_two_party_members_harness_works_in_the_directory_the_graph_was_given` is what
+# holds the floor: it fails against 0.2.11 rather than merely reading differently.
+#
+# The floor before it, kept because it is still a floor: 0.2.11 is where `{task}`
+# in a member's own `task` expands to the run's, which is what a dag-scope graph
+# composes its members' roles out of — the launcher's task says only what the run
+# *is*, so a member that must be told what to do about it says so itself. Below
+# that, those six characters stand for themselves and every member is handed the
+# bare run description with no job attached.
 [workspace.dependencies]
-oneagentgraph = "0.2.11"
+oneagentgraph = "0.2.12"
 onevcs = "0.2.6"
 
 [package]
