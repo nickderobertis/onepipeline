@@ -466,6 +466,51 @@ fn a_live_driver_that_has_stopped_writing_reads_as_parked_rather_than_dead() {
     world.release("build.go");
 }
 
+/// The same silence, with a decision point outstanding, is *not* parked.
+///
+/// The discriminating counterpart to the journey above: identical held dispatch,
+/// identical live pid, identical quiet ledger, and the one difference is a human
+/// node nobody has attested. A run waiting on a person is doing exactly what it
+/// should, so reporting it `PARKED` sends an operator to adopt work that needs no
+/// rescue — and `adopt` may end the driver it finds, which would cost the held
+/// dispatch for nothing.
+#[test]
+fn a_quiet_driver_holding_a_decision_point_reads_as_active_rather_than_parked() {
+    let world = World::new("driver-quiet-deciding");
+    // The held dispatch keeps the pid alive and the ledger silent; the human node
+    // beside it is independent of that dispatch, so it is ready and unattested
+    // while the run goes quiet — which is what makes the decision outstanding.
+    world.script("build.wait", "hold");
+    let run = start_detached(
+        &world,
+        "deciding",
+        vec![agent("build", &[]), human("approve", &[])],
+    );
+
+    // Wait for the state the verdict is read against: the dispatch is held open,
+    // so from here the ledger has nothing further to write.
+    world.until("the held node to be dispatched", |world| {
+        !world.events_of(&run, "node-dispatched").is_empty()
+    });
+    // Past the threshold the neighbouring journey parks at, so silence alone can
+    // no longer be what keeps this verdict `ACTIVE`.
+    std::thread::sleep(std::time::Duration::from_secs(2));
+
+    let mut status = world.cmd(&["status", &run]);
+    status.env("ONEPIPELINE_PARKED_AFTER_SECONDS", "1");
+    let rendered =
+        String::from_utf8_lossy(&status.output().expect("the binary runs").stdout).to_string();
+    assert!(
+        !rendered.contains("PARKED"),
+        "a run waiting on a person was reported parked: {rendered}"
+    );
+    assert!(
+        rendered.contains("ACTIVE"),
+        "a run waiting on a person is not reported active: {rendered}"
+    );
+    world.release("build.go");
+}
+
 #[test]
 fn a_parked_run_is_adoptable_as_much_as_a_dead_one_is() {
     let world = World::new("driver-adopt-parked");
