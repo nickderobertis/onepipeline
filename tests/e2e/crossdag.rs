@@ -241,6 +241,11 @@ fn the_recorded_position_survives_the_driver_that_recorded_it() {
 
 /// A complete-looking run planted *outside* the runs root, so reaching it is
 /// proof of escape rather than of a plausible-looking string being refused.
+// llmlint: ignore-block[tests_mirror_real_usage] a run *outside* the runs root cannot be
+// produced by the CLI by construction — every verb that creates one creates it inside the
+// root — and that is precisely the property under test: reaching this store would prove a
+// run id climbed out. Fabricating the persisted stores directly is the only way to place
+// a plausible target there for the escape to be proved against.
 fn plant_outside(world: &World) -> String {
     let outside = world.root.join("elsewhere");
     std::fs::create_dir_all(&outside).expect("a run outside the root");
@@ -270,6 +275,7 @@ fn plant_outside(world: &World) -> String {
     .expect("its journal");
     "elsewhere".to_string()
 }
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 #[test]
 fn a_run_id_that_climbs_out_of_the_runs_root_reaches_nothing() {
