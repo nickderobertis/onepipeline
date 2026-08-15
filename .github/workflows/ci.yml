@@ -150,6 +150,19 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just,nextest
+      # The journey itself already refuses without a credential, but its refusal
+      # names GH_TOKEN — the variable — and a person reading a red job needs the
+      # name of the thing to go set. Fail here instead, naming the secret, before
+      # a compile has been paid for. Never a skip: an unrunnable smoke is a
+      # failure, not a pass.
+      - name: The smoke's credential is present
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+        run: |
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::the real-everything smoke needs the RELEASE_PLZ_TOKEN secret, passed as GH_TOKEN. Set it to a PAT that can push to, open a pull request on, and merge in the scratch repository. This job never skips and never falls back to a fake." >&2
+            exit 1
+          fi
       - name: Real onevcs, real git, real GitHub
         run: just smoke-real
         env:
