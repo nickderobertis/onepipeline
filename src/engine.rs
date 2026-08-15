@@ -264,29 +264,26 @@ struct Dispatch {
     control: Option<TurnAddress>,
 }
 
-/// Drive one run's graph to settlement, in this process.
+/// Take the run's ownership lock, or report who holds it.
+///
+/// Taken by the caller rather than by the loop, because a caller that is about
+/// to *claim* the run — in the launch record, or by launching an observer for
+/// it — has to lose the race first: writing its own pid there and then failing
+/// on the lock would leave the record naming a process that is gone, and every
+/// reader afterwards would call the run undriven while the driver that won was
+/// still working on it.
+pub fn claim(paths: &RunPaths) -> Result<OwnershipLock> {
+    OwnershipLock::acquire(paths, "drive")
+}
+
+/// Drive one run's graph to settlement, in this process, under a lock the
+/// caller already holds.
 ///
 /// Returns the state the graph settled in, whose exit code the binary carries:
 /// 0 for `complete`, 1 for `waiting` or `failed`. The loop returns when the
 /// graph is terminal or when nothing can move without something arriving over
 /// the channel — a decision point cleared while the loop is still running
 /// resumes the subtree it held, without any external driver action.
-pub fn drive(paths: &RunPaths) -> Result<GraphState> {
-    drive_holding(paths, claim(paths)?)
-}
-
-/// Take the run's ownership lock, or report who holds it.
-///
-/// Separate from [`drive`] because a caller that is about to *claim* the run in
-/// the launch record has to lose the race first: writing its own pid there and
-/// then failing on the lock would leave the record naming a process that is
-/// gone, and every reader afterwards would call the run undriven while a driver
-/// was still working on it.
-pub fn claim(paths: &RunPaths) -> Result<OwnershipLock> {
-    OwnershipLock::acquire(paths, "drive")
-}
-
-/// [`drive`], for a caller that already holds the run's lock.
 pub fn drive_holding(paths: &RunPaths, lock: OwnershipLock) -> Result<GraphState> {
     let launch: LaunchRecord = ledger::read_json(&paths.launch())?;
     // llmlint: ignore-block[boundary_inputs_validated] graph-reference syntax and
