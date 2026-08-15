@@ -51,6 +51,13 @@ const DRAIN_GRACE: Duration = Duration::from_secs(2);
 /// that waited longer would make a genuinely failed launch look like a slow one.
 const DRIVER_HANDOVER: Duration = Duration::from_secs(30);
 
+/// How many of a failed driver's last lines a refusal repeats.
+///
+/// Enough for the sibling's own refusal and the sentence around it, and few
+/// enough that a driver that failed after working for an hour does not put its
+/// whole log on one line.
+const DRIVER_LOG_LINES: usize = 8;
+
 /// Execute one parsed command line.
 pub fn dispatch(cli: Cli) -> Result<i32> {
     use crate::cli::Command as Verb;
@@ -390,18 +397,19 @@ fn start(args: &StartArgs) -> Result<i32> {
         // launch would have run in-process — and it launches the observer
         // itself, so `stop` reaches that graph through the driver's own process
         // tree rather than leaving an agent running beside a stopped run.
-        let driver = retain_driver(&paths)?;
+        let mut driver = retain_driver(&paths)?;
+        let pid = driver.id();
         // The driver records its own pid and its observer's graph run, so there
         // is one writer of those fields and no race between this process and the
         // one it just started. Waiting for it also means a launch that could not
         // start a driver says so, rather than printing a pid for a process that
         // is already gone.
-        confirm_driving(&paths, driver)?;
+        confirm_driving(&paths, &mut driver)?;
         println!(
             "{}",
             json!({
                 "run_id": run,
-                "pid": driver,
+                "pid": pid,
                 "commands": {
                     "next": format!("onepipeline next {run}"),
                     "monitor": format!("onepipeline monitor {run}"),
@@ -444,23 +452,55 @@ fn observe(
 }
 
 /// Wait for a retained driver to claim the run, or report that it never did.
-fn confirm_driving(paths: &RunPaths, driver: u32) -> Result<()> {
+///
+/// A detached launch is the one caller that never waits for what it started, so
+/// a driver that died on its way up — an observer graph that refused, a ledger it
+/// could not read — would otherwise be reported as a running one: an exit 0 and a
+/// pid for a process that is already gone. The driver's own words come back with
+/// the refusal, because they are in a file the launcher is about to walk away
+/// from and nothing else will ever read them out loud.
+fn confirm_driving(paths: &RunPaths, driver: &mut std::process::Child) -> Result<()> {
+    let pid = driver.id();
     let deadline = Instant::now() + DRIVER_HANDOVER;
     while Instant::now() < deadline {
         let recorded: Option<LaunchRecord> = ledger::read_json_opt(&paths.launch());
-        if recorded.is_some_and(|record| record.pid == driver) {
+        if recorded.is_some_and(|record| record.pid == pid) {
             return Ok(());
         }
-        if !sys::process_may_be_live(driver) {
+        // `try_wait` rather than a pid probe, and reaping is the point: a child
+        // nobody waits on stays a zombie, and a zombie answers a liveness probe
+        // as alive — so a driver that died on its way up would be waited out to
+        // the whole backstop instead of reported at once.
+        if matches!(driver.try_wait(), Ok(Some(_)) | Err(_)) {
             break;
         }
         std::thread::sleep(ATTACH_POLL);
     }
     Err(Error::Refused(format!(
-        "the driver retained for run '{}' did not claim it; its output is in {}",
+        "the driver retained for run '{}' did not claim it: {}",
         paths.run,
-        paths.driver_log().display()
+        driver_said(paths)
     )))
+}
+
+/// What a retained driver wrote before it gave up, bounded to what a refusal can
+/// carry.
+fn driver_said(paths: &RunPaths) -> String {
+    let log = paths.driver_log();
+    let said = std::fs::read_to_string(&log).unwrap_or_default();
+    let tail: String = said
+        .lines()
+        .rev()
+        .take(DRIVER_LOG_LINES)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("; ");
+    if tail.trim().is_empty() {
+        return format!("it said nothing; its output is in {}", log.display());
+    }
+    format!("{tail} (its whole output is in {})", log.display())
 }
 
 /// Start the retained driver a detached launch leaves behind.
@@ -468,7 +508,7 @@ fn confirm_driving(paths: &RunPaths, driver: u32) -> Result<()> {
 /// This executable, at [`engine::DRIVE_VERB`], with its output in the run's own
 /// driver log: the process that returns from `start --detach` must not be
 /// holding the pipe a driver writes to.
-fn retain_driver(paths: &RunPaths) -> Result<u32> {
+fn retain_driver(paths: &RunPaths) -> Result<std::process::Child> {
     let log = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -483,15 +523,14 @@ fn retain_driver(paths: &RunPaths) -> Result<u32> {
     })?;
     let exe = std::env::current_exe()
         .map_err(|e| Error::Invalid(format!("cannot find this executable to retain a driver: {e}")))?;
-    let child = std::process::Command::new(exe)
+    std::process::Command::new(exe)
         .arg(engine::DRIVE_VERB)
         .arg(&paths.run)
         .stdin(std::process::Stdio::null())
         .stdout(log)
         .stderr(errors)
         .spawn()
-        .map_err(|e| Error::Invalid(format!("cannot retain a driver for '{}': {e}", paths.run)))?;
-    Ok(child.id())
+        .map_err(|e| Error::Invalid(format!("cannot retain a driver for '{}': {e}", paths.run)))
 }
 
 /// `onepipeline drive-run` — the retained driver of a detached launch.
@@ -503,6 +542,11 @@ fn retain_driver(paths: &RunPaths) -> Result<u32> {
 /// observer with it.
 fn drive_run(args: &RunArgs) -> Result<i32> {
     let paths = resolve(&args.run)?;
+    // The lock before the claim: a driver that wrote its pid into the record and
+    // then lost the race for the lock would leave the run naming a process that
+    // is gone, and every reader would call it undriven while the driver that
+    // won was still working.
+    let lock = engine::claim(&paths)?;
     let mut record: LaunchRecord = ledger::read_json(&paths.launch())?;
     let view = RunView::open(&paths)?;
     let log = paths.driver_log();
@@ -520,7 +564,7 @@ fn drive_run(args: &RunArgs) -> Result<i32> {
     record.host = sys::hostname();
     ledger::write_json(&paths.launch(), &record)?;
 
-    let settled = engine::drive(&paths)?;
+    let settled = engine::drive_holding(&paths, lock)?;
     if let Some(run) = observer.as_mut() {
         run.cancel();
     }
@@ -787,6 +831,14 @@ fn adopt(args: &RunArgs) -> Result<i32> {
             paths.run, paths.run
         )));
     }
+    // A driver this host has proved is *not working* still holds the run's
+    // ownership lock, and the loop this adoption is about to start is the run's
+    // single writer — so taking the run over means ending the process that had
+    // it. Only ever a driver the verdict above already called undriven: a run
+    // still being driven was refused, and this is the same taking-over `adopt`
+    // has always been. A dead one is signalled to no effect, which is the
+    // ordinary case.
+    displace_the_parked_driver(&record)?;
 
     record.adoptions += 1;
     record.pid = sys::pid();
@@ -844,6 +896,36 @@ fn adopt(args: &RunArgs) -> Result<i32> {
     // the settlements that produced them, so a subtree that was paused stays
     // paused and is released by the same `attest` it always was.
     attach(&paths, observer.as_mut())
+}
+
+/// End a driver that holds a run nothing is driving, and wait for it to go.
+///
+/// The lock the engine loop takes is reclaimable only from a holder this host
+/// can prove is gone, so an adoption that started its loop beside a parked
+/// driver would lose the race and refuse — leaving the one documented way back
+/// from `PARKED` closed.
+fn displace_the_parked_driver(record: &LaunchRecord) -> Result<()> {
+    if record.host != sys::hostname() || !sys::process_may_be_live(record.pid) {
+        return Ok(());
+    }
+    eprintln!(
+        "onepipeline: run '{}' is held by driver pid {}, which is not working; \
+         ending it to adopt the run",
+        record.run_id, record.pid
+    );
+    sys::stop(record.pid, sys::Stop::Politely);
+    let deadline = Instant::now() + DRIVER_HANDOVER;
+    while Instant::now() < deadline {
+        if !sys::process_may_be_live(record.pid) {
+            return Ok(());
+        }
+        std::thread::sleep(ATTACH_POLL);
+    }
+    Err(Error::Refused(format!(
+        "run '{}' is held by driver pid {}, which did not end when asked; \
+         end it by hand and adopt the run again",
+        record.run_id, record.pid
+    )))
 }
 
 /// `onepipeline stop`.

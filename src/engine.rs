@@ -347,7 +347,22 @@ struct Dispatch {
 /// the channel — a decision point cleared while the loop is still running
 /// resumes the subtree it held, without any external driver action.
 pub fn drive(paths: &RunPaths) -> Result<GraphState> {
-    let lock = OwnershipLock::acquire(paths, "drive")?;
+    drive_holding(paths, claim(paths)?)
+}
+
+/// Take the run's ownership lock, or report who holds it.
+///
+/// Separate from [`drive`] because a caller that is about to *claim* the run in
+/// the launch record has to lose the race first: writing its own pid there and
+/// then failing on the lock would leave the record naming a process that is
+/// gone, and every reader afterwards would call the run undriven while a driver
+/// was still working on it.
+pub fn claim(paths: &RunPaths) -> Result<OwnershipLock> {
+    OwnershipLock::acquire(paths, "drive")
+}
+
+/// [`drive`], for a caller that already holds the run's lock.
+pub fn drive_holding(paths: &RunPaths, lock: OwnershipLock) -> Result<GraphState> {
     let launch: LaunchRecord = ledger::read_json(&paths.launch())?;
     // llmlint: ignore-block[boundary_inputs_validated] graph-reference syntax and
     // contents are oneagentgraph's validation boundary. Here the ledger boundary

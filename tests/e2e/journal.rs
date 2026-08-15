@@ -1,5 +1,5 @@
 //! The journal is the run's authoritative record, and **the plan of record is
-//! the graph the round executed** — not the launch file, which every live edit
+//! the graph the run is executing** — not the launch file, which every live edit
 //! the reconciler committed is absent from.
 //!
 //! Ported from `test_journal_sequence_e2e` and `test_plan_of_record_e2e`.
@@ -10,7 +10,7 @@
 // model turns to produce, and `dispatch.rs` is where the real `oneagentgraph` binary is
 // driven instead. `harness.rs` carries the same suppression and the full rationale.
 
-use crate::harness::{agent, human, plan_of, World};
+use crate::harness::{agent, plan_of, World};
 use serde_json::json;
 
 #[test]
@@ -23,9 +23,15 @@ fn a_runs_journal_is_one_ordered_merged_stream_with_per_stream_sequences() {
             vec![agent("first", &[]), agent("second", &["first"])],
         ),
     );
+    // Detached, so the run really is written by more than one process: the
+    // launcher records the launch and the driver it retains records everything
+    // the loop does.
     world
-        .run(&["start", &path.to_string_lossy(), "--attach"])
+        .run(&["start", &path.to_string_lossy(), "--detach"])
         .exited(0);
+    world.until("the run to settle", |world| {
+        world.run_file("sequenced", "result.json").is_file()
+    });
 
     let events = world.journal("sequenced");
     assert!(events.len() > 4, "{events:?}");
@@ -52,8 +58,8 @@ fn a_runs_journal_is_one_ordered_merged_stream_with_per_stream_sequences() {
     }
 
     // `seq` is monotonic **per stream** — that is what a consumer detects loss
-    // with, and the run is written by more than one process: the launch, and
-    // each round owner. Every stream must be gapless from zero.
+    // with, and the run is written by more than one process: the launcher, and
+    // the driver it retained. Every stream must be gapless from zero.
     let mut by_stream: std::collections::BTreeMap<String, Vec<u64>> = Default::default();
     for event in events.iter().filter(|event| event["source"] == "pipeline") {
         by_stream
@@ -94,7 +100,7 @@ fn a_line_this_build_cannot_read_is_skipped_rather_than_ending_the_read() {
     // and that path is what keeps one unreadable record from ending every view of the run.
     //
     // A record written by a newer schema still claims its sequence number, and
-    // a reader skips it rather than failing the round it is observing.
+    // a reader skips it rather than failing the run it is observing.
     let journal = world.run_file("future", "events.jsonl");
     let mut text = std::fs::read_to_string(&journal).expect("the journal reads");
     text.push_str("{\"v\":99,\"from\":\"a newer build\"}\n");
@@ -105,15 +111,15 @@ fn a_line_this_build_cannot_read_is_skipped_rather_than_ending_the_read() {
     world.run(&["results", "future"]).exited(0);
     world.run(&["telemetry", "future"]).exited(0);
 
-    // The transition is the one reader that cannot shrug: a record it cannot
-    // read might have been an authoritative graph mutation, so it says so and
-    // derives from the launch record rather than from a graph it knows is
-    // incomplete.
+    // A driver is the one reader that cannot shrug: a record it cannot read
+    // might have been an authoritative graph mutation — a `drop` that removed a
+    // node it is about to dispatch — so it says so. It still drives, because
+    // refusing would leave the run with nothing driving it.
     world
-        .run(&["round", "next", "future"])
+        .run(&["adopt", "future"])
         .exited(0)
         .err_has("cannot read")
-        .err_has("launch record");
+        .err_has("missing a committed edit");
 }
 
 #[test]
@@ -135,16 +141,16 @@ fn a_dispatch_line_this_build_cannot_read_is_skipped_and_the_turn_after_it_is_no
         "the turn after the unreadable line never reached the merged store"
     );
     assert_eq!(
-        world.run_json("badline", "round-01/result.json")["state"],
+        world.run_json("badline", "result.json")["state"],
         "complete",
         "an unreadable sibling line failed the node it belonged to"
     );
 }
 
+/// The plan of record is what the loop is executing, not the file it launched.
 #[test]
-fn the_next_round_is_derived_from_the_graph_the_round_executed() {
+fn the_graph_of_record_is_the_one_the_loop_executed_not_the_launch_file() {
     let world = World::new("journal-record");
-    world.script("driver.wait", "hold");
     world.script("flaky.wait", "hold");
     let path = world.plan(
         "record",
@@ -156,15 +162,6 @@ fn the_next_round_is_derived_from_the_graph_the_round_executed() {
     world
         .run(&["start", &path.to_string_lossy(), "--detach"])
         .exited(0);
-
-    // Run the round from this test, so the live edit lands against a round it
-    // controls.
-    let mut round = world.cmd(&["round", "run", "record"]);
-    let mut running = round
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .expect("the round starts");
     world.until("the node to be in flight", |world| {
         !world.events_of("record", "node-dispatched").is_empty()
     });
@@ -184,37 +181,28 @@ fn the_next_round_is_derived_from_the_graph_the_round_executed() {
         )
         .exited(0);
     world.release("flaky.go");
-    running.wait().expect("the round finishes");
+    world.until("the run to settle", |world| {
+        world.run_file("record", "result.json").is_file()
+    });
 
-    // The launch record is never rewritten: it is what the round *started*
-    // with, and the replacement is not in it.
-    let launch_record = world.run_json("record", "round-01/plan.json");
-    let launched: Vec<&str> = launch_record["tasks"]
+    // The plan file is never rewritten: it is what the run *started* with, and
+    // the replacement is not in it.
+    let launched: Vec<String> = world.run_json("record", "plan.json")["tasks"]
         .as_array()
         .expect("tasks")
         .iter()
-        .filter_map(|node| node["id"].as_str())
+        .filter_map(|node| node["id"].as_str().map(str::to_string))
         .collect();
     assert_eq!(
         launched,
-        vec!["flaky", "after"],
-        "the launch record was rewritten"
+        vec!["flaky".to_string(), "after".to_string()],
+        "the launch file was rewritten"
     );
 
-    // The graph the round *executed* is the one that counts, and it carried the
+    // The graph the loop *executed* is the one that counts, and it carried the
     // replacement: the reconciler installed the edited graph immediately, so
-    // `flaky-2` was dispatched in this same round.
-    let executed = world.run_json("record", "round-01/result.json");
-    let ran: Vec<&str> = executed["nodes"]
-        .as_array()
-        .expect("nodes")
-        .iter()
-        .filter_map(|node| node["id"].as_str())
-        .collect();
-    assert!(
-        ran.contains(&"flaky-2"),
-        "the replacement never ran: {ran:?}"
-    );
+    // `flaky-2` was dispatched without waiting for anything.
+    let executed = world.run_json("record", "result.json");
     let status = |id: &str| {
         executed["nodes"]
             .as_array()
@@ -225,102 +213,33 @@ fn the_next_round_is_derived_from_the_graph_the_round_executed() {
             .clone()
     };
     assert_eq!(status("flaky-2"), "done");
-    // The superseded node stays in the executed graph, cancelled.
+    assert_eq!(status("after"), "done");
+    // The superseded node stays in the executed graph, cancelled, so the run's
+    // own record still names what was replaced.
     assert_eq!(status("flaky"), "cancelled");
-
-    // The transition folds that journal, so the superseded node is removed
-    // exactly as a `drop` would remove it — and nothing is left to schedule.
-    let transitioned = world.run(&["round", "next", "record"]);
-    transitioned.exited(0).out_has("\"complete\"");
-    assert!(
-        !world.run_file("record", "round-02/plan.json").exists(),
-        "a round was opened for work the executed graph had already finished"
-    );
-    world.release("driver.go");
+    assert_eq!(executed["state"], "complete");
 }
 
 #[test]
-fn only_this_rounds_notes_carry_forward_and_a_done_node_falls_out() {
-    let world = World::new("journal-context");
-    world.script("driver.wait", "hold");
-    world.script("slow.wait", "hold");
-    let path = world.plan(
-        "notes",
-        &plan_of(
-            "notes",
-            vec![
-                agent("slow", &[]),
-                agent("later", &[]),
-                human("approve", &["later"]),
-            ],
-        ),
-    );
-    world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
-
-    let mut round = world.cmd(&["round", "run", "notes"]);
-    let mut running = round
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .expect("the round starts");
-    world.until("a node to be in flight", |world| {
-        !world.events_of("notes", "node-dispatched").is_empty()
-    });
-
-    world
-        .run_with_stdin(
-            &["reply", "notes"],
-            &json!({
-                "version": 1,
-                "commands": [{"op": "context", "id": "slow", "note": "the fixture moved"}],
-            })
-            .to_string(),
-        )
-        .exited(0);
-    world.release("slow.go");
-    running.wait().expect("the round finishes");
-
-    world.run(&["round", "next", "notes"]).exited(0);
-    // Nothing to run: every agent node settled and the human is waiting. The
-    // transition reports rather than opening a round that dispatches nothing.
-    assert!(
-        !world.run_file("notes", "round-02/plan.json").exists(),
-        "a round was opened with nothing that could start"
-    );
-
-    let result = world.run_json("notes", "round-01/result.json");
-    let status = |id: &str| {
-        result["nodes"]
-            .as_array()
-            .expect("nodes")
-            .iter()
-            .find(|node| node["id"] == id)
-            .unwrap_or_else(|| panic!("{id} is missing from {result}"))["status"]
-            .clone()
-    };
-    assert_eq!(status("slow"), "done");
-    assert_eq!(status("approve"), "waiting");
-    world.release("driver.go");
-}
-
-#[test]
-fn a_rounds_result_is_written_atomically_and_read_back_whole() {
+fn the_runs_result_is_written_atomically_and_read_back_whole() {
     let world = World::new("journal-result");
     let path = world.plan("atomic", &plan_of("atomic", vec![agent("build", &[])]));
     world
         .run(&["start", &path.to_string_lossy(), "--attach"])
         .exited(0);
 
-    let result = world.run_json("atomic", "round-01/result.json");
+    let result = world.run_json("atomic", "result.json");
     assert_eq!(result["run_id"], "atomic");
-    assert_eq!(result["round"], 1);
     assert_eq!(result["ok"], true);
+    // One document for the whole run: there are no rounds to record separately.
+    assert!(
+        result.get("round").is_none(),
+        "the result claims a round: {result}"
+    );
 
     // No temporary survives the rename a reader could pick up instead.
-    let leftovers: Vec<String> = std::fs::read_dir(world.run_file("atomic", "round-01"))
-        .expect("the round directory")
+    let leftovers: Vec<String> = std::fs::read_dir(world.run_file("atomic", ""))
+        .expect("the run directory")
         .flatten()
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .filter(|name| name.contains("tmp"))

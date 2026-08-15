@@ -627,6 +627,17 @@ pub fn derive(
 ) -> BTreeMap<String, NodeStatus> {
     let mut statuses: BTreeMap<String, NodeStatus> = BTreeMap::new();
     for node in graph.iter() {
+        if node.parked {
+            // A park is the planner's own idle, and it outranks whatever the
+            // dispatch it stopped went on to record: `cancel` parks a node *and*
+            // stops its work, so a node parked while it was running settles
+            // `cancelled` a moment later. Read the settlement instead and the
+            // node reports as something a `requeue` is not obviously the way
+            // back from — while the flag that actually holds it out of every
+            // later dispatch sits unmentioned on its definition.
+            statuses.insert(node.id.clone(), NodeStatus::Parked);
+            continue;
+        }
         if let Some(recorded) = recorded.get(&node.id) {
             // A recorded settlement stands, except for the two derived gates:
             // they are re-derived against the graph as it is now.

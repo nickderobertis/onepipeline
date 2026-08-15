@@ -17,7 +17,7 @@
 // model turns to produce, and `dispatch.rs` is where the real `oneagentgraph` binary is
 // driven instead. `harness.rs` carries the same suppression and the full rationale.
 
-use crate::harness::{agent, human, plan_of, World};
+use crate::harness::{agent, human, plan_of, World, NOTHING_DRIVING};
 use serde_json::{json, Value};
 
 /// A node depending on another run's node.
@@ -34,18 +34,18 @@ fn settle(world: &World, name: &str, nodes: Vec<Value>) -> String {
         .run(&["start", &path.to_string_lossy(), "--attach"])
         .settled();
     world.until("the run to settle", |world| {
-        !world.events_of(name, "round-finished").is_empty()
+        world.run_file(name, "result.json").is_file()
     });
     name.to_string()
 }
 
-fn status_of(world: &World, run: &str, round: &str, id: &str) -> Value {
-    world.run_json(run, round)["nodes"]
+fn status_of(world: &World, run: &str, id: &str) -> Value {
+    world.run_json(run, "result.json")["nodes"]
         .as_array()
         .expect("nodes")
         .iter()
         .find(|node| node["id"] == id)
-        .unwrap_or_else(|| panic!("{id} is missing from {run}/{round}"))["status"]
+        .unwrap_or_else(|| panic!("{id} is missing from {run}'s result"))["status"]
         .clone()
 }
 
@@ -63,11 +63,11 @@ fn a_dependency_on_a_finished_upstream_node_resolves_and_the_consumer_runs() {
     );
 
     assert_eq!(
-        status_of(&world, &run, "round-01/result.json", "ship"),
+        status_of(&world, &run, "ship"),
         "done"
     );
     assert_eq!(
-        world.run_json(&run, "round-01/result.json")["state"],
+        world.run_json(&run, "result.json")["state"],
         "complete"
     );
 
@@ -92,10 +92,7 @@ fn an_upstream_that_failed_leaves_its_consumer_blocked_rather_than_failing_it() 
     let run = settle(&world, "waits", vec![consumer("ship", "run:broke#build")]);
 
     // Blocked, not failed: the upstream may still be retried by its own planner.
-    assert_eq!(
-        status_of(&world, &run, "round-01/result.json", "ship"),
-        "blocked"
-    );
+    assert_eq!(status_of(&world, &run, "ship"), "blocked");
     assert!(
         world
             .events_of(&run, "node-dispatched")
@@ -110,7 +107,7 @@ fn an_upstream_that_failed_leaves_its_consumer_blocked_rather_than_failing_it() 
 }
 
 #[test]
-fn an_upstream_that_arrives_later_unblocks_the_consumer_in_the_next_round() {
+fn an_upstream_that_arrives_later_unblocks_the_consumer_when_a_driver_looks_again() {
     let world = World::new("crossdag-recovers");
     // Nothing named `arrives` exists yet: an unknown run is exactly the case an
     // unresolved edge waits through.
@@ -119,30 +116,20 @@ fn an_upstream_that_arrives_later_unblocks_the_consumer_in_the_next_round() {
         "patient",
         vec![consumer("ship", "run:arrives#build")],
     );
-    assert_eq!(
-        status_of(&world, &run, "round-01/result.json", "ship"),
-        "blocked"
-    );
+    assert_eq!(status_of(&world, &run, "ship"), "blocked");
 
     // The upstream arrives.
     settle(&world, "arrives", vec![agent("build", &[])]);
 
-    // The transition has to open a round for it. A ready check that could not
-    // resolve the edge would find nothing ready and park the run for good,
-    // which is the run sitting on work that is now perfectly startable.
-    world.run(&["round", "next", &run]).exited(0);
-    assert!(
-        world.run_file(&run, "round-02/plan.json").exists(),
-        "no round was opened for an upstream that had arrived"
-    );
-    world.run(&["round", "run", &run]).exited(0);
+    // The edge is re-read on every reconcile pass, so a driver picks the
+    // consumer up and runs it. One that could not resolve the edge would find
+    // nothing ready and park the run for good — sitting on work that is now
+    // perfectly startable.
+    world.run(&["adopt", &run]).exited(0);
 
+    assert_eq!(status_of(&world, &run, "ship"), "done");
     assert_eq!(
-        status_of(&world, &run, "round-02/result.json", "ship"),
-        "done"
-    );
-    assert_eq!(
-        world.run_json(&run, "round-02/result.json")["state"],
+        world.run_json(&run, "result.json")["state"],
         "complete"
     );
 }
@@ -159,7 +146,7 @@ fn an_upstream_that_moves_after_it_was_recorded_is_reported_without_rerunning_wo
         vec![agent("build", &[]), human("approve", &[])],
     );
 
-    // The consumer's round is held open by a second node, so the upstream can
+    // The consumer's run is held open by a second node, so the upstream can
     // move while the watch is live.
     world.script("late.wait", "hold");
     let path = world.plan(
@@ -198,8 +185,8 @@ fn an_upstream_that_moves_after_it_was_recorded_is_reported_without_rerunning_wo
     );
 
     world.release("late.go");
-    world.until("the round to finish", |world| {
-        !world.events_of("watcher", "round-finished").is_empty()
+    world.until("the run to settle", |world| {
+        world.run_file("watcher", "result.json").is_file()
     });
 
     // Reported, not re-run: the consumer keeps the work it already did.
@@ -218,7 +205,7 @@ fn an_upstream_that_moves_after_it_was_recorded_is_reported_without_rerunning_wo
 }
 
 #[test]
-fn the_recorded_position_survives_the_round_that_recorded_it() {
+fn the_recorded_position_survives_the_driver_that_recorded_it() {
     let world = World::new("crossdag-durable");
     settle(
         &world,
@@ -226,9 +213,9 @@ fn the_recorded_position_survives_the_round_that_recorded_it() {
         vec![agent("build", &[]), human("approve", &[])],
     );
 
-    // The consumer fails, so it is carried into a second round still naming the
-    // edge — and that second round is a different process from the one that
-    // recorded where the upstream had got.
+    // The consumer fails, so a `retry` brings it back still naming the edge —
+    // and the driver that runs the replacement is a different process from the
+    // one that recorded where the upstream had got.
     world.script("ship.fail", "1");
     let run = settle(
         &world,
@@ -239,13 +226,12 @@ fn the_recorded_position_survives_the_round_that_recorded_it() {
         .as_u64()
         .expect("a baseline");
 
-    // The upstream moves between the two rounds.
+    // The upstream moves between the two drivers.
     world.run(&["attest", "steady", "approve"]).exited(0);
+    // A fresh driver, in a fresh process, over the same ledger.
+    world.run(&["adopt", &run]).exited(NOTHING_DRIVING);
 
-    world.run(&["round", "next", &run]).exited(0);
-    world.run(&["round", "run", &run]);
-
-    // A baseline held only in the round that captured it would be re-captured
+    // A baseline held only in the process that captured it would be re-captured
     // here — at the upstream's *new* position — and the movement would never be
     // reported by anything.
     let modified = world.events_of(&run, "upstream-modified");
@@ -253,7 +239,7 @@ fn the_recorded_position_survives_the_round_that_recorded_it() {
     assert_eq!(
         modified[0]["payload"]["captured_last_seq"],
         json!(baseline),
-        "the second round measured from a position it captured itself: {modified:?}"
+        "the second driver measured from a position it captured itself: {modified:?}"
     );
     assert_eq!(
         world.events_of(&run, "cross-dag-satisfied").len(),
@@ -273,7 +259,7 @@ fn plant_outside(world: &World) -> String {
             "run_id": "elsewhere", "plan": "/dev/null", "graph": "g",
             "launcher": "e2e", "session": "someone", "pid": 1, "host": "h",
             "started_at": "2026-01-01T00:00:00.000Z",
-            "round_budget": 1, "heartbeat_interval": 1, "adoptions": 0,
+            "heartbeat_interval": 1, "adoptions": 0,
         })
         .to_string(),
     )
@@ -308,7 +294,7 @@ fn a_run_id_that_climbs_out_of_the_runs_root_reaches_nothing() {
         vec!["results", "../elsewhere"],
         vec!["stop", "../elsewhere"],
         vec!["next", "../elsewhere"],
-        vec!["round", "run", "../elsewhere"],
+        vec!["adopt", "../elsewhere"],
     ] {
         let refused = world.run(&verb);
         assert_eq!(

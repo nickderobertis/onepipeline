@@ -24,18 +24,13 @@ const PLANTED_DOCUMENT: &str =
 /// The one recognisable string inside it.
 const PLANTED_WORDS: &str = "planted-and-never-read";
 
-/// Run one round from this test rather than from the driver, keeping what it
-/// said: a refusal made as an envelope is ingested reaches the engine's own
-/// stderr, which in a detached run goes to a log no assertion can read.
+/// Drive one run from this test, attached, keeping what the launch said: a
+/// refusal made as an envelope is ingested reaches the driver's own stderr,
+/// which in a detached run goes to a log no assertion can read.
 fn driven(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> (String, Run) {
-    world.script("driver.wait", "hold");
     let path = world.plan(name, &plan_of(name, nodes));
-    world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
-    let round = world.run(&["round", "run", name]);
-    world.release("driver.go");
-    (name.to_string(), round)
+    let launched = world.run(&["start", &path.to_string_lossy(), "--attach"]);
+    (name.to_string(), launched)
 }
 
 /// How long a held publication phase is kept open, so its bucket is a real
@@ -53,7 +48,7 @@ fn settled(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
         .run(&["start", &path.to_string_lossy(), "--attach"])
         .settled();
     world.until("the run to settle", |world| {
-        !world.events_of(name, "round-finished").is_empty()
+        world.run_file(name, "result.json").is_file()
     });
     name.to_string()
 }
@@ -76,9 +71,9 @@ fn monitor_renders_all_three_streams_under_their_own_typed_ids() {
     stream.out_has("graph:service");
     stream.out_has("agent:");
     stream.out_has("vcs:");
-    // A round transition has no node, so it has no graph id: it reaches the
-    // reader as run state rather than as an event line, naming the run.
-    stream.out_has("-- watched  round-01");
+    // The run's own state has no node, so it has no graph id: it reaches the
+    // reader as a trailer rather than as an event line, naming the run.
+    stream.out_has("-- watched  1/1 done");
 }
 #[test]
 fn monitor_writes_nothing_and_consumes_nothing() {
@@ -110,7 +105,7 @@ fn monitor_writes_nothing_and_consumes_nothing() {
         before,
         "a read-only view wrote to the journal"
     );
-    // And none of them took the lock the round holds.
+    // And none of them took the lock the driving process holds.
     world.release("build.go");
 }
 
@@ -197,7 +192,7 @@ fn status_names_a_live_dispatch_and_flags_one_nothing_is_driving() {
             .any(|event| event["source"] == "agentgraph")
     });
     world.until("the run to settle", |world| {
-        !world.events_of("live", "round-finished").is_empty()
+        world.run_file("live", "result.json").is_file()
     });
 
     // Once it has settled, no view calls it running whatever else is true.
@@ -380,7 +375,7 @@ fn telemetry_separates_gate_and_lock_time_from_agent_time() {
     });
     world.release("gate.go");
     world.until("the run to settle", |world| {
-        !world.events_of("gated", "round-finished").is_empty()
+        world.run_file("gated", "result.json").is_file()
     });
 
     let document = world.run(&["telemetry", "gated"]).json();

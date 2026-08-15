@@ -33,28 +33,28 @@ fn graph(relative: &str) -> GraphConfig {
 }
 
 #[test]
-fn the_dag_scope_graph_is_the_orchestrator_and_the_resettable_check_in() {
+fn the_dag_scope_graph_is_the_monitor_and_the_resettable_check_in() {
     let config = graph("graphs/dag-scope.yaml");
     assert_eq!(config.name, "dag-scope");
 
-    let orchestrator = config
+    let monitor = config
         .members
-        .get("orchestrator")
-        .expect("the dag-scope graph has an orchestrator member");
-    let Member::Onejudge(orchestrator) = orchestrator else {
-        panic!("the orchestrator is a two-party conversation");
+        .get("monitor")
+        .expect("the dag-scope graph has a monitor member");
+    let Member::Onejudge(monitor) = monitor else {
+        panic!("the monitor is a two-party conversation");
     };
-    // Its judge side is this crate's own channel server, so the planner replies
-    // through the same conversation the orchestrator runs in.
-    let JudgeSide::Command(judge) = &orchestrator.judge else {
-        panic!("the orchestrator's judge side is a command provider");
+    // Its judge side is this crate's own channel server, so the planner reads
+    // what the monitor raises through the same conversation it runs in.
+    let JudgeSide::Command(judge) = &monitor.judge else {
+        panic!("the monitor's judge side is a command provider");
     };
     assert_eq!(judge.command[0], "onepipeline");
     assert_eq!(judge.command[1], "channel");
     assert_eq!(judge.command[2], "serve");
     assert!(
         judge.command[3].contains("ONEPIPELINE_RUN_ID"),
-        "the driver has nowhere to substitute the run id: {:?}",
+        "the launcher has nowhere to substitute the run id: {:?}",
         judge.command
     );
 
@@ -102,7 +102,7 @@ fn the_node_scope_graph_is_the_default_worker_and_judge() {
 
 #[test]
 fn every_shipped_persona_is_a_persona_with_both_sides() {
-    for name in ["orchestrator", "check-in", "pr-author"] {
+    for name in ["monitor", "check-in", "pr-author"] {
         let text = read(&format!("personas/{name}.yaml"));
         let document: serde_json::Value = serde_norway::from_str(&text)
             .unwrap_or_else(|e| panic!("personas/{name}.yaml is not valid YAML: {e}"));
@@ -129,24 +129,41 @@ fn every_shipped_persona_is_a_persona_with_both_sides() {
 }
 
 #[test]
-fn the_orchestrator_persona_speaks_this_crates_command_vocabulary() {
-    let text = unwrapped("personas/orchestrator.yaml");
-    for verb in ["onepipeline round run", "onepipeline round next"] {
+fn the_monitor_persona_observes_and_never_drives() {
+    let text = unwrapped("personas/monitor.yaml");
+    // It says what it is for, in the vocabulary the channel actually enforces.
+    for word in ["Observe one run", "non-blocking", "\"author\": \"monitor\""] {
+        assert!(text.contains(word), "the monitor persona never says `{word}`");
+    }
+    // The ops it may issue, and the three it is refused, named so the persona
+    // and the allowlist cannot drift apart.
+    for op in ["retry", "requeue", "cancel", "context", "add"] {
         assert!(
-            text.contains(verb),
-            "the orchestrator persona never names `{verb}`"
+            text.contains(&format!("`{op}`")),
+            "the monitor persona does not name the `{op}` op it may issue"
         );
     }
-    // It must not carry the vocabulary it was ported from.
+    for refused in ["complete", "attest", "drop"] {
+        assert!(
+            text.contains(&format!("`{refused}`")),
+            "the monitor persona does not name the `{refused}` op it is refused"
+        );
+    }
+    // It never drives, and it never authors the target project's content.
+    assert!(text.contains("You do not drive it"));
+    assert!(text.contains("never author the target project"));
+    // And it must not carry the vocabulary it was ported from.
     for stale in [
         "run-plan",
         "next-round",
         "channel-reply",
         "just orchestrate",
+        "onepipeline round run",
+        "onepipeline round next",
     ] {
         assert!(
             !text.contains(stale),
-            "the orchestrator persona still says `{stale}`"
+            "the monitor persona still says `{stale}`"
         );
     }
 }
@@ -243,10 +260,10 @@ fn the_executor_rules_example_selects_the_shipped_local_executor() {
     assert_eq!(output.status.code(), Some(0), "{output:?}");
 
     world.until("the run to settle", |world| {
-        !world.events_of("ruled", "round-finished").is_empty()
+        world.run_file("ruled", "result.json").is_file()
     });
     assert_eq!(
-        world.run_json("ruled", "round-01/result.json")["state"],
+        world.run_json("ruled", "result.json")["state"],
         "complete"
     );
 }
@@ -267,7 +284,7 @@ fn a_rules_file_the_grammar_refuses_dispatches_nothing() {
     let mut command = world.cmd(&["start", &plan.to_string_lossy(), "--attach"]);
     command.env("ONEPIPELINE_EXECUTOR_RULES", &rules);
     let output = command.output().expect("the binary runs");
-    // The round refuses; the run is recorded but nothing is dispatched.
+    // The loop refuses; the run is recorded but nothing is dispatched.
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("not declared")
             || world
@@ -305,14 +322,13 @@ fn a_memory_limit_in_a_unit_the_grammar_cannot_read_dispatches_nothing() {
         "a rules file with an unreadable limit still dispatched"
     );
 
-    // The round refuses by name. Asked directly, because the driver that runs
-    // this verb during `start` owns its own stderr — the orchestrator member is
-    // what reads this refusal, and this is the command it runs.
-    let mut round = world.cmd(&["round", "run", "badunit"]);
-    round.env("ONEPIPELINE_EXECUTOR_RULES", &rules);
-    let refused = round.output().expect("the binary runs");
+    // And it refuses by name, on the stderr the operator who typed `start` is
+    // already reading: the launch drives the run itself.
+    let mut again = world.cmd(&["start", &plan.to_string_lossy(), "--attach"]);
+    again.env("ONEPIPELINE_EXECUTOR_RULES", &rules);
+    let refused = again.output().expect("the binary runs");
     let said = String::from_utf8_lossy(&refused.stderr).to_string();
-    assert!(!refused.status.success(), "the round ran anyway: {said}");
+    assert!(!refused.status.success(), "the run ran anyway: {said}");
     assert!(said.contains("min_free_mem"), "{said}");
     assert!(
         said.contains("GiB"),
@@ -351,47 +367,40 @@ fn a_node_label_rule_routes_the_node_it_names_and_only_that_node() {
     let output = command.output().expect("the binary runs");
     assert_eq!(output.status.code(), Some(0), "{output:?}");
     world.until("the run to settle", |world| {
-        !world.events_of("labelled", "round-finished").is_empty()
+        world.run_file("labelled", "result.json").is_file()
     });
     assert_eq!(
-        world.run_json("labelled", "round-01/result.json")["state"],
+        world.run_json("labelled", "result.json")["state"],
         "complete"
     );
 
     // The same plan against a rule naming a persona this node does not carry has
-    // nowhere to dispatch, and the round refuses rather than picking somewhere.
+    // nowhere to dispatch, and the run refuses rather than picking somewhere.
     let world = World::new("shipped-labelrule-miss");
     let elsewhere = label_routed_rules(&world, "reviewer");
-    let said = refused_round(&world, "unlabelled", &elsewhere);
+    let said = refused_launch(&world, "unlabelled", &elsewhere);
     assert!(said.contains("nothing can dispatch"), "{said}");
 }
 
-/// Launch a one-node run whose driver is held, run its round from here, and
-/// return what that round said.
+/// Launch a one-node run under these rules and return what the launch said.
 ///
-/// The round is run from the test rather than from the driver so the refusal is
-/// this command's own stderr, asserted where it was produced rather than read
-/// back out of what the driver recorded. Holding the driver at its rendezvous
-/// is what keeps this the run's single writer.
-fn refused_round(world: &World, name: &str, rules: &std::path::Path) -> String {
-    world.script("driver.wait", "hold");
+/// Attached, because the launch drives the run itself: the refusal is this
+/// command's own stderr, asserted where it was produced rather than read back
+/// out of what some other process recorded.
+fn refused_launch(world: &World, name: &str, rules: &std::path::Path) -> String {
     let plan = world.plan(
         name,
         &crate::harness::plan_of(name, vec![crate::harness::agent("build", &[])]),
     );
-    world
-        .cmd(&["start", &plan.to_string_lossy(), "--detach"])
+    let refused = world
+        .cmd(&["start", &plan.to_string_lossy(), "--attach"])
         .env("ONEPIPELINE_EXECUTOR_RULES", rules)
         .output()
         .expect("the binary runs");
-    let mut round = world.cmd(&["round", "run", name]);
-    round.env("ONEPIPELINE_EXECUTOR_RULES", rules);
-    let refused = round.output().expect("the binary runs");
     let said = String::from_utf8_lossy(&refused.stderr).to_string();
-    world.release("driver.go");
     assert!(
         !refused.status.success(),
-        "the round dispatched anyway: {said}"
+        "the run dispatched anyway: {said}"
     );
     said
 }
@@ -408,10 +417,31 @@ fn a_rule_testing_a_label_that_is_not_selectable_is_refused_by_name() {
          rules: [{when: {node_label: {step: implement}}, use: local}, {use: local}]\n",
     )
     .expect("the rules are written");
-    let said = refused_round(&world, "badlabel", &rules);
+    let said = refused_launch(&world, "badlabel", &rules);
     assert!(said.contains("step"), "{said}");
     assert!(
         said.contains("persona"),
+        "the refusal did not name what a rule may test instead: {said}"
+    );
+}
+
+/// `round` is the other label a rule may not test, and for a stronger reason
+/// than `step`: nothing stamps one at all any more, so a rule naming one could
+/// never hold under any run.
+#[test]
+fn a_rule_testing_the_retired_round_label_is_refused_by_name() {
+    let world = World::new("shipped-roundlabel");
+    let rules = world.root.join("round-label-executors.yaml");
+    std::fs::write(
+        &rules,
+        "executors: [{name: local, type: local}]\n\
+         rules: [{when: {node_label: {round: \"1\"}}, use: local}, {use: local}]\n",
+    )
+    .expect("the rules are written");
+    let said = refused_launch(&world, "roundlabel", &rules);
+    assert!(said.contains("round"), "{said}");
+    assert!(
+        said.contains("run_id") && said.contains("node") && said.contains("persona"),
         "the refusal did not name what a rule may test instead: {said}"
     );
 }
