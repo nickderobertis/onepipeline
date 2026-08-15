@@ -329,24 +329,6 @@ impl LaunchRecord {
     }
 }
 
-/// What one run's launch said about its events.
-///
-/// Read at the point of use rather than threaded down through the reconcile
-/// loop: a source filter is needed exactly where a source is started, and the
-/// run id is what every one of those places already holds.
-///
-/// A launch record this cannot read yields the empty block, which filters
-/// nothing. That is the reading a run written by a build predating the block
-/// gets, and it is the safe direction for a read that has no way to refuse: a
-/// filter is what a run does *not* relay, so failing to find one relays
-/// everything rather than silencing a source over an unreadable file.
-pub fn launch_filters(run: &str) -> Filters {
-    let paths = RunPaths::under(&runs_root(), run);
-    read_json_opt::<LaunchRecord>(&paths.launch())
-        .map(|record| record.filters)
-        .unwrap_or_default()
-}
-
 /// Read a JSON document, refusing anything the type does not accept.
 pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
     let text = fs::read_to_string(path).map_err(|e| Error::Ledger {

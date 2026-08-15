@@ -475,9 +475,12 @@ fn a_filter_spec_is_refused_by_the_shared_grammars_own_rules() {
         .expect_err("`round` is not in the grammar");
     assert!(deprecated.to_string().contains("round"), "{deprecated}");
 
+    // Both refusals are at the one boundary: a spec reaches this crate from a
+    // command line, from a file, and from the launch record every later read
+    // opens, and a filter checked only where an operator typed it would be a
+    // record that could be edited into a matcher this build says it will not
+    // honour — and then honoured.
     let empty_matcher = EventFilter::parse(r#"{"exclude": [{}]}"#)
-        .expect("an empty matcher parses; it is validation that refuses it")
-        .validate()
         .expect_err("a matcher naming no field matches everything");
     assert!(
         empty_matcher.to_string().contains("exclude"),
@@ -485,10 +488,15 @@ fn a_filter_spec_is_refused_by_the_shared_grammars_own_rules() {
     );
 
     let empty_field = EventFilter::parse(r#"{"include": [{"kind": ""}]}"#)
-        .expect("it parses")
-        .validate()
         .expect_err("nothing on the stream carries an empty kind");
     assert!(empty_field.to_string().contains("kind"), "{empty_field}");
+
+    // The launch record is that boundary too, and it is the one an operator
+    // never typed at: a block edited into a matcher naming nothing is refused
+    // where the record is read.
+    let record = serde_json::from_str::<Filters>(r#"{"vcs": {"exclude": [{}]}}"#)
+        .expect_err("a launch record carrying an unusable filter is refused");
+    assert!(record.to_string().contains("exclude"), "{record}");
 }
 
 /// `exclude` wins, an absent `include` admits everything, and a glob is `*`.

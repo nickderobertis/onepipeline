@@ -458,6 +458,14 @@ pub enum GraphOutput<'a> {
 /// The source filter in particular has three ways to arrive — a library
 /// `Request`, this build's own `drive`, and an overridden sibling's
 /// `--event-filter` — and all three read it from here.
+// llmlint: ignore-block[invalid_states_unrepresentable] `graph` is the resolved
+// reference this struct's own callers already held as a string, gathered rather than
+// retyped: the same launch-recorded, `resolve_graph`-checked value `src/lifecycle.rs`
+// carries under the same reasoning, and the same one `retained_command` has to spell onto
+// an argv either way. `oneagentgraph::config::ConfigRef` is transparent over exactly this
+// string and adds no invariant, and one of the two callers here holds a `String` off the
+// launch record rather than a `ConfigRef` — so taking one would mint the sibling's type
+// at this seam only to unwrap it again two functions down.
 #[derive(Debug, Clone, Copy)]
 pub struct Launch<'a> {
     /// The agent-graph config to run.
@@ -481,6 +489,7 @@ pub struct Launch<'a> {
     /// Where the started graph's own output goes.
     pub output: GraphOutput<'a>,
 }
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 /// A started graph's output, from the reading side.
 ///

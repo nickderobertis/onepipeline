@@ -38,6 +38,7 @@ pub fn execute(
     node: &Node,
     cancel: &crate::executor::CancellationToken,
     tx: &Sender<Message>,
+    vcs_filter: Option<&EventFilter>,
 ) -> Settlement {
     let Some(request) = crate::vcs::request_for(node) else {
         return Settlement {
@@ -45,11 +46,6 @@ pub fn execute(
             ..Settlement::plain(&node.id, NodeStatus::Failed, Some("invalid-node"))
         };
     };
-
-    // What this run said `onevcs` may relay, read once for the whole node: every
-    // session this workstream opens is one of that source's streams, and the
-    // filter is what keeps a stream nobody will read from being relayed at all.
-    let vcs_filter = crate::ledger::launch_filters(run).vcs;
 
     // A node that declared no steps has one dispatch and no step, so nothing
     // stamps a `step` label the plan never wrote.
@@ -164,12 +160,11 @@ pub fn execute(
         if stream.is_none() {
             if let Some(token) = &session {
                 worktree = crate::vcs::worktree_of(token);
-                stream =
-                    crate::vcs::follow(token, vcs_filter.as_ref(), relay_into(tx, whose.clone()));
+                stream = crate::vcs::follow(token, vcs_filter, relay_into(tx, whose.clone()));
             }
         }
         if drained.settlement.status != NodeStatus::Done {
-            end_session(stream, tx, session.as_deref(), &whose, vcs_filter.as_ref());
+            end_session(stream, tx, session.as_deref(), &whose, vcs_filter);
             return Settlement {
                 branch,
                 completed_steps: completed,
@@ -201,7 +196,7 @@ pub fn execute(
         &token,
         branch,
     );
-    end_session(stream, tx, Some(&token), &whose, vcs_filter.as_ref());
+    end_session(stream, tx, Some(&token), &whose, vcs_filter);
     settlement
 }
 
@@ -565,6 +560,7 @@ mod tests {
             &node,
             &crate::executor::CancellationToken::new(),
             &tx,
+            None,
         );
         assert_eq!(settlement.status, NodeStatus::Failed);
         assert_eq!(settlement.outcome.as_deref(), Some("invalid-node"));

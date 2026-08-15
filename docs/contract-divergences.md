@@ -906,19 +906,39 @@ approved text says a profile shapes a view and says nothing about a cursor, and
 inventing one would make `next` and `monitor` disagree about what "the event
 view" means.
 
+<!-- llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] this entry
+*describes* the duplication rather than introducing it: `docs/contract.md` fixes the
+filter grammar — like the envelope beside it — as duplicated per repository by design,
+with the committed grammar text as the one source and each producer's own contract test as
+the drift gate. `tests/contract.rs` is this repository's, and it fails `just check` the
+moment `src/filter.rs` stops matching the document. Building a cross-repository generation
+step or drift gate instead is a change to three independently-released tools and to the
+approved contract, which is a proposal to the planner who owns it — which is what this
+entry is. -->
+
 ## 32. Corners of the shared filter grammar, resolved as the other two producers resolve them — OPEN
 
 **Proposal (for the planner who owns the contract): confirm these three
 resolutions, which all three producers must make identically for one spec to mean
 one thing across the stack.**
 
-The grammar is shared across `oneagentgraph`, `onevcs`, and this crate, with no
-shared crate: each owns a copy, held to the committed text by its own contract
-test. Three corners the approved text does not settle are resolved here to match
-what `oneagentgraph`'s `docs/event-filter-notes.md` records, so one spec does not
-filter differently depending on which producer read it. They are listed for the
-planner because agreement between three repositories is not something any one of
-them can enforce.
+**The grammar has one source and a drift gate, and this entry is not about
+that.** The source is the grammar committed in `docs/contract.md`, which the
+approved contract fixes as authoritative for all three producers; the gate is
+`tests/contract.rs`, which drives that document's own `filters:` example through
+`src/filter.rs`'s types and fails this repository's `just check` the moment its
+copy stops matching the text. `oneagentgraph` and `onevcs` each carry the same
+text and the same gate. There is deliberately no shared crate — the same decision
+the envelope beside it is under, and for the same reason: a shared crate would
+make three independently-released tools co-version.
+
+What *is* open is narrower. Three corners of that text do not settle a question
+an implementation has to answer anyway, so each producer answers it — and two
+producers answering it differently is a spec that filters differently depending
+on who read it, which no contract test can catch because each copy would still
+match the text. They are resolved here to match what `oneagentgraph`'s
+`docs/event-filter-notes.md` records, and listed for the planner because the
+agreement is between repositories rather than inside one.
 
 **The glob dialect is `*` and nothing else.** `*` stands for any run of
 characters including none; every other character is itself, so `?` and `[a-z]`
@@ -937,3 +957,5 @@ plainly read.
 does not name, and this crate no longer stamps it at all — so it is refused by
 the matcher reader like any other non-field, rather than quietly accepted as a
 key nothing can satisfy.
+
+<!-- llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate] -->

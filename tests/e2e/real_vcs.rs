@@ -209,6 +209,10 @@ fn a_launchs_vcs_filter_reaches_the_real_sibling_and_narrows_what_it_relays() {
     let repo = world.repository("local-direct", &["true"]);
     world.script("service.work", "the worker wrote this\n");
 
+    // Read through `monitor --all`, the unfiltered view of the merged store a
+    // person opens — so what this asserts is what a reader of the run sees.
+    let relayed = |run: &str| -> String { world.run(&["monitor", run, "--all"]).stdout };
+
     // No `filters:` block: ingestion is exactly what it always was, and this is
     // the control the filtered run below is read against.
     let path = world.plan(
@@ -218,14 +222,11 @@ fn a_launchs_vcs_filter_reaches_the_real_sibling_and_narrows_what_it_relays() {
     world
         .run(&["start", &path.to_string_lossy(), "--attach"])
         .settled();
-    world.until("the unfiltered run to settle", |world| {
-        world.run_file("unfiltered", "result.json").is_file()
-    });
-    let ingested = vcs_kinds(&world, "unfiltered");
+    let ingested = relayed("unfiltered");
     for kind in ["gate-verdict", "push", "session-closed"] {
         assert!(
-            ingested.iter().any(|seen| seen == kind),
-            "a launch naming no filters did not ingest {kind}: {ingested:?}"
+            ingested.contains(kind),
+            "a launch naming no filters did not ingest {kind}:\n{ingested}"
         );
     }
 
@@ -244,28 +245,23 @@ fn a_launchs_vcs_filter_reaches_the_real_sibling_and_narrows_what_it_relays() {
             r#"{"exclude": [{"kind": "gate-verdict"}]}"#,
         ])
         .settled();
-    world.until("the filtered run to settle", |world| {
-        world.run_file("filtered", "result.json").is_file()
-    });
 
-    let kinds = vcs_kinds(&world, "filtered");
+    let kinds = relayed("filtered");
     assert!(
-        !kinds.iter().any(|kind| kind == "gate-verdict"),
-        "the source filter did not reach `onevcs`: {kinds:?}"
+        !kinds.contains("gate-verdict"),
+        "the source filter did not reach `onevcs`:\n{kinds}"
     );
     // Narrowed, not silenced — and the *same* publication happened, so the
     // difference between the two runs is the filter and nothing else.
     for kind in ["push", "session-closed"] {
         assert!(
-            kinds.iter().any(|seen| seen == kind),
-            "the source filter dropped {kind}, which it admits: {kinds:?}"
+            kinds.contains(kind),
+            "the source filter dropped {kind}, which it admits:\n{kinds}"
         );
     }
-    let result = world.run_json("filtered", "result.json");
-    assert_eq!(
-        result["nodes"][0]["outcome"],
-        "merged",
-        "filtering the stream changed what the run did: {result}\n{}",
-        why(&world, "filtered")
-    );
+    world
+        .run(&["results", "filtered"])
+        .exited(0)
+        .out_has("service")
+        .out_has("merged");
 }

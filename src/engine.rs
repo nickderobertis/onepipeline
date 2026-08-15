@@ -445,7 +445,7 @@ fn converge(
             journal,
             state,
             &rules,
-            &launch.node_graph,
+            launch,
             &tx,
             &mut in_flight,
             &paused,
@@ -997,7 +997,7 @@ fn start_ready(
     journal: &mut Journal,
     state: &mut RunState,
     rules: &ExecutorRules,
-    node_graph: &str,
+    launch: &LaunchRecord,
     tx: &Sender<Message>,
     in_flight: &mut BTreeMap<String, Dispatch>,
     paused: &BTreeSet<String>,
@@ -1055,7 +1055,7 @@ fn start_ready(
             journal::labels(&paths.run, Some(&node.id)),
             journal::payload(&[("persona", json!(node.persona)), ("attempt", json!(1))]),
         )?;
-        spawn(paths, rules, node_graph, &node, cancel.clone(), tx.clone())?;
+        spawn(paths, rules, launch, &node, cancel.clone(), tx.clone())?;
         let now = Instant::now();
         in_flight.insert(
             node.id.clone(),
@@ -1080,7 +1080,7 @@ fn start_ready(
 fn spawn(
     paths: &RunPaths,
     rules: &ExecutorRules,
-    node_graph: &str,
+    launch: &LaunchRecord,
     node: &Node,
     cancel: CancellationToken,
     tx: Sender<Message>,
@@ -1105,13 +1105,26 @@ fn spawn(
 
     let run = paths.run.clone();
     let node = node.clone();
-    let node_graph = node_graph.to_string();
+    let node_graph = launch.node_graph.clone();
+    // Cloned off the record the loop read **strictly**, rather than re-read from
+    // disk where a dispatch needs it: `launch.json` is external input, and a
+    // second, leniently-read copy of it would be a filter this build could not
+    // honour arriving where nothing can refuse it.
+    let vcs_filter = launch.filters.vcs.clone();
     std::thread::Builder::new()
         .name(format!("dispatch-{}", node.id))
         .spawn(move || {
             let executor = crate::rules::executor_for(&entry);
             let settlement = if node.repo.is_some() {
-                crate::lifecycle::execute(executor.as_ref(), &run, &node_graph, &node, &cancel, &tx)
+                crate::lifecycle::execute(
+                    executor.as_ref(),
+                    &run,
+                    &node_graph,
+                    &node,
+                    &cancel,
+                    &tx,
+                    vcs_filter.as_ref(),
+                )
             } else {
                 execute_direct(executor.as_ref(), &run, &node_graph, &node, &cancel, &tx)
             };

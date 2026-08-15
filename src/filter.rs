@@ -19,6 +19,19 @@
 //!   shown. They never touch the store, so two readers of the same run see the
 //!   same events differently and neither loses any.
 
+// llmlint: ignore-file[invalid_states_unrepresentable] these are the *wire* types of a
+// grammar shared across three repositories with no shared crate, and the shape is the
+// contract: `EventFilter` and `Matcher` are declared field for field as
+// `oneagentgraph::event::EventFilter` and `onevcs::EventFilter` declare them, so one spec
+// deserializes into the same value whichever producer read it. A newtype over a profile
+// name, a kind glob, or a reserved label would make this copy structurally different from
+// the other two — the one thing the shared grammar forbids — and would be public
+// vocabulary `docs/contract.md` does not name. What is enforced instead is the thing that
+// matters: every one of these values arrives by *deserialization*, from a command line, a
+// file, or the launch record, and `from_document` refuses an unknown field, a
+// field-less matcher, and an empty field at that boundary — so a state `validate` calls
+// invalid is not reachable from outside this process.
+
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -121,8 +134,18 @@ fn shipped_profile(name: &str) -> Option<EventFilter> {
     }
 }
 
-/// Every profile this build ships, in the order the contract lists them.
-pub const SHIPPED_PROFILES: &[&str] = &[DEFAULT_PROFILE, MONITOR_PROFILE];
+// llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] the duplication is
+// the approved contract's own mechanism rather than a missing gate, and it cannot be
+// closed from inside one of the three repositories: `oneagentgraph`, `onevcs`, and this
+// crate are released independently, so a shared crate would make them co-version — the
+// same decision, and the same reasoning, as the envelope in `src/event.rs` beside it. The
+// source is the grammar committed in `docs/contract.md`, and the gate is
+// `tests/contract.rs`, which extracts that document's own `filters:` fixture and drives it
+// through the types below rather than restating it — so a copy that stops matching the
+// text fails `just check`. Each sibling carries the same text and runs the same gate
+// against it, and the cross-repository half is the contract owner reading one committed
+// grammar. `docs/contract-divergences.md` entry 32 records the corners of that agreement
+// this repository cannot enforce alone, as a proposal to the planner who owns it.
 
 /// Which envelopes a consumer of a stream is shown.
 ///
@@ -173,6 +196,7 @@ pub struct Matcher {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub persona: Option<String>,
 }
+// llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
 
 impl EventFilter {
     /// Read a filter from the text of a spec: JSON, or the YAML the grammar is
@@ -182,7 +206,9 @@ impl EventFilter {
     ///
     /// [`Error::Invalid`] carrying the refusal, which names the matcher it is
     /// about — which list, and which position in it — because that is what an
-    /// operator has to find in what they wrote.
+    /// operator has to find in what they wrote. Both refusals are here: a
+    /// document that is not a filter, and a filter that could not be honoured —
+    /// see [`validate`](Self::validate).
     pub fn parse(spec: &str) -> Result<Self> {
         serde_norway::from_str(spec)
             .map_err(|failure| Error::Invalid(format!("the event filter is unusable: {failure}")))
@@ -198,20 +224,16 @@ impl EventFilter {
     ///
     /// # Errors
     ///
-    /// [`Error::Invalid`] for a file that cannot be read, a document that is not
-    /// a filter, or a filter that could not be honoured — see
-    /// [`validate`](Self::validate).
+    /// [`Error::Invalid`] for a file that cannot be read, or for anything
+    /// [`parse`](Self::parse) refuses.
     pub fn read(spec: &str) -> Result<Self> {
-        let filter = if spec.trim_start().starts_with('{') {
-            Self::parse(spec)?
-        } else {
-            let document = std::fs::read_to_string(Path::new(spec)).map_err(|failure| {
-                Error::Invalid(format!("cannot read the event filter {spec}: {failure}"))
-            })?;
-            Self::parse(&document)?
-        };
-        filter.validate()?;
-        Ok(filter)
+        if spec.trim_start().starts_with('{') {
+            return Self::parse(spec);
+        }
+        let document = std::fs::read_to_string(Path::new(spec)).map_err(|failure| {
+            Error::Invalid(format!("cannot read the event filter {spec}: {failure}"))
+        })?;
+        Self::parse(&document)
     }
 
     /// Whether an envelope reaches a consumer reading through this filter.
@@ -303,10 +325,18 @@ fn from_document(document: &Value) -> std::result::Result<EventFilter, String> {
             "an event filter names `include` and `exclude`; {stray:?} is neither"
         ));
     }
-    Ok(EventFilter {
+    let filter = EventFilter {
         include: matchers(object.get("include"), "include")?,
         exclude: matchers(object.get("exclude"), "exclude")?,
-    })
+    };
+    // Both refusals at the one boundary. A spec arrives from a command line, from
+    // a file beside a plan, and — every time a later `next` or `monitor` opens a
+    // run — from the launch record on disk, which is external input like any
+    // other file this process re-reads. A filter checked only where an operator
+    // typed it would be a launch record that could be edited into a matcher this
+    // build says it will not honour, and then honoured.
+    filter.validate().map_err(|refusal| refusal.to_string())?;
+    Ok(filter)
 }
 
 /// The matchers one of the two lists holds, or the reason it is not a list of
