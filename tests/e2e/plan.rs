@@ -417,6 +417,12 @@ fn a_plan_the_schema_refuses_never_starts_a_run() {
             "expects_no_diff settles without a dispatch",
         ),
         (
+            "zerostepbudget",
+            r#"{"schema_version":1,"tasks":[{"id":"a","repo":"o/r","steps":[
+                {"id":"s","persona":"e","task":"t","max_turns":0}]}]}"#,
+            "no turn at all",
+        ),
+        (
             "zerobudget",
             r#"{"schema_version":1,"tasks":[{"id":"a","persona":"e","task":"t","max_turns":0}]}"#,
             "no turn at all",

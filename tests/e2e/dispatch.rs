@@ -1517,6 +1517,11 @@ fn write_persona(world: &World, name: &str) {
 /// reads as `12` — which is exactly what the defect this fixes did — one that
 /// lost to the run-wide override reads as `9`, and only forwarding it as the more
 /// specific of the two reads as `45`.
+///
+/// One node per run, and the runs are sequential: a node-scope graph run is named
+/// for the millisecond and process that minted it, so two dispatched together
+/// from one process can collide over the sibling's state directory. That is a
+/// fault of its own and not this journey's subject.
 #[test]
 fn a_nodes_turn_budget_reaches_its_dispatch_and_outranks_the_run_wide_one() {
     let world = World::new("real-turn-budget");
@@ -1526,30 +1531,33 @@ fn a_nodes_turn_budget_reaches_its_dispatch_and_outranks_the_run_wide_one() {
         write_persona(&world, persona);
     }
 
+    let dispatched = |run: &str, node: Value| {
+        let path = world.plan(run, &plan_of(run, vec![node]));
+        world
+            .run_on_agentgraph(&[
+                "start",
+                &path.to_string_lossy(),
+                "--attach",
+                "--node-set",
+                "members.worker.max_turns=9",
+            ])
+            .settled();
+        turns_dispatched(&world, run, run, None)
+    };
+
     let mut budgeted = agent("budgeted", &[]);
     budgeted["persona"] = Value::from("./budgeted.yaml");
     budgeted["max_turns"] = json!(45);
     let mut plain = agent("plain", &[]);
     plain["persona"] = Value::from("./plain.yaml");
-    let path = world.plan("turnbudget", &plan_of("turnbudget", vec![budgeted, plain]));
-
-    world
-        .run_on_agentgraph(&[
-            "start",
-            &path.to_string_lossy(),
-            "--attach",
-            "--node-set",
-            "members.worker.max_turns=9",
-        ])
-        .settled();
 
     assert_eq!(
-        turns_dispatched(&world, "turnbudget", "budgeted", None),
+        dispatched("budgeted", budgeted),
         45,
         "the node's own turn budget did not reach the member that runs its work"
     );
     assert_eq!(
-        turns_dispatched(&world, "turnbudget", "plain", None),
+        dispatched("plain", plain),
         9,
         "the operator's run-wide override did not reach a node that declared none"
     );

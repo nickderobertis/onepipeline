@@ -592,6 +592,60 @@ fn a_plan_still_carrying_done_when_is_refused_by_name_and_told_where_the_bar_goe
     std::fs::remove_dir_all(&root).ok();
 }
 
+/// A dispatch an external caller builds carries its node's controls into the
+/// launch, and a control the graph has no field for refuses that launch.
+///
+/// Through the public seam, with no `run_id`: nothing here reads a launch record,
+/// so what reaches `oneagentgraph` is the request's own `controls` or nothing at
+/// all. The sibling checks an override against the same schema it reads the graph
+/// with, so a `max_turns` addressed to a single-sided member — which has no such
+/// field — is refused by name. That refusal is only reachable if the control was
+/// transmitted; a dispatch that dropped it would launch the graph happily.
+#[test]
+fn a_dispatch_built_outside_a_run_still_carries_its_controls_into_the_launch() {
+    let root = std::env::temp_dir().join(format!("onepipeline-seam-{}", std::process::id()));
+    std::fs::create_dir_all(&root).expect("a scratch root");
+    std::env::set_var("ONEAGENTGRAPH_STATE_DIR", root.join("state"));
+    let graph = root.join("single-sided.yaml");
+    std::fs::write(
+        &graph,
+        "version: 1\nname: single-sided\nmembers:\n  worker:\n    kind: oneharness\n    \
+         oneharness_config: ./nothing.toml\n",
+    )
+    .expect("the graph is written");
+
+    let request = |controls| DispatchRequest {
+        graph: ConfigRef(graph.display().to_string()),
+        task: "## What\nDo the thing.".into(),
+        labels: Labels::default(),
+        controls,
+        workspace: WorkspaceSpec::Path(root.clone()),
+        cancel: CancellationToken::new(),
+    };
+
+    let Err(refused) = LocalExecutor.dispatch(request(NodeControls {
+        max_turns: Some(45),
+    })) else {
+        panic!("a single-sided member has no `max_turns`, so the launch cannot start");
+    };
+    let refused = refused.to_string();
+    assert!(
+        refused.contains("max_turns"),
+        "the control never reached the launch: {refused}"
+    );
+
+    // Without one, nothing addresses that field at all, and the launch fails
+    // further in — on the config this graph names and this test never wrote.
+    let Err(other) = LocalExecutor.dispatch(request(NodeControls::default())) else {
+        panic!("the graph names a config that does not exist");
+    };
+    assert!(
+        !other.to_string().contains("max_turns"),
+        "a control nobody declared was sent anyway: {other}"
+    );
+    std::fs::remove_dir_all(&root).ok();
+}
+
 /// A node's turn budget reaches the graph that runs it, read off the effective
 /// configuration rather than off the code path that composed it.
 ///
