@@ -375,6 +375,18 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
                 state.completion_requests.push(reason.to_string());
             }
         }
+        // A fresh driver means no dispatch the previous one started survives:
+        // the process that was running them is gone, and this crate's dispatches
+        // are threads of that process. A node still recorded `running` would
+        // otherwise be a node nothing is running and nothing will ever settle —
+        // never ready, so never dispatched again, and never terminal, so the
+        // loop that adopted it would spin on it forever. The record stands as
+        // history; what it means for the *frontier* ends here.
+        Some(journal::PipelineKind::DriverAdopted) => {
+            state
+                .recorded
+                .retain(|_, status| *status != NodeStatus::Running);
+        }
         Some(journal::PipelineKind::PlannerSurfaceQueued) => state.surfaces_queued += 1,
         Some(journal::PipelineKind::PlannerSurfaced) => {
             state.surfaces_read += 1;
@@ -943,6 +955,45 @@ mod tests {
         ]);
         assert!(state.pending_context.is_empty());
         assert_eq!(state.graph.get("build").expect("build").context, None);
+    }
+
+    /// A driver that takes a run over ends the dispatches the one before it left
+    /// in flight: they were threads of a process that is gone.
+    ///
+    /// Left recorded as running, such a node is never ready — so nothing
+    /// dispatches it again — and never terminal, so the loop that adopted the
+    /// run spins on it for good. This is the boundary at which the frontier
+    /// learns that.
+    #[test]
+    fn an_adoption_ends_the_dispatches_the_driver_before_it_left_running() {
+        let plan = plan_of_nodes(vec![agent("build", &[]), agent("ship", &["build"])]);
+        let events = vec![
+            pipeline(
+                journal::PipelineKind::RunStarted,
+                0,
+                None,
+                &[("plan", json!(plan))],
+            ),
+            pipeline(journal::PipelineKind::NodeDispatched, 1, Some("build"), &[]),
+        ];
+        let held = fold(&events);
+        assert_eq!(held.recorded["build"], NodeStatus::Running);
+        assert_eq!(held.statuses()["build"], NodeStatus::Running);
+
+        let mut adopted = events;
+        adopted.push(pipeline(
+            journal::PipelineKind::DriverAdopted,
+            2,
+            None,
+            &[("adoption", json!(1))],
+        ));
+        let state = fold(&adopted);
+        assert!(!state.recorded.contains_key("build"));
+        assert_eq!(
+            state.statuses()["build"],
+            NodeStatus::Ready,
+            "a node the dead driver left running was not offered to the fresh one"
+        );
     }
 
     /// A node that failed with work on a branch is pinned to it, so whatever
