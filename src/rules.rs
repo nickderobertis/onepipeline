@@ -166,7 +166,6 @@ impl Predicate {
 fn label_of(labels: &Labels, key: &str) -> Option<String> {
     match key {
         "run_id" => labels.run_id.clone(),
-        "round" => labels.round.map(|round| round.to_string()),
         "node" => labels.node.clone(),
         "persona" => labels.persona.clone(),
         _ => None,
@@ -178,9 +177,12 @@ fn label_of(labels: &Labels, key: &str) -> Option<String> {
 /// `step` is deliberately absent: an executor is chosen once per node, before
 /// any of its steps run, so a rule testing `step` could never hold. Refusing it
 /// at load says that; accepting it would leave a rule that silently never fires.
-/// A free-form extra is absent for the same reason it is free-form — no plan
-/// schema declares it, so nothing could be validated against.
-pub const SELECTABLE_LABELS: &[&str] = &["run_id", "round", "node", "persona"];
+/// `round` is absent for the stronger version of the same reason — execution is
+/// continuous and nothing stamps a round at all, so a rule naming one could
+/// never hold under any run. A free-form extra is absent for the reason it is
+/// free-form — no plan schema declares it, so nothing could be validated
+/// against.
+pub const SELECTABLE_LABELS: &[&str] = &["run_id", "node", "persona"];
 
 impl ExecutorRules {
     /// The rules a run uses when it is pointed at no file.
