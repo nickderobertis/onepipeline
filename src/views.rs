@@ -50,7 +50,7 @@ pub enum DriverLiveness {
 use std::path::Path;
 
 use crate::event::{Envelope, Source};
-use crate::graph::{self, NodeStatus};
+use crate::graph::{self, Landing, NodeStatus};
 use crate::journal::PipelineKind;
 use crate::ledger::{self, LaunchRecord, RunPaths};
 use crate::projection::{self, RunState};
@@ -223,14 +223,24 @@ impl RunView {
     }
 
     /// A one-line summary of where the run has got to.
+    ///
+    /// `n/n done` is the line a planner reads to decide a run is finished, and
+    /// on its own it is the false completion this crate exists to stop
+    /// reporting: every node can be done while every change is sitting in a pull
+    /// request nobody merged. So the count of what has not landed rides the same
+    /// line, and is absent — rather than a zero — when there is nothing to say.
     pub fn summary(&self) -> String {
         let statuses = self.state.statuses();
         let done = statuses
             .values()
             .filter(|status| **status == NodeStatus::Done)
             .count();
+        let unlanded = match unlanded_nodes(&self.state).len() {
+            0 => String::new(),
+            count => format!(", {count} not landed"),
+        };
         format!(
-            "round-{:02}  ({done}/{} done)",
+            "round-{:02}  ({done}/{} done{unlanded})",
             self.state.round,
             statuses.len()
         )
@@ -361,6 +371,19 @@ pub fn status(views: &[RunView]) -> String {
             }
             out.push('\n');
         }
+        // The settled nodes whose work has not reached anyone. This view
+        // otherwise reports only what is in flight, so a planner reading it saw
+        // a run go quiet and took that for a run whose work had landed. Named
+        // here rather than left to `results`, because deciding there is nothing
+        // left to do is a decision made from this view.
+        let unlanded = unlanded_nodes(&view.state);
+        if !unlanded.is_empty() {
+            out.push_str(&format!(
+                "  {} node(s) settled without landing: {}\n",
+                unlanded.len(),
+                unlanded.join(", ")
+            ));
+        }
         if let Some(health) = crate::agentgraph::health() {
             out.push_str(&format!("  providers: {health}\n"));
         }
@@ -369,6 +392,21 @@ pub fn status(views: &[RunView]) -> String {
         out.push_str("no runs recorded\n");
     }
     out
+}
+
+/// The nodes this run published a change for that had not reached its base, in
+/// id order.
+///
+/// Read off what each settlement observed — never off a node's repository or its
+/// policy — so a node absent from this list is one that either landed or had no
+/// change to land, and never one nobody looked at.
+fn unlanded_nodes(state: &RunState) -> Vec<&str> {
+    state
+        .landings
+        .iter()
+        .filter(|(_, landing)| **landing == Landing::Unlanded)
+        .map(|(node, _)| node.as_str())
+        .collect()
 }
 
 /// What one in-flight dispatch is doing now, on the line that reports it.
@@ -462,7 +500,10 @@ pub fn monitor(view: &RunView) -> String {
 fn summarize(event: &Envelope) -> String {
     const CAP: usize = 96;
     let mut detail = event.kind.0.clone();
-    for key in ["status", "outcome", "state", "message", "reason"] {
+    // `landing` beside `status`: a `node-settled` and a `published` both carry
+    // it, and a monitor line that showed only `done` said the same thing about a
+    // merge and about an open change request.
+    for key in ["status", "landing", "outcome", "state", "message", "reason"] {
         if let Some(value) = event.payload.get(key).and_then(|v| v.as_str()) {
             detail.push_str(&format!(" {value}"));
         }
@@ -477,6 +518,19 @@ fn summarize(event: &Envelope) -> String {
     stripped.chars().take(CAP).collect()
 }
 
+/// How a landing reads on a rendered line.
+///
+/// A phrase rather than the bare word, and it says *when* it was true: the run
+/// observed this at the moment the node settled and has not looked since, which
+/// is deliberate — a change request a person owns is not something a run blocks
+/// or polls on. A reader who wants today's answer opens the change.
+fn landed_phrase(landing: Landing) -> &'static str {
+    match landing {
+        Landing::Landed => "landed on its base",
+        Landing::Unlanded => "NOT landed: the change had not reached its base when this settled",
+    }
+}
+
 /// `onepipeline results` — per-node outcomes, with each node's own evidence.
 pub fn results(view: &RunView) -> String {
     let mut out = format!("{}  round-{:02}\n", view.paths.run, view.state.round);
@@ -489,6 +543,15 @@ pub fn results(view: &RunView) -> String {
         out.push_str(&format!("  {:<24} {}", node.id, status.as_str()));
         if let Some(outcome) = view.state.outcomes.get(&node.id) {
             out.push_str(&format!(" ({outcome})"));
+        }
+        // Beside the status word, because it is the fact the status word does
+        // not carry: `done` is the same for a change that merged and one still
+        // sitting in a pull request. Rendered for both landings rather than only
+        // the unlanded one — a reader who sees the qualifier where a change was
+        // open and nothing where it merged is reading the absence, which is what
+        // every other node's absence already means.
+        if let Some(landing) = view.state.landings.get(&node.id) {
+            out.push_str(&format!(" — {}", landed_phrase(*landing)));
         }
         if status == NodeStatus::Running && view.state.stop_recorded() {
             out.push_str(&format!(" — {}", became_of_the_worker(&view.state)));

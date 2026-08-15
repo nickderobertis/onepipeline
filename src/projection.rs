@@ -17,7 +17,7 @@ use serde_json::Value;
 
 use crate::edits::{self, Frontier, Operation};
 use crate::event::{Envelope, Source};
-use crate::graph::{Graph, NodeStatus};
+use crate::graph::{Graph, Landing, NodeStatus};
 use crate::journal;
 use crate::plan::Plan;
 
@@ -78,6 +78,16 @@ pub struct RunState {
     pub branches: BTreeMap<String, String>,
     /// Where a human reads the change each published node opened.
     pub change_urls: BTreeMap<String, String>,
+    /// Whether each published node's change reached its base branch.
+    ///
+    /// Kept across the round boundary, like [`branches`](Self::branches) and
+    /// [`change_urls`](Self::change_urls) and unlike
+    /// [`outcomes`](Self::outcomes): an unmerged change request outlives the
+    /// round that opened it, and a fact cleared at the transition would report
+    /// every earlier round's open change as one nobody had anything to say
+    /// about. A node that settles again overwrites its own entry, which is the
+    /// only way the answer changes.
+    pub landings: BTreeMap<String, Landing>,
     /// The declared steps each node's attempt finished.
     ///
     /// What a continuation may skip, and the only record of it: a step is not a
@@ -294,6 +304,17 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
             }
             if let Some(url) = payload.get("change_url").and_then(Value::as_str) {
                 state.change_urls.insert(node.clone(), url.to_string());
+            }
+            // Only a word this build can interpret. A record carrying a landing
+            // it cannot read leaves the node with none, which reads as "this run
+            // observed nothing about where that change got to" — the one honest
+            // answer, and never the convenient one.
+            if let Some(landing) = payload
+                .get(journal::SETTLED_LANDING)
+                .and_then(Value::as_str)
+                .and_then(Landing::parse)
+            {
+                state.landings.insert(node.clone(), landing);
             }
             if let Some(ts) = millis_of(&event.ts) {
                 state.settled_at.insert(node.clone(), ts);
@@ -624,6 +645,76 @@ mod tests {
         assert!(millis_of("2024-02-29T00:00:00.000Z").is_some(), "2024 is");
         assert_eq!(millis_of("2100-02-29T00:00:00.000Z"), None, "2100 is not");
         assert!(millis_of("2000-02-29T00:00:00.000Z").is_some(), "2000 is");
+    }
+
+    /// A landing survives the round boundary, and an unreadable one records
+    /// nothing.
+    ///
+    /// The boundary is the point. `outcomes` is per-round because it describes
+    /// the attempt that just ran, but an unmerged change request outlives every
+    /// round after the one that opened it — so a landing cleared at the
+    /// transition would have the run stop mentioning the change on the round
+    /// after it was published, which is precisely when a planner starts deciding
+    /// there is nothing left to do.
+    #[test]
+    fn a_landing_outlives_the_round_that_recorded_it_and_an_unreadable_one_records_nothing() {
+        let plan = plan_of_nodes(vec![agent("open", &[]), agent("guessy", &[])]);
+        let settled = |seq: u64, node: &str, landing: Value| {
+            pipeline(
+                journal::PipelineKind::NodeSettled,
+                seq,
+                Some(node),
+                &[
+                    ("status", json!("done")),
+                    ("outcome", json!("change-open")),
+                    (journal::SETTLED_LANDING, landing),
+                ],
+            )
+        };
+        let events = vec![
+            pipeline(
+                journal::PipelineKind::RunStarted,
+                0,
+                None,
+                &[("plan", json!(plan))],
+            ),
+            pipeline(
+                journal::PipelineKind::RoundStarted,
+                1,
+                None,
+                &[("plan", json!(plan))],
+            ),
+            settled(2, "open", json!("unlanded")),
+            // A word a newer writer used and this build cannot interpret.
+            settled(3, "guessy", json!("half-landed")),
+            pipeline(journal::PipelineKind::RoundFinished, 4, None, &[]),
+            Envelope {
+                labels: labels("demo", Some(2), None),
+                ..pipeline(
+                    journal::PipelineKind::RoundStarted,
+                    5,
+                    None,
+                    &[("plan", json!(plan))],
+                )
+            },
+        ];
+
+        let state = fold(&events);
+        assert_eq!(state.round, 2, "the fold reached the second round");
+        assert_eq!(
+            state.landings.get("open"),
+            Some(&Landing::Unlanded),
+            "the open change stopped being reported on the round after it opened"
+        );
+        assert!(
+            !state.outcomes.contains_key("open"),
+            "this journey only says something if the round boundary really cleared the outcome"
+        );
+        assert_eq!(
+            state.landings.get("guessy"),
+            None,
+            "a landing this build cannot read was folded as one it could"
+        );
     }
 
     #[test]

@@ -870,10 +870,17 @@ fn a_publication_that_had_nothing_to_publish_says_so_rather_than_claiming_it_lan
     assert_eq!(node["status"], "done", "{node}\n{}", why(&world, &run));
     assert_eq!(node["outcome"], "no-changes", "{node}");
     assert_eq!(node["change_url"], json!(null), "{node}");
-    world
-        .run(&["results", &run])
-        .exited(0)
-        .out_has("no-changes");
+    // And it claims no landing either way. There was no change of this node's,
+    // so "landed" would say work reached the base that never existed and "not
+    // landed" would send a planner looking for a change request nobody opened.
+    assert_eq!(node["landing"], json!(null), "{node}");
+    let results = world.run(&["results", &run]);
+    results.exited(0).out_has("no-changes");
+    assert!(
+        !results.stdout.contains("landed"),
+        "a node with nothing to publish is reported as one whose change did or did not land:\n{}",
+        results.stdout
+    );
 }
 
 #[test]
@@ -940,6 +947,134 @@ fn a_change_the_host_is_holding_settles_the_node_as_queued() {
             .as_str()
             .is_some_and(|url| url.contains("/pull/")),
         "a queued change named nowhere to read it: {node}"
+    );
+}
+
+/// A settled node and a landed node are different facts, and one publication
+/// policy produces both.
+///
+/// The identity is `change-auto` for **both** halves — it asks the host to land
+/// the change once its checks pass — so nothing about the ask distinguishes
+/// them. What distinguishes them is the host: in the first half it holds the
+/// change, and in the second it lands it. Both nodes settle `done`, because
+/// publishing is the whole of what the round asked of them, and only one of them
+/// put anything on `main`.
+///
+/// That is the whole of the defect. A planner reading a settled node closed work
+/// on a change that had reached nobody, which is how a worktree fix in a sibling
+/// came to be believed done while the behaviour it fixed was still in production.
+/// Everything a planner reads is checked here — the ledger record, the round
+/// result the read API serves, and every view that renders a node's status.
+///
+/// Nothing waits for the merge. The unlanded half settles and the round ends with
+/// the change still open, because a change request a person owns is not something
+/// a run may block or poll on.
+#[test]
+fn a_settled_node_and_a_landed_node_are_told_apart_by_what_the_host_did_not_by_the_policy() {
+    let world = World::new("lifecycle-landing");
+    // Asks the host to land it once its checks pass. One policy, both answers.
+    world.repository("change-auto", &["true"]);
+
+    // The host is holding the change and has not landed it.
+    world.script("service.work", "the change nobody merged\n");
+    // Named for the scenario and not for the answer: a run id is printed on every
+    // view line, so `heldopen` cannot satisfy an assertion looking for the word
+    // this journey is about.
+    let open = settle(&world, "heldopen", vec![lifecycle("service", &[])]);
+
+    let settled = world.events_of(&open, "node-settled");
+    let record = settled
+        .iter()
+        .find(|event| event["labels"]["node"] == "service")
+        .unwrap_or_else(|| panic!("the node never settled\n{}", why(&world, &open)));
+    assert_eq!(record["payload"]["status"], "done", "{record}");
+    assert_eq!(
+        record["payload"]["landing"], "unlanded",
+        "the ledger records a change that reached nobody as though it had landed: {record}"
+    );
+
+    let node = world.run_json(&open, "round-01/result.json")["nodes"][0].clone();
+    assert_eq!(node["status"], "done", "{node}\n{}", why(&world, &open));
+    assert_eq!(
+        node["landing"], "unlanded",
+        "the read API serves a settled node and a landed one as the same node: {node}"
+    );
+
+    // Every view a planner decides from. `results` is the per-node one; `status`
+    // otherwise reports only what is in flight, so a run gone quiet reads as one
+    // whose work landed; `goals` is the `n/n done` line that says a run is
+    // finished; `monitor` is the stream.
+    world
+        .run(&["results", &open])
+        .exited(0)
+        .out_has("NOT landed");
+    world
+        .run(&["status", &open])
+        .exited(0)
+        .out_has("1 node(s) settled without landing: service");
+    world
+        .run(&["goals", &open])
+        .exited(0)
+        .out_has("1 not landed");
+    world.run(&["monitor", &open]).exited(0).out_has("unlanded");
+
+    // The same policy, and this time the host lands what it is handed.
+    world.script("gh.merged", "");
+    world.script("service.work", "the change the host merged\n");
+    let landed = settle(&world, "hostmerged", vec![lifecycle("service", &[])]);
+
+    let node = world.run_json(&landed, "round-01/result.json")["nodes"][0].clone();
+    assert_eq!(node["status"], "done", "{node}\n{}", why(&world, &landed));
+    assert_eq!(
+        node["landing"],
+        "landed",
+        "a change the host was observed landing is not reported as landed: {node}\n{}",
+        why(&world, &landed)
+    );
+    let results = world.run(&["results", &landed]);
+    results.exited(0).out_has("landed on its base");
+    assert!(
+        !results.stdout.contains("NOT landed"),
+        "a landed change is reported as one that did not land:\n{}",
+        results.stdout
+    );
+    let status = world.run(&["status", &landed]);
+    status.exited(0);
+    assert!(
+        !status.stdout.contains("settled without landing"),
+        "a run with nothing outstanding is reported as holding an unlanded change:\n{}",
+        status.stdout
+    );
+    let goals = world.run(&["goals", &landed]);
+    goals.exited(0).out_has("done)");
+    assert!(
+        !goals.stdout.contains("not landed"),
+        "a run whose only change landed still counts one against it:\n{}",
+        goals.stdout
+    );
+
+    // And side by side, which is how `runs` presents them: the two runs did the
+    // same work under the same policy, and only one of them still owes somebody
+    // a merge.
+    let listed = world.run(&["runs"]);
+    listed.exited(0);
+    let row = |run: &str| {
+        listed
+            .stdout
+            .lines()
+            .find(|line| line.contains(run))
+            .unwrap_or_else(|| panic!("`runs` never listed {run}:\n{}", listed.stdout))
+            .to_string()
+    };
+    assert!(
+        row(&open).contains("1 not landed"),
+        "`runs` reports a run holding an open change as finished work:\n{}",
+        row(&open)
+    );
+    assert!(
+        !row(&landed).contains("not landed"),
+        "`runs` reports a run whose change landed as one that did not:\n{}",
+        row(&landed)
     );
 }
 

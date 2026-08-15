@@ -247,6 +247,15 @@ impl StopTeardown {
     }
 }
 
+/// The `node-settled` payload field saying whether the node's change reached
+/// its base branch.
+///
+/// Named once because `engine::settle` writes it and `projection` reads it, and
+/// a run whose two sides disagree about this field is a run that reports work as
+/// landed on the strength of nothing. Absent on a settlement that published no
+/// change of its own — see [`crate::graph::Landing`].
+pub const SETTLED_LANDING: &str = "landing";
+
 /// The payload of a `node-settled` event, as the projection folds it.
 pub fn settled_payload(
     status: &str,

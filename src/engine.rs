@@ -27,7 +27,7 @@ use crate::event::{Envelope, Labels};
 use crate::executor::{
     CancelMode, CancellationToken, DispatchHandle, DispatchRequest, Executor, WorkspaceSpec,
 };
-use crate::graph::{self, Graph, GraphState, NodeStatus};
+use crate::graph::{self, Graph, GraphState, Landing, NodeStatus};
 use crate::journal::{self, Journal};
 use crate::ledger::{self, LaunchRecord, OwnershipLock, RunPaths};
 use crate::plan::{Node, NodeKind, Plan};
@@ -159,6 +159,22 @@ pub struct NodeResult {
     /// The named outcome, when it had one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<String>,
+    /// Whether the change this node published reached its base branch.
+    ///
+    /// The one field on this record that a `done` node's *status* does not
+    /// already imply: a change request open for review settles the node exactly
+    /// as a merge does, and a reader closing work on the status alone would
+    /// close it on a change that reached nobody. Absent where there was no
+    /// change of this node's to land — see [`Landing`].
+    ///
+    /// Optional and omitted when absent, so a run with no lifecycle publication
+    /// writes the result file it always wrote and a consumer reading one is
+    /// unaffected. `round-NN/result.json` carries no schema version to bump;
+    /// widening it any way that was *not* additive would need one, and that is a
+    /// proposal to the planner who owns the contract rather than a change made
+    /// here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub landing: Option<Landing>,
     /// What a ready human action asks for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<String>,
@@ -192,6 +208,14 @@ pub struct Settlement {
     pub status: NodeStatus,
     /// The named outcome, when it had one.
     pub outcome: Option<String>,
+    /// Whether the change this node published reached its base branch.
+    ///
+    /// Narrowed like `status` and unlike the three strings above, because this
+    /// one is a claim rather than a label: an unrecognised word here would have
+    /// to be read as *some* landing, and both readings are a false report. The
+    /// journal writes it as a word and [`Landing::parse`] reads an unknown one
+    /// back as no observation at all.
+    pub landing: Option<Landing>,
     /// The failure's own words.
     pub detail: Option<String>,
     /// The branch a lifecycle node left behind.
@@ -210,6 +234,8 @@ impl Settlement {
             node: node.to_string(),
             status,
             outcome: outcome.map(str::to_string),
+            // A settlement nothing published has nothing to say about landing.
+            landing: None,
             detail: None,
             branch: None,
             change_url: None,
@@ -1186,6 +1212,9 @@ fn settle(
     if let Some(url) = &settlement.change_url {
         payload.insert("change_url".into(), json!(url));
     }
+    if let Some(landing) = settlement.landing {
+        payload.insert(journal::SETTLED_LANDING.into(), json!(landing.as_str()));
+    }
     if !settlement.completed_steps.is_empty() {
         payload.insert("completed_steps".into(), json!(settlement.completed_steps));
     }
@@ -1300,6 +1329,7 @@ fn record_result(
                 id: node.id.clone(),
                 status,
                 outcome: state.outcomes.get(&node.id).cloned(),
+                landing: state.landings.get(&node.id).copied(),
                 action: (status == NodeStatus::Waiting)
                     .then(|| node.task.clone())
                     .flatten(),

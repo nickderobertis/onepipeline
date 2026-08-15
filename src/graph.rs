@@ -110,6 +110,70 @@ impl NodeStatus {
     }
 }
 
+/// Whether a settled node's change reached the branch it was published onto.
+///
+/// **A qualifier on the terminal status, not a status of its own**, and the
+/// choice is the point. A node *settles* when it publishes, and for a `team`
+/// identity publishing opens a change request — so a node reports `done` while
+/// its work sits in a pull request nobody has merged. "Settled" and "landed" are
+/// different facts, and until this existed only the first was reported: a planner
+/// closing work on a settled node could close it on a change that never reached
+/// anyone. That is exactly how a worktree fix in a sibling came to be believed
+/// done while the behaviour it fixed was still in production.
+///
+/// A tenth [`NodeStatus`] would have said the same thing in a place where it
+/// changes what the run *does*: `done` is what makes a dependent eligible, what
+/// stops a node being re-dispatched, what `state_of` reads for `complete`, and
+/// what `docs/contract.md` fixes as the only settlement a cross-DAG reference
+/// accepts. None of that should move — a node whose change is open really has
+/// finished its work — so what is added is the second fact beside the status
+/// rather than a new value inside it.
+///
+/// Recorded **only where a publication answered**, which is what keeps it an
+/// observation. `None` is "no change of this node's to land": a direct agent
+/// node, a human action, a workstream whose branch its base already carried,
+/// a publication that failed and settled `failed` under its own name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Landing {
+    /// The change reached its base branch, and this run **saw** it get there:
+    /// `onevcs` answered the publication with the commit it landed at.
+    Landed,
+    /// The node published a change that has not reached its base branch — a
+    /// change request open for review, or one the host has queued behind checks.
+    ///
+    /// A statement about the moment the node settled, and never re-derived
+    /// afterwards: a person merging the change later is not something this run
+    /// waits for, polls for, or claims to know about. See
+    /// [`crate::vcs::landing_of`].
+    Unlanded,
+}
+
+impl Landing {
+    /// The word this landing is written and rendered as.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Landed => "landed",
+            Self::Unlanded => "unlanded",
+        }
+    }
+
+    /// Read a landing back from a journal record.
+    ///
+    /// `None` for a word this build does not know, which is the same reading a
+    /// record written before the field existed gets: a build that cannot
+    /// interpret a landing has not observed one, and inventing either answer
+    /// from an unreadable value is the false report this whole distinction
+    /// exists to remove.
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "landed" => Some(Self::Landed),
+            "unlanded" => Some(Self::Unlanded),
+            _ => None,
+        }
+    }
+}
+
 /// How a whole graph settled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -1216,6 +1280,31 @@ mod tests {
             assert_eq!(NodeStatus::parse(status.as_str()), Some(status));
         }
         assert_eq!(NodeStatus::parse("invented"), None);
+    }
+
+    /// A landing round-trips through its word, and an unreadable one is no
+    /// observation rather than a guess.
+    ///
+    /// Both halves matter. The word is what the journal carries between builds,
+    /// and a build meeting a landing it does not know has to answer "this run
+    /// observed nothing about where that change got to" — because the other two
+    /// answers are the two false reports this qualifier was added to stop.
+    #[test]
+    fn a_landing_round_trips_through_its_word_and_an_unknown_one_is_no_landing() {
+        for landing in [Landing::Landed, Landing::Unlanded] {
+            assert_eq!(Landing::parse(landing.as_str()), Some(landing));
+        }
+        for unreadable in ["", "invented", "done", "merged", "Landed"] {
+            assert_eq!(
+                Landing::parse(unreadable),
+                None,
+                "{unreadable:?} was read as a landing this build understands"
+            );
+        }
+        // And it is not a status: a reader handed one of these words where the
+        // other belongs gets nothing, rather than the neighbouring meaning.
+        assert_eq!(NodeStatus::parse(Landing::Landed.as_str()), None);
+        assert_eq!(Landing::parse(NodeStatus::Done.as_str()), None);
     }
 
     #[test]
