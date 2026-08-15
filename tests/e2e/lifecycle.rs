@@ -1048,22 +1048,25 @@ fn the_round_result_a_consumer_reads_states_its_version_and_carries_the_landing(
 
 /// The round result `round run` printed, as a consumer parses it.
 ///
-/// The last JSON line the verb wrote, because the engine's own diagnostics share
-/// that descriptor and a consumer reads the document rather than the noise around
-/// it.
+/// The **whole** of stdout, parsed in one go rather than searched for a line that
+/// happens to be JSON. That is the contract this reader holds the verb to: a
+/// consumer driving the engine pipes stdout into a parser, and a diagnostic
+/// sharing that descriptor would break it. Everything the verb has to say to a
+/// person goes to stderr.
 fn printed_result(round: &crate::harness::Run) -> serde_json::Value {
-    round
-        .stdout
-        .lines()
-        .rev()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line.trim()).ok())
-        .find(|document| document.get("nodes").is_some())
-        .unwrap_or_else(|| {
+    let document: serde_json::Value =
+        serde_json::from_str(round.stdout.trim()).unwrap_or_else(|error| {
             panic!(
-                "`round run` printed no round result:\nstdout: {}\nstderr: {}",
+                "`round run` stdout is not one machine-readable document ({error}):\n\
+                 stdout: {}\nstderr: {}",
                 round.stdout, round.stderr
             )
-        })
+        });
+    assert!(
+        document.get("nodes").is_some(),
+        "`round run` printed something other than a round result: {document}"
+    );
+    document
 }
 
 /// A settled node and a landed node are different facts, and one publication
