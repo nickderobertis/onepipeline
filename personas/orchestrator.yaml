@@ -3,8 +3,14 @@
 # reference; what it *is* changed — the role it carries is the monitor, which is
 # the agent name below, the member name in `graphs/dag-scope.yaml`, and the
 # author identity the channel enforces an op allowlist against.
+#
+# llmlint: ignore-block[names_match_behavior] the file name and the role it carries
+# disagree deliberately. `docs/contract.md` names `personas/orchestrator.yaml` as the
+# shipped path of the `monitor` role and `tests/contract.rs` holds that pairing, so
+# renaming the file to match the role would break the path consumers already name.
 agent:
   name: monitor
+# llmlint: ignore-end[names_match_behavior]
   instructions: |
     Observe one run. You do not drive it: deterministic code dispatches every
     node the moment its dependencies settle, and nothing you do makes the run
