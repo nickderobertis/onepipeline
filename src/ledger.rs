@@ -1,8 +1,8 @@
 //! The run ledger: where a run's durable state lives, and who may write it.
 //!
 //! One directory per run under the runs root. The launch record says who owns
-//! the run and how to relaunch it; the ownership lock is what makes the engine
-//! verbs a single writer; the journal beside them is the merged event store.
+//! the run and how to relaunch it; the ownership lock is what makes the driving
+//! process a single writer; the journal beside them is the merged event store.
 //!
 //! Writes that a reader could catch half-finished are atomic — written to a
 //! temporary beside the target and renamed over it — because every view here
@@ -144,8 +144,8 @@ impl RunPaths {
     /// A file rather than a pipe, because the process that would read the pipe
     /// is the launcher, and `--detach` means the launcher is about to exit. A
     /// driver holding the write end of a pipe nobody holds the read end of dies
-    /// on its first line of output — and it dies mid-round, leaving a run whose
-    /// round never closes and whose driver is gone.
+    /// on its first line of output — and it dies mid-run, leaving a run whose
+    /// graph never settles and whose driver is gone.
     pub fn driver_log(&self) -> PathBuf {
         self.dir.join("driver.log")
     }
@@ -184,20 +184,14 @@ impl RunPaths {
         self.channel_dir().join(name)
     }
 
-    /// One round's directory.
-    pub fn round_dir(&self, round: u64) -> PathBuf {
-        self.dir.join(format!("round-{round:02}"))
+    /// The run's recorded result, rewritten whenever a driver closes out.
+    ///
+    /// One document, at the run's own root: the frontier is continuous, so what
+    /// the ledger records is where the whole graph has got to.
+    pub fn result(&self) -> PathBuf {
+        self.dir.join("result.json")
     }
 
-    /// A round's launch record — the graph it started with, never rewritten.
-    pub fn round_plan(&self, round: u64) -> PathBuf {
-        self.round_dir(round).join("plan.json")
-    }
-
-    /// A round's recorded result.
-    pub fn round_result(&self, round: u64) -> PathBuf {
-        self.round_dir(round).join("result.json")
-    }
 }
 
 /// Every run the root records, in id order.
@@ -245,15 +239,20 @@ pub struct LaunchRecord {
     /// it shipped, so a build that predates it still reads what it wrote.
     #[serde(default, skip_serializing_if = "is_unset")]
     pub dir: PathBuf,
-    /// The dag-scope agent-graph config the driver launches.
+    /// The dag-scope agent-graph config launched as this run's observer.
+    ///
+    /// Empty when the launch named none — the shipped default — because no
+    /// agent is required to execute a plan.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub graph: String,
-    /// The `oneagentgraph` run the current driver is, as that library minted
-    /// it — **not** this run's id, which names something else entirely.
+    /// The `oneagentgraph` run this run's observer graph is, as that library
+    /// minted it — **not** this run's id, which names something else entirely.
     ///
     /// Written after the launch that produced it, and rewritten by every
     /// `adopt`, because an adoption starts a fresh graph run with an id of its
     /// own. It is how a later `onepipeline next` — a different process, with no
-    /// handle on the driver — addresses the run's pacemaker.
+    /// handle on the observer — addresses the run's pacemaker. Empty when no
+    /// observer graph was launched.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub graph_run: String,
     /// The default node-scope agent-graph config every dispatch launches.
@@ -270,8 +269,6 @@ pub struct LaunchRecord {
     pub host: String,
     /// When the run was launched.
     pub started_at: String,
-    /// The round budget, in seconds.
-    pub round_budget: u64,
     /// The pacemaker interval, in seconds.
     pub heartbeat_interval: u64,
     /// Opaque overrides replayed on the dag-scope graph launch.
@@ -368,7 +365,7 @@ pub fn append_line(path: &Path, line: &str) -> Result<()> {
     // One `write_all` of the record *and* its terminator, never `writeln!`:
     // that macro writes the text and the newline as two calls, and a run's
     // journal is appended by several processes at once — the launcher's relay
-    // and the round's own writer among them. A second appender landing between
+    // and the driving process's own writer among them. A second appender landing between
     // the two tears the record in half, and a torn line is silently skipped by
     // every reader here, so the event simply disappears.
     file.write_all(format!("{line}\n").as_bytes())
@@ -404,9 +401,9 @@ pub struct LockRecord {
 
 /// The run's ownership lock, released when this value is dropped.
 ///
-/// The engine verbs are the only writers of a run's graph, journal, and round
-/// ledger, and this is what makes that true across processes: the lock file is
-/// created exclusively, so a second writer loses the race rather than
+/// The process driving a run is the only writer of its graph and its journal's
+/// graph records, and this is what makes that true across processes: the lock
+/// file is created exclusively, so a second writer loses the race rather than
 /// interleaving with the first.
 #[derive(Debug)]
 pub struct OwnershipLock {
@@ -420,7 +417,7 @@ impl OwnershipLock {
     /// Take the run's lock, or report who holds it.
     ///
     /// A lock whose holder this host can prove is gone is reclaimed: a driver
-    /// that died mid-round must not leave its run unwritable forever, which is
+    /// that died mid-run must not leave its run unwritable forever, which is
     /// the state `adopt` exists to recover from.
     pub fn acquire(paths: &RunPaths, verb: &str) -> Result<Self> {
         let path = paths.lock();
@@ -515,7 +512,7 @@ mod tests {
     }
 
     /// A run's journal has several appenders at once — the launcher relaying its
-    /// driver's stream, and the round's own writer — so a record has to reach the
+    /// driver's stream, and the engine loop's own writer — so a record has to reach the
     /// file whole. Written as concurrent appenders because that is the only way
     /// the tearing shows: each opens its own descriptor, exactly as the separate
     /// processes do.
@@ -560,19 +557,19 @@ mod tests {
         let paths = RunPaths::under(&root, "demo");
         paths.create().expect("the run directory");
 
-        let first = OwnershipLock::acquire(&paths, "round run").expect("the first writer wins");
-        let second = OwnershipLock::acquire(&paths, "round next");
+        let first = OwnershipLock::acquire(&paths, "start").expect("the first writer wins");
+        let second = OwnershipLock::acquire(&paths, "adopt");
         match second {
             Err(Error::Locked { run, pid, verb, .. }) => {
                 assert_eq!(run, "demo");
                 assert_eq!(pid, sys::pid());
-                assert_eq!(verb, "round run");
+                assert_eq!(verb, "start");
             }
             other => panic!("a second writer was not refused: {other:?}"),
         }
 
         first.release();
-        OwnershipLock::acquire(&paths, "round next").expect("the lock was released");
+        OwnershipLock::acquire(&paths, "adopt").expect("the lock was released");
         fs::remove_dir_all(&root).ok();
     }
 
@@ -613,12 +610,12 @@ mod tests {
                 pid: dead,
                 host: sys::hostname(),
                 acquired_at: sys::now_rfc3339(),
-                verb: "round run".to_string(),
+                verb: "start".to_string(),
             },
         )
         .expect("a stale lock");
 
-        OwnershipLock::acquire(&paths, "round run").expect("a dead holder's lock is reclaimed");
+        OwnershipLock::acquire(&paths, "start").expect("a dead holder's lock is reclaimed");
         fs::remove_dir_all(&root).ok();
     }
 
@@ -630,7 +627,7 @@ mod tests {
         fs::write(paths.lock(), "not json at all").expect("a corrupt lock");
 
         assert!(matches!(
-            OwnershipLock::acquire(&paths, "round run"),
+            OwnershipLock::acquire(&paths, "start"),
             Err(Error::Locked { .. })
         ));
         fs::remove_dir_all(&root).ok();
@@ -650,7 +647,6 @@ mod tests {
             pid: 1,
             host: "h".into(),
             started_at: sys::now_rfc3339(),
-            round_budget: 1,
             heartbeat_interval: 1,
             dag_sets: Vec::new(),
             node_sets: Vec::new(),
@@ -674,7 +670,6 @@ mod tests {
             pid: 1,
             host: "h".into(),
             started_at: sys::now_rfc3339(),
-            round_budget: 1,
             heartbeat_interval: 1,
             dag_sets: Vec::new(),
             node_sets: Vec::new(),

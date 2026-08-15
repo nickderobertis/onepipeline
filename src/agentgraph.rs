@@ -414,7 +414,6 @@ struct LibraryGraphRun {
     events: Option<mpsc::Receiver<Result<Envelope>>>,
     settled: mpsc::Receiver<Result<Settled>>,
     cancel: mpsc::Sender<()>,
-    pid: u32,
     /// The graph run's own id, as the sibling minted it.
     run_id: GraphRunId,
     exited: Arc<AtomicBool>,
@@ -960,7 +959,6 @@ impl GraphRun {
         };
         let running = oneagentgraph::run::start(&request, &run_env)
             .map_err(|error| sibling(error.to_string()))?;
-        let pid = running.started().pid;
         let run_id = running.started().run_id.clone();
         let (events_tx, events_rx) = mpsc::channel();
         let (settled_tx, settled_rx) = mpsc::channel();
@@ -1019,7 +1017,6 @@ impl GraphRun {
                 events: Some(events_rx),
                 settled: settled_rx,
                 cancel: cancel_tx,
-                pid,
                 run_id,
                 exited,
             }),
@@ -1056,13 +1053,6 @@ impl GraphRun {
         }
     }
 
-    pub fn pid(&self) -> u32 {
-        match &self.backend {
-            GraphBackend::Library(run) => run.pid,
-            GraphBackend::Process(run) => run.pid(),
-        }
-    }
-
     /// The `oneagentgraph` run id this launch minted, whichever way it ran.
     ///
     /// **Not this crate's run id**, and that distinction is the whole reason
@@ -1083,6 +1073,10 @@ impl GraphRun {
         }
     }
 
+    /// Whether the graph has ended, reaping a retained process if it has.
+    ///
+    /// Reaping is the point for the process backend. A child nobody waits on
+    /// stays a zombie, and a zombie answers a liveness probe as alive.
     pub fn has_exited(&mut self) -> bool {
         match &mut self.backend {
             GraphBackend::Library(run) => run.exited.load(Ordering::Acquire),

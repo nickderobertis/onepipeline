@@ -139,7 +139,11 @@ pub fn liveness(launch: &LaunchRecord, state: &RunState) -> DriverLiveness {
         .last_write_at
         .map(|last| sys::now_millis().saturating_sub(last) / 1_000);
     match quiet_for {
-        Some(seconds) if seconds > parked_after_seconds() && !state.round_open => {
+        // A run holding an outstanding decision point is *waiting*, not parked:
+        // the loop that would be writing is deliberately holding a subtree back
+        // until a person answers, and a driver reported dead there sends an
+        // operator to intervene in work that is doing exactly what it should.
+        Some(seconds) if seconds > parked_after_seconds() && !state.awaiting_decision() => {
             DriverLiveness::Parked
         }
         _ => DriverLiveness::Driving,
@@ -229,11 +233,7 @@ impl RunView {
             .values()
             .filter(|status| **status == NodeStatus::Done)
             .count();
-        format!(
-            "round-{:02}  ({done}/{} done)",
-            self.state.round,
-            statuses.len()
-        )
+        format!("{done}/{} done", statuses.len())
     }
 }
 
@@ -244,10 +244,7 @@ impl RunView {
 /// there would send a planner to intervene in finished work.
 pub fn liveness_word(view: &RunView) -> &'static str {
     let statuses = view.state.statuses();
-    if !view.state.round_open
-        && !statuses.is_empty()
-        && graph::state_of(&statuses) == graph::GraphState::Complete
-    {
+    if !statuses.is_empty() && graph::state_of(&statuses) == graph::GraphState::Complete {
         return "SETTLED";
     }
     view.liveness().as_str()
@@ -302,10 +299,10 @@ pub fn status(views: &[RunView]) -> String {
     let mut out = String::new();
     for view in views {
         out.push_str(&format!(
-            "{}  {}  round-{:02}\n",
+            "{}  {}  {}\n",
             view.paths.run,
             liveness_word(view),
-            view.state.round
+            view.summary()
         ));
         if view.liveness().is_undriven() {
             out.push_str(&format!(
@@ -446,12 +443,12 @@ pub fn monitor(view: &RunView) -> String {
         };
         out.push_str(&format!("{}  {:<28} {}\n", event.ts, id, summarize(event)));
     }
-    // A round transition has no node, so it has no graph id: it reaches the
-    // reader as run state rather than as an event line.
+    // The run's own state has no node, so it has no graph id: it reaches the
+    // reader as a trailer rather than as an event line.
     out.push_str(&format!(
-        "-- {}  round-{:02}  {}  {}\n",
+        "-- {}  {}  {}  {}\n",
         view.paths.run,
-        view.state.round,
+        view.summary(),
         liveness_word(view),
         graph::state_of(&view.state.statuses()).as_str()
     ));
@@ -479,7 +476,7 @@ fn summarize(event: &Envelope) -> String {
 
 /// `onepipeline results` — per-node outcomes, with each node's own evidence.
 pub fn results(view: &RunView) -> String {
-    let mut out = format!("{}  round-{:02}\n", view.paths.run, view.state.round);
+    let mut out = format!("{}  {}\n", view.paths.run, view.summary());
     let statuses = view.state.statuses();
     for node in view.state.graph.iter() {
         let status = statuses
@@ -751,7 +748,6 @@ mod tests {
             pid,
             host: sys::hostname(),
             started_at: sys::now_rfc3339(),
-            round_budget: 14_400,
             heartbeat_interval: 1_800,
             dag_sets: Vec::new(),
             node_sets: Vec::new(),
@@ -949,9 +945,9 @@ mod tests {
                     &[("plan", json!(plan()))],
                 ),
                 event(
-                    crate::journal::PipelineKind::RoundStarted,
-                    None,
-                    &[("plan", json!(plan()))],
+                    crate::journal::PipelineKind::NodeReady,
+                    Some("build"),
+                    &[],
                 ),
                 event(
                     crate::journal::PipelineKind::NodeDispatched,
@@ -969,9 +965,10 @@ mod tests {
         assert!(stream.contains("agent:oneagentgraph-1"), "{stream}");
         assert!(stream.contains("vcs:onevcs-tok"), "{stream}");
         assert!(stream.contains("graph:build"), "{stream}");
-        // A round transition has no node, so it has no typed id: it reaches the
-        // reader as run state, naming the run it belongs to.
-        assert!(stream.contains("-- demo  round-01"), "{stream}");
+        // The run's own state has no node, so it has no typed id: it reaches the
+        // reader as a trailer, naming the run it belongs to.
+        assert!(stream.contains("-- demo  0/1 done"), "{stream}");
+        assert!(!stream.contains("round"), "a round reached a view: {stream}");
 
         let views = vec![view];
         assert!(status(&views).contains("build: running"));
