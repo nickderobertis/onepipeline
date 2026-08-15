@@ -6,7 +6,7 @@ Plan schema v2 = ai-orchestrator tracked-graph schema v7 node shapes (`agent` di
 
 `schema_version: 2` is that change: v1 declared a `done_when` and a `max_turns` that no dispatch ever received, so the two versions do not describe the same document and a v1 plan is **refused deliberately**, naming what moved and what to set. A v1 plan that still carries `done_when` is answered with the field's own refusal rather than the version's, because the field is the thing its author has to move. Every optional field is omitted from what this crate writes when it is empty, so a plan round-trips as the file wrote it.
 
-Per-node **controls** — what a node declares about how its dispatch runs, as against what it is asked to do — reach that dispatch as node-scope overrides on its agent-graph launch, applied after the run-wide `--node-set`s: `max_turns` is the worker member's own turn ceiling. A control this build accepts and cannot apply refuses the plan at validation, and refuses the launch again where it is composed; neither path may fall back to a default. A node with `steps` declares its persona, task, and turn budget on them, and a `kind: human` or `expects_no_diff` node — which has no dispatch — declares none of the three.
+Per-node **controls** — what a node declares about how its dispatch runs, as against what it is asked to do — reach that dispatch as node-scope overrides on its agent-graph launch, applied after the run-wide `--node-set`s: `max_turns` is the worker member's own turn ceiling. A control this build accepts and cannot apply refuses the plan at validation, and refuses the launch again where it is composed; neither path may fall back to a default. A control a dispatch could not run under is not representable on the dispatch at all — `max_turns` is a `NonZeroU32` there, and the checked conversion from the plan's own `Option<u32>` happens at the trust boundary, so `max_turns: 0` is refused where the plan is read rather than by the member that could not start. A node with `steps` declares its persona, task, and turn budget on them, and a `kind: human` or `expects_no_diff` node — which has no dispatch — declares none of the three.
 
 `resume` continues a node on the branch its previous attempt preserved: `{branch, checkpoint?, completed_steps?}`. `branch` is the preserved branch. `completed_steps` names the steps that branch already carries, and a continuation skips exactly those and re-runs the rest — an absent or empty list re-runs the whole workstream, which repeats work but never skips it. `checkpoint` must be a commit reachable on the remote; a local-only revision is not a checkpoint, because the machine that continues the node is not the machine that made it.
 
@@ -33,7 +33,7 @@ pub struct DispatchRequest {
     pub graph: ConfigRef,                        // content-addressed node-scope agent-graph config (oneagentgraph type)
     pub task: String,
     pub labels: Labels,                          // reserved: run_id, round, node, step, persona
-    pub controls: NodeControls,                  // the node's own dispatch controls: { max_turns: Option<u32> }
+    pub controls: NodeControls,                  // the node's own dispatch controls: { max_turns: Option<NonZeroU32> }
     pub workspace: WorkspaceSpec,                // Path(PathBuf) | VcsSession(SessionRequest: onevcs type)
     pub cancel: CancellationToken,
 }

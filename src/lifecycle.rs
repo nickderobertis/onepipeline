@@ -15,6 +15,7 @@ use std::sync::mpsc::Sender;
 
 use onevcs::SessionRequest;
 
+use crate::controls::NodeControls;
 use crate::engine::{self, Message, Settlement};
 use crate::event::{Envelope, Labels};
 use crate::executor::{DispatchRequest, Executor, WorkspaceSpec};
@@ -48,7 +49,11 @@ pub fn execute(
     // A node that declared no steps has one dispatch and no step, so nothing
     // stamps a `step` label the plan never wrote.
     let declared_steps = node.steps.is_some();
-    let steps = match ordered_steps(node) {
+    // Every step's controls are narrowed here, before a session exists: a
+    // workstream that cannot dispatch one of its steps must not first cut a
+    // branch and run the steps before it, because that leaves work on a branch
+    // for a node that was never going to finish.
+    let steps = match dispatchable_steps(node) {
         Ok(steps) => steps,
         Err(reason) => {
             return Settlement {
@@ -81,7 +86,7 @@ pub fn execute(
         .map(|resume| resume.completed_steps.clone())
         .unwrap_or_default();
 
-    for step in &steps {
+    for (step, controls) in &steps {
         if declared_steps && completed.iter().any(|id| id == &step.id) {
             // Already on the preserved branch. Re-running it would redo work the
             // branch carries, which for a step that opened a change is not
@@ -134,7 +139,7 @@ pub fn execute(
                 declared_steps.then_some(step.id.as_str()),
                 step.persona.as_deref(),
             ),
-            controls: crate::controls::NodeControls::of_step(step),
+            controls: *controls,
             workspace: workspace.clone(),
             cancel: cancel.clone(),
         };
@@ -432,6 +437,24 @@ fn close(token: Option<&str>) {
     }
 }
 
+/// A node's steps in dispatch order, each with the controls its dispatch runs
+/// under, or why the node has none it can run.
+///
+/// One function for both refusals a workstream can carry before it starts — a
+/// dependency cycle among its steps, and a step whose declaration no dispatch
+/// can honour — because they cost the same thing if they are found late: a
+/// branch cut for a node that was never going to finish.
+fn dispatchable_steps(node: &Node) -> std::result::Result<Vec<(Step, NodeControls)>, String> {
+    ordered_steps(node)?
+        .into_iter()
+        .map(|step| {
+            NodeControls::of_step(&step)
+                .map(|controls| (step.clone(), controls))
+                .map_err(|why| format!("node '{}': step '{}': {why}", node.id, step.id))
+        })
+        .collect()
+}
+
 /// A node's steps in topological order, or why they have none.
 ///
 /// Steps share one branch and run serially, so the order is a total one: ties
@@ -486,6 +509,51 @@ pub fn ordered_steps(node: &Node) -> std::result::Result<Vec<Step>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A workstream refuses before it cuts a branch.
+    ///
+    /// The step's declaration is one no dispatch can run under, and it is found
+    /// while the node is still a document: nothing here opens a session, so the
+    /// refusal cannot leave commits on a branch for a node that was never going
+    /// to finish. `execute` reports it through the arm a step cycle already
+    /// takes.
+    #[test]
+    fn a_step_whose_budget_no_dispatch_can_run_under_stops_the_workstream() {
+        let node = Node {
+            id: "service".into(),
+            repo: Some("owner/service".into()),
+            steps: Some(vec![
+                Step {
+                    max_turns: Some(45),
+                    ..step("implement", &[])
+                },
+                Step {
+                    max_turns: Some(0),
+                    ..step("review", &["implement"])
+                },
+            ]),
+            ..Node::default()
+        };
+        let why = dispatchable_steps(&node)
+            .expect_err("a step that can take no turn is not dispatchable");
+        assert!(why.contains("node 'service': step 'review':"), "{why}");
+        assert!(why.contains("no turn at all"), "{why}");
+
+        // The step that *can* run keeps the budget it declared, narrowed.
+        let node = Node {
+            steps: Some(vec![Step {
+                max_turns: Some(45),
+                ..step("implement", &[])
+            }]),
+            ..node
+        };
+        let dispatchable = dispatchable_steps(&node).expect("45 is a budget a step can run under");
+        assert_eq!(
+            dispatchable[0].1.max_turns,
+            std::num::NonZeroU32::new(45),
+            "the step's own budget did not survive the conversion"
+        );
+    }
 
     fn step(id: &str, deps: &[&str]) -> Step {
         Step {

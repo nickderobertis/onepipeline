@@ -917,7 +917,7 @@ fn reply(args: &ReplyArgs) -> Result<i32> {
         let why = serde_json::from_str::<serde_json::Value>(text.trim())
             .ok()
             .as_ref()
-            .and_then(crate::plan::retired_field)
+            .and_then(crate::plan::retired_field_refusal)
             .unwrap_or_else(|| e.to_string());
         Error::Refused(format!("the reply is malformed: {why}"))
     })?;

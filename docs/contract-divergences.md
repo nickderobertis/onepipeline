@@ -690,6 +690,17 @@ an override — and one whose honest answer is "nothing this build can apply" is
 written `set: None` and refuses the plan at validation and the launch at
 composition. Silently defaulting is no longer reachable.
 
+The dispatch's own view of a control is valid by construction. `NodeControls`
+holds `max_turns` as a `NonZeroU32`, so a budget of zero — which no dispatch can
+run under, and which `oneagentgraph` refuses when it validates the graph — cannot
+be built, carried, or launched with. The plan schema keeps `Option<u32>`, because
+that is the shape a v7 plan file is written in and a live edit merges submitted
+JSON into; `NodeControls::of_node` and `of_step` are the checked conversion
+between the two, and they run at the trust boundary every plan and every edit
+crosses. A graph that reached a dispatch without crossing it — one folded from a
+journal a stale build wrote — settles the node `invalid-node` with the same
+sentence rather than launching.
+
 The plan schema is **version 2** for it. The two versions do not describe the
 same document — one field is gone and one now reaches the dispatch — so a plan
 declaring version 1 is refused deliberately, naming what moved and what to set
@@ -697,7 +708,7 @@ rather than reporting that two numbers differ. A version-1 plan that still
 carries `done_when` is answered with the field's refusal instead, because the
 field is the thing its author has to move and the version is downstream of that.
 
-`docs/contract.md` now says all of this: the schema is v2, the node-shape list
-carries `max_turns` and no `done_when`, a paragraph states what a control is and
-what happens to one that cannot be applied, and the seam sketch declares
-`DispatchRequest::controls`.
+The amended contract declares the schema as v2, lists `max_turns` among the node
+shapes and no `done_when` at all, states what a control is and what becomes of
+one that cannot be applied, and names `pub controls: NodeControls` in its seam
+sketch.

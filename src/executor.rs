@@ -411,7 +411,7 @@ mod tests {
                 ..Labels::default()
             },
             &NodeControls {
-                max_turns: Some(45),
+                max_turns: std::num::NonZeroU32::new(45),
             },
         )
         .expect("both are appliable");

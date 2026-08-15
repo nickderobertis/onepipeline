@@ -391,7 +391,7 @@ pub fn validate_node(node: &Node) -> Result<()> {
     // live edit is checked against — rather than at a dispatch that would have
     // spent its budget under a default nobody asked for.
     NodeControls::of_node(node)
-        .overrides()
+        .and_then(|controls| controls.overrides())
         .map_err(|why| named(&why))?;
 
     match (&node.repo, &node.steps) {
@@ -469,7 +469,7 @@ fn validate_steps(node: &Node, steps: &[Step]) -> Result<()> {
             // The same rule the node above is held to: a control this build
             // cannot apply stops the plan here rather than at the step's launch.
             NodeControls::of_step(step)
-                .overrides()
+                .and_then(|controls| controls.overrides())
                 .map_err(|why| named(format!("step '{}': {why}", step.id)))?;
         }
         if step.task.as_ref().is_none_or(|t| t.trim().is_empty()) {

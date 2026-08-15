@@ -10,6 +10,7 @@
 //! asserts the document still names them.
 
 use std::collections::BTreeSet;
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
 use clap::{CommandFactory, Parser};
@@ -234,7 +235,7 @@ fn the_dispatch_request_carries_every_field_the_contract_declares() {
             ..Labels::default()
         },
         controls: NodeControls {
-            max_turns: Some(24),
+            max_turns: NonZeroU32::new(24),
         },
         workspace: WorkspaceSpec::VcsSession(SessionRequest {
             repo: "nickderobertis/some-service".into(),
@@ -251,7 +252,7 @@ fn the_dispatch_request_carries_every_field_the_contract_declares() {
     );
     assert_eq!(
         request.controls.max_turns,
-        Some(24),
+        NonZeroU32::new(24),
         "the request carries the node's own controls, not only its labels"
     );
     assert_contract_names(
@@ -683,7 +684,7 @@ fn a_dispatch_built_outside_a_run_still_carries_its_controls_into_the_launch() {
     };
 
     let Err(refused) = LocalExecutor.dispatch(request(NodeControls {
-        max_turns: Some(45),
+        max_turns: NonZeroU32::new(45),
     })) else {
         panic!("a single-sided member has no `max_turns`, so the launch cannot start");
     };
@@ -748,7 +749,7 @@ fn a_declared_turn_budget_reaches_the_effective_configuration_of_the_worker() {
     );
     assert_eq!(
         turns_of(&effective(NodeControls {
-            max_turns: Some(45)
+            max_turns: NonZeroU32::new(45)
         })),
         Some(45),
         "the node's turn budget did not reach the member that runs its work"

@@ -510,7 +510,7 @@ fn compile_requeue(
     // serialization no longer carries one — and it is named here rather than
     // reaching the schema as an unknown field, because a retry that carries a
     // corrected review bar is exactly where a planner writes one.
-    if let Some(retired) = crate::plan::retired_field(&merged) {
+    if let Some(retired) = crate::plan::retired_field_refusal(&merged) {
         return Err(refuse(format!("requeue: node {retired}")));
     }
     // The amended node is validated as the node it produces, so a malformed pin

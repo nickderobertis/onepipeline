@@ -125,7 +125,7 @@ impl Plan {
         // A document this schema refuses is read a second time, leniently, to
         // see whether a retired field is why. Only on the failing path: the
         // reading that decides whether a plan loads stays exactly the one it was.
-        let refused = |e: String| named(retired_field_in(&text).unwrap_or(e));
+        let refused = |e: String| named(retired_field_refusal_in(&text).unwrap_or(e));
 
         if is_json {
             match serde_json::from_str::<serde_json::Value>(&text) {
@@ -150,15 +150,15 @@ impl Plan {
     }
 }
 
-/// The retired field a submitted document still carries, named with where it
-/// was found, or `None` if it carries none.
+/// The refusal a submitted document still carrying the retired field earns,
+/// named with where in the document it was found, or `None` if it carries none.
 ///
 /// A whole-document walk rather than a walk of the plan's own shape: the same
 /// field reaches this crate inside a plan file, inside a reply envelope's `add`,
 /// and inside a `requeue`'s amendment, and one refusal for all three is one
 /// answer a planner can act on. Only mapping *keys* are read, so prose that
 /// discusses the field is not mistaken for a document that declares it.
-pub(crate) fn retired_field(document: &serde_json::Value) -> Option<String> {
+pub(crate) fn retired_field_refusal(document: &serde_json::Value) -> Option<String> {
     match document {
         serde_json::Value::Object(map) => {
             if map.contains_key(DONE_WHEN) {
@@ -169,9 +169,9 @@ pub(crate) fn retired_field(document: &serde_json::Value) -> Option<String> {
                     .unwrap_or_default();
                 return Some(format!("{whose}{DONE_WHEN_RETIRED}"));
             }
-            map.values().find_map(retired_field)
+            map.values().find_map(retired_field_refusal)
         }
-        serde_json::Value::Array(items) => items.iter().find_map(retired_field),
+        serde_json::Value::Array(items) => items.iter().find_map(retired_field_refusal),
         _ => None,
     }
 }
@@ -181,8 +181,8 @@ pub(crate) fn retired_field(document: &serde_json::Value) -> Option<String> {
 /// Read leniently — as YAML, which also reads the JSON a plan file is usually
 /// written in — because the text reaching here is one the strict schema already
 /// refused, and a second refusal to parse it is simply "no retired field".
-fn retired_field_in(text: &str) -> Option<String> {
-    retired_field(&serde_norway::from_str::<serde_json::Value>(text).ok()?)
+fn retired_field_refusal_in(text: &str) -> Option<String> {
+    retired_field_refusal(&serde_norway::from_str::<serde_json::Value>(text).ok()?)
 }
 
 impl Node {

@@ -399,3 +399,133 @@ fn two_records_of_one_stream_claiming_one_sequence_keep_arriving_order() {
         rendered.stdout
     );
 }
+
+// llmlint: ignore-block[tests_mirror_real_usage] the record these three write is one an
+// *older* build of this crate wrote for real: `max_turns: 0` parsed, validated, and
+// launched before the judge controls were made honest, so every run that build left
+// behind still says so in its store. No command on *this* build's surface produces one —
+// every entry point validates — and the paths under test exist precisely for a graph that
+// reached a dispatch without crossing that boundary. Writing the record is the only way
+// to reach them, and leaving them unreached would leave the runtime refusal unproven. The
+// same reasoning, and the same instrument, as the unreadable-line journey above.
+
+/// Fold a graph into a held run that validation never saw.
+///
+/// A `run-started` records the plan the run is converging toward, and the round
+/// derives its graph from the journal rather than from the launch file — so a
+/// record an **older build wrote** is how a node reaches a dispatch carrying a
+/// declaration this build refuses. `max_turns: 0` was such a declaration: it
+/// parsed and launched before the judge controls were made honest, and any run
+/// that build left behind still says so in its store.
+///
+/// Written with a late timestamp and a stream of its own, which is where the
+/// merge puts a record that arrived last.
+fn fold_stale_plan(world: &World, run: &str, tasks: serde_json::Value) {
+    let journal = world.run_file(run, "events.jsonl");
+    let mut text = std::fs::read_to_string(&journal).expect("the journal reads");
+    text.push_str(&format!(
+        "{}\n",
+        json!({
+            "v": 1, "ts": "2099-01-01T00:00:00.000Z", "stream": "a-staler-build", "seq": 0,
+            "source": "pipeline", "kind": "run-started",
+            "labels": {"run_id": run},
+            "payload": {"plan": {"schema_version": 2, "concurrency": 4, "tasks": tasks}},
+            "artifacts": [],
+        })
+    ));
+    std::fs::write(&journal, text).expect("the journal is written");
+}
+
+/// A round refuses a node it cannot dispatch, rather than launching it under a
+/// default nobody asked for.
+///
+/// The graph a round executes comes from the journal, which validation does not
+/// re-run — so the refusal a plan gets at launch has to exist again at the
+/// dispatch, in the node's own settlement. Its outcome is `invalid-node`: not
+/// the agent's failure, and not an infrastructure one either.
+#[test]
+fn a_stale_graph_whose_node_cannot_be_dispatched_settles_rather_than_launching() {
+    let world = World::new("journal-stale-budget");
+    world.script("driver.wait", "hold");
+    let path = world.plan("stale", &plan_of("stale", vec![agent("build", &[])]));
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+    fold_stale_plan(
+        &world,
+        "stale",
+        json!([{"id": "build", "persona": "engineer", "task": "## What\nbuild", "max_turns": 0}]),
+    );
+
+    // Run the round from here, so its diagnostics land on a descriptor this test
+    // holds rather than inside the driver's own subprocess.
+    world.run(&["round", "run", "stale"]).exited(1);
+    world.release("driver.go");
+
+    let settled = world.events_of("stale", "node-settled");
+    let build = settled
+        .iter()
+        .find(|event| event["labels"]["node"] == "build")
+        .expect("the node settled");
+    assert_eq!(build["payload"]["status"], "failed", "{build}");
+    assert_eq!(build["payload"]["outcome"], "invalid-node", "{build}");
+    assert!(
+        build["payload"]["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("no turn at all")),
+        "the settlement does not say what was wrong with the node: {build}"
+    );
+    assert!(
+        world
+            .journal("stale")
+            .iter()
+            .all(|event| event["source"] != "agentgraph"),
+        "a node that could not be dispatched reached the sibling anyway"
+    );
+}
+
+/// A workstream refuses before it cuts a branch.
+///
+/// The node names a repository nothing has registered, so if the refusal came
+/// any later than it does the failure would be `onevcs`'s rather than the
+/// step's — and a branch would already exist for a node that was never going to
+/// finish.
+#[test]
+fn a_stale_graph_whose_step_cannot_be_dispatched_refuses_before_any_session() {
+    let world = World::new("journal-stale-step");
+    world.script("driver.wait", "hold");
+    let path = world.plan("staleste", &plan_of("staleste", vec![agent("build", &[])]));
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+    fold_stale_plan(
+        &world,
+        "staleste",
+        json!([{
+            "id": "build",
+            "repo": "nobody/registered-this",
+            "steps": [
+                {"id": "implement", "persona": "engineer", "task": "## What\nimplement",
+                 "max_turns": 0}
+            ],
+        }]),
+    );
+
+    world.run(&["round", "run", "staleste"]).exited(1);
+    world.release("driver.go");
+
+    let settled = world.events_of("staleste", "node-settled");
+    let build = settled.first().expect("the node settled");
+    assert_eq!(build["payload"]["outcome"], "invalid-node", "{build}");
+    let detail = build["payload"]["detail"].as_str().unwrap_or_default();
+    assert!(detail.contains("step 'implement'"), "{build}");
+    assert!(detail.contains("no turn at all"), "{build}");
+    assert!(
+        world
+            .journal("staleste")
+            .iter()
+            .all(|event| event["source"] != "vcs"),
+        "a workstream that could not dispatch its step opened a session anyway"
+    );
+}
+// llmlint: ignore-end[tests_mirror_real_usage]

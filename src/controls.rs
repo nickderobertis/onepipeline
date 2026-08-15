@@ -14,11 +14,22 @@
 //! warning. A control with nowhere to land now stops the plan at validation,
 //! which is where a launch reads it.
 //!
+//! [`NodeControls`] is the *dispatch's* view of those controls, and it is valid
+//! by construction: a turn budget is a [`NonZeroU32`], so "run for no turns" —
+//! which no dispatch can honour, and which `oneagentgraph` refuses when it
+//! validates the graph — cannot be built, passed along, or launched with. The
+//! plan schema keeps `Option<u32>`, because that is the shape a v7 plan file is
+//! written in and a live edit merges submitted JSON into; the checked conversion
+//! between the two is [`NodeControls::of_node`] and [`NodeControls::of_step`],
+//! and it happens at the trust boundary every plan and every edit crosses.
+//!
 //! How a future control is kept honest: `NodeControls::declared` destructures
 //! the struct field by field with **no `..` rest pattern**, so a control added
 //! to [`NodeControls`] does not compile until this module says what it applies
 //! to. A control whose honest answer is "nothing this crate can apply" is given
 //! `set: None` there, and the renderer beneath it refuses that control by name.
+
+use std::num::NonZeroU32;
 
 use crate::plan::{Node, Step};
 
@@ -30,48 +41,61 @@ use crate::plan::{Node, Step};
 /// assumption the persona override has always made.
 pub(crate) const WORKER_MEMBER: &str = "worker";
 
-/// The controls one node or step declares.
+/// What a plan declaring a turn budget of zero is told.
+///
+/// Its own sentence rather than an inline string, because two conversions
+/// produce it — a node's and a step's — and one wording is what makes the answer
+/// the same wherever a planner wrote the zero.
+pub(crate) const ZERO_TURNS: &str =
+    "`max_turns: 0` lets the dispatch take no turn at all; omit it to run under the agent \
+     graph's own ceiling";
+
+/// The controls one node or step declares, as a dispatch carries them.
 ///
 /// Copied out of the plan rather than borrowed from it, because a dispatch
-/// outlives the borrow of the graph it was built from.
-// llmlint: ignore-block[invalid_states_unrepresentable] `max_turns` is `Option<u32>`
-// rather than a positive-integer type because it *mirrors* the plan field, which is
-// `Option<u32>` for the reason `plan.rs` records: `docs/contract.md` fixes the node shapes
-// as schema v7's, and a live edit merges arbitrary submitted JSON into one. So the zero is
-// representable at the boundary whatever this type says, and narrowing here alone would
-// only move it — while making `of_node`/`of_step` fallible would put an error arm no
-// validated plan can reach on every dispatch path. It is *rejected* instead, in
-// `overrides` below, which is the one function both plan validation and launch
-// composition call.
+/// outlives the borrow of the graph it was built from — and *narrowed* on the way
+/// through: the plan's `Option<u32>` can say zero and this cannot, so no code
+/// downstream of the conversion has to ask whether the budget it holds is one a
+/// dispatch could run under.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct NodeControls {
     /// The dispatch's turn budget, applied as the worker member's `max_turns`.
-    pub max_turns: Option<u32>,
+    pub max_turns: Option<NonZeroU32>,
 }
-// llmlint: ignore-end[invalid_states_unrepresentable]
 
-/// One declared control: the name a plan writes, and the override that applies
-/// it — or `None` for one this build accepts and cannot apply.
+/// One declared control, paired with what applies it.
+///
+/// `name` is spelled as the *plan* spells it, because a refusal about it is read
+/// by whoever wrote the plan. `set` is `None` for a control this build accepts
+/// and has no override for, which is the case the refusal exists for.
 struct Control {
-    /// The plan field's own name, which is what a refusal has to say.
     name: &'static str,
-    /// The `PATH=VALUE` this control renders to, and `None` where there is none.
     set: Option<String>,
 }
 
 impl NodeControls {
-    /// What a node declares.
-    pub fn of_node(node: &Node) -> Self {
-        Self {
-            max_turns: node.max_turns,
-        }
+    /// What a node declares, checked.
+    ///
+    /// # Errors
+    ///
+    /// The reason the node's declaration is not one a dispatch can run under —
+    /// today, a turn budget of zero.
+    pub fn of_node(node: &Node) -> std::result::Result<Self, String> {
+        Ok(Self {
+            max_turns: turn_budget(node.max_turns)?,
+        })
     }
 
-    /// What one step of a lifecycle node declares.
-    pub fn of_step(step: &Step) -> Self {
-        Self {
-            max_turns: step.max_turns,
-        }
+    /// What one step of a lifecycle node declares, checked.
+    ///
+    /// # Errors
+    ///
+    /// As [`of_node`](Self::of_node): a step's budget crosses the same boundary,
+    /// and a step is where a workstream's budgets are actually written.
+    pub fn of_step(step: &Step) -> std::result::Result<Self, String> {
+        Ok(Self {
+            max_turns: turn_budget(step.max_turns)?,
+        })
     }
 
     /// The `--set` overrides these controls render to, or the reason the first
@@ -81,23 +105,14 @@ impl NodeControls {
     /// that each caller says *where* it was refused — a plan node at validation,
     /// or a dispatch at launch — without a second error prefix inside the
     /// sentence.
+    ///
+    /// # Errors
+    ///
+    /// The name of the first control this build accepts and cannot apply.
     pub fn overrides(&self) -> std::result::Result<Vec<String>, String> {
-        // A budget of zero is a value no dispatch can honour: it lets the member
-        // take no turn at all, which is what `oneagentgraph` refuses when it
-        // validates the graph it has been handed. Refused here as well, where the
-        // plan is read, so a planner is told before a launch is composed rather
-        // than by a member that could not start.
-        if self.max_turns == Some(0) {
-            return Err(
-                "`max_turns: 0` lets the dispatch take no turn at all; omit it to \
-                        run under the agent graph's own ceiling"
-                    .to_string(),
-            );
-        }
         rendered(self.declared())
     }
 
-    /// Every control declared here, paired with what applies it.
     fn declared(&self) -> Vec<Control> {
         // Destructured with no `..` rest pattern on purpose: a control added to
         // `NodeControls` does not compile until it is given a line below. One
@@ -115,6 +130,23 @@ impl NodeControls {
             });
         }
         declared
+    }
+}
+
+/// The plan's turn budget as a dispatch can hold one.
+///
+/// The whole narrowing, in one place: absent stays absent, a positive budget
+/// becomes one that cannot later be read as zero, and the zero is refused here
+/// rather than carried to a member that could not start. `oneagentgraph` refuses
+/// `max_turns: 0` when it validates the graph it is handed, so a zero allowed
+/// through would fail the launch anyway — several minutes and one composed
+/// dispatch later, in a sibling's words rather than in the plan's.
+fn turn_budget(declared: Option<u32>) -> std::result::Result<Option<NonZeroU32>, String> {
+    match declared {
+        None => Ok(None),
+        Some(budget) => NonZeroU32::new(budget)
+            .map(Some)
+            .ok_or(ZERO_TURNS.to_string()),
     }
 }
 
@@ -142,11 +174,29 @@ fn rendered(declared: Vec<Control>) -> std::result::Result<Vec<String>, String> 
 mod tests {
     use super::*;
 
+    fn node(max_turns: Option<u32>) -> Node {
+        Node {
+            id: "build".into(),
+            persona: Some("engineer".into()),
+            task: Some("## What\nship it".into()),
+            max_turns,
+            ..Node::default()
+        }
+    }
+
+    fn step(max_turns: Option<u32>) -> Step {
+        Step {
+            id: "implement".into(),
+            persona: Some("engineer".into()),
+            task: Some("## What\nship it".into()),
+            max_turns,
+            ..Step::default()
+        }
+    }
+
     #[test]
     fn a_declared_turn_budget_renders_as_the_workers_own_override() {
-        let controls = NodeControls {
-            max_turns: Some(45),
-        };
+        let controls = NodeControls::of_node(&node(Some(45))).expect("45 is a budget");
         assert_eq!(
             controls.overrides().expect("a budget is appliable"),
             vec!["members.worker.max_turns=45".to_string()]
@@ -155,25 +205,43 @@ mod tests {
 
     #[test]
     fn a_node_that_declares_no_control_overrides_nothing() {
+        let controls = NodeControls::of_node(&node(None)).expect("nothing to convert");
+        assert_eq!(controls.max_turns, None);
         assert_eq!(
-            NodeControls::default()
-                .overrides()
-                .expect("nothing to apply"),
+            controls.overrides().expect("nothing to apply"),
             Vec::<String>::new(),
             "a set nobody asked for would override the graph's own value"
         );
     }
 
+    /// The conversion is what narrows the plan's `Option<u32>` to a budget a
+    /// dispatch can run under, and it is checked: the value a dispatch cannot
+    /// honour is refused here rather than represented and carried.
     #[test]
-    fn a_turn_budget_of_zero_is_refused_where_the_plan_is_read() {
-        let refused = NodeControls { max_turns: Some(0) }
-            .overrides()
-            .expect_err("a dispatch cannot run for no turns");
-        assert!(refused.contains("no turn at all"), "{refused}");
-        assert!(
-            refused.contains("omit it"),
-            "the refusal does not say what to do instead: {refused}"
+    fn the_checked_conversion_keeps_a_positive_budget_and_refuses_zero() {
+        assert_eq!(
+            NodeControls::of_node(&node(Some(45)))
+                .expect("45 converts")
+                .max_turns,
+            NonZeroU32::new(45)
         );
+        assert_eq!(
+            NodeControls::of_step(&step(Some(45)))
+                .expect("45 converts")
+                .max_turns,
+            NonZeroU32::new(45)
+        );
+
+        for refused in [
+            NodeControls::of_node(&node(Some(0))).expect_err("a node cannot run for no turns"),
+            NodeControls::of_step(&step(Some(0))).expect_err("a step cannot run for no turns"),
+        ] {
+            assert!(refused.contains("no turn at all"), "{refused}");
+            assert!(
+                refused.contains("omit it"),
+                "the refusal does not say what to do instead: {refused}"
+            );
+        }
     }
 
     #[test]
