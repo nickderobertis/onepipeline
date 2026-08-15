@@ -100,37 +100,49 @@ fn the_node_scope_graph_is_the_default_worker_and_judge() {
     );
 }
 
+/// Each shipped persona file, and the role it carries.
+///
+/// `orchestrator.yaml` holds the **monitor**: the orchestrator persona was
+/// rewritten into the observer rather than replaced by a file beside it, so the
+/// shipped path a consumer already names keeps resolving to the run's one
+/// dag-scope persona.
+const SHIPPED_PERSONAS: [(&str, &str); 3] = [
+    ("orchestrator", "monitor"),
+    ("check-in", "check-in"),
+    ("pr-author", "pr-author"),
+];
+
 #[test]
 fn every_shipped_persona_is_a_persona_with_both_sides() {
-    for name in ["monitor", "check-in", "pr-author"] {
-        let text = read(&format!("personas/{name}.yaml"));
+    for (file, role) in SHIPPED_PERSONAS {
+        let text = read(&format!("personas/{file}.yaml"));
         let document: serde_json::Value = serde_norway::from_str(&text)
-            .unwrap_or_else(|e| panic!("personas/{name}.yaml is not valid YAML: {e}"));
+            .unwrap_or_else(|e| panic!("personas/{file}.yaml is not valid YAML: {e}"));
 
         assert_eq!(
-            document["agent"]["name"], name,
-            "personas/{name}.yaml names a different agent"
+            document["agent"]["name"], role,
+            "personas/{file}.yaml names a different agent"
         );
         let instructions = document["agent"]["instructions"]
             .as_str()
-            .unwrap_or_else(|| panic!("personas/{name}.yaml has no agent instructions"));
+            .unwrap_or_else(|| panic!("personas/{file}.yaml has no agent instructions"));
         let supervisor = document["user"]["persona"]
             .as_str()
-            .unwrap_or_else(|| panic!("personas/{name}.yaml has no supervisor persona"));
+            .unwrap_or_else(|| panic!("personas/{file}.yaml has no supervisor persona"));
         assert!(
             instructions.len() > 200,
-            "personas/{name}.yaml says too little"
+            "personas/{file}.yaml says too little"
         );
         assert!(
             supervisor.len() > 100,
-            "personas/{name}.yaml supervises too little"
+            "personas/{file}.yaml supervises too little"
         );
     }
 }
 
 #[test]
 fn the_monitor_persona_observes_and_never_drives() {
-    let text = unwrapped("personas/monitor.yaml");
+    let text = unwrapped("personas/orchestrator.yaml");
     // It says what it is for, in the vocabulary the channel actually enforces.
     for word in ["Observe one run", "non-blocking", "\"author\": \"monitor\""] {
         assert!(
