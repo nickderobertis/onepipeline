@@ -11,7 +11,7 @@ contract**, and `docs/contract.md` was amended to carry each ruling. They stay
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–23 and 25–28 are open**. Each states what the code does today and the
+Entries **10–23 and 25–29 are open**. Each states what the code does today and the
 proposal it is waiting on — most of them a question for a *producer* rather than
 for this crate, because `oneagentgraph` and `onevcs` are independent tools that
 expose general integration hooks only and nothing in them may know about this
@@ -802,3 +802,32 @@ see a retry; the settlement still distinguishes `no-agent-progress` from
 
 The alternative — silence — was rejected as removing evidence the delta did not
 ask to remove.
+
+## 29. Continuing preserved work moved from the round transition into `retry` — OPEN
+
+**Proposal (for the planner who owns the contract): confirm that a `retry`
+naming no branch continues the one its target preserved, and that the superseded
+node leaves the graph with the edit that replaced it.**
+
+Two behaviours lived in the round transition, and rounds are gone.
+
+**Continuing a preserved branch.** A node that ran, committed, and stopped —
+failed, cancelled, parked — leaves work on a branch. The transition pinned the
+carried node to it, so the next round's attempt continued that branch rather than
+cutting a fresh one beside committed work nothing points at. Roundless, nothing
+carries a node forward on its own: what re-runs the work is the planner's
+`retry`. So the pin is folded onto the node when its settlement records the
+branch (`projection::pin_preserved_branch`), and a replacement that names neither
+`branch` nor `resume` inherits both from the node it supersedes. A planner who
+named either is answered with what they named, which is the agreement
+`validate_retry_pin` already holds.
+
+**Removing the superseded node.** The contract's own words were that the
+superseded node "stays in the executed graph, cancelled, so the round's own
+record still names it, and the transition then removes it exactly as a `drop`
+would". There is no transition to do the removing, and a cancelled node left in
+the graph holds the whole run in `waiting` forever — a graph that can never
+settle because something was retried. So `retry` now removes it in the same
+edit, emitting the `node-dropped` operation the transition would have. What
+became of it is still in the run's record: its own `node-settled`, and the
+`edit-committed` that replaced it.
