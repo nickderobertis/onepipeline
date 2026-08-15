@@ -1166,6 +1166,32 @@ mod tests {
         .expect("a title on a node that never publishes was held to the publication's limit");
     }
 
+    /// An ordinary title takes the path where this check does nothing at all.
+    ///
+    /// Every length above is built from [`SUBJECT_LIMIT`] and moves with it,
+    /// which proves the arithmetic at the edge and only there. This one is
+    /// deliberately *not* derived from the bound: it is the length a planner
+    /// actually writes, well inside the limit, and the case that would catch a
+    /// check that refused far more than the publication does.
+    #[test]
+    fn a_title_a_planner_would_actually_write_is_left_alone() {
+        // 100 characters — a real subject, not a fixture built out of the bound.
+        let title = "feat(plan): refuse a node title that the publication would not commit under, \
+                     before it is dispatched";
+        assert!(
+            title.len() < SUBJECT_LIMIT,
+            "this is only an ordinary title while it is inside the bound: {} characters",
+            title.len()
+        );
+
+        validate(&plan_of(vec![Node {
+            title: Some(title.to_owned()),
+            repo: Some("owner/repo".into()),
+            ..agent("publish", &[])
+        }]))
+        .expect("an ordinary title was refused");
+    }
+
     /// The version this schema replaced is refused *deliberately*.
     ///
     /// Every plan written on this host before the judge controls were made

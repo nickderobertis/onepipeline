@@ -733,7 +733,10 @@ fn a_publication_that_its_gate_rejects_settles_the_node_failed_by_name() {
 /// whole dispatch and its gate. The title that fits by one character runs right
 /// after it, on the same repository, because a bound is only proven by the side
 /// of it that publishes — and it carries the spacing the sibling trims before it
-/// measures, so the two measure the same title.
+/// measures, so the two measure the same title. Last is the ordinary title a
+/// planner actually writes, well inside the limit rather than at it: the two
+/// lengths above are built from the bound and exercise its arithmetic, and this
+/// one exercises the everyday path, where the check has to do nothing at all.
 #[test]
 fn a_title_the_sibling_will_not_commit_under_is_refused_before_any_dispatch() {
     let world = World::new("lifecycle-longtitle");
@@ -792,6 +795,36 @@ fn a_title_the_sibling_will_not_commit_under_is_refused_before_any_dispatch() {
     assert!(
         repo.base_commits(&world).contains(&subject),
         "the title at the limit did not reach the base: {:?}\n{}",
+        repo.base_commits(&world),
+        why(&world, &run)
+    );
+
+    // 100 characters: a real subject rather than one padded out of the bound, so
+    // it stays an ordinary title however the bound moves.
+    let ordinary = "feat(plan): refuse a node title that the publication would not commit under, \
+                    before it is dispatched";
+    assert!(
+        ordinary.len() < SUBJECT_LIMIT,
+        "this is only an ordinary title while it is inside the bound: {} characters",
+        ordinary.len()
+    );
+    let mut plain = lifecycle("service", &[]);
+    plain["title"] = json!(ordinary);
+    // The run above already landed the worker's file on the base, so this one
+    // needs its own content: with nothing to commit the node settles
+    // `no-changes` and publishes no subject, which would leave the assertion
+    // below passing for a reason that has nothing to do with the title.
+    world.script("service.work", "the worker wrote this too\n");
+    let run = settle(&world, "plaintitle", vec![plain]);
+    assert_eq!(
+        world.run_json(&run, "result.json")["state"],
+        "complete",
+        "{}",
+        why(&world, &run)
+    );
+    assert!(
+        repo.base_commits(&world).contains(&ordinary.to_string()),
+        "an ordinary title did not reach the base: {:?}\n{}",
         repo.base_commits(&world),
         why(&world, &run)
     );
