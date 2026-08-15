@@ -1108,18 +1108,21 @@ fn the_driving_process_is_a_single_writer() {
     });
 
     // The driving process holds the run's ownership lock for as long as it is
-    // driving, so a second loop loses the race rather than interleaving with it.
-    // Spelled at the verb `start --detach` retains, because that is the only
-    // thing that starts a second loop.
-    world
-        .run(&["drive-run", &run])
-        .exited(REFUSED)
-        .err_has("is being written by pid");
-    // And an adoption refuses outright while the run is genuinely being driven.
+    // driving, and `adopt` is the only documented way to point a second loop at
+    // a run that already has one. It refuses, rather than interleaving.
     world
         .run(&["adopt", &run])
         .exited(REFUSED)
         .err_has("still being driven");
+    // And the run really was still being written while it refused: the graph is
+    // where a second writer would have shown up, and it holds exactly the one
+    // dispatch this driver started.
+    assert_eq!(
+        world.events_of(&run, "node-dispatched").len(),
+        1,
+        "something wrote to the run beside its driver: {:?}",
+        world.kinds(&run)
+    );
     world.release("build.go");
 }
 

@@ -97,7 +97,6 @@ fn a_verb_that_names_a_run_nobody_recorded_refuses_and_says_where_it_looked() {
         vec!["status", "ghost"],
         vec!["stop", "ghost"],
         vec!["adopt", "ghost"],
-        vec!["drive-run", "ghost"],
     ] {
         world
             .run(&args)
