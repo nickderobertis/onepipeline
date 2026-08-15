@@ -759,15 +759,18 @@ fn attach(paths: &RunPaths, observer: Option<&mut agentgraph::GraphRun>) -> Resu
         reported = lines.len();
 
         if concluded {
-            // Whatever the loop reported is this launch's failure to report: a
-            // lock it could not take, a ledger it could not read.
-            engine
-                .join()
-                .map_err(|_| Error::Invalid(format!("the engine loop for '{}' panicked", paths.run)))??;
-            // The observer has nothing left to observe.
+            // The observer has nothing left to observe — stopped **before** the
+            // loop's own verdict is unwrapped, because that verdict may be a
+            // refusal, and a launch that returned one having left a graph
+            // running would leave an agent working on a run nobody is driving.
             if let Some(run) = watched.as_deref_mut() {
                 run.cancel();
             }
+            // Whatever the loop reported is this launch's failure to report: a
+            // lock it could not take, a ledger it could not read.
+            engine.join().map_err(|_| {
+                Error::Invalid(format!("the engine loop for '{}' panicked", paths.run))
+            })??;
             let settlement = settlement_of(&view);
             println!(
                 "{}",
