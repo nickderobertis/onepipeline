@@ -47,14 +47,21 @@ pub enum DriverLiveness {
 }
 // llmlint: ignore-end[names_match_behavior]
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::event::{Envelope, Source};
+use crate::filter::EventFilter;
 use crate::graph::{self, Landing, NodeStatus};
 use crate::journal::PipelineKind;
-use crate::ledger::{self, LaunchRecord, RunPaths};
-use crate::projection::{self, RunState};
+use crate::ledger::{self, LaunchRecord, LockRecord, RunPaths};
+use crate::projection::{self, MemberLabel, Refusal, RunState};
 use crate::sys;
+
+/// A run root a view refused, and the reason it gave.
+///
+/// Re-exported where the views are, because a rejection is part of what a view
+/// reports: a root that was skipped is named on the same output a run is.
+pub use crate::ledger::Skipped;
 
 /// How long a launch may hold its pid without doing anything before it is
 /// reported [`Parked`](DriverLiveness::Parked).
@@ -225,17 +232,6 @@ impl RunView {
         })
     }
 
-    /// Every readable run under a root, oldest id first.
-    ///
-    /// A run this host cannot read at all drops out, having supported no claim
-    /// either way.
-    pub fn all(root: &Path) -> Vec<Self> {
-        ledger::all_runs(root)
-            .iter()
-            .filter_map(|paths| Self::open(paths).ok())
-            .collect()
-    }
-
     /// How the run is being driven.
     pub fn liveness(&self) -> DriverLiveness {
         liveness(&self.launch, &self.state, &self.paths)
@@ -277,6 +273,120 @@ impl RunView {
     }
 }
 
+/// What a view over a whole runs root read, and what it refused.
+///
+/// The second half is why this type exists. A view that opened every run it
+/// could and silently dropped the rest reported a rejection as an *absence*: a
+/// host with thirty run roots on it rendered as `no runs recorded`, which a
+/// planner reads as "nothing is running". A refused root is a fact about the
+/// root, and it is carried to the renderer rather than thrown away in the read.
+#[derive(Debug)]
+pub struct Survey {
+    /// The runs root this survey read. Named on the output, because it is the
+    /// scope of every claim made from it.
+    pub root: PathBuf,
+    /// The runs that read, oldest id first.
+    pub views: Vec<RunView>,
+    /// The run roots that did not, each with the reason it was refused.
+    pub skipped: Vec<Skipped>,
+}
+
+impl Survey {
+    /// Read every run under a root, keeping what could not be read.
+    ///
+    /// A root the ledger refused and a run whose launch record this build cannot
+    /// accept are the same fact to a reader — one directory that claimed to be a
+    /// run and is not being reported as one — so they arrive on one list.
+    pub fn of(root: &Path) -> Self {
+        let index = ledger::all_runs(root);
+        let mut views = Vec::new();
+        let mut skipped = index.skipped;
+        for paths in index.runs {
+            match RunView::open(&paths) {
+                Ok(view) => views.push(view),
+                // The refusal as `results` already words it: the file, the
+                // offending field, and what was expected. Nothing is added to it
+                // here — a second wording of one refusal is a second thing to
+                // keep true.
+                Err(error) => skipped.push(Skipped {
+                    path: paths.dir,
+                    reason: error.to_string(),
+                }),
+            }
+        }
+        skipped.sort_by(|a, b| a.path.cmp(&b.path));
+        Self {
+            root: root.to_path_buf(),
+            views,
+            skipped,
+        }
+    }
+
+    /// The one run a caller named, surveyed on its own.
+    ///
+    /// It was opened by name, so a root it did not read is not this survey's to
+    /// report: a caller who named a run that could not be read was refused
+    /// outright rather than handed a view of it.
+    pub fn of_one(view: RunView) -> Self {
+        let root = view
+            .paths
+            .dir
+            .parent()
+            .map_or_else(ledger::runs_root, Path::to_path_buf);
+        Self {
+            root,
+            views: vec![view],
+            skipped: Vec::new(),
+        }
+    }
+}
+
+// llmlint: ignore-block[cli_output_contract] a refused run root is part of the answer, not
+// a failure of the command: the empty case here *replaces* `no runs recorded`, so it cannot
+// live on a stream other than the answer it replaces. The two driver sites that print these
+// carry the exit code that goes with the same decision.
+/// What a view says about the run roots it refused, or nothing when it refused
+/// none.
+///
+/// Counted **and** named. A count alone tells a reader something is wrong and
+/// not which directory to look at, and the reason is what `results` already
+/// prints for exactly this refusal.
+fn skipped_lines(skipped: &[Skipped]) -> String {
+    if skipped.is_empty() {
+        return String::new();
+    }
+    let mut out = format!("{} run root(s) skipped:\n", skipped.len());
+    for root in skipped {
+        // Every value on the line is a stranger's — a directory name on disk and
+        // a refusal built from it — so both go through the same strip.
+        out.push_str(&format!(
+            "  {}: {}\n",
+            one_line(&root.path.display().to_string()),
+            one_line(&root.reason)
+        ));
+    }
+    out
+}
+
+/// What a whole-root view says when it has no run to report.
+///
+/// Two different facts, which is the whole reason this is a function: a root
+/// with nothing in it and a root whose every run was refused both rendered as
+/// `no runs recorded`, and only one of them means there is nothing running.
+fn nothing_to_report(survey: &Survey) -> String {
+    let mut out = if survey.views.is_empty() && !survey.skipped.is_empty() {
+        format!(
+            "no run under {} could be read\n",
+            one_line(&survey.root.display().to_string())
+        )
+    } else {
+        "no runs recorded\n".to_string()
+    };
+    out.push_str(&skipped_lines(&survey.skipped));
+    out
+}
+// llmlint: ignore-end[cli_output_contract]
+
 /// The word a view prints for how a run is being driven.
 ///
 /// A run whose graph completed is **settled**, not abandoned: its driver is
@@ -291,9 +401,14 @@ pub fn liveness_word(view: &RunView) -> &'static str {
 }
 
 /// `onepipeline runs`.
+///
+/// A run root under this root that could not be read is named at the end rather
+/// than dropped: an empty listing on a host that holds runs is the reading that
+/// costs the most, because it is the one a planner acts on by starting more work.
 pub fn runs(root: &Path, mine_only: bool, session: &str) -> String {
+    let survey = Survey::of(root);
     let mut out = String::new();
-    for view in RunView::all(root) {
+    for view in &survey.views {
         let owned = view.launch.owned_by(session);
         if mine_only && !owned {
             continue;
@@ -304,7 +419,7 @@ pub fn runs(root: &Path, mine_only: bool, session: &str) -> String {
             view.paths.run,
             view.launch.owner_label(session),
             view.summary(),
-            liveness_word(&view)
+            liveness_word(view)
         ));
         // A run reported stopped keeps the line saying why it stopped rather
         // than an invitation to read updates nothing will follow up on.
@@ -329,15 +444,16 @@ pub fn runs(root: &Path, mine_only: bool, session: &str) -> String {
         }
     }
     if out.is_empty() {
-        out.push_str("no runs recorded\n");
+        return nothing_to_report(&survey);
     }
+    out.push_str(&skipped_lines(&survey.skipped));
     out
 }
 
 /// `onepipeline status`.
-pub fn status(views: &[RunView]) -> String {
+pub fn status(survey: &Survey) -> String {
     let mut out = String::new();
-    for view in views {
+    for view in &survey.views {
         out.push_str(&format!(
             "{}  {}  {}\n",
             view.paths.run,
@@ -398,6 +514,17 @@ pub fn status(views: &[RunView]) -> String {
             }
             out.push('\n');
         }
+        // What refused, for the nodes that failed. A failed node otherwise reads
+        // the same whether its own gate failed or an identity chain ran out, and
+        // the two call for opposite actions from whoever is reading this.
+        for (id, node_status) in &statuses {
+            if *node_status != NodeStatus::Failed {
+                continue;
+            }
+            for refusal in refusals_of(&view.state, id) {
+                out.push_str(&format!("  {id}: failed — {}\n", refusal_phrase(refusal)));
+            }
+        }
         // The settled nodes whose work has not reached anyone. This view
         // otherwise reports only what is in flight, so a planner reading it saw
         // a run go quiet and took that for a run whose work had landed. Named
@@ -416,9 +543,77 @@ pub fn status(views: &[RunView]) -> String {
         }
     }
     if out.is_empty() {
-        out.push_str("no runs recorded\n");
+        return nothing_to_report(survey);
     }
+    out.push_str(&skipped_lines(&survey.skipped));
     out
+}
+
+/// Every provider refusal one node's dispatches recorded, in arrival order.
+fn refusals_of<'a>(state: &'a RunState, node: &str) -> &'a [Refusal] {
+    state.refusals.get(node).map_or(&[], Vec::as_slice)
+}
+
+/// How one provider refusal reads on a rendered line.
+///
+/// The side first, because it is the half a reader most often gets wrong: the
+/// two sides of a member prefer different identities, and an operator who
+/// restored the wrong subscription spent a night watching the same failure.
+///
+/// Every value on the line is a stranger's — an identity, a classification, a
+/// role, and a member name, all read off a sibling's envelope — so the whole
+/// phrase goes through the same control strip the rest of this module uses.
+fn refusal_phrase(refusal: &Refusal) -> String {
+    // The role's own spelling, taken from the producing library's serialization
+    // rather than matched into words of this crate's: the sides are that
+    // library's vocabulary, and a second spelling of them here is a second thing
+    // to keep true.
+    let role = refusal
+        .advanced
+        .role
+        .and_then(|role| serde_json::to_value(role).ok());
+    let side = match (
+        role.as_ref().and_then(serde_json::Value::as_str),
+        &refusal.member,
+    ) {
+        (Some(role), _) => format!("the {role} side"),
+        (None, MemberLabel::Named(member)) => format!("member '{member}'"),
+        // Neither was stamped. The identity is still the thing to act on, and
+        // naming a side the record does not carry would send the fix at a chain
+        // nobody named — which is the failure this line exists to end.
+        //
+        // llmlint: ignore-block[changed_behavior_has_e2e] `oneagentgraph` labels a
+        // member's envelopes with the member, so no producer reaches either arm; they are
+        // written for one that stamps neither, or stamps something that is not a member
+        // name. The arm a producer does reach is driven in `tests/e2e/views.rs`.
+        (None, MemberLabel::Unstamped) => "a side the record does not name".to_string(),
+        // Stamped, and not readable as a member. Saying the record names no
+        // side would be denying a record that does name one.
+        (None, MemberLabel::Unreadable) => "a side this build cannot read".to_string(),
+        // llmlint: ignore-end[changed_behavior_has_e2e]
+    };
+    // llmlint: ignore-block[changed_behavior_has_e2e] `FallbackAdvanced::reason` is a
+    // required `String`, so no producer reaches the empty half; it is written for a newer
+    // sibling that relaxes the field. The half a producer does reach is driven end to end.
+    let reason = if refusal.advanced.reason.is_empty() {
+        "for a reason the record does not carry".to_string()
+    } else {
+        format!("({})", refusal.advanced.reason)
+    };
+    // llmlint: ignore-end[changed_behavior_has_e2e]
+    // What was counted, said as what it is: records carrying this same side,
+    // identity, and reason. The producer stamps a turn on each advance and
+    // nothing here reads it, so "on N turns" would be a measurement this line
+    // never made.
+    let again = if refusal.records.get() > 1 {
+        format!(", recorded {} times", refusal.records)
+    } else {
+        String::new()
+    };
+    one_line(&format!(
+        "{side}: identity '{}' refused {reason}{again}",
+        refusal.advanced.identity
+    ))
 }
 
 /// The nodes this run published a change for that had not reached its base, in
@@ -462,36 +657,190 @@ fn working(activity: &crate::projection::NodeActivity) -> String {
     }
 }
 
+/// Whether this host can prove the run behind a recorded dispatch is still being
+/// driven.
+///
+/// Three answers, because a row an operator acts on has to distinguish them.
+/// `Stale` and `Live` are proofs in opposite directions; `Unproven` is the
+/// answer this host does not have, and collapsing it into either is how a
+/// registry row outlives the process it describes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Proof {
+    /// The run's lock is held, and the pid holding it started when the record
+    /// says it did.
+    ///
+    /// Deliberately not named for liveness: what this establishes is that the
+    /// evidence agrees, to the resolution the host reports a process start at —
+    /// one second, where that is `ps`. A pid reused *inside* that resolution by
+    /// a process that also started then is the one case this cannot separate,
+    /// and it is why the word is about the lock rather than about the work.
+    Held,
+    /// This host proved nothing is driving the run behind the row.
+    Stale(String),
+    /// This host cannot decide: the lock was taken elsewhere, cannot be read, or
+    /// carries no stamp to check the pid against.
+    Unproven(String),
+}
+
+/// Whether the dispatches a run records are backed by a driver this host can
+/// prove is running them.
+///
+/// The **ownership lock**, not the launch record: the lock is created by the
+/// process that drives the run and removed when it lets go, so its presence is a
+/// claim made now rather than one made at launch. Its pid says which process,
+/// and its start token says the pid is still that process — a pid alone is what a
+/// two-day-old lock has, and a reused one answers a liveness probe as alive.
+fn dispatch_proof(view: &RunView) -> Proof {
+    if view.state.stop_recorded() {
+        return Proof::Stale("the run was stopped".to_string());
+    }
+    let path = view.paths.lock();
+    // Asked for, rather than tested with `is_file`: that helper answers `false`
+    // for a lock that is not there *and* for one this host would not describe,
+    // and only the first is a proof. Reading the second as absence would turn a
+    // question into a verdict that nothing is driving the run.
+    match std::fs::metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Proof::Stale(
+                "nothing holds the run's ownership lock, so no driver is running it".to_string(),
+            )
+        }
+        // llmlint: ignore-block[changed_behavior_has_e2e] a lock this host will not describe
+        // at all is a host condition no portable journey can set; the answer beside it — a
+        // lock that is there and is not a file — is driven in `tests/e2e/views.rs`.
+        Err(error) => {
+            return Proof::Unproven(format!(
+                "the run's ownership lock cannot be described: {error}"
+            ))
+        }
+        // llmlint: ignore-end[changed_behavior_has_e2e]
+        Ok(about) if !about.is_file() => {
+            return Proof::Unproven(
+                "the run's ownership lock is not a file, so nothing here holds it".to_string(),
+            )
+        }
+        Ok(_) => {}
+    }
+    let Some(held) = ledger::read_json_opt::<LockRecord>(&path) else {
+        // A claim this build cannot read is still a claim — it is what stops a
+        // second writer — but it proves nothing about a *dispatch*, and a row is
+        // a claim that one exists.
+        return Proof::Unproven("the run's ownership lock cannot be read".to_string());
+    };
+    if held.host != sys::hostname() {
+        return Proof::Unproven(format!(
+            "its driver holds the lock on {}, and a pid means nothing across machines",
+            held.host
+        ));
+    }
+    if !sys::process_may_be_live(held.pid) {
+        return Proof::Stale(format!("its driver (pid {}) is gone", held.pid));
+    }
+    if held.started.is_empty() {
+        return Proof::Unproven(format!(
+            "the run's lock carries no start token for pid {}, so nothing says it is still \
+             the process that took it",
+            held.pid
+        ));
+    }
+    match sys::process_start_token(held.pid) {
+        // llmlint: ignore-block[changed_behavior_has_e2e] the host declining to answer is a
+        // property of the machine rather than of anything a user types. The answers it does
+        // give, and three other unproven arms that resolve alike, are driven end to end.
+        None => Proof::Unproven(format!(
+            "this host will not say when pid {} started",
+            held.pid
+        )),
+        // llmlint: ignore-end[changed_behavior_has_e2e]
+        Some(token) if token.matches(&held.started) => Proof::Held,
+        Some(_) => Proof::Stale(format!(
+            "pid {} is a different process from the one that took the run's lock",
+            held.pid
+        )),
+    }
+}
+
 /// `onepipeline host` — every live dispatch on this host, across every planner.
-pub fn host(views: &[RunView]) -> String {
+///
+/// A row here is a claim that a dispatch exists **now**, and it is acted on: an
+/// operator leaves it alone, or ends it. So a row is rendered as live only where
+/// this host can prove the run behind it is still being driven — its ownership
+/// lock's pid, and the start token that says the pid is still the process that
+/// took it. A row proved to have nothing behind it is dropped and counted, and
+/// one this host cannot decide either way is rendered saying so. Never a bare
+/// row that reads as live work.
+pub fn host(survey: &Survey) -> String {
     let mut out = format!("host {}\n", sys::hostname());
-    let mut any = false;
-    for view in views {
-        let statuses = view.state.statuses();
-        for (id, status) in &statuses {
+    // The scope of the claim. This scan has an under-reporting direction it
+    // cannot see past — a run recorded under another runs root is a live
+    // dispatch this view will never list — and a reader who does not know which
+    // root was read cannot tell that absence from an idle host.
+    out.push_str(&format!(
+        "  reading {}\n",
+        one_line(&survey.root.display().to_string())
+    ));
+    let mut rendered = false;
+    let mut ignored: Vec<String> = Vec::new();
+    for view in &survey.views {
+        let proof = dispatch_proof(view);
+        for (id, status) in &view.state.statuses() {
             if *status != NodeStatus::Running {
                 continue;
             }
-            any = true;
+            if let Proof::Stale(why) = &proof {
+                ignored.push(one_line(&format!("{}/{id}: {why}", view.paths.run)));
+                continue;
+            }
             let age = view
                 .state
                 .dispatched_at
                 .get(id)
                 .map(|at| sys::now_millis().saturating_sub(*at))
                 .unwrap_or(0);
+            rendered = true;
             out.push_str(&format!(
-                "  {:<24} {:<20} {:<16} {}\n",
+                "  {:<24} {:<20} {:<16} {}",
                 view.paths.run,
                 id,
                 view.launch.launcher,
                 crate::telemetry::duration(age)
             ));
+            if let Proof::Unproven(why) = &proof {
+                out.push_str(&format!("  UNPROVEN: {}", one_line(why)));
+            }
+            out.push('\n');
         }
     }
-    if !any {
+    if !rendered {
         out.push_str("  no live dispatches\n");
     }
+    if !ignored.is_empty() {
+        out.push_str(&format!(
+            "  {} stale registry entr{} ignored: {}\n",
+            ignored.len(),
+            if ignored.len() == 1 { "y" } else { "ies" },
+            ignored.join("; ")
+        ));
+    }
+    out.push_str(&skipped_lines(&survey.skipped));
     out
+}
+
+/// One run's merged store as one reader is shown it.
+///
+/// **Read-time only.** The store is not touched and nothing is recorded: two
+/// readers of the same run see it through different profiles and neither loses
+/// an event the other keeps, which is the whole difference between this and the
+/// source filters a launch passes through to `oneagentgraph` and `onevcs`.
+///
+/// Borrowed rather than cloned where nothing is dropped, because the common case
+/// — `--all`, and the shipped `monitor` profile — is a filter that admits
+/// everything.
+pub fn shaped<'a>(view: &'a RunView, filter: &EventFilter) -> Vec<&'a Envelope> {
+    view.events
+        .iter()
+        .filter(|event| filter.matches(event))
+        .collect()
 }
 
 /// `onepipeline monitor` — one pass over the merged stream.
@@ -499,11 +848,11 @@ pub fn host(views: &[RunView]) -> String {
 /// The first line is the contract, not a banner: every event line carries the
 /// typed id a detail lookup resolves, and the monitor never tries to *be* the
 /// detail.
-pub fn monitor(view: &RunView) -> String {
+pub fn monitor(view: &RunView, filter: &EventFilter) -> String {
     let mut out = String::from(
         "Concise graph events; ask the producing library for full detail by stream id.\n",
     );
-    for event in &view.events {
+    for event in shaped(view, filter) {
         let id = match event.source {
             Source::Pipeline => format!("graph:{}", event.labels.node.as_deref().unwrap_or("-")),
             Source::Agentgraph => format!("agent:{}", event.stream),
@@ -622,6 +971,14 @@ pub fn results(view: &RunView) -> String {
             .and_then(|detail| detail.as_str())
         {
             out.push_str(&format!("      detail: {}\n", one_line(detail)));
+        }
+        // Which side asked, and which identity refused. A failed node's own
+        // detail says what the dispatch reported; this says who would not serve
+        // it, which is the fact a retry aimed at the wrong chain does not change.
+        if status == NodeStatus::Failed {
+            for refusal in refusals_of(&view.state, &node.id) {
+                out.push_str(&format!("      provider: {}\n", refusal_phrase(refusal)));
+            }
         }
         if status == NodeStatus::Waiting {
             if let Some(task) = &node.task {
@@ -766,9 +1123,9 @@ fn one_line(text: &str) -> String {
 }
 
 /// `onepipeline goals` — what each run is for, and how far it has got.
-pub fn goals(views: &[RunView]) -> String {
+pub fn goals(survey: &Survey) -> String {
     let mut out = String::new();
-    for view in views {
+    for view in &survey.views {
         let goal = view
             .state
             .plan
@@ -798,8 +1155,9 @@ pub fn goals(views: &[RunView]) -> String {
         }
     }
     if out.is_empty() {
-        out.push_str("no runs recorded\n");
+        return nothing_to_report(survey);
     }
+    out.push_str(&skipped_lines(&survey.skipped));
     out
 }
 
@@ -807,6 +1165,7 @@ pub fn goals(views: &[RunView]) -> String {
 mod tests {
     use super::*;
     use crate::event::{EventKind, Labels, ENVELOPE_VERSION};
+    use crate::filter::Filters;
     use crate::plan::{Node, Plan, PLAN_SCHEMA_VERSION};
     use serde_json::json;
     use std::path::PathBuf;
@@ -852,6 +1211,7 @@ mod tests {
             dag_sets: Vec::new(),
             node_sets: Vec::new(),
             adoptions: 0,
+            filters: Filters::default(),
         }
     }
 
@@ -869,6 +1229,25 @@ mod tests {
             .expect("appended");
         }
         paths
+    }
+
+    /// The lock a driving process leaves behind it, as this process would take
+    /// it: the pid *and* the start token that says the pid is still that
+    /// process.
+    fn hold_lock(paths: &RunPaths) {
+        ledger::write_json(
+            &paths.lock(),
+            &LockRecord {
+                pid: sys::pid(),
+                host: sys::hostname(),
+                acquired_at: sys::now_rfc3339(),
+                verb: "drive".into(),
+                started: sys::process_start_token(sys::pid())
+                    .map(|token| token.recorded().to_string())
+                    .unwrap_or_default(),
+            },
+        )
+        .expect("a held lock");
     }
 
     fn event(
@@ -1070,6 +1449,390 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// A directory under the runs root that this build will not read is a
+    /// **rejection**, and every whole-root view names it beside the runs that
+    /// did read.
+    ///
+    /// The reading it replaces: the same root listed one run and said nothing
+    /// about the other directory, so a planner could not tell a root holding one
+    /// run from a root holding one run and one it could not open.
+    #[test]
+    fn a_run_root_this_build_refuses_is_named_rather_than_dropped() {
+        let root = scratch("skipped");
+        write_run(
+            &root,
+            "readable",
+            sys::pid(),
+            &[event(
+                crate::journal::PipelineKind::RunStarted,
+                None,
+                &[("plan", json!(plan()))],
+            )],
+        );
+        // A directory that records no launch at all.
+        std::fs::create_dir_all(root.join("no-launch")).expect("a directory with no launch");
+        // And one whose launch record carries a field this build does not accept
+        // — the refusal `results` already words, naming the file and the field.
+        let typo = RunPaths::under(&root, "typo");
+        typo.create().expect("the run directory");
+        std::fs::write(typo.launch(), json!({"oops": true}).to_string()).expect("a launch record");
+
+        let survey = Survey::of(&root);
+        assert_eq!(survey.views.len(), 1, "{:?}", survey.skipped);
+        assert_eq!(survey.skipped.len(), 2, "{:?}", survey.skipped);
+
+        // The run that read is still listed, beside the two that did not.
+        for rendered in [
+            runs(&root, false, "session-a"),
+            status(&survey),
+            goals(&survey),
+        ] {
+            assert!(rendered.contains("readable"), "{rendered}");
+        }
+        // `host` lists dispatches rather than runs, so the run it read is not on
+        // it — the roots it could not read still are.
+        for rendered in [
+            runs(&root, false, "session-a"),
+            status(&survey),
+            goals(&survey),
+            host(&survey),
+        ] {
+            assert!(rendered.contains("2 run root(s) skipped"), "{rendered}");
+            assert!(rendered.contains("no-launch"), "{rendered}");
+            assert!(rendered.contains("launch.json"), "{rendered}");
+            // The offending field, as the schema named it.
+            assert!(rendered.contains("oops"), "{rendered}");
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A root whose every run was refused is not a root with nothing in it, and
+    /// the two must not read alike: one means nothing is running and the other
+    /// means this build cannot see what is.
+    #[test]
+    fn a_root_whose_every_run_is_refused_does_not_read_as_no_runs_recorded() {
+        let root = scratch("all-refused");
+        std::fs::create_dir_all(root.join("no-launch")).expect("a directory with no launch");
+
+        let survey = Survey::of(&root);
+        assert!(survey.views.is_empty());
+        for rendered in [
+            runs(&root, false, "session-a"),
+            status(&survey),
+            goals(&survey),
+        ] {
+            assert!(
+                !rendered.contains("no runs recorded"),
+                "a rejected root reported as an absence: {rendered}"
+            );
+            assert!(rendered.contains("no run under"), "{rendered}");
+            assert!(rendered.contains("1 run root(s) skipped"), "{rendered}");
+            assert!(rendered.contains("no-launch"), "{rendered}");
+        }
+
+        // An empty root is still the other fact, and still says so.
+        let empty = scratch("all-refused-empty");
+        assert_eq!(runs(&empty, false, "session-a"), "no runs recorded\n");
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&empty).ok();
+    }
+
+    /// A dispatch row nothing is driving is not a live dispatch.
+    ///
+    /// Measured on a real host: six rows aged 12h–52h rendered as a live fleet
+    /// while nothing matching them was running. The row is dropped and counted
+    /// rather than rendered, because an operator acts on this list — and the
+    /// action it invites for work that does not exist is the one that ends work
+    /// that does.
+    #[test]
+    fn a_host_row_whose_driver_is_gone_is_counted_rather_than_rendered_live() {
+        let root = scratch("host-stale");
+        let paths = write_run(
+            &root,
+            "ghosted",
+            sys::pid(),
+            &[
+                event(
+                    crate::journal::PipelineKind::RunStarted,
+                    None,
+                    &[("plan", json!(plan()))],
+                ),
+                event(
+                    crate::journal::PipelineKind::NodeDispatched,
+                    Some("build"),
+                    &[],
+                ),
+            ],
+        );
+        // The lock a driver that died left behind: its pid is one this host can
+        // prove is gone.
+        ledger::write_json(
+            &paths.lock(),
+            &LockRecord {
+                pid: dead_pid(),
+                host: sys::hostname(),
+                acquired_at: sys::now_rfc3339(),
+                verb: "drive".into(),
+                started: "a token from the process that died".into(),
+            },
+        )
+        .expect("a stale lock");
+
+        let rendered = host(&Survey::of(&root));
+        assert!(
+            !rendered.contains("ghosted               "),
+            "a dispatch nothing is driving was rendered as a live row: {rendered}"
+        );
+        assert!(rendered.contains("no live dispatches"), "{rendered}");
+        assert!(
+            rendered.contains("1 stale registry entry ignored"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("ghosted/build"), "{rendered}");
+        assert!(rendered.contains("is gone"), "{rendered}");
+        // And the scope of the claim is on the output, because the scan cannot
+        // see a run recorded under another root.
+        assert!(rendered.contains(&root.display().to_string()), "{rendered}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The same run with a driver actually holding it: the row renders, and it
+    /// renders as live.
+    #[test]
+    fn a_host_row_backed_by_a_held_lock_renders_as_a_live_dispatch() {
+        let root = scratch("host-live");
+        let paths = write_run(
+            &root,
+            "driven",
+            sys::pid(),
+            &[
+                event(
+                    crate::journal::PipelineKind::RunStarted,
+                    None,
+                    &[("plan", json!(plan()))],
+                ),
+                event(
+                    crate::journal::PipelineKind::NodeDispatched,
+                    Some("build"),
+                    &[],
+                ),
+            ],
+        );
+        hold_lock(&paths);
+
+        let rendered = host(&Survey::of(&root));
+        assert!(rendered.contains("driven"), "{rendered}");
+        assert!(rendered.contains("build"), "{rendered}");
+        assert!(!rendered.contains("no live dispatches"), "{rendered}");
+        assert!(!rendered.contains("stale registry"), "{rendered}");
+        assert!(!rendered.contains("UNPROVEN"), "{rendered}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A lock this host cannot check the pid against is neither proof. The row
+    /// stays visible — dropping a dispatch that may be running is the other
+    /// error — and it says outright that nothing backs it.
+    #[test]
+    fn a_host_row_this_host_cannot_prove_either_way_says_so_rather_than_reading_live() {
+        let root = scratch("host-unproven");
+        let paths = write_run(
+            &root,
+            "elsewhere",
+            sys::pid(),
+            &[
+                event(
+                    crate::journal::PipelineKind::RunStarted,
+                    None,
+                    &[("plan", json!(plan()))],
+                ),
+                event(
+                    crate::journal::PipelineKind::NodeDispatched,
+                    Some("build"),
+                    &[],
+                ),
+            ],
+        );
+        ledger::write_json(
+            &paths.lock(),
+            &LockRecord {
+                pid: sys::pid(),
+                host: "some-other-host".into(),
+                acquired_at: sys::now_rfc3339(),
+                verb: "drive".into(),
+                started: String::new(),
+            },
+        )
+        .expect("a lock taken elsewhere");
+
+        let rendered = host(&Survey::of(&root));
+        assert!(rendered.contains("elsewhere"), "{rendered}");
+        assert!(rendered.contains("UNPROVEN"), "{rendered}");
+        assert!(rendered.contains("some-other-host"), "{rendered}");
+        assert!(!rendered.contains("stale registry"), "{rendered}");
+
+        // A lock held by a live process on this host that carries no start token
+        // is the same answer for a different reason: nothing says the pid is
+        // still the process that took it.
+        ledger::write_json(
+            &paths.lock(),
+            &LockRecord {
+                pid: sys::pid(),
+                host: sys::hostname(),
+                acquired_at: sys::now_rfc3339(),
+                verb: "drive".into(),
+                started: String::new(),
+            },
+        )
+        .expect("a lock from a build that predates the stamp");
+        let rendered = host(&Survey::of(&root));
+        assert!(rendered.contains("UNPROVEN"), "{rendered}");
+        assert!(rendered.contains("no start token"), "{rendered}");
+
+        // And a live pid whose start token disagrees with the one recorded is a
+        // *different* process wearing a reused pid: proved stale.
+        ledger::write_json(
+            &paths.lock(),
+            &LockRecord {
+                pid: sys::pid(),
+                host: sys::hostname(),
+                acquired_at: sys::now_rfc3339(),
+                verb: "drive".into(),
+                started: "the process that took it, which was not this one".into(),
+            },
+        )
+        .expect("a lock a reused pid now answers for");
+        let rendered = host(&Survey::of(&root));
+        assert!(
+            rendered.contains("1 stale registry entry ignored"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("different process"), "{rendered}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A node that failed because an identity chain ran out says which side
+    /// asked and which identity refused.
+    ///
+    /// Both sides, because they are the point: a two-party member runs one chain
+    /// per side and they prefer different identities, so a fix aimed at the wrong
+    /// one changes nothing and the run fails the same way again.
+    #[test]
+    fn a_failed_node_names_the_side_and_the_identity_that_refused() {
+        let root = scratch("refusal");
+        let refused = |role: Option<&str>, identity: &str, reason: &str| {
+            let mut fields = vec![("identity", json!(identity)), ("reason", json!(reason))];
+            if let Some(role) = role {
+                fields.push(("role", json!(role)));
+            }
+            let mut envelope = relayed(
+                EventKind("fallback-advanced".into()),
+                Source::Agentgraph,
+                Some("build"),
+                &fields,
+            );
+            envelope.stream = "oneagentgraph-1".into();
+            envelope
+                .labels
+                .extra
+                .insert("member".into(), "worker".into());
+            envelope
+        };
+        write_run(
+            &root,
+            "refused",
+            sys::pid(),
+            &[
+                event(
+                    crate::journal::PipelineKind::RunStarted,
+                    None,
+                    &[("plan", json!(plan()))],
+                ),
+                event(
+                    crate::journal::PipelineKind::NodeDispatched,
+                    Some("build"),
+                    &[],
+                ),
+                refused(Some("agent"), "claude-code", "quota"),
+                refused(Some("judge"), "codex", "rate_limit"),
+                // The same side refusing the same way again is one fact
+                // recorded twice, not two facts.
+                refused(Some("judge"), "codex", "rate_limit"),
+                event(
+                    crate::journal::PipelineKind::NodeSettled,
+                    Some("build"),
+                    &[
+                        ("status", json!("failed")),
+                        ("outcome", json!("task-failed")),
+                    ],
+                ),
+            ],
+        );
+
+        let survey = Survey::of(&root);
+        let rendered = results(&survey.views[0]);
+        assert!(rendered.contains("the agent side"), "{rendered}");
+        assert!(rendered.contains("claude-code"), "{rendered}");
+        assert!(rendered.contains("(quota)"), "{rendered}");
+        assert!(rendered.contains("the judge side"), "{rendered}");
+        assert!(rendered.contains("codex"), "{rendered}");
+        assert!(rendered.contains("recorded 2 times"), "{rendered}");
+
+        // The same attribution on the view a planner reads first.
+        let rendered = status(&survey);
+        assert!(rendered.contains("build: failed —"), "{rendered}");
+        assert!(rendered.contains("the judge side"), "{rendered}");
+        assert!(rendered.contains("codex"), "{rendered}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A record that names no side is rendered without one, and a chain that
+    /// named no identity is not rendered at all: an attribution nobody can act
+    /// on is what this whole line exists to replace.
+    #[test]
+    fn an_unattributed_refusal_is_never_given_a_side_it_did_not_carry() {
+        let advanced = |reason: &str| oneagentgraph::event::FallbackAdvanced {
+            identity: "codex".into(),
+            reason: reason.into(),
+            role: None,
+            turn: None,
+        };
+        let single = Refusal {
+            advanced: advanced("auth"),
+            member: MemberLabel::Named("worker".into()),
+            records: std::num::NonZeroU64::MIN,
+        };
+        assert_eq!(
+            refusal_phrase(&single),
+            "member 'worker': identity 'codex' refused (auth)"
+        );
+        let bare = Refusal {
+            advanced: advanced(""),
+            member: MemberLabel::Unstamped,
+            records: std::num::NonZeroU64::MIN,
+        };
+        let phrase = refusal_phrase(&bare);
+        assert!(
+            phrase.contains("a side the record does not name"),
+            "{phrase}"
+        );
+        assert!(
+            phrase.contains("for a reason the record does not carry"),
+            "{phrase}"
+        );
+
+        // An advance carrying no identity names nothing to act on. It is not an
+        // advance the producing library's own type accepts, so nothing here
+        // assembles an attribution out of what is left of it.
+        let mut nameless = relayed(
+            EventKind("fallback-advanced".into()),
+            Source::Agentgraph,
+            Some("build"),
+            &[("reason", json!("quota"))],
+        );
+        nameless.stream = "oneagentgraph-1".into();
+        assert!(projection::fold(&[nameless]).refusals.is_empty());
+    }
+
     #[test]
     fn every_view_renders_from_the_merged_stream() {
         let root = scratch("render");
@@ -1110,7 +1873,7 @@ mod tests {
         );
         let view = RunView::open(&RunPaths::under(&root, "demo")).expect("the run reads");
 
-        let stream = monitor(&view);
+        let stream = monitor(&view, &EventFilter::default());
         assert!(stream.starts_with("Concise graph events;"), "{stream}");
         assert!(stream.contains("agent:oneagentgraph-1"), "{stream}");
         assert!(stream.contains("vcs:onevcs-tok"), "{stream}");
@@ -1123,11 +1886,14 @@ mod tests {
             "a round reached a view: {stream}"
         );
 
-        let views = vec![view];
-        assert!(status(&views).contains("build: running"));
-        assert!(host(&views).contains("build"));
-        assert!(goals(&views).contains("close the coverage gap"));
-        assert!(results(&views[0]).contains("build"));
+        // A driver holds the run, which is what makes its dispatch a live one to
+        // the host view.
+        hold_lock(&RunPaths::under(&root, "demo"));
+        let survey = Survey::of(&root);
+        assert!(status(&survey).contains("build: running"));
+        assert!(host(&survey).contains("build"));
+        assert!(goals(&survey).contains("close the coverage gap"));
+        assert!(results(&survey.views[0]).contains("build"));
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -1151,8 +1917,7 @@ mod tests {
                 ),
             ],
         );
-        let view = RunView::open(&RunPaths::under(&root, "demo")).expect("the run reads");
-        let rendered = status(std::slice::from_ref(&view));
+        let rendered = status(&Survey::of(&root));
         assert!(rendered.contains("UNDRIVEN"), "{rendered}");
         std::fs::remove_dir_all(&root).ok();
     }
@@ -1191,8 +1956,7 @@ mod tests {
                 turn,
             ],
         );
-        let view = RunView::open(&RunPaths::under(&root, "demo")).expect("the run reads");
-        let rendered = status(std::slice::from_ref(&view));
+        let rendered = status(&Survey::of(&root));
         assert!(
             rendered.contains("now Bash cargo llvm-cov --workspace"),
             "{rendered}"

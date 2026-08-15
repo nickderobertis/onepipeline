@@ -34,8 +34,12 @@ revision, since the crate depends on its siblings by git and a git dependency
 cannot be published — build it from the repository:
 
 ```bash
-cargo install --git https://github.com/nickderobertis/onepipeline --locked
+cargo install --git https://github.com/nickderobertis/onepipeline onepipeline --locked
 ```
+
+The package name is not optional: `cargo install --git` searches the whole
+repository, and this one also carries the `onepipeline-testfakes` test harness,
+so an unqualified command fails with `multiple packages with binaries found`.
 
 Prebuilt archives for Linux (x86-64, arm64), macOS (Intel, Apple silicon), and
 Windows (x86-64) are attached to every release, with `sha256` checksums.

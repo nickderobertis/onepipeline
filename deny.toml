@@ -47,8 +47,21 @@ skip-tree = []
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# Empty on purpose: every dependency, the two siblings included, resolves from
-# crates.io. With no git source allowed, a `git = ` dependency — a revision pin
-# that would make this graph unreproducible from the registries alone — fails
-# the check instead of being reintroduced by hand.
-allow-git = []
+# Exactly the one sibling repository this crate pins by revision, and nothing
+# else. `onevcs` was the second entry and no longer needs to be one: the revision
+# it was pinned at is published, so `Cargo.toml` resolves it from the registry
+# and an allowance kept here would permit a git source no build asks for.
+#
+# `unknown-git` stays `deny`, so this list is the whole of what a git source may
+# be: a second one — a transitive dependency that grew a git pin, or another
+# repository added here by hand — still fails this check. What it buys is the
+# thing the filter grammar needs: that grammar is a *cross-repository* contract
+# with no shared crate, so what has to be pinned is the revision the sibling's
+# copy of it was merged at, before a release carries it.
+#
+# The reproducibility this replaced is not lost. The dependency pins an exact
+# `rev` rather than a branch, and carries the registry `version` beside it — so
+# the graph resolves to one commit, `Cargo.lock` records it, and `cargo publish`
+# still records a registry dependency. `cargo publish --dry-run` is what holds
+# that last part honest.
+allow-git = ["https://github.com/nickderobertis/oneagentgraph"]

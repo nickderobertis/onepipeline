@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::filter::Filters;
 use crate::sys;
 
 /// The environment variable that moves the runs root.
@@ -193,20 +194,139 @@ impl RunPaths {
     }
 }
 
-/// Every run the root records, in id order.
-pub fn all_runs(root: &Path) -> Vec<RunPaths> {
-    let Ok(entries) = fs::read_dir(root) else {
-        return Vec::new();
+/// A run root this build refused, and the reason it gave.
+///
+/// A rejection, never an absence. A reader who is told nothing is there acts on
+/// "nothing is running"; a reader who is told which directory was refused and
+/// why can fix it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Skipped {
+    /// The directory that was refused.
+    pub path: PathBuf,
+    /// Why, in the words the reader needs to act on it.
+    pub reason: String,
+}
+
+/// Every run a root records, and every run root under it that records none.
+///
+/// The two halves are returned together because dropping the second is what
+/// made an unreadable root indistinguishable from an empty one: a host with
+/// thirty run roots on it rendered as a host with nothing running.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct RunIndex {
+    /// The runs the root records, in id order.
+    pub runs: Vec<RunPaths>,
+    /// The run roots it refused, in path order.
+    pub skipped: Vec<Skipped>,
+}
+
+/// Every run the root records, in id order, and every run root it refused.
+///
+/// A directory under the runs root is a *claim* to be a run, and one this build
+/// cannot read is a claim it is rejecting — so it comes back named. A plain file
+/// beside the runs is not such a claim and is passed over silently: nothing ever
+/// said it was a run.
+pub fn all_runs(root: &Path) -> RunIndex {
+    let mut index = RunIndex::default();
+    // llmlint: ignore-block[changed_behavior_has_e2e] a runs root that exists and will not
+    // open, and an entry the filesystem lists and then refuses to describe, are host
+    // conditions no portable journey can set. The arm a user reaches — a run root with no
+    // launch record — is driven in `tests/e2e/views.rs`.
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        // A root nobody has written to yet holds nothing to reject, which is the
+        // one reading of an empty view that is honest. Anything else is a root
+        // this process was pointed at and could not read, and reporting that as
+        // "no runs recorded" is the lie this whole index exists to stop.
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return index,
+        Err(error) => {
+            index.skipped.push(Skipped {
+                path: root.to_path_buf(),
+                reason: format!("the runs root cannot be read: {error}"),
+            });
+            return index;
+        }
     };
-    let mut runs: Vec<RunPaths> = entries
-        .flatten()
-        .filter(|e| e.path().is_dir())
-        .filter(|e| e.path().join("launch.json").is_file())
-        .filter_map(|e| e.file_name().into_string().ok())
-        .map(|name| RunPaths::under(root, &name))
-        .collect();
-    runs.sort_by(|a, b| a.run.cmp(&b.run));
-    runs
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                index.skipped.push(Skipped {
+                    path: root.to_path_buf(),
+                    reason: format!("an entry under the runs root cannot be read: {error}"),
+                });
+                continue;
+            }
+        };
+        let path = entry.path();
+        // Asked for, rather than tested with `is_dir`: that helper answers
+        // `false` both for "not a directory" and for "this host would not say",
+        // and reading the second as the first is the collapse this whole index
+        // exists to undo — the entry would be dropped as though it had never
+        // claimed to be a run.
+        let about = match fs::metadata(&path) {
+            Ok(about) => about,
+            // Gone between the listing and the look. A run swept while this scan
+            // was running is not a root to make any claim about.
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                index.skipped.push(Skipped {
+                    path,
+                    reason: format!("this host will not describe it: {error}"),
+                });
+                continue;
+            }
+        };
+        // llmlint: ignore-end[changed_behavior_has_e2e]
+        if !about.is_dir() {
+            continue;
+        }
+        // llmlint: ignore-block[changed_behavior_has_e2e] a directory name that is not text
+        // is not portably creatable — Windows refuses one outright — and no run id this
+        // crate mints is one. What lands here is a directory an operator left beside the
+        // runs, which this arm names rather than drops.
+        let Ok(name) = entry.file_name().into_string() else {
+            index.skipped.push(Skipped {
+                path,
+                reason: "its name is not text this host can read, so no run id names it".into(),
+            });
+            continue;
+        };
+        // llmlint: ignore-end[changed_behavior_has_e2e]
+        let paths = RunPaths::under(root, &name);
+        let launch = paths.launch();
+        let named = launch
+            .file_name()
+            .map_or_else(|| "launch record".into(), |name| name.to_string_lossy());
+        // Every answer kept apart, for the same reason as above: absent, present
+        // as something that is not a record, and unreadable are three different
+        // things to tell a reader, and `is_file` says `false` to all three.
+        let refused = match fs::metadata(&launch) {
+            Ok(about) if about.is_file() => None,
+            Ok(_) => Some(format!(
+                "its {named} is not a file, so it records no launch"
+            )),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Some(format!(
+                "no {named}: a run root records the launch that owns it"
+            )),
+            // llmlint: ignore-block[changed_behavior_has_e2e] a launch record this host
+            // lists and will not describe is a host condition no portable journey can set.
+            // The two answers a user reaches are both driven in `tests/e2e/views.rs`.
+            Err(error) => Some(format!("its {named} cannot be read: {error}")),
+            // llmlint: ignore-end[changed_behavior_has_e2e]
+        };
+        if let Some(reason) = refused {
+            index.skipped.push(Skipped {
+                path: paths.dir,
+                reason,
+            });
+            continue;
+        }
+        index.runs.push(paths);
+    }
+    index.runs.sort_by(|a, b| a.run.cmp(&b.run));
+    index.skipped.sort_by(|a, b| a.path.cmp(&b.path));
+    index
 }
 
 /// Whether a path field carries nothing, for the records that omit it then.
@@ -282,6 +402,17 @@ pub struct LaunchRecord {
     /// How many times a fresh driver has been attached by `adopt`.
     #[serde(default)]
     pub adoptions: u32,
+    /// What this launch said about its run's events: the two source filters it
+    /// passes through, and the read-time profiles it defines.
+    ///
+    /// Retained here rather than derived per command because both halves outlive
+    /// the launching process: `adopt` replays the source filters onto the graphs
+    /// it restarts, and every later `next` and `monitor` — different processes,
+    /// with no handle on the launch — reads through the profiles this run was
+    /// given. Omitted when empty, like every other field added to this record
+    /// after it shipped, so a build that predates it still reads what it wrote.
+    #[serde(default, skip_serializing_if = "Filters::is_empty")]
+    pub filters: Filters,
 }
 
 impl LaunchRecord {
@@ -410,6 +541,21 @@ pub struct LockRecord {
     pub acquired_at: String,
     /// What the holder is doing, for the refusal message.
     pub verb: String,
+    /// The holder's own process start token, as
+    /// [`sys::process_start_token`] read it when the lock was taken.
+    ///
+    /// The pid beside it says *which* process; this says it is still that
+    /// process. A pid is reused, so a lock left behind by a driver that died two
+    /// days ago names a pid the host may since have handed to something else —
+    /// and a view reading the pid alone renders that as a live dispatch. Compared
+    /// for equality against a fresh reading and never parsed.
+    ///
+    /// Empty when this host would not say, and on a record written before the
+    /// field existed. Omitted when empty, like every other field added to a
+    /// record after it shipped. Empty is **not** a match: it leaves a reader
+    /// unable to prove the holder either way, which is the answer it has.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub started: String,
 }
 
 /// The run's ownership lock, released when this value is dropped.
@@ -445,6 +591,9 @@ impl OwnershipLock {
             host: sys::hostname(),
             acquired_at: sys::now_rfc3339(),
             verb: verb.to_string(),
+            started: sys::process_start_token(sys::pid())
+                .map(|token| token.recorded().to_string())
+                .unwrap_or_default(),
         };
         let body = serde_json::to_string(&record)
             .map_err(|e| Error::Invalid(format!("{}: {e}", path.display())))?;
@@ -522,6 +671,104 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("a scratch root");
         dir
+    }
+
+    /// The record a launch that declared no filters writes is the record every
+    /// build before the block existed wrote.
+    ///
+    /// Checked at the wire rather than through the types: `Filters::default()`
+    /// and an explicit `"filters": {}` are the same value in Rust whatever the
+    /// serializer does, but writing the empty block out would make a record this
+    /// build wrote unreadable to a build that predates the field — which is the
+    /// one thing an added field must not do — and would have every reader
+    /// branching on a key that is always present and usually meaningless.
+    #[test]
+    fn a_launch_that_declared_no_filters_writes_the_record_it_always_wrote() {
+        let record = LaunchRecord {
+            filters: Filters::default(),
+            ..a_record()
+        };
+        let text = serde_json::to_string(&record).expect("it serialises");
+        assert!(
+            !text.contains("filters"),
+            "an empty filters block reached the record: {text}"
+        );
+        assert_eq!(
+            serde_json::from_str::<LaunchRecord>(&text).expect("it re-parses"),
+            record
+        );
+
+        // Which is the same thing as saying a record written *before* the field
+        // existed still reads, as the launch it was: nothing filtered, and the
+        // shipped profiles to read through. Spelled as its own document rather
+        // than inferred from the omission above, because that is the file on
+        // disk this build has to keep opening.
+        let older = serde_json::json!({
+            "run_id": "demo",
+            "plan": "plan.json",
+            "node_graph": "graphs/node-scope.yaml",
+            "launcher": "claude-code",
+            "session": "a-session",
+            "pid": 1,
+            "host": "h",
+            "started_at": "2026-08-15T00:00:00.000Z",
+            "heartbeat_interval": 1800,
+        });
+        let read: LaunchRecord =
+            serde_json::from_value(older).expect("a record predating the field still reads");
+        assert!(read.filters.is_empty());
+    }
+
+    /// A record that *did* declare filters carries every one of them back.
+    #[test]
+    fn a_launchs_filters_survive_the_record_they_are_retained_in() {
+        let declared = Filters {
+            agentgraph: Some(
+                crate::filter::EventFilter::parse(r#"{"exclude": [{"kind": "turn-*"}]}"#)
+                    .expect("a filter"),
+            ),
+            vcs: Some(
+                crate::filter::EventFilter::parse(r#"{"include": [{"kind": "gate-*"}]}"#)
+                    .expect("a filter"),
+            ),
+            profiles: [(
+                "planner".to_string(),
+                crate::filter::EventFilter::parse(r#"{"include": [{"source": "pipeline"}]}"#)
+                    .expect("a filter"),
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let record = LaunchRecord {
+            filters: declared.clone(),
+            ..a_record()
+        };
+        let text = serde_json::to_string(&record).expect("it serialises");
+        let read: LaunchRecord = serde_json::from_str(&text).expect("it re-parses");
+        assert_eq!(read.filters, declared);
+        assert_eq!(read, record);
+    }
+
+    /// A launch record with nothing said about its events.
+    fn a_record() -> LaunchRecord {
+        LaunchRecord {
+            run_id: "demo".into(),
+            plan: PathBuf::from("plan.json"),
+            dir: PathBuf::from("/tmp/launch"),
+            graph: String::new(),
+            graph_run: String::new(),
+            node_graph: "graphs/node-scope.yaml".into(),
+            launcher: "claude-code".into(),
+            session: "a-session".into(),
+            pid: 1,
+            host: "h".into(),
+            started_at: sys::now_rfc3339(),
+            heartbeat_interval: 1_800,
+            dag_sets: Vec::new(),
+            node_sets: Vec::new(),
+            adoptions: 0,
+            filters: Filters::default(),
+        }
     }
 
     /// A run's journal has several appenders at once — the launcher relaying its
@@ -624,6 +871,7 @@ mod tests {
                 host: sys::hostname(),
                 acquired_at: sys::now_rfc3339(),
                 verb: "start".to_string(),
+                started: String::new(),
             },
         )
         .expect("a stale lock");
@@ -664,6 +912,7 @@ mod tests {
             dag_sets: Vec::new(),
             node_sets: Vec::new(),
             adoptions: 0,
+            filters: Filters::default(),
         };
         assert!(!record.owned_by(sys::UNKNOWN_LAUNCHER));
         assert_eq!(record.owner_label("anyone"), "[unknown]");
@@ -687,6 +936,7 @@ mod tests {
             dag_sets: Vec::new(),
             node_sets: Vec::new(),
             adoptions: 0,
+            filters: Filters::default(),
         };
         let label = record.owner_label("mine");
         assert!(!label.contains("secret-session-id"), "{label} leaks the id");
@@ -713,7 +963,11 @@ mod tests {
 
     #[test]
     fn appended_lines_read_back_in_order_and_skip_blanks() {
-        let root = scratch("append");
+        // A scratch name of its own: `scratch` derives the directory from the
+        // process, so two tests naming one share it — and these two run at once,
+        // which made the concurrent-appender count above fail on this test's
+        // writes rather than on a torn record.
+        let root = scratch("append-order");
         let path = root.join("queue.jsonl");
         assert!(read_lines(&path).is_empty());
         append_line(&path, "first").expect("appended");
@@ -723,18 +977,82 @@ mod tests {
         fs::remove_dir_all(&root).ok();
     }
 
+    /// A directory that is not a run is a **rejection**, and it comes back named.
+    ///
+    /// The reading it replaces: the same root reported two runs and said nothing
+    /// at all about the third directory, so a reader could not tell a root that
+    /// holds nothing from one whose contents were refused.
     #[test]
-    fn only_directories_with_a_launch_record_are_runs() {
+    fn only_directories_with_a_launch_record_are_runs_and_the_rest_are_named() {
         let root = scratch("index");
         for name in ["b-run", "a-run"] {
             let paths = RunPaths::under(&root, name);
             paths.create().expect("a run directory");
             write_json(&paths.launch(), &serde_json::json!({})).expect("a launch record");
         }
-        fs::create_dir_all(root.join("scratch")).expect("a non-run directory");
-        let ids: Vec<String> = all_runs(&root).into_iter().map(|r| r.run).collect();
+        fs::create_dir_all(root.join("scratch")).expect("a directory that records no run");
+        fs::write(root.join("notes.txt"), "not a run root").expect("a file beside the runs");
+        // A launch record that is there and is not a record: absent and "present
+        // as something else" are different things to tell a reader.
+        fs::create_dir_all(RunPaths::under(&root, "impostor").launch())
+            .expect("a launch record that is a directory");
+
+        let index = all_runs(&root);
+        let ids: Vec<String> = index.runs.iter().map(|r| r.run.clone()).collect();
         assert_eq!(ids, vec!["a-run".to_string(), "b-run".to_string()]);
-        assert!(all_runs(&root.join("missing")).is_empty());
+        // Each directory is named with its own reason; the file never claimed to
+        // be a run, so nothing is claimed about it either.
+        let refused: Vec<(PathBuf, String)> = index
+            .skipped
+            .iter()
+            .map(|root| (root.path.clone(), root.reason.clone()))
+            .collect();
+        assert_eq!(refused.len(), 2, "{refused:?}");
+        assert_eq!(refused[0].0, root.join("impostor"));
+        assert!(refused[0].1.contains("is not a file"), "{refused:?}");
+        assert_eq!(refused[1].0, root.join("scratch"));
+        assert!(refused[1].1.contains("no launch.json"), "{refused:?}");
+
+        // A root nobody has written to holds nothing to reject.
+        assert_eq!(all_runs(&root.join("missing")), RunIndex::default());
         fs::remove_dir_all(&root).ok();
+    }
+
+    /// The lock names the process *and* proves it is still that process.
+    ///
+    /// A pid alone is what a two-day-old lock has, and a pid the host has since
+    /// reused answers a liveness probe as alive — which is how a dead run's
+    /// dispatches were rendered as a live fleet.
+    #[test]
+    fn a_lock_records_the_holders_start_token_beside_its_pid() {
+        let root = scratch("stamp");
+        let paths = RunPaths::under(&root, "demo");
+        paths.create().expect("the run directory");
+
+        let held = OwnershipLock::acquire(&paths, "drive").expect("the lock is taken");
+        let record: LockRecord = read_json(&paths.lock()).expect("the lock reads back");
+        assert_eq!(record.pid, sys::pid());
+        assert!(
+            sys::process_start_token(sys::pid())
+                .expect("this host says when a process started")
+                .matches(&record.started),
+            "the lock's stamp is not this process's own start"
+        );
+        assert!(!record.started.is_empty());
+        held.release();
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A lock written before the stamp existed still reads, and still round-trips
+    /// without gaining a field it never had.
+    #[test]
+    fn a_lock_without_a_start_token_reads_and_is_written_back_without_one() {
+        let record: LockRecord = serde_json::from_str(
+            r#"{"pid":1,"host":"h","acquired_at":"2026-01-01T00:00:00.000Z","verb":"drive"}"#,
+        )
+        .expect("a lock from a build that predates the stamp");
+        assert!(record.started.is_empty());
+        let written = serde_json::to_string(&record).expect("it serializes");
+        assert!(!written.contains("started"), "{written}");
     }
 }

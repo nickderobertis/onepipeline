@@ -46,7 +46,7 @@ pub enum Command {
     #[command(subcommand)]
     Channel(ChannelCommand),
     /// Read the next planner surface.
-    Next(RunArgs),
+    Next(ReadArgs),
     /// Reply to a surface, with a verdict, graph edits, or both.
     Reply(ReplyArgs),
     /// Raise a surface to the planner.
@@ -62,7 +62,7 @@ pub enum Command {
     /// Every live dispatch on this host, with its owner and load contribution.
     Host,
     /// Stream a run's merged events.
-    Monitor(RunArgs),
+    Monitor(ReadArgs),
     /// Per-node outcomes, with each node's own evidence.
     Results(RunArgs),
     /// What each run is for, and how far it has got.
@@ -123,6 +123,41 @@ pub struct StartArgs {
     /// Proceed even when another live session holds a targeted repository.
     #[arg(long)]
     pub acknowledge_concurrent: bool,
+    /// The launch config: what this launch declares about its run, as one
+    /// document. Each flag below overrides the part of it that it names.
+    #[arg(long, value_name = "FILE")]
+    pub launch_config: Option<PathBuf>,
+    /// Keep only the events a filter admits out of every `oneagentgraph` launch
+    /// this run starts, as a file path or inline JSON.
+    #[arg(long, value_name = "SPEC")]
+    pub filter_agentgraph: Option<String>,
+    /// Keep only the events a filter admits out of every `onevcs` session this
+    /// run follows, as a file path or inline JSON.
+    #[arg(long, value_name = "SPEC")]
+    pub filter_vcs: Option<String>,
+    /// Define or override one named read-time profile, as `NAME=SPEC`.
+    /// Repeatable. `planner` and `monitor` ship and are overridden by name.
+    #[arg(long = "filter-profile", value_name = "NAME=SPEC")]
+    pub filter_profiles: Vec<String>,
+}
+
+/// A read verb that shapes its event view through a filter profile.
+///
+/// Naming neither reads through the shipped [`DEFAULT_PROFILE`] — the planner's
+/// view, which is what these two verbs are for.
+///
+/// [`DEFAULT_PROFILE`]: crate::filter::DEFAULT_PROFILE
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct ReadArgs {
+    /// The run id.
+    pub run: String,
+    /// The profile to read through: a name this run has, or a filter spec as a
+    /// file path or inline JSON.
+    #[arg(long, value_name = "NAME|SPEC", conflicts_with = "all")]
+    pub filter: Option<String>,
+    /// Read every event in the store, through no profile at all.
+    #[arg(long)]
+    pub all: bool,
 }
 
 /// `onepipeline drive` — the retained driver a detached launch starts.
@@ -146,6 +181,11 @@ pub struct DriveArgs {
     /// One opaque graph-config override, repeatable, applied in order.
     #[arg(long = "set", value_name = "PATH=VALUE")]
     pub sets: Vec<String>,
+    /// The source filter this launch relays through, inline as JSON. Spelled as
+    /// `oneagentgraph run` spells it, because an overridden binary is what
+    /// receives it.
+    #[arg(long, value_name = "SPEC")]
+    pub event_filter: Option<String>,
 }
 
 /// The channel's server side.

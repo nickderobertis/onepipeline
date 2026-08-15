@@ -42,6 +42,7 @@ pub mod controls;
 pub mod error;
 pub mod event;
 pub mod executor;
+pub mod filter;
 pub mod plan;
 pub mod rules;
 pub mod views;

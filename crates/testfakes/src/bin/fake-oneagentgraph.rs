@@ -349,6 +349,15 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         write_work(args, &fake::segment(&key), &body);
     }
 
+    // Every candidate this dispatch's identity chains stepped past, published
+    // one per candidate exactly as the real CLI publishes them. Scripted
+    // `<key>.refused`, one `ROLE IDENTITY REASON` per line, with `-` for the
+    // role of a single-sided member — which has one side and so nothing to
+    // distinguish.
+    if let Some(script) = fake::node_script(dir, &key, "refused") {
+        refuse_candidates(args, &node, step.as_deref(), &script);
+    }
+
     if let Some(code) = fake::node_script(dir, &key, "fail") {
         // A scripted code that is not a code is a test that means something
         // other than what it says. Defaulting it to 1 would quietly pass the
@@ -362,6 +371,86 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         return ExitCode::from(code);
     }
     ExitCode::SUCCESS
+}
+
+/// Publish one `fallback-advanced` per candidate an identity chain stepped past.
+///
+/// Built through the sibling's **own** payload type, so what this writes is what
+/// that library writes: a double that hand-rolled the fields would be an oracle
+/// for a payload nothing produces, and the whole point of the journey it serves
+/// is that a consumer reads the identity and the side off the real one.
+fn refuse_candidates(args: &[String], node: &str, step: Option<&str>, script: &str) {
+    let labels = member_labels(args, node, step);
+    // Above every seq `emit` uses, because these are written after it: a
+    // producer's seq is its own statement of the order it wrote things in.
+    for (offset, line) in script
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .enumerate()
+    {
+        let mut columns = line.split_whitespace();
+        // Exactly three, and the fourth column is checked for: a script this
+        // read leniently would emit a candidate the test author did not write,
+        // and a double that publishes something other than what its script says
+        // is an oracle for nothing.
+        let (Some(role), Some(identity), Some(reason), None) = (
+            columns.next(),
+            columns.next(),
+            columns.next(),
+            columns.next(),
+        ) else {
+            fake::fail(&format!(
+                "a `.refused` line reads {line:?}, which is not `ROLE IDENTITY REASON`"
+            ));
+        };
+        let advanced = oneagentgraph::event::FallbackAdvanced {
+            identity: identity.to_string(),
+            reason: reason.to_string(),
+            // `-` is a single-sided member: one side, so no side to name.
+            // Every word but `-` is read through the sibling's **own** `Role`, so
+            // the script's grammar is that library's spelling rather than a copy
+            // of it that keeps parsing after a rename.
+            role: match role {
+                "-" => None,
+                other => Some(
+                    serde_json::from_value::<oneagentgraph::event::Role>(other.into())
+                        .unwrap_or_else(|error| {
+                            fake::fail(&format!(
+                                "a `.refused` line names the role {other:?}: {error}"
+                            ))
+                        }),
+                ),
+            },
+            turn: Some(1),
+        };
+        // The sibling's **own** envelope, serialized through the sibling's own
+        // type: a hand-rolled object here would be an independent copy of a
+        // schema that library owns, and it would keep serializing after the
+        // schema moved. The labels cross the same boundary — `Labels` carries
+        // what it declares and flattens the rest, which is what a `--label` the
+        // caller passed is.
+        let envelope = oneagentgraph::event::Envelope {
+            v: oneagentgraph::event::ENVELOPE_VERSION,
+            ts: fake::now(),
+            stream: stream(),
+            seq: 10 + offset as u64,
+            source: oneagentgraph::event::Source::Agentgraph,
+            kind: oneagentgraph::event::EventKind::FallbackAdvanced,
+            labels: serde_json::from_value(serde_json::Value::Object(labels.clone()))
+                .unwrap_or_else(|error| fake::fail(&format!("the labels are not labels: {error}"))),
+            payload: match serde_json::to_value(&advanced) {
+                Ok(serde_json::Value::Object(payload)) => payload,
+                other => fake::fail(&format!("an advance is not an object: {other:?}")),
+            },
+            artifacts: Vec::new(),
+        };
+        println!(
+            "{}",
+            serde_json::to_string(&envelope).unwrap_or_else(|error| fake::fail(&format!(
+                "the envelope will not write: {error}"
+            )))
+        );
+    }
 }
 
 /// Write one document into the dispatch's workspace.

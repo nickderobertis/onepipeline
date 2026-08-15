@@ -17,7 +17,7 @@
 // provider turn, and these journeys run inside `just check`, which has neither a
 // credential nor a budget for one.
 
-use crate::harness::{agent, human, plan_of, World, REPORTING_MEMBER};
+use crate::harness::{agent, human, plan_of, World, REFUSED, REPORTING_MEMBER};
 use serde_json::{json, Value};
 
 /// The prose a `member-started` says its member was launched with.
@@ -1745,5 +1745,276 @@ fn a_steps_turn_budget_reaches_that_steps_own_dispatch() {
         45,
         "the step's own turn budget did not reach the dispatch that ran it; the graph's \
          own default is 12"
+    );
+}
+
+/// `filters.agentgraph` reaches every `oneagentgraph` launch the run starts.
+///
+/// The real sibling is what filters here: the launch is handed the filter on its
+/// own `--event-filter` / `events.filter` surface, so the events never reach this
+/// crate at all — which is the point, since a run that relayed them and dropped
+/// them would still have paid to relay them.
+///
+/// Read against a control run in the same world that names no `filters:` block,
+/// because "narrowed" is a comparison: the same plan, the same graph, and the
+/// same real member, ingested twice.
+#[test]
+fn a_launchs_agentgraph_filter_reaches_the_real_sibling_and_narrows_what_it_relays() {
+    let world = World::new("real-agentgraph-filter");
+    world.write_graphs();
+
+    // Read through `monitor --all`, which is the unfiltered view of the merged
+    // store a person opens — so what this asserts is what a reader of the run
+    // sees, rather than what a file under the run directory happens to hold.
+    let relayed = |run: &str| -> String { world.run(&["monitor", run, "--all"]).stdout };
+
+    // No `filters:` block at all: ingestion is what it always was.
+    let path = world.plan(
+        "unfiltered",
+        &plan_of("unfiltered", vec![agent("build", &[])]),
+    );
+    world
+        .run_on_agentgraph(&["start", &path.to_string_lossy(), "--attach"])
+        .settled();
+    let ingested = relayed("unfiltered");
+    for kind in ["turn-activity", "member-settled"] {
+        assert!(
+            ingested.contains(kind),
+            "a launch naming no filters did not ingest {kind}:\n{ingested}"
+        );
+    }
+
+    let path = world.plan("filtered", &plan_of("filtered", vec![agent("build", &[])]));
+    world
+        .run_on_agentgraph(&[
+            "start",
+            &path.to_string_lossy(),
+            "--attach",
+            "--filter-agentgraph",
+            r#"{"exclude": [{"kind": "turn-*"}]}"#,
+        ])
+        .settled();
+
+    let kinds = relayed("filtered");
+    assert!(
+        !kinds.contains("turn-"),
+        "the source filter did not reach `oneagentgraph`:\n{kinds}"
+    );
+    // Narrowed, not silenced, and the run still settled on what the member did —
+    // a filter says what is emitted, never what the run acts on.
+    assert!(
+        kinds.contains("member-settled"),
+        "the source filter dropped the settlement, which it admits:\n{kinds}"
+    );
+    world
+        .run(&["results", "filtered"])
+        .exited(0)
+        .out_has("build")
+        .out_has("done");
+}
+
+/// The observer graph is one of the run's `oneagentgraph` launches too, and the
+/// spec may be a file.
+///
+/// Two things the journey above leaves out, and both are paths an operator
+/// reaches: `--dag-graph` starts a *second* graph, launched from somewhere else
+/// in this crate entirely, and a filter long enough to be worth writing down is
+/// kept in a file and named by path rather than pasted onto one line of argv.
+///
+/// The observer's envelopes are the ones carrying no `node` label: a node-scope
+/// dispatch is stamped with the node it is running and the observer is stamped
+/// with the run alone, because it is watching all of them.
+#[test]
+fn the_observer_graphs_own_stream_is_filtered_too_and_the_spec_may_be_a_file() {
+    let world = World::new("real-observer-filter");
+    world.write_graphs();
+
+    let spec = world.root.join("relay.json");
+    std::fs::write(&spec, r#"{"exclude": [{"kind": "turn-*"}]}"#).expect("the spec is written");
+
+    // llmlint: ignore-block[tests_mirror_real_usage] the claim is about *which of the
+    // run's two graph launches* relayed a record, and the label that distinguishes them
+    // — a node-scope dispatch is stamped with its node, the observer with the run alone
+    // — is not rendered by any view: `monitor` gives every agentgraph line the same
+    // `agent:{stream}` id, and the filter grammar has no way to ask for an *absent*
+    // label. The merged store is the contract's own artifact ("envelope NDJSON, one
+    // store per run"), and it is where this distinction exists to be read.
+    let observed = |run: &str| -> Vec<String> {
+        world
+            .journal(run)
+            .iter()
+            .filter(|event| event["source"] == "agentgraph" && event["labels"]["node"].is_null())
+            .filter_map(|event| event["kind"].as_str().map(str::to_string))
+            .collect()
+    };
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    let path = world.plan("watched", &plan_of("watched", vec![agent("build", &[])]));
+    world
+        .run_on_agentgraph(&[
+            "start",
+            &path.to_string_lossy(),
+            "--attach",
+            "--dag-graph",
+            &world.dag_graph(),
+        ])
+        .settled();
+    let ingested = observed("watched");
+    assert!(
+        ingested.iter().any(|kind| kind.starts_with("turn-")),
+        "the observer graph relayed no turn of its own, so this journey could not \
+         tell a filtered observer from a quiet one: {ingested:?}"
+    );
+
+    let path = world.plan("quiet", &plan_of("quiet", vec![agent("build", &[])]));
+    world
+        .run_on_agentgraph(&[
+            "start",
+            &path.to_string_lossy(),
+            "--attach",
+            "--dag-graph",
+            &world.dag_graph(),
+            "--filter-agentgraph",
+            &spec.to_string_lossy(),
+        ])
+        .settled();
+
+    let kinds = observed("quiet");
+    assert!(
+        !kinds.iter().any(|kind| kind.starts_with("turn-")),
+        "the source filter did not reach the observer graph's own launch: {kinds:?}"
+    );
+    // And it is the filter that did it, rather than an observer that never ran:
+    // the launch it made is recorded, and the graph it started announced itself.
+    assert!(
+        !kinds.is_empty(),
+        "the observer graph relayed nothing at all, so nothing here is about the filter"
+    );
+}
+
+/// `adopt` replays the launch's source filter onto the observer it relaunches.
+///
+/// An adoption starts a **fresh** graph run, from a different process and often
+/// from a different directory, so the filter has to come off the launch record
+/// rather than off the command line nobody typed this time. A run that filtered
+/// its observer until its first driver died, and then relayed everything after
+/// it was adopted, would be a run whose ingestion depends on how many drivers it
+/// has had.
+#[test]
+fn an_adoption_relaunches_the_observer_under_the_launchs_own_filter() {
+    let world = World::new("real-adopt-filter");
+    world.write_graphs();
+
+    // llmlint: ignore-block[tests_mirror_real_usage] the claim is about *which of the
+    // run's two graph launches* relayed a record, and the label that distinguishes them
+    // — a node-scope dispatch is stamped with its node, the observer with the run alone
+    // — is not rendered by any view: `monitor` gives every agentgraph line the same
+    // `agent:{stream}` id, and the filter grammar has no way to ask for an *absent*
+    // label. The merged store is the contract's own artifact ("envelope NDJSON, one
+    // store per run"), and it is where this distinction exists to be read.
+    let observed = |run: &str| -> Vec<String> {
+        world
+            .journal(run)
+            .iter()
+            .filter(|event| event["source"] == "agentgraph" && event["labels"]["node"].is_null())
+            .filter_map(|event| event["kind"].as_str().map(str::to_string))
+            .collect()
+    };
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    // A human gate ahead of the work, so the launch settles undriven with the
+    // node still to run — which is the state an `adopt` picks up.
+    let path = world.plan(
+        "readopted",
+        &plan_of(
+            "readopted",
+            vec![human("approve", &[]), agent("build", &["approve"])],
+        ),
+    );
+    world
+        .run_on_agentgraph(&[
+            "start",
+            &path.to_string_lossy(),
+            "--attach",
+            "--dag-graph",
+            &world.dag_graph(),
+            "--filter-agentgraph",
+            r#"{"exclude": [{"kind": "turn-*"}]}"#,
+        ])
+        .exited(0);
+    world.run(&["attest", "readopted", "approve"]).exited(0);
+    let before = observed("readopted").len();
+
+    world
+        .run_on_agentgraph(&["adopt", "readopted"])
+        .exited(0)
+        .settled();
+
+    let kinds = observed("readopted");
+    assert!(
+        kinds.len() > before,
+        "the adoption relaunched no observer, so nothing here is about its filter: {kinds:?}"
+    );
+    assert!(
+        !kinds.iter().any(|kind| kind.starts_with("turn-")),
+        "the adoption relaunched the observer without the launch's own filter: {kinds:?}"
+    );
+}
+
+/// The retained driver reads its own `--event-filter`, and refuses one it could
+/// not honour.
+///
+/// `drive` is the process a detached launch retains, so the spec crosses a
+/// process boundary as text and becomes a value again on the far side. A driver
+/// that took a spec it could not honour would be a detached run relaying
+/// everything, with the refusal in a stream nobody read — and the launcher that
+/// started it already gone.
+#[test]
+fn the_retained_driver_reads_its_own_event_filter_and_refuses_an_unusable_one() {
+    let world = World::new("drive-filter");
+    world.write_graphs();
+    let graph = world.graphs().join("node-scope.yaml");
+    let dir = world.root.join("driven");
+    std::fs::create_dir_all(&dir).expect("a directory for the driven graph");
+
+    let drive = |spec: &str| {
+        world.run_on(
+            world.agentgraph_cmd(&[
+                "drive",
+                &graph.to_string_lossy(),
+                "--task",
+                "Do the work and settle.",
+                "--dir",
+                &dir.to_string_lossy(),
+                "--event-filter",
+                spec,
+            ]),
+            "drive with an event filter",
+        )
+    };
+
+    // A spec this build says it will not honour, refused before a graph starts.
+    let refused = drive(r#"{"include": [{"role": "agent"}]}"#);
+    assert_eq!(refused.code, REFUSED, "{}", refused.stderr);
+    assert!(
+        refused.stderr.contains("role"),
+        "the refusal does not name the offending field:\n{}",
+        refused.stderr
+    );
+
+    // And one it can honour reaches the graph it drives: the relay is this
+    // process's stdout, so what the filter left out is simply not on it.
+    let driven = drive(r#"{"exclude": [{"kind": "turn-*"}]}"#);
+    assert_eq!(driven.code, 0, "{}", driven.stderr);
+    assert!(
+        !driven.stdout.contains("turn-activity"),
+        "the retained driver relayed what its filter excluded:\n{}",
+        driven.stdout
+    );
+    assert!(
+        driven.stdout.contains("member-settled"),
+        "the retained driver relayed nothing at all, so nothing here is about the \
+         filter:\n{}",
+        driven.stdout
     );
 }

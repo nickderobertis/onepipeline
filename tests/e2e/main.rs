@@ -28,6 +28,7 @@ mod context_delivery;
 mod crossdag;
 mod dispatch;
 mod driver;
+mod filter;
 mod journal;
 mod lifecycle;
 mod live_edit;

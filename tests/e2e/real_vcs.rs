@@ -190,3 +190,131 @@ fn a_real_gate_that_rejects_the_branch_fails_the_node_and_leaves_the_base_alone(
         "the gate's verdict never reached the merged store"
     );
 }
+
+/// `filters.vcs` reaches the real `onevcs` and narrows what it relays.
+///
+/// The filter is handed to the sibling as a **value**, on the filtered
+/// `EventStream` constructor it exposes for exactly this — so what this journey
+/// proves is that the source did not relay the records, rather than that this
+/// crate read them and threw them away. The evidence for that distinction is the
+/// second half: the records the filter admits are all still there, in a run whose
+/// publication did the same work.
+///
+/// Both halves in one journey, run against one repository, because the claim is a
+/// *comparison*: an ingestion the filter narrowed against the ingestion a launch
+/// naming no `filters:` block gets, which has to be the one it always got.
+#[test]
+fn a_launchs_vcs_filter_reaches_the_real_sibling_and_narrows_what_it_relays() {
+    let world = World::new("real-vcs-filter");
+    let repo = world.repository("local-direct", &["true"]);
+    world.script("service.work", "the worker wrote this\n");
+
+    // Read through `monitor --all`, the unfiltered view of the merged store a
+    // person opens — so what this asserts is what a reader of the run sees.
+    let relayed = |run: &str| -> String { world.run(&["monitor", run, "--all"]).stdout };
+
+    // No `filters:` block: ingestion is exactly what it always was, and this is
+    // the control the filtered run below is read against.
+    let path = world.plan(
+        "unfiltered",
+        &plan_of("unfiltered", vec![node(&repo.checkout)]),
+    );
+    world
+        .run(&["start", &path.to_string_lossy(), "--attach"])
+        .settled();
+    let ingested = relayed("unfiltered");
+    for kind in ["gate-verdict", "push", "session-closed"] {
+        assert!(
+            ingested.contains(kind),
+            "a launch naming no filters did not ingest {kind}:\n{ingested}"
+        );
+    }
+
+    // Different content, because the first run already landed the last lot: a
+    // branch whose base already carries its change publishes nothing, and a
+    // comparison against a run that did no work would prove nothing about the
+    // filter.
+    world.script("service.work", "and then the worker wrote this\n");
+    let path = world.plan("filtered", &plan_of("filtered", vec![node(&repo.checkout)]));
+    world
+        .run(&[
+            "start",
+            &path.to_string_lossy(),
+            "--attach",
+            "--filter-vcs",
+            r#"{"exclude": [{"kind": "gate-verdict"}]}"#,
+        ])
+        .settled();
+
+    let kinds = relayed("filtered");
+    assert!(
+        !kinds.contains("gate-verdict"),
+        "the source filter did not reach `onevcs`:\n{kinds}"
+    );
+    // Narrowed, not silenced — and the *same* publication happened, so the
+    // difference between the two runs is the filter and nothing else.
+    for kind in ["push", "session-closed"] {
+        assert!(
+            kinds.contains(kind),
+            "the source filter dropped {kind}, which it admits:\n{kinds}"
+        );
+    }
+    world
+        .run(&["results", "filtered"])
+        .exited(0)
+        .out_has("service")
+        .out_has("merged");
+}
+
+/// `--filter-vcs` replaces the source filter a launch config supplied.
+///
+/// The vcs half of the override rule, and the only place it is observable: a
+/// source filter's effect is what the *real* `onevcs` did not relay, so a
+/// journey with no repository in it could only assert on the ask. The config
+/// here would silence the gate verdict; the flag replaces it with one that
+/// silences the push instead, so admitting the verdict is what proves the flag
+/// won rather than merely being read.
+#[test]
+fn a_vcs_filter_flag_replaces_the_one_a_launch_config_supplied() {
+    let world = World::new("real-vcs-filter-override");
+    let repo = world.repository("local-direct", &["true"]);
+    world.script("service.work", "the worker wrote this\n");
+
+    let config = world.root.join("launch.json");
+    std::fs::write(
+        &config,
+        r#"{"schema_version": 1,
+            "filters": {"vcs": {"exclude": [{"kind": "gate-verdict"}]}}}"#,
+    )
+    .expect("the launch config is written");
+
+    let path = world.plan(
+        "overridden",
+        &plan_of("overridden", vec![node(&repo.checkout)]),
+    );
+    world
+        .run(&[
+            "start",
+            &path.to_string_lossy(),
+            "--attach",
+            "--launch-config",
+            &config.to_string_lossy(),
+            "--filter-vcs",
+            r#"{"exclude": [{"kind": "push"}]}"#,
+        ])
+        .settled();
+
+    let relayed = world.run(&["monitor", "overridden", "--all"]).stdout;
+    assert!(
+        !relayed.contains("push"),
+        "the flag's own filter did not reach `onevcs`:\n{relayed}"
+    );
+    assert!(
+        relayed.contains("gate-verdict"),
+        "the config's filter was still applied beside the flag that replaced it:\n{relayed}"
+    );
+    world
+        .run(&["results", "overridden"])
+        .exited(0)
+        .out_has("merged");
+}

@@ -128,6 +128,16 @@ pub struct RunState {
     /// once rather than repeated at every later attempt. A note the running turn
     /// already took never enters this set at all.
     pub pending_context: BTreeMap<String, String>,
+    /// Every candidate each node's identity chains stepped past, in the order
+    /// the store recorded them.
+    ///
+    /// The only record in the merged store that says *which* identity refused
+    /// and *which side* of the conversation asked it. Without it a node that
+    /// failed on an exhausted subscription reads exactly like one that failed
+    /// its own gate, and the two sides of a member prefer different identities —
+    /// so a fix aimed at the wrong chain changes nothing and the run fails the
+    /// same way again.
+    pub refusals: BTreeMap<String, Vec<Refusal>>,
     /// What each node's dispatch is doing *now*, from the relayed stream.
     ///
     /// The one question no event of this crate's own can answer: a
@@ -172,6 +182,67 @@ pub struct NodeActivity {
     pub events: u64,
     /// When the last of them arrived, in epoch milliseconds.
     pub last_at: Option<u64>,
+}
+
+/// One candidate a node's identity chain stepped past, and how often it was
+/// recorded.
+///
+/// The advance itself is `oneagentgraph`'s **own** payload type, held whole
+/// rather than copied field by field: the identity, `oneharness`'s
+/// classification of why the candidate could not run, and — for a two-party
+/// member — which side of the conversation the chain belonged to are that
+/// library's contract, and a second declaration of them here is a second thing
+/// to keep true. What this crate adds is what the *envelope* carried around it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refusal {
+    /// The advance exactly as `oneagentgraph` published it.
+    pub advanced: oneagentgraph::event::FallbackAdvanced,
+    /// The member whose chain it was, as the producer labelled the envelope.
+    ///
+    /// What names the side when the advance's own `role` does not: a
+    /// single-sided member has one side and stamps none, and a record that
+    /// named neither is one this crate must not invent a side for. That is the
+    /// whole failure being fixed — a fix aimed at the wrong side of a
+    /// conversation changes nothing.
+    pub member: MemberLabel,
+    /// How many records carried this same side, identity, and reason.
+    ///
+    /// Non-zero because a refusal exists only by having been recorded once.
+    /// Deliberately not a count of *turns*: the producer stamps a turn on each
+    /// advance and this does not read it, so claiming turns would be a
+    /// measurement nothing here made.
+    pub records: std::num::NonZeroU64,
+}
+
+/// The member an envelope named, as far as this build could read it.
+///
+/// Three answers rather than an [`Option`], because the third is a different
+/// fact and reading it as either of the others is a claim nothing supports: a
+/// label a producer stamped and this build cannot read is **not** a producer
+/// that stamped none, and a view saying "the record does not name a side" about
+/// one would be denying a record that does name one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MemberLabel {
+    /// The producer stamped one, and it reads.
+    Named(String),
+    /// The producer stamped none. A single-sided member's envelope is the
+    /// ordinary case.
+    Unstamped,
+    /// The producer stamped something this build cannot read as a member.
+    Unreadable,
+}
+
+/// Whether a relayed envelope is `oneagentgraph`'s "a chain stepped past a
+/// candidate".
+///
+/// Read **through that library's own enum** rather than compared against a
+/// string of this crate's: the kind is the sibling's vocabulary, and a literal
+/// here would be a second copy of a contract it owns — one that keeps matching
+/// after the producer renames the kind, and silently stops attributing anything.
+/// A kind this build has no reading of simply is not one.
+fn is_fallback_advanced(kind: &crate::event::EventKind) -> bool {
+    serde_json::from_value::<oneagentgraph::event::EventKind>(Value::String(kind.0.clone()))
+        .is_ok_and(|known| known == oneagentgraph::event::EventKind::FallbackAdvanced)
 }
 
 /// The kind `oneagentgraph` reports a bounded tool summary as.
@@ -249,8 +320,10 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
     if event.source != Source::Pipeline {
         // A relayed envelope does not decide this crate's graph state — a
         // sibling library does not settle a node — but it is the only evidence
-        // of what the node it belongs to is doing while it runs.
+        // of what the node it belongs to is doing while it runs, and the only
+        // evidence of which identity refused when it stops running.
         fold_activity(state, event);
+        fold_refusal(state, event);
         return;
     }
     let payload = &event.payload;
@@ -564,6 +637,66 @@ fn fold_activity(state: &mut RunState, event: &Envelope) {
     if !summary.is_empty() {
         activity.doing = Some(summary);
     }
+}
+
+/// Record one candidate a node's identity chain stepped past.
+///
+/// Only `oneagentgraph` publishes these: a `fallback-advanced` from any other
+/// source is a kind this crate has no reading of, and attributing a provider
+/// refusal to whatever wrote it would be the invented attribution this exists to
+/// replace.
+fn fold_refusal(state: &mut RunState, event: &Envelope) {
+    // llmlint: ignore-block[changed_behavior_has_e2e] the three guards here are about
+    // envelopes no producer in this stack writes: only `oneagentgraph` publishes this kind,
+    // it labels a dispatch's envelopes with the node, and the payload is its own declared
+    // type. Reaching any of them needs a store a *newer* build — or something wearing a
+    // producer's clothes — wrote. Held by this module's and `src/views.rs`'s own tests;
+    // what a user can reach is driven in `tests/e2e/views.rs`.
+    if event.source != Source::Agentgraph || !is_fallback_advanced(&event.kind) {
+        return;
+    }
+    let Some(node) = event.labels.node.as_deref() else {
+        return;
+    };
+    // Read into `oneagentgraph`'s **own** declaration of an advance rather than
+    // by field name, exactly as that library reads `oneharness`'s: the shape
+    // this crate expects is then the shape the producer publishes, and a payload
+    // that is not one is a record this build has no reading of. Dropping it is
+    // the right direction — an attribution assembled out of whatever fields
+    // happened to be present is the invented attribution this exists to replace.
+    let Ok(advanced) = serde_json::from_value::<oneagentgraph::event::FallbackAdvanced>(
+        Value::Object(event.payload.clone()),
+    ) else {
+        return;
+    };
+    // llmlint: ignore-end[changed_behavior_has_e2e]
+    let refusal = Refusal {
+        advanced,
+        // The label arrives in `extra`, because this crate's own envelope does
+        // not declare `member` — so it is checked here rather than by a schema.
+        // A value that is not a member name is kept apart from a producer that
+        // stamped none: they are different facts about the record.
+        member: match event.labels.extra.get("member") {
+            None => MemberLabel::Unstamped,
+            Some(Value::String(member)) => MemberLabel::Named(member.clone()),
+            Some(_) => MemberLabel::Unreadable,
+        },
+        records: std::num::NonZeroU64::MIN,
+    };
+    let recorded = state.refusals.entry(node.to_string()).or_default();
+    // The turn is deliberately not part of what makes two records the same: one
+    // side's chain refusing the same identity the same way is one fact about
+    // this node, however many turns asked it.
+    if let Some(same) = recorded.iter_mut().find(|seen| {
+        seen.advanced.identity == refusal.advanced.identity
+            && seen.advanced.role == refusal.advanced.role
+            && seen.advanced.reason == refusal.advanced.reason
+            && seen.member == refusal.member
+    }) {
+        same.records = same.records.saturating_add(1);
+        return;
+    }
+    recorded.push(refusal);
 }
 
 fn plan_of(payload: &serde_json::Map<String, Value>) -> Option<Plan> {

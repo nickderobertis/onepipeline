@@ -561,7 +561,7 @@ fn a_publications_own_records_reach_the_journal_while_it_is_still_publishing() {
 
     world.until("the publication to reach its gate", |world| {
         world
-            .run(&["monitor", "watched"])
+            .run(&["monitor", "watched", "--all"])
             .stdout
             .contains("gate-started")
     });
@@ -592,7 +592,7 @@ fn a_publications_own_records_reach_the_journal_while_it_is_still_publishing() {
     // And the rest of the publication landed too, exactly once each: `monitor`
     // renders one line per event, so a record relayed twice — by a follow and by
     // the read that covers for one — shows up as two.
-    let stream = world.run(&["monitor", "watched"]);
+    let stream = world.run(&["monitor", "watched", "--all"]);
     stream.exited(0);
     for kind in [
         "lock-acquired",
@@ -649,7 +649,7 @@ fn a_record_written_after_the_follow_ended_still_reaches_the_merged_store_once()
     // Once. Recovering the tail by re-reading the whole stream would put every
     // other record in twice, which is the same defect from the other side —
     // `monitor` renders one line per event, so a duplicate is visible as one.
-    let stream = world.run(&["monitor", &run]);
+    let stream = world.run(&["monitor", &run, "--all"]);
     stream.exited(0);
     // Not `session-opened`: this crate writes one of its own beside the
     // sibling's, so two is the right answer there and says nothing about relay.
@@ -1225,7 +1225,10 @@ fn a_settled_node_and_a_landed_node_are_told_apart_by_what_the_host_did_not_by_t
         .run(&["goals", &open])
         .exited(0)
         .out_has("1 not landed");
-    world.run(&["monitor", &open]).exited(0).out_has("unlanded");
+    world
+        .run(&["monitor", &open, "--all"])
+        .exited(0)
+        .out_has("unlanded");
 
     // The same policy, and this time the host lands what it is handed.
     world.script("gh.merged", "");

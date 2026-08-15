@@ -30,13 +30,44 @@ resolver = "2"
 #
 # `tests/e2e/dispatch.rs` holds the first end to end: it fails against 0.2.11
 # rather than merely reading differently.
+#
+# **`oneagentgraph` is pinned to a git revision, and carries a `version` beside
+# it.** The filter grammar this crate passes through to both siblings is a
+# *cross-repository* contract with no shared crate, so what must be pinned is the
+# revision that sibling's copy of it was merged at, before a release carries it.
+# `rev` is what a build resolves; the `version` beside it is what `cargo publish`
+# records, which a git-only dependency would make impossible for a crate that
+# ships on crates.io. The two must name the same release: `7854b19` *is*
+# `oneagentgraph` v0.2.13, the release commit of the pull request that merged its
+# filter support (#40). `tests/e2e/dispatch.rs` drives that surface against the
+# real sibling, so a pin moved to a revision without it fails rather than reads
+# differently.
+#
+# **`onevcs` is a registry release**, and is one again because the revision it
+# was pinned at is *published*: `d3c495d` is the tag `v0.2.7` exactly — the
+# release commit of the pull request that merged its filter support (#26) — and
+# v0.2.7 is an ancestor of v0.2.10, so 0.2.10 carries that grammar and three
+# fixes above it. Holding the pin would hold this crate at 0.2.7, and
+# `src/graph.rs` reads `onevcs::provenance::SUBJECT_LIMIT` to refuse an
+# unpublishable node title at plan load: that constant is 72 at v0.2.7 and 120
+# from v0.2.8 on, so a build behind the pin would refuse at load every title
+# between the two that the publication commits without complaint.
+# `tests/e2e/real_vcs.rs` drives the surface.
 [workspace.dependencies]
-oneagentgraph = "0.2.12"
-onevcs = "0.2.8"
+oneagentgraph = { git = "https://github.com/nickderobertis/oneagentgraph", rev = "7854b1941b235e05afaa9cbaa69a2daf63de722e", version = "0.2.13" }
+onevcs = "0.2.10"
+# The sibling's own test-support crate, from the **same** revision as the library
+# it implements — here by resolving both from the registry at the releases cut
+# from one commit: `onevcs-testing` v0.1.10 and `onevcs` v0.2.10 are the same tag,
+# and v0.1.10 requires `onevcs = "0.2.10"`, so the build has one copy. Two copies
+# is not a version skew but a compile error: `tests/onevcs_seam.rs` — whose whole
+# job is to drive this crate's seam against those providers — would not build,
+# because the two copies' types are different types.
+onevcs-testing = "0.1.10"
 
 [package]
 name = "onepipeline"
-version = "0.4.0"
+version = "0.6.0"
 edition = "2021"
 rust-version = "1.88"
 description = "Execute a task DAG over oneagentgraph and onevcs, merging their event streams into one."
@@ -93,9 +124,9 @@ serde_json = { version = "1", features = ["preserve_order"] }
 serde_norway = "0.9"
 thiserror = "2"
 
-# The siblings this crate composes. Both are on crates.io, so they resolve from
-# the registry like any other dependency — no git source, so a clone of this repo
-# builds from the registries alone.
+# The siblings this crate composes, at the workspace's own pins — a git revision
+# each, with the registry version beside it that publishing records. See
+# `[workspace.dependencies]` for why the revision rather than the release.
 oneagentgraph = { workspace = true }
 onevcs = { workspace = true }
 
@@ -127,7 +158,7 @@ windows-sys = { version = "0.61", features = [
 # must stay one: what it implements must never be reachable from a release
 # binary.
 [dev-dependencies]
-onevcs-testing = "0.1.5"
+onevcs-testing = { workspace = true }
 
 [[test]]
 name = "e2e"
