@@ -1,11 +1,12 @@
 //! The driver contract: launching a run, owning it, attaching to it, and
 //! handing it to a fresh driver when its own dies.
 //!
-//! `onepipeline start` launches the dag-scope agent graph — the shipped default
-//! is an `orchestrator` member plus a resettable-cron `check-in` member — and
-//! that orchestrator drives the engine verbs under the run's ownership lock.
-//! This crate never decides what the graph should be; it schedules, dispatches,
-//! transitions, and closes out.
+//! `onepipeline start` drives the run itself: it runs [`engine::drive`]'s
+//! continuous loop under the run's ownership lock, in this process. No agent is
+//! required to execute a plan. `--dag-graph REF` attaches an agent graph as an
+//! **observer** — it watches the stream and authors channel surfaces, and it
+//! never drives the engine. This crate never decides what the graph should be;
+//! it schedules, dispatches, and closes out.
 //!
 //! Runs belong to the session that launched them. `stop` refuses another
 //! session's run and `--force` names the owner; `adopt` has no `--force` at all,
@@ -19,10 +20,10 @@ use std::time::{Duration, Instant};
 use serde_json::json;
 
 use crate::agentgraph;
-use crate::channel::{ChannelState, Command, Reply, Surface, SurfaceKind};
+use crate::channel::{Author, ChannelState, Command, Reply, Surface, SurfaceKind};
 use crate::cli::{
-    AttestArgs, ChannelCommand, Cli, OptionalRunArgs, ReplyArgs, RoundCommand, RunArgs, RunsArgs,
-    StartArgs, StopArgs, SurfaceArgs, TelemetryArgs, TranscriptArgs,
+    AttestArgs, ChannelCommand, Cli, OptionalRunArgs, ReplyArgs, RunArgs, RunsArgs, StartArgs,
+    StopArgs, SurfaceArgs, TelemetryArgs, TranscriptArgs, DAG_GRAPH_OFF,
 };
 use crate::concurrency::{self, Liveness, State};
 use crate::edits;
@@ -36,18 +37,19 @@ use crate::sys;
 use crate::telemetry;
 use crate::views::{self, RunView};
 
-/// The environment variable naming the dag-scope agent graph `start` launches.
-pub const DAG_GRAPH_ENV: &str = "ONEPIPELINE_DAG_GRAPH";
-
-/// The dag-scope agent graph shipped with this crate.
-pub const DEFAULT_DAG_GRAPH: &str = "graphs/dag-scope.yaml";
-
 /// How often an attach re-reads the run to see whether it has settled.
 const ATTACH_POLL: Duration = Duration::from_millis(50);
 
-/// How long an attach collects a departed driver's last envelopes before
+/// How long an attach collects a departed observer's last envelopes before
 /// settling without them.
 const DRAIN_GRACE: Duration = Duration::from_secs(2);
+
+/// How long `start --detach` waits for its retained driver to claim the run.
+///
+/// Process startup plus one read of the ledger, with room for a loaded host: a
+/// launch that waited less would report a driver that had not started, and one
+/// that waited longer would make a genuinely failed launch look like a slow one.
+const DRIVER_HANDOVER: Duration = Duration::from_secs(30);
 
 /// Execute one parsed command line.
 pub fn dispatch(cli: Cli) -> Result<i32> {
@@ -55,13 +57,7 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
     match cli.command {
         Verb::Start(args) => start(&args),
         Verb::Adopt(args) => adopt(&args),
-        Verb::Round(RoundCommand::Run(args)) => {
-            Ok(engine::round_run(&resolve(&args.run)?)?.exit_code())
-        }
-        Verb::Round(RoundCommand::Next(args)) => {
-            engine::round_next(&resolve(&args.run)?)?;
-            Ok(EXIT_SUCCESS)
-        }
+        Verb::DriveRun(args) => drive_run(&args),
         Verb::Channel(ChannelCommand::Serve(args)) => serve(&args),
         Verb::Next(args) => next(&args),
         Verb::Reply(args) => reply(&args),
@@ -107,13 +103,6 @@ fn resolve(run: &str) -> Result<RunPaths> {
         });
     }
     Ok(paths)
-}
-
-fn dag_graph() -> String {
-    std::env::var(DAG_GRAPH_ENV)
-        .ok()
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| DEFAULT_DAG_GRAPH.to_string())
 }
 
 fn launch_dir() -> Result<PathBuf> {
@@ -241,7 +230,12 @@ fn start(args: &StartArgs) -> Result<i32> {
     let mut plan = Plan::load(&args.plan)?;
     graph::validate(&plan)?;
     let launch_dir = launch_dir()?;
-    let graph_ref = resolve_graph(&dag_graph(), &launch_dir)?;
+    // Resolved only when one was named: `off` is the shipped default, and a
+    // launch that names no observer resolves nothing and launches nothing.
+    let graph_ref = match args.dag_graph.as_str() {
+        DAG_GRAPH_OFF => String::new(),
+        reference => resolve_graph(reference, &launch_dir)?,
+    };
     let node_graph_ref = resolve_graph(&engine::configured_node_graph(), &launch_dir)?;
     resolve_plan_graphs(&mut plan, &launch_dir)?;
 
@@ -318,7 +312,6 @@ fn start(args: &StartArgs) -> Result<i32> {
         pid: sys::pid(),
         host: sys::hostname(),
         started_at: sys::now_rfc3339(),
-        round_budget: args.round_budget,
         heartbeat_interval: args.heartbeat_interval,
         dag_sets: args.dag_sets.clone(),
         node_sets: args.node_sets.clone(),
@@ -329,7 +322,7 @@ fn start(args: &StartArgs) -> Result<i32> {
     if !live.is_empty() {
         open.emit(
             journal::PipelineKind::ConcurrentAcknowledged,
-            journal::labels(&run, None, None),
+            journal::labels(&run, None),
             journal::payload(&[
                 (
                     "shared_identities",
@@ -363,7 +356,7 @@ fn start(args: &StartArgs) -> Result<i32> {
     }
     open.emit(
         journal::PipelineKind::RunStarted,
-        journal::labels(&run, None, None),
+        journal::labels(&run, None),
         journal::payload(&[
             ("plan", json!(plan)),
             ("graph", json!(graph_ref)),
@@ -371,51 +364,44 @@ fn start(args: &StartArgs) -> Result<i32> {
             // infer which directory a run's members worked in from the process
             // that happened to launch them.
             ("dir", json!(launch_dir)),
-            ("round_budget", json!(args.round_budget)),
             ("heartbeat_interval", json!(args.heartbeat_interval)),
         ]),
     )?;
 
-    // The record is durable *before* the process that reads it exists. The
-    // driver's first act is `onepipeline round run`, which opens the launch
-    // record, so a driver that wins the race against its own launcher dies on a
-    // file nobody had written yet — and the run then sits at `run-started`
-    // with nothing driving it. Writing it twice is the price of that ordering:
-    // the first record names this process, which is what drives the run until
-    // the graph process it starts takes over.
+    // The record is durable *before* anything that reads it exists. The engine
+    // loop opens the launch record for the node graph it dispatches under, and
+    // a detached driver is a separate process that would otherwise die on a file
+    // nobody had written yet — leaving a run stuck at `run-started` with nothing
+    // driving it. It is written again below, once the pids and the observer's
+    // graph run are known.
     ledger::write_json(&paths.launch(), &record)?;
     if args.detach {
         // Before the driver exists, and only on this path: a detaching launcher
-        // starts nothing else, and the driver it is about to start must not
-        // hold this process's streams open behind it. See
+        // is about to exit, and the driver it is about to start must not hold
+        // this process's streams open behind it. See
         // [`sys::disown_standard_handles`] for what inherits what.
         sys::disown_standard_handles();
     }
-    let log = paths.driver_log();
-    let mut launched = launch_graph(
-        &paths,
-        &record,
-        plan.goal.as_ref().map(|goal| goal.text.as_str()),
-        if args.detach {
-            agentgraph::GraphOutput::Logged(&log)
-        } else {
-            agentgraph::GraphOutput::Relayed
-        },
-    )?;
-    record.pid = launched.pid();
-    record.graph_run = launched
-        .run_id()
-        .map(ToString::to_string)
-        .unwrap_or_default();
-    ledger::write_json(&paths.launch(), &record)?;
 
     if args.detach {
-        // The launch record and nothing else: a run that should go unattended.
+        // A retained process, because the loop that drives a run cannot outlive
+        // a launcher that is about to return. It is *this* build at its own
+        // hidden verb, so the run is driven by the same engine an attached
+        // launch would have run in-process — and it launches the observer
+        // itself, so `stop` reaches that graph through the driver's own process
+        // tree rather than leaving an agent running beside a stopped run.
+        let driver = retain_driver(&paths)?;
+        // The driver records its own pid and its observer's graph run, so there
+        // is one writer of those fields and no race between this process and the
+        // one it just started. Waiting for it also means a launch that could not
+        // start a driver says so, rather than printing a pid for a process that
+        // is already gone.
+        confirm_driving(&paths, driver)?;
         println!(
             "{}",
             json!({
                 "run_id": run,
-                "pid": launched.pid(),
+                "pid": driver,
                 "commands": {
                     "next": format!("onepipeline next {run}"),
                     "monitor": format!("onepipeline monitor {run}"),
@@ -424,14 +410,128 @@ fn start(args: &StartArgs) -> Result<i32> {
         );
         return Ok(EXIT_SUCCESS);
     }
-    attach(&paths, Some(&mut launched))
+
+    let goal = plan.goal.as_ref().map(|goal| goal.text.as_str());
+    // The observer, if the launch named one. It watches and reports; the loop
+    // below is what drives the run either way, so a graph that refuses to start
+    // fails the launch rather than leaving a run nothing executes.
+    let mut observer = observe(&paths, &mut record, goal, agentgraph::GraphOutput::Relayed)?;
+    ledger::write_json(&paths.launch(), &record)?;
+    attach(&paths, observer.as_mut())
 }
 
-/// Start the dag-scope graph that drives the run.
+/// Launch the run's observer graph, when it was launched with one.
+///
+/// Records the graph run it minted, which is what a later `next` addresses the
+/// pacemaker by. `output` is the caller's promise about itself: an attaching
+/// launcher stays and relays what the observer says into the merged store, and
+/// a retained driver hands it the run's own driver log instead.
+fn observe(
+    paths: &RunPaths,
+    record: &mut LaunchRecord,
+    goal: Option<&str>,
+    output: agentgraph::GraphOutput<'_>,
+) -> Result<Option<agentgraph::GraphRun>> {
+    if record.graph.is_empty() {
+        return Ok(None);
+    }
+    let launched = launch_graph(paths, record, goal, output)?;
+    record.graph_run = launched
+        .run_id()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    Ok(Some(launched))
+}
+
+/// Wait for a retained driver to claim the run, or report that it never did.
+fn confirm_driving(paths: &RunPaths, driver: u32) -> Result<()> {
+    let deadline = Instant::now() + DRIVER_HANDOVER;
+    while Instant::now() < deadline {
+        let recorded: Option<LaunchRecord> = ledger::read_json_opt(&paths.launch());
+        if recorded.is_some_and(|record| record.pid == driver) {
+            return Ok(());
+        }
+        if !sys::process_may_be_live(driver) {
+            break;
+        }
+        std::thread::sleep(ATTACH_POLL);
+    }
+    Err(Error::Refused(format!(
+        "the driver retained for run '{}' did not claim it; its output is in {}",
+        paths.run,
+        paths.driver_log().display()
+    )))
+}
+
+/// Start the retained driver a detached launch leaves behind.
+///
+/// This executable, at [`engine::DRIVE_VERB`], with its output in the run's own
+/// driver log: the process that returns from `start --detach` must not be
+/// holding the pipe a driver writes to.
+fn retain_driver(paths: &RunPaths) -> Result<u32> {
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(paths.driver_log())
+        .map_err(|source| Error::Ledger {
+            path: paths.driver_log(),
+            source,
+        })?;
+    let errors = log.try_clone().map_err(|source| Error::Ledger {
+        path: paths.driver_log(),
+        source,
+    })?;
+    let exe = std::env::current_exe()
+        .map_err(|e| Error::Invalid(format!("cannot find this executable to retain a driver: {e}")))?;
+    let child = std::process::Command::new(exe)
+        .arg(engine::DRIVE_VERB)
+        .arg(&paths.run)
+        .stdin(std::process::Stdio::null())
+        .stdout(log)
+        .stderr(errors)
+        .spawn()
+        .map_err(|e| Error::Invalid(format!("cannot retain a driver for '{}': {e}", paths.run)))?;
+    Ok(child.id())
+}
+
+/// `onepipeline drive-run` — the retained driver of a detached launch.
+///
+/// Hidden, and the same loop an attached launch runs in-process: what differs is
+/// only which process it runs in. It claims the run in the launch record — one
+/// writer of that field, so the launcher never races it — and launches the
+/// observer itself, so a `stop` that reaps this process's tree reaps the
+/// observer with it.
+fn drive_run(args: &RunArgs) -> Result<i32> {
+    let paths = resolve(&args.run)?;
+    let mut record: LaunchRecord = ledger::read_json(&paths.launch())?;
+    let view = RunView::open(&paths)?;
+    let log = paths.driver_log();
+    let mut observer = observe(
+        &paths,
+        &mut record,
+        view.state
+            .plan
+            .as_ref()
+            .and_then(|plan| plan.goal.as_ref())
+            .map(|goal| goal.text.as_str()),
+        agentgraph::GraphOutput::Logged(&log),
+    )?;
+    record.pid = sys::pid();
+    record.host = sys::hostname();
+    ledger::write_json(&paths.launch(), &record)?;
+
+    let settled = engine::drive(&paths)?;
+    if let Some(run) = observer.as_mut() {
+        run.cancel();
+    }
+    Ok(settled.exit_code())
+}
+
+/// Start the dag-scope graph that **observes** the run.
 ///
 /// `output` is the launcher's promise about itself: an attaching launcher stays
-/// and relays what the driver produces, and a detaching one is about to exit, so
-/// the driver is given a file instead of a pipe whose reader is going away.
+/// and relays what the observer produces, and a detaching one is about to exit,
+/// so the observer is given a file instead of a pipe whose reader is going away.
 ///
 /// The directory comes from the **record** rather than from this process, which
 /// is what makes `start` and `adopt` name the same place for one run: an
@@ -451,7 +551,7 @@ fn launch_graph(
         &record.graph,
         &task,
         &recorded_dir(record)?,
-        &journal::labels(&paths.run, None, None),
+        &journal::labels(&paths.run, None),
         &[
             (agentgraph::RUN_ID_ENV.to_string(), paths.run.clone()),
             (
@@ -464,12 +564,12 @@ fn launch_graph(
     )?;
     // A launcher is the one caller that never waits for what it started, so a
     // graph that refused this launch would otherwise be reported as a running
-    // driver — an exit 0 and a pid for a process that is already gone.
+    // observer — an exit 0 and a pid for a process that is already gone.
     launched.confirm_started()?;
     Ok(launched)
 }
 
-/// What the run is, for the one `--task` the dag-scope graph is launched with.
+/// What the run is, for the one `--task` the observer graph is launched with.
 ///
 /// **Role-neutral on purpose:** `oneagentgraph` hands this to every member of
 /// the graph carrying none of its own, so a role stated here is stated to
@@ -489,15 +589,15 @@ fn run_description(run: &str, goal: Option<&str>) -> String {
 /// How an attach ended.
 ///
 /// **Settled** is a property of the run: it is no longer advancing on its own,
-/// so the next move is the planner's. Deliberately neither "the round finished"
-/// — which returns while the driver is still scheduling — nor "the driver
-/// exited", which never returns on the ordinary case.
+/// so the next move is the planner's. Deliberately neither "the graph finished"
+/// — the loop returns while independent branches may still have been dispatched
+/// — nor "the observer exited", which says nothing about the run at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Settlement {
     /// The graph completed successfully.
     Complete,
-    /// A **blocking** planner surface is pending: the run will not move until a
-    /// reply answers it.
+    /// A **blocking** decision point is outstanding and nothing else can move:
+    /// the run will not advance until a reply or an attestation clears it.
     AwaitingPlanner,
     /// Nothing is driving the run.
     Unattended,
@@ -523,16 +623,22 @@ impl Settlement {
     }
 }
 
-/// Stream the run's events and return when it settles.
+/// Run the engine loop in this process and stream the run until it settles.
 ///
-/// The graph process is drained on a thread of its own. Reading it inline would
-/// make the attach wait for the driver to *exit*, which is exactly the reading
-/// the settlement contract rejects: on the ordinary case that process stays
-/// alive holding a question nobody is answering.
-fn attach(paths: &RunPaths, launched: Option<&mut agentgraph::GraphRun>) -> Result<i32> {
+/// The loop runs on a thread of its own so this one can render. Reading it
+/// inline would make the attach silent for the whole run, which is the opposite
+/// of the streaming contract: surfaces and events reach the operator as they
+/// occur.
+///
+/// The loop is what decides when to stop. It waits out every decision point that
+/// still has work running beside it — an `attest` or a `reply` arriving then
+/// resumes the paused subtree inside the running loop, with no external driver
+/// action — and returns when the graph is terminal or when nothing at all can
+/// move without the channel. Only then does this return.
+fn attach(paths: &RunPaths, observer: Option<&mut agentgraph::GraphRun>) -> Result<i32> {
     let (tx, rx) = std::sync::mpsc::channel();
-    let mut driver = launched;
-    if let Some(run) = driver.as_deref_mut() {
+    let mut watched = observer;
+    if let Some(run) = watched.as_deref_mut() {
         let events = run.events();
         std::thread::Builder::new()
             .name(format!("attach-{}", paths.run))
@@ -546,32 +652,47 @@ fn attach(paths: &RunPaths, launched: Option<&mut agentgraph::GraphRun>) -> Resu
             .map_err(|e| Error::Invalid(format!("cannot start the attach relay: {e}")))?;
     }
     let mut reported = 0usize;
+    let mut observer_gone = false;
     let mut journal = Journal::open(paths);
 
+    let driving = paths.clone();
+    let engine = std::thread::Builder::new()
+        .name(format!("engine-{}", paths.run))
+        .spawn(move || engine::drive(&driving))
+        .map_err(|e| Error::Invalid(format!("cannot start the engine loop: {e}")))?;
+
     loop {
-        // Everything the graph process emits joins the merged store, so an
-        // attach and a later replay see the same stream.
+        // Everything the observer emits joins the merged store, so an attach and
+        // a later replay see the same stream.
         while let Ok(envelope) = rx.try_recv() {
             journal.relay(&envelope)?;
         }
 
         // Asked *before* the state is read, so the two cannot disagree in the
-        // one direction that matters. A driver this process started and then
-        // collected is proof that nothing is driving the run any more —
-        // stronger than probing its pid, which a zombie would answer as alive.
-        // Reading the state afterwards means the state is at least as new as
-        // that proof, so a run its driver finished and exited on settles as the
-        // `complete` it is rather than as an `unattended` this loop merely
-        // looked at too early.
-        let driver_gone = driver
-            .as_deref_mut()
-            .is_some_and(agentgraph::GraphRun::has_exited);
-        if driver_gone {
-            // Its last envelopes are still in flight between the relay thread
-            // and this one. Collecting them before the settlement is what makes
-            // the merged store the whole of what the driver said, rather than
-            // whatever happened to have arrived. Bounded, because a grandchild
-            // that inherited the pipe can hold it open past its parent's exit.
+        // one direction that matters: the state is then at least as new as the
+        // proof that the loop has stopped, and a run its own loop finished
+        // settles as the `complete` it is rather than as an `unattended` this
+        // loop merely looked at too early.
+        // Reaped rather than merely probed: an observer nobody waits on stays a
+        // zombie, and a zombie answers a liveness probe as alive. Said once, so
+        // a graph that stopped watching a live run is visible to the operator
+        // reading the stream.
+        if let Some(run) = watched.as_deref_mut() {
+            if run.has_exited() && !observer_gone {
+                observer_gone = true;
+                eprintln!(
+                    "onepipeline: the observer graph for '{}' has stopped watching; \
+                     the run is still being driven",
+                    paths.run
+                );
+            }
+        }
+
+        let concluded = engine.is_finished();
+        if concluded {
+            // The observer's last envelopes are still in flight between the
+            // relay thread and this one. Collecting them before the settlement
+            // is what makes the merged store the whole of what it said.
             let deadline = std::time::Instant::now() + DRAIN_GRACE;
             while std::time::Instant::now() < deadline {
                 match rx.recv_timeout(ATTACH_POLL) {
@@ -593,7 +714,17 @@ fn attach(paths: &RunPaths, launched: Option<&mut agentgraph::GraphRun>) -> Resu
         }
         reported = lines.len();
 
-        if let Some(settlement) = settlement_of(&view, driver_gone) {
+        if concluded {
+            // Whatever the loop reported is this launch's failure to report: a
+            // lock it could not take, a ledger it could not read.
+            engine
+                .join()
+                .map_err(|_| Error::Invalid(format!("the engine loop for '{}' panicked", paths.run)))??;
+            // The observer has nothing left to observe.
+            if let Some(run) = watched.as_deref_mut() {
+                run.cancel();
+            }
+            let settlement = settlement_of(&view);
             println!(
                 "{}",
                 json!({"run_id": paths.run, "settlement": settlement.as_str()})
@@ -604,27 +735,32 @@ fn attach(paths: &RunPaths, launched: Option<&mut agentgraph::GraphRun>) -> Resu
     }
 }
 
-/// Whether the run has settled, and how.
-fn settlement_of(view: &RunView, driver_gone: bool) -> Option<Settlement> {
+/// How a run that has stopped advancing settled.
+///
+/// Re-derived from the graph and the channel rather than from any round state:
+/// what makes a run `awaiting-planner` is an outstanding **decision point** —
+/// a ready human action, or a blocking surface nobody has answered.
+fn settlement_of(view: &RunView) -> Settlement {
     let statuses = view.state.statuses();
-    if !view.state.round_open
-        && !statuses.is_empty()
-        && graph::state_of(&statuses) == GraphState::Complete
-    {
-        return Some(Settlement::Complete);
+    if !statuses.is_empty() && graph::state_of(&statuses) == GraphState::Complete {
+        return Settlement::Complete;
     }
-    // A *non-blocking* surface is deliberately not `awaiting-planner`: the
-    // driver continues past a heartbeat update without waiting for a reply, so
-    // returning there would walk away from a working run.
-    if let Some(pending) = ChannelState::new(&view.paths).pending() {
-        if pending.blocking {
-            return Some(Settlement::AwaitingPlanner);
-        }
+    // A *non-blocking* surface is deliberately not `awaiting-planner`: it is a
+    // report, and it holds nothing back.
+    if view.state.awaiting_decision() || blocking_surface(&view.paths) {
+        return Settlement::AwaitingPlanner;
     }
-    if driver_gone || view.liveness().is_undriven() {
-        return Some(Settlement::Unattended);
-    }
-    None
+    Settlement::Unattended
+}
+
+/// Whether a blocking surface is outstanding, read or not.
+fn blocking_surface(paths: &RunPaths) -> bool {
+    let queue = ChannelState::new(paths).queue();
+    queue
+        .waiting
+        .iter()
+        .chain(queue.pending.iter())
+        .any(|surface| surface.blocking)
 }
 
 /// `onepipeline adopt`.
@@ -666,7 +802,7 @@ fn adopt(args: &RunArgs) -> Result<i32> {
     let mut journal = Journal::open(&paths);
     journal.emit(
         journal::PipelineKind::DriverAdopted,
-        journal::labels(&paths.run, Some(view.state.round), None),
+        journal::labels(&paths.run, None),
         journal::payload(&[
             ("adoption", json!(record.adoptions)),
             ("pid", json!(record.pid)),
@@ -677,25 +813,37 @@ fn adopt(args: &RunArgs) -> Result<i32> {
     // comes off the run's own projected plan rather than off the plan file the
     // launch named: a run whose graph the planner has edited since is still the
     // run this driver is adopting, and that file may no longer exist at all.
-    let mut launched = launch_graph(
-        &paths,
-        &record,
-        view.state
-            .plan
-            .as_ref()
-            .and_then(|plan| plan.goal.as_ref())
-            .map(|goal| goal.text.as_str()),
-        agentgraph::GraphOutput::Relayed,
-    )?;
-    // A fresh driver is a fresh graph run with an id of its own, and the
-    // pacemaker is addressed by that id — so the record names the run that is
-    // driving now rather than the one that died.
-    record.graph_run = launched
-        .run_id()
-        .map(ToString::to_string)
-        .unwrap_or_default();
+    //
+    // The observer only, and only when the run was launched with one: what
+    // adoption is *for* is the loop below, which this process runs itself.
+    let mut observer = if record.graph.is_empty() {
+        None
+    } else {
+        let launched = launch_graph(
+            &paths,
+            &record,
+            view.state
+                .plan
+                .as_ref()
+                .and_then(|plan| plan.goal.as_ref())
+                .map(|goal| goal.text.as_str()),
+            agentgraph::GraphOutput::Relayed,
+        )?;
+        // A fresh observer is a fresh graph run with an id of its own, and the
+        // pacemaker is addressed by that id — so the record names the run that
+        // is watching now rather than the one that died.
+        record.graph_run = launched
+            .run_id()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        Some(launched)
+    };
     ledger::write_json(&paths.launch(), &record)?;
-    attach(&paths, Some(&mut launched))
+    // An adoption resumes the graph exactly where the journal left it, including
+    // mid-decision: the fold reconstructs the outstanding decision points from
+    // the settlements that produced them, so a subtree that was paused stays
+    // paused and is released by the same `attest` it always was.
+    attach(&paths, observer.as_mut())
 }
 
 /// `onepipeline stop`.
@@ -719,7 +867,6 @@ fn stop(args: &StopArgs) -> Result<i32> {
         );
     }
 
-    let view = RunView::open(&paths)?;
     // Attempted before the record is written, so the record says what happened
     // rather than what was about to be tried.
     let teardown = terminate(record.pid, &record.host);
@@ -732,7 +879,7 @@ fn stop(args: &StopArgs) -> Result<i32> {
     let mut journal = Journal::open(&paths);
     journal.emit(
         journal::PipelineKind::RunStopped,
-        journal::labels(&paths.run, Some(view.state.round), None),
+        journal::labels(&paths.run, None),
         journal::payload(&[
             ("owner", json!(owner)),
             ("forced", json!(args.force)),
@@ -801,8 +948,8 @@ fn next(args: &RunArgs) -> Result<i32> {
     let view = RunView::open(&paths)?;
     let channel = ChannelState::new(&paths);
 
-    let Some(surface) = channel.claim(view.state.round)? else {
-        let settled = !view.state.round_open && view.liveness().is_undriven();
+    let Some(surface) = channel.claim()? else {
+        let settled = view.liveness().is_undriven();
         println!(
             "{}",
             if settled {
@@ -817,11 +964,7 @@ fn next(args: &RunArgs) -> Result<i32> {
     let mut journal = Journal::open(&paths);
     journal.emit(
         journal::PipelineKind::PlannerSurfaced,
-        journal::labels(
-            &paths.run,
-            Some(view.state.round),
-            surface.workstream.as_deref(),
-        ),
+        journal::labels(&paths.run, surface.workstream.as_deref()),
         journal::payload(&[
             ("kind", json!(surface.kind)),
             ("message", json!(surface.message)),
@@ -849,7 +992,6 @@ fn next(args: &RunArgs) -> Result<i32> {
 /// `onepipeline surface`.
 fn surface(args: &SurfaceArgs) -> Result<i32> {
     let paths = resolve(&args.run)?;
-    let view = RunView::open(&paths)?;
     let kind = match args.kind {
         SurfaceKind::CheckIn => crate::channel::source::CHECK_IN,
     };
@@ -858,17 +1000,16 @@ fn surface(args: &SurfaceArgs) -> Result<i32> {
         kind: kind.to_string(),
         message: args.message.clone(),
         source: kind.to_string(),
-        // A pacemaker update is a report, not a request: it never blocks the
-        // graph frontier waiting for a decision.
+        // A pacemaker update is a report, not a request: it never holds any
+        // subtree back waiting for a decision.
         blocking: false,
-        round: view.state.round,
         queued_at: sys::now_millis(),
         workstream: None,
     })?;
     let mut journal = Journal::open(&paths);
     journal.emit(
         journal::PipelineKind::PlannerSurfaceQueued,
-        journal::labels(&paths.run, Some(view.state.round), None),
+        journal::labels(&paths.run, None),
         journal::payload(&[
             ("kind", json!(queued.kind)),
             ("message", json!(queued.message)),
@@ -886,6 +1027,9 @@ fn attest(args: &AttestArgs) -> Result<i32> {
         &resolve(&args.run)?,
         &Reply {
             version: Some(crate::channel::REPLY_ENVELOPE_VERSION),
+            // The person who took the action, through the planner's own channel:
+            // `attest` is not an op an observer may issue at all.
+            author: Author::Planner,
             commands: vec![Command::Attest {
                 reference: args.reference.clone(),
             }],
@@ -925,6 +1069,10 @@ fn reply(args: &ReplyArgs) -> Result<i32> {
 }
 
 /// Validate a reply, queue it, and report which of the two true things happened.
+///
+/// The author's op allowlist is enforced here, before anything is queued: a
+/// monitor that asks for an op it may not issue is refused with the reason, and
+/// nothing durable is written on its behalf.
 fn submit(paths: &RunPaths, envelope: &Reply) -> Result<i32> {
     let view = RunView::open(paths)?;
     let channel = ChannelState::new(paths);
@@ -944,8 +1092,9 @@ fn submit(paths: &RunPaths, envelope: &Reply) -> Result<i32> {
         let mut journal = Journal::open(paths);
         journal.emit(
             journal::PipelineKind::PlannerReplied,
-            journal::labels(&paths.run, Some(view.state.round), None),
+            journal::labels(&paths.run, None),
             journal::payload(&[
+                ("author", json!(envelope.author)),
                 ("completion", json!(envelope.completion)),
                 ("reason", json!(envelope.reason)),
             ]),
@@ -954,7 +1103,7 @@ fn submit(paths: &RunPaths, envelope: &Reply) -> Result<i32> {
             if envelope.completion == Some(true) {
                 journal.emit(
                     journal::PipelineKind::CompletionRequested,
-                    journal::labels(&paths.run, Some(view.state.round), None),
+                    journal::labels(&paths.run, None),
                     journal::payload(&[("reason", json!(reason))]),
                 )?;
             }
@@ -970,22 +1119,11 @@ fn submit(paths: &RunPaths, envelope: &Reply) -> Result<i32> {
         )));
     }
 
-    // Edits require a live round: replying with one when no round is executing
-    // is refused with that reason. Two commands are not edits and stay legal at
-    // a round boundary — a bare `complete` verdict, and an `attest`, which
-    // records that a person did something rather than mutating the graph.
-    // Refusing an attestation at a boundary would strand every human-gated run:
-    // its round has settled, and no later round can open until the action is
-    // recorded.
-    let structural = envelope
-        .commands
-        .iter()
-        .any(|command| !matches!(command, Command::Complete { .. } | Command::Attest { .. }));
-    if structural && !view.state.round_open {
-        return Err(Error::Refused(format!(
-            "run '{}' has no round executing, and an edit needs a live round to apply to",
-            paths.run
-        )));
+    // What this author may ask for at all, before what this graph will accept:
+    // an op outside the allowlist is refused by name and with the reason, and
+    // never reaches the durable queue.
+    for command in &envelope.commands {
+        crate::channel::allows(envelope.author, command)?;
     }
 
     // Every edit is validated against the graph projected from the journal,
@@ -997,56 +1135,74 @@ fn submit(paths: &RunPaths, envelope: &Reply) -> Result<i32> {
         edits::compile(&mut projected, &frontier, command)?;
     }
 
-    // With a round executing, the reconciler is the single writer and the
-    // command goes to its durable queue. Without one there is no other writer,
-    // so the boundary-legal commands are recorded here under the ownership lock.
-    if !view.state.round_open {
-        let lock = ledger::OwnershipLock::acquire(paths, "reply")?;
-        let mut journal = Journal::open(paths);
-        for command in &envelope.commands {
-            match command {
-                Command::Complete { reason } => journal.emit(
-                    journal::PipelineKind::CompletionRequested,
-                    journal::labels(&paths.run, Some(view.state.round), None),
-                    journal::payload(&[("reason", json!(reason))]),
-                )?,
-                Command::Attest { reference } => journal.emit(
-                    journal::PipelineKind::HumanAttested,
-                    journal::labels(&paths.run, Some(view.state.round), Some(reference)),
-                    journal::payload(&[("ref", json!(reference))]),
-                )?,
-                _ => {}
+    // Whether a reconciler is running is asked by *taking the run's lock*, which
+    // is the same question and the only answer that cannot be raced: with a
+    // driver alive the lock is held and the command goes to its durable queue,
+    // and with nothing driving the run this process becomes the single writer
+    // and applies the edit itself. Execution is continuous, so there is no
+    // boundary at which an edit has nothing to apply to.
+    match ledger::OwnershipLock::acquire(paths, "reply") {
+        Ok(lock) => {
+            let mut journal = Journal::open(paths);
+            let mut graph = view.state.graph.clone();
+            for command in &envelope.commands {
+                let operations = edits::compile(&mut graph, &frontier, command)?;
+                journal.emit(
+                    journal::PipelineKind::EditCommitted,
+                    journal::labels(&paths.run, None),
+                    journal::payload(&[
+                        ("author", json!(envelope.author)),
+                        ("command", json!(command)),
+                        ("operations", json!(operations)),
+                    ]),
+                )?;
+                for operation in &operations {
+                    match operation {
+                        edits::Operation::CompletionRequested { reason } => journal.emit(
+                            journal::PipelineKind::CompletionRequested,
+                            journal::labels(&paths.run, None),
+                            journal::payload(&[("reason", json!(reason))]),
+                        )?,
+                        edits::Operation::HumanAttested { node } => journal.emit(
+                            journal::PipelineKind::HumanAttested,
+                            journal::labels(&paths.run, Some(node)),
+                            journal::payload(&[("ref", json!(node))]),
+                        )?,
+                        _ => {}
+                    }
+                }
             }
-        }
-        lock.release();
-        channel.answer(envelope)?;
-        println!("{}", json!({"reply": 0, "state": "applied"}));
-        return Ok(EXIT_SUCCESS);
-    }
-
-    let id = channel.submit(&envelope.commands)?;
-
-    let deadline = Instant::now() + Duration::from_secs(reply_timeout_seconds());
-    while Instant::now() < deadline {
-        if let Some(outcome) = channel.outcome_of(id) {
+            lock.release();
             channel.answer(envelope)?;
-            if outcome.applied {
-                println!("{}", json!({"reply": id, "state": "applied"}));
-                return Ok(EXIT_SUCCESS);
-            }
-            return Err(Error::Refused(
-                outcome
-                    .reason
-                    .unwrap_or_else(|| "the reconciler rejected the edit".into()),
-            ));
+            println!("{}", json!({"reply": 0, "state": "applied"}));
+            Ok(EXIT_SUCCESS)
         }
-        std::thread::sleep(ATTACH_POLL);
-    }
+        Err(Error::Locked { .. }) => {
+            let id = channel.submit(envelope.author, &envelope.commands)?;
+            let deadline = Instant::now() + Duration::from_secs(reply_timeout_seconds());
+            while Instant::now() < deadline {
+                if let Some(outcome) = channel.outcome_of(id) {
+                    channel.answer(envelope)?;
+                    if outcome.applied {
+                        println!("{}", json!({"reply": id, "state": "applied"}));
+                        return Ok(EXIT_SUCCESS);
+                    }
+                    return Err(Error::Refused(
+                        outcome
+                            .reason
+                            .unwrap_or_else(|| "the reconciler rejected the edit".into()),
+                    ));
+                }
+                std::thread::sleep(ATTACH_POLL);
+            }
 
-    // Accepted and durable, but not reconciled within the timeout: they remain
-    // queued, and this is not an instruction to resend.
-    println!("{}", json!({"reply": id, "state": "queued"}));
-    Ok(EXIT_QUEUED)
+            // Accepted and durable, but not reconciled within the timeout: they
+            // remain queued, and this is not an instruction to resend.
+            println!("{}", json!({"reply": id, "state": "queued"}));
+            Ok(EXIT_QUEUED)
+        }
+        Err(other) => Err(other),
+    }
 }
 
 fn reply_timeout_seconds() -> u64 {
@@ -1057,12 +1213,13 @@ fn reply_timeout_seconds() -> u64 {
         .unwrap_or(crate::channel::DEFAULT_REPLY_TIMEOUT_SECONDS)
 }
 
-/// `onepipeline channel serve` — the orchestrator member's judge side.
+/// `onepipeline channel serve` — an observer member's judge side.
 ///
-/// The orchestrator emits one JSON frame per round boundary on stdout; this
-/// relays it to the planner as a blocking surface, waits for the answer, and
-/// writes the verdict back. Only the planner can issue edits: a worker's
-/// proposal is advice, and this side never authors one.
+/// The observer emits one JSON frame on stdout whenever it has something to
+/// raise; this relays it to the planner as a surface, waits for the answer, and
+/// writes the verdict back. A frame is advice: this side never authors an edit
+/// on the observer's behalf, and an edit it wants comes through `reply` with its
+/// own author, where the allowlist applies.
 fn serve(args: &RunArgs) -> Result<i32> {
     let paths = resolve(&args.run)?;
     let channel = ChannelState::new(&paths);
@@ -1070,33 +1227,31 @@ fn serve(args: &RunArgs) -> Result<i32> {
 
     for line in stdin.lock().lines() {
         // End of input and a broken pipe are not the same fact. Read as one,
-        // the orchestrator's judge side exits 0 on a stream that failed
-        // mid-round, so the boundary question it was carrying never reaches the
-        // planner and nothing anywhere says why.
+        // the observer's judge side exits 0 on a stream that failed mid-frame,
+        // so the question it was carrying never reaches the planner and nothing
+        // anywhere says why.
         let line = line.map_err(|e| Error::Sibling {
             tool: "oneagentgraph",
-            message: format!("the orchestrator's frame stream could not be read: {e}"),
+            message: format!("the observer's frame stream could not be read: {e}"),
         })?;
         if line.trim().is_empty() {
             continue;
         }
-        let frame: BoundaryFrame = serde_json::from_str(line.trim())
-            .map_err(|e| Error::Refused(format!("the orchestrator emitted a bad frame: {e}")))?;
-        let view = RunView::open(&paths)?;
+        let frame: ObserverFrame = serde_json::from_str(line.trim())
+            .map_err(|e| Error::Refused(format!("the observer emitted a bad frame: {e}")))?;
         let queued = channel.push(Surface {
             id: 0,
             kind: frame.kind,
             message: frame.message,
             source: crate::channel::source::PROPOSAL.to_string(),
             blocking: frame.blocking,
-            round: view.state.round,
             queued_at: sys::now_millis(),
             workstream: frame.node,
         })?;
         let mut journal = Journal::open(&paths);
         journal.emit(
             journal::PipelineKind::PlannerSurfaceQueued,
-            journal::labels(&paths.run, Some(view.state.round), None),
+            journal::labels(&paths.run, queued.workstream.as_deref()),
             journal::payload(&[
                 ("kind", json!(queued.kind)),
                 ("message", json!(queued.message)),
@@ -1122,21 +1277,22 @@ fn serve(args: &RunArgs) -> Result<i32> {
     Ok(EXIT_SUCCESS)
 }
 
-/// What the orchestrator emits at a round boundary.
+/// What an observer emits when it has something to raise.
 ///
 /// External input, so it has a schema: an unknown key or a missing `kind` or
 /// `message` is refused by name rather than defaulted into a surface the
 /// planner then has to interpret.
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct BoundaryFrame {
-    /// What the surface is asking about, in the orchestrator persona's own
-    /// boundary vocabulary.
+struct ObserverFrame {
+    /// What the surface is asking about, in the observer persona's own
+    /// vocabulary.
     kind: String,
     /// Its text.
     message: String,
-    /// Whether the orchestrator is waiting on the answer. A boundary frame is
-    /// blocking unless it says otherwise; a worker's advice is not.
+    /// Whether the run should wait on the answer. A frame that says nothing is
+    /// blocking, because an observer that stopped to ask is waiting; a monitor
+    /// reporting what it saw says `false` and holds nothing back.
     #[serde(default = "blocking_by_default")]
     blocking: bool,
     /// The node that provoked it, when one did.
@@ -1275,9 +1431,8 @@ mod tests {
         "Drive",
         "drive",
         "to settlement",
-        "onepipeline round run",
-        "onepipeline round next",
-        "round next",
+        "observe",
+        "Observe",
         "nothing else",
         "run state",
         "you",
@@ -1367,10 +1522,14 @@ mod tests {
         assert_eq!(Settlement::Unattended.as_str(), "unattended");
     }
 
+    /// The prose that told a launched member to drive, which no member is asked
+    /// to do any more.
     #[test]
-    fn the_dag_graph_comes_from_the_environment_or_falls_back_to_the_shipped_one() {
-        assert!(!dag_graph().is_empty());
-        assert!(dag_graph().contains("dag-scope") || std::env::var(DAG_GRAPH_ENV).is_ok());
+    fn the_launched_graphs_task_never_asks_a_member_to_drive_the_engine() {
+        let task = run_description("tracked-release", Some("close the coverage gap"));
+        for verb in ["round run", "round next", "drive-run"] {
+            assert!(!task.contains(verb), "the observer's task names {verb}: {task}");
+        }
     }
 
     #[test]

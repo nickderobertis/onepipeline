@@ -84,7 +84,7 @@ pub struct EventKind(pub String);
 
 /// Where in the run an event happened.
 ///
-/// The five reserved keys are the ones `docs/contract.md` names on a
+/// The reserved keys are the ones `docs/contract.md` names on a
 /// [`DispatchRequest`](crate::executor::DispatchRequest); anything else a
 /// producer stamps rides in [`extra`](Self::extra). Enrichers never rewrite what
 /// is already there.
@@ -93,7 +93,14 @@ pub struct Labels {
     /// The run this event belongs to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
-    /// The round within the run.
+    /// The round within the run. **Deprecated and never stamped:** execution is
+    /// continuous, so there is no round to name.
+    ///
+    /// The field survives because this envelope is duplicated across the three
+    /// libraries and the siblings still declare it — dropping it here would make
+    /// one copy of a shared wire shape reject what another one writes. It is
+    /// read and re-serialized as it arrives and is `None` on everything this
+    /// crate produces.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub round: Option<u64>,
     /// The graph node being executed.
@@ -124,13 +131,11 @@ pub enum PipelineKind {
     RunStarted,
     /// A launch deliberately proceeded beside live repository holders.
     ConcurrentAcknowledged,
-    /// A round began executing.
-    RoundStarted,
-    /// A round stopped executing, with the state it settled in.
-    RoundFinished,
+    /// Every dependency of a node has settled `done`, so it may dispatch now.
+    NodeReady,
     /// A node's dispatch was started.
     NodeDispatched,
-    /// A node reached a terminal status for this round.
+    /// A node reached a terminal status.
     NodeSettled,
     /// A live edit was accepted and applied to the desired graph.
     EditCommitted,
@@ -150,10 +155,10 @@ pub enum PipelineKind {
     RunStopped,
     /// An in-flight dispatch recorded nothing past the stall threshold.
     QuietWorker,
-    /// A round exceeded its budget and cooperatively cancelled its workers.
-    RoundBudgetExceeded,
-    /// A request a round boundary depends on was retried.
-    BoundaryRetried,
+    /// A blocking surface began holding a subtree of dependents back.
+    DecisionPending,
+    /// That surface was cleared, and the subtree it held was released.
+    DecisionCleared,
     /// A cross-DAG edge resolved, with how far its upstream had got when it did.
     CrossDagSatisfied,
     /// A cross-DAG upstream advanced after its consumer recorded it.
@@ -168,8 +173,7 @@ impl PipelineKind {
         match self {
             Self::RunStarted => "run-started",
             Self::ConcurrentAcknowledged => "concurrent-acknowledged",
-            Self::RoundStarted => "round-started",
-            Self::RoundFinished => "round-finished",
+            Self::NodeReady => "node-ready",
             Self::NodeDispatched => "node-dispatched",
             Self::NodeSettled => "node-settled",
             Self::EditCommitted => "edit-committed",
@@ -181,8 +185,8 @@ impl PipelineKind {
             Self::DriverAdopted => "driver-adopted",
             Self::RunStopped => "run-stopped",
             Self::QuietWorker => "quiet-worker",
-            Self::RoundBudgetExceeded => "round-budget-exceeded",
-            Self::BoundaryRetried => "boundary-retried",
+            Self::DecisionPending => "decision-pending",
+            Self::DecisionCleared => "decision-cleared",
             Self::CrossDagSatisfied => "cross-dag-satisfied",
             Self::UpstreamModified => "upstream-modified",
             Self::CompletionRequested => "completion-requested",
@@ -217,8 +221,7 @@ impl From<PipelineKind> for EventKind {
 pub const PIPELINE_KINDS: &[PipelineKind] = &[
     PipelineKind::RunStarted,
     PipelineKind::ConcurrentAcknowledged,
-    PipelineKind::RoundStarted,
-    PipelineKind::RoundFinished,
+    PipelineKind::NodeReady,
     PipelineKind::NodeDispatched,
     PipelineKind::NodeSettled,
     PipelineKind::EditCommitted,
@@ -230,8 +233,8 @@ pub const PIPELINE_KINDS: &[PipelineKind] = &[
     PipelineKind::DriverAdopted,
     PipelineKind::RunStopped,
     PipelineKind::QuietWorker,
-    PipelineKind::RoundBudgetExceeded,
-    PipelineKind::BoundaryRetried,
+    PipelineKind::DecisionPending,
+    PipelineKind::DecisionCleared,
     PipelineKind::CrossDagSatisfied,
     PipelineKind::UpstreamModified,
     PipelineKind::CompletionRequested,

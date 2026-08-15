@@ -2,12 +2,11 @@
 //!
 //! One `events.jsonl` per run holds every envelope the run produced — this
 //! crate's own, plus the `oneagentgraph` and `onevcs` envelopes it relays — so
-//! there is one ordered record a view, a replay, and a round transition all read
-//! the same way.
+//! there is one ordered record a view and a replay both read the same way.
 //!
-//! The journal is append-only and the engine verbs are its only writer. Reading
-//! is unlocked and takes no lock a writer needs, which is what lets every view
-//! run beside a live round.
+//! The journal is append-only and the engine loop is its only writer of graph
+//! state. Reading is unlocked and takes no lock a writer needs, which is what
+//! lets every view run beside a live run.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::path::Path;
@@ -98,11 +97,13 @@ impl Journal {
     }
 }
 
-/// Labels naming a run, and optionally a round and a node within it.
-pub fn labels(run: &str, round: Option<u64>, node: Option<&str>) -> Labels {
+/// Labels naming a run, and optionally a node within it.
+///
+/// No round: execution is continuous, so the reserved `round` key is never
+/// stamped — see [`Labels::round`](crate::event::Labels::round).
+pub fn labels(run: &str, node: Option<&str>) -> Labels {
     Labels {
         run_id: Some(run.to_string()),
-        round,
         node: node.map(str::to_string),
         ..Labels::default()
     }
@@ -121,7 +122,7 @@ pub fn payload(fields: &[(&str, Value)]) -> Map<String, Value> {
 ///
 /// A line this build cannot parse is skipped rather than ending the read: a
 /// reader skips records from a version it does not know rather than failing the
-/// round it is observing.
+/// run it is observing.
 pub fn read(path: &Path) -> Vec<Envelope> {
     ledger::read_lines(path)
         .iter()
@@ -132,8 +133,8 @@ pub fn read(path: &Path) -> Vec<Envelope> {
 /// Whether the journal holds a line this build could not read.
 ///
 /// Strict replay needs to know: an unreadable line might have been an
-/// authoritative graph mutation, so a transition that folds one reports rather
-/// than guesses.
+/// authoritative graph mutation, so a reader that folds one reports rather than
+/// guesses.
 pub fn has_unreadable_lines(path: &Path) -> bool {
     ledger::read_lines(path)
         .iter()
@@ -182,7 +183,7 @@ fn merged_order(events: &[Envelope]) -> Vec<usize> {
     }
 
     let mut order = Vec::with_capacity(events.len());
-    // Each round takes the earliest record still at the head of any stream. A
+    // Each pass takes the earliest record still at the head of any stream. A
     // stream's head is its next `seq`, so its own order is never in question;
     // what this decides is only which stream goes next.
     while let Some(stream) = streams
@@ -322,14 +323,14 @@ mod tests {
         journal
             .emit(
                 PipelineKind::RunStarted,
-                labels("demo", None, None),
+                labels("demo", None),
                 payload(&[]),
             )
             .expect("appended");
         journal
             .emit(
-                PipelineKind::RoundStarted,
-                labels("demo", Some(1), None),
+                PipelineKind::NodeReady,
+                labels("demo", Some("build")),
                 payload(&[]),
             )
             .expect("appended");
@@ -354,7 +355,7 @@ mod tests {
         journal
             .emit(
                 PipelineKind::RunStarted,
-                labels("demo", None, None),
+                labels("demo", None),
                 payload(&[]),
             )
             .expect("appended");
@@ -379,7 +380,7 @@ mod tests {
             seq: 7,
             source: Source::Agentgraph,
             kind: EventKind("turn-finished".into()),
-            labels: labels("demo", Some(1), Some("build")),
+            labels: labels("demo", Some("build")),
             payload: payload(&[]),
             artifacts: Vec::new(),
         };

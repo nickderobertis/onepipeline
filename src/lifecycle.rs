@@ -33,7 +33,6 @@ pub const PR_AUTHOR_PERSONA: &str = "pr-author";
 pub fn execute(
     executor: &dyn Executor,
     run: &str,
-    round: u64,
     default_graph: &str,
     node: &Node,
     cancel: &crate::executor::CancellationToken,
@@ -55,7 +54,7 @@ pub fn execute(
     // for a node that was never going to finish.
     // llmlint: ignore-block[changed_behavior_has_e2e] what this arm newly carries — a
     // step whose declaration no dispatch can run under — is refused by `graph::validate`
-    // at `start`, at every round transition, and at every live edit, so only a graph
+    // at `start` and at every live edit, so only a graph
     // folded from a journal an *earlier build* wrote reaches it. Reaching that end to
     // end means writing that journal by hand, which proves the fixture rather than the
     // code, and deleting the arm would reinstate the silent default this control exists
@@ -83,11 +82,11 @@ pub fn execute(
     // Where in the run the session's own envelopes belong. The node, not a
     // step: a session outlives every step that wrote in it, and the publication
     // that follows them belongs to none.
-    let whose = engine::dispatch_labels(run, round, &node.id, None, node.persona.as_deref());
+    let whose = engine::dispatch_labels(run, &node.id, None, node.persona.as_deref());
     let mut branch: Option<String> = node.branch.clone();
     // The steps the preserved branch already carries, plus the ones this attempt
-    // adds. Carried forward whole, because the branch a later round preserves is
-    // the same branch: a step skipped this round is still on it.
+    // adds. Carried forward whole, because the branch a later attempt preserves
+    // is the same branch: a step skipped on one attempt is still on it.
     let mut completed: Vec<String> = node
         .resume
         .as_ref()
@@ -142,7 +141,6 @@ pub fn execute(
             task: step.rendered_task(node.context.as_deref()),
             labels: engine::dispatch_labels(
                 run,
-                round,
                 &node.id,
                 declared_steps.then_some(step.id.as_str()),
                 step.persona.as_deref(),
@@ -151,7 +149,7 @@ pub fn execute(
             workspace: workspace.clone(),
             cancel: cancel.clone(),
         };
-        let drained = engine::attempt(executor, &node.id, engine::Role::Worker, cancel, tx, &build);
+        let drained = engine::attempt(executor, &node.id, cancel, tx, &build);
         // The session the dispatch opened is what publication needs, whether or
         // not the step succeeded: a cancelled step's commits are preserved on
         // the branch it left behind.
@@ -188,7 +186,6 @@ pub fn execute(
     let settlement = publish(
         executor,
         run,
-        round,
         default_graph,
         node,
         worktree.as_deref(),
@@ -204,7 +201,7 @@ pub fn execute(
 /// Draft the change request, then publish through `onevcs`.
 #[allow(
     clippy::too_many_arguments,
-    reason = "publication needs the dispatch context (executor, run, round, node, cancel, \
+    reason = "publication needs the dispatch context (executor, run, node, cancel, \
               stream) as well as what the steps left behind (the session token, its branch, \
               and the worktree they worked in); the first six are the node's own dispatch \
               identity and bundling them would only move the same list one indirection away"
@@ -212,7 +209,6 @@ pub fn execute(
 fn publish(
     executor: &dyn Executor,
     run: &str,
-    round: u64,
     default_graph: &str,
     node: &Node,
     worktree: Option<&std::path::Path>,
@@ -225,7 +221,6 @@ fn publish(
         draft_title(
             executor,
             run,
-            round,
             default_graph,
             node,
             worktree,
@@ -249,7 +244,7 @@ fn publish(
                 };
             }
             let labels =
-                engine::dispatch_labels(run, round, &node.id, None, node.persona.as_deref());
+                engine::dispatch_labels(run, &node.id, None, node.persona.as_deref());
             let _ = tx.send(Message::Event(Box::new(crate::vcs::published_event(
                 &published, &labels,
             ))));
@@ -302,7 +297,6 @@ fn publish(
 fn draft_title(
     executor: &dyn Executor,
     run: &str,
-    round: u64,
     default_graph: &str,
     node: &Node,
     worktree: Option<&std::path::Path>,
@@ -327,7 +321,7 @@ fn draft_title(
              following the repository's own template. The task this branch delivered:\n\n{}",
             node.rendered_task()
         ),
-        labels: engine::dispatch_labels(run, round, &node.id, None, Some(PR_AUTHOR_PERSONA)),
+        labels: engine::dispatch_labels(run, &node.id, None, Some(PR_AUTHOR_PERSONA)),
         // None of the node's own: the drafting dispatch is not the node's work,
         // and a turn budget written for that work would be spent twice — once on
         // it and once here — if this dispatch inherited it.
@@ -382,7 +376,6 @@ fn relay_into(tx: &Sender<Message>, node: Labels) -> Box<dyn Fn(Envelope) + Send
 /// An enricher, so it never rewrites: a key the producer stamped stands.
 fn stamp(labels: &mut Labels, known: &Labels) {
     labels.run_id = labels.run_id.take().or_else(|| known.run_id.clone());
-    labels.round = labels.round.or(known.round);
     labels.node = labels.node.take().or_else(|| known.node.clone());
     labels.persona = labels.persona.take().or_else(|| known.persona.clone());
 }
@@ -564,7 +557,6 @@ mod tests {
         let settlement = execute(
             &crate::executor::LocalExecutor,
             "demo",
-            1,
             "graphs/node-scope.yaml",
             &node,
             &crate::executor::CancellationToken::new(),

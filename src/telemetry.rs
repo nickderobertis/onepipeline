@@ -146,8 +146,8 @@ pub enum BucketName {
     LockWait,
     /// Wall time preparing a workspace: the clone, the worktree, the fetch.
     Setup,
-    /// Everything else the run's own clock covers — round transitions, waiting
-    /// on a planner decision or on a person, and the gaps between them.
+    /// Everything else the run's own clock covers — waiting on a decision point
+    /// or on a person, and the gaps between dispatches.
     Scheduling,
 }
 
@@ -702,7 +702,6 @@ mod tests {
             kind,
             labels: Labels {
                 run_id: Some("demo".into()),
-                round: Some(1),
                 node: node.map(str::to_string),
                 ..Labels::default()
             },
@@ -813,7 +812,7 @@ mod tests {
                 Some("build"),
                 &[("status", json!("done"))],
             ),
-            at(100, journal::PipelineKind::RoundFinished, None, &[]),
+            at(100, journal::PipelineKind::RunStopped, None, &[]),
         ];
         let telemetry = of_run(&paths(), &events);
         assert_eq!(telemetry.wall_ms, 100_000);
@@ -1036,7 +1035,7 @@ mod tests {
                 Some("build"),
                 &[],
             ),
-            at(30, journal::PipelineKind::RoundFinished, None, &[]),
+            at(30, journal::PipelineKind::RunStopped, None, &[]),
         ];
         // Deliberately out of order: the wall clock is first-to-last as read.
         events.reverse();

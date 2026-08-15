@@ -16,8 +16,9 @@ use clap::{Args, Parser, Subcommand};
 
 use crate::channel::SurfaceKind;
 
-/// The round budget, in seconds, when `start` is given none.
-pub const DEFAULT_ROUND_BUDGET_SECONDS: u64 = 14_400;
+/// What `--dag-graph` means when it names no graph: no agent graph is launched
+/// at all, and deterministic code alone drives the run.
+pub const DAG_GRAPH_OFF: &str = "off";
 
 /// The planner-update pacemaker interval, in seconds, when `start` is given
 /// none.
@@ -37,13 +38,10 @@ pub struct Cli {
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 #[command(rename_all = "kebab-case")]
 pub enum Command {
-    /// Launch a plan's dag-scope agent graph and drive it.
+    /// Execute a plan: drive its DAG continuously to settlement.
     Start(StartArgs),
     /// Attach a fresh driver to a run whose ledger is intact.
     Adopt(RunArgs),
-    /// The engine verbs the orchestrator member drives.
-    #[command(subcommand)]
-    Round(RoundCommand),
     /// The channel's server side.
     #[command(subcommand)]
     Channel(ChannelCommand),
@@ -73,6 +71,14 @@ pub enum Command {
     Transcript(TranscriptArgs),
     /// Session timing and usage.
     Telemetry(TelemetryArgs),
+    /// Drive one run's engine loop in this process.
+    ///
+    /// Not part of the documented surface and hidden from `--help`: it is the
+    /// process `start --detach` retains, because the loop that drives a run
+    /// cannot outlive a launcher that is about to exit. Nothing but this
+    /// crate's own launcher spells it.
+    #[command(hide = true, name = crate::engine::DRIVE_VERB)]
+    DriveRun(RunArgs),
     /// Drive one agent graph in this process, relaying its envelopes as NDJSON.
     ///
     /// Not part of the documented surface and hidden from `--help`: it is how
@@ -96,9 +102,13 @@ pub struct StartArgs {
     /// Print the launch record and return, leaving the run unattended.
     #[arg(long)]
     pub detach: bool,
-    /// How long one round may run, in seconds.
-    #[arg(long, value_name = "SECONDS", default_value_t = DEFAULT_ROUND_BUDGET_SECONDS)]
-    pub round_budget: u64,
+    /// The dag-scope agent graph to attach as an observer, or `off` for none.
+    ///
+    /// `off` is the shipped default: no agent is required to run a plan. A
+    /// graph named here observes the run and authors channel surfaces; it never
+    /// drives the engine.
+    #[arg(long, value_name = "REF", default_value = DAG_GRAPH_OFF)]
+    pub dag_graph: String,
     /// How often the durable planner-update pacemaker comes due, in seconds.
     #[arg(long, value_name = "SECONDS", default_value_t = DEFAULT_HEARTBEAT_INTERVAL_SECONDS)]
     pub heartbeat_interval: u64,
@@ -138,22 +148,11 @@ pub struct DriveArgs {
     pub sets: Vec<String>,
 }
 
-/// The engine verbs, guarded by the run ownership lock: single writer.
-#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
-#[command(rename_all = "kebab-case")]
-pub enum RoundCommand {
-    /// Execute the current round.
-    Run(RunArgs),
-    /// Transition to the next round.
-    Next(RunArgs),
-}
-
 /// The channel's server side.
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 #[command(rename_all = "kebab-case")]
 pub enum ChannelCommand {
-    /// Serve the channel as the orchestrator member's judge-side command
-    /// provider.
+    /// Serve the channel as an observer member's judge-side command provider.
     Serve(RunArgs),
 }
 

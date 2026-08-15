@@ -1,7 +1,6 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "run_id": "golden",
-  "round": 1,
   "state": "complete",
   "ok": true,
   "nodes": [

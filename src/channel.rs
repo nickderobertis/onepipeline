@@ -37,6 +37,102 @@ use crate::plan::Node;
 /// The reply envelope version this crate reads and writes.
 pub const REPLY_ENVELOPE_VERSION: u32 = 1;
 
+/// Who wrote a reply, and therefore which ops it may carry.
+///
+/// A channel with two authors needs to say which one is speaking: the planner
+/// owns the graph and the monitor only watches it, and the difference has to be
+/// enforced rather than trusted. Omitted, an envelope is the planner's — every
+/// reply written before this field existed was.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Author {
+    /// The planner: it owns decomposition and review, and may issue every op.
+    #[default]
+    Planner,
+    /// An observing monitor: it may correct and re-run work, and may not decide
+    /// that the run is finished, that a person acted, or that a node goes away.
+    Monitor,
+}
+
+impl Author {
+    /// The word a record names this author with.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Planner => "planner",
+            Self::Monitor => "monitor",
+        }
+    }
+
+    /// Whether this is the default, so serialization can omit it.
+    fn is_planner(&self) -> bool {
+        matches!(self, Self::Planner)
+    }
+}
+
+/// The ops one author may issue, or a refusal naming what it may not.
+///
+/// The allowlist is per author and it is exhaustive: an op that is not on it is
+/// refused, so a new op is refused for the monitor until somebody decides
+/// otherwise rather than being granted by omission.
+pub fn allows(author: Author, command: &Command) -> crate::Result<()> {
+    if author == Author::Planner {
+        return Ok(());
+    }
+    let refused = match command {
+        Command::Retry { .. }
+        | Command::Requeue { .. }
+        | Command::Cancel { .. }
+        | Command::Context { .. }
+        | Command::Add { .. } => return Ok(()),
+        Command::Complete { .. } => {
+            "whether the run is finished is the planner's verdict, not an observation"
+        }
+        Command::Attest { .. } => {
+            "a human action is attested by the person who took it, never by a watcher"
+        }
+        Command::Drop { .. } => {
+            "removing work from the graph is a decomposition decision the planner owns"
+        }
+        Command::Reparent { .. } => {
+            "rewiring dependencies is a decomposition decision the planner owns"
+        }
+    };
+    Err(crate::Error::Refused(format!(
+        "'{}' is not an op the monitor may issue: {refused}. Surface it to the planner instead",
+        op_of(command)
+    )))
+}
+
+/// The wire word for one command's op.
+pub fn op_of(command: &Command) -> &'static str {
+    match command {
+        Command::Add { .. } => "add",
+        Command::Drop { .. } => "drop",
+        Command::Reparent { .. } => "reparent",
+        Command::Retry { .. } => "retry",
+        Command::Cancel { .. } => "cancel",
+        Command::Requeue { .. } => "requeue",
+        Command::Attest { .. } => "attest",
+        Command::Complete { .. } => "complete",
+        Command::Context { .. } => "context",
+    }
+}
+
+/// The node one command is about, when it names one.
+pub fn target_of(command: &Command) -> Option<String> {
+    match command {
+        Command::Add { node } => Some(node.id.clone()),
+        Command::Drop { id, .. }
+        | Command::Reparent { id, .. }
+        | Command::Retry { id, .. }
+        | Command::Cancel { id }
+        | Command::Requeue { id, .. }
+        | Command::Context { id, .. } => Some(id.clone()),
+        Command::Attest { reference } => Some(reference.clone()),
+        Command::Complete { .. } => None,
+    }
+}
+
 /// One reply to a planner surface.
 ///
 /// A command-only envelope gets a synthesized continuing verdict; commands can
@@ -47,6 +143,9 @@ pub struct Reply {
     /// [`REPLY_ENVELOPE_VERSION`] when the envelope carries commands.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<u32>,
+    /// Who wrote it. Omitted, [`Author::Planner`].
+    #[serde(default, skip_serializing_if = "Author::is_planner")]
+    pub author: Author,
     /// The legacy verdict: whether the planner considers the run complete.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion: Option<bool>,
@@ -110,7 +209,7 @@ pub enum Command {
         node: Node,
     },
     /// Park a pending or running node: cancel its dispatch cooperatively and
-    /// hold it out of every later round until a `requeue`.
+    /// hold it out of every later dispatch until a `requeue`.
     Cancel {
         /// The node to park.
         id: String,
@@ -141,7 +240,8 @@ pub enum Command {
     Context {
         /// The node the note is for.
         id: String,
-        /// The note. It carries exactly one round.
+        /// The note. It carries exactly one dispatch: it attaches to the node's
+        /// next one and is consumed when that dispatch takes it.
         note: String,
         /// When the note reaches the node. Omitted, it is [`Deliver::Auto`],
         /// which is what every `context` edit written before this field got.
@@ -208,6 +308,8 @@ pub(crate) mod source {
     pub const PROPOSAL: &str = "proposal";
     /// The reconciler answered an edit it could not apply.
     pub const RECONCILER: &str = "reconciler";
+    /// An observing monitor applied an edit of its own.
+    pub const MONITOR: &str = "monitor";
 }
 
 /// One surface, as it sits in the durable queue.
@@ -221,13 +323,10 @@ pub(crate) struct Surface {
     pub message: String,
     /// What raised it — see [`source`].
     pub source: String,
-    /// Whether the run is waiting on the answer. A non-blocking surface does
-    /// not stop the graph frontier.
+    /// Whether the run is waiting on the answer. A **blocking** surface is a
+    /// decision point and holds the subtree that depends on
+    /// [`workstream`](Self::workstream); a non-blocking one holds nothing.
     pub blocking: bool,
-    /// The round it was written for. One that outlives its round is discarded
-    /// rather than kept consumable: it describes work in a round that has
-    /// finished.
-    pub round: u64,
     /// When it was queued, in epoch milliseconds.
     pub queued_at: u64,
     /// The node that provoked it, when one did.
@@ -275,6 +374,9 @@ pub(crate) struct QueuedReply {
 pub(crate) struct QueuedCommands {
     /// Monotonic within the run.
     pub id: u64,
+    /// Who submitted it, which is what decides the ops it may carry.
+    #[serde(default)]
+    pub author: Author,
     /// The commands, reconciled in order.
     pub commands: Vec<Command>,
 }
@@ -339,22 +441,15 @@ impl ChannelState {
         Ok(surface)
     }
 
-    /// Claim the next readable surface for the active round.
+    /// Claim the next readable surface.
     ///
-    /// A surface that outlives the round it was written for is **discarded**,
-    /// not kept consumable: it describes work in a round that has finished, and
-    /// the check-in that replaces it describes the round actually running.
-    pub fn claim(&self, active_round: u64) -> crate::Result<Option<Surface>> {
+    /// No round to outlive: a surface describes the one continuous run, so it
+    /// stays consumable until somebody reads it. A check-in that has been
+    /// superseded is replaced at [`push`](Self::push) rather than discarded
+    /// here.
+    pub fn claim(&self) -> crate::Result<Option<Surface>> {
         let mut queue = self.queue();
-        let mut claimed = None;
-        while !queue.waiting.is_empty() {
-            let candidate = queue.waiting.remove(0);
-            if candidate.round != 0 && active_round != 0 && candidate.round != active_round {
-                continue;
-            }
-            claimed = Some(candidate);
-            break;
-        }
+        let claimed = (!queue.waiting.is_empty()).then(|| queue.waiting.remove(0));
         if let Some(surface) = &claimed {
             // A surface outlives its delivery while it waits for an answer, so
             // it is held here rather than dropped: the run is reported as
@@ -418,11 +513,12 @@ impl ChannelState {
     }
 
     /// Append one envelope of edits to the durable command queue.
-    pub fn submit(&self, commands: &[Command]) -> crate::Result<u64> {
+    pub fn submit(&self, author: Author, commands: &[Command]) -> crate::Result<u64> {
         let path = self.paths.channel("commands.jsonl");
         let id = crate::ledger::read_lines(&path).len() as u64;
         let queued = QueuedCommands {
             id,
+            author,
             commands: commands.to_vec(),
         };
         crate::ledger::append_line(
