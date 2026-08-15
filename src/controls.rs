@@ -63,14 +63,46 @@ pub struct NodeControls {
     pub max_turns: Option<NonZeroU32>,
 }
 
-/// One declared control, paired with what applies it.
+/// One control a node declared.
 ///
-/// `name` is spelled as the *plan* spells it, because a refusal about it is read
-/// by whoever wrote the plan. `set` is `None` for a control this build accepts
-/// and has no override for, which is the case the refusal exists for.
-struct Control {
-    name: &'static str,
-    set: Option<String>,
+/// A closed set, and each variant carries its own value: what a control is
+/// called and what applies it are both decided by the variant, so a control
+/// cannot be built under one name and applied as another, and a name this build
+/// does not know cannot be built at all.
+enum Control {
+    /// The turn budget, which the worker member's own `max_turns` applies.
+    MaxTurns(NonZeroU32),
+    /// A control this build accepts and has no override for.
+    ///
+    /// None exists today, which is why it is `cfg(test)`: production cannot name
+    /// one, and the refusal that answers one is proven rather than assumed. A
+    /// future control that has nowhere to land takes this shape without the
+    /// `cfg` — and until it is given one, `declared` will not compile.
+    #[cfg(test)]
+    Unappliable(&'static str),
+}
+
+impl Control {
+    /// The name the *plan* spells it with, which is what a refusal has to say.
+    fn name(&self) -> &'static str {
+        match self {
+            Self::MaxTurns(_) => "max_turns",
+            #[cfg(test)]
+            Self::Unappliable(name) => name,
+        }
+    }
+
+    /// The `PATH=VALUE` that applies it, or `None` where this build has none.
+    fn set(&self) -> Option<String> {
+        match self {
+            // `OnejudgeMember::max_turns` is the sibling's own turn ceiling for
+            // the two-party conversation a node's dispatch is, so the plan's
+            // budget is that field and needs no merge layer here.
+            Self::MaxTurns(budget) => Some(format!("members.{WORKER_MEMBER}.max_turns={budget}")),
+            #[cfg(test)]
+            Self::Unappliable(_) => None,
+        }
+    }
 }
 
 impl NodeControls {
@@ -121,13 +153,7 @@ impl NodeControls {
         let Self { max_turns } = self;
         let mut declared = Vec::new();
         if let Some(budget) = max_turns {
-            // `OnejudgeMember::max_turns` is the sibling's own turn ceiling for
-            // the two-party conversation a node's dispatch is, so the plan's
-            // budget is that field and needs no merge layer here.
-            declared.push(Control {
-                name: "max_turns",
-                set: Some(format!("members.{WORKER_MEMBER}.max_turns={budget}")),
-            });
+            declared.push(Control::MaxTurns(*budget));
         }
         declared
     }
@@ -159,11 +185,11 @@ fn rendered(declared: Vec<Control>) -> std::result::Result<Vec<String>, String> 
     declared
         .into_iter()
         .map(|control| {
-            control.set.ok_or_else(|| {
+            control.set().ok_or_else(|| {
                 format!(
                     "`{}` is a control this build accepts and cannot apply to a dispatch, \
                      so the dispatch would silently run under a default nobody asked for",
-                    control.name
+                    control.name()
                 )
             })
         })
@@ -247,13 +273,10 @@ mod tests {
     #[test]
     fn a_control_with_nowhere_to_land_is_refused_by_name_rather_than_dropped() {
         // The shape a future control takes when this crate accepts it and has no
-        // override for it — what `declared` writes as `set: None`. `done_when`
-        // was exactly this and said nothing at all for the whole of its life.
-        let refused = rendered(vec![Control {
-            name: "someday",
-            set: None,
-        }])
-        .expect_err("a control with no override cannot be applied");
+        // override for it. `done_when` was exactly this and said nothing at all
+        // for the whole of its life.
+        let refused = rendered(vec![Control::Unappliable("someday")])
+            .expect_err("a control with no override cannot be applied");
         assert!(refused.contains("someday"), "{refused}");
         assert!(
             refused.contains("default nobody asked for"),

@@ -539,6 +539,33 @@ mod tests {
         assert!(why.contains("node 'service': step 'review':"), "{why}");
         assert!(why.contains("no turn at all"), "{why}");
 
+        // And the workstream itself stops there. The repository is one nothing
+        // has registered, so if this refusal came any later the failure would be
+        // `onevcs`'s — which is the same as saying a branch would already exist
+        // for a node that was never going to finish. The executor is the real
+        // one for the same reason: a regression here would go looking for
+        // `oneagentgraph` rather than quietly running the step.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let settlement = execute(
+            &crate::executor::LocalExecutor,
+            "demo",
+            1,
+            "graphs/node-scope.yaml",
+            &node,
+            &crate::executor::CancellationToken::new(),
+            &tx,
+        );
+        assert_eq!(settlement.status, NodeStatus::Failed);
+        assert_eq!(settlement.outcome.as_deref(), Some("invalid-node"));
+        let detail = settlement.detail.expect("the settlement says why");
+        assert!(detail.contains("step 'review'"), "{detail}");
+        assert!(detail.contains("no turn at all"), "{detail}");
+        assert_eq!(
+            rx.try_iter().count(),
+            0,
+            "a workstream that could not dispatch a step opened a session anyway"
+        );
+
         // The step that *can* run keeps the budget it declared, narrowed.
         let node = Node {
             steps: Some(vec![Step {
