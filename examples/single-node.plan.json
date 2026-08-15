@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "name": "single-node",
   "goal": {
     "text": "Close one coverage gap in the reporting service"
@@ -10,8 +10,8 @@
       "repo": "nickderobertis/some-service",
       "persona": "engineer",
       "title": "test: cover the reporting service's failure paths",
-      "task": "## What\nAdd realistic tests for the reporting endpoint's failure and recovery paths.\n\n## Why\nThe endpoint's failures are currently unproven, so a regression there reaches users before anyone sees it.\n\n## Acceptance criteria\n- A test drives the real endpoint and asserts its behaviour when the upstream store is unavailable.\n- A test drives the real endpoint and asserts it recovers once the store returns.\n- Each new test is observed failing for the intended reason before it passes.\n- The repository's own gate is green.",
-      "done_when": "all task acceptance criteria are met, the new tests fail for the intended reason before they pass, and the repository's full gate passes without lowering enforced coverage"
+      "task": "## What\nAdd realistic tests for the reporting endpoint's failure and recovery paths.\n\n## Why\nThe endpoint's failures are currently unproven, so a regression there reaches users before anyone sees it.\n\n## Acceptance criteria\n- A test drives the real endpoint and asserts its behaviour when the upstream store is unavailable.\n- A test drives the real endpoint and asserts it recovers once the store returns.\n- Each new test is observed failing for the intended reason before it passes.\n- The repository's own full gate is green, without lowering enforced coverage.",
+      "max_turns": 24
     }
   ]
 }

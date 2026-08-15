@@ -506,6 +506,13 @@ fn compile_requeue(
     if let Some(object) = merged.as_object_mut() {
         object.remove("parked");
     }
+    // A retired field can only have come from the amendment — the node's own
+    // serialization no longer carries one — and it is named here rather than
+    // reaching the schema as an unknown field, because a retry that carries a
+    // corrected review bar is exactly where a planner writes one.
+    if let Some(retired) = crate::plan::retired_field_refusal(&merged) {
+        return Err(refuse(format!("requeue: node {retired}")));
+    }
     // The amended node is validated as the node it produces, so a malformed pin
     // is refused at submission rather than at the next dispatch.
     let amended: Node = serde_json::from_value(merged)
@@ -1157,6 +1164,41 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(message.contains("is invalid"), "{message}");
+    }
+
+    /// The retry that carried a corrected review bar is where a planner writes
+    /// one, so the amendment gets the same named refusal a plan file does — not
+    /// the schema's bare `unknown field`.
+    #[test]
+    fn requeue_refuses_a_retired_field_by_name_and_says_where_the_bar_goes() {
+        let mut parked = agent("contract", &[]);
+        parked.parked = true;
+        let mut graph = graph_of(vec![parked]);
+        let mut amend = Map::new();
+        amend.insert(
+            "done_when".into(),
+            Value::String("the gate is green".into()),
+        );
+        let message = compile(
+            &mut graph,
+            &Frontier::default(),
+            &Command::Requeue {
+                id: "contract".into(),
+                amend: Some(amend),
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(message.contains("'contract':"), "{message}");
+        assert!(
+            message.contains("`done_when` is no longer a plan field"),
+            "{message}"
+        );
+        assert!(
+            message.contains("`## Acceptance criteria` section of its own task"),
+            "the refusal does not say where the bar goes: {message}"
+        );
+        assert!(!message.contains("unknown field"), "{message}");
     }
 
     #[test]

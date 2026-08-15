@@ -842,10 +842,34 @@ fn execute_direct(
     tx: &Sender<Message>,
 ) -> Settlement {
     let graph = node_graph(node.agent_graph.as_ref(), default_graph);
+    // The node's controls are narrowed *before* a dispatch is composed, and a
+    // declaration no dispatch can run under settles the node instead of being
+    // launched with. Validation refuses one at every submission, so reaching
+    // this arm means the graph came from somewhere validation did not run — a
+    // journal a stale build wrote, or one edited by hand — and the answer there
+    // is the same as the plan's, in the node's own settlement.
+    // llmlint: ignore-block[changed_behavior_has_e2e] no invocation a user can type
+    // reaches this arm: `graph::validate` refuses the declaration at `start`, at every
+    // round transition, and at every live edit, so the only graph carrying one is
+    // folded from a journal an *earlier build* wrote. This suite could reach that only
+    // by writing that journal by hand, which would prove the fixture rather than the
+    // code, and deleting the arm would reinstate the silent default this control
+    // exists to remove. Held instead by the unit test below, which drives the real
+    // `LocalExecutor`.
+    let controls = match crate::controls::NodeControls::of_node(node) {
+        Ok(controls) => controls,
+        Err(why) => {
+            return Settlement {
+                detail: Some(why),
+                ..Settlement::plain(&node.id, NodeStatus::Failed, Some("invalid-node"))
+            }
+        }
+    }; // llmlint: ignore-end[changed_behavior_has_e2e]
     let request = || DispatchRequest {
         graph: graph.clone(),
         task: node.rendered_task(),
         labels: dispatch_labels(run, round, &node.id, None, node.persona.as_deref()),
+        controls,
         workspace: WorkspaceSpec::Path(project_dir()),
         cancel: cancel.clone(),
     };
@@ -1577,6 +1601,41 @@ mod tests {
             deps: deps.iter().map(|d| (*d).to_string()).collect(),
             ..Node::default()
         }
+    }
+
+    /// A node whose budget no dispatch can run under settles instead of being
+    /// launched with.
+    ///
+    /// Validation refuses one at every submission, so a node reaching here with
+    /// a zero came from a graph validation never saw — a journal a stale build
+    /// wrote, which `Graph::from_plan` folds without re-checking. The executor
+    /// is the real [`LocalExecutor`], deliberately: if the refusal regressed, it
+    /// would go looking for `oneagentgraph` rather than quietly running the node
+    /// under the graph's own ceiling.
+    #[test]
+    fn a_node_whose_budget_no_dispatch_can_run_under_settles_rather_than_launching() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let node = Node {
+            max_turns: Some(0),
+            ..agent("build", &[])
+        };
+        let settlement = execute_direct(
+            &crate::executor::LocalExecutor,
+            "demo",
+            1,
+            "graphs/node-scope.yaml",
+            &node,
+            &CancellationToken::new(),
+            &tx,
+        );
+        assert_eq!(settlement.status, NodeStatus::Failed);
+        assert_eq!(settlement.outcome.as_deref(), Some("invalid-node"));
+        let detail = settlement.detail.expect("the settlement says why");
+        assert!(detail.contains("no turn at all"), "{detail}");
+        assert!(
+            rx.try_iter().count() == 0,
+            "a node that was never dispatched reported turns"
+        );
     }
 
     fn state_of(nodes: Vec<Node>, recorded: &[(&str, NodeStatus)]) -> RunState {

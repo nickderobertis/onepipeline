@@ -1445,3 +1445,159 @@ fn a_retained_driver_carries_a_failing_graphs_own_exit_code() {
         failed.stdout
     );
 }
+
+/// The turn ceiling the dispatch of `node` — or of one of its steps — was
+/// actually handed.
+///
+/// Read through the run's **own merged stream**, which is this crate's published
+/// surface: `oneagentgraph` publishes the configuration path it launched a member
+/// with on that member's `member-started`, so the run says which file each
+/// dispatch was given rather than a test guessing at one. That file is the
+/// sibling's *effective* configuration for the member — its base config, the
+/// persona delta, and every `--set` applied, resolved by the sibling itself —
+/// and it is what onejudge is handed. Nothing else offline can state a turn
+/// ceiling: a two-party member needs a provider turn to spend one, and this
+/// suite has no stand-in for a paid turn.
+fn turns_dispatched(world: &World, run: &str, node: &str, step: Option<&str>) -> u64 {
+    let events = world.journal(run);
+    let started = events
+        .iter()
+        .filter(|event| event["kind"] == "member-started")
+        .find(|event| {
+            event["labels"]["onepipeline.node"] == node
+                && step.is_none_or(|step| event["labels"]["onepipeline.step"] == step)
+        })
+        .unwrap_or_else(|| panic!("no member started for {node}/{step:?}: {events:?}"));
+    let config = started["payload"]["config"]
+        .as_str()
+        .expect("the sibling publishes the config it launched the member with");
+    let text = std::fs::read_to_string(config).expect("that configuration is on disk");
+    let effective: Value = serde_norway::from_str(&text).expect("it parses");
+    effective["user"]["max_turns"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("{config} states no turn ceiling: {text}"))
+}
+
+/// A two-party node-scope graph, as the shipped one is, with a base config that
+/// states the default turn ceiling every member starts from.
+///
+/// `12` is that default deliberately: it is the number a node declaring `45` was
+/// silently collapsed to for the whole life of the defect this proves fixed.
+fn write_supervised_node_graph(world: &World) {
+    std::fs::write(
+        world.graphs().join("onejudge.base.yaml"),
+        "agent:\n  instructions: Do the work.\nuser:\n  persona: Review it.\n  \
+         done_when: the original task is complete\n  max_turns: 12\n",
+    )
+    .expect("the onejudge base config is written");
+    std::fs::write(
+        world.graphs().join("node-scope.yaml"),
+        "version: 1\nname: node-scope\nmembers:\n  worker:\n    kind: onejudge\n    \
+         base_config: ./onejudge.base.yaml\n    agent:\n      \
+         oneharness_config: ./oneharness.toml\n    judge:\n      \
+         oneharness_config: ./oneharness.toml\n    mode: bypass\n",
+    )
+    .expect("the node-scope graph is written");
+}
+
+/// One persona file, so a two-party member has a delta to resolve.
+fn write_persona(world: &World, name: &str) {
+    std::fs::write(
+        world.graphs().join(format!("{name}.yaml")),
+        format!("agent:\n  name: {name}\n  instructions: Ship it.\nuser:\n  persona: Review it.\n"),
+    )
+    .expect("the persona is written");
+}
+
+/// A node's turn budget reaches the configuration its dispatch is handed, and
+/// beats the run-wide override an operator set.
+///
+/// Three values are distinct on purpose: the base config's `12`, the operator's
+/// run-wide `9`, and the node's own `45`. A budget that never left this crate
+/// reads as `12` — which is exactly what the defect this fixes did — one that
+/// lost to the run-wide override reads as `9`, and only forwarding it as the more
+/// specific of the two reads as `45`.
+///
+/// One node per run, and the runs are sequential: a node-scope graph run is named
+/// for the millisecond and process that minted it, so two dispatched together
+/// from one process can collide over the sibling's state directory. That is a
+/// fault of its own and not this journey's subject.
+#[test]
+fn a_nodes_turn_budget_reaches_its_dispatch_and_outranks_the_run_wide_one() {
+    let world = World::new("real-turn-budget");
+    world.write_graphs();
+    write_supervised_node_graph(&world);
+    for persona in ["budgeted", "plain"] {
+        write_persona(&world, persona);
+    }
+
+    let dispatched = |run: &str, node: Value| {
+        let path = world.plan(run, &plan_of(run, vec![node]));
+        world
+            .run_on_agentgraph(&[
+                "start",
+                &path.to_string_lossy(),
+                "--attach",
+                "--node-set",
+                "members.worker.max_turns=9",
+            ])
+            .settled();
+        turns_dispatched(&world, run, run, None)
+    };
+
+    let mut budgeted = agent("budgeted", &[]);
+    budgeted["persona"] = Value::from("./budgeted.yaml");
+    budgeted["max_turns"] = json!(45);
+    let mut plain = agent("plain", &[]);
+    plain["persona"] = Value::from("./plain.yaml");
+
+    assert_eq!(
+        dispatched("budgeted", budgeted),
+        45,
+        "the node's own turn budget did not reach the member that runs its work"
+    );
+    assert_eq!(
+        dispatched("plain", plain),
+        9,
+        "the operator's run-wide override did not reach a node that declared none"
+    );
+}
+
+/// A step's turn budget reaches that step's own dispatch.
+///
+/// A workstream's steps are dispatched one at a time on one branch, each with its
+/// own persona and its own controls — and a node that declares steps may not
+/// declare a budget at all, so the step's is the only budget there is. The
+/// repository side is real too: the step runs in a `onevcs` session.
+#[test]
+fn a_steps_turn_budget_reaches_that_steps_own_dispatch() {
+    let world = World::new("real-step-budget");
+    world.write_graphs();
+    write_supervised_node_graph(&world);
+    write_persona(&world, "implementer");
+    world.repository("local-direct", &["true"]);
+
+    let node = json!({
+        "id": "service",
+        "repo": "service",
+        // Its own title, so the run spends no `pr-author` dispatch: that one runs
+        // under a persona this world has not written, and this journey is about
+        // the step.
+        "title": "feat: land what the step made",
+        "steps": [
+            {"id": "implement", "persona": "./implementer.yaml", "task": "## What\nimplement",
+             "max_turns": 45},
+        ],
+    });
+    let path = world.plan("stepbudget", &plan_of("stepbudget", vec![node]));
+    world
+        .run_on_agentgraph(&["start", &path.to_string_lossy(), "--attach"])
+        .settled();
+
+    assert_eq!(
+        turns_dispatched(&world, "stepbudget", "service", Some("implement")),
+        45,
+        "the step's own turn budget did not reach the dispatch that ran it; the graph's \
+         own default is 12"
+    );
+}

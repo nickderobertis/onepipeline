@@ -32,7 +32,8 @@ use oneagentgraph::config::ConfigRef;
 use onevcs::SessionRequest;
 
 use crate::agentgraph::{GraphOutput, GraphRun};
-use crate::error::Result;
+use crate::controls::{NodeControls, WORKER_MEMBER};
+use crate::error::{Error, Result};
 use crate::event::{Envelope, Labels};
 
 /// Where a node's dispatch runs.
@@ -77,6 +78,13 @@ pub struct DispatchRequest {
     /// Where in the run this dispatch sits. The reserved keys are `run_id`,
     /// `round`, `node`, `step`, and `persona`.
     pub labels: Labels,
+    /// The per-node controls this dispatch runs under.
+    ///
+    /// Carried on the request rather than on the labels: a label is what an
+    /// envelope is stamped with and what a `node_label` rule selects on, while a
+    /// control changes the agent graph's own effective configuration. `persona`
+    /// is both, and is the label, which is why it is not here.
+    pub controls: NodeControls,
     /// The workspace to run in.
     pub workspace: WorkspaceSpec,
     /// Raised to stop the dispatch cooperatively.
@@ -222,7 +230,7 @@ impl Executor for LocalExecutor {
             }
         };
         // Relayed: this dispatch is read turn by turn into the merged store.
-        let node_sets = node_sets(&req.labels)?;
+        let node_sets = node_sets(&req.labels, &req.controls)?;
         let run = GraphRun::start(
             &req.graph.0,
             &req.task,
@@ -241,20 +249,28 @@ impl Executor for LocalExecutor {
     }
 }
 
-/// Read the run's opaque node-scope overrides at the last responsible moment.
-/// The labels already identify the launch ledger for every local dispatch.
-fn node_sets(labels: &Labels) -> Result<Vec<String>> {
-    let Some(run) = labels.run_id.as_deref() else {
-        return Ok(Vec::new());
-    };
-    let paths = crate::ledger::RunPaths::under(&crate::ledger::runs_root(), run);
-    crate::ledger::read_json::<crate::ledger::LaunchRecord>(&paths.launch()).map(|record| {
-        let mut sets = record.node_sets;
-        if let Some(persona) = &labels.persona {
-            sets.push(format!("members.worker.persona={persona}"));
+/// The overrides one dispatch's graph launch carries, in the order they apply.
+///
+/// The run's opaque node-scope overrides are read at the last responsible
+/// moment — the labels already identify the launch ledger for every local
+/// dispatch — and the node's own settings are applied *after* them: an operator's
+/// `--node-set` is run-wide, and a control the plan wrote against one node is the
+/// more specific of the two.
+fn node_sets(labels: &Labels, controls: &NodeControls) -> Result<Vec<String>> {
+    let mut sets = match labels.run_id.as_deref() {
+        Some(run) => {
+            let paths = crate::ledger::RunPaths::under(&crate::ledger::runs_root(), run);
+            crate::ledger::read_json::<crate::ledger::LaunchRecord>(&paths.launch())?.node_sets
         }
-        sets
-    })
+        None => Vec::new(),
+    };
+    if let Some(persona) = &labels.persona {
+        sets.push(format!("members.{WORKER_MEMBER}.persona={persona}"));
+    }
+    // A control this build cannot apply refuses the launch here as well as at
+    // validation, so no path composes a launch that drops one on the floor.
+    sets.extend(controls.overrides().map_err(Error::Invalid)?);
+    Ok(sets)
 }
 
 /// One dispatch running on this machine.
@@ -371,6 +387,7 @@ mod tests {
             graph: ConfigRef("./graphs/node-scope.yaml".into()),
             task: "## What\ndo it".into(),
             labels: Labels::default(),
+            controls: NodeControls::default(),
             workspace: WorkspaceSpec::VcsSession(SessionRequest {
                 repo: "owner/repo".into(),
                 branch: None,
@@ -381,5 +398,30 @@ mod tests {
         };
         assert!(matches!(request.workspace, WorkspaceSpec::VcsSession(_)));
         assert_eq!(request.graph.0, "./graphs/node-scope.yaml");
+    }
+
+    #[test]
+    fn a_dispatch_with_no_run_still_carries_its_nodes_own_controls() {
+        // No `run_id`, so there is no launch record to read: the node's own
+        // budget is what the launch must still carry, because a dispatch that
+        // dropped it here would run to the base config's default instead.
+        let sets = node_sets(
+            &Labels {
+                persona: Some("engineer".into()),
+                ..Labels::default()
+            },
+            &NodeControls {
+                max_turns: std::num::NonZeroU32::new(45),
+            },
+        )
+        .expect("both are appliable");
+        assert_eq!(
+            sets,
+            vec![
+                "members.worker.persona=engineer".to_string(),
+                "members.worker.max_turns=45".to_string(),
+            ],
+            "the node's own control must apply after the run-wide ones"
+        );
     }
 }

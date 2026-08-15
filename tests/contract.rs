@@ -10,6 +10,7 @@
 //! asserts the document still names them.
 
 use std::collections::BTreeSet;
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
 use clap::{CommandFactory, Parser};
@@ -18,6 +19,7 @@ use onepipeline::channel::{Command as Edit, Dependents, Reply, SurfaceKind};
 use onepipeline::cli::{
     Cli, Command, DEFAULT_HEARTBEAT_INTERVAL_SECONDS, DEFAULT_ROUND_BUDGET_SECONDS,
 };
+use onepipeline::controls::NodeControls;
 use onepipeline::error::{EXIT_NOTHING_DRIVING, EXIT_QUEUED, EXIT_REFUSED, EXIT_SUCCESS};
 use onepipeline::event::{
     ArtifactId, ArtifactRef, Envelope, EventKind, Labels, PipelineKind, Source, ENVELOPE_VERSION,
@@ -232,6 +234,9 @@ fn the_dispatch_request_carries_every_field_the_contract_declares() {
             persona: Some("engineer".into()),
             ..Labels::default()
         },
+        controls: NodeControls {
+            max_turns: NonZeroU32::new(24),
+        },
         workspace: WorkspaceSpec::VcsSession(SessionRequest {
             repo: "nickderobertis/some-service".into(),
             branch: None,
@@ -243,7 +248,12 @@ fn the_dispatch_request_carries_every_field_the_contract_declares() {
 
     assert_contract_names(
         "DispatchRequest field",
-        &["graph", "task", "labels", "workspace", "cancel"],
+        &["graph", "task", "labels", "controls", "workspace", "cancel"],
+    );
+    assert_eq!(
+        request.controls.max_turns,
+        NonZeroU32::new(24),
+        "the request carries the node's own controls, not only its labels"
     );
     assert_contract_names(
         "reserved label",
@@ -319,6 +329,7 @@ fn dispatching_goes_through_the_oneagentgraph_seam_and_says_so_when_it_cannot() 
         graph: ConfigRef("./graphs/node-scope.yaml".into()),
         task: "anything".into(),
         labels: Labels::default(),
+        controls: NodeControls::default(),
         workspace: WorkspaceSpec::Path(PathBuf::from(".")),
         cancel: CancellationToken::new(),
     }) else {
@@ -371,7 +382,6 @@ fn every_node_shape() -> Value {
                 "id": "direct",
                 "persona": "engineer",
                 "task": "## What\nx\n\n## Why\ny\n\n## Acceptance criteria\n- z",
-                "done_when": "all task acceptance criteria are met",
                 "max_turns": 24,
                 "expects_no_diff": true,
                 "context": "the earlier round already landed the schema",
@@ -408,7 +418,6 @@ fn every_node_shape() -> Value {
                         "id": "implement",
                         "persona": "engineer",
                         "task": "## What\nx",
-                        "done_when": "the gate is green",
                         "max_turns": 32,
                         "expects_no_diff": false,
                         "executor": "local",
@@ -438,6 +447,11 @@ fn the_plan_schema_carries_every_node_shape_the_contract_names() {
     let direct = &plan.tasks[0];
     assert_eq!(direct.kind, NodeKind::Agent, "`agent` is the default kind");
     assert!(direct.expects_no_diff);
+    assert_eq!(
+        direct.max_turns,
+        Some(24),
+        "a turn budget is a node-level control the schema keeps"
+    );
     assert_eq!(direct.executor.as_deref(), Some("local"));
     assert_eq!(
         direct.agent_graph,
@@ -480,6 +494,11 @@ fn the_plan_schema_carries_every_node_shape_the_contract_names() {
     assert_eq!(steps.len(), 2);
     assert_eq!(steps[0].kind, NodeKind::Agent);
     assert_eq!(steps[1].kind, NodeKind::Human);
+    assert_eq!(
+        steps[0].max_turns,
+        Some(32),
+        "a step carries its own turn budget"
+    );
 
     assert_contract_names(
         "node shape",
@@ -491,10 +510,249 @@ fn the_plan_schema_carries_every_node_shape_the_contract_names() {
             "`expects_no_diff`",
             "`context`",
             "cross-DAG `run:<id>#<node>` refs",
-            "judge-only `done_when`",
+            "per-node `max_turns`",
             "`executor: NAME`",
             "`agent_graph: REF`",
         ],
+    );
+}
+
+/// The contract's schema version and this crate's are the same number, and the
+/// version it replaced is refused deliberately.
+///
+/// The plan schema is a serialized contract: a document says which version it
+/// was written at, and a reader decides by that. So the number the document
+/// states and the number the code writes are gated against each other here, and
+/// the previous version — which every plan on this host was written at — is
+/// refused with what to change rather than accepted as near enough.
+#[test]
+fn the_contracts_plan_schema_version_is_the_one_this_crate_writes() {
+    assert!(
+        CONTRACT.contains(&format!("Plan schema v{PLAN_SCHEMA_VERSION} =")),
+        "the contract states a different plan schema version than this crate writes \
+         ({PLAN_SCHEMA_VERSION})"
+    );
+    assert!(
+        CONTRACT.contains("a v1 plan is **refused deliberately**"),
+        "the contract no longer says the previous version is refused on purpose"
+    );
+
+    let root = std::env::temp_dir().join(format!("onepipeline-version-{}", std::process::id()));
+    std::fs::create_dir_all(&root).expect("a scratch root");
+    let path = root.join("legacy.plan.json");
+    // A legacy plan with nothing else wrong with it: the version alone is what
+    // stops it, and the refusal is what its author needs to act on.
+    std::fs::write(
+        &path,
+        r#"{"schema_version":1,"tasks":[{"id":"a","persona":"engineer","task":"Do it."}]}"#,
+    )
+    .expect("written");
+    // It parses — the schema's shape is not what is wrong with it — and what
+    // stops it is validation, which `tests/e2e/plan.rs` drives through the
+    // binary because that is where a planner meets the refusal.
+    let legacy = Plan::load(&path).expect("a legacy plan is still a readable document");
+    assert_ne!(
+        legacy.schema_version, PLAN_SCHEMA_VERSION,
+        "this fixture is meant to declare the version that was replaced"
+    );
+
+    // What this crate *writes* carries the current number, so a document it
+    // produces is one this contract describes and one an older reader refuses.
+    let current = Plan {
+        schema_version: PLAN_SCHEMA_VERSION,
+        ..legacy
+    };
+    let written = serde_json::to_value(&current).expect("it serialises");
+    assert_eq!(written["schema_version"], PLAN_SCHEMA_VERSION);
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// The retired field, refused **by name** at every boundary a plan crosses.
+///
+/// `deny_unknown_fields` would answer a plan still carrying it with a bare
+/// `unknown field`, which tells a planner that a field does not exist and not
+/// where the review bar they wrote belongs. Every plan written before this schema
+/// change carries one, so the refusal has to say where the bar goes instead.
+#[test]
+fn a_plan_still_carrying_done_when_is_refused_by_name_and_told_where_the_bar_goes() {
+    assert!(
+        CONTRACT.contains("A plan still carrying `done_when` is refused **by name**"),
+        "the contract no longer states the refusal"
+    );
+    let root = std::env::temp_dir().join(format!("onepipeline-donewhen-{}", std::process::id()));
+    std::fs::create_dir_all(&root).expect("a scratch root");
+    let path = root.join("retired.plan.json");
+    // At the retired version, as every plan carrying this field is: the field is
+    // what its author has to move, so the field is what they are told about.
+    std::fs::write(
+        &path,
+        r#"{"schema_version":1,"tasks":[{"id":"contract","persona":"engineer",
+            "task":"Do the thing.","done_when":"the gate is green"}]}"#,
+    )
+    .expect("written");
+
+    let message = Plan::load(&path).unwrap_err().to_string();
+    assert!(
+        message.contains("'contract':"),
+        "the refusal does not name the node that carries it: {message}"
+    );
+    assert!(
+        message.contains("`done_when` is no longer a plan field"),
+        "the refusal does not name the field: {message}"
+    );
+    assert!(
+        message.contains("`## Acceptance criteria` section of its own task"),
+        "the refusal does not say where a per-node bar goes: {message}"
+    );
+    assert!(
+        message.contains("onejudge base config") && message.contains("user.done_when"),
+        "the refusal does not say where a broader bar goes: {message}"
+    );
+    assert!(
+        !message.contains("unknown field"),
+        "the schema's bare refusal reached the planner instead: {message}"
+    );
+    assert!(
+        !message.contains("schema_version"),
+        "the version refusal displaced the field's: {message}"
+    );
+
+    // A step carries the same field and gets the same answer, named by the step.
+    std::fs::write(
+        &path,
+        r#"{"schema_version":1,"tasks":[{"id":"service","repo":"o/r","steps":[
+            {"id":"implement","persona":"engineer","task":"Do the thing.",
+             "done_when":"the gate is green"}]}]}"#,
+    )
+    .expect("written");
+    let message = Plan::load(&path).unwrap_err().to_string();
+    assert!(
+        message.contains("'implement':") && message.contains("no longer a plan field"),
+        "a step's retired field is not named: {message}"
+    );
+
+    // And a plan that carries none still loads: the second, lenient reading only
+    // ever runs on a document the schema already refused.
+    std::fs::write(
+        &path,
+        format!(
+            r#"{{"schema_version":{PLAN_SCHEMA_VERSION},"tasks":[
+                {{"id":"contract","persona":"engineer","task":"Do the thing.",
+                 "max_turns":45}}]}}"#
+        ),
+    )
+    .expect("written");
+    assert_eq!(
+        Plan::load(&path)
+            .expect("a plan without the retired field loads")
+            .tasks[0]
+            .max_turns,
+        Some(45)
+    );
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// A dispatch an external caller builds carries its node's controls into the
+/// launch, and a control the graph has no field for refuses that launch.
+///
+/// Through the public seam, with no `run_id`: nothing here reads a launch record,
+/// so what reaches `oneagentgraph` is the request's own `controls` or nothing at
+/// all. The sibling checks an override against the same schema it reads the graph
+/// with, so a `max_turns` addressed to a single-sided member — which has no such
+/// field — is refused by name. That refusal is only reachable if the control was
+/// transmitted; a dispatch that dropped it would launch the graph happily.
+#[test]
+fn a_dispatch_built_outside_a_run_still_carries_its_controls_into_the_launch() {
+    let root = std::env::temp_dir().join(format!("onepipeline-seam-{}", std::process::id()));
+    std::fs::create_dir_all(&root).expect("a scratch root");
+    std::env::set_var("ONEAGENTGRAPH_STATE_DIR", root.join("state"));
+    let graph = root.join("single-sided.yaml");
+    std::fs::write(
+        &graph,
+        "version: 1\nname: single-sided\nmembers:\n  worker:\n    kind: oneharness\n    \
+         oneharness_config: ./nothing.toml\n",
+    )
+    .expect("the graph is written");
+
+    let request = |controls| DispatchRequest {
+        graph: ConfigRef(graph.display().to_string()),
+        task: "## What\nDo the thing.".into(),
+        labels: Labels::default(),
+        controls,
+        workspace: WorkspaceSpec::Path(root.clone()),
+        cancel: CancellationToken::new(),
+    };
+
+    let Err(refused) = LocalExecutor.dispatch(request(NodeControls {
+        max_turns: NonZeroU32::new(45),
+    })) else {
+        panic!("a single-sided member has no `max_turns`, so the launch cannot start");
+    };
+    let refused = refused.to_string();
+    assert!(
+        refused.contains("max_turns"),
+        "the control never reached the launch: {refused}"
+    );
+
+    // Without one, nothing addresses that field at all, and the launch fails
+    // further in — on the config this graph names and this test never wrote.
+    let Err(other) = LocalExecutor.dispatch(request(NodeControls::default())) else {
+        panic!("the graph names a config that does not exist");
+    };
+    assert!(
+        !other.to_string().contains("max_turns"),
+        "a control nobody declared was sent anyway: {other}"
+    );
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// A node's turn budget reaches the graph that runs it, read off the effective
+/// configuration rather than off the code path that composed it.
+///
+/// The overrides this crate renders are applied to the **shipped** node-scope
+/// graph by `oneagentgraph`'s own applier — the same call its `run` makes before
+/// it builds a member — and the worker is read out of the result. A budget the
+/// overrides never carried cannot survive that, and neither can one addressed to
+/// a member or a field the sibling does not have.
+#[test]
+fn a_declared_turn_budget_reaches_the_effective_configuration_of_the_worker() {
+    assert!(
+        CONTRACT.contains("`max_turns` is the worker member's own turn ceiling"),
+        "the contract no longer says where a turn budget lands"
+    );
+    let text = std::fs::read_to_string(repo_root().join("graphs/node-scope.yaml"))
+        .expect("the node-scope graph ships");
+
+    let effective = |controls: NodeControls| -> GraphConfig {
+        let overrides: Vec<_> = controls
+            .overrides()
+            .expect("a declared budget is appliable")
+            .iter()
+            .map(|set| oneagentgraph::run::parse_set(set).expect("the sibling parses the override"))
+            .collect();
+        let mut document: Value = serde_norway::from_str(&text).expect("the graph parses");
+        oneagentgraph::run::apply_overrides(&mut document, &overrides)
+            .expect("the sibling applies the override");
+        serde_norway::from_value(serde_norway::to_value(&document).expect("a value"))
+            .expect("the overridden graph is still a valid graph config")
+    };
+
+    let turns_of = |graph: &GraphConfig| match graph.members.get("worker") {
+        Some(Member::Onejudge(worker)) => worker.max_turns,
+        other => panic!("the node-scope worker is a two-party member: {other:?}"),
+    };
+
+    assert_eq!(
+        turns_of(&effective(NodeControls::default())),
+        None,
+        "the shipped graph must state no budget, or this proves nothing"
+    );
+    assert_eq!(
+        turns_of(&effective(NodeControls {
+            max_turns: NonZeroU32::new(45)
+        })),
+        Some(45),
+        "the node's turn budget did not reach the member that runs its work"
     );
 }
 
@@ -1287,6 +1545,7 @@ const RULINGS: &[(&str, &str)] = &[
     ("7.", "completed_steps"),
     ("8.", "cross-dag-satisfied"),
     ("9.", "publication_wait"),
+    ("24.", "NodeControls"),
 ];
 
 #[test]
@@ -1296,12 +1555,26 @@ fn every_recorded_divergence_is_ruled_on_or_states_the_proposal_it_waits_on() {
 
     let sections: Vec<&str> = divergences.split("\n## ").skip(1).collect();
     assert!(sections.len() >= RULINGS.len(), "{sections:?}");
+    let section_of = |number: &str| {
+        sections
+            .iter()
+            .find(|section| section.starts_with(number))
+            .unwrap_or_else(|| panic!("the record has no divergence {number}"))
+    };
 
-    // Everything after the ruled-on entries is a proposal the planner who owns
-    // the contract has not answered. It is recorded and marked, never resolved
-    // from this repository — which is the whole point of the file.
-    for section in sections.iter().skip(RULINGS.len()) {
+    // Every entry a ruling has not closed is a proposal the planner who owns the
+    // contract has not answered. It is recorded and marked, never resolved from
+    // this repository — which is the whole point of the file. Matched by the
+    // entry's own number rather than by its position, so a later ruling does not
+    // have to be renumbered into the leading block to be recognised.
+    for section in &sections {
         let heading = section.lines().next().expect("a heading");
+        if RULINGS
+            .iter()
+            .any(|(number, _)| heading.starts_with(number))
+        {
+            continue;
+        }
         assert!(
             heading.ends_with("— OPEN"),
             "an unruled divergence is not marked open: {heading}"
@@ -1312,10 +1585,11 @@ fn every_recorded_divergence_is_ruled_on_or_states_the_proposal_it_waits_on() {
         );
     }
 
-    for ((number, named), section) in RULINGS.iter().zip(&sections) {
+    for (number, named) in RULINGS {
+        let section = section_of(number);
         let heading = section.lines().next().expect("a heading");
         assert!(
-            heading.starts_with(number) && heading.ends_with("— RESOLVED"),
+            heading.ends_with("— RESOLVED"),
             "divergence {number} is not marked resolved: {heading}"
         );
         assert!(

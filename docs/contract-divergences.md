@@ -6,12 +6,12 @@ code takes the nearest thing that does exist, and the divergence is recorded
 here as a proposal for the planner who owns the contract. Nothing on this list is
 resolved unilaterally.
 
-Entries **1–9** have since been **ruled on by the planner who owns the
+Entries **1–9 and 24** have since been **ruled on by the planner who owns the
 contract**, and `docs/contract.md` was amended to carry each ruling. They stay
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10 onward are open**. Each states what the code does today and the
+Entries **10–23 are open**. Each states what the code does today and the
 proposal it is waiting on — most of them a question for a *producer* rather than
 for this crate, because `oneagentgraph` and `onevcs` are independent tools that
 expose general integration hooks only and nothing in them may know about this
@@ -630,3 +630,85 @@ published artifact without it cannot launch a detached run at all.
 What is open is only whether the contract should *say* this: a launcher that
 spawns itself is a fact about the driver contract, and it is currently recorded
 here rather than there.
+
+## 24. A node's judge controls never left this crate — RESOLVED
+
+**Ruling: forward `max_turns` as a node-scope override, delete `done_when` from
+the plan schema, and refuse any control this build cannot apply. No `done_when`
+field in `oneagentgraph`, and no config-merge layer here.**
+
+Schema v7's node shapes included a judge-only `done_when`, and the contract
+carried it. Nothing transmitted it. A dispatch's entire per-node override set was
+one line — the persona — so `done_when` and `max_turns` were parsed from the
+plan, copied into a step, and dropped. Nothing in the launch record, the journal,
+or any view said so.
+
+The cost was not the wrong default but the silence. One node was failed twice —
+after three hours and after fifteen minutes — against the base config's default
+criterion, with its `max_turns: 45` collapsed to the base default of 12, while
+the repository's own gate was green both times. Its retry carried a corrected
+`done_when` and a corrected budget and failed on the identical sentence, because
+neither control was ever transmitted. The work was complete both times and had to
+be recovered by hand.
+
+`max_turns` is now `members.worker.max_turns=N` beside the persona, applied after
+the run-wide `--node-set`s because a control written against one node is the more
+specific of the two. `OnejudgeMember::max_turns` is the sibling's existing
+mechanism, so nothing new was needed there.
+
+`done_when` is **gone from `Node` and `Step`** rather than forwarded. onejudge
+hands that field to the judge verbatim as its criterion, and the judge is given
+the transcript whose first message is the task with its acceptance criteria — so
+the per-node bar is already written, in the task, and a second place to write it
+is a second place for it to disagree with itself. A bar broader than one node
+belongs in the onejudge base config the node-scope graph's worker points at,
+written once; onejudge's own default when none is supplied is already "the
+original task is complete". Both alternatives — a `done_when` on
+`OnejudgeMember`, and a config-merge layer in this crate — were considered and
+rejected.
+
+`#[serde(deny_unknown_fields)]` would have refused a plan still carrying the
+field with a bare `unknown field` message. Every plan written before this change
+carries one, so it is refused **by name** instead, with where the bar goes:
+
+```text
+invalid: plan.json: 'contract': `done_when` is no longer a plan field. A node's
+review bar is the `## Acceptance criteria` section of its own task, which the
+judge is handed verbatim; a bar broader than one node belongs in the onejudge
+base config the node-scope graph's worker already points at, under
+`user.done_when`
+```
+
+The same refusal answers a reply envelope's `add` and a `requeue`'s amendment,
+which is where a planner writes a corrected bar.
+
+What keeps the next control honest is structural rather than remembered.
+`DispatchRequest` carries a `controls: NodeControls`, and `src/controls.rs` is
+the one place a control becomes an override: it destructures `NodeControls` with
+no `..` rest pattern, so a field added there does not compile until it is given
+an override — and one whose honest answer is "nothing this build can apply" is
+written `set: None` and refuses the plan at validation and the launch at
+composition. Silently defaulting is no longer reachable.
+
+The dispatch's own view of a control is valid by construction. `NodeControls`
+holds `max_turns` as a `NonZeroU32`, so a budget of zero — which no dispatch can
+run under, and which `oneagentgraph` refuses when it validates the graph — cannot
+be built, carried, or launched with. The plan schema keeps `Option<u32>`, because
+that is the shape a v7 plan file is written in and a live edit merges submitted
+JSON into; `NodeControls::of_node` and `of_step` are the checked conversion
+between the two, and they run at the trust boundary every plan and every edit
+crosses. A graph that reached a dispatch without crossing it — one folded from a
+journal a stale build wrote — settles the node `invalid-node` with the same
+sentence rather than launching.
+
+The plan schema is **version 2** for it. The two versions do not describe the
+same document — one field is gone and one now reaches the dispatch — so a plan
+declaring version 1 is refused deliberately, naming what moved and what to set
+rather than reporting that two numbers differ. A version-1 plan that still
+carries `done_when` is answered with the field's refusal instead, because the
+field is the thing its author has to move and the version is downstream of that.
+
+The amended contract declares the schema as v2, lists `max_turns` among the node
+shapes and no `done_when` at all, states what a control is and what becomes of
+one that cannot be applied, and names `pub controls: NodeControls` in its seam
+sketch.

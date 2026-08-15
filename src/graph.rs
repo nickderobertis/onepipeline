@@ -14,6 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::controls::NodeControls;
 use crate::error::{Error, Result};
 use crate::plan::{Node, NodeKind, Plan, Step};
 
@@ -268,8 +269,18 @@ pub fn validate(plan: &Plan) -> Result<()> {
 /// make the planner unable to abandon a graph it started.
 pub fn validate_edited(plan: &Plan) -> Result<()> {
     if plan.schema_version != crate::plan::PLAN_SCHEMA_VERSION {
+        // The version this one replaced is refused *deliberately*, with what to
+        // change: it is the version every plan on this host was written at, and a
+        // planner reading only that two numbers differ has to go and find out
+        // which fields moved. Any other version is a number this build has never
+        // written, so there is no migration to name.
+        let migration = if plan.schema_version == crate::plan::PLAN_SCHEMA_VERSION_RETIRED {
+            format!("; {}", crate::plan::RETIRED_VERSION_MIGRATION)
+        } else {
+            String::new()
+        };
         return Err(Error::Invalid(format!(
-            "plan schema_version {} is not {}",
+            "plan schema_version {} is not {}{migration}",
             plan.schema_version,
             crate::plan::PLAN_SCHEMA_VERSION
         )));
@@ -344,9 +355,9 @@ pub fn validate_node(node: &Node) -> Result<()> {
         if node.task.as_ref().is_none_or(|t| t.trim().is_empty()) {
             return Err(named("a human node needs task prose"));
         }
-        if node.persona.is_some() || node.done_when.is_some() {
+        if node.persona.is_some() || node.max_turns.is_some() {
             return Err(named(
-                "a human node has no dispatch, so no persona or done_when",
+                "a human node has no dispatch, so no persona or turn budget",
             ));
         }
         if node.repo.is_some() || node.steps.is_some() || node.expects_no_diff {
@@ -364,9 +375,9 @@ pub fn validate_node(node: &Node) -> Result<()> {
         if node.task.as_ref().is_none_or(|t| t.trim().is_empty()) {
             return Err(named("an expects_no_diff node needs task prose"));
         }
-        if node.persona.is_some() || node.done_when.is_some() {
+        if node.persona.is_some() || node.max_turns.is_some() {
             return Err(named(
-                "expects_no_diff settles without a dispatch, so it takes no persona or done_when",
+                "expects_no_diff settles without a dispatch, so it takes no persona or turn budget",
             ));
         }
         if node.steps.is_some() {
@@ -374,6 +385,14 @@ pub fn validate_node(node: &Node) -> Result<()> {
         }
         return Ok(());
     }
+
+    // Every control this node declares has to have somewhere to land. One that
+    // does not is refused here — at the validation a launch runs, and the one a
+    // live edit is checked against — rather than at a dispatch that would have
+    // spent its budget under a default nobody asked for.
+    NodeControls::of_node(node)
+        .and_then(|controls| controls.overrides())
+        .map_err(|why| named(&why))?;
 
     match (&node.repo, &node.steps) {
         (None, Some(_)) => Err(named("steps run on one branch, so they need a repo")),
@@ -387,9 +406,12 @@ pub fn validate_node(node: &Node) -> Result<()> {
             Ok(())
         }
         (Some(_), Some(steps)) => {
-            if node.persona.is_some() || node.task.is_some() {
+            // The turn budget belongs with the persona and the task: a node with
+            // steps dispatches none of its own, so one written here would reach
+            // no dispatch at all. Refused rather than quietly ignored.
+            if node.persona.is_some() || node.task.is_some() || node.max_turns.is_some() {
                 return Err(named(
-                    "a node with steps takes its persona and task from them",
+                    "a node with steps takes its persona, task, and turn budget from them",
                 ));
             }
             validate_steps(node, steps)
@@ -426,21 +448,29 @@ fn validate_steps(node: &Node, steps: &[Step]) -> Result<()> {
                     step.id
                 )));
             }
-            if step.persona.is_some() || step.done_when.is_some() || step.expects_no_diff {
+            if step.persona.is_some() || step.max_turns.is_some() || step.expects_no_diff {
                 return Err(named(format!(
-                    "human step '{}' has no dispatch, so no persona, done_when, or expects_no_diff",
+                    "human step '{}' has no dispatch, so no persona, turn budget, or \
+                     expects_no_diff",
                     step.id
                 )));
             }
         } else if step.expects_no_diff {
-            if step.persona.is_some() || step.done_when.is_some() {
+            if step.persona.is_some() || step.max_turns.is_some() {
                 return Err(named(format!(
                     "step '{}': expects_no_diff settles without a dispatch",
                     step.id
                 )));
             }
-        } else if step.persona.is_none() {
-            return Err(named(format!("agent step '{}' needs a persona", step.id)));
+        } else {
+            if step.persona.is_none() {
+                return Err(named(format!("agent step '{}' needs a persona", step.id)));
+            }
+            // The same rule the node above is held to: a control this build
+            // cannot apply stops the plan here rather than at the step's launch.
+            NodeControls::of_step(step)
+                .and_then(|controls| controls.overrides())
+                .map_err(|why| named(format!("step '{}': {why}", step.id)))?;
         }
         if step.task.as_ref().is_none_or(|t| t.trim().is_empty()) {
             return Err(named(format!("step '{}' needs task prose", step.id)));
@@ -838,7 +868,7 @@ mod tests {
                     persona: Some("engineer".into()),
                     ..Node::default()
                 },
-                "no persona or done_when",
+                "no persona or turn budget",
             ),
             (
                 Node {
@@ -858,7 +888,7 @@ mod tests {
                     persona: Some("engineer".into()),
                     ..Node::default()
                 },
-                "takes no persona or done_when",
+                "takes no persona or turn budget",
             ),
             (
                 Node {
@@ -886,7 +916,7 @@ mod tests {
                     }]),
                     ..Node::default()
                 },
-                "takes its persona and task from them",
+                "takes its persona, task, and turn budget from them",
             ),
             (
                 Node {
@@ -900,6 +930,56 @@ mod tests {
                     ..Node::default()
                 },
                 "needs a persona",
+            ),
+            (
+                Node {
+                    id: "human-budget".into(),
+                    kind: NodeKind::Human,
+                    task: Some("t".into()),
+                    max_turns: Some(45),
+                    ..Node::default()
+                },
+                "no persona or turn budget",
+            ),
+            (
+                Node {
+                    id: "nodiff-budget".into(),
+                    expects_no_diff: true,
+                    task: Some("t".into()),
+                    max_turns: Some(45),
+                    ..Node::default()
+                },
+                "takes no persona or turn budget",
+            ),
+            (
+                Node {
+                    id: "steps-and-budget".into(),
+                    repo: Some("o/r".into()),
+                    max_turns: Some(45),
+                    steps: Some(vec![Step {
+                        id: "one".into(),
+                        persona: Some("engineer".into()),
+                        task: Some("t".into()),
+                        ..Step::default()
+                    }]),
+                    ..Node::default()
+                },
+                "takes its persona, task, and turn budget from them",
+            ),
+            (
+                Node {
+                    id: "human-step-budget".into(),
+                    repo: Some("o/r".into()),
+                    steps: Some(vec![Step {
+                        id: "sign-off".into(),
+                        kind: NodeKind::Human,
+                        task: Some("t".into()),
+                        max_turns: Some(45),
+                        ..Step::default()
+                    }]),
+                    ..Node::default()
+                },
+                "no persona, turn budget, or expects_no_diff",
             ),
             (
                 Node {
@@ -925,6 +1005,44 @@ mod tests {
                 node.id
             );
         }
+    }
+
+    /// The version this schema replaced is refused *deliberately*.
+    ///
+    /// Every plan written on this host before the judge controls were made
+    /// honest declares it, so its author is told which fields moved and what to
+    /// set — not that two numbers differ, which is all a version this build has
+    /// never written can be told.
+    #[test]
+    fn the_retired_schema_version_is_refused_with_the_migration_it_needs() {
+        let mut legacy = plan_of(vec![agent("a", &[])]);
+        legacy.schema_version = crate::plan::PLAN_SCHEMA_VERSION_RETIRED;
+        let message = validate(&legacy).unwrap_err().to_string();
+        assert!(
+            message.contains(&format!(
+                "schema_version {} is not {}",
+                crate::plan::PLAN_SCHEMA_VERSION_RETIRED,
+                crate::plan::PLAN_SCHEMA_VERSION
+            )),
+            "{message}"
+        );
+        assert!(message.contains("`done_when`"), "{message}");
+        assert!(message.contains("`max_turns`"), "{message}");
+        assert!(
+            message.contains("set `schema_version: 2`"),
+            "the refusal does not say what to set: {message}"
+        );
+
+        // A version this build has never written has no migration to name, so it
+        // is told the two numbers and nothing invented.
+        let mut unknown = plan_of(vec![agent("a", &[])]);
+        unknown.schema_version = 99;
+        let message = validate(&unknown).unwrap_err().to_string();
+        assert!(message.contains("schema_version 99"), "{message}");
+        assert!(
+            !message.contains("`done_when`"),
+            "a migration was offered for a version it does not describe: {message}"
+        );
     }
 
     #[test]
