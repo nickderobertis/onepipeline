@@ -20,7 +20,7 @@
 // opened and merged offline. `harness.rs` carries the same suppression and the full
 // rationale.
 
-use crate::harness::{gate_script, lifecycle, plan_of, Repository, World};
+use crate::harness::{agent, gate_script, lifecycle, plan_of, Repository, World};
 use serde_json::json;
 
 fn settle(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
@@ -967,6 +967,103 @@ fn a_change_the_host_is_holding_settles_the_node_as_queued() {
     // Done, and not landed. The host has accepted it and the base does not carry
     // it yet, so the settlement says both things rather than only the first.
     assert_eq!(node["landing"], "unlanded", "{node}");
+}
+
+/// The document `round run` prints carries the landing, at a stated version, and
+/// says nothing where there was nothing to observe.
+///
+/// This is the **read interface** rather than a file this suite goes looking for:
+/// `round run` writes the round result to stdout, and that is what a consumer
+/// driving the engine parses. `round-NN/result.json` is the same document, and
+/// the journey checks they agree — a version stated on one and not the other
+/// would be a contract with two answers.
+///
+/// All three of the landing's cases are read here. The first round carries two:
+/// a change the host is holding, and a plain agent node that published nothing
+/// and therefore carries **no `landing` key at all**. The third — a change
+/// observed on its base — is the second half, under the same policy once the host
+/// lands what it is handed, because a version that round-trips one value and
+/// drops the other is the defect a golden exists to catch.
+///
+/// Each half gets its own world. The round is run from the test rather than from
+/// the driver, which is what puts its stdout in hand, and the rendezvous holding
+/// that driver is per-world: two halves sharing one would have the second run's
+/// driver take the round before the test could.
+#[test]
+fn the_round_result_a_consumer_reads_states_its_version_and_carries_the_landing() {
+    // The host is holding the change it was handed.
+    let world = World::new("lifecycle-result-contract");
+    world.repository("change-auto", &["true"]);
+    world.script("service.work", "the worker wrote this\n");
+    let (open, round) = driven(
+        &world,
+        "readapi",
+        vec![lifecycle("service", &[]), agent("build", &[])],
+    );
+    let printed = printed_result(&round);
+    assert_eq!(
+        printed["schema_version"], 2,
+        "the round result a consumer parses states no version, or not this one: {printed}"
+    );
+    // The same document, on disk, agreeing with the one that was printed.
+    assert_eq!(
+        world.run_json(&open, "round-01/result.json"),
+        printed,
+        "`round run` printed a different document from the one it recorded"
+    );
+
+    let node = |printed: &serde_json::Value, id: &str| {
+        printed["nodes"]
+            .as_array()
+            .expect("the result carries nodes")
+            .iter()
+            .find(|node| node["id"] == id)
+            .unwrap_or_else(|| panic!("{id} is missing from {printed}"))
+            .clone()
+    };
+    assert_eq!(
+        node(&printed, "service")["landing"],
+        "unlanded",
+        "{printed}"
+    );
+    // A node that published nothing carries no landing *key*: a `null` on every
+    // node would have a consumer branching on a field that is almost always
+    // meaningless, which is how the distinction stops being read at all.
+    assert!(
+        node(&printed, "build").get("landing").is_none(),
+        "a node with no change to land carries a landing key anyway: {}",
+        node(&printed, "build")
+    );
+
+    // The same policy, and this time the host lands what it is handed.
+    let world = World::new("lifecycle-result-contract-landed");
+    world.repository("change-auto", &["true"]);
+    world.script("gh.merged", "");
+    world.script("service.work", "the worker wrote this\n");
+    let (_, round) = driven(&world, "readapi", vec![lifecycle("service", &[])]);
+    let printed = printed_result(&round);
+    assert_eq!(printed["schema_version"], 2, "{printed}");
+    assert_eq!(node(&printed, "service")["landing"], "landed", "{printed}");
+}
+
+/// The round result `round run` printed, as a consumer parses it.
+///
+/// The last JSON line the verb wrote, because the engine's own diagnostics share
+/// that descriptor and a consumer reads the document rather than the noise around
+/// it.
+fn printed_result(round: &crate::harness::Run) -> serde_json::Value {
+    round
+        .stdout
+        .lines()
+        .rev()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line.trim()).ok())
+        .find(|document| document.get("nodes").is_some())
+        .unwrap_or_else(|| {
+            panic!(
+                "`round run` printed no round result:\nstdout: {}\nstderr: {}",
+                round.stdout, round.stderr
+            )
+        })
 }
 
 /// A settled node and a landed node are different facts, and one publication
