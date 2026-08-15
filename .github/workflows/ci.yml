@@ -212,12 +212,18 @@ jobs:
 
   # The README's from-source one-liner, read out of README.md and run verbatim.
   # The command is not spelled again here: the README is its one source, so this
-  # job cannot end up proving a command nobody is told to type. It can only
-  # resolve code that is already on the remote, so it runs on main rather than on
-  # pull requests — where the `install` job above proves the same path against
-  # the branch's own revision. Not a required check for that reason.
+  # job cannot end up proving a command nobody is told to type.
+  #
+  # It runs on pull requests as well as on main, and is a required check. What it
+  # resolves is still the remote's default branch rather than the branch under
+  # review — that is inherent to a `--git` install with no revision, and the
+  # `install` job above is what proves this revision — but a job that only ever
+  # ran after the merge could not block anything, and did not: this command was
+  # broken on every platform for days, straight through a release, because
+  # `cargo install --git` searches the whole repository and `crates/testfakes`
+  # also declares binaries. A check that gates nothing is indistinguishable from
+  # no check, so it gates.
   install-documented:
-    if: github.event_name == 'push'
     strategy:
       fail-fast: false
       matrix:
