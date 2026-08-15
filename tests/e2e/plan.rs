@@ -20,7 +20,7 @@ fn settle(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
         .run(&["start", &path.to_string_lossy(), "--detach"])
         .exited(0);
     world.until("the run to settle", |world| {
-        !world.events_of(name, "round-finished").is_empty()
+        world.run_file(name, "result.json").is_file()
     });
     name.to_string()
 }
@@ -39,7 +39,7 @@ fn a_cross_dag_dependency_is_accepted_and_gates_only_the_node_that_names_it() {
         vec![agent("independent", &[]), consumer],
     );
 
-    let result = world.run_json(&run, "round-01/result.json");
+    let result = world.run_json(&run, "result.json");
     let node = |id: &str| {
         result["nodes"]
             .as_array()
@@ -132,21 +132,15 @@ fn a_node_pinned_to_an_executor_the_rules_do_not_declare_is_refused_by_name() {
     // before any provider time is spent rather than silently falling back.
     pinned["executor"] = json!("a-cluster-nobody-declared");
     let path = world.plan("pinned", &plan_of("pinned", vec![pinned]));
-    // The driver is held, so this round is run once and by this test. Left to
-    // race, the driver's own `round run` takes the ownership lock first and the
-    // refusal being asserted has already happened somewhere nothing can read.
-    world.script("driver.wait", "hold");
-    world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
-    let mut command = world.cmd(&["round", "run", "pinned"]);
+    // The launch drives the run itself, so the refusal is the launch's own: it
+    // reaches the operator on the stderr they are already reading.
+    let mut command = world.cmd(&["start", &path.to_string_lossy(), "--attach"]);
     command.env("ONEPIPELINE_EXECUTOR_RULES", &rules);
     let refused = command.output().expect("the binary runs");
-    world.release("driver.go");
     let said = String::from_utf8_lossy(&refused.stderr).to_string();
     assert!(
         !refused.status.success(),
-        "the round dispatched anyway: {said}"
+        "the run dispatched anyway: {said}"
     );
     assert!(said.contains("a-cluster-nobody-declared"), "{said}");
     assert!(said.contains("do not declare"), "{said}");
@@ -158,9 +152,9 @@ fn a_single_node_plan_runs_to_completion_and_records_its_evidence() {
     let run = settle(&world, "single", vec![agent("build", &[])]);
 
     world.until("the graph to complete", |world| {
-        world.run_file(&run, "round-01/result.json").exists()
+        world.run_file(&run, "result.json").exists()
     });
-    let result = world.run_json(&run, "round-01/result.json");
+    let result = world.run_json(&run, "result.json");
     assert_eq!(result["state"], "complete", "{result}");
     assert_eq!(result["ok"], true);
     assert_eq!(result["nodes"][0]["id"], "build");
@@ -231,7 +225,7 @@ fn a_failed_dependency_skips_its_descendant_rather_than_blocking_it() {
         vec![agent("build", &[]), agent("ship", &["build"])],
     );
 
-    let result = world.run_json(&run, "round-01/result.json");
+    let result = world.run_json(&run, "result.json");
     assert_eq!(result["state"], "failed", "{result}");
     assert_eq!(result["ok"], false);
     let status = |id: &str| {
@@ -262,7 +256,7 @@ fn a_ready_human_action_waits_and_blocks_what_it_unblocks() {
         ],
     );
 
-    let result = world.run_json(&run, "round-01/result.json");
+    let result = world.run_json(&run, "result.json");
     assert_eq!(result["state"], "waiting", "{result}");
     let node = |id: &str| {
         result["nodes"]
@@ -296,7 +290,7 @@ fn an_expects_no_diff_node_settles_without_spending_a_dispatch() {
         })],
     );
 
-    let result = world.run_json(&run, "round-01/result.json");
+    let result = world.run_json(&run, "result.json");
     assert_eq!(result["nodes"][0]["status"], "done");
     assert_eq!(result["nodes"][0]["outcome"], "no-changes");
     assert!(
@@ -339,7 +333,7 @@ fn concurrency_bounds_how_many_nodes_are_in_flight_at_once() {
         world.release(&format!("{node}.go"));
     }
     world.until("the run to settle", |world| {
-        !world.events_of("bounded", "round-finished").is_empty()
+        world.run_file("bounded", "result.json").is_file()
     });
     assert_eq!(world.events_of("bounded", "node-dispatched").len(), 3);
 }
@@ -519,7 +513,7 @@ fn a_json_plan_keeps_json_escape_semantics_all_the_way_to_the_dispatch() {
         .run(&["start", &path.to_string_lossy(), "--detach"])
         .exited(0);
     world.until("the run to settle", |world| {
-        !world.events_of("emoji", "round-finished").is_empty()
+        world.run_file("emoji", "result.json").is_file()
     });
 
     let relayed = world
@@ -543,7 +537,7 @@ fn a_round_that_settles_unfinished_exits_one_rather_than_zero() {
         .run(&["start", &path.to_string_lossy(), "--detach"])
         .exited(0);
     world.until("the round to finish", |world| {
-        !world.events_of("exit", "round-finished").is_empty()
+        world.run_file("exit", "result.json").is_file()
     });
     // Driving the same round again is the engine verb a caller reads the exit
     // status off: a failed graph is unfinished, not an error.
@@ -612,7 +606,7 @@ fn a_worker_that_goes_quiet_is_surfaced_without_blocking_the_round() {
 
     world.release("slow.go");
     world.until("the run to settle", |world| {
-        !world.events_of("quiet", "round-finished").is_empty()
+        world.run_file("quiet", "result.json").is_file()
     });
 }
 
@@ -641,9 +635,9 @@ fn a_round_that_outlives_its_budget_cancels_its_workers_and_asks_the_planner() {
 
     world.release("slow.go");
     world.until("the round to finish", |world| {
-        !world.events_of("budgeted", "round-finished").is_empty()
+        world.run_file("budgeted", "result.json").is_file()
     });
     // The in-flight work was cancelled cooperatively rather than killed.
-    let result = world.run_json("budgeted", "round-01/result.json");
+    let result = world.run_json("budgeted", "result.json");
     assert_eq!(result["nodes"][0]["status"], "cancelled", "{result}");
 }

@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use clap::{CommandFactory, Parser};
 use oneagentgraph::config::{ConfigRef, GraphConfig, JudgeSide, Member};
-use onepipeline::channel::{Command as Edit, Dependents, Reply, SurfaceKind};
+use onepipeline::channel::{allows, Author, Command as Edit, Dependents, Reply, SurfaceKind};
 use onepipeline::cli::{
     Cli, Command, DAG_GRAPH_OFF, DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
 };
@@ -880,6 +880,124 @@ fn op_of(command: &Edit) -> &'static str {
 const OPS: &[&str] = &[
     "add", "drop", "reparent", "retry", "cancel", "requeue", "attest", "complete", "context",
 ];
+
+/// The per-author allowlist the contract fixes, both directions.
+///
+/// A monitor is an observer: it may correct and re-run work, and it may not
+/// decide that the run is finished, that a person acted, or that work leaves the
+/// graph. Held against every op the protocol has, so an op added later is
+/// refused for the monitor until somebody decides otherwise rather than granted
+/// by omission.
+#[test]
+fn the_monitor_may_issue_exactly_the_ops_the_contract_allows_it() {
+    assert!(
+        CONTRACT.contains(
+            "`monitor` may issue `retry | requeue | cancel | context | add` only, and \
+             `complete`, `attest`, and `drop` are refused for the monitor with a reason"
+        ),
+        "the contract's per-author allowlist moved"
+    );
+
+    let node = Node {
+        id: "fresh".into(),
+        persona: Some("engineer".into()),
+        task: Some("## What\ndo it".into()),
+        ..Node::default()
+    };
+    let every: Vec<(&str, Edit)> = vec![
+        ("add", Edit::Add { node: node.clone() }),
+        (
+            "drop",
+            Edit::Drop {
+                id: "x".into(),
+                dependents: Dependents::Detach,
+            },
+        ),
+        (
+            "reparent",
+            Edit::Reparent {
+                id: "x".into(),
+                deps: Vec::new(),
+            },
+        ),
+        (
+            "retry",
+            Edit::Retry {
+                id: "x".into(),
+                node,
+            },
+        ),
+        ("cancel", Edit::Cancel { id: "x".into() }),
+        (
+            "requeue",
+            Edit::Requeue {
+                id: "x".into(),
+                amend: None,
+            },
+        ),
+        (
+            "attest",
+            Edit::Attest {
+                reference: "x".into(),
+            },
+        ),
+        (
+            "complete",
+            Edit::Complete {
+                reason: "done".into(),
+            },
+        ),
+        (
+            "context",
+            Edit::Context {
+                id: "x".into(),
+                note: "look here".into(),
+                deliver: onepipeline::channel::Deliver::Auto,
+            },
+        ),
+    ];
+    assert_eq!(every.len(), OPS.len(), "an op is missing from this table");
+
+    let allowed = ["retry", "requeue", "cancel", "context", "add"];
+    for (op, command) in &every {
+        // The planner owns the graph, so nothing is refused for it.
+        allows(Author::Planner, command)
+            .unwrap_or_else(|e| panic!("the planner was refused `{op}`: {e}"));
+
+        let verdict = allows(Author::Monitor, command);
+        if allowed.contains(op) {
+            verdict.unwrap_or_else(|e| panic!("the monitor was refused `{op}`: {e}"));
+            continue;
+        }
+        let refusal = verdict
+            .expect_err(&format!("the monitor was allowed `{op}`"))
+            .to_string();
+        assert!(refusal.contains(op), "the refusal does not name the op: {refusal}");
+        // With a reason, not merely a no: the monitor has to know what to do
+        // instead, and "surface it" is the whole answer.
+        assert!(
+            refusal.contains("Surface it to the planner"),
+            "the refusal does not say what to do instead: {refusal}"
+        );
+    }
+
+    // The author rides the envelope, defaults to the planner, and is omitted
+    // when it is the default — so a reply written before authors existed is one.
+    let plain: Reply = serde_json::from_str(r#"{"completion":true}"#).expect("it parses");
+    assert_eq!(plain.author, Author::Planner);
+    assert!(
+        !serde_json::to_string(&plain)
+            .expect("it serializes")
+            .contains("author"),
+        "the default author is written out"
+    );
+    let watched: Reply =
+        serde_json::from_str(r#"{"version":1,"author":"monitor","commands":[]}"#)
+            .expect("it parses");
+    assert_eq!(watched.author, Author::Monitor);
+    assert_eq!(Author::Monitor.as_str(), "monitor");
+    assert_eq!(Author::Planner.as_str(), "planner");
+}
 
 #[test]
 fn the_contract_lists_exactly_the_ops_this_crate_accepts() {

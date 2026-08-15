@@ -1,8 +1,8 @@
 //! Where a `context` note lands: into the turn that is running now, or onto the
 //! node's next dispatch.
 //!
-//! `context` exists to carry what the planner learned while the round ran to a
-//! node that is *still running*, so the journeys here are about the one thing an
+//! `context` exists to carry what the planner learned while the run was going to
+//! a node that is *still running*, so the journeys here are about the one thing an
 //! `edit-committed` cannot tell you on its own — whether the worker that was
 //! already working read it. The one that proves live delivery drives it all the
 //! way through: the note reaches a held dispatch, and the work that dispatch
@@ -59,12 +59,20 @@ fn held(world: &World, name: &str, node: &str) -> String {
 /// Start a run with a held node and a second node that never dispatches at all,
 /// which is the other way a `live` note can find nothing to deliver into.
 fn held_beside_a_pending_node(world: &World, name: &str) -> String {
+    held_beside_a_pending_node_with(world, name, Vec::new())
+}
+
+/// The same, plus whatever else the journey needs in the graph.
+///
+/// A journey that dispatches one node *twice* needs something else still
+/// running while it does: the loop returns as soon as nothing can move, so a
+/// graph whose every node has settled has no driver left to pick a requeue up.
+fn held_beside_a_pending_node_with(world: &World, name: &str, extra: Vec<Value>) -> String {
     world.script("slow.turn-open", "");
     world.script("slow.wait", "hold");
-    let path = world.plan(
-        name,
-        &plan_of(name, vec![agent("slow", &[]), agent("later", &["slow"])]),
-    );
+    let mut nodes = vec![agent("slow", &[]), agent("later", &["slow"])];
+    nodes.extend(extra);
+    let path = world.plan(name, &plan_of(name, nodes));
     world
         .run(&["start", &path.to_string_lossy(), "--detach"])
         .exited(0);
@@ -85,6 +93,20 @@ fn delivery(world: &World, run: &str) -> Option<String> {
                 .as_str()
                 .map(str::to_string)
         })
+}
+
+/// The task prose each of a node's dispatches was given, in dispatch order.
+fn tasks_dispatched(world: &World, run: &str, node: &str) -> Vec<String> {
+    world
+        .journal(run)
+        .into_iter()
+        .filter(|event| {
+            event["labels"]["node"] == node
+                && event["source"] == "agentgraph"
+                && event["kind"] == "turn-activity"
+        })
+        .filter_map(|event| event["payload"]["task"].as_str().map(str::to_string))
+        .collect()
 }
 
 /// The last thing the node's dispatch said it was doing.
@@ -139,7 +161,7 @@ fn auto_delivers_into_the_running_turn_and_changes_what_that_worker_does() {
 
     world.release("slow.go");
     world.until("the run to settle", |world| {
-        !world.events_of(&run, "round-finished").is_empty()
+        world.run_file(&run, "result.json").is_file()
     });
 
     // What the *running* turn did with it. The task prose it was dispatched
@@ -164,16 +186,15 @@ fn auto_delivers_into_the_running_turn_and_changes_what_that_worker_does() {
 }
 
 /// The compatibility promise, driven end to end: a node whose turn has no lever
-/// takes the note exactly as `context` always delivered one — onto its next
-/// dispatch, rendered as its own section of the task prose.
+/// takes the note exactly as `context` always delivered one — the lever is
+/// pulled, nothing happens, and the note is deferred rather than lost.
 #[test]
-fn auto_defers_to_the_next_dispatch_when_there_is_no_controllable_turn() {
-    let world = World::new("context-deferred");
+fn auto_defers_when_the_running_turn_has_no_lever_to_deliver_into() {
+    let world = World::new("context-nolever");
     // A member on a harness with no out-of-band turn control: it runs, and there
-    // is nothing to redirect. It fails, so the round after it carries it.
+    // is nothing to redirect.
     world.script("slow.no-lever", "");
-    world.script("slow.fail", "1");
-    let run = held(&world, "defernote", "slow");
+    let run = held(&world, "nolever", "slow");
 
     world
         .run_with_stdin(
@@ -198,28 +219,93 @@ fn auto_defers_to_the_next_dispatch_when_there_is_no_controllable_turn() {
     assert_eq!(interrupted[0]["payload"]["delivered"], json!(false));
 
     world.release("slow.go");
-    world.until("the round to finish", |world| {
-        !world.events_of(&run, "round-finished").is_empty()
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
     });
     // Nothing was redirected, so the turn did what it was originally given.
     assert_eq!(
         activity(&world, &run, "slow")["payload"]["redirected"],
         Value::Null
     );
+}
 
-    world.run(&["round", "next", &run]).exited(0);
-    let next = world.run_json(&run, "round-02/plan.json");
-    let carried = next["tasks"]
-        .as_array()
-        .expect("tasks")
-        .iter()
-        .find(|node| node["id"] == "slow")
-        .expect("the failed node is carried")
-        .clone();
+/// A deferred note rides **exactly one** dispatch: the node's next one, and no
+/// later one.
+#[test]
+fn a_deferred_note_rides_the_next_dispatch_and_is_consumed_by_it() {
+    let world = World::new("context-deferred");
+    // A held node, a second node that has not been dispatched at all — the note
+    // is for that one — and a third that stays in flight throughout, so the loop
+    // is still running when the requeue below asks for a second dispatch.
+    world.script("keep.wait", "hold");
+    let run =
+        held_beside_a_pending_node_with(&world, "defernote", vec![agent("keep", &[])]);
+    world.script("later.wait", "hold");
+
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([{"op": "context", "id": "later", "note": NOTE}])),
+        )
+        .exited(0)
+        .out_has("\"applied\"");
+    world.until("the note to be committed", |world| {
+        delivery(world, &run).is_some()
+    });
     assert_eq!(
-        carried["context"], NOTE,
-        "the deferred note is not on the node's next dispatch: {carried}"
+        delivery(&world, &run).as_deref(),
+        Some("deferred"),
+        "a note for a node with no dispatch at all was reported live"
     );
+
+    // The dependency settles, so the note's node dispatches — carrying it.
+    world.release("slow.go");
+    world.until("the note's node to be dispatched", |world| {
+        world
+            .events_of(&run, "node-dispatched")
+            .iter()
+            .any(|event| event["labels"]["node"] == "later")
+    });
+
+    // Parked mid-flight and brought back: the node is dispatched a second time,
+    // and the note is *not* on it. A correction the worker has already been
+    // given is stated once.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([{"op": "cancel", "id": "later"}])),
+        )
+        .exited(0);
+    world.release("later.go");
+    world.until("the parked node to settle", |world| {
+        world
+            .events_of(&run, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "later")
+    });
+    let first = tasks_dispatched(&world, &run, "later");
+    assert!(
+        first[0].contains(NOTE),
+        "the deferred note did not reach the node's next dispatch: {}",
+        first[0]
+    );
+
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([{"op": "requeue", "id": "later"}])),
+        )
+        .exited(0);
+    world.until("the requeued node to be dispatched again", |world| {
+        tasks_dispatched(world, &run, "later").len() >= 2
+    });
+    let both = tasks_dispatched(&world, &run, "later");
+    assert!(
+        !both[1].contains(NOTE),
+        "a note outlived the dispatch that took it: {}",
+        both[1]
+    );
+    world.release("keep.go");
 }
 
 /// A planner who needs the correction *now* is told when it could not have it,
@@ -276,16 +362,30 @@ fn live_refuses_a_node_that_has_no_dispatch_without_reaching_for_a_lever() {
     world.release("slow.go");
 }
 
-/// A note the running turn took is *delivered*, so the round after it starts
-/// clean: the transition does not re-state a correction the worker has already
-/// acted on.
+/// A note the running turn took is *delivered*, so a later dispatch of the same
+/// node starts clean: nothing re-states a correction the worker acted on.
 #[test]
-fn a_live_note_is_not_carried_into_the_round_after_it() {
+fn a_live_note_is_not_owed_to_a_later_dispatch_of_the_same_node() {
     let world = World::new("context-live-not-carried");
-    // It fails, so the node is carried into a second round — which is exactly
-    // where a note that was still owed would show up.
-    world.script("slow.fail", "1");
-    let run = held(&world, "livecarry", "slow");
+    // `keep` stays in flight throughout, so the loop is still running when the
+    // requeue below asks for a second dispatch of `slow`.
+    world.script("keep.wait", "hold");
+    world.script("slow.turn-open", "");
+    world.script("slow.wait", "hold");
+    let path = world.plan(
+        "livecarry",
+        &plan_of("livecarry", vec![agent("slow", &[]), agent("keep", &[])]),
+    );
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+    world.until("the held node's turn to open", |world| {
+        world
+            .events_of("livecarry", "turn-started")
+            .iter()
+            .any(|event| event["labels"]["node"] == "slow")
+    });
+    let run = "livecarry".to_string();
 
     world
         .run_with_stdin(
@@ -298,24 +398,37 @@ fn a_live_note_is_not_carried_into_the_round_after_it() {
     });
     assert_eq!(delivery(&world, &run).as_deref(), Some("live"));
 
+    // Parked mid-flight and brought back, which is the only way one node is
+    // dispatched twice — and exactly where a note that was still owed shows up.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([{"op": "cancel", "id": "slow"}])),
+        )
+        .exited(0);
     world.release("slow.go");
-    world.until("the round to finish", |world| {
-        !world.events_of(&run, "round-finished").is_empty()
+    world.until("the parked node to settle", |world| {
+        world
+            .events_of(&run, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "slow")
     });
-    world.run(&["round", "next", &run]).exited(0);
-
-    let carried = world.run_json(&run, "round-02/plan.json")["tasks"]
-        .as_array()
-        .expect("tasks")
-        .iter()
-        .find(|node| node["id"] == "slow")
-        .expect("the failed node is carried")
-        .clone();
-    assert_eq!(
-        carried["context"],
-        Value::Null,
-        "a note the running turn already read was carried into the next round: {carried}"
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([{"op": "requeue", "id": "slow"}])),
+        )
+        .exited(0);
+    world.until("the requeued node to be dispatched again", |world| {
+        tasks_dispatched(world, &run, "slow").len() >= 2
+    });
+    let both = tasks_dispatched(&world, &run, "slow");
+    assert!(
+        !both[1].contains(NOTE),
+        "a note the running turn already read was carried into a later dispatch: {}",
+        both[1]
     );
+    world.release("keep.go");
 }
 
 /// A newer sibling's envelope shape on the interrupt stream does not cost the
@@ -349,7 +462,7 @@ fn a_line_this_build_cannot_read_does_not_lose_the_delivery_behind_it() {
 
     world.release("slow.go");
     world.until("the run to settle", |world| {
-        !world.events_of(&run, "round-finished").is_empty()
+        world.run_file(&run, "result.json").is_file()
     });
     assert_eq!(
         activity(&world, &run, "slow")["payload"]["redirected"],
@@ -420,7 +533,7 @@ fn next_leaves_a_running_turn_alone_and_a_bad_mode_is_refused() {
 
     world.release("slow.go");
     world.until("the run to settle", |world| {
-        !world.events_of(&run, "round-finished").is_empty()
+        world.run_file(&run, "result.json").is_file()
     });
     assert_eq!(
         activity(&world, &run, "slow")["payload"]["redirected"],

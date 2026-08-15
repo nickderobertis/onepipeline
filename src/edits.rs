@@ -352,7 +352,10 @@ fn compile_retry(
             replacement.id
         )));
     }
-    let replacement = pin_retry_branch(validate_retry_pin(replacement)?);
+    let replacement = pin_retry_branch(inherit_preserved_branch(
+        validate_retry_pin(replacement)?,
+        &target,
+    ));
     graph::validate_node(&replacement).map_err(|e| refuse(e.to_string()))?;
 
     let mut replacement = replacement;
@@ -427,6 +430,27 @@ fn validate_retry_pin(node: &Node) -> Result<Node> {
         }
     }
     Ok(node.clone())
+}
+
+/// A replacement that names no branch of its own continues the one the node it
+/// supersedes left behind.
+///
+/// The superseded node's attempt ran, committed, and stopped, so its branch
+/// holds work. A replacement that cut a fresh branch beside it would retry the
+/// publication against an empty tree and leave the committed work for a person
+/// to find. The pin is on the node because the fold put it there when the
+/// attempt settled — see `projection::pin_preserved_branch` — so this reads what
+/// the run recorded rather than guessing a name.
+///
+/// A planner who named either field is answered with what they named: naming a
+/// branch is a decision somebody made after reading the result.
+fn inherit_preserved_branch(mut node: Node, superseded: &Node) -> Node {
+    if node.branch.is_some() || node.resume.is_some() {
+        return node;
+    }
+    node.branch.clone_from(&superseded.branch);
+    node.resume.clone_from(&superseded.resume);
+    node
 }
 
 /// A retry that states a `resume` and no `branch` is pinned to the resume's own

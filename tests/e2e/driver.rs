@@ -1,7 +1,7 @@
 //! Who launched a run, who may stop it, what happens when its driver dies, and
 //! when an attach returns.
 //!
-//! Ported from `test_orchestrate_launch_e2e`, `test_attach_settles_e2e`, `test_run_ownership_e2e`, `test_round_ownership_e2e`, `test_run_adoption_e2e`, `test_relaunch_seed_e2e`, and the driver-liveness half of `test_liveness_e2e`.
+//! Ported from `test_orchestrate_launch_e2e`, `test_attach_settles_e2e`, `test_run_ownership_e2e`, `test_run_adoption_e2e`, `test_relaunch_seed_e2e`, and the driver-liveness half of `test_liveness_e2e`.
 
 // llmlint: ignore-file[e2e_not_mocked] `World` substitutes the two *siblings* at their
 // subprocess boundary and nothing inside the crate under test, which is driven as a real
@@ -16,6 +16,24 @@ use serde_json::json;
 
 fn start_detached(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
     start_detached_announcing(world, name, nodes).0
+}
+
+/// The same launch, with an observer graph attached.
+///
+/// The shipped default is `--dag-graph off` — a run needs no agent — so a
+/// journey about what a launched graph is given asks for one explicitly.
+fn start_detached_observed(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
+    let path = world.plan(name, &plan_of(name, nodes));
+    world
+        .run(&[
+            "start",
+            &path.to_string_lossy(),
+            "--detach",
+            "--dag-graph",
+            &world.shipped_dag_graph(),
+        ])
+        .exited(0);
+    name.to_string()
 }
 
 /// The same launch, with the driver pid it announced.
@@ -99,8 +117,7 @@ fn dag_launch_tasks(world: &World) -> Vec<String> {
 const ROLE_PROSE: &[&str] = &[
     "Drive",
     "to settlement",
-    "onepipeline round run",
-    "onepipeline round next",
+    "Observe",
     "nothing else",
     "run state",
 ];
@@ -128,7 +145,7 @@ fn assert_says_only_what_the_run_is(task: &str, run: &str, goal: &str) {
 #[test]
 fn the_launched_graphs_task_names_the_run_and_its_goal_at_start_and_at_adoption() {
     let world = World::new("driver-task");
-    let run = start_detached(&world, "described", vec![human("approve", &[])]);
+    let run = start_detached_observed(&world, "described", vec![human("approve", &[])]);
     // `plan_of` states this goal, so a task without it is one the plan never
     // reached.
     let goal = "Deliver described";
@@ -139,7 +156,9 @@ fn the_launched_graphs_task_names_the_run_and_its_goal_at_start_and_at_adoption(
     world.until("the driver to exit", |world| {
         world.run(&["status", &run]).stdout.contains("DRIVER DEAD")
     });
-    world.run(&["adopt", &run]).exited(NOTHING_DRIVING);
+    // A run parked on a person is *awaiting the planner*, not abandoned: the
+    // adoption picks it up and returns on the decision it cannot clear.
+    world.run(&["adopt", &run]).exited(0);
     let relaunched = dag_launch_tasks(&world);
     assert_eq!(relaunched.len(), 2, "{relaunched:?}");
     assert_says_only_what_the_run_is(&relaunched[1], &run, goal);
@@ -161,7 +180,13 @@ fn a_run_whose_plan_states_no_goal_is_launched_saying_so() {
         .expect("the shared plan states a goal to remove");
     let path = world.plan("goalless", &plan);
     world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .run(&[
+            "start",
+            &path.to_string_lossy(),
+            "--detach",
+            "--dag-graph",
+            &world.shipped_dag_graph(),
+        ])
         .exited(0);
 
     let launched = dag_launch_tasks(&world);
@@ -170,16 +195,18 @@ fn a_run_whose_plan_states_no_goal_is_launched_saying_so() {
 }
 
 #[test]
-fn start_launches_the_shipped_dag_scope_graph_and_records_how_to_relaunch_it() {
+fn start_launches_the_named_dag_scope_graph_and_records_how_to_relaunch_it() {
     let world = World::new("driver-launch");
-    world.script("driver.wait", "hold");
+    world.script("build.wait", "hold");
     let path = world.plan("launched", &plan_of("launched", vec![agent("build", &[])]));
     let started = world.run(&[
         "start",
         &path.to_string_lossy(),
         "--detach",
+        "--dag-graph",
+        &world.shipped_dag_graph(),
         "--set",
-        "members.orchestrator.agent.model=first value",
+        "members.monitor.agent.model=first value",
         "--set=members.check-in.model=second=value",
         "--node-set",
         "members.worker.agent.model=node value",
@@ -209,12 +236,15 @@ fn start_launches_the_shipped_dag_scope_graph_and_records_how_to_relaunch_it() {
 
     // The relaunch record is what `adopt` replays from.
     let launch = world.run_json("launched", "launch.json");
-    assert_eq!(launch["round_budget"], 14_400);
     assert_eq!(launch["heartbeat_interval"], 1_800);
+    assert!(
+        launch.get("round_budget").is_none(),
+        "a retired field survived in the launch record: {launch}"
+    );
     assert_eq!(
         launch["dag_sets"],
         json!([
-            "members.orchestrator.agent.model=first value",
+            "members.monitor.agent.model=first value",
             "members.check-in.model=second=value"
         ])
     );
@@ -227,40 +257,133 @@ fn start_launches_the_shipped_dag_scope_graph_and_records_how_to_relaunch_it() {
         .as_str()
         .expect("a graph")
         .ends_with("dag-scope.yaml"));
-    // The pid recorded is the graph process's, not this command's: what drives
-    // the run is that process.
+    // The pid recorded is the retained driver's, not this command's: what drives
+    // the run is that process, and it is this build rather than any agent.
     assert_ne!(launch["pid"], json!(0));
-    world.release("driver.go");
+    world.release("build.go");
+}
+
+/// The headline of the roundless contract: a plan runs with no agent at all.
+///
+/// Default flags, a dependency chain, and nothing launched but the dispatches
+/// themselves — every downstream node started by the settlement of the one
+/// before it, with no round anywhere in the record.
+#[test]
+fn a_dependency_chain_runs_to_completion_under_start_with_no_agent_graph() {
+    let world = World::new("driver-continuous");
+    let path = world.plan(
+        "chained",
+        &plan_of(
+            "chained",
+            vec![
+                agent("first", &[]),
+                agent("second", &["first"]),
+                agent("third", &["second"]),
+            ],
+        ),
+    );
+    world
+        .run(&["start", &path.to_string_lossy()])
+        .exited(0)
+        .out_has("\"settlement\":\"complete\"");
+
+    // No agent graph was launched: `--dag-graph` defaults to `off`, so the only
+    // thing the sibling was asked for is the three node dispatches.
+    let dag_launches = world
+        .invocations()
+        .into_iter()
+        .filter(|call| {
+            call["args"][1]
+                .as_str()
+                .is_some_and(|graph| graph.ends_with("dag-scope.yaml"))
+        })
+        .count();
+    assert_eq!(
+        dag_launches, 0,
+        "a run with default flags launched an agent graph: {:?}",
+        world.invocations()
+    );
+
+    // Each node became ready on its dependency settling, and was dispatched from
+    // there. The order is the chain's, and there is no round event in it.
+    let kinds = world.kinds("chained");
+    assert!(
+        kinds.iter().all(|kind| !kind.starts_with("round-")),
+        "a round event reached the journal: {kinds:?}"
+    );
+    let ready: Vec<String> = world
+        .events_of("chained", "node-ready")
+        .iter()
+        .map(|event| event["labels"]["node"].as_str().unwrap_or("").to_string())
+        .collect();
+    assert_eq!(ready, vec!["first", "second", "third"]);
+
+    // Dispatched immediately on settlement, not after any barrier: each node's
+    // dispatch follows the previous node's settlement with nothing between them.
+    let sequence: Vec<String> = world
+        .journal("chained")
+        .iter()
+        .filter(|event| event["kind"] == "node-dispatched" || event["kind"] == "node-settled")
+        .map(|event| {
+            format!(
+                "{} {}",
+                event["kind"].as_str().unwrap_or(""),
+                event["labels"]["node"].as_str().unwrap_or("")
+            )
+        })
+        .collect();
+    assert_eq!(
+        sequence,
+        vec![
+            "node-dispatched first",
+            "node-settled first",
+            "node-dispatched second",
+            "node-settled second",
+            "node-dispatched third",
+            "node-settled third",
+        ]
+    );
+    assert_eq!(world.run_json("chained", "result.json")["state"], "complete");
 }
 
 #[test]
-fn the_launch_record_is_written_before_the_driver_that_reads_it_is_started() {
+fn the_launch_record_is_written_before_anything_the_launcher_starts_reads_it() {
     let world = World::new("driver-ordering");
-    // The driver is held at its first instruction, *after* it has recorded what
-    // the ledger held. Holding it there is what makes this about the launcher's
-    // ordering and nothing else: whatever the driver does next cannot be the
-    // reason the record is there.
-    world.script("driver.wait", "hold");
+    // The observer is held at its first instruction, *after* it has recorded
+    // what the ledger held. Holding it there is what makes this about the
+    // launcher's ordering and nothing else.
+    world.script("observer.wait", "hold");
+    world.script("build.wait", "hold");
     let path = world.plan("ordered", &plan_of("ordered", vec![agent("build", &[])]));
     world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .run(&[
+            "start",
+            &path.to_string_lossy(),
+            "--detach",
+            "--dag-graph",
+            &world.shipped_dag_graph(),
+        ])
         .exited(0);
 
-    world.until("the driver to read the run's ledger", |world| {
-        !world.driver_saw().is_empty()
+    world.until("the observer to read the run's ledger", |world| {
+        !world.observer_saw().is_empty()
     });
-    // A driver that wins the race against its own launcher dies on a file
-    // nobody wrote, and the run then sits at `run-started` with nothing driving
-    // it — which reads as a mysteriously hung run rather than as the ordering
-    // bug it is.
-    let saw = world.driver_saw();
+    // Anything the launcher starts and that opens the run's ledger — the
+    // retained driver most of all — dies on a file nobody wrote if the record
+    // is written second, and the run then sits at `run-started` with nothing
+    // driving it: a mysteriously hung run rather than the ordering bug it is.
+    let saw = world.observer_saw();
     assert_eq!(saw[0]["run"], "ordered");
     assert_eq!(
         saw[0]["launch_record"],
         json!(true),
-        "the driver was started before its launch record existed: {saw:?}"
+        "a launched member was started before the launch record existed: {saw:?}"
     );
-    world.release("driver.go");
+    // And the retained driver claimed the run, which `start --detach` waits for
+    // and would have refused without.
+    assert_ne!(world.run_json("ordered", "launch.json")["pid"], json!(0));
+    world.release("observer.go");
+    world.release("build.go");
 }
 
 #[test]
@@ -274,24 +397,48 @@ fn an_attached_start_returns_when_the_graph_completes() {
 #[test]
 fn an_attach_returns_exit_three_when_nothing_is_driving_the_run() {
     let world = World::new("driver-unattended");
-    // A human action nothing can clear: the driver settles the round, finds no
-    // round it could open, and exits with the graph unfinished.
+    // A human action nothing can clear and nothing else to run: the loop has
+    // nowhere to go, so the attach returns with the graph unfinished.
     let path = world.plan(
         "unattended",
-        &plan_of("unattended", vec![human("approve", &[])]),
+        &plan_of("unattended", vec![agent("build", &[])]),
     );
+    // The one node fails, so nothing is ready, nothing is waiting on a person,
+    // and no surface is blocking: the run is simply not being driven any more.
+    world.script("build.fail", "1");
     world
         .run(&["start", &path.to_string_lossy(), "--attach"])
         .exited(NOTHING_DRIVING)
         .out_has("\"settlement\":\"unattended\"");
 }
 
+/// A run parked on a person is *awaiting the planner*, not abandoned.
+///
+/// The distinction the exit codes draw: exit 3 sends an operator to intervene in
+/// a run nothing is driving, and a run waiting for an attestation is doing
+/// exactly what it should.
+#[test]
+fn an_attach_returns_awaiting_planner_when_a_decision_point_is_all_that_is_left() {
+    let world = World::new("driver-awaiting");
+    let path = world.plan("awaiting", &plan_of("awaiting", vec![human("approve", &[])]));
+    world
+        .run(&["start", &path.to_string_lossy(), "--attach"])
+        .exited(0)
+        .out_has("\"settlement\":\"awaiting-planner\"");
+    assert_eq!(
+        world.events_of("awaiting", "decision-pending").len(),
+        1,
+        "the decision point was never reported: {:?}",
+        world.kinds("awaiting")
+    );
+}
+
 #[test]
 fn a_live_driver_that_has_stopped_writing_reads_as_parked_rather_than_dead() {
     let world = World::new("driver-parked");
-    // The driver is alive and holding, so its pid proves nothing about
-    // progress — which is the whole distinction `PARKED` exists to draw.
-    world.script("driver.wait", "hold");
+    // The driver is alive with a dispatch held open, so its pid proves nothing
+    // about progress — which is the whole distinction `PARKED` exists to draw.
+    world.script("build.wait", "hold");
     let run = start_detached(&world, "quiet", vec![agent("build", &[])]);
 
     world.until("the run to be reported parked", |world| {
@@ -309,15 +456,16 @@ fn a_live_driver_that_has_stopped_writing_reads_as_parked_rather_than_dead() {
     let rendered = String::from_utf8_lossy(&parked.output().expect("runs").stdout).to_string();
     assert!(!rendered.contains("DRIVER DEAD"), "{rendered}");
     assert!(rendered.contains("adopt"), "{rendered}");
-    world.release("driver.go");
+    world.release("build.go");
 }
 
 #[test]
 fn a_parked_run_is_adoptable_as_much_as_a_dead_one_is() {
     let world = World::new("driver-adopt-parked");
-    // Its driver is alive and holding, so this is the *other* undriven verdict:
-    // nothing has proved the process gone, and nothing is happening either.
-    world.script("driver.wait", "hold");
+    // Its driver is alive with a dispatch held open, so this is the *other*
+    // undriven verdict: nothing has proved the process gone, and nothing is
+    // happening either.
+    world.script("build.wait", "hold");
     let run = start_detached(&world, "idle", vec![agent("build", &[])]);
     world.until("the run to be reported parked", |world| {
         let mut status = world.cmd(&["status", &run]);
@@ -337,7 +485,15 @@ fn a_parked_run_is_adoptable_as_much_as_a_dead_one_is() {
         String::from_utf8_lossy(&adopted.stderr)
     );
     assert_eq!(world.events_of(&run, "driver-adopted").len(), 1);
-    world.release("driver.go");
+    // Taking the run over ended the driver that was holding it: the loop an
+    // adoption starts is the run's single writer, so the parked one could not
+    // stay.
+    assert!(
+        String::from_utf8_lossy(&adopted.stderr).contains("ending it to adopt the run"),
+        "the parked driver was left holding the run: {}",
+        String::from_utf8_lossy(&adopted.stderr)
+    );
+    world.release("build.go");
 }
 
 #[test]
@@ -352,8 +508,10 @@ fn a_dead_driver_reads_as_driver_dead_and_adopt_is_the_way_back() {
             "start",
             &path.to_string_lossy(),
             "--detach",
+            "--dag-graph",
+            &world.shipped_dag_graph(),
             "--set",
-            "members.orchestrator.agent.model=adopted model",
+            "members.monitor.agent.model=adopted model",
         ])
         .exited(0);
     let run = "orphaned".to_string();
@@ -374,7 +532,7 @@ fn a_dead_driver_reads_as_driver_dead_and_adopt_is_the_way_back() {
         .filter(|call| call["tool"] == "oneagentgraph" && call["args"][0] == "run")
         .count();
     let adopted = world.run(&["adopt", &run]);
-    adopted.exited(NOTHING_DRIVING);
+    adopted.exited(0);
     let adoptions = world.events_of(&run, "driver-adopted");
     assert_eq!(adoptions.len(), 1, "{adoptions:?}");
     assert_eq!(world.run_json(&run, "launch.json")["adoptions"], 1);
@@ -391,10 +549,7 @@ fn a_dead_driver_reads_as_driver_dead_and_adopt_is_the_way_back() {
         .iter()
         .position(|arg| arg == "--set")
         .expect("the adopted launch retained --set");
-    assert_eq!(
-        args[set_at + 1],
-        "members.orchestrator.agent.model=adopted model"
-    );
+    assert_eq!(args[set_at + 1], "members.monitor.agent.model=adopted model");
 }
 
 /// One run, one directory — whichever launch path started the driver.
@@ -416,14 +571,20 @@ fn a_dead_driver_reads_as_driver_dead_and_adopt_is_the_way_back() {
 #[test]
 fn start_and_adopt_give_the_sibling_the_same_directory_for_one_run() {
     let world = World::new("driver-launch-dir");
-    // A human action nothing can clear: the driver settles the round, finds no
-    // round it could open, and exits — which is what leaves the run adoptable.
+    // A human action nothing can clear: the loop has nowhere to go and returns,
+    // which is what leaves the run adoptable.
     let path = world.plan(
         "relocated",
         &plan_of("relocated", vec![human("approve", &[])]),
     );
     let launched_from = world.project.clone();
-    let mut start = world.cmd(&["start", &path.to_string_lossy(), "--detach"]);
+    let mut start = world.cmd(&[
+        "start",
+        &path.to_string_lossy(),
+        "--detach",
+        "--dag-graph",
+        &world.shipped_dag_graph(),
+    ]);
     start.current_dir(&launched_from);
     world.run_on(start, "start relocated").exited(0);
     let run = "relocated".to_string();
@@ -437,9 +598,7 @@ fn start_and_adopt_give_the_sibling_the_same_directory_for_one_run() {
     assert_ne!(adopted_from, launched_from);
     let mut adopt = world.cmd(&["adopt", &run]);
     adopt.current_dir(&adopted_from);
-    world
-        .run_on(adopt, "adopt relocated")
-        .exited(NOTHING_DRIVING);
+    world.run_on(adopt, "adopt relocated").exited(0);
     assert_eq!(world.events_of(&run, "driver-adopted").len(), 1);
 
     let dirs = dag_launch_dirs(&world);
@@ -518,7 +677,13 @@ fn a_launch_records_the_directory_the_process_resolves_not_the_route_to_it() {
     );
 
     let path = world.plan("routed", &plan_of("routed", vec![human("approve", &[])]));
-    let mut start = world.cmd(&["start", &path.to_string_lossy(), "--detach"]);
+    let mut start = world.cmd(&[
+        "start",
+        &path.to_string_lossy(),
+        "--detach",
+        "--dag-graph",
+        &world.shipped_dag_graph(),
+    ]);
     start.current_dir(&route);
     world.run_on(start, "start routed").exited(0);
     let run = "routed".to_string();
@@ -560,7 +725,7 @@ fn a_launch_records_the_directory_the_process_resolves_not_the_route_to_it() {
 #[test]
 fn a_launch_record_without_a_directory_is_replayed_from_the_adopting_process() {
     let world = World::new("driver-legacy-dir");
-    let run = start_detached(&world, "legacy", vec![human("approve", &[])]);
+    let run = start_detached_observed(&world, "legacy", vec![human("approve", &[])]);
     world.until("the driver to exit", |world| {
         world.run(&["status", &run]).stdout.contains("DRIVER DEAD")
     });
@@ -581,7 +746,7 @@ fn a_launch_record_without_a_directory_is_replayed_from_the_adopting_process() {
     let adopted_from = world.project.clone();
     let mut adopt = world.cmd(&["adopt", &run]);
     adopt.current_dir(&adopted_from);
-    world.run_on(adopt, "adopt legacy").exited(NOTHING_DRIVING);
+    world.run_on(adopt, "adopt legacy").exited(0);
     let dirs = dag_launch_dirs(&world);
     assert_eq!(
         Path::new(dirs.last().expect("the adoption relaunched the graph")),
@@ -642,7 +807,7 @@ fn a_launch_record_without_a_directory_is_replayed_from_the_adopting_process() {
 #[test]
 fn adoption_re_addresses_the_pacemaker_at_the_graph_run_now_driving() {
     let world = World::new("driver-adopt-pacemaker");
-    let run = start_detached(&world, "readdressed", vec![human("approve", &[])]);
+    let run = start_detached_observed(&world, "readdressed", vec![human("approve", &[])]);
     world.until("the driver to exit", |world| {
         world.run(&["status", &run]).stdout.contains("DRIVER DEAD")
     });
@@ -651,7 +816,7 @@ fn adoption_re_addresses_the_pacemaker_at_the_graph_run_now_driving() {
         .expect("the first driver's graph run")
         .to_string();
 
-    world.run(&["adopt", &run]).exited(NOTHING_DRIVING);
+    world.run(&["adopt", &run]).exited(0);
     let after = world.run_json(&run, "launch.json")["graph_run"]
         .as_str()
         .expect("the adopted driver's graph run")
@@ -697,9 +862,9 @@ fn adoption_re_addresses_the_pacemaker_at_the_graph_run_now_driving() {
 fn a_run_with_no_recorded_graph_run_says_why_the_pacemaker_was_not_reset() {
     let world = World::new("driver-no-graph-run");
     world.script("build.wait", "hold");
-    let run = start_detached(&world, "unaddressed", vec![agent("build", &[])]);
-    world.until("the run to open a round", |world| {
-        !world.events_of(&run, "round-started").is_empty()
+    let run = start_detached_observed(&world, "unaddressed", vec![agent("build", &[])]);
+    world.until("the run to dispatch its node", |world| {
+        !world.events_of(&run, "node-dispatched").is_empty()
     });
     world
         .run(&["surface", &run, "--kind", "check-in", "--message", "steady"])
@@ -905,7 +1070,7 @@ fn a_run_nobody_can_attribute_is_nobodys() {
 }
 
 #[test]
-fn the_engine_verbs_are_a_single_writer() {
+fn the_driving_process_is_a_single_writer() {
     let world = World::new("driver-lock");
     world.script("build.wait", "hold");
     let run = start_detached(&world, "locked", vec![agent("build", &[])]);
@@ -913,96 +1078,104 @@ fn the_engine_verbs_are_a_single_writer() {
         !world.events_of(&run, "node-dispatched").is_empty()
     });
 
-    // The driver holds the run's ownership lock for the whole round, so a
-    // second writer loses the race rather than interleaving with it.
+    // The driving process holds the run's ownership lock for as long as it is
+    // driving, so a second loop loses the race rather than interleaving with it.
+    // Spelled at the verb `start --detach` retains, because that is the only
+    // thing that starts a second loop.
     world
-        .run(&["round", "run", &run])
+        .run(&["drive-run", &run])
         .exited(REFUSED)
         .err_has("is being written by pid");
+    // And an adoption refuses outright while the run is genuinely being driven.
     world
-        .run(&["round", "next", &run])
+        .run(&["adopt", &run])
         .exited(REFUSED)
-        .err_has("is being written by pid");
+        .err_has("still being driven");
     world.release("build.go");
 }
 
 #[test]
-fn the_engine_verbs_drive_a_run_the_planner_launched_detached() {
-    let world = World::new("driver-verbs");
-    // The driver is held back, so this test *is* the orchestrator: it runs the
-    // same two verbs under the same lock, which is what the shipped persona
-    // instructs and the only way run state may change.
-    world.script("driver.wait", "hold");
+fn a_detached_launch_drives_the_whole_chain_and_records_one_result() {
+    let world = World::new("driver-detached-drive");
     let run = start_detached(
         &world,
-        "verbs",
+        "unattendedchain",
         vec![agent("first", &[]), agent("second", &["first"])],
     );
 
-    world.run(&["round", "run", &run]).exited(0);
-    assert_eq!(
-        world.run_json(&run, "round-01/result.json")["state"],
-        "complete"
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+    let result = world.run_json(&run, "result.json");
+    assert_eq!(result["state"], "complete");
+    assert_eq!(result["ok"], json!(true));
+    // One document for the run, not one per round: there are no rounds, and
+    // nothing beside it claims to be the frontier.
+    assert!(
+        !world.run_file(&run, "round-01").exists(),
+        "a round directory was written"
     );
-
-    // Nothing is left to do, so the transition reports completion rather than
-    // opening a round that would dispatch nothing.
-    let transitioned = world.run(&["round", "next", &run]);
-    transitioned.exited(0).out_has("\"complete\"");
-    assert_eq!(transitioned.json()["next_round"], serde_json::Value::Null);
-    assert!(!world.run_file(&run, "round-02").exists());
-    world.release("driver.go");
+    let ids: Vec<&str> = result["nodes"]
+        .as_array()
+        .expect("the result names every node")
+        .iter()
+        .map(|node| node["id"].as_str().unwrap_or(""))
+        .collect();
+    assert_eq!(ids, vec!["first", "second"]);
 }
 
 #[test]
 fn a_detached_driver_outlives_its_own_output_and_keeps_what_it_said() {
     let world = World::new("driver-detached-output");
-    // The dispatch emits a line this build cannot read, so the engine verb the
-    // driver runs says so — on the driver's own stderr, from a subprocess of a
-    // subprocess. That is the one thing a detached driver cannot be given a
-    // pipe for: the process that would read it is the launcher, and `--detach`
-    // means the launcher has already gone. Written into such a pipe, the verb
-    // dies of a broken one mid-round, and the run is left holding an open round
-    // with nothing driving it — which surfaces much later, and as something
-    // else entirely: a `reply` refused because the run "has settled".
-    world.script("build.unreadable", "");
-    let run = start_detached(&world, "detachedlog", vec![agent("build", &[])]);
+    // A journal record this build cannot read, so the loop says so on its own
+    // stderr. That is the one thing a detached driver cannot be given a pipe
+    // for: the process that would read it is the launcher, and `--detach` means
+    // the launcher has already gone. Written into such a pipe, the loop dies of
+    // a broken one mid-run, and the run is left with nothing driving it — which
+    // surfaces much later, and as something else entirely.
+    let path = world.plan("detachedlog", &plan_of("detachedlog", vec![agent("build", &[])]));
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+    let run = "detachedlog".to_string();
 
-    // On the driver's own record of the round, not on the engine's event for it.
-    // `round-finished` is journaled by the `round run` the driver spawned, so it
-    // is there while that child is still exiting and before the driver has
-    // written down what it exited with — a gap wide enough to lose on a host
-    // whose process teardown is slower, where this waited on one fact and then
-    // asserted a different one that had not happened yet.
-    world.until("the driver to finish its round", |world| {
-        !world.events_of(&run, "round-finished").is_empty()
-            && world
-                .driver_saw()
-                .iter()
-                .any(|record| record["round_run"].is_number())
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
     });
+    assert_eq!(world.run_json(&run, "result.json")["state"], "complete");
 
-    // The driver ran its round to the end rather than dying on its first line,
-    // and the verb it ran succeeded.
-    let saw = world.driver_saw();
-    assert!(
-        saw.iter().any(|record| record["round_run"] == json!(0)),
-        "the driver's round did not finish: {saw:?}"
-    );
-    assert_eq!(
-        world.run_json(&run, "round-01/result.json")["state"],
-        "complete"
-    );
+    // And the driver's own descriptor was a file it could write, not a pipe
+    // whose reader had gone: an adoption after a hand-written record proves it
+    // by making the loop say something.
+    let log = world.run_file(&run, "driver.log");
+    assert!(log.exists(), "the detached driver was given no log to write");
+}
 
-    // And what it said is on disk, where a planner who never attached can read
-    // it. A detached driver's words are otherwise the run's one unrecoverable
-    // output.
-    let log = std::fs::read_to_string(world.run_file(&run, "driver.log"))
-        .expect("the detached driver's output was kept");
-    assert!(
-        log.contains("skipped"),
-        "the driver's own words were lost: {log}"
-    );
+/// A driver that folds a record it cannot read says so, and drives anyway.
+///
+/// The record might have been an authoritative graph mutation — a `drop` that
+/// removed a node the loop is about to dispatch — so it is reported. Refusing
+/// would leave the run with nothing driving it, which is strictly worse.
+#[test]
+fn a_journal_record_this_build_cannot_read_is_reported_by_the_driver_that_meets_it() {
+    let world = World::new("driver-unreadable");
+    let path = world.plan("unreadable", &plan_of("unreadable", vec![human("approve", &[])]));
+    world
+        .run(&["start", &path.to_string_lossy(), "--attach"])
+        .exited(0);
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(world.run_file("unreadable", "events.jsonl"))
+        .and_then(|mut file| {
+            use std::io::Write;
+            file.write_all(b"{\"v\":99,\"from\":\"a newer build\"}\n")
+        })
+        .expect("a record this build cannot read");
+
+    world
+        .run(&["adopt", "unreadable"])
+        .exited(0)
+        .err_has("cannot read");
 }
 
 #[test]
@@ -1018,14 +1191,14 @@ fn a_detached_start_returns_while_the_run_it_launched_is_still_in_flight() {
     // launcher does when the driver it starts inherits, and holds open, the
     // streams its own caller is reading.
     assert!(
-        world.events_of(&run, "round-finished").is_empty(),
+        !world.run_file(&run, "result.json").is_file(),
         "the launch did not return until the run had settled: {:?}",
         world.kinds(&run)
     );
 
     world.release("build.go");
     world.until("the run to settle once it is released", |world| {
-        !world.events_of(&run, "round-finished").is_empty()
+        world.run_file(&run, "result.json").is_file()
     });
 }
 
@@ -1051,7 +1224,13 @@ fn a_refusal_slower_than_any_launch_window_still_fails_the_launch() {
     // each, and a launcher that reported this one as started would do it for
     // whichever form it did not wait on.
     for form in ["--detach", "--attach"] {
-        let started = world.run(&["start", &path.to_string_lossy(), form]);
+        let started = world.run(&[
+            "start",
+            &path.to_string_lossy(),
+            form,
+            "--dag-graph",
+            &world.shipped_dag_graph(),
+        ]);
 
         started.exited(REFUSED);
         started.err_has("oneagentgraph");
@@ -1074,7 +1253,13 @@ fn a_refusal_slower_than_any_launch_window_still_fails_the_launch() {
     // good number, and the only thing standing between it and a wait that ends
     // before it starts is the crate declining to take it.
     for unusable in ["however long it takes", "0"] {
-        let mut launch = world.cmd(&["start", &path.to_string_lossy(), "--detach"]);
+        let mut launch = world.cmd(&[
+            "start",
+            &path.to_string_lossy(),
+            "--detach",
+            "--dag-graph",
+            &world.shipped_dag_graph(),
+        ]);
         launch.env(crate::harness::STARTUP_TIMEOUT_ENV, unusable);
         let started = world.run_on(launch, "start --detach");
         started.exited(REFUSED);
@@ -1107,7 +1292,13 @@ fn a_graph_that_neither_starts_nor_exits_fails_the_launch_rather_than_outlasting
 
     // The second launch mints a run of its own beside the first.
     for (form, run) in [("--detach", "silent"), ("--attach", "silent-2")] {
-        let mut launch = world.cmd(&["start", &path.to_string_lossy(), form]);
+        let mut launch = world.cmd(&[
+            "start",
+            &path.to_string_lossy(),
+            form,
+            "--dag-graph",
+            &world.shipped_dag_graph(),
+        ]);
         launch.env(crate::harness::STARTUP_TIMEOUT_ENV, "1");
         let began = std::time::Instant::now();
         let started = world.run_on(launch, form);
@@ -1131,8 +1322,8 @@ fn a_graph_that_neither_starts_nor_exits_fails_the_launch_rather_than_outlasting
             "`start {form}` never got an answer and still printed a pid:\n{}",
             started.stdout
         );
-        // Nothing is driving the run, and the ledger says so rather than naming
-        // a driver: the launch is what an `adopt` is offered from.
+        // The launch refused, so nothing recorded a driver for the run at all:
+        // the ledger is what an `adopt` is offered from.
         world.run(&["status", run]).out_has("DRIVER DEAD");
     }
 }
@@ -1151,17 +1342,32 @@ fn a_graph_that_finished_before_announcing_anything_is_a_launch_that_worked() {
     let path = world.plan("quiet", &plan_of("quiet", vec![agent("build", &[])]));
 
     // Detached: the launch reports the run it started, because starting it is
-    // all it promised.
-    let started = world.run(&["start", &path.to_string_lossy(), "--detach"]);
+    // all it promised — and the observer having stopped watching costs the run
+    // nothing, because the observer never drove it.
+    let started = world.run(&[
+        "start",
+        &path.to_string_lossy(),
+        "--detach",
+        "--dag-graph",
+        &world.shipped_dag_graph(),
+    ]);
     started.exited(0).out_has("\"run_id\"");
-    world.run(&["status", "quiet"]).out_has("DRIVER DEAD");
+    world.until("the run to settle", |world| {
+        world.run_file("quiet", "result.json").is_file()
+    });
+    assert_eq!(world.run_json("quiet", "result.json")["state"], "complete");
 
-    // Attached: the launch stays, finds nothing driving the run, and says so —
-    // exit 3 rather than a refusal, because the graph did not refuse anything.
-    world
-        .run(&["start", &path.to_string_lossy(), "--attach"])
-        .exited(NOTHING_DRIVING)
-        .out_has("\"settlement\":\"unattended\"");
+    // Attached: the launch stays, drives the run itself, and settles it — the
+    // observer's clean exit is reported and changes nothing.
+    let attached = world.run(&[
+        "start",
+        &path.to_string_lossy(),
+        "--attach",
+        "--dag-graph",
+        &world.shipped_dag_graph(),
+    ]);
+    attached.exited(0).out_has("\"settlement\":\"complete\"");
+    attached.err_has("has stopped watching");
 }
 
 /// The `(pid, parent pid)` pairs this host reports.
@@ -1246,10 +1452,11 @@ fn stopping_a_run_ends_its_whole_dispatch_tree_and_leaves_the_run_beside_it_alon
         });
     }
 
-    // Read before the stop, and only once the dispatch has actually grown: a
-    // tree of one process is a journey that would pass without the fix.
-    world.until("the dispatch to be more than one process", |_| {
-        descendants(driver).len() > 1
+    // Read before the stop, and only once the dispatch has actually started: a
+    // tree of one process is a journey that would pass without the fix, because
+    // the expensive process is a level below the pid the ledger holds.
+    world.until("the dispatch to be a process below the driver", |_| {
+        !descendants(driver).is_empty()
     });
     let tree: Vec<u32> = std::iter::once(driver).chain(descendants(driver)).collect();
     assert!(
@@ -1289,8 +1496,8 @@ fn a_forced_stop_ends_the_whole_dispatch_tree_of_another_sessions_run() {
     world.until("a node to be in flight", |world| {
         !world.events_of(&run, "node-dispatched").is_empty()
     });
-    world.until("the dispatch to be more than one process", |_| {
-        descendants(driver).len() > 1
+    world.until("the dispatch to be a process below the driver", |_| {
+        !descendants(driver).is_empty()
     });
     let tree: Vec<u32> = std::iter::once(driver).chain(descendants(driver)).collect();
 
@@ -1338,8 +1545,8 @@ fn a_stop_that_cannot_read_the_process_table_refuses_and_leaves_the_run_retryabl
         world.until("a node to be in flight", |world| {
             !world.events_of(&run, "node-dispatched").is_empty()
         });
-        world.until("the dispatch to be more than one process", |_| {
-            descendants(driver).len() > 1
+        world.until("the dispatch to be a process below the driver", |_| {
+            !descendants(driver).is_empty()
         });
         let tree: Vec<u32> = std::iter::once(driver).chain(descendants(driver)).collect();
 
@@ -1491,8 +1698,8 @@ fn a_stop_that_reaches_part_of_the_tree_refuses_and_names_what_it_left() {
     world.until("a node to be in flight", |world| {
         !world.events_of(&run, "node-dispatched").is_empty()
     });
-    world.until("the dispatch to be more than one process", |_| {
-        descendants(driver).len() > 1
+    world.until("the dispatch to be a process below the driver", |_| {
+        !descendants(driver).is_empty()
     });
     let tree: Vec<u32> = std::iter::once(driver).chain(descendants(driver)).collect();
 

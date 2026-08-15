@@ -11,7 +11,7 @@ contract**, and `docs/contract.md` was amended to carry each ruling. They stay
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–23 are open**. Each states what the code does today and the
+Entries **10–23 and 25–28 are open**. Each states what the code does today and the
 proposal it is waiting on — most of them a question for a *producer* rather than
 for this crate, because `oneagentgraph` and `onevcs` are independent tools that
 expose general integration hooks only and nothing in them may know about this
@@ -712,3 +712,93 @@ The amended contract declares the schema as v2, lists `max_turns` among the node
 shapes and no `done_when` at all, states what a control is and what becomes of
 one that cannot be applied, and names `pub controls: NodeControls` in its seam
 sketch.
+
+## 25. The retained driver of a detached launch is now a *second* hidden verb — OPEN
+
+**Proposal (for the planner who owns the contract): fold this into the ruling on
+entry 23 — name both hidden verbs in the driver contract, or accept both outside
+the documented surface.**
+
+Entry 23 records `onepipeline drive`, the hidden verb a detached launch retains
+to compose *this build's* `oneagentgraph`. Roundless execution adds a second one
+for the same structural reason and at a different layer. The engine is no longer
+an agent running `round run|next`: `start` runs the reconcile loop itself, and an
+attached launch runs it in-process. A **detached** launch cannot — the loop is a
+thread, and a thread does not outlive the launcher that is about to return — so
+it retains this executable at `onepipeline drive-run RUN`, which takes the
+ownership lock, launches the observer graph if the run has one, and runs the same
+loop the attached launch would have run in this process.
+
+Both verbs are `hide = true` and both are reached directly by
+`scripts/smoke-published.sh`, which `tests/contract.rs` requires of every hidden
+verb. `drive-run` is also what makes `stop` whole: the observer is launched *by*
+the retained driver, so it is inside the process tree a stop reaps rather than a
+sibling process reparented to init.
+
+What is open is the same question entry 23 asks, now about two verbs.
+
+## 26. `attach` returns when the loop concludes, not the moment a surface blocks — OPEN
+
+**Proposal (for the planner who owns the contract): confirm that
+`awaiting-planner` means "outstanding decision *and* nothing else can move", or
+say what an attached launch should do with the loop it is running.**
+
+The contract says attach "returns when the run settles ... a blocking surface
+waits". Under rounds that was unambiguous: the driver was a separate process, so
+the attaching launcher could return the moment a blocking surface appeared and
+leave the run advancing behind it.
+
+It cannot now, and the two halves of the delta pull against each other. A
+decision point "pauses only its dependent subtree; independent branches proceed",
+so returning the moment one appears would abandon branches that are still
+running — in-process, returning ends the loop. And clearing a decision
+"auto-resumes the paused subtree within the running loop", which requires the
+loop to still be running when the clear arrives.
+
+So the loop waits out every decision it can still make progress beside, and
+returns only when nothing can move without something arriving over the channel.
+`settlement_of` then reads `awaiting-planner` off that state: an outstanding
+`kind: human` action, or an unanswered blocking surface. A decision cleared while
+other work is in flight resumes inside the loop, exactly as the delta says; one
+cleared after the launch returned is picked up by `adopt`.
+
+## 27. `adopt` now ends the parked driver it is taking the run over from — OPEN
+
+**Proposal (for the planner who owns the contract): confirm that adopting a
+`PARKED` run may end the process holding it, or say what else should reopen a run
+whose driver is alive and not working.**
+
+The contract makes `PARKED` — a live pid that has written nothing for a whole
+interval — an *undriven* verdict, and `adopt` the way back from it. Under rounds
+that cost nothing: the ownership lock was taken and released per engine verb, so
+a parked driver was not holding it.
+
+The loop now holds that lock for as long as it drives, and a reclaim only happens
+for a holder this host can prove is gone. An adoption that started its loop
+beside a parked driver would lose the race and refuse — closing the one documented
+way back from `PARKED`. So `adopt`, having already refused a run that is genuinely
+being driven, ends the parked driver politely, waits for it to go, and then takes
+the lock. It says so on stderr, and it still has no `--force`: what it may end is
+only a driver the liveness verdict has already called undriven.
+
+## 28. A retried dispatch is journalled as a dispatch, not as its own kind — OPEN
+
+**Proposal (for the planner who owns the contract): confirm that `node-dispatched`
+with an `attempt` is the right record for a re-asked dispatch, or restore a kind
+for it.**
+
+The approved event delta removes `boundary-retried`, whose name was the round
+boundary's. The behaviour it reported is not round-shaped and is retained: a
+dispatch that produced *nothing* and failed is asked again, because that failure
+carries no work to lose, and only that one — an attempt that answered has already
+answered.
+
+With the kind gone the retry had nowhere to be recorded, and an unreported retry
+is a run whose evidence says one dispatch where three happened. So each attempt
+emits `node-dispatched`, which is what it is, carrying `attempt`, `attempts`, and
+the bounded reason the last attempt gave. A reader counts dispatches per node to
+see a retry; the settlement still distinguishes `no-agent-progress` from
+`task-failed`.
+
+The alternative — silence — was rejected as removing evidence the delta did not
+ask to remove.
