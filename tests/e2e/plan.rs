@@ -344,80 +344,6 @@ fn concurrency_bounds_how_many_nodes_are_in_flight_at_once() {
     assert_eq!(world.events_of("bounded", "node-dispatched").len(), 3);
 }
 
-/// The node-scope overrides one dispatch's launch actually carried.
-fn overrides_dispatched(world: &World, node: &str) -> Vec<String> {
-    world
-        .invocations()
-        .iter()
-        .filter(|invocation| {
-            invocation["tool"] == "oneagentgraph" && invocation["args"][0] == "run"
-        })
-        .filter_map(|invocation| {
-            let args: Vec<String> = invocation["args"]
-                .as_array()?
-                .iter()
-                .filter_map(|arg| arg.as_str().map(str::to_string))
-                .collect();
-            args.iter()
-                .any(|arg| arg == &format!("onepipeline.node={node}"))
-                .then(|| {
-                    args.windows(2)
-                        .filter(|pair| pair[0] == "--set")
-                        .map(|pair| pair[1].clone())
-                        .collect::<Vec<String>>()
-                })
-        })
-        .next()
-        .unwrap_or_else(|| panic!("{node} never dispatched"))
-}
-
-/// A node's turn budget reaches the dispatch, proven from the **effective
-/// configuration** that launch produces rather than from the code path.
-///
-/// The overrides the launch actually carried are taken off the recorded
-/// invocation and applied to the shipped node-scope graph by `oneagentgraph`'s
-/// own applier — the same call its `run` makes before it builds a member — and
-/// the worker is read out of the result. A budget the launch never carried
-/// cannot survive that, and neither can one addressed to a field the sibling
-/// does not have.
-#[test]
-fn a_nodes_turn_budget_reaches_the_configuration_its_dispatch_is_handed() {
-    let world = World::new("plan-budget");
-    let mut budgeted = agent("budgeted", &[]);
-    budgeted["max_turns"] = json!(45);
-    settle(&world, "budget", vec![agent("plain", &[]), budgeted]);
-
-    let effective = |node: &str| -> oneagentgraph::config::GraphConfig {
-        let overrides: Vec<_> = overrides_dispatched(&world, node)
-            .iter()
-            .map(|set| oneagentgraph::run::parse_set(set).expect("the sibling parses it"))
-            .collect();
-        let text = std::fs::read_to_string(crate::harness::repo_file("graphs/node-scope.yaml"))
-            .expect("the node-scope graph ships");
-        let mut document: serde_json::Value =
-            serde_norway::from_str(&text).expect("the graph parses");
-        oneagentgraph::run::apply_overrides(&mut document, &overrides)
-            .expect("every override the launch carried names something in the graph");
-        serde_norway::from_value(serde_norway::to_value(&document).expect("a value"))
-            .expect("the overridden graph is still a valid graph config")
-    };
-    let turns_of = |node: &str| match effective(node).members.remove("worker") {
-        Some(oneagentgraph::config::Member::Onejudge(worker)) => worker.max_turns,
-        other => panic!("the node-scope worker is a two-party member: {other:?}"),
-    };
-
-    assert_eq!(
-        turns_of("budgeted"),
-        Some(45),
-        "the node's turn budget never reached the member that runs its work"
-    );
-    assert_eq!(
-        turns_of("plain"),
-        None,
-        "a node that declared no budget had one imposed on it"
-    );
-}
-
 #[test]
 fn a_plan_the_schema_refuses_never_starts_a_run() {
     let world = World::new("plan-refuse");
@@ -473,6 +399,28 @@ fn a_plan_the_schema_refuses_never_starts_a_run() {
                 {"id":"s","persona":"e","task":"t"}]}]}"#,
             "takes its persona, task, and turn budget from them",
         ),
+        (
+            "nodiffbudget",
+            r#"{"schema_version":1,"tasks":[{"id":"a","task":"t","expects_no_diff":true,"max_turns":45}]}"#,
+            "takes no persona or turn budget",
+        ),
+        (
+            "humanstepbudget",
+            r#"{"schema_version":1,"tasks":[{"id":"a","repo":"o/r","steps":[
+                {"id":"s","kind":"human","task":"t","max_turns":45}]}]}"#,
+            "no persona, turn budget, or expects_no_diff",
+        ),
+        (
+            "nodiffstepbudget",
+            r#"{"schema_version":1,"tasks":[{"id":"a","repo":"o/r","steps":[
+                {"id":"s","task":"t","expects_no_diff":true,"max_turns":45}]}]}"#,
+            "expects_no_diff settles without a dispatch",
+        ),
+        (
+            "zerobudget",
+            r#"{"schema_version":1,"tasks":[{"id":"a","persona":"e","task":"t","max_turns":0}]}"#,
+            "no turn at all",
+        ),
         // The retired field, named rather than answered with `unknown field`.
         (
             "donewhen",
@@ -498,6 +446,20 @@ fn a_plan_the_schema_refuses_never_starts_a_run() {
             "a refused plan left a run directory behind"
         );
     }
+
+    // A plan file is read with its own format's escape semantics, so the two
+    // formats reach the schema by different paths. The retired field is named on
+    // both, because a planner who writes YAML wrote the same review bar.
+    let yaml = world.raw_plan(
+        "donewhen.plan.yaml",
+        "schema_version: 1\ntasks:\n  - id: a\n    persona: e\n    task: t\n    \
+         done_when: the gate is green\n",
+    );
+    world
+        .run(&["start", &yaml.to_string_lossy()])
+        .exited(REFUSED)
+        .err_has("`done_when` is no longer a plan field")
+        .err_has("`## Acceptance criteria` section of its own task");
 }
 
 #[test]

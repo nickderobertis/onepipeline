@@ -34,11 +34,21 @@ pub(crate) const WORKER_MEMBER: &str = "worker";
 ///
 /// Copied out of the plan rather than borrowed from it, because a dispatch
 /// outlives the borrow of the graph it was built from.
+// llmlint: ignore-block[invalid_states_unrepresentable] `max_turns` is `Option<u32>`
+// rather than a positive-integer type because it *mirrors* the plan field, which is
+// `Option<u32>` for the reason `plan.rs` records: `docs/contract.md` fixes the node shapes
+// as schema v7's, and a live edit merges arbitrary submitted JSON into one. So the zero is
+// representable at the boundary whatever this type says, and narrowing here alone would
+// only move it — while making `of_node`/`of_step` fallible would put an error arm no
+// validated plan can reach on every dispatch path. It is *rejected* instead, in
+// `overrides` below, which is the one function both plan validation and launch
+// composition call.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct NodeControls {
     /// The dispatch's turn budget, applied as the worker member's `max_turns`.
     pub max_turns: Option<u32>,
 }
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 /// One declared control: the name a plan writes, and the override that applies
 /// it — or `None` for one this build accepts and cannot apply.
@@ -72,6 +82,18 @@ impl NodeControls {
     /// or a dispatch at launch — without a second error prefix inside the
     /// sentence.
     pub fn overrides(&self) -> std::result::Result<Vec<String>, String> {
+        // A budget of zero is a value no dispatch can honour: it lets the member
+        // take no turn at all, which is what `oneagentgraph` refuses when it
+        // validates the graph it has been handed. Refused here as well, where the
+        // plan is read, so a planner is told before a launch is composed rather
+        // than by a member that could not start.
+        if self.max_turns == Some(0) {
+            return Err(
+                "`max_turns: 0` lets the dispatch take no turn at all; omit it to \
+                        run under the agent graph's own ceiling"
+                    .to_string(),
+            );
+        }
         rendered(self.declared())
     }
 
@@ -139,6 +161,18 @@ mod tests {
                 .expect("nothing to apply"),
             Vec::<String>::new(),
             "a set nobody asked for would override the graph's own value"
+        );
+    }
+
+    #[test]
+    fn a_turn_budget_of_zero_is_refused_where_the_plan_is_read() {
+        let refused = NodeControls { max_turns: Some(0) }
+            .overrides()
+            .expect_err("a dispatch cannot run for no turns");
+        assert!(refused.contains("no turn at all"), "{refused}");
+        assert!(
+            refused.contains("omit it"),
+            "the refusal does not say what to do instead: {refused}"
         );
     }
 
