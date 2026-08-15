@@ -410,7 +410,7 @@ pub fn runs(root: &Path, mine_only: bool, session: &str) -> String {
             view.paths.run,
             view.launch.owner_label(session),
             view.summary(),
-            liveness_word(&view)
+            liveness_word(view)
         ));
         // A run reported stopped keeps the line saying why it stopped rather
         // than an invitation to read updates nothing will follow up on.
@@ -698,9 +698,11 @@ fn dispatch_proof(view: &RunView) -> Proof {
 ///
 /// A row here is a claim that a dispatch exists **now**, and it is acted on: an
 /// operator leaves it alone, or ends it. So a row is rendered as live only where
-/// [`dispatch_proof`] says the run behind it is still being driven; a row this
-/// host proves nothing is behind is dropped and counted, and one it cannot
-/// decide is rendered saying so. Never a bare row that reads as live work.
+/// this host can prove the run behind it is still being driven — its ownership
+/// lock's pid, and the start token that says the pid is still the process that
+/// took it. A row proved to have nothing behind it is dropped and counted, and
+/// one this host cannot decide either way is rendered saying so. Never a bare
+/// row that reads as live work.
 pub fn host(survey: &Survey) -> String {
     let mut out = format!("host {}\n", sys::hostname());
     // The scope of the claim. This scan has an under-reporting direction it
@@ -1628,10 +1630,7 @@ mod tests {
     fn a_failed_node_names_the_side_and_the_identity_that_refused() {
         let root = scratch("refusal");
         let refused = |role: Option<&str>, identity: &str, reason: &str| {
-            let mut fields = vec![
-                ("identity", json!(identity)),
-                ("reason", json!(reason)),
-            ];
+            let mut fields = vec![("identity", json!(identity)), ("reason", json!(reason))];
             if let Some(role) = role {
                 fields.push(("role", json!(role)));
             }
@@ -1671,7 +1670,10 @@ mod tests {
                 event(
                     crate::journal::PipelineKind::NodeSettled,
                     Some("build"),
-                    &[("status", json!("failed")), ("outcome", json!("task-failed"))],
+                    &[
+                        ("status", json!("failed")),
+                        ("outcome", json!("task-failed")),
+                    ],
                 ),
             ],
         );
@@ -1714,7 +1716,10 @@ mod tests {
             ..Refusal::default()
         };
         let phrase = refusal_phrase(&bare);
-        assert!(phrase.contains("a side the record does not name"), "{phrase}");
+        assert!(
+            phrase.contains("a side the record does not name"),
+            "{phrase}"
+        );
         assert!(
             phrase.contains("for a reason the record does not carry"),
             "{phrase}"
