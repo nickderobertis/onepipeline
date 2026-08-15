@@ -475,10 +475,21 @@ fn a_parked_run_is_adoptable_as_much_as_a_dead_one_is() {
     });
 
     // The hint a parked run prints has to be a hint that works: an `adopt` that
-    // refused here would leave the only offered way back closed.
+    // refused here would leave the only offered way back closed. It stays
+    // attached until the run settles, so the work it picks up is released from
+    // beside it: the node the dead driver left in flight is re-dispatched by the
+    // fresh one, and this is that dispatch being let go.
     let mut adopt = world.cmd(&["adopt", &run]);
     adopt.env("ONEPIPELINE_PARKED_AFTER_SECONDS", "1");
-    let adopted = adopt.output().expect("the binary runs");
+    let adopted = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            world.until("the fresh driver to re-dispatch the held node", |world| {
+                world.events_of(&run, "node-dispatched").len() >= 2
+            });
+            world.release("build.go");
+        });
+        adopt.output().expect("the binary runs")
+    });
     assert!(
         !String::from_utf8_lossy(&adopted.stderr).contains("still being driven"),
         "a parked run refused the adoption its own status line offers: {}",
@@ -493,7 +504,15 @@ fn a_parked_run_is_adoptable_as_much_as_a_dead_one_is() {
         "the parked driver was left holding the run: {}",
         String::from_utf8_lossy(&adopted.stderr)
     );
-    world.release("build.go");
+    // And the work the dead driver had in flight was offered to the fresh one: a
+    // node left recorded as running is a node nothing runs and nothing settles,
+    // which is a loop that spins on it for good.
+    assert_eq!(
+        world.run_json(&run, "result.json")["state"],
+        "complete",
+        "the adopted run did not finish the work it took over:\n{}",
+        world.dump()
+    );
 }
 
 #[test]
