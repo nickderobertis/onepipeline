@@ -732,7 +732,8 @@ fn a_publication_that_its_gate_rejects_settles_the_node_failed_by_name() {
 /// and the limit, rather than the publication refusing it after the node's
 /// whole dispatch and its gate. The title that fits by one character runs right
 /// after it, on the same repository, because a bound is only proven by the side
-/// of it that publishes.
+/// of it that publishes — and it carries the spacing the sibling trims before it
+/// measures, so the two measure the same title.
 #[test]
 fn a_title_the_sibling_will_not_commit_under_is_refused_before_any_dispatch() {
     let world = World::new("lifecycle-longtitle");
@@ -775,8 +776,12 @@ fn a_title_the_sibling_will_not_commit_under_is_refused_before_any_dispatch() {
         "a title the sibling would refuse still reached the base"
     );
 
-    let fits = titled(SUBJECT_LIMIT);
+    // The subject inside is the last one that fits, and the spacing around it is
+    // spacing the sibling trims before it measures — so the launch measures it
+    // the same way, and what publishes is the subject.
+    let mut fits = titled(SUBJECT_LIMIT);
     let subject = fits["title"].as_str().expect("the title").to_string();
+    fits["title"] = json!(format!("  {subject}  "));
     let run = settle(&world, "fitstitle", vec![fits]);
     assert_eq!(
         world.run_json(&run, "result.json")["state"],
