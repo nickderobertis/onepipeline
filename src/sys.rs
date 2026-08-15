@@ -457,6 +457,35 @@ fn platform_process_may_be_live(pid: u32) -> bool {
     waited != WAIT_OBJECT_0
 }
 
+/// What a host says about when one process started, kept as the opaque thing it
+/// is.
+///
+/// A newtype rather than a `String` because there is exactly one operation on
+/// it — asking whether a *recorded* token is this same process's — and every
+/// other thing a string invites is a bug: it is not a time to parse, not an
+/// order to sort by, and not text to render. The one comparison also carries the
+/// rule that makes it a proof, which a bare `==` between two strings does not:
+/// an **empty** recorded token never matches. Empty is what a lock written
+/// before this field existed carries, and what a host that would not answer
+/// leaves behind, and reading either as agreement would let two absences prove
+/// each other.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartToken(String);
+
+impl StartToken {
+    /// The token as a record on disk carries it.
+    pub fn recorded(&self) -> &str {
+        &self.0
+    }
+
+    /// Whether a token recorded earlier is this same process's.
+    ///
+    /// The empty one is never anybody's, for the reason on the type.
+    pub fn matches(&self, recorded: &str) -> bool {
+        !recorded.is_empty() && self.0 == recorded
+    }
+}
+
 /// When a process started, as an opaque token this host can compare a later
 /// reading against.
 ///
@@ -474,11 +503,11 @@ fn platform_process_may_be_live(pid: u32) -> bool {
 /// `None` is "this host would not say", which is **neither** verdict: a caller
 /// has an unproven row rather than a live one or a dead one, and reporting it as
 /// either is the misreading this exists to stop.
-pub fn process_start_token(pid: u32) -> Option<String> {
+pub fn process_start_token(pid: u32) -> Option<StartToken> {
     if pid == 0 {
         return None;
     }
-    platform_process_start_token(pid)
+    platform_process_start_token(pid).map(StartToken)
 }
 
 /// Through `ps`, for the same reason [`process_table`] is: Linux has `/proc` and
@@ -703,12 +732,16 @@ mod tests {
     #[test]
     fn a_start_token_is_stable_for_one_process_and_absent_for_a_pid_nothing_holds() {
         let mine = process_start_token(pid()).expect("this host says when a process started");
-        assert!(!mine.is_empty());
+        assert!(!mine.recorded().is_empty());
         assert_eq!(
-            process_start_token(pid()).as_deref(),
-            Some(mine.as_str()),
+            process_start_token(pid()),
+            Some(mine.clone()),
             "one process gave two different start tokens"
         );
+        assert!(mine.matches(mine.recorded()));
+        // The two absences that must never prove each other.
+        assert!(!mine.matches(""));
+        assert!(!mine.matches("some other process's start"));
         let dead = reaped_pid();
         assert!(
             process_start_token(dead).is_none(),

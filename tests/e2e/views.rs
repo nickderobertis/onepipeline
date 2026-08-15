@@ -842,6 +842,63 @@ fn a_root_whose_every_run_is_refused_does_not_read_as_an_empty_one() {
     }
 }
 
+/// A run another planner owns is not this one's, and `--mine` filtering it out
+/// is not the same fact as a root that could not be read.
+///
+/// The empty view has to say which of the two it met: `no runs recorded` for a
+/// listing nothing matched, and the roots it refused named beside it either way.
+#[test]
+fn mine_filtering_everything_out_is_not_the_same_as_a_root_that_could_not_be_read() {
+    let world = World::new("views-mine-skipped");
+    // The run belongs to another planner's session, so `--mine` has nothing to
+    // list — while the root beside it is still one this build refused.
+    let stranger = world.as_session("session-other");
+    settled(&stranger, "theirs", vec![agent("build", &[])]);
+    std::fs::create_dir_all(world.runs.join("half-written")).expect("a run root with no launch");
+
+    let rendered = world.run(&["runs", "--mine"]);
+    rendered
+        .exited(0)
+        // A run was read; it was simply not this session's.
+        .out_has("no runs recorded")
+        .out_has("1 run root(s) skipped")
+        .out_has("half-written");
+    assert!(
+        !rendered.stdout.contains("no run under"),
+        "a run that read was reported as one that could not:\n{}",
+        rendered.stdout
+    );
+}
+
+/// A stopped run's dispatches are not live dispatches.
+///
+/// The one proof that does not depend on a process at all: the run's own ledger
+/// records that it was ended, and a row rendered from it afterwards claims a
+/// worker the stop was aimed at.
+#[test]
+fn host_never_renders_a_dispatch_of_a_run_that_was_stopped() {
+    let world = World::new("views-stopped");
+    world.script("build.wait", "hold");
+    let path = world.plan("halted", &plan_of("halted", vec![agent("build", &[])]));
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+    world.until("the dispatch to be in flight", |world| {
+        !world.events_of("halted", "node-dispatched").is_empty()
+    });
+    world.run(&["host"]).exited(0).out_has("build");
+
+    world.run(&["stop", "halted"]).exited(0);
+    world
+        .run(&["host"])
+        .exited(0)
+        .out_has("no live dispatches")
+        .out_has("1 stale registry entry ignored")
+        .out_has("halted/build")
+        .out_has("the run was stopped");
+    world.release("build.go");
+}
+
 // llmlint: ignore-block[tests_mirror_real_usage] one fact below is written into the run's
 // ledger by hand: the pid inside its ownership lock. That is a driver that died without
 // releasing what it held — the state this journey is about, and the state measured on a

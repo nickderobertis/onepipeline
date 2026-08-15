@@ -551,7 +551,9 @@ impl OwnershipLock {
             host: sys::hostname(),
             acquired_at: sys::now_rfc3339(),
             verb: verb.to_string(),
-            started: sys::process_start_token(sys::pid()).unwrap_or_default(),
+            started: sys::process_start_token(sys::pid())
+                .map(|token| token.recorded().to_string())
+                .unwrap_or_default(),
         };
         let body = serde_json::to_string(&record)
             .map_err(|e| Error::Invalid(format!("{}: {e}", path.display())))?;
@@ -883,9 +885,10 @@ mod tests {
         let held = OwnershipLock::acquire(&paths, "drive").expect("the lock is taken");
         let record: LockRecord = read_json(&paths.lock()).expect("the lock reads back");
         assert_eq!(record.pid, sys::pid());
-        assert_eq!(
-            record.started,
-            sys::process_start_token(sys::pid()).unwrap_or_default(),
+        assert!(
+            sys::process_start_token(sys::pid())
+                .expect("this host says when a process started")
+                .matches(&record.started),
             "the lock's stamp is not this process's own start"
         );
         assert!(!record.started.is_empty());

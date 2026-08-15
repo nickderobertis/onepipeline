@@ -704,7 +704,7 @@ fn dispatch_proof(view: &RunView) -> Proof {
             held.pid
         )),
         // llmlint: ignore-end[changed_behavior_has_e2e]
-        Some(token) if token == held.started => Proof::Live,
+        Some(token) if token.matches(&held.started) => Proof::Live,
         Some(_) => Proof::Stale(format!(
             "pid {} is a different process from the one that took the run's lock",
             held.pid
@@ -1172,7 +1172,9 @@ mod tests {
                 host: sys::hostname(),
                 acquired_at: sys::now_rfc3339(),
                 verb: "drive".into(),
-                started: sys::process_start_token(sys::pid()).unwrap_or_default(),
+                started: sys::process_start_token(sys::pid())
+                    .map(|token| token.recorded().to_string())
+                    .unwrap_or_default(),
             },
         )
         .expect("a held lock");
