@@ -1179,9 +1179,9 @@ fn a_detached_driver_outlives_its_own_output_and_keeps_what_it_said() {
     });
     assert_eq!(world.run_json(&run, "result.json")["state"], "complete");
 
-    // And the driver's own descriptor was a file it could write, not a pipe
-    // whose reader had gone: an adoption after a hand-written record proves it
-    // by making the loop say something.
+    // And what it was given to write to is a file rather than a pipe whose
+    // reader had gone: the run reached settlement, which it could not have done
+    // had its driver died on its first line of output.
     let log = world.run_file(&run, "driver.log");
     assert!(
         log.exists(),
