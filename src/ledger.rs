@@ -227,6 +227,13 @@ pub struct RunIndex {
 /// said it was a run.
 pub fn all_runs(root: &Path) -> RunIndex {
     let mut index = RunIndex::default();
+    // llmlint: ignore-block[changed_behavior_has_e2e] no invocation a user can type reaches
+    // either arm below: the first needs a runs root that exists and will not open, and the
+    // second a directory entry the filesystem lists and then refuses to describe. Both are
+    // host conditions rather than journeys — a permission bit a test would have to be root
+    // to set on one platform and cannot set at all on the other — and reaching them by
+    // chmod would make the suite pass or fail on which user ran it. What a user *can* reach
+    // is the run root with no launch record, and `tests/e2e/views.rs` drives that one.
     let entries = match fs::read_dir(root) {
         Ok(entries) => entries,
         // A root nobody has written to yet holds nothing to reject, which is the
@@ -253,10 +260,17 @@ pub fn all_runs(root: &Path) -> RunIndex {
                 continue;
             }
         };
+        // llmlint: ignore-end[changed_behavior_has_e2e]
         let path = entry.path();
         if !path.is_dir() {
             continue;
         }
+        // llmlint: ignore-block[changed_behavior_has_e2e] a directory name that is not
+        // text is not a name a portable journey can create: Windows refuses one outright,
+        // and the byte sequences that make one on Unix are exactly the ones a test's own
+        // toolchain mangles. A run id is minted from `[A-Za-z0-9._-]`, so nothing this
+        // crate writes lands here; what does is a directory an operator put beside the
+        // runs, which is the case this arm names rather than drops.
         let Ok(name) = entry.file_name().into_string() else {
             index.skipped.push(Skipped {
                 path,
@@ -264,6 +278,7 @@ pub fn all_runs(root: &Path) -> RunIndex {
             });
             continue;
         };
+        // llmlint: ignore-end[changed_behavior_has_e2e]
         let paths = RunPaths::under(root, &name);
         let launch = paths.launch();
         if !launch.is_file() {

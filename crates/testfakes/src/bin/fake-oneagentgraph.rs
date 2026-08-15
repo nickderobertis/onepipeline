@@ -389,9 +389,16 @@ fn refuse_candidates(args: &[String], node: &str, step: Option<&str>, script: &s
         .enumerate()
     {
         let mut columns = line.split_whitespace();
-        let (Some(role), Some(identity), Some(reason)) =
-            (columns.next(), columns.next(), columns.next())
-        else {
+        // Exactly three, and the fourth column is checked for: a script this
+        // read leniently would emit a candidate the test author did not write,
+        // and a double that publishes something other than what its script says
+        // is an oracle for nothing.
+        let (Some(role), Some(identity), Some(reason), None) = (
+            columns.next(),
+            columns.next(),
+            columns.next(),
+            columns.next(),
+        ) else {
             fake::fail(&format!(
                 "a `.refused` line reads {line:?}, which is not `ROLE IDENTITY REASON`"
             ));
@@ -418,7 +425,10 @@ fn refuse_candidates(args: &[String], node: &str, step: Option<&str>, script: &s
                 "stream": stream(),
                 "seq": 10 + offset as u64,
                 "source": "agentgraph",
-                "kind": "fallback-advanced",
+                // The sibling's own kind, serialized through the sibling's own
+                // enum: a literal here could drift from what that library
+                // publishes and from what the consumer reads.
+                "kind": oneagentgraph::event::EventKind::FallbackAdvanced,
                 "labels": labels,
                 "payload": advanced,
             })

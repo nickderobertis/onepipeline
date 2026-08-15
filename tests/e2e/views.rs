@@ -788,16 +788,33 @@ fn a_run_root_the_views_refuse_is_named_with_its_reason() {
     // A run root left half-written: the directory is there and the launch record
     // that says who owns it is not.
     std::fs::create_dir_all(world.runs.join("half-written")).expect("a run root with no launch");
+    // And one whose launch record carries a field this build does not accept,
+    // which is the refusal `results` already words: the file, the offending
+    // field, and what was expected.
+    std::fs::create_dir_all(world.runs.join("typo")).expect("a run root");
+    std::fs::write(
+        world.runs.join("typo").join("launch.json"),
+        r#"{"oops": true}"#,
+    )
+    .expect("a launch record this build refuses");
 
     for view in [vec!["runs"], vec!["status"], vec!["goals"]] {
         world
             .run(&view)
             .exited(0)
             .out_has(&run)
-            .out_has("1 run root(s) skipped")
+            .out_has("2 run root(s) skipped")
             .out_has("half-written")
-            .out_has("launch.json");
+            .out_has("launch.json")
+            .out_has("unknown field `oops`");
     }
+    // `host` lists dispatches rather than runs, so the run it read is not on it
+    // — but a root it could not read is a dispatch it cannot see, and it says so.
+    world
+        .run(&["host"])
+        .exited(0)
+        .out_has("2 run root(s) skipped")
+        .out_has("half-written");
 }
 
 /// A root whose every run was refused is not a root with nothing in it.
@@ -857,9 +874,15 @@ fn host_never_renders_a_dispatch_whose_driver_this_host_can_prove_is_gone() {
     // Now the driver dies without releasing what it held, which is the only
     // thing that changes.
     let lock = world.run_file("ghosted", "owner.lock");
-    let mut held = world.run_json("ghosted", "owner.lock");
-    held["pid"] = serde_json::json!(reaped_pid());
-    std::fs::write(&lock, held.to_string()).expect("the lock is rewritten");
+    // The lock exactly as the live driver took it, kept so each answer below
+    // changes one fact about it and nothing else.
+    let held = world.run_json("ghosted", "owner.lock");
+    let rewrite = |edit: &dyn Fn(&mut serde_json::Value)| {
+        let mut record = held.clone();
+        edit(&mut record);
+        std::fs::write(&lock, record.to_string()).expect("the lock is rewritten");
+    };
+    rewrite(&|record| record["pid"] = serde_json::json!(reaped_pid()));
 
     world
         .run(&["host"])
@@ -871,6 +894,56 @@ fn host_never_renders_a_dispatch_whose_driver_this_host_can_prove_is_gone() {
         // And the scope of the claim, because this scan cannot see a run
         // recorded under another runs root.
         .out_has(&world.runs.display().to_string());
+
+    // A pid the host has since handed to something else: the pid is live and it
+    // is not the process that took the lock. Proved stale, for a different
+    // reason — and the reason a pid alone was never enough.
+    rewrite(&|record| {
+        record["started"] = serde_json::json!("the process that took it, which is not this one");
+    });
+    world
+        .run(&["host"])
+        .exited(0)
+        .out_has("1 stale registry entry ignored")
+        .out_has("different process");
+
+    // The three answers this host does not have. None of them renders as a live
+    // dispatch, and none is dropped either: a dispatch that may be running is
+    // the other error, and the row says outright that nothing backs it.
+    let unproven = |why: &str| {
+        let rendered = world.run(&["host"]);
+        rendered.exited(0).out_has("UNPROVEN").out_has(why);
+        assert!(
+            !rendered.stdout.contains("stale registry"),
+            "an answer this host does not have was reported as a proof:\n{}",
+            rendered.stdout
+        );
+    };
+    // A lock taken on another machine, where a pid means nothing.
+    rewrite(&|record| record["host"] = serde_json::json!("some-other-host"));
+    unproven("some-other-host");
+    // A lock from a build that predates the start token.
+    rewrite(&|record| {
+        record
+            .as_object_mut()
+            .expect("a lock record")
+            .remove("started");
+    });
+    unproven("no start token");
+    // A lock this build cannot read at all. Still a claim — it is what stops a
+    // second writer — but it proves nothing about a *dispatch*, and a row is a
+    // claim that one exists.
+    std::fs::write(&lock, "not json at all").expect("the lock is rewritten");
+    unproven("cannot be read");
+
+    // And with nothing holding the run at all, nothing is driving it.
+    std::fs::remove_file(&lock).expect("the lock is removed");
+    world
+        .run(&["host"])
+        .exited(0)
+        .out_has("no live dispatches")
+        .out_has("1 stale registry entry ignored")
+        .out_has("nothing holds the run's ownership lock");
     world.release("build.go");
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
@@ -903,7 +976,9 @@ fn a_provider_refusal_names_the_side_and_the_identity_in_results_and_status() {
     let world = World::new("views-refused");
     world.script(
         "build.refused",
-        "agent claude-code quota\njudge codex rate_limit\n",
+        // The judge side's chain refuses twice over, which is one fact recorded
+        // twice rather than two facts.
+        "agent claude-code quota\njudge codex rate_limit\njudge codex rate_limit\n",
     );
     world.script("build.fail", "1");
     let run = settled(&world, "refused", vec![agent("build", &[])]);
@@ -913,7 +988,9 @@ fn a_provider_refusal_names_the_side_and_the_identity_in_results_and_status() {
         .exited(0)
         .out_has("failed")
         .out_has("provider: the agent side: identity 'claude-code' refused (quota)")
-        .out_has("provider: the judge side: identity 'codex' refused (rate_limit)");
+        .out_has(
+            "provider: the judge side: identity 'codex' refused (rate_limit), recorded 2 times",
+        );
 
     world
         .run(&["status", &run])

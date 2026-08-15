@@ -563,18 +563,29 @@ fn refusal_phrase(refusal: &Refusal) -> String {
         // nobody named — which is the failure this line exists to end.
         (None, None) => "a side the record does not name".to_string(),
     };
+    // llmlint: ignore-block[changed_behavior_has_e2e] no producer reaches the empty half:
+    // `oneagentgraph::event::FallbackAdvanced` declares `reason` as a required `String`, so
+    // a candidate that named none never reaches a journal at all. It is written for the
+    // build after this one — a newer sibling that relaxes the field — and says what it has
+    // rather than rendering an empty pair of brackets that reads as a measured nothing.
+    // The half a real producer does reach is driven end to end in `tests/e2e/views.rs`.
     let reason = if refusal.reason.is_empty() {
         "for a reason the record does not carry".to_string()
     } else {
         format!("({})", refusal.reason)
     };
-    let turns = if refusal.turns > 1 {
-        format!(", on {} turns", refusal.turns)
+    // llmlint: ignore-end[changed_behavior_has_e2e]
+    // What was counted, said as what it is: records carrying this same side,
+    // identity, and reason. The producer stamps a turn on each advance and
+    // nothing here reads it, so "on N turns" would be a measurement this line
+    // never made.
+    let again = if refusal.records > 1 {
+        format!(", recorded {} times", refusal.records)
     } else {
         String::new()
     };
     one_line(&format!(
-        "{side}: identity '{}' refused {reason}{turns}",
+        "{side}: identity '{}' refused {reason}{again}",
         refusal.identity
     ))
 }
@@ -682,10 +693,17 @@ fn dispatch_proof(view: &RunView) -> Proof {
         ));
     }
     match sys::process_start_token(held.pid) {
+        // llmlint: ignore-block[changed_behavior_has_e2e] this arm is the host declining to
+        // answer, which a journey would have to produce by giving the binary a `ps` that
+        // fails — and that is a property of the machine the suite runs on rather than of
+        // anything a user types. The two answers the host *does* give are both driven end
+        // to end in `tests/e2e/views.rs`, and this arm resolves the same way as every other
+        // unproven one, which that journey covers three times over.
         None => Proof::Unproven(format!(
             "this host will not say when pid {} started",
             held.pid
         )),
+        // llmlint: ignore-end[changed_behavior_has_e2e]
         Some(token) if token == held.started => Proof::Live,
         Some(_) => Proof::Stale(format!(
             "pid {} is a different process from the one that took the run's lock",
@@ -1664,8 +1682,8 @@ mod tests {
                 ),
                 refused(Some("agent"), "claude-code", "quota"),
                 refused(Some("judge"), "codex", "rate_limit"),
-                // The same side refusing the same way again is one fact about
-                // two turns, not two facts.
+                // The same side refusing the same way again is one fact
+                // recorded twice, not two facts.
                 refused(Some("judge"), "codex", "rate_limit"),
                 event(
                     crate::journal::PipelineKind::NodeSettled,
@@ -1685,7 +1703,7 @@ mod tests {
         assert!(rendered.contains("(quota)"), "{rendered}");
         assert!(rendered.contains("the judge side"), "{rendered}");
         assert!(rendered.contains("codex"), "{rendered}");
-        assert!(rendered.contains("on 2 turns"), "{rendered}");
+        assert!(rendered.contains("recorded 2 times"), "{rendered}");
 
         // The same attribution on the view a planner reads first.
         let rendered = status(&survey);
@@ -1705,7 +1723,7 @@ mod tests {
             reason: "auth".into(),
             role: None,
             member: Some("worker".into()),
-            turns: 1,
+            records: 1,
         };
         assert_eq!(
             refusal_phrase(&single),

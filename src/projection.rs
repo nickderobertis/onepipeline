@@ -214,17 +214,29 @@ pub struct Refusal {
     /// The member whose chain it was, as the producer labelled it. What names
     /// the side when [`role`](Self::role) does not.
     pub member: Option<String>,
-    /// How many times this same side, identity, and reason were recorded.
+    /// How many records carried this same side, identity, and reason.
     ///
-    /// One chain refusing the same way on ten turns is one fact about ten turns.
-    pub turns: u64,
+    /// Exactly that, and deliberately not a count of *turns*: the producer
+    /// stamps a turn on each advance and this does not read it, so two records
+    /// may be one turn's chain retried or two turns' chains refusing alike. One
+    /// chain refusing the same way ten times is one fact recorded ten times, and
+    /// claiming ten turns for it would be a measurement nothing here made.
+    pub records: u64,
 }
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
-/// The kind `oneagentgraph` reports a candidate a chain stepped past as.
+/// Whether a relayed envelope is `oneagentgraph`'s "a chain stepped past a
+/// candidate".
 ///
-/// A wire string rather than one of [`journal::PipelineKind`]'s, like
-/// [`TURN_ACTIVITY`]: it is the sibling's vocabulary.
-const FALLBACK_ADVANCED: &str = "fallback-advanced";
+/// Read **through that library's own enum** rather than compared against a
+/// string of this crate's: the kind is the sibling's vocabulary, and a literal
+/// here would be a second copy of a contract it owns — one that keeps matching
+/// after the producer renames the kind, and silently stops attributing anything.
+/// A kind this build has no reading of simply is not one.
+fn is_fallback_advanced(kind: &crate::event::EventKind) -> bool {
+    serde_json::from_value::<oneagentgraph::event::EventKind>(Value::String(kind.0.clone()))
+        .is_ok_and(|known| known == oneagentgraph::event::EventKind::FallbackAdvanced)
+}
 
 /// The kind `oneagentgraph` reports a bounded tool summary as.
 ///
@@ -627,7 +639,7 @@ fn fold_activity(state: &mut RunState, event: &Envelope) {
 /// refusal to whatever wrote it would be the invented attribution this exists to
 /// replace.
 fn fold_refusal(state: &mut RunState, event: &Envelope) {
-    if event.source != Source::Agentgraph || event.kind.0 != FALLBACK_ADVANCED {
+    if event.source != Source::Agentgraph || !is_fallback_advanced(&event.kind) {
         return;
     }
     let Some(node) = event.labels.node.as_deref() else {
@@ -638,15 +650,23 @@ fn fold_refusal(state: &mut RunState, event: &Envelope) {
     // recording it with an empty one would report a chain as having stepped past
     // a harness nobody can name — which is the reading the producer already
     // refuses to write.
+    //
+    // llmlint: ignore-block[changed_behavior_has_e2e] no user invocation reaches this
+    // guard: `oneagentgraph::event::FallbackAdvanced` declares `identity` as a required
+    // `String`, and that library already drops a candidate whose identity it cannot read
+    // rather than publishing one, so a real producer cannot put an unnamed chain on the
+    // wire. Reaching it needs a journal a *newer* build wrote. Held by this module's own
+    // fold test instead; what a user can reach is driven in `tests/e2e/views.rs`.
     let Some(identity) = text(event.payload.get("identity")).filter(|id| !id.is_empty()) else {
         return;
     };
+    // llmlint: ignore-end[changed_behavior_has_e2e]
     let refusal = Refusal {
         identity,
         reason: text(event.payload.get("reason")).unwrap_or_default(),
         role: text(event.payload.get("role")),
         member: text(event.labels.extra.get("member")),
-        turns: 1,
+        records: 1,
     };
     let recorded = state.refusals.entry(node.to_string()).or_default();
     if let Some(same) = recorded.iter_mut().find(|seen| {
@@ -655,7 +675,7 @@ fn fold_refusal(state: &mut RunState, event: &Envelope) {
             && seen.member == refusal.member
             && seen.reason == refusal.reason
     }) {
-        same.turns += 1;
+        same.records += 1;
         return;
     }
     recorded.push(refusal);

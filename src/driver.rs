@@ -1434,6 +1434,18 @@ fn wait_for_reply(channel: &ChannelState) -> Result<Reply> {
     })
 }
 
+// llmlint: ignore-block[cli_output_contract] a run root these views refused is **part of
+// the answer**, not a failure of the command: the reader asked what is on this host and is
+// being told what could not be read, which is the whole fix — the alternative it replaces
+// is a silent drop that renders a host holding thirty run roots as `no runs recorded`. So
+// it goes to stdout with the rest of the view, and the empty case is what settles the
+// stream: `no run under <root> could be read` *replaces* `no runs recorded`, and the answer
+// to "what is running" cannot live on a different stream from the answer it replaces. The
+// exit code stays 0 for the same reason — the command did what it was asked and reported
+// what it saw, and failing `runs` because one stray directory sits beside the runs would
+// break every wrapper over it on a host where that is ordinary. A caller that named *one*
+// run and could not have it is a different case and is still refused outright, by
+// `resolve` and `RunView::open` above.
 /// `onepipeline runs`.
 fn runs(args: &RunsArgs) -> Result<i32> {
     print!(
@@ -1452,6 +1464,7 @@ fn report(args: &OptionalRunArgs, render: fn(&views::Survey) -> String) -> Resul
     print!("{}", render(&survey));
     Ok(EXIT_SUCCESS)
 }
+// llmlint: ignore-end[cli_output_contract]
 
 /// `onepipeline transcript`.
 ///
