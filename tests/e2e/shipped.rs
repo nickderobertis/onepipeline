@@ -339,7 +339,7 @@ fn a_memory_limit_in_a_unit_the_grammar_cannot_read_dispatches_nothing() {
 /// A rules file whose only rule tests a node label, with no fallback. The
 /// absence of a fallback is what makes the selection observable through the
 /// binary: a node the label rule does not match has nowhere to dispatch, and the
-/// round says so by name.
+/// launch says so by name.
 fn label_routed_rules(world: &World, persona: &str) -> std::path::PathBuf {
     let rules = world.root.join(format!("label-{persona}-executors.yaml"));
     std::fs::write(

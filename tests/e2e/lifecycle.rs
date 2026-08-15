@@ -330,7 +330,7 @@ fn a_session_record_that_cannot_be_read_falls_back_to_opening_a_session() {
     let path = world.plan("norecord", &plan_of("norecord", vec![node]));
     // Attached, so the fallback's own words land on a descriptor this test
     // holds: the loop runs in the process this command started.
-    let round = world
+    let driving = world
         .cmd(&["start", &path.to_string_lossy(), "--attach"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -369,7 +369,7 @@ fn a_session_record_that_cannot_be_read_falls_back_to_opening_a_session() {
     // llmlint: ignore-end[tests_mirror_real_usage]
 
     world.release("service.implement.go");
-    let settled = round.wait_with_output().expect("the run drives");
+    let settled = driving.wait_with_output().expect("the run drives");
     let said = String::from_utf8_lossy(&settled.stderr).into_owned();
 
     assert!(

@@ -408,7 +408,7 @@ fn the_channel_server_relays_a_boundary_frame_and_writes_back_the_verdict() {
     let run = running(&world, "served", vec![agent("build", &[])]);
 
     // This is the orchestrator member's judge side: it reads the frame the
-    // orchestrator emits at a round boundary, relays it to the planner, and
+    // observer emits when it has something to raise, relays it to the planner, and
     // writes the answer back into the conversation.
     let mut serving = world
         .cmd(&["channel", "serve", &run])
