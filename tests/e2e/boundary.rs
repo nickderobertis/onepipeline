@@ -53,10 +53,7 @@ fn a_dispatch_that_produced_nothing_is_asked_again_and_each_attempt_is_journalle
     );
 
     // The recovery is what it is for: the node settled.
-    assert_eq!(
-        world.run_json(&run, "result.json")["state"],
-        "complete"
-    );
+    assert_eq!(world.run_json(&run, "result.json")["state"], "complete");
 }
 
 #[test]

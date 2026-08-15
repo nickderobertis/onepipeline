@@ -812,7 +812,12 @@ mod tests {
             "the gate needs the lockfile"
         );
         assert_eq!(
-            attached.graph.get("build").expect("build").context.as_deref(),
+            attached
+                .graph
+                .get("build")
+                .expect("build")
+                .context
+                .as_deref(),
             Some("the gate needs the lockfile"),
             "the note did not reach the node it is for"
         );
@@ -1094,8 +1099,12 @@ mod tests {
     #[test]
     fn a_nodes_activity_accumulates_across_the_attempts_it_was_dispatched_for() {
         let activity = |seq: u64| {
-            let mut event =
-                pipeline(journal::PipelineKind::NodeDispatched, seq, Some("build"), &[]);
+            let mut event = pipeline(
+                journal::PipelineKind::NodeDispatched,
+                seq,
+                Some("build"),
+                &[],
+            );
             event.source = Source::Agentgraph;
             event.kind = crate::event::EventKind(TURN_ACTIVITY.into());
             event

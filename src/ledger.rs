@@ -191,7 +191,6 @@ impl RunPaths {
     pub fn result(&self) -> PathBuf {
         self.dir.join("result.json")
     }
-
 }
 
 /// Every run the root records, in id order.

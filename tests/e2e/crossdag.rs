@@ -62,14 +62,8 @@ fn a_dependency_on_a_finished_upstream_node_resolves_and_the_consumer_runs() {
         vec![consumer("ship", "run:produced#build")],
     );
 
-    assert_eq!(
-        status_of(&world, &run, "ship"),
-        "done"
-    );
-    assert_eq!(
-        world.run_json(&run, "result.json")["state"],
-        "complete"
-    );
+    assert_eq!(status_of(&world, &run, "ship"), "done");
+    assert_eq!(world.run_json(&run, "result.json")["state"], "complete");
 
     // Resolving is recorded, with how far the upstream had got when it was: the
     // consumer has to know where to measure later movement from.
@@ -128,10 +122,7 @@ fn an_upstream_that_arrives_later_unblocks_the_consumer_when_a_driver_looks_agai
     world.run(&["adopt", &run]).exited(0);
 
     assert_eq!(status_of(&world, &run, "ship"), "done");
-    assert_eq!(
-        world.run_json(&run, "result.json")["state"],
-        "complete"
-    );
+    assert_eq!(world.run_json(&run, "result.json")["state"], "complete");
 }
 
 #[test]

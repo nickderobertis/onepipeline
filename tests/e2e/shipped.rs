@@ -133,7 +133,10 @@ fn the_monitor_persona_observes_and_never_drives() {
     let text = unwrapped("personas/monitor.yaml");
     // It says what it is for, in the vocabulary the channel actually enforces.
     for word in ["Observe one run", "non-blocking", "\"author\": \"monitor\""] {
-        assert!(text.contains(word), "the monitor persona never says `{word}`");
+        assert!(
+            text.contains(word),
+            "the monitor persona never says `{word}`"
+        );
     }
     // The ops it may issue, and the three it is refused, named so the persona
     // and the allowlist cannot drift apart.
@@ -262,10 +265,7 @@ fn the_executor_rules_example_selects_the_shipped_local_executor() {
     world.until("the run to settle", |world| {
         world.run_file("ruled", "result.json").is_file()
     });
-    assert_eq!(
-        world.run_json("ruled", "result.json")["state"],
-        "complete"
-    );
+    assert_eq!(world.run_json("ruled", "result.json")["state"], "complete");
 }
 
 #[test]

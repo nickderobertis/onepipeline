@@ -521,8 +521,11 @@ fn retain_driver(paths: &RunPaths) -> Result<std::process::Child> {
         path: paths.driver_log(),
         source,
     })?;
-    let exe = std::env::current_exe()
-        .map_err(|e| Error::Invalid(format!("cannot find this executable to retain a driver: {e}")))?;
+    let exe = std::env::current_exe().map_err(|e| {
+        Error::Invalid(format!(
+            "cannot find this executable to retain a driver: {e}"
+        ))
+    })?;
     std::process::Command::new(exe)
         .arg(engine::DRIVE_VERB)
         .arg(&paths.run)
@@ -1613,7 +1616,10 @@ mod tests {
     fn the_launched_graphs_task_never_asks_a_member_to_drive_the_engine() {
         let task = run_description("tracked-release", Some("close the coverage gap"));
         for verb in ["round run", "round next", "drive-run"] {
-            assert!(!task.contains(verb), "the observer's task names {verb}: {task}");
+            assert!(
+                !task.contains(verb),
+                "the observer's task names {verb}: {task}"
+            );
         }
     }
 

@@ -289,10 +289,7 @@ fn several_steps_share_one_branch_and_run_serially_in_topological_order() {
         branches.windows(2).all(|pair| pair[0] == pair[1]),
         "the steps did not share one branch: {branches:?}"
     );
-    assert_eq!(
-        world.run_json(&run, "result.json")["state"],
-        "complete"
-    );
+    assert_eq!(world.run_json(&run, "result.json")["state"], "complete");
 }
 
 /// A workstream whose session record goes missing between two steps.
@@ -453,10 +450,7 @@ fn the_pr_author_dispatch_drafts_the_title_and_never_blocks_publication() {
         repo.base_commits(&world),
         why(&world, &run)
     );
-    assert_eq!(
-        world.run_json(&run, "result.json")["state"],
-        "complete"
-    );
+    assert_eq!(world.run_json(&run, "result.json")["state"], "complete");
 }
 
 #[test]
@@ -997,7 +991,11 @@ fn an_explicit_pin_the_planner_wrote_wins_over_a_branch_a_dispatch_preserved() {
         .find(|operation| operation["kind"] == "node-added")
         .expect("the replacement was added")["node"]
         .clone();
-    assert_eq!(node["branch"], json!("feature/the-planner-said-so"), "{node}");
+    assert_eq!(
+        node["branch"],
+        json!("feature/the-planner-said-so"),
+        "{node}"
+    );
     assert_eq!(
         node["resume"]["branch"],
         json!("feature/the-planner-said-so")
@@ -1203,10 +1201,7 @@ fn a_session_line_this_build_cannot_read_is_reported_and_does_not_fail_the_node(
 
     // A sibling emitting a shape this build does not know must not stop the
     // node, and must not vanish silently either.
-    assert_eq!(
-        world.run_json(&run, "result.json")["state"],
-        "complete"
-    );
+    assert_eq!(world.run_json(&run, "result.json")["state"], "complete");
     assert!(
         world
             .journal(&run)

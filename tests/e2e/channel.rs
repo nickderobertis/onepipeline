@@ -602,7 +602,10 @@ fn a_human_decision_holds_its_subtree_while_another_branch_runs_and_attest_resum
     world.until("the run to settle", |world| {
         world.run_file("decided", "result.json").is_file()
     });
-    assert_eq!(world.run_json("decided", "result.json")["state"], "complete");
+    assert_eq!(
+        world.run_json("decided", "result.json")["state"],
+        "complete"
+    );
 }
 
 /// An edit needs no live round, because there are none: a run nothing is

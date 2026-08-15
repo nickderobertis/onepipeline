@@ -312,11 +312,7 @@ mod tests {
 
         let mut journal = Journal::open(&paths);
         journal
-            .emit(
-                PipelineKind::RunStarted,
-                labels("demo", None),
-                payload(&[]),
-            )
+            .emit(PipelineKind::RunStarted, labels("demo", None), payload(&[]))
             .expect("appended");
         journal
             .emit(
@@ -344,11 +340,7 @@ mod tests {
         paths.create().expect("the run directory");
         let mut journal = Journal::open(&paths);
         journal
-            .emit(
-                PipelineKind::RunStarted,
-                labels("demo", None),
-                payload(&[]),
-            )
+            .emit(PipelineKind::RunStarted, labels("demo", None), payload(&[]))
             .expect("appended");
         ledger::append_line(&paths.journal(), r#"{"v":99,"from":"the future"}"#).expect("appended");
 

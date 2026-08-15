@@ -299,7 +299,8 @@ fn a_dependency_chain_runs_to_completion_under_start_with_no_agent_graph() {
         })
         .count();
     assert_eq!(
-        dag_launches, 0,
+        dag_launches,
+        0,
         "a run with default flags launched an agent graph: {:?}",
         world.invocations()
     );
@@ -343,7 +344,10 @@ fn a_dependency_chain_runs_to_completion_under_start_with_no_agent_graph() {
             "node-settled third",
         ]
     );
-    assert_eq!(world.run_json("chained", "result.json")["state"], "complete");
+    assert_eq!(
+        world.run_json("chained", "result.json")["state"],
+        "complete"
+    );
 }
 
 #[test]
@@ -420,7 +424,10 @@ fn an_attach_returns_exit_three_when_nothing_is_driving_the_run() {
 #[test]
 fn an_attach_returns_awaiting_planner_when_a_decision_point_is_all_that_is_left() {
     let world = World::new("driver-awaiting");
-    let path = world.plan("awaiting", &plan_of("awaiting", vec![human("approve", &[])]));
+    let path = world.plan(
+        "awaiting",
+        &plan_of("awaiting", vec![human("approve", &[])]),
+    );
     world
         .run(&["start", &path.to_string_lossy(), "--attach"])
         .exited(0)
@@ -568,7 +575,10 @@ fn a_dead_driver_reads_as_driver_dead_and_adopt_is_the_way_back() {
         .iter()
         .position(|arg| arg == "--set")
         .expect("the adopted launch retained --set");
-    assert_eq!(args[set_at + 1], "members.monitor.agent.model=adopted model");
+    assert_eq!(
+        args[set_at + 1],
+        "members.monitor.agent.model=adopted model"
+    );
 }
 
 /// One run, one directory — whichever launch path started the driver.
@@ -1152,7 +1162,10 @@ fn a_detached_driver_outlives_its_own_output_and_keeps_what_it_said() {
     // the launcher has already gone. Written into such a pipe, the loop dies of
     // a broken one mid-run, and the run is left with nothing driving it — which
     // surfaces much later, and as something else entirely.
-    let path = world.plan("detachedlog", &plan_of("detachedlog", vec![agent("build", &[])]));
+    let path = world.plan(
+        "detachedlog",
+        &plan_of("detachedlog", vec![agent("build", &[])]),
+    );
     world
         .run(&["start", &path.to_string_lossy(), "--detach"])
         .exited(0);
@@ -1167,7 +1180,10 @@ fn a_detached_driver_outlives_its_own_output_and_keeps_what_it_said() {
     // whose reader had gone: an adoption after a hand-written record proves it
     // by making the loop say something.
     let log = world.run_file(&run, "driver.log");
-    assert!(log.exists(), "the detached driver was given no log to write");
+    assert!(
+        log.exists(),
+        "the detached driver was given no log to write"
+    );
 }
 
 /// A driver that folds a record it cannot read says so, and drives anyway.
@@ -1178,7 +1194,10 @@ fn a_detached_driver_outlives_its_own_output_and_keeps_what_it_said() {
 #[test]
 fn a_journal_record_this_build_cannot_read_is_reported_by_the_driver_that_meets_it() {
     let world = World::new("driver-unreadable");
-    let path = world.plan("unreadable", &plan_of("unreadable", vec![human("approve", &[])]));
+    let path = world.plan(
+        "unreadable",
+        &plan_of("unreadable", vec![human("approve", &[])]),
+    );
     world
         .run(&["start", &path.to_string_lossy(), "--attach"])
         .exited(0);
