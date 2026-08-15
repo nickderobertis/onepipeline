@@ -69,6 +69,24 @@ impl Author {
     }
 }
 
+/// Whether one author may declare the run finished, or a refusal saying why not.
+///
+/// The legacy verdict says the same thing `complete` says, in a field rather
+/// than in an op — so an allowlist that guarded only the ops would let a
+/// commandless reply walk straight past it. Whether the run is finished is one
+/// decision however it is spelled.
+pub fn allows_completion(author: Author, completion: Option<bool>) -> crate::Result<()> {
+    if author == Author::Planner || completion != Some(true) {
+        return Ok(());
+    }
+    Err(crate::Error::Refused(
+        "declaring the run complete is not something the monitor may do: whether the run \
+         is finished is the planner's verdict, not an observation. Surface it to the \
+         planner instead"
+            .to_string(),
+    ))
+}
+
 /// The ops one author may issue, or a refusal naming what it may not.
 ///
 /// The allowlist is per author and it is exhaustive: an op that is not on it is

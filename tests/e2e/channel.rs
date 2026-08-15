@@ -400,15 +400,15 @@ fn attesting_something_that_is_not_a_ready_human_action_is_refused_by_name() {
 }
 
 #[test]
-fn the_channel_server_relays_a_boundary_frame_and_writes_back_the_verdict() {
+fn the_channel_server_relays_an_observer_frame_and_writes_back_the_verdict() {
     use std::io::{BufRead, BufReader, Write};
 
     let world = World::new("channel-serve");
     world.script("build.wait", "hold");
     let run = running(&world, "served", vec![agent("build", &[])]);
 
-    // This is the orchestrator member's judge side: it reads the frame the
-    // observer emits when it has something to raise, relays it to the planner, and
+    // This is an observer member's judge side: it reads the frame that member
+    // emits when it has something to raise, relays it to the planner, and
     // writes the answer back into the conversation.
     let mut serving = world
         .cmd(&["channel", "serve", &run])
@@ -1033,4 +1033,135 @@ fn a_blocking_surface_naming_no_node_pauses_nothing_and_still_awaits_the_planner
 
     drop(stdin);
     let _ = serving.wait();
+}
+
+/// A frame naming a node the run does not have is refused, not queued.
+///
+/// The node decides what a blocking frame holds back, so a name the graph does
+/// not carry would raise a question about work nobody is doing — and hold
+/// nothing while reading as something the run is waiting on.
+#[test]
+fn the_channel_server_refuses_a_frame_about_a_node_the_run_does_not_have() {
+    use std::io::Write;
+
+    let world = World::new("channel-frame-node");
+    world.script("build.wait", "hold");
+    let run = running(&world, "unknownnode", vec![agent("build", &[])]);
+
+    let mut serving = world
+        .cmd(&["channel", "serve", &run])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the channel server starts");
+    let mut stdin = serving.stdin.take().expect("stdin is piped");
+    writeln!(
+        stdin,
+        r#"{{"kind":"blocker","message":"what about this?","node":"nowhere"}}"#
+    )
+    .expect("the frame is written");
+    stdin.flush().expect("flushed");
+    drop(stdin);
+
+    let output = serving.wait_with_output().expect("the server exits");
+    assert_eq!(output.status.code(), Some(REFUSED), "{output:?}");
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert!(said.contains("nowhere"), "{said}");
+    // And it names what the run does have, so the observer can correct itself.
+    assert!(said.contains("build"), "{said}");
+    assert!(
+        world.events_of(&run, "planner-surface-queued").is_empty(),
+        "a frame about a node nobody has still reached the planner"
+    );
+    world.release("build.go");
+}
+
+/// The monitor may not declare the run finished, in a verdict any more than in
+/// an op.
+///
+/// The legacy verdict says what `complete` says, in a field rather than in a
+/// command list — so an allowlist that guarded only the ops would let a
+/// commandless reply walk straight past it.
+#[test]
+fn a_monitor_cannot_declare_the_run_complete_with_a_commandless_verdict() {
+    let world = World::new("channel-monitor-verdict");
+    world.script("build.wait", "hold");
+    let run = running(&world, "verdict", vec![agent("build", &[])]);
+
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({
+                "author": "monitor",
+                "completion": true,
+                "reason": "looks finished to me",
+            })
+            .to_string(),
+        )
+        .exited(REFUSED)
+        .err_has("not something the monitor may do")
+        .err_has("Surface it to the planner");
+    assert!(
+        world.events_of(&run, "completion-requested").is_empty(),
+        "the monitor declared the run complete: {:?}",
+        world.kinds(&run)
+    );
+
+    // The planner's own verdict is unaffected, which is what makes the refusal
+    // about the author rather than about the field.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({"completion": true, "reason": "the run is finished"}).to_string(),
+        )
+        .exited(0);
+    assert_eq!(world.events_of(&run, "completion-requested").len(), 1);
+    world.release("build.go");
+}
+
+/// An edit the monitor applies to a run nothing is driving is surfaced to the
+/// planner exactly as one applied by the loop is.
+///
+/// Which of the two applied it is an accident of whether anything was driving
+/// the run; the planner owns the graph either way, and learning about the edit
+/// is not something they should have to be lucky to do.
+#[test]
+fn a_monitor_edit_applied_with_nothing_driving_is_still_surfaced_to_the_planner() {
+    let world = World::new("channel-monitor-undriven");
+    let path = world.plan(
+        "undrivenmonitor",
+        &plan_of("undrivenmonitor", vec![human("approve", &[])]),
+    );
+    world
+        .run(&["start", &path.to_string_lossy(), "--attach"])
+        .exited(0);
+
+    world
+        .run_with_stdin(
+            &["reply", "undrivenmonitor"],
+            &json!({
+                "version": 1,
+                "author": "monitor",
+                "commands": [{"op": "add", "node": {"id": "sweep", "persona": "engineer",
+                                                    "task": "## What\nsweep"}}],
+            })
+            .to_string(),
+        )
+        .exited(0)
+        .out_has("\"applied\"");
+
+    let committed = world
+        .events_of("undrivenmonitor", "edit-committed")
+        .into_iter()
+        .next()
+        .expect("the edit was applied");
+    assert_eq!(committed["payload"]["author"], "monitor", "{committed}");
+    let surfaced = world
+        .events_of("undrivenmonitor", "planner-surface-queued")
+        .into_iter()
+        .find(|event| event["payload"]["kind"] == "monitor-edit")
+        .expect("the monitor's edit was surfaced to the planner");
+    assert_eq!(surfaced["payload"]["blocking"], json!(false), "{surfaced}");
+    assert_eq!(surfaced["payload"]["source"], "monitor", "{surfaced}");
 }
