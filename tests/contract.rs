@@ -1629,22 +1629,43 @@ fn the_default_node_scope_graph_is_a_worker_and_a_judge() {
     );
 }
 
+/// The shipped persona files, and the role each one carries.
+///
+/// The monitor's file keeps the `orchestrator.yaml` name it shipped under: the
+/// orchestrator persona was **rewritten** into the observer, not replaced by a
+/// file beside it, so the path a consumer already names keeps resolving. The
+/// role is what changed, and the role is what the contract, the graph member,
+/// and the channel's author allowlist all spell `monitor`.
+const SHIPPED_PERSONAS: [(&str, &str); 3] = [
+    ("orchestrator", "monitor"),
+    ("check-in", "check-in"),
+    ("pr-author", "pr-author"),
+];
+
 #[test]
 fn every_persona_the_contract_ships_is_present_and_has_both_sides() {
-    assert!(CONTRACT.contains("personas `monitor`, `check-in`, `pr-author`"));
-    for name in ["monitor", "check-in", "pr-author"] {
-        let path = repo_root().join("personas").join(format!("{name}.yaml"));
+    assert!(CONTRACT.contains(
+        "personas `monitor` (at `personas/orchestrator.yaml`, the shipped file the \
+         orchestrator persona was rewritten into), `check-in`, `pr-author`"
+    ));
+    for (file, role) in SHIPPED_PERSONAS {
+        let path = repo_root().join("personas").join(format!("{file}.yaml"));
         let text =
-            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{name} persona ships: {e}"));
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{file} persona ships: {e}"));
         let persona: Value =
-            serde_norway::from_str(&text).unwrap_or_else(|e| panic!("{name} parses: {e}"));
+            serde_norway::from_str(&text).unwrap_or_else(|e| panic!("{file} parses: {e}"));
+        assert_eq!(
+            persona.pointer("/agent/name").and_then(Value::as_str),
+            Some(role),
+            "personas/{file}.yaml carries the {role} role"
+        );
         assert!(
             persona.pointer("/agent/instructions").is_some(),
-            "{name} states the agent's role"
+            "{file} states the agent's role"
         );
         assert!(
             persona.pointer("/user/persona").is_some(),
-            "{name} states the supervisor's review bar"
+            "{file} states the supervisor's review bar"
         );
     }
 }
@@ -1681,7 +1702,13 @@ const RULINGS: &[(&str, &str)] = &[
     ("7.", "completed_steps"),
     ("8.", "cross-dag-satisfied"),
     ("9.", "publication_wait"),
+    ("23.", "drive GRAPH"),
     ("24.", "NodeControls"),
+    ("25.", "drive-run RUN"),
+    ("26.", "nothing else able to move"),
+    ("27.", "ending that parked driver politely"),
+    ("28.", "`attempt`, `attempts`"),
+    ("29.", "inherits both"),
 ];
 
 #[test]

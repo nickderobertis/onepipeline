@@ -23,7 +23,9 @@ members:
   monitor:
     kind: onejudge
     base_config: ./onejudge.base.yaml
-    persona: ../personas/monitor.yaml
+    # The monitor role ships at the `orchestrator.yaml` path it was rewritten
+    # into; the role it carries is named by the persona itself.
+    persona: ../personas/orchestrator.yaml
     agent:
       oneharness_config: ./oneharness.orchestrator.toml
     # The judge side is this crate's own channel server, so the planner reads

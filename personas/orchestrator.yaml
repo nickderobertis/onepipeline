@@ -1,3 +1,8 @@
+# The run's observer. This file keeps the `orchestrator.yaml` name it shipped
+# under because that is the shipped path the contract names and consumers
+# reference; what it *is* changed — the role it carries is the monitor, which is
+# the agent name below, the member name in `graphs/dag-scope.yaml`, and the
+# author identity the channel enforces an op allowlist against.
 agent:
   name: monitor
   instructions: |
