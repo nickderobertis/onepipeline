@@ -564,7 +564,7 @@ fn a_human_decision_holds_its_subtree_while_another_branch_runs_and_attest_resum
     let pending = world.events_of("decided", "decision-pending");
     assert_eq!(pending.len(), 1, "{pending:?}");
     assert_eq!(pending[0]["payload"]["reference"], "approve");
-    assert_eq!(pending[0]["payload"]["kind"], "human");
+    assert_eq!(pending[0]["payload"]["kind"], "attestation");
     assert_eq!(pending[0]["payload"]["unblocks"], json!(["ship"]));
 
     // The independent branch runs to completion beside it. Nothing about a

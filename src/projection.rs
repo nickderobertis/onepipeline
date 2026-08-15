@@ -72,6 +72,9 @@ pub struct RunState {
     pub settled_at: BTreeMap<String, u64>,
     /// Human actions attested across the whole run.
     pub attestations: BTreeSet<String>,
+    /// The decision points reported as holding dependents back and not yet
+    /// reported as released, by the reference that clears each.
+    pub decisions_pending: BTreeMap<String, PendingDecision>,
     /// The completion reasons the planner has journalled.
     pub completion_requests: Vec<String>,
     /// Surfaces sent, and surfaces a planner actually read.
@@ -127,6 +130,21 @@ pub struct RunState {
     /// going is [`dispatched_at`](Self::dispatched_at), which a view reports
     /// beside this.
     pub activity: BTreeMap<String, NodeActivity>,
+}
+
+/// A decision point a driver reported as holding dependents back and has not
+/// reported as released.
+///
+/// Folded from the journal rather than held in a process, because a decision
+/// outlives the driver that reported it: an adoption picks up a run parked on
+/// one, and a fresh loop that did not know what its predecessor was holding
+/// would clear it silently — the pause reported, the release never.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PendingDecision {
+    /// What kind of decision it is, in the vocabulary its raiser used.
+    pub kind: String,
+    /// The nodes it was reported as holding back.
+    pub unblocks: Vec<String>,
 }
 
 /// What one node's dispatch has recorded, and what it last said it was doing.
@@ -361,6 +379,35 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
             state
                 .recorded
                 .retain(|_, status| *status != NodeStatus::Running);
+        }
+        Some(journal::PipelineKind::DecisionPending) => {
+            if let Some(reference) = payload.get("reference").and_then(Value::as_str) {
+                state.decisions_pending.insert(
+                    reference.to_string(),
+                    PendingDecision {
+                        kind: payload
+                            .get("kind")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                        unblocks: payload
+                            .get("unblocks")
+                            .and_then(Value::as_array)
+                            .map(|held| {
+                                held.iter()
+                                    .filter_map(Value::as_str)
+                                    .map(str::to_string)
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                    },
+                );
+            }
+        }
+        Some(journal::PipelineKind::DecisionCleared) => {
+            if let Some(reference) = payload.get("reference").and_then(Value::as_str) {
+                state.decisions_pending.remove(reference);
+            }
         }
         Some(journal::PipelineKind::PlannerSurfaceQueued) => state.surfaces_queued += 1,
         Some(journal::PipelineKind::PlannerSurfaced) => {

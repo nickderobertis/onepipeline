@@ -1,0 +1,11 @@
+# Who reviews what. One owner today, because that is who owns the repository.
+#
+# This routes GitHub's review *requests*. It does not gate merges on its own:
+# blocking on an owner's review is a branch-protection setting, applied with the
+# rest of this repo's governance (see AGENTS.md) and deliberately not turned on
+# here — the merge bar is the required CI contexts, and auto-merge lands on them.
+#
+# The subtrees below carry their own always-loaded instructions — `src/AGENTS.md`
+# for the crate, `apps/`-style guidance elsewhere — so a change inside one is a
+# change to a documented boundary and is routed the same way as any other.
+* @nickderobertis

@@ -421,6 +421,28 @@ fn a_human_step_holds_the_workstream_rather_than_being_inferred() {
             "a workstream published past its human step: {kinds:?}"
         );
     }
+
+    // It is a decision point like any other: a workstream stopped at a human
+    // step waits on a person exactly as a `kind: human` node does, and the same
+    // `attest` clears it. Reported as one, and released as one.
+    let pending = world.events_of(&run, "decision-pending");
+    assert_eq!(pending.len(), 1, "{pending:?}");
+    assert_eq!(pending[0]["payload"]["reference"], "service");
+    assert_eq!(pending[0]["payload"]["kind"], "attestation");
+
+    world.run(&["attest", &run, "service"]).exited(0);
+    // The run had settled on the decision, so a fresh driver picks it up — and
+    // finds the action recorded, which is what releases it.
+    world.run(&["adopt", &run]).exited(0);
+    let cleared = world.events_of(&run, "decision-cleared");
+    assert_eq!(cleared.len(), 1, "{cleared:?}");
+    assert_eq!(cleared[0]["payload"]["reference"], "service");
+    assert_eq!(
+        world.run_json(&run, "result.json")["state"],
+        "complete",
+        "the attested workstream did not settle:\n{}",
+        why(&world, &run)
+    );
 }
 
 #[test]
