@@ -60,7 +60,7 @@ fn monitor_renders_all_three_streams_under_their_own_typed_ids() {
     world.script("service.work", "the worker wrote this\n");
     let run = settled(&world, "watched", vec![lifecycle("service", &[])]);
 
-    let stream = world.run(&["monitor", &run]);
+    let stream = world.run(&["monitor", &run, "--all"]);
     stream.exited(0);
     // The first line is the contract, not a banner.
     assert!(

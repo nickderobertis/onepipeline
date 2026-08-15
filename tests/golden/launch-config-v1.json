@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "filters": {
+    "agentgraph": {
+      "exclude": [
+        {
+          "kind": "turn-activity"
+        }
+      ]
+    },
+    "vcs": {
+      "include": [
+        {
+          "kind": "gate-*"
+        },
+        {
+          "kind": "session-closed"
+        }
+      ]
+    },
+    "profiles": {
+      "monitor": {},
+      "planner": {
+        "include": [
+          {
+            "source": "pipeline"
+          }
+        ]
+      }
+    }
+  }
+}

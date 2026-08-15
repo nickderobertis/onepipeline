@@ -50,6 +50,7 @@ pub enum DriverLiveness {
 use std::path::{Path, PathBuf};
 
 use crate::event::{Envelope, Source};
+use crate::filter::EventFilter;
 use crate::graph::{self, Landing, NodeStatus};
 use crate::journal::PipelineKind;
 use crate::ledger::{self, LaunchRecord, LockRecord, RunPaths};
@@ -825,16 +826,33 @@ pub fn host(survey: &Survey) -> String {
     out
 }
 
+/// One run's merged store as one reader is shown it.
+///
+/// **Read-time only.** The store is not touched and nothing is recorded: two
+/// readers of the same run see it through different profiles and neither loses
+/// an event the other keeps, which is the whole difference between this and the
+/// source filters a launch passes through to `oneagentgraph` and `onevcs`.
+///
+/// Borrowed rather than cloned where nothing is dropped, because the common case
+/// — `--all`, and the shipped `monitor` profile — is a filter that admits
+/// everything.
+pub fn shaped<'a>(view: &'a RunView, filter: &EventFilter) -> Vec<&'a Envelope> {
+    view.events
+        .iter()
+        .filter(|event| filter.matches(event))
+        .collect()
+}
+
 /// `onepipeline monitor` — one pass over the merged stream.
 ///
 /// The first line is the contract, not a banner: every event line carries the
 /// typed id a detail lookup resolves, and the monitor never tries to *be* the
 /// detail.
-pub fn monitor(view: &RunView) -> String {
+pub fn monitor(view: &RunView, filter: &EventFilter) -> String {
     let mut out = String::from(
         "Concise graph events; ask the producing library for full detail by stream id.\n",
     );
-    for event in &view.events {
+    for event in shaped(view, filter) {
         let id = match event.source {
             Source::Pipeline => format!("graph:{}", event.labels.node.as_deref().unwrap_or("-")),
             Source::Agentgraph => format!("agent:{}", event.stream),
@@ -1147,6 +1165,7 @@ pub fn goals(survey: &Survey) -> String {
 mod tests {
     use super::*;
     use crate::event::{EventKind, Labels, ENVELOPE_VERSION};
+    use crate::filter::Filters;
     use crate::plan::{Node, Plan, PLAN_SCHEMA_VERSION};
     use serde_json::json;
     use std::path::PathBuf;
@@ -1192,6 +1211,7 @@ mod tests {
             dag_sets: Vec::new(),
             node_sets: Vec::new(),
             adoptions: 0,
+            filters: Filters::default(),
         }
     }
 
@@ -1853,7 +1873,7 @@ mod tests {
         );
         let view = RunView::open(&RunPaths::under(&root, "demo")).expect("the run reads");
 
-        let stream = monitor(&view);
+        let stream = monitor(&view, &EventFilter::default());
         assert!(stream.starts_with("Concise graph events;"), "{stream}");
         assert!(stream.contains("agent:oneagentgraph-1"), "{stream}");
         assert!(stream.contains("vcs:onevcs-tok"), "{stream}");
