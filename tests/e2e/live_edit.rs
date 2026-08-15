@@ -497,30 +497,67 @@ fn an_edit_carrying_the_retired_bar_is_refused_by_name_at_both_boundaries() {
 
 /// A title `onevcs` will not commit under is refused wherever it enters.
 ///
-/// The plan file is one way in and the channel is the other: an `add` naming a
-/// repository carries the same publication subject a plan file would, and a
-/// planner who wrote one too long is told so while nothing has been dispatched
-/// for it, rather than by the publication at the end of the node's own run.
+/// The plan file is one way in and the channel is the other — and the channel
+/// has three ways to write a publication subject: `add` states one outright, a
+/// `retry` replacement carries one for the node superseding the failure, and a
+/// `requeue` amendment writes one onto a node already in the graph. All three
+/// reach the same check, which matters most for the latter two: they are what a
+/// planner writes *after* a publication failed, so refusing them here is what
+/// stops the same title being recomputed and refused identically.
 #[test]
-fn an_edit_adding_an_unpublishable_title_is_refused_with_the_limit_it_broke() {
+fn an_edit_writing_an_unpublishable_title_is_refused_with_the_limit_it_broke() {
     let world = World::new("edit-longtitle");
-    let run = live(&world, "edittitle", vec![agent("slow", &[])], &["slow"]);
+    let run = live(
+        &world,
+        "edittitle",
+        vec![agent("slow", &[]), agent("sweep", &["slow"])],
+        &["slow"],
+    );
 
     let over = "t".repeat(SUBJECT_LIMIT + 1);
+    let refuses = |command: Value, node: &str| {
+        world
+            .run_with_stdin(&["reply", &run], &envelope(json!([command])))
+            .exited(REFUSED)
+            .err_has(&format!("node '{node}'"))
+            .err_has(&format!("{} characters", SUBJECT_LIMIT + 1))
+            .err_has(&format!("{SUBJECT_LIMIT}-character limit"));
+    };
+
+    refuses(
+        json!({"op": "add", "node": {
+            "id": "publish", "persona": "engineer", "task": "## What\npublish",
+            "repo": "service", "title": &over}}),
+        "publish",
+    );
+
+    refuses(
+        json!({"op": "retry", "id": "slow", "node": {
+            "id": "slow-2", "persona": "engineer", "task": "## What\nagain",
+            "repo": "service", "title": &over}}),
+        "slow-2",
+    );
+
+    // A node has to be off the frontier before it can be requeued, so the park
+    // is the setup rather than the subject — it is the one edit here that lands.
     world
         .run_with_stdin(
             &["reply", &run],
-            &envelope(json!([{"op": "add", "node": {
-                "id": "publish", "persona": "engineer", "task": "## What\npublish",
-                "repo": "service", "title": over}}])),
+            &envelope(json!([{"op": "cancel", "id": "sweep"}])),
         )
-        .exited(REFUSED)
-        .err_has("node 'publish'")
-        .err_has(&format!("{} characters", SUBJECT_LIMIT + 1))
-        .err_has(&format!("{SUBJECT_LIMIT}-character limit"));
+        .exited(0);
+    world.until("the park to commit", |world| {
+        committed(world, &run).contains(&"cancel".to_string())
+    });
+    refuses(
+        json!({"op": "requeue", "id": "sweep",
+            "amend": {"repo": "service", "title": &over}}),
+        "sweep",
+    );
 
-    assert!(
-        committed(&world, &run).is_empty(),
+    assert_eq!(
+        committed(&world, &run),
+        vec!["cancel".to_string()],
         "a refused edit reached the graph"
     );
 

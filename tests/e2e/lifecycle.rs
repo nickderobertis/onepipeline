@@ -726,17 +726,12 @@ fn a_publication_that_its_gate_rejects_settles_the_node_failed_by_name() {
 
 /// A title the sibling will not commit under never reaches a dispatch.
 ///
-/// `onevcs` holds a publication subject to
-/// [`SUBJECT_LIMIT`](onevcs::provenance::SUBJECT_LIMIT), and the plan file
-/// states the title — so the launch refuses it, naming the node, the length,
-/// and the limit, rather than the publication refusing it after the node's
-/// whole dispatch and its gate. The title that fits by one character runs right
-/// after it, on the same repository, because a bound is only proven by the side
-/// of it that publishes — and it carries the spacing the sibling trims before it
-/// measures, so the two measure the same title. Last is the ordinary title a
-/// planner actually writes, well inside the limit rather than at it: the two
-/// lengths above are built from the bound and exercise its arithmetic, and this
-/// one exercises the everyday path, where the check has to do nothing at all.
+/// The plan file states the title and
+/// [`SUBJECT_LIMIT`](onevcs::provenance::SUBJECT_LIMIT) bounds it, so the launch
+/// refuses it — naming the node, the length, and the limit — rather than the
+/// publication refusing it after the node's whole dispatch and its gate. Each
+/// title that is legal publishes on the same repository, because a bound is only
+/// proven by the side of it that commits.
 #[test]
 fn a_title_the_sibling_will_not_commit_under_is_refused_before_any_dispatch() {
     let world = World::new("lifecycle-longtitle");
