@@ -21,11 +21,17 @@
 # strand the tag.
 publish = false
 
-# API breaking-change detection (cargo-semver-checks) needs an extra tool and
-# would block releases on any surface change — which, for a crate whose whole
-# current job is to publish an interface, is every release. Rely on review and
-# the conventional-commit type instead (a `!` or `BREAKING CHANGE:` still bumps).
-semver_check = false
+# API breaking-change detection, via cargo-semver-checks. On: this workspace has
+# already shipped a breaking change as a patch, because the only thing standing
+# between an incompatible signature and a semver-clean release was a human
+# remembering to type `!`. The tool reads the built API rather than the commit
+# subject, so it catches the break the subject forgot to declare.
+#
+# It is not a veto on changing the interface — pre-1.0 a break bumps the minor
+# and release-plz proceeds. It is what makes that bump happen without being
+# asked. The release-plz job in .github/workflows/release-plz.yml installs
+# cargo-semver-checks; without it on PATH release-plz cannot run this check.
+semver_check = true
 
 git_tag_name = "v{{ version }}"
 git_release_name = "v{{ version }}"
