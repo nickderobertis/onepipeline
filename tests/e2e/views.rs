@@ -918,13 +918,11 @@ fn host_never_renders_a_dispatch_of_a_run_that_was_stopped() {
 // held, and no command produces it on demand — one that could would be one that kills a
 // live driver. The run is real, its dispatch is genuinely in flight, and every claim
 // afterwards is read off the CLI.
-/// A `host` row is a claim that a dispatch exists **now**, and it is acted on.
-///
-/// Measured on a real host: six rows aged 12h–52h rendered as a live fleet while
-/// one agent process was running and none of them matched. So the row is
-/// rendered only while this host can prove the run behind it is still being
-/// driven — the ownership lock's pid, and the start token that says the pid is
-/// still the process that took it.
+/// A `host` row is a claim that a dispatch exists **now**, and it is acted on —
+/// an operator leaves the work alone, or ends it. So the row is rendered only
+/// while this host can prove the run behind it is still being driven: the
+/// ownership lock's pid, and the start token that says the pid is still the
+/// process that took it.
 #[test]
 fn host_never_renders_a_dispatch_whose_driver_this_host_can_prove_is_gone() {
     let world = World::new("views-ghosted");
@@ -1038,8 +1036,7 @@ fn reaped_pid() -> u32 {
 ///
 /// Both sides, because that is the fact: a two-party member runs one chain per
 /// side and they prefer different identities, so a fix aimed at the wrong one
-/// changes nothing and the run fails the same way again. An unattributed quota
-/// failure once cost a whole night aimed at the wrong chain.
+/// changes nothing and the run fails the same way again.
 #[test]
 fn a_provider_refusal_names_the_side_and_the_identity_in_results_and_status() {
     let world = World::new("views-refused");

@@ -257,9 +257,27 @@ pub fn all_runs(root: &Path) -> RunIndex {
                 continue;
             }
         };
-        // llmlint: ignore-end[changed_behavior_has_e2e]
         let path = entry.path();
-        if !path.is_dir() {
+        // Asked for, rather than tested with `is_dir`: that helper answers
+        // `false` both for "not a directory" and for "this host would not say",
+        // and reading the second as the first is the collapse this whole index
+        // exists to undo — the entry would be dropped as though it had never
+        // claimed to be a run.
+        let about = match fs::metadata(&path) {
+            Ok(about) => about,
+            // Gone between the listing and the look. A run swept while this scan
+            // was running is not a root to make any claim about.
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                index.skipped.push(Skipped {
+                    path,
+                    reason: format!("this host will not describe it: {error}"),
+                });
+                continue;
+            }
+        };
+        // llmlint: ignore-end[changed_behavior_has_e2e]
+        if !about.is_dir() {
             continue;
         }
         // llmlint: ignore-block[changed_behavior_has_e2e] a directory name that is not text
@@ -276,15 +294,30 @@ pub fn all_runs(root: &Path) -> RunIndex {
         // llmlint: ignore-end[changed_behavior_has_e2e]
         let paths = RunPaths::under(root, &name);
         let launch = paths.launch();
-        if !launch.is_file() {
+        let named = launch
+            .file_name()
+            .map_or_else(|| "launch record".into(), |name| name.to_string_lossy());
+        // Every answer kept apart, for the same reason as above: absent, present
+        // as something that is not a record, and unreadable are three different
+        // things to tell a reader, and `is_file` says `false` to all three.
+        let refused = match fs::metadata(&launch) {
+            Ok(about) if about.is_file() => None,
+            Ok(_) => Some(format!(
+                "its {named} is not a file, so it records no launch"
+            )),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Some(format!(
+                "no {named}: a run root records the launch that owns it"
+            )),
+            // llmlint: ignore-block[changed_behavior_has_e2e] a launch record this host
+            // lists and will not describe is a host condition no portable journey can set.
+            // The two answers a user reaches are both driven in `tests/e2e/views.rs`.
+            Err(error) => Some(format!("its {named} cannot be read: {error}")),
+            // llmlint: ignore-end[changed_behavior_has_e2e]
+        };
+        if let Some(reason) = refused {
             index.skipped.push(Skipped {
                 path: paths.dir,
-                reason: format!(
-                    "no {}: a run root records the launch that owns it",
-                    launch
-                        .file_name()
-                        .map_or_else(|| "launch record".into(), |name| name.to_string_lossy())
-                ),
+                reason,
             });
             continue;
         }
@@ -847,19 +880,26 @@ mod tests {
         }
         fs::create_dir_all(root.join("scratch")).expect("a directory that records no run");
         fs::write(root.join("notes.txt"), "not a run root").expect("a file beside the runs");
+        // A launch record that is there and is not a record: absent and "present
+        // as something else" are different things to tell a reader.
+        fs::create_dir_all(RunPaths::under(&root, "impostor").launch())
+            .expect("a launch record that is a directory");
 
         let index = all_runs(&root);
         let ids: Vec<String> = index.runs.iter().map(|r| r.run.clone()).collect();
         assert_eq!(ids, vec!["a-run".to_string(), "b-run".to_string()]);
-        // The directory is named with its reason; the file never claimed to be a
-        // run, so nothing is claimed about it either.
-        assert_eq!(index.skipped.len(), 1, "{:?}", index.skipped);
-        assert_eq!(index.skipped[0].path, root.join("scratch"));
-        assert!(
-            index.skipped[0].reason.contains("launch.json"),
-            "{:?}",
-            index.skipped[0]
-        );
+        // Each directory is named with its own reason; the file never claimed to
+        // be a run, so nothing is claimed about it either.
+        let refused: Vec<(PathBuf, String)> = index
+            .skipped
+            .iter()
+            .map(|root| (root.path.clone(), root.reason.clone()))
+            .collect();
+        assert_eq!(refused.len(), 2, "{refused:?}");
+        assert_eq!(refused[0].0, root.join("impostor"));
+        assert!(refused[0].1.contains("is not a file"), "{refused:?}");
+        assert_eq!(refused[1].0, root.join("scratch"));
+        assert!(refused[1].1.contains("no launch.json"), "{refused:?}");
 
         // A root nobody has written to holds nothing to reject.
         assert_eq!(all_runs(&root.join("missing")), RunIndex::default());

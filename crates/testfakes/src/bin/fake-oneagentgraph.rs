@@ -417,21 +417,32 @@ fn refuse_candidates(args: &[String], node: &str, step: Option<&str>, script: &s
             },
             turn: Some(1),
         };
+        // The sibling's **own** envelope, serialized through the sibling's own
+        // type: a hand-rolled object here would be an independent copy of a
+        // schema that library owns, and it would keep serializing after the
+        // schema moved. The labels cross the same boundary — `Labels` carries
+        // what it declares and flattens the rest, which is what a `--label` the
+        // caller passed is.
+        let envelope = oneagentgraph::event::Envelope {
+            v: oneagentgraph::event::ENVELOPE_VERSION,
+            ts: fake::now(),
+            stream: stream(),
+            seq: 10 + offset as u64,
+            source: oneagentgraph::event::Source::Agentgraph,
+            kind: oneagentgraph::event::EventKind::FallbackAdvanced,
+            labels: serde_json::from_value(serde_json::Value::Object(labels.clone()))
+                .unwrap_or_else(|error| fake::fail(&format!("the labels are not labels: {error}"))),
+            payload: match serde_json::to_value(&advanced) {
+                Ok(serde_json::Value::Object(payload)) => payload,
+                other => fake::fail(&format!("an advance is not an object: {other:?}")),
+            },
+            artifacts: Vec::new(),
+        };
         println!(
             "{}",
-            serde_json::json!({
-                "v": 1,
-                "ts": fake::now(),
-                "stream": stream(),
-                "seq": 10 + offset as u64,
-                "source": "agentgraph",
-                // The sibling's own kind, serialized through the sibling's own
-                // enum: a literal here could drift from what that library
-                // publishes and from what the consumer reads.
-                "kind": oneagentgraph::event::EventKind::FallbackAdvanced,
-                "labels": labels,
-                "payload": advanced,
-            })
+            serde_json::to_string(&envelope).unwrap_or_else(|error| fake::fail(&format!(
+                "the envelope will not write: {error}"
+            )))
         );
     }
 }
