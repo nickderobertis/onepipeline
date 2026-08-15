@@ -99,6 +99,11 @@ fn live_holders_refuse_unless_acknowledged_and_stale_holders_do_not_refuse() {
         .kill()
         .expect("the first session owner is terminated");
     first_owner.wait().expect("the first session owner exits");
+    // And so does the acknowledged run's: it drove itself the moment it was
+    // launched, so it opened a session of its own on the same identity, and a
+    // launch that met *that* one would be refused by a live holder rather than
+    // proceeding past a stale one — which is the claim below.
+    world.run(&["stop", "second"]).exited(0);
     world.release("build.go");
 
     let stale_plan = world.plan("third", &plan_of("third", vec![lifecycle()]));

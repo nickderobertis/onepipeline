@@ -239,9 +239,9 @@ fn start(args: &StartArgs) -> Result<i32> {
     let launch_dir = launch_dir()?;
     // Resolved only when one was named: `off` is the shipped default, and a
     // launch that names no observer resolves nothing and launches nothing.
-    let graph_ref = match args.dag_graph.as_str() {
-        DAG_GRAPH_OFF => String::new(),
-        reference => resolve_graph(reference, &launch_dir)?,
+    let graph_ref: Option<String> = match args.dag_graph.as_str() {
+        DAG_GRAPH_OFF => None,
+        reference => Some(resolve_graph(reference, &launch_dir)?),
     };
     let node_graph_ref = resolve_graph(&engine::configured_node_graph(), &launch_dir)?;
     resolve_plan_graphs(&mut plan, &launch_dir)?;
@@ -304,7 +304,7 @@ fn start(args: &StartArgs) -> Result<i32> {
         // fresh `adopt` starts from some other directory — replays this value
         // rather than reading its own.
         dir: launch_dir.clone(),
-        graph: graph_ref.clone(),
+        graph: graph_ref.clone().unwrap_or_default(),
         // Replaced below by the graph run's own id, which does not exist until
         // the launch below has produced it.
         graph_run: String::new(),
@@ -440,7 +440,7 @@ fn observe(
     goal: Option<&str>,
     output: agentgraph::GraphOutput<'_>,
 ) -> Result<Option<agentgraph::GraphRun>> {
-    if record.graph.is_empty() {
+    if record.observer_graph().is_none() {
         return Ok(None);
     }
     let launched = launch_graph(paths, record, goal, output)?;
@@ -874,7 +874,7 @@ fn adopt(args: &RunArgs) -> Result<i32> {
     //
     // The observer only, and only when the run was launched with one: what
     // adoption is *for* is the loop below, which this process runs itself.
-    let mut observer = if record.graph.is_empty() {
+    let mut observer = if record.observer_graph().is_none() {
         None
     } else {
         let launched = launch_graph(

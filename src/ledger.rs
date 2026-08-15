@@ -240,8 +240,11 @@ pub struct LaunchRecord {
     pub dir: PathBuf,
     /// The dag-scope agent-graph config launched as this run's observer.
     ///
-    /// Empty when the launch named none — the shipped default — because no
-    /// agent is required to execute a plan.
+    /// Absent when the launch named none, which is the shipped default: no
+    /// agent is required to execute a plan. Read it through
+    /// [`observer_graph`](Self::observer_graph) rather than testing this field —
+    /// the serialized shape omits an absent value, and the one place that turns
+    /// "omitted" back into "there is none" is that accessor.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub graph: String,
     /// The `oneagentgraph` run this run's observer graph is, as that library
@@ -282,6 +285,17 @@ pub struct LaunchRecord {
 }
 
 impl LaunchRecord {
+    /// The observer graph this run was launched with, when it was launched with
+    /// one.
+    ///
+    /// The record is a serialized schema and an absent string field is written
+    /// as no field at all, so the absence arrives back as an empty one. This is
+    /// where that becomes an [`Option`] again, so no caller decides for itself
+    /// what an empty graph reference means.
+    pub fn observer_graph(&self) -> Option<&str> {
+        (!self.graph.is_empty()).then_some(self.graph.as_str())
+    }
+
     /// Whether `session` is the session that launched this run.
     ///
     /// An `unknown` launch is nobody's, including the reader's — a
