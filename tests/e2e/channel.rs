@@ -128,8 +128,13 @@ fn a_second_check_in_replaces_the_one_still_waiting_to_be_read() {
 
     let read = world.run(&["next", &run]);
     read.exited(0).out_has("the second update");
-    assert!(
-        !read.stdout.contains("the first update"),
+    // On the **surface**, which is the claim. The event view beside it carries
+    // the run's own `planner-surface-queued` for both check-ins, because both
+    // were queued — being superseded is what happened to the surface, not
+    // something the run un-records.
+    let delivered = read.json()["surface"]["message"].clone();
+    assert_eq!(
+        delivered, "the second update",
         "a superseded check-in was delivered: {}",
         read.stdout
     );
@@ -223,7 +228,9 @@ fn the_next_check_in_replaces_the_queued_one_rather_than_being_blocked_by_it() {
     // one check-in is ever pending — kept current, not kept still.
     let read = world.run(&["next", &run]);
     read.exited(0).out_has("second update");
-    assert!(!read.stdout.contains("first update"));
+    // On the surface, which is the claim: the event view beside it records that
+    // both check-ins were queued, because both were.
+    assert_eq!(read.json()["surface"]["message"], "second update");
 
     let empty = world.run(&["next", &run]);
     assert_eq!(empty.json()["status"], "running");

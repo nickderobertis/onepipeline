@@ -1747,3 +1747,72 @@ fn a_steps_turn_budget_reaches_that_steps_own_dispatch() {
          own default is 12"
     );
 }
+
+/// `filters.agentgraph` reaches every `oneagentgraph` launch the run starts.
+///
+/// The real sibling is what filters here: the launch is handed the filter on its
+/// own `--event-filter` / `events.filter` surface, so the events never reach this
+/// crate at all — which is the point, since a run that relayed them and dropped
+/// them would still have paid to relay them.
+///
+/// Read against a control run in the same world that names no `filters:` block,
+/// because "narrowed" is a comparison: the same plan, the same graph, and the
+/// same real member, ingested twice.
+#[test]
+fn a_launchs_agentgraph_filter_reaches_the_real_sibling_and_narrows_what_it_relays() {
+    let world = World::new("real-agentgraph-filter");
+    world.write_graphs();
+
+    let kinds_of = |run: &str| -> Vec<String> {
+        world
+            .journal(run)
+            .iter()
+            .filter(|event| event["source"] == "agentgraph")
+            .filter_map(|event| event["kind"].as_str().map(str::to_string))
+            .collect()
+    };
+
+    // No `filters:` block at all: ingestion is what it always was.
+    let path = world.plan(
+        "unfiltered",
+        &plan_of("unfiltered", vec![agent("build", &[])]),
+    );
+    world
+        .run_on_agentgraph(&["start", &path.to_string_lossy(), "--attach"])
+        .settled();
+    let ingested = kinds_of("unfiltered");
+    for kind in ["turn-activity", "member-settled"] {
+        assert!(
+            ingested.iter().any(|seen| seen == kind),
+            "a launch naming no filters did not ingest {kind}: {ingested:?}"
+        );
+    }
+
+    let path = world.plan("filtered", &plan_of("filtered", vec![agent("build", &[])]));
+    world
+        .run_on_agentgraph(&[
+            "start",
+            &path.to_string_lossy(),
+            "--attach",
+            "--filter-agentgraph",
+            r#"{"exclude": [{"kind": "turn-*"}]}"#,
+        ])
+        .settled();
+
+    let kinds = kinds_of("filtered");
+    assert!(
+        !kinds.iter().any(|kind| kind.starts_with("turn-")),
+        "the source filter did not reach `oneagentgraph`: {kinds:?}"
+    );
+    // Narrowed, not silenced, and the run still settled on what the member did —
+    // a filter says what is emitted, never what the run acts on.
+    assert!(
+        kinds.iter().any(|kind| kind == "member-settled"),
+        "the source filter dropped the settlement, which it admits: {kinds:?}"
+    );
+    let result = world.run_json("filtered", "result.json");
+    assert_eq!(
+        result["nodes"][0]["status"], "done",
+        "filtering the stream changed what the run did: {result}"
+    );
+}

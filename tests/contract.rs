@@ -27,6 +27,7 @@ use onepipeline::executor::{
     CancelMode, CancellationToken, Capabilities, CapacityReport, DispatchRequest, Executor,
     LocalExecutor, WorkspaceSpec,
 };
+use onepipeline::filter::{EventFilter, Filters, Matcher};
 use onepipeline::plan::{Node, NodeKind, Plan, Resume, Step, PLAN_SCHEMA_VERSION};
 use onepipeline::rules::{ExecutorKind, ExecutorRules, Predicate};
 use onevcs::registry::{RepoType, Workflow};
@@ -88,6 +89,26 @@ fn fenced_block(language: &str) -> String {
     blocks.into_iter().next().expect("one block")
 }
 
+/// The one fenced block of that language whose body names `needle`.
+///
+/// The contract carries more than one example in a given language, so a fixture
+/// says which of them it is about by naming a key only that one has — rather
+/// than by an index, which a block inserted above it would silently shift onto
+/// the wrong example.
+fn fenced_block_naming(language: &str, needle: &str) -> String {
+    let mut matching: Vec<String> = fenced_blocks(language)
+        .into_iter()
+        .filter(|body| body.contains(needle))
+        .collect();
+    assert_eq!(
+        matching.len(),
+        1,
+        "expected exactly one ```{language} block naming {needle:?} in docs/contract.md, found {}",
+        matching.len()
+    );
+    matching.pop().expect("one block")
+}
+
 /// Every `` `backticked` `` token in the contract.
 fn backticked() -> BTreeSet<String> {
     let mut out = BTreeSet::new();
@@ -114,7 +135,7 @@ fn assert_contract_names(what: &str, names: &[&str]) {
 
 #[test]
 fn the_contracts_rules_example_parses_and_round_trips() {
-    let yaml = fenced_block("yaml");
+    let yaml = fenced_block_naming("yaml", "executors:");
     let rules: ExecutorRules = serde_norway::from_str(&yaml).expect("the rules example parses");
 
     assert_eq!(
@@ -212,7 +233,8 @@ fn the_shipped_rules_example_is_the_contracts_own() {
         .expect("examples/executors.yaml ships");
     let shipped: ExecutorRules = serde_norway::from_str(&shipped).expect("it parses");
     let documented: ExecutorRules =
-        serde_norway::from_str(&fenced_block("yaml")).expect("the contract's example parses");
+        serde_norway::from_str(&fenced_block_naming("yaml", "executors:"))
+            .expect("the contract's example parses");
     assert_eq!(
         shipped, documented,
         "the shipped executor-rules example must be the contract's own"
@@ -338,6 +360,191 @@ fn dispatching_goes_through_the_oneagentgraph_seam_and_says_so_when_it_cannot() 
         message.contains("oneagentgraph"),
         "the seam is unnamed: {message}"
     );
+}
+
+/// The `filters:` block in the contract is a block this crate's own types read.
+///
+/// Driven out of the document, like every other fixture here: the grammar is
+/// shared across the stack with no shared crate, so the committed text is the one
+/// source and a copy that stopped matching it fails this gate.
+#[test]
+fn the_contracts_filters_example_parses_and_round_trips() {
+    #[derive(serde::Deserialize)]
+    struct Block {
+        filters: Filters,
+    }
+    let yaml = fenced_block_naming("yaml", "profiles:");
+    let block: Block = serde_norway::from_str(&yaml).expect("the filters example parses");
+    let filters = block.filters;
+
+    let agentgraph = filters
+        .agentgraph
+        .as_ref()
+        .expect("it names a source filter");
+    assert_eq!(agentgraph.include, Vec::new(), "an absent include is empty");
+    assert_eq!(agentgraph.exclude.len(), 1);
+    assert_eq!(agentgraph.exclude[0].kind.as_deref(), Some("turn-activity"));
+    let vcs = filters.vcs.as_ref().expect("it names a vcs filter");
+    assert_eq!(vcs.include.len(), 2);
+    assert_eq!(vcs.include[0].kind.as_deref(), Some("gate-*"));
+
+    // The two shipped profiles, exactly as the contract states them: an
+    // override that changed either would be a run whose default view is not the
+    // documented one.
+    assert_eq!(
+        filters.profiles["planner"],
+        EventFilter {
+            include: vec![Matcher {
+                source: Some(Source::Pipeline),
+                ..Matcher::default()
+            }],
+            exclude: Vec::new(),
+        }
+    );
+    assert_eq!(filters.profiles["monitor"], EventFilter::default());
+
+    let round_tripped: Filters =
+        serde_json::from_str(&serde_json::to_string(&filters).expect("serializes"))
+            .expect("re-parses");
+    assert_eq!(round_tripped, filters);
+}
+
+/// The shipped defaults are the contract's, and both are overridable by name.
+#[test]
+fn the_shipped_profiles_are_the_contracts_own_and_are_overridable() {
+    let empty = Filters::default();
+    assert_eq!(
+        empty.profile("planner").expect("planner ships"),
+        EventFilter {
+            include: vec![Matcher {
+                source: Some(Source::Pipeline),
+                ..Matcher::default()
+            }],
+            exclude: Vec::new(),
+        }
+    );
+    assert_eq!(
+        empty.profile("monitor").expect("monitor ships"),
+        EventFilter::default(),
+        "the shipped monitor profile is unfiltered"
+    );
+
+    let mine = EventFilter::parse(r#"{"include": [{"kind": "node-*"}]}"#).expect("a filter");
+    let overridden = Filters {
+        profiles: [
+            ("planner".to_string(), mine.clone()),
+            ("monitor".to_string(), mine.clone()),
+        ]
+        .into_iter()
+        .collect(),
+        ..Filters::default()
+    };
+    assert_eq!(overridden.profile("planner").expect("overridden"), mine);
+    assert_eq!(overridden.profile("monitor").expect("overridden"), mine);
+
+    let unknown = empty
+        .profile("planer")
+        .expect_err("a profile this run does not have is refused");
+    let said = unknown.to_string();
+    assert!(said.contains("planer"), "{said}");
+    assert!(
+        said.contains("planner") && said.contains("monitor"),
+        "{said}"
+    );
+}
+
+/// The grammar's refusal semantics, at the boundary a spec crosses.
+#[test]
+fn a_filter_spec_is_refused_by_the_shared_grammars_own_rules() {
+    let unknown_field = EventFilter::parse(r#"{"include": [{"role": "agent"}]}"#)
+        .expect_err("a matcher field the grammar does not have is refused");
+    let said = unknown_field.to_string();
+    assert!(said.contains("role"), "the refusal names the field: {said}");
+    assert!(
+        said.contains("include") && said.contains('1'),
+        "the refusal says which list and where in it: {said}"
+    );
+
+    let stray = EventFilter::parse(r#"{"includes": []}"#)
+        .expect_err("a filter names include and exclude and nothing else");
+    assert!(stray.to_string().contains("includes"), "{stray}");
+
+    // `round` is a reserved label the approved matcher list does not name, so it
+    // is refused here like any other non-field rather than quietly accepted.
+    let deprecated = EventFilter::parse(r#"{"include": [{"round": "1"}]}"#)
+        .expect_err("`round` is not in the grammar");
+    assert!(deprecated.to_string().contains("round"), "{deprecated}");
+
+    let empty_matcher = EventFilter::parse(r#"{"exclude": [{}]}"#)
+        .expect("an empty matcher parses; it is validation that refuses it")
+        .validate()
+        .expect_err("a matcher naming no field matches everything");
+    assert!(
+        empty_matcher.to_string().contains("exclude"),
+        "{empty_matcher}"
+    );
+
+    let empty_field = EventFilter::parse(r#"{"include": [{"kind": ""}]}"#)
+        .expect("it parses")
+        .validate()
+        .expect_err("nothing on the stream carries an empty kind");
+    assert!(empty_field.to_string().contains("kind"), "{empty_field}");
+}
+
+/// `exclude` wins, an absent `include` admits everything, and a glob is `*`.
+#[test]
+fn the_grammar_matches_the_way_the_contract_says_it_does() {
+    let envelope = |source: Source, kind: &str, labels: Labels| Envelope {
+        v: ENVELOPE_VERSION,
+        ts: "2026-08-15T00:00:00.000Z".into(),
+        stream: "s".into(),
+        seq: 0,
+        source,
+        kind: EventKind(kind.into()),
+        labels,
+        payload: Default::default(),
+        artifacts: Vec::new(),
+    };
+    let plain = envelope(Source::Agentgraph, "turn-activity", Labels::default());
+
+    assert!(
+        EventFilter::default().matches(&plain),
+        "an absent include admits everything"
+    );
+    let excluded = EventFilter::parse(r#"{"exclude": [{"kind": "turn-*"}]}"#).expect("a filter");
+    assert!(!excluded.matches(&plain), "a glob matches the wire string");
+    let both = EventFilter::parse(
+        r#"{"include": [{"source": "agentgraph"}], "exclude": [{"kind": "turn-activity"}]}"#,
+    )
+    .expect("a filter");
+    assert!(!both.matches(&plain), "exclude wins over include");
+
+    // A label the envelope never stamped is not a wildcard.
+    let asks_node = EventFilter::parse(r#"{"include": [{"node": "build"}]}"#).expect("a filter");
+    assert!(
+        !asks_node.matches(&plain),
+        "an unstamped label never matches"
+    );
+    assert!(asks_node.matches(&envelope(
+        Source::Pipeline,
+        "node-settled",
+        Labels {
+            node: Some("build".into()),
+            ..Labels::default()
+        }
+    )));
+
+    // `member` has no typed slot on this crate's labels, so it is read out of
+    // the extras a relayed envelope stamps it in.
+    let asks_member =
+        EventFilter::parse(r#"{"include": [{"member": "worker"}]}"#).expect("a filter");
+    let mut relayed = plain.clone();
+    relayed
+        .labels
+        .extra
+        .insert("member".into(), json!("worker"));
+    assert!(asks_member.matches(&relayed));
+    assert!(!asks_member.matches(&plain));
 }
 
 #[test]
@@ -1479,7 +1686,7 @@ fn the_contract_names_every_command_and_view_this_crate_offers() {
     assert_contract_names(
         "channel command",
         &[
-            "`onepipeline next RUN`",
+            "`onepipeline next RUN [--filter NAME|SPEC] [--all]`",
             "reply RUN [FILE]",
             "surface RUN --kind check-in --message TEXT",
             "attest RUN REF",
@@ -1493,12 +1700,13 @@ fn the_contract_names_every_command_and_view_this_crate_offers() {
 
     // The views, as the contract lists them.
     let tokens = backticked();
-    for view in ["runs", "status", "host", "monitor", "results", "goals"] {
+    for view in ["runs", "status", "host", "results", "goals"] {
         assert!(
             tokens.contains(view),
             "the contract no longer lists the `{view}` view"
         );
     }
+    assert!(tokens.contains("monitor RUN [--filter NAME|SPEC] [--all]"));
     assert!(tokens.contains("telemetry [--breakdown]"));
     assert!(tokens.contains("transcript RUN [NODE]"));
     assert!(tokens.contains("runs --mine"));

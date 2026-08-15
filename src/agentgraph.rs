@@ -68,6 +68,7 @@ use std::time::{Duration, Instant};
 
 use crate::error::{Error, Result};
 use crate::event::{Envelope, Labels};
+use crate::filter::EventFilter;
 
 /// The environment variable naming the `oneagentgraph` executable.
 pub const BINARY_ENV: &str = "ONEPIPELINE_ONEAGENTGRAPH_BIN";
@@ -449,6 +450,38 @@ pub enum GraphOutput<'a> {
     Logged(&'a Path),
 }
 
+/// One graph launch, as the two backends both receive it.
+///
+/// A value rather than eight positional arguments: the two backends and the
+/// retained-process command line all take exactly this, and a launch that
+/// reached one of them missing a field the others got is the drift this removes.
+/// The source filter in particular has three ways to arrive — a library
+/// `Request`, this build's own `drive`, and an overridden sibling's
+/// `--event-filter` — and all three read it from here.
+#[derive(Debug, Clone, Copy)]
+pub struct Launch<'a> {
+    /// The agent-graph config to run.
+    pub graph: &'a str,
+    /// The task prose every member without its own is given.
+    pub task: &'a str,
+    /// The directory the graph's members work in.
+    pub dir: &'a Path,
+    /// The labels stamped on every envelope this launch relays.
+    pub labels: &'a Labels,
+    /// Environment exported to the launch, beyond this process's own.
+    pub env: &'a [(String, String)],
+    /// Opaque graph-config overrides, applied in order.
+    pub sets: &'a [String],
+    /// What this launch may relay onto the run's merged store, or everything.
+    ///
+    /// The run's own say over a source it does not itself produce: filtering
+    /// belongs to the library that owns the stream, so what a launch is told not
+    /// to emit is never emitted rather than read and dropped here.
+    pub filter: Option<&'a EventFilter>,
+    /// Where the started graph's own output goes.
+    pub output: GraphOutput<'a>,
+}
+
 /// A started graph's output, from the reading side.
 ///
 /// One value rather than a field per destination: a launch's output went to a
@@ -484,6 +517,7 @@ fn retained_command(
     dir: &Path,
     labels: &[String],
     sets: &[String],
+    filter: Option<&EventFilter>,
 ) -> Result<Command> {
     let mut command = match overridden() {
         true => {
@@ -512,22 +546,49 @@ fn retained_command(
     for value in sets {
         command.arg("--set").arg(value);
     }
+    // Spelled the same to both, because both parse it the same way: this build's
+    // own `drive` and the sibling's `run` each read a `--event-filter` that
+    // starts with `{` as the document itself. Rendered rather than passed as the
+    // spec an operator typed, so a launch never re-reads a file that may have
+    // changed — or vanished — since the launch that validated it.
+    if let Some(filter) = filter {
+        command.arg("--event-filter").arg(
+            serde_json::to_string(filter)
+                .map_err(|error| sibling(format!("rendering the event filter: {error}")))?,
+        );
+    }
     Ok(command)
+}
+
+/// This crate's filter, as the sibling's own type.
+///
+/// Through the wire shape rather than field by field, because the wire shape is
+/// what the grammar is: the two types are the same document by contract, and
+/// crossing at their `Serialize`/`Deserialize` is what makes a field one of them
+/// grows and the other has not a refusal here rather than a value silently
+/// dropped on the way through. The sibling's own reader is also the one that
+/// decides whether it will accept the spec, which is the answer that matters —
+/// this is the value it is about to filter with.
+fn sibling_filter(filter: &EventFilter) -> Result<oneagentgraph::event::EventFilter> {
+    let document = serde_json::to_string(filter)
+        .map_err(|error| sibling(format!("rendering the event filter: {error}")))?;
+    serde_json::from_str(&document)
+        .map_err(|error| sibling(format!("`oneagentgraph` refused the event filter: {error}")))
 }
 
 impl ProcessGraphRun {
     /// Start a graph, with its envelopes going wherever `output` says.
-    pub fn start(
-        graph: &str,
-        task: &str,
-        dir: &Path,
-        labels: &Labels,
-        env: &[(String, String)],
-        sets: &[String],
-        output: GraphOutput<'_>,
-    ) -> Result<Self> {
-        let mut command = retained_command(graph, task, dir, &label_args(labels), sets)?;
-        for (key, value) in env {
+    pub fn start(launch: &Launch<'_>) -> Result<Self> {
+        let output = launch.output;
+        let mut command = retained_command(
+            launch.graph,
+            launch.task,
+            launch.dir,
+            &label_args(launch.labels),
+            launch.sets,
+            launch.filter,
+        )?;
+        for (key, value) in launch.env {
             command.env(key, value);
         }
         command.stdin(Stdio::null());
@@ -898,23 +959,22 @@ impl GraphRun {
     /// said nothing would send a different `--cwd` to the harness depending on
     /// which backend it happened to take. Naming it is the only way a run gets
     /// one answer.
-    pub fn start(
-        graph: &str,
-        task: &str,
-        dir: &Path,
-        labels: &Labels,
-        env: &[(String, String)],
-        sets: &[String],
-        output: GraphOutput<'_>,
-    ) -> Result<Self> {
-        if matches!(output, GraphOutput::Logged(_)) || std::env::var_os(BINARY_ENV).is_some() {
-            return ProcessGraphRun::start(graph, task, dir, labels, env, sets, output).map(
-                |run| Self {
-                    backend: GraphBackend::Process(run),
-                },
-            );
+    pub fn start(launch: &Launch<'_>) -> Result<Self> {
+        if matches!(launch.output, GraphOutput::Logged(_)) || std::env::var_os(BINARY_ENV).is_some()
+        {
+            return ProcessGraphRun::start(launch).map(|run| Self {
+                backend: GraphBackend::Process(run),
+            });
         }
-        Self::in_library(graph, task, dir, &label_args(labels), env, sets)
+        Self::in_library(
+            launch.graph,
+            launch.task,
+            launch.dir,
+            &label_args(launch.labels),
+            launch.env,
+            launch.sets,
+            launch.filter,
+        )
     }
 
     /// Start a graph through the sibling library, in this process.
@@ -931,6 +991,7 @@ impl GraphRun {
         labels: &[String],
         env: &[(String, String)],
         sets: &[String],
+        filter: Option<&EventFilter>,
     ) -> Result<Self> {
         let mut run_env = process_env();
         run_env.extend(env.iter().cloned());
@@ -953,6 +1014,7 @@ impl GraphRun {
             dir: dir.to_path_buf(),
             labels,
             overrides,
+            filter: filter.map(sibling_filter).transpose()?,
             state_dir,
             oneharness_bin: oneharness_bin(&run_env),
         };
@@ -1131,10 +1193,15 @@ pub fn drive(
     dir: &Path,
     labels: &[String],
     sets: &[String],
+    filter: Option<&str>,
 ) -> Result<i32> {
     use std::io::Write;
 
-    let mut run = GraphRun::in_library(graph, task, dir, labels, &[], sets)?;
+    // Read here rather than in the launcher that spelled it: this is a process
+    // boundary, so the spec arrives as text and this is where it becomes a value
+    // again — refused, with the offending matcher named, before a graph starts.
+    let filter = filter.map(EventFilter::read).transpose()?;
+    let mut run = GraphRun::in_library(graph, task, dir, labels, &[], sets, filter.as_ref())?;
     let mut out = std::io::stdout();
     for envelope in run.events() {
         let envelope = envelope?;
@@ -1682,16 +1749,17 @@ mod tests {
 
         // Whether it *ran* is not the claim — the member cannot, by
         // construction. The claim is what the launch did to this process.
-        let started = GraphRun::start(
-            &graph.to_string_lossy(),
-            "## What\nNothing.\n\n## Why\nThe export is the subject.\n\n## Acceptance criteria\n- \
-             None.",
-            &root,
-            &Labels::default(),
-            &[],
-            &[],
-            GraphOutput::Relayed,
-        );
+        let started = GraphRun::start(&Launch {
+            graph: &graph.to_string_lossy(),
+            task: "## What\nNothing.\n\n## Why\nThe export is the subject.\n\n## Acceptance \
+                   criteria\n- None.",
+            dir: &root,
+            labels: &Labels::default(),
+            env: &[],
+            sets: &[],
+            filter: None,
+            output: GraphOutput::Relayed,
+        });
         if let Ok(mut run) = started {
             run.cancel();
             let _ = run.wait();

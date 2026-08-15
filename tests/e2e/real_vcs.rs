@@ -190,3 +190,82 @@ fn a_real_gate_that_rejects_the_branch_fails_the_node_and_leaves_the_base_alone(
         "the gate's verdict never reached the merged store"
     );
 }
+
+/// `filters.vcs` reaches the real `onevcs` and narrows what it relays.
+///
+/// The filter is handed to the sibling as a **value**, on the filtered
+/// `EventStream` constructor it exposes for exactly this — so what this journey
+/// proves is that the source did not relay the records, rather than that this
+/// crate read them and threw them away. The evidence for that distinction is the
+/// second half: the records the filter admits are all still there, in a run whose
+/// publication did the same work.
+///
+/// Both halves in one journey, run against one repository, because the claim is a
+/// *comparison*: an ingestion the filter narrowed against the ingestion a launch
+/// naming no `filters:` block gets, which has to be the one it always got.
+#[test]
+fn a_launchs_vcs_filter_reaches_the_real_sibling_and_narrows_what_it_relays() {
+    let world = World::new("real-vcs-filter");
+    let repo = world.repository("local-direct", &["true"]);
+    world.script("service.work", "the worker wrote this\n");
+
+    // No `filters:` block: ingestion is exactly what it always was, and this is
+    // the control the filtered run below is read against.
+    let path = world.plan(
+        "unfiltered",
+        &plan_of("unfiltered", vec![node(&repo.checkout)]),
+    );
+    world
+        .run(&["start", &path.to_string_lossy(), "--attach"])
+        .settled();
+    world.until("the unfiltered run to settle", |world| {
+        world.run_file("unfiltered", "result.json").is_file()
+    });
+    let ingested = vcs_kinds(&world, "unfiltered");
+    for kind in ["gate-verdict", "push", "session-closed"] {
+        assert!(
+            ingested.iter().any(|seen| seen == kind),
+            "a launch naming no filters did not ingest {kind}: {ingested:?}"
+        );
+    }
+
+    // Different content, because the first run already landed the last lot: a
+    // branch whose base already carries its change publishes nothing, and a
+    // comparison against a run that did no work would prove nothing about the
+    // filter.
+    world.script("service.work", "and then the worker wrote this\n");
+    let path = world.plan("filtered", &plan_of("filtered", vec![node(&repo.checkout)]));
+    world
+        .run(&[
+            "start",
+            &path.to_string_lossy(),
+            "--attach",
+            "--filter-vcs",
+            r#"{"exclude": [{"kind": "gate-verdict"}]}"#,
+        ])
+        .settled();
+    world.until("the filtered run to settle", |world| {
+        world.run_file("filtered", "result.json").is_file()
+    });
+
+    let kinds = vcs_kinds(&world, "filtered");
+    assert!(
+        !kinds.iter().any(|kind| kind == "gate-verdict"),
+        "the source filter did not reach `onevcs`: {kinds:?}"
+    );
+    // Narrowed, not silenced — and the *same* publication happened, so the
+    // difference between the two runs is the filter and nothing else.
+    for kind in ["push", "session-closed"] {
+        assert!(
+            kinds.iter().any(|seen| seen == kind),
+            "the source filter dropped {kind}, which it admits: {kinds:?}"
+        );
+    }
+    let result = world.run_json("filtered", "result.json");
+    assert_eq!(
+        result["nodes"][0]["outcome"],
+        "merged",
+        "filtering the stream changed what the run did: {result}\n{}",
+        why(&world, "filtered")
+    );
+}

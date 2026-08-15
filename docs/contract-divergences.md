@@ -11,11 +11,14 @@ the contract**, and `docs/contract.md` was amended to carry each ruling. They st
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–22 are open**. Each states what the code does today and the
-proposal it is waiting on — every one of them a question for a *producer* rather
-than for this crate, because `oneagentgraph` and `onevcs` are independent tools
-that expose general integration hooks only and nothing in them may know about
-this one. An open entry is recorded here and never resolved from this repository.
+Entries **10–22 and 30–32 are open**. Each states what the code does today and
+the proposal it is waiting on. **10–22** are every one of them a question for a
+*producer* rather than for this crate, because `oneagentgraph` and `onevcs` are
+independent tools that expose general integration hooks only and nothing in them
+may know about this one. **30–32** are questions for the planner who owns the
+contract: two corners of the event-filter delta this crate had to resolve to
+compile it, and one set of cross-repository agreements no single repository can
+enforce. An open entry is recorded here and never resolved from this repository.
 
 ## 1. `ResolvedGraphRef` is not a type `oneagentgraph` exports — RESOLVED
 
@@ -841,3 +844,96 @@ settle because something was retried. So `retry` now removes it in the same
 edit, emitting the `node-dropped` operation the transition would have. What
 became of it is still in the run's record: its own `node-settled`, and the
 `edit-committed` that replaced it.
+
+## 30. The launch's `filters:` block is spelled as `start` flags, and the launch record is where it lives — OPEN
+
+**Proposal (for the planner who owns the contract): confirm that the three
+`start` flags are the whole of the launch-level input surface, or name the
+launch-config document `--filters FILE` would read the block from.**
+
+The approved contract names a launch-level `filters:` block "in the launch config
+and equivalent `start` flags". This crate has no launch *config*: `start` takes a
+plan and flags, and the only launch-level document is `launch.json`, which the
+launcher **writes** and `adopt` replays. So there is nothing for an operator to
+hand `start` a whole block in, and the block reaches a run as three flags —
+`--filter-agentgraph SPEC`, `--filter-vcs SPEC`, and repeatable
+`--filter-profile NAME=SPEC` — each `SPEC` being the same file-or-inline-JSON
+spelling `oneagentgraph run --event-filter` takes, so a block *can* be kept in
+files beside the plan and named three times.
+
+What the code does: `cli::StartArgs` carries the three flags,
+`driver::declared_filters` reads and validates each one at the boundary, and the
+result is retained as `ledger::LaunchRecord::filters` — where `adopt` replays it
+onto the graphs it restarts and every later `next` and `monitor` reads the
+profiles from. `docs/contract.md` states the block and the flags as the same
+thing and shows the block in its serialized shape, which is the shape the record
+carries.
+
+The proposal is whether `start` should additionally take one `--filters FILE`
+naming a document holding the whole block. Nothing in this crate reads a
+launch-level config file today, so adding one is a new input surface rather than
+a spelling of an existing one — and it is the planner's call whether the three
+flags are the whole of it.
+
+## 31. `next` had no event view for a profile to shape, so it grew one — OPEN
+
+**Proposal (for the planner who owns the contract): confirm that `next` answers
+`{status, surface, events}`, with `events` the whole merged store shaped by the
+profile — the same view `monitor` renders — rather than a window since the
+reader last looked.**
+
+The approved contract says a read-time profile "shapes the event view" of both
+`next` and `monitor`, and adds that a profile "must not change which surfaces
+exist or the unread-surface accounting" and that "blocking surfaces are always
+delivered". `monitor` renders the merged store, so it has an event view. `next`
+did not: it answered `{status, surface}` and nothing else, so `--filter` on it
+would have had nothing to act on unless it filtered the *channel* — which is the
+one thing the same sentence forbids.
+
+So `next` now answers `{status, surface, events}`, where `events` is the run's
+merged store shaped by the profile, exactly as `monitor` shapes what it renders.
+The three clauses above then become one guarantee, stated in `docs/contract.md`
+and held by `tests/e2e/filter.rs`: a profile is a view over **events**, and the
+channel — which surfaces exist, which one `next` claims, and the unread
+accounting over them — is never filtered.
+
+The corner this leaves is cost rather than correctness: the view is the whole
+store each time, as `monitor`'s already is, so a planner polling `next` re-reads
+the pipeline spine on every call. A cursor — "since the `planner-surfaced` this
+reader last recorded" — is derivable from the store with no new state, and is the
+obvious next question if that cost bites. It is not taken here because the
+approved text says a profile shapes a view and says nothing about a cursor, and
+inventing one would make `next` and `monitor` disagree about what "the event
+view" means.
+
+## 32. Corners of the shared filter grammar, resolved as the other two producers resolve them — OPEN
+
+**Proposal (for the planner who owns the contract): confirm these three
+resolutions, which all three producers must make identically for one spec to mean
+one thing across the stack.**
+
+The grammar is shared across `oneagentgraph`, `onevcs`, and this crate, with no
+shared crate: each owns a copy, held to the committed text by its own contract
+test. Three corners the approved text does not settle are resolved here to match
+what `oneagentgraph`'s `docs/event-filter-notes.md` records, so one spec does not
+filter differently depending on which producer read it. They are listed for the
+planner because agreement between three repositories is not something any one of
+them can enforce.
+
+**The glob dialect is `*` and nothing else.** `*` stands for any run of
+characters including none; every other character is itself, so `?` and `[a-z]`
+are literals. Stated in `docs/contract.md` rather than left to each
+implementation.
+
+**A label matcher reads the key as the envelope carries it.** This crate's
+`event::Labels` has typed slots for `run_id`, `node`, `step`, and `persona`, and
+flattens everything else into `extra` — so `member`, which the grammar reserves
+and this crate never stamps itself, arrives among the extras on a relayed
+sibling envelope. `filter::stamped` consults the typed slot *and* the extras;
+consulting only the typed slot would refuse to see a label the same consumer can
+plainly read.
+
+**`round` is not matchable.** It is a reserved label the approved matcher list
+does not name, and this crate no longer stamps it at all — so it is refused by
+the matcher reader like any other non-field, rather than quietly accepted as a
+key nothing can satisfy.

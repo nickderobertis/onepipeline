@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::filter::Filters;
 use crate::sys;
 
 /// The environment variable that moves the runs root.
@@ -282,6 +283,17 @@ pub struct LaunchRecord {
     /// How many times a fresh driver has been attached by `adopt`.
     #[serde(default)]
     pub adoptions: u32,
+    /// What this launch said about its run's events: the two source filters it
+    /// passes through, and the read-time profiles it defines.
+    ///
+    /// Retained here rather than derived per command because both halves outlive
+    /// the launching process: `adopt` replays the source filters onto the graphs
+    /// it restarts, and every later `next` and `monitor` — different processes,
+    /// with no handle on the launch — reads through the profiles this run was
+    /// given. Omitted when empty, like every other field added to this record
+    /// after it shipped, so a build that predates it still reads what it wrote.
+    #[serde(default, skip_serializing_if = "Filters::is_empty")]
+    pub filters: Filters,
 }
 
 impl LaunchRecord {
@@ -315,6 +327,24 @@ impl LaunchRecord {
             format!("[{}:{}]", self.launcher, sys::session_digest(&self.session))
         }
     }
+}
+
+/// What one run's launch said about its events.
+///
+/// Read at the point of use rather than threaded down through the reconcile
+/// loop: a source filter is needed exactly where a source is started, and the
+/// run id is what every one of those places already holds.
+///
+/// A launch record this cannot read yields the empty block, which filters
+/// nothing. That is the reading a run written by a build predating the block
+/// gets, and it is the safe direction for a read that has no way to refuse: a
+/// filter is what a run does *not* relay, so failing to find one relays
+/// everything rather than silencing a source over an unreadable file.
+pub fn launch_filters(run: &str) -> Filters {
+    let paths = RunPaths::under(&runs_root(), run);
+    read_json_opt::<LaunchRecord>(&paths.launch())
+        .map(|record| record.filters)
+        .unwrap_or_default()
 }
 
 /// Read a JSON document, refusing anything the type does not accept.
@@ -664,6 +694,7 @@ mod tests {
             dag_sets: Vec::new(),
             node_sets: Vec::new(),
             adoptions: 0,
+            filters: Filters::default(),
         };
         assert!(!record.owned_by(sys::UNKNOWN_LAUNCHER));
         assert_eq!(record.owner_label("anyone"), "[unknown]");
@@ -687,6 +718,7 @@ mod tests {
             dag_sets: Vec::new(),
             node_sets: Vec::new(),
             adoptions: 0,
+            filters: Filters::default(),
         };
         let label = record.owner_label("mine");
         assert!(!label.contains("secret-session-id"), "{label} leaks the id");

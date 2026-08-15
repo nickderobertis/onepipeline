@@ -31,8 +31,8 @@ resolver = "2"
 # `tests/e2e/dispatch.rs` holds the first end to end: it fails against 0.2.11
 # rather than merely reading differently.
 [workspace.dependencies]
-oneagentgraph = "0.2.12"
-onevcs = "0.2.6"
+oneagentgraph = "0.2.13"
+onevcs = "0.2.7"
 
 [package]
 name = "onepipeline"
@@ -127,7 +127,7 @@ windows-sys = { version = "0.61", features = [
 # must stay one: what it implements must never be reachable from a release
 # binary.
 [dev-dependencies]
-onevcs-testing = "0.1.5"
+onevcs-testing = "0.1.7"
 
 [[test]]
 name = "e2e"
