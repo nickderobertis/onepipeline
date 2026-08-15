@@ -11,7 +11,7 @@
 // model turns to produce, and `dispatch.rs` is where the real `oneagentgraph` binary is
 // driven instead. `harness.rs` carries the same suppression and the full rationale.
 
-use crate::harness::{agent, human, plan_of, World, REFUSED};
+use crate::harness::{agent, human, plan_of, World, NOTHING_DRIVING, REFUSED};
 use serde_json::json;
 
 /// Start a run detached and wait until it is executing.
@@ -970,5 +970,67 @@ fn a_blocking_surface_holds_the_subtree_of_the_node_it_names_until_it_is_answere
 
     drop(stdin);
     world.release("keep.go");
+    let _ = serving.wait();
+}
+
+/// A blocking surface that names no node holds no subtree — and is still what
+/// the run is waiting on.
+///
+/// The other half of the decision contract: what a surface pauses is the
+/// subtree of the node it named, so one that named none pauses nothing. It does
+/// not therefore *cost* nothing: a run that cannot move with a question
+/// outstanding is awaiting the planner, not abandoned, and the two send an
+/// operator to different places.
+#[test]
+fn a_blocking_surface_naming_no_node_pauses_nothing_and_still_awaits_the_planner() {
+    use std::io::Write;
+
+    let world = World::new("channel-surface-runwide");
+    // The one node fails, so the graph stops moving with nothing ready, nothing
+    // waiting on a person, and — until the frame below — no question to answer.
+    world.script("build.fail", "1");
+    let path = world.plan("runwide", &plan_of("runwide", vec![agent("build", &[])]));
+    world
+        .run(&["start", &path.to_string_lossy(), "--attach"])
+        .exited(NOTHING_DRIVING)
+        .out_has("\"settlement\":\"unattended\"");
+
+    // A blocking question about the run rather than about any node in it.
+    let mut serving = world
+        .cmd(&["channel", "serve", "runwide"])
+        // Nobody answers this one, and the server's own wait is not what is
+        // under test: shortened so the journey is not the timeout.
+        .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the channel server starts");
+    let mut stdin = serving.stdin.take().expect("stdin is piped");
+    writeln!(
+        stdin,
+        r#"{{"kind":"blocker","message":"the whole plan looks wrong; what now?"}}"#
+    )
+    .expect("the frame is written");
+    stdin.flush().expect("flushed");
+    world.until("the question to reach the planner", |world| {
+        !world
+            .events_of("runwide", "planner-surface-queued")
+            .is_empty()
+    });
+
+    // The same run, driven again: it still cannot move, and now it says why.
+    world
+        .run(&["adopt", "runwide"])
+        .exited(0)
+        .out_has("\"settlement\":\"awaiting-planner\"");
+
+    // And it held nothing back: the surface named no node, so its subtree is
+    // empty and no dispatch was skipped on its account.
+    let pending = world.events_of("runwide", "decision-pending");
+    assert_eq!(pending.len(), 1, "{pending:?}");
+    assert_eq!(pending[0]["payload"]["unblocks"], json!([]));
+
+    drop(stdin);
     let _ = serving.wait();
 }
