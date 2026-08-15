@@ -20,7 +20,8 @@
 // opened and merged offline. `harness.rs` carries the same suppression and the full
 // rationale.
 
-use crate::harness::{agent, gate_script, lifecycle, plan_of, Repository, World};
+use crate::harness::{agent, gate_script, lifecycle, plan_of, Repository, World, REFUSED};
+use onevcs::provenance::SUBJECT_LIMIT;
 use serde_json::json;
 
 fn settle(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
@@ -723,54 +724,78 @@ fn a_publication_that_its_gate_rejects_settles_the_node_failed_by_name() {
         .out_has("publication-failed");
 }
 
-/// A title the sibling will not commit under.
+/// A title the sibling will not commit under never reaches a dispatch.
 ///
-/// `onevcs::Subject` is the conversion that checks a publication's title, and
-/// this crate builds its request through it — so a title too long to be a commit
-/// subject is refused *where the request is built*, before the session's work is
-/// committed and its base merged, rather than after. The planner sets the title,
-/// so this is reachable from a plan file and the node has to settle on it by
-/// name rather than crash or publish something the sibling would refuse.
+/// `onevcs` holds a publication subject to
+/// [`SUBJECT_LIMIT`](onevcs::provenance::SUBJECT_LIMIT), and a title the plan
+/// file states is knowable against that bound before anything runs — so the
+/// launch refuses it, naming the node, the length, and the limit. It used to be
+/// refused where the publication request is built, which is *after* the node's
+/// whole dispatch and its gate: the worker did all of its work, failed on the
+/// last step, and the automatic retry recomputed the same title from the same
+/// plan and failed identically.
+///
+/// The title that fits by one character is run right after it, on the same
+/// repository, because a bound is only proven by the side of it that publishes.
 #[test]
-fn a_title_the_sibling_will_not_commit_under_fails_the_node_before_it_publishes() {
+fn a_title_the_sibling_will_not_commit_under_is_refused_before_any_dispatch() {
     let world = World::new("lifecycle-longtitle");
     let repo = world.repository("local-direct", &["true"]);
     world.script("service.work", "the worker wrote this\n");
-    let mut node = lifecycle("service", &[]);
-    // Past the 72-character subject the sibling accepts, and nothing else about
-    // it is wrong: it is a title a planner could plausibly write.
-    node["title"] = json!(format!(
-        "feat: {}",
-        "land the change the worker made ".repeat(3)
-    ));
-    let run = settle(&world, "longtitle", vec![node]);
+    // A plausible planner title, padded to exactly the length this journey is
+    // about: nothing else about it is wrong.
+    let titled = |length: usize| {
+        let mut title = "feat: land the change the worker made".to_string();
+        while title.len() < length {
+            title.push_str(" and then some");
+        }
+        title.truncate(length);
+        let mut node = lifecycle("service", &[]);
+        node["title"] = json!(title);
+        node
+    };
+    let over = world.plan(
+        "longtitle",
+        &plan_of("longtitle", vec![titled(SUBJECT_LIMIT + 1)]),
+    );
+    world
+        .run(&["start", &over.to_string_lossy(), "--attach"])
+        .exited(REFUSED)
+        .err_has("node 'service'")
+        .err_has(&format!("{} characters", SUBJECT_LIMIT + 1))
+        .err_has(&format!("{SUBJECT_LIMIT}-character limit"));
 
-    let result = world.run_json(&run, "result.json");
-    assert_eq!(
-        result["nodes"][0]["status"],
-        "failed",
-        "{result}\n{}",
-        why(&world, &run)
-    );
-    assert_eq!(
-        result["nodes"][0]["outcome"], "publication-failed",
-        "{result}"
-    );
-    // Named, so an operator can fix the plan rather than guess. The words are
-    // the sibling's own refusal, relayed.
-    let settled = &world.events_of(&run, "node-settled")[0];
+    // Nothing was started, nothing was dispatched, and nothing reached the base:
+    // the refusal is the launch's own, on the stderr an operator is reading.
     assert!(
-        settled["payload"]["detail"]
-            .as_str()
-            .is_some_and(|detail| detail.contains("title") && detail.contains("limit")),
-        "the refusal does not say the title is why: {settled}"
+        !world.runs.join("longtitle").exists(),
+        "a refused plan left a run directory behind"
     );
-    // And nothing landed: the refusal comes before the publication, not after
-    // half of one.
+    assert!(
+        !world.was_invoked("oneagentgraph", &["run"]),
+        "a plan refused at its boundary still spent a dispatch"
+    );
     assert_eq!(
         repo.base_commits(&world),
         vec!["chore: seed the repository".to_string()],
-        "a title the sibling refused still reached the base"
+        "a title the sibling would refuse still reached the base"
+    );
+
+    // One character shorter is a title a publication carries.
+    let fits = titled(SUBJECT_LIMIT);
+    let subject = fits["title"].as_str().expect("the title").to_string();
+    let run = settle(&world, "fitstitle", vec![fits]);
+    assert_eq!(
+        world.run_json(&run, "result.json")["state"],
+        "complete",
+        "{}",
+        why(&world, &run)
+    );
+    assert!(
+        repo.base_commits(&world).contains(&subject),
+        "the title at the limit did not reach the base: {:?}\n{}",
+        repo.base_commits(&world),
+        why(&world, &run)
     );
 }
 

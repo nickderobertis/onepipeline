@@ -32,7 +32,7 @@ resolver = "2"
 # rather than merely reading differently.
 [workspace.dependencies]
 oneagentgraph = "0.2.12"
-onevcs = "0.2.6"
+onevcs = "0.2.8"
 
 [package]
 name = "onepipeline"
