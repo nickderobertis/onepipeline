@@ -122,8 +122,6 @@ jobs:
         with:
           toolchain: ${{ steps.msrv.outputs.version }}
       - uses: Swatinem/rust-cache@v2
-      # Repository-local and cached, not a marketplace download: an action that
-      # fetches at run time takes every required check down with it.
       - uses: ./.github/actions/setup-just
       # `just msrv` reads the same `rust-version` field, so the recipe and the
       # job can never disagree about which floor was proven.
@@ -150,16 +148,14 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just,nextest
-      # The journey itself already refuses without a credential, but its refusal
-      # names GH_TOKEN — the variable — and a person reading a red job needs the
-      # name of the thing to go set. Fail here instead, naming the secret, before
-      # a compile has been paid for. Never a skip: an unrunnable smoke is a
-      # failure, not a pass.
+      # The journey's own refusal names GH_TOKEN, the variable; a red job needs
+      # the name of the secret to go set. Given a presence signal rather than the
+      # PAT itself — nothing here needs the value.
       - name: The smoke's credential is present
         env:
-          GH_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          HAS_CREDENTIAL: ${{ secrets.RELEASE_PLZ_TOKEN != '' }}
         run: |
-          if [ -z "${GH_TOKEN:-}" ]; then
+          if [ "$HAS_CREDENTIAL" != "true" ]; then
             echo "::error::the real-everything smoke needs the RELEASE_PLZ_TOKEN secret, passed as GH_TOKEN. Set it to a PAT that can push to, open a pull request on, and merge in the scratch repository. This job never skips and never falls back to a fake." >&2
             exit 1
           fi
@@ -229,15 +225,11 @@ jobs:
   # The command is not spelled again here: the README is its one source, so this
   # job cannot end up proving a command nobody is told to type.
   #
-  # It runs on pull requests as well as on main, and is a required check. What it
-  # resolves is still the remote's default branch rather than the branch under
-  # review — that is inherent to a `--git` install with no revision, and the
-  # `install` job above is what proves this revision — but a job that only ever
-  # ran after the merge could not block anything, and did not: this command was
-  # broken on every platform for days, straight through a release, because
-  # `cargo install --git` searches the whole repository and `crates/testfakes`
-  # also declares binaries. A check that gates nothing is indistinguishable from
-  # no check, so it gates.
+  # It runs on pull requests too, and is required. What it resolves is still the
+  # remote's default branch rather than the branch under review — inherent to a
+  # `--git` install with no revision, and the `install` job above is what proves
+  # this revision — but a check that can only report after the merge gates
+  # nothing, which is how the documented command stayed broken through a release.
   install-documented:
     strategy:
       fail-fast: false

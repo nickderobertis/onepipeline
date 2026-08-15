@@ -79,12 +79,21 @@ jobs:
       # taiki-e/install-action verifies the downloaded archive's checksum before
       # unpacking it; a `curl | tar` pipeline would execute an unauthenticated
       # download.
-      # cargo-semver-checks alongside release-plz because release-plz.toml sets
-      # `semver_check = true` and shells out to it: absent from PATH, the API
-      # break this repository has already shipped once goes undetected again.
       - uses: taiki-e/install-action@v2
         with:
           tool: release-plz@${{ env.RELEASE_PLZ_VERSION }},cargo-semver-checks
+
+      # release-plz.toml is the one source for whether the API check runs; this
+      # job only has to be able to honour it. Derived rather than assumed,
+      # because release-plz shells out to cargo-semver-checks and off PATH the
+      # check does not run — and does not say so.
+      - name: The toolchain honours release-plz.toml's semver_check
+        run: |
+          if grep -Eq '^[[:space:]]*semver_check[[:space:]]*=[[:space:]]*true' release-plz.toml \
+             && ! command -v cargo-semver-checks >/dev/null; then
+            echo "::error::release-plz.toml sets semver_check = true, but cargo-semver-checks is not on PATH — add it to the install-action tool list above or the API check silently will not run" >&2
+            exit 1
+          fi
 
       - name: Tag and publish a merged version bump
         env:
