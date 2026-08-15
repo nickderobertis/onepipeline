@@ -207,12 +207,11 @@ pub struct Refusal {
     pub member: Option<String>,
     /// How many records carried this same side, identity, and reason.
     ///
-    /// Exactly that, and deliberately not a count of *turns*: the producer
-    /// stamps a turn on each advance and this does not read it, so two records
-    /// may be one turn's chain retried or two turns' chains refusing alike. One
-    /// chain refusing the same way ten times is one fact recorded ten times, and
-    /// claiming ten turns for it would be a measurement nothing here made.
-    pub records: u64,
+    /// Non-zero because a refusal exists only by having been recorded once.
+    /// Deliberately not a count of *turns*: the producer stamps a turn on each
+    /// advance and this does not read it, so claiming turns would be a
+    /// measurement nothing here made.
+    pub records: std::num::NonZeroU64,
 }
 
 /// Whether a relayed envelope is `oneagentgraph`'s "a chain stepped past a
@@ -654,7 +653,7 @@ fn fold_refusal(state: &mut RunState, event: &Envelope) {
             .get("member")
             .and_then(Value::as_str)
             .map(str::to_string),
-        records: 1,
+        records: std::num::NonZeroU64::MIN,
     };
     let recorded = state.refusals.entry(node.to_string()).or_default();
     // The turn is deliberately not part of what makes two records the same: one
@@ -666,7 +665,7 @@ fn fold_refusal(state: &mut RunState, event: &Envelope) {
             && seen.advanced.reason == refusal.advanced.reason
             && seen.member == refusal.member
     }) {
-        same.records += 1;
+        same.records = same.records.saturating_add(1);
         return;
     }
     recorded.push(refusal);

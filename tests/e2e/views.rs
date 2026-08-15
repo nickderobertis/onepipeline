@@ -785,6 +785,11 @@ fn runs_summarises_every_recorded_run_and_says_whose_it_is() {
 fn a_run_root_the_views_refuse_is_named_with_its_reason() {
     let world = World::new("views-skipped");
     let run = settled(&world, "readable", vec![agent("build", &[])]);
+    // llmlint: ignore-block[tests_mirror_real_usage] a run root with no launch record is a
+    // state of the *filesystem* — a crash between the directory and the record, or a
+    // directory an operator left beside the runs — and no command makes one, which is why
+    // the views met it in the first place. The run beside it is launched through the CLI,
+    // and every claim is read off the CLI.
     // A run root left half-written: the directory is there and the launch record
     // that says who owns it is not.
     std::fs::create_dir_all(world.runs.join("half-written")).expect("a run root with no launch");
@@ -797,6 +802,7 @@ fn a_run_root_the_views_refuse_is_named_with_its_reason() {
         r#"{"oops": true}"#,
     )
     .expect("a launch record this build refuses");
+    // llmlint: ignore-end[tests_mirror_real_usage]
 
     for view in [vec!["runs"], vec!["status"], vec!["goals"]] {
         world
@@ -825,7 +831,11 @@ fn a_run_root_the_views_refuse_is_named_with_its_reason() {
 #[test]
 fn a_root_whose_every_run_is_refused_does_not_read_as_an_empty_one() {
     let world = World::new("views-allrefused");
+    // llmlint: ignore-block[tests_mirror_real_usage] the same filesystem state as the
+    // journey above, and for the same reason: no command makes a run root with no launch
+    // record. What is asserted is the CLI's answer to it.
     std::fs::create_dir_all(world.runs.join("half-written")).expect("a run root with no launch");
+    // llmlint: ignore-end[tests_mirror_real_usage]
 
     for view in [vec!["runs"], vec!["status"], vec!["goals"]] {
         let rendered = world.run(&view);
@@ -854,7 +864,11 @@ fn mine_filtering_everything_out_is_not_the_same_as_a_root_that_could_not_be_rea
     // list — while the root beside it is still one this build refused.
     let stranger = world.as_session("session-other");
     settled(&stranger, "theirs", vec![agent("build", &[])]);
+    // llmlint: ignore-block[tests_mirror_real_usage] as above: a run root with no launch
+    // record is a filesystem state no command produces. The run beside it is another
+    // planner's, launched through the CLI as that planner would.
     std::fs::create_dir_all(world.runs.join("half-written")).expect("a run root with no launch");
+    // llmlint: ignore-end[tests_mirror_real_usage]
 
     let rendered = world.run(&["runs", "--mine"]);
     rendered
@@ -899,13 +913,11 @@ fn host_never_renders_a_dispatch_of_a_run_that_was_stopped() {
     world.release("build.go");
 }
 
-// llmlint: ignore-block[tests_mirror_real_usage] one fact below is written into the run's
-// ledger by hand: the pid inside its ownership lock. That is a driver that died without
-// releasing what it held — the state this journey is about, and the state measured on a
-// real host — and no command a user can type produces it on demand, because a command that
-// could would be one that kills a live driver. Everything else here is real: the run is
-// launched and driven by the compiled binary, its dispatch is genuinely in flight, and
-// every claim afterwards is read off the CLI.
+// llmlint: ignore-block[tests_mirror_real_usage] one fact is written by hand: the pid
+// inside the run's ownership lock. That is a driver that died without releasing what it
+// held, and no command produces it on demand — one that could would be one that kills a
+// live driver. The run is real, its dispatch is genuinely in flight, and every claim
+// afterwards is read off the CLI.
 /// A `host` row is a claim that a dispatch exists **now**, and it is acted on.
 ///
 /// Measured on a real host: six rows aged 12h–52h rendered as a live fleet while

@@ -340,16 +340,10 @@ impl Survey {
     }
 }
 
-// llmlint: ignore-block[cli_output_contract] the two renderings below are **part of the
-// answer**, not a failure of the command, which is why they are on the view's own output
-// rather than on standard error. The reader asked what is on this host and is being told
-// what could not be read — the whole fix, replacing a silent drop that rendered a host
-// holding thirty run roots as `no runs recorded`. The empty case is what settles the
-// stream: `no run under <root> could be read` *replaces* `no runs recorded`, and the answer
-// to "what is running" cannot live on a different stream from the answer it replaces. The
-// same decision, and the exit code that goes with it, is recorded at the two driver sites
-// that print these. A caller that named *one* run and could not have it is a different
-// case, and is still refused outright.
+// llmlint: ignore-block[cli_output_contract] a refused run root is part of the answer, not
+// a failure of the command: the empty case here *replaces* `no runs recorded`, so it cannot
+// live on a stream other than the answer it replaces. The two driver sites that print these
+// carry the exit code that goes with the same decision.
 /// What a view says about the run roots it refused, or nothing when it refused
 /// none.
 ///
@@ -585,12 +579,9 @@ fn refusal_phrase(refusal: &Refusal) -> String {
         // nobody named — which is the failure this line exists to end.
         (None, None) => "a side the record does not name".to_string(),
     };
-    // llmlint: ignore-block[changed_behavior_has_e2e] no producer reaches the empty half:
-    // `oneagentgraph::event::FallbackAdvanced` declares `reason` as a required `String`, so
-    // a candidate that named none never reaches a journal at all. It is written for the
-    // build after this one — a newer sibling that relaxes the field — and says what it has
-    // rather than rendering an empty pair of brackets that reads as a measured nothing.
-    // The half a real producer does reach is driven end to end in `tests/e2e/views.rs`.
+    // llmlint: ignore-block[changed_behavior_has_e2e] `FallbackAdvanced::reason` is a
+    // required `String`, so no producer reaches the empty half; it is written for a newer
+    // sibling that relaxes the field. The half a producer does reach is driven end to end.
     let reason = if refusal.advanced.reason.is_empty() {
         "for a reason the record does not carry".to_string()
     } else {
@@ -601,7 +592,7 @@ fn refusal_phrase(refusal: &Refusal) -> String {
     // identity, and reason. The producer stamps a turn on each advance and
     // nothing here reads it, so "on N turns" would be a measurement this line
     // never made.
-    let again = if refusal.records > 1 {
+    let again = if refusal.records.get() > 1 {
         format!(", recorded {} times", refusal.records)
     } else {
         String::new()
@@ -715,12 +706,9 @@ fn dispatch_proof(view: &RunView) -> Proof {
         ));
     }
     match sys::process_start_token(held.pid) {
-        // llmlint: ignore-block[changed_behavior_has_e2e] this arm is the host declining to
-        // answer, which a journey would have to produce by giving the binary a `ps` that
-        // fails — and that is a property of the machine the suite runs on rather than of
-        // anything a user types. The two answers the host *does* give are both driven end
-        // to end in `tests/e2e/views.rs`, and this arm resolves the same way as every other
-        // unproven one, which that journey covers three times over.
+        // llmlint: ignore-block[changed_behavior_has_e2e] the host declining to answer is a
+        // property of the machine rather than of anything a user types. The answers it does
+        // give, and three other unproven arms that resolve alike, are driven end to end.
         None => Proof::Unproven(format!(
             "this host will not say when pid {} started",
             held.pid
@@ -1751,7 +1739,7 @@ mod tests {
         let single = Refusal {
             advanced: advanced("auth"),
             member: Some("worker".into()),
-            records: 1,
+            records: std::num::NonZeroU64::MIN,
         };
         assert_eq!(
             refusal_phrase(&single),
@@ -1760,7 +1748,7 @@ mod tests {
         let bare = Refusal {
             advanced: advanced(""),
             member: None,
-            records: 1,
+            records: std::num::NonZeroU64::MIN,
         };
         let phrase = refusal_phrase(&bare);
         assert!(
