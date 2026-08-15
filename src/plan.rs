@@ -33,6 +33,22 @@ pub const PLAN_SCHEMA_VERSION: u32 = 1;
 /// The heading a carried planner note is rendered under.
 pub const PLANNER_CONTEXT_HEADING: &str = "## Planner context";
 
+/// A field the plan schema used to carry, and where its content goes now.
+///
+/// `deny_unknown_fields` refuses a plan still carrying it either way, with
+/// `unknown field `done_when``. That tells a planner a field does not exist; it
+/// does not tell them where the review bar they wrote belongs, and every plan
+/// written before this schema change carries one. So the refusal names the field
+/// and says where the bar goes instead.
+pub(crate) const DONE_WHEN_RETIRED: &str =
+    "`done_when` is no longer a plan field. A node's review bar is the \
+     `## Acceptance criteria` section of its own task, which the judge is handed \
+     verbatim; a bar broader than one node belongs in the onejudge base config the \
+     node-scope graph's worker already points at, under `user.done_when`";
+
+/// The name of that field, as a submitted document still spells it.
+const DONE_WHEN: &str = "done_when";
+
 /// What stands in for a [`Goal`] a plan states none of.
 ///
 /// One spelling for both readers of it — the `goals` view a planner reads, and
@@ -85,10 +101,15 @@ impl Plan {
             .is_some_and(|ext| ext.eq_ignore_ascii_case("json"));
         let named = |e: String| Error::Invalid(format!("{}: {e}", path.display()));
 
+        // A document this schema refuses is read a second time, leniently, to
+        // see whether a retired field is why. Only on the failing path: the
+        // reading that decides whether a plan loads stays exactly the one it was.
+        let refused = |e: String| named(retired_field_in(&text).unwrap_or(e));
+
         if is_json {
             match serde_json::from_str::<serde_json::Value>(&text) {
                 Ok(serde_json::Value::Object(_)) => {
-                    return serde_json::from_str(&text).map_err(|e| named(e.to_string()));
+                    return serde_json::from_str(&text).map_err(|e| refused(e.to_string()));
                 }
                 Ok(other) => {
                     let kind = match other {
@@ -104,8 +125,43 @@ impl Plan {
                 Err(_) => {}
             }
         }
-        serde_norway::from_str(&text).map_err(|e| named(e.to_string()))
+        serde_norway::from_str(&text).map_err(|e| refused(e.to_string()))
     }
+}
+
+/// The retired field a submitted document still carries, named with where it
+/// was found, or `None` if it carries none.
+///
+/// A whole-document walk rather than a walk of the plan's own shape: the same
+/// field reaches this crate inside a plan file, inside a reply envelope's `add`,
+/// and inside a `requeue`'s amendment, and one refusal for all three is one
+/// answer a planner can act on. Only mapping *keys* are read, so prose that
+/// discusses the field is not mistaken for a document that declares it.
+pub(crate) fn retired_field(document: &serde_json::Value) -> Option<String> {
+    match document {
+        serde_json::Value::Object(map) => {
+            if map.contains_key(DONE_WHEN) {
+                let whose = map
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|id| format!("'{id}': "))
+                    .unwrap_or_default();
+                return Some(format!("{whose}{DONE_WHEN_RETIRED}"));
+            }
+            map.values().find_map(retired_field)
+        }
+        serde_json::Value::Array(items) => items.iter().find_map(retired_field),
+        _ => None,
+    }
+}
+
+/// The same, for a document that has not been parsed yet.
+///
+/// Read leniently — as YAML, which also reads the JSON a plan file is usually
+/// written in — because the text reaching here is one the strict schema already
+/// refused, and a second refusal to parse it is simply "no retired field".
+fn retired_field_in(text: &str) -> Option<String> {
+    retired_field(&serde_norway::from_str::<serde_json::Value>(text).ok()?)
 }
 
 impl Node {
@@ -196,10 +252,6 @@ pub struct Node {
     /// Prerequisite node ids, or cross-DAG `run:<id>#<node>` references.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deps: Vec<String>,
-    /// The judge-only completion bar. Always requires that every acceptance
-    /// criterion in `task` is met, and may add broader quality measures.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub done_when: Option<String>,
     /// The dispatch's turn budget.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_turns: Option<u32>,
@@ -275,9 +327,6 @@ pub struct Step {
     /// Prerequisite step ids within the same node.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deps: Vec<String>,
-    /// The judge-only completion bar for this step.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub done_when: Option<String>,
     /// The step's turn budget.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_turns: Option<u32>,

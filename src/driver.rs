@@ -910,8 +910,17 @@ fn reply(args: &ReplyArgs) -> Result<i32> {
             buffer
         }
     };
-    let envelope: Reply = serde_json::from_str(text.trim())
-        .map_err(|e| Error::Refused(format!("the reply is malformed: {e}")))?;
+    // A reply this schema refuses is read a second time, leniently, to see
+    // whether a retired plan field is why — an `add` carrying one is the same
+    // planner mistake as a plan file carrying one, and deserves the same answer.
+    let envelope: Reply = serde_json::from_str(text.trim()).map_err(|e| {
+        let why = serde_json::from_str::<serde_json::Value>(text.trim())
+            .ok()
+            .as_ref()
+            .and_then(crate::plan::retired_field)
+            .unwrap_or_else(|| e.to_string());
+        Error::Refused(format!("the reply is malformed: {why}"))
+    })?;
     submit(&paths, &envelope)
 }
 

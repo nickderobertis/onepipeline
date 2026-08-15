@@ -2,7 +2,9 @@
 
 Composes oneagentgraph + onevcs, owns the task DAG, merges the three event streams.
 
-Plan schema v1 = ai-orchestrator tracked-graph schema v7 node shapes unchanged (`agent` direct, lifecycle with `repo`, `kind: human`, nested `steps` on one branch, `expects_no_diff`, `context`, cross-DAG `run:<id>#<node>` refs, What/Why/Acceptance-criteria task prose, judge-only `done_when`), with: `repo` resolved through onevcs; new optional per-node `executor: NAME`; new optional `agent_graph: REF` overriding the default node-scope graph config.
+Plan schema v1 = ai-orchestrator tracked-graph schema v7 node shapes (`agent` direct, lifecycle with `repo`, `kind: human`, nested `steps` on one branch, `expects_no_diff`, `context`, cross-DAG `run:<id>#<node>` refs, What/Why/Acceptance-criteria task prose, per-node `max_turns`), with: `repo` resolved through onevcs; new optional per-node `executor: NAME`; new optional `agent_graph: REF` overriding the default node-scope graph config; and **no `done_when`** — v7's judge-only bar is retired here, because onejudge hands that field to the judge verbatim and the criterion belongs in the onejudge document the node-scope graph's worker already points at, written once. A per-node bar is the task's own `## Acceptance criteria`, which the judge reads as the first message of the transcript it is given. A plan still carrying `done_when` is refused **by name**, and the refusal says where the bar goes instead.
+
+Per-node **controls** — what a node declares about how its dispatch runs, as against what it is asked to do — reach that dispatch as node-scope overrides on its agent-graph launch, applied after the run-wide `--node-set`s: `max_turns` is the worker member's own turn ceiling. A control this build accepts and cannot apply refuses the plan at validation, and refuses the launch again where it is composed; neither path may fall back to a default. A node with `steps` declares its persona, task, and turn budget on them, and a `kind: human` or `expects_no_diff` node — which has no dispatch — declares none of the three.
 
 `resume` continues a node on the branch its previous attempt preserved: `{branch, checkpoint?, completed_steps?}`. `branch` is the preserved branch. `completed_steps` names the steps that branch already carries, and a continuation skips exactly those and re-runs the rest — an absent or empty list re-runs the whole workstream, which repeats work but never skips it. `checkpoint` must be a commit reachable on the remote; a local-only revision is not a checkpoint, because the machine that continues the node is not the machine that made it.
 
@@ -29,6 +31,7 @@ pub struct DispatchRequest {
     pub graph: ConfigRef,                        // content-addressed node-scope agent-graph config (oneagentgraph type)
     pub task: String,
     pub labels: Labels,                          // reserved: run_id, round, node, step, persona
+    pub controls: NodeControls,                  // the node's own dispatch controls: { max_turns: Option<u32> }
     pub workspace: WorkspaceSpec,                // Path(PathBuf) | VcsSession(SessionRequest: onevcs type)
     pub cancel: CancellationToken,
 }

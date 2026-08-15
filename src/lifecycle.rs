@@ -134,6 +134,7 @@ pub fn execute(
                 declared_steps.then_some(step.id.as_str()),
                 step.persona.as_deref(),
             ),
+            controls: crate::controls::NodeControls::of_step(step),
             workspace: workspace.clone(),
             cancel: cancel.clone(),
         };
@@ -307,6 +308,10 @@ fn draft_title(
             node.rendered_task()
         ),
         labels: engine::dispatch_labels(run, round, &node.id, None, Some(PR_AUTHOR_PERSONA)),
+        // None of the node's own: the drafting dispatch is not the node's work,
+        // and a turn budget written for that work would be spent twice — once on
+        // it and once here — if this dispatch inherited it.
+        controls: crate::controls::NodeControls::default(),
         workspace,
         cancel: cancel.clone(),
     });
@@ -442,7 +447,6 @@ pub fn ordered_steps(node: &Node) -> std::result::Result<Vec<Step>, String> {
             task: node.task.clone(),
             persona: node.persona.clone(),
             deps: Vec::new(),
-            done_when: node.done_when.clone(),
             max_turns: node.max_turns,
             expects_no_diff: node.expects_no_diff,
             executor: node.executor.clone(),

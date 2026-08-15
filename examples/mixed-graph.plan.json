@@ -28,8 +28,7 @@
         {
           "id": "implement",
           "persona": "engineer",
-          "task": "## What\nImplement the approved API and rollout behaviour and write the tests that prove it.\n\n## Why\nDeliver the approved release behaviour to service users without breaking the agreed contract, with the implementation fully proven in its own dispatch.\n\n## Acceptance criteria\n- The approved API and rollout behaviour are implemented.\n- Realistic request tests prove the happy path and a failure or recovery path.\n- Each new test is observed failing for the intended reason before it passes.",
-          "done_when": "all task acceptance criteria are met, the approved contract is proven through real requests without opening coverage gaps, and the repository's full gate passes"
+          "task": "## What\nImplement the approved API and rollout behaviour and write the tests that prove it.\n\n## Why\nDeliver the approved release behaviour to service users without breaking the agreed contract, with the implementation fully proven in its own dispatch.\n\n## Acceptance criteria\n- The approved API and rollout behaviour are implemented.\n- Realistic request tests prove the happy path and a failure or recovery path, without opening coverage gaps.\n- Each new test is observed failing for the intended reason before it passes.\n- The repository's own full gate is green."
         },
         {
           "id": "staging-approval",

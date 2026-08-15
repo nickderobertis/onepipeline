@@ -462,6 +462,57 @@ fn a_retry_may_name_only_one_branch() {
 
     world.release("service.go");
 }
+/// A planner who writes a review bar into an edit is told where it goes.
+///
+/// Both halves of the retired field's story reach this crate through the
+/// channel: an `add` carrying it never parses into a command at all, and a
+/// `requeue` carrying it parses and is refused by the reconciler. Neither may
+/// answer with the schema's bare `unknown field`, because a planner reading that
+/// learns only that the field is gone.
+#[test]
+fn an_edit_carrying_the_retired_bar_is_refused_by_name_at_both_boundaries() {
+    let world = World::new("edit-donewhen");
+    let run = live(
+        &world,
+        "retired",
+        vec![agent("slow", &[]), agent("sweep", &["slow"])],
+        &["slow"],
+    );
+
+    let refusal = world.run_with_stdin(
+        &["reply", &run],
+        &envelope(json!([{"op": "add", "node": {
+            "id": "extra", "persona": "engineer", "task": "## What\nextra",
+            "done_when": "the gate is green"}}])),
+    );
+    refusal
+        .exited(REFUSED)
+        .err_has("`done_when` is no longer a plan field")
+        .err_has("`## Acceptance criteria` section of its own task")
+        .err_has("under `user.done_when`");
+
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([{"op": "cancel", "id": "sweep"}])),
+        )
+        .exited(0);
+    world.until("the park to commit", |world| {
+        committed(world, &run).contains(&"cancel".to_string())
+    });
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(
+                json!([{"op": "requeue", "id": "sweep", "amend": {"done_when": "the gate is green"}}]),
+            ),
+        )
+        .exited(REFUSED)
+        .err_has("`done_when` is no longer a plan field");
+
+    world.release("slow.go");
+}
+
 #[test]
 fn drop_requires_a_dependents_fate_and_detach_keeps_them() {
     let world = World::new("edit-drop");

@@ -38,6 +38,7 @@
 
 pub mod channel;
 pub mod cli;
+pub mod controls;
 pub mod error;
 pub mod event;
 pub mod executor;

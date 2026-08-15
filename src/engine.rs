@@ -846,6 +846,7 @@ fn execute_direct(
         graph: graph.clone(),
         task: node.rendered_task(),
         labels: dispatch_labels(run, round, &node.id, None, node.persona.as_deref()),
+        controls: crate::controls::NodeControls::of_node(node),
         workspace: WorkspaceSpec::Path(project_dir()),
         cancel: cancel.clone(),
     };
