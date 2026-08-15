@@ -6,16 +6,16 @@ code takes the nearest thing that does exist, and the divergence is recorded
 here as a proposal for the planner who owns the contract. Nothing on this list is
 resolved unilaterally.
 
-Entries **1–9 and 24** have since been **ruled on by the planner who owns the
-contract**, and `docs/contract.md` was amended to carry each ruling. They stay
+Entries **1–9, 23, and 24–29** have since been **ruled on by the planner who owns
+the contract**, and `docs/contract.md` was amended to carry each ruling. They stay
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–23 are open**. Each states what the code does today and the
-proposal it is waiting on — most of them a question for a *producer* rather than
-for this crate, because `oneagentgraph` and `onevcs` are independent tools that
-expose general integration hooks only and nothing in them may know about this
-one. An open entry is recorded here and never resolved from this repository.
+Entries **10–22 are open**. Each states what the code does today and the
+proposal it is waiting on — every one of them a question for a *producer* rather
+than for this crate, because `oneagentgraph` and `onevcs` are independent tools
+that expose general integration hooks only and nothing in them may know about
+this one. An open entry is recorded here and never resolved from this repository.
 
 ## 1. `ResolvedGraphRef` is not a type `oneagentgraph` exports — RESOLVED
 
@@ -592,11 +592,18 @@ So the host side of a subprocess journey is still stood in for at `onevcs`'s own
 by `crates/testfakes`'s `fake-gh`. `tests/smoke/` runs the same publication
 against the real `gh` and is what holds it honest.
 
-## 23. The retained driver a detached launch spawns is a verb the contract does not name — OPEN
+## 23. The retained driver a detached launch spawns is a verb the contract does not name — RESOLVED
 
-**Proposal (for the planner who owns the contract): name `start --detach`'s
-retained driver in the driver contract, or accept a hidden verb outside the
-documented surface.**
+**Ruling: name both retained-driver verbs in the driver contract as the
+documented mechanism a detached launch keeps driving with. They stay
+`hide = true` in the CLI, and the smoke coverage requirement stands.**
+
+Ruled together with entry 25, which raised the same question about the second
+verb. The driver contract now names `drive GRAPH` and `drive-run RUN`, says what
+each retains and why, and states that both are hidden, absent from the surface
+list, and reached by `scripts/smoke-published.sh` — which `tests/contract.rs`
+requires of every hidden verb, because a published artifact that cannot reach
+them cannot launch a detached run at all.
 
 The contract's driver contract declares `start ... [--attach|--detach]` and says
 the launch "launches the dag-scope agent graph ... via oneagentgraph". It does
@@ -627,9 +634,9 @@ contract's surface is checked against; `scripts/smoke-published.sh` reaches it
 directly, and `tests/contract.rs` requires that of every hidden verb, because a
 published artifact without it cannot launch a detached run at all.
 
-What is open is only whether the contract should *say* this: a launcher that
-spawns itself is a fact about the driver contract, and it is currently recorded
-here rather than there.
+What was open was only whether the contract should *say* this: a launcher that
+spawns itself is a fact about the driver contract, and it was recorded here
+rather than there. It is now recorded in both.
 
 ## 24. A node's judge controls never left this crate — RESOLVED
 
@@ -712,3 +719,125 @@ The amended contract declares the schema as v2, lists `max_turns` among the node
 shapes and no `done_when` at all, states what a control is and what becomes of
 one that cannot be applied, and names `pub controls: NodeControls` in its seam
 sketch.
+
+## 25. The retained driver of a detached launch is now a *second* hidden verb — RESOLVED
+
+**Ruling: as entry 23 — name both retained-driver verbs in the driver contract.
+Both stay `hide = true`, and both stay under the smoke coverage requirement.**
+
+Entry 23 records `onepipeline drive`, the hidden verb a detached launch retains
+to compose *this build's* `oneagentgraph`. Roundless execution adds a second one
+for the same structural reason and at a different layer. The engine is no longer
+an agent running `round run|next`: `start` runs the reconcile loop itself, and an
+attached launch runs it in-process. A **detached** launch cannot — the loop is a
+thread, and a thread does not outlive the launcher that is about to return — so
+it retains this executable at `onepipeline drive-run RUN`, which takes the
+ownership lock, launches the observer graph if the run has one, and runs the same
+loop the attached launch would have run in this process.
+
+Both verbs are `hide = true` and both are reached directly by
+`scripts/smoke-published.sh`, which `tests/contract.rs` requires of every hidden
+verb. `drive-run` is also what makes `stop` whole: the observer is launched *by*
+the retained driver, so it is inside the process tree a stop reaps rather than a
+sibling process reparented to init.
+
+The driver contract now names both, and says of each what it retains and why.
+
+## 26. `attach` returns when the loop concludes, not the moment a surface blocks — RESOLVED
+
+**Ruling: confirmed. `awaiting-planner` means an outstanding decision **and**
+nothing else able to move; an attached launch waits out every decision it can
+make progress beside and returns only when the run cannot advance without
+something arriving over the channel.**
+
+The contract says attach "returns when the run settles ... a blocking surface
+waits". Under rounds that was unambiguous: the driver was a separate process, so
+the attaching launcher could return the moment a blocking surface appeared and
+leave the run advancing behind it.
+
+It cannot now, and the two halves of the delta pull against each other. A
+decision point "pauses only its dependent subtree; independent branches proceed",
+so returning the moment one appears would abandon branches that are still
+running — in-process, returning ends the loop. And clearing a decision
+"auto-resumes the paused subtree within the running loop", which requires the
+loop to still be running when the clear arrives.
+
+So the loop waits out every decision it can still make progress beside, and
+returns only when nothing can move without something arriving over the channel.
+`settlement_of` then reads `awaiting-planner` off that state: an outstanding
+`kind: human` action, or an unanswered blocking surface. A decision cleared while
+other work is in flight resumes inside the loop, exactly as the delta says; one
+cleared after the launch returned is picked up by `adopt`. That is what the
+ruling confirmed, and the driver contract now states the conjunction outright.
+
+## 27. `adopt` now ends the parked driver it is taking the run over from — RESOLVED
+
+**Ruling: confirmed. `adopt` may politely end a driver the liveness verdict has
+already called PARKED or otherwise undriven, wait for it to go, and then take the
+lock. The stderr disclosure stands, and there is still no `--force`.**
+
+The contract makes `PARKED` — a live pid that has written nothing for a whole
+interval — an *undriven* verdict, and `adopt` the way back from it. Under rounds
+that cost nothing: the ownership lock was taken and released per engine verb, so
+a parked driver was not holding it.
+
+The loop now holds that lock for as long as it drives, and a reclaim only happens
+for a holder this host can prove is gone. An adoption that started its loop
+beside a parked driver would lose the race and refuse — closing the one documented
+way back from `PARKED`. So `adopt`, having already refused a run that is genuinely
+being driven, ends the parked driver politely, waits for it to go, and then takes
+the lock. It says so on stderr, and it still has no `--force`: what it may end is
+only a driver the liveness verdict has already called undriven. The driver
+contract now says all of that.
+
+## 28. A retried dispatch is journalled as a dispatch, not as its own kind — RESOLVED
+
+**Ruling: confirmed. `node-dispatched` carrying an `attempt` is the record for a
+re-asked dispatch, and only a dispatch that produced nothing and failed is
+re-asked. The contract's event section states the `attempt` payload.**
+
+The approved event delta removes `boundary-retried`, whose name was the round
+boundary's. The behaviour it reported is not round-shaped and is retained: a
+dispatch that produced *nothing* and failed is asked again, because that failure
+carries no work to lose, and only that one — an attempt that answered has already
+answered.
+
+With the kind gone the retry had nowhere to be recorded, and an unreported retry
+is a run whose evidence says one dispatch where three happened. So each attempt
+emits `node-dispatched`, which is what it is, carrying `attempt`, `attempts`, and
+the bounded reason the last attempt gave. A reader counts dispatches per node to
+see a retry; the settlement still distinguishes `no-agent-progress` from
+`task-failed`.
+
+The alternative — silence — was rejected as removing evidence the delta did not
+ask to remove.
+
+## 29. Continuing preserved work moved from the round transition into `retry` — RESOLVED
+
+**Ruling: confirmed, both halves. A `retry` naming neither `branch` nor `resume`
+inherits both from the node it supersedes — an explicitly named one wins — and
+`retry` removes the superseded node in the same edit, emitting `node-dropped`.
+The run's record keeps that node's settlement and the edit that replaced it.**
+
+Two behaviours lived in the round transition, and rounds are gone.
+
+**Continuing a preserved branch.** A node that ran, committed, and stopped —
+failed, cancelled, parked — leaves work on a branch. The transition pinned the
+carried node to it, so the next round's attempt continued that branch rather than
+cutting a fresh one beside committed work nothing points at. Roundless, nothing
+carries a node forward on its own: what re-runs the work is the planner's
+`retry`. So the pin is folded onto the node when its settlement records the
+branch (`projection::pin_preserved_branch`), and a replacement that names neither
+`branch` nor `resume` inherits both from the node it supersedes. A planner who
+named either is answered with what they named, which is the agreement
+`validate_retry_pin` already holds.
+
+**Removing the superseded node.** The contract's own words were that the
+superseded node "stays in the executed graph, cancelled, so the round's own
+record still names it, and the transition then removes it exactly as a `drop`
+would". There is no transition to do the removing, and a cancelled node left in
+the graph holds the whole run in `waiting` forever — a graph that can never
+settle because something was retried. So `retry` now removes it in the same
+edit, emitting the `node-dropped` operation the transition would have. What
+became of it is still in the run's record: its own `node-settled`, and the
+`edit-committed` that replaced it.

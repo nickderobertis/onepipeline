@@ -119,6 +119,34 @@ pub fn parked_after_seconds() -> u64 {
         .unwrap_or(DEFAULT_PARKED_AFTER_SECONDS)
 }
 
+/// Whether a **decision point** is outstanding, in either of the two forms one
+/// takes: a ready human action nobody has attested, or a blocking surface nobody
+/// has answered.
+///
+/// The one question every verdict about a stalled run asks, so the settlement and
+/// the liveness verdict cannot disagree about the same run — a run reported
+/// `PARKED` invites an `adopt` that may end its driver, and doing that to a run
+/// whose next move is already sitting in a planner's queue costs the work it
+/// holds for nothing.
+pub fn decision_outstanding(state: &RunState, paths: &RunPaths) -> bool {
+    state.awaiting_human_action() || blocking_surface(paths)
+}
+
+/// Whether a blocking surface is outstanding, read or not.
+///
+/// Unread counts. A question nobody has looked at is still a question the run is
+/// waiting on, and a verdict that ignored it would report the run as abandoned —
+/// sending an operator to intervene in a run whose next move is already sitting
+/// in their own queue.
+fn blocking_surface(paths: &RunPaths) -> bool {
+    let queue = crate::channel::ChannelState::new(paths).queue();
+    queue
+        .waiting
+        .iter()
+        .chain(queue.pending.iter())
+        .any(|surface| surface.blocking)
+}
+
 /// Whether a run is being driven, and if not, why not.
 ///
 /// Every unreadable input resolves toward "still working", so a busy driver is
@@ -126,7 +154,7 @@ pub fn parked_after_seconds() -> u64 {
 /// write is enough to keep it reported as running. A pid recorded on another
 /// host is exactly such an unknown — a pid means nothing across machines — so a
 /// run another driver is holding reads as the live work it is.
-pub fn liveness(launch: &LaunchRecord, state: &RunState) -> DriverLiveness {
+pub fn liveness(launch: &LaunchRecord, state: &RunState, paths: &RunPaths) -> DriverLiveness {
     if state.stop_recorded() {
         return DriverLiveness::DriverDead;
     }
@@ -139,7 +167,13 @@ pub fn liveness(launch: &LaunchRecord, state: &RunState) -> DriverLiveness {
         .last_write_at
         .map(|last| sys::now_millis().saturating_sub(last) / 1_000);
     match quiet_for {
-        Some(seconds) if seconds > parked_after_seconds() && !state.round_open => {
+        // A run holding an outstanding decision point is *waiting*, not parked:
+        // the loop that would be writing is deliberately holding a subtree back
+        // until a person answers, and a driver reported dead there sends an
+        // operator to intervene in work that is doing exactly what it should.
+        Some(seconds)
+            if seconds > parked_after_seconds() && !decision_outstanding(state, paths) =>
+        {
             DriverLiveness::Parked
         }
         _ => DriverLiveness::Driving,
@@ -172,7 +206,7 @@ impl RunView {
         let mut events = crate::journal::read(&paths.journal());
         crate::journal::merge_order(&mut events);
         let mut state = projection::fold(&events);
-        // A view resolves cross-DAG edges the same way the round does, so a
+        // A view resolves cross-DAG edges the same way the loop does, so a
         // consumer this run is about to dispatch is not reported blocked to the
         // person deciding whether to intervene. Reading only: rendering a run
         // records nothing about it.
@@ -204,7 +238,7 @@ impl RunView {
 
     /// How the run is being driven.
     pub fn liveness(&self) -> DriverLiveness {
-        liveness(&self.launch, &self.state)
+        liveness(&self.launch, &self.state, &self.paths)
     }
 
     /// The surfaces nobody has read yet, and how stale the oldest is.
@@ -239,11 +273,7 @@ impl RunView {
             0 => String::new(),
             count => format!(", {count} not landed"),
         };
-        format!(
-            "round-{:02}  ({done}/{} done{unlanded})",
-            self.state.round,
-            statuses.len()
-        )
+        format!("{done}/{} done{unlanded}", statuses.len())
     }
 }
 
@@ -254,10 +284,7 @@ impl RunView {
 /// there would send a planner to intervene in finished work.
 pub fn liveness_word(view: &RunView) -> &'static str {
     let statuses = view.state.statuses();
-    if !view.state.round_open
-        && !statuses.is_empty()
-        && graph::state_of(&statuses) == graph::GraphState::Complete
-    {
+    if !statuses.is_empty() && graph::state_of(&statuses) == graph::GraphState::Complete {
         return "SETTLED";
     }
     view.liveness().as_str()
@@ -312,10 +339,10 @@ pub fn status(views: &[RunView]) -> String {
     let mut out = String::new();
     for view in views {
         out.push_str(&format!(
-            "{}  {}  round-{:02}\n",
+            "{}  {}  {}\n",
             view.paths.run,
             liveness_word(view),
-            view.state.round
+            view.summary()
         ));
         if view.liveness().is_undriven() {
             out.push_str(&format!(
@@ -484,12 +511,12 @@ pub fn monitor(view: &RunView) -> String {
         };
         out.push_str(&format!("{}  {:<28} {}\n", event.ts, id, summarize(event)));
     }
-    // A round transition has no node, so it has no graph id: it reaches the
-    // reader as run state rather than as an event line.
+    // The run's own state has no node, so it has no graph id: it reaches the
+    // reader as a trailer rather than as an event line.
     out.push_str(&format!(
-        "-- {}  round-{:02}  {}  {}\n",
+        "-- {}  {}  {}  {}\n",
         view.paths.run,
-        view.state.round,
+        view.summary(),
         liveness_word(view),
         graph::state_of(&view.state.statuses()).as_str()
     ));
@@ -533,7 +560,14 @@ fn landed_phrase(landing: Landing) -> &'static str {
 
 /// `onepipeline results` — per-node outcomes, with each node's own evidence.
 pub fn results(view: &RunView) -> String {
-    let mut out = format!("{}  round-{:02}\n", view.paths.run, view.state.round);
+    // The run and how its graph stands — deliberately not the node tally the
+    // other views carry, because every line under this one is a node's own
+    // status and a header that also said `done` would read as one of them.
+    let mut out = format!(
+        "{}  {}\n",
+        view.paths.run,
+        graph::state_of(&view.state.statuses()).as_str()
+    );
     let statuses = view.state.statuses();
     for node in view.state.graph.iter() {
         let status = statuses
@@ -814,7 +848,6 @@ mod tests {
             pid,
             host: sys::hostname(),
             started_at: sys::now_rfc3339(),
-            round_budget: 14_400,
             heartbeat_interval: 1_800,
             dag_sets: Vec::new(),
             node_sets: Vec::new(),
@@ -898,6 +931,60 @@ mod tests {
         assert_eq!(view.liveness(), DriverLiveness::DriverDead);
         assert!(view.liveness().is_undriven());
         assert!(runs(&root, false, "session-a").contains("DRIVER DEAD"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A run this quiet is parked — unless a decision is outstanding.
+    ///
+    /// Both halves of the same setup, so the difference between them is only the
+    /// blocking surface: a live pid, and a last write old enough that silence
+    /// alone would park it.
+    fn quiet_run(root: &Path, run: &str) -> RunPaths {
+        let mut stale = event(
+            crate::journal::PipelineKind::RunStarted,
+            None,
+            &[("plan", json!(plan()))],
+        );
+        // Far older than `DEFAULT_PARKED_AFTER_SECONDS`, so the verdict does not
+        // depend on the threshold's environment override.
+        stale.ts = "2020-01-01T00:00:00Z".into();
+        write_run(root, run, sys::pid(), &[stale])
+    }
+
+    #[test]
+    fn a_live_driver_that_has_gone_quiet_with_nothing_outstanding_reads_as_parked() {
+        let root = scratch("quiet-parked");
+        let paths = quiet_run(&root, "demo");
+        let view = RunView::open(&paths).expect("the run reads");
+        assert_eq!(view.liveness(), DriverLiveness::Parked);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The same silence, with a blocking surface nobody has answered.
+    ///
+    /// A decision point takes two forms, and `settlement_of` already reports this
+    /// run `awaiting-planner`. A liveness verdict that read only the graph's human
+    /// actions called the very same run `PARKED` — inviting an `adopt` that may
+    /// end its driver while the answer sits unread in a planner's queue.
+    #[test]
+    fn a_live_driver_quiet_behind_a_blocking_surface_reads_as_active() {
+        let root = scratch("quiet-blocking");
+        let paths = quiet_run(&root, "demo");
+        crate::channel::ChannelState::new(&paths)
+            .push(crate::channel::Surface {
+                id: 0,
+                kind: "blocker".into(),
+                message: "Node build needs a decision; proceed?".into(),
+                source: "monitor".into(),
+                blocking: true,
+                queued_at: sys::now_millis(),
+                workstream: Some("build".into()),
+            })
+            .expect("the surface queues");
+
+        let view = RunView::open(&paths).expect("the run reads");
+        assert_eq!(view.liveness(), DriverLiveness::Driving);
+        assert!(!view.liveness().is_undriven());
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -1011,11 +1098,7 @@ mod tests {
                     None,
                     &[("plan", json!(plan()))],
                 ),
-                event(
-                    crate::journal::PipelineKind::RoundStarted,
-                    None,
-                    &[("plan", json!(plan()))],
-                ),
+                event(crate::journal::PipelineKind::NodeReady, Some("build"), &[]),
                 event(
                     crate::journal::PipelineKind::NodeDispatched,
                     Some("build"),
@@ -1032,9 +1115,13 @@ mod tests {
         assert!(stream.contains("agent:oneagentgraph-1"), "{stream}");
         assert!(stream.contains("vcs:onevcs-tok"), "{stream}");
         assert!(stream.contains("graph:build"), "{stream}");
-        // A round transition has no node, so it has no typed id: it reaches the
-        // reader as run state, naming the run it belongs to.
-        assert!(stream.contains("-- demo  round-01"), "{stream}");
+        // The run's own state has no node, so it has no typed id: it reaches the
+        // reader as a trailer, naming the run it belongs to.
+        assert!(stream.contains("-- demo  0/1 done"), "{stream}");
+        assert!(
+            !stream.contains("round"),
+            "a round reached a view: {stream}"
+        );
 
         let views = vec![view];
         assert!(status(&views).contains("build: running"));

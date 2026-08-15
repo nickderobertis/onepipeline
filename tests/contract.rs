@@ -15,10 +15,8 @@ use std::path::{Path, PathBuf};
 
 use clap::{CommandFactory, Parser};
 use oneagentgraph::config::{ConfigRef, GraphConfig, JudgeSide, Member};
-use onepipeline::channel::{Command as Edit, Dependents, Reply, SurfaceKind};
-use onepipeline::cli::{
-    Cli, Command, DEFAULT_HEARTBEAT_INTERVAL_SECONDS, DEFAULT_ROUND_BUDGET_SECONDS,
-};
+use onepipeline::channel::{allows, Author, Command as Edit, Dependents, Reply, SurfaceKind};
+use onepipeline::cli::{Cli, Command, DAG_GRAPH_OFF, DEFAULT_HEARTBEAT_INTERVAL_SECONDS};
 use onepipeline::controls::NodeControls;
 use onepipeline::error::{EXIT_NOTHING_DRIVING, EXIT_QUEUED, EXIT_REFUSED, EXIT_SUCCESS};
 use onepipeline::event::{
@@ -881,6 +879,126 @@ const OPS: &[&str] = &[
     "add", "drop", "reparent", "retry", "cancel", "requeue", "attest", "complete", "context",
 ];
 
+/// The per-author allowlist the contract fixes, both directions.
+///
+/// A monitor is an observer: it may correct and re-run work, and it may not
+/// decide that the run is finished, that a person acted, or that work leaves the
+/// graph. Held against every op the protocol has, so an op added later is
+/// refused for the monitor until somebody decides otherwise rather than granted
+/// by omission.
+#[test]
+fn the_monitor_may_issue_exactly_the_ops_the_contract_allows_it() {
+    assert!(
+        CONTRACT.contains(
+            "`monitor` may issue `retry | requeue | cancel | context | add` only, and \
+             `complete`, `attest`, and `drop` are refused for the monitor with a reason"
+        ),
+        "the contract's per-author allowlist moved"
+    );
+
+    let node = Node {
+        id: "fresh".into(),
+        persona: Some("engineer".into()),
+        task: Some("## What\ndo it".into()),
+        ..Node::default()
+    };
+    let every: Vec<(&str, Edit)> = vec![
+        ("add", Edit::Add { node: node.clone() }),
+        (
+            "drop",
+            Edit::Drop {
+                id: "x".into(),
+                dependents: Dependents::Detach,
+            },
+        ),
+        (
+            "reparent",
+            Edit::Reparent {
+                id: "x".into(),
+                deps: Vec::new(),
+            },
+        ),
+        (
+            "retry",
+            Edit::Retry {
+                id: "x".into(),
+                node,
+            },
+        ),
+        ("cancel", Edit::Cancel { id: "x".into() }),
+        (
+            "requeue",
+            Edit::Requeue {
+                id: "x".into(),
+                amend: None,
+            },
+        ),
+        (
+            "attest",
+            Edit::Attest {
+                reference: "x".into(),
+            },
+        ),
+        (
+            "complete",
+            Edit::Complete {
+                reason: "done".into(),
+            },
+        ),
+        (
+            "context",
+            Edit::Context {
+                id: "x".into(),
+                note: "look here".into(),
+                deliver: onepipeline::channel::Deliver::Auto,
+            },
+        ),
+    ];
+    assert_eq!(every.len(), OPS.len(), "an op is missing from this table");
+
+    let allowed = ["retry", "requeue", "cancel", "context", "add"];
+    for (op, command) in &every {
+        // The planner owns the graph, so nothing is refused for it.
+        allows(Author::Planner, command)
+            .unwrap_or_else(|e| panic!("the planner was refused `{op}`: {e}"));
+
+        let verdict = allows(Author::Monitor, command);
+        if allowed.contains(op) {
+            verdict.unwrap_or_else(|e| panic!("the monitor was refused `{op}`: {e}"));
+            continue;
+        }
+        let refusal = verdict
+            .expect_err(&format!("the monitor was allowed `{op}`"))
+            .to_string();
+        assert!(
+            refusal.contains(op),
+            "the refusal does not name the op: {refusal}"
+        );
+        // With a reason, not merely a no: the monitor has to know what to do
+        // instead, and "surface it" is the whole answer.
+        assert!(
+            refusal.contains("Surface it to the planner"),
+            "the refusal does not say what to do instead: {refusal}"
+        );
+    }
+
+    // The author rides the envelope, defaults to the planner, and is omitted
+    // when it is the default — so a reply written before authors existed is one.
+    let plain: Reply = serde_json::from_str(r#"{"completion":true}"#).expect("it parses");
+    assert_eq!(plain.author, Author::Planner);
+    assert!(
+        !serde_json::to_string(&plain)
+            .expect("it serializes")
+            .contains("author"),
+        "the default author is written out"
+    );
+    let watched: Reply = serde_json::from_str(r#"{"version":1,"author":"monitor","commands":[]}"#)
+        .expect("it parses");
+    assert_eq!(watched.author, Author::Monitor);
+    assert_eq!(Author::Monitor.as_str(), "monitor");
+    assert_eq!(Author::Planner.as_str(), "planner");
+}
+
 #[test]
 fn the_contract_lists_exactly_the_ops_this_crate_accepts() {
     let listed = "`add | drop | reparent | retry | cancel | requeue | attest | complete | context`";
@@ -1167,7 +1285,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
     // undocumented wire; a kind the contract lists and the enum does not carry is
     // a promise nothing keeps. `PIPELINE_KINDS` is what `Journal::emit` accepts,
     // so this is the emitted set and not a second copy of it.
-    assert_eq!(PIPELINE_KINDS.len(), 20, "the closed set changed size");
+    assert_eq!(PIPELINE_KINDS.len(), 19, "the closed set changed size");
     let listed: BTreeSet<String> = backticked()
         .into_iter()
         .filter(|token| {
@@ -1219,7 +1337,7 @@ fn a_relayed_envelope_keeps_its_producers_own_kind() {
 #[test]
 fn the_driver_contracts_invocation_parses_exactly_as_written() {
     let documented = "onepipeline start plan.json [--attach|--detach] \
-                      [--round-budget 14400] [--heartbeat-interval 1800] \
+                      [--dag-graph off|REF] [--heartbeat-interval 1800] \
                       [--set PATH=VALUE]... [--node-set PATH=VALUE]... \
                       [--acknowledge-concurrent]";
     assert!(CONTRACT.contains(documented), "the driver invocation moved");
@@ -1229,12 +1347,12 @@ fn the_driver_contracts_invocation_parses_exactly_as_written() {
         "start",
         "plan.json",
         "--detach",
-        "--round-budget",
-        "14400",
+        "--dag-graph",
+        "graphs/dag-scope.yaml",
         "--heartbeat-interval",
         "1800",
         "--set",
-        "members.orchestrator.agent.model=dag one",
+        "members.monitor.agent.model=dag one",
         "--set=members.check-in.model=dag=two",
         "--node-set",
         "members.worker.agent.model=node one",
@@ -1248,13 +1366,13 @@ fn the_driver_contracts_invocation_parses_exactly_as_written() {
     assert_eq!(args.plan, PathBuf::from("plan.json"));
     assert!(args.detach);
     assert!(!args.attach);
-    assert_eq!(args.round_budget, 14_400);
+    assert_eq!(args.dag_graph, "graphs/dag-scope.yaml");
     assert_eq!(args.heartbeat_interval, 1_800);
     assert!(args.acknowledge_concurrent);
     assert_eq!(
         args.dag_sets,
         [
-            "members.orchestrator.agent.model=dag one",
+            "members.monitor.agent.model=dag one",
             "members.check-in.model=dag=two"
         ]
     );
@@ -1266,15 +1384,43 @@ fn the_driver_contracts_invocation_parses_exactly_as_written() {
         ]
     );
 
-    // The document's numbers are this crate's defaults.
-    assert_eq!(DEFAULT_ROUND_BUDGET_SECONDS, 14_400);
+    // The document's numbers and its default are this crate's.
     assert_eq!(DEFAULT_HEARTBEAT_INTERVAL_SECONDS, 1_800);
+    assert!(
+        CONTRACT.contains("`--dag-graph` defaults to `off`"),
+        "the contract no longer states the shipped default"
+    );
     let defaulted = Cli::try_parse_from(["onepipeline", "start", "plan.json"]).expect("parses");
     let Command::Start(args) = defaulted.command else {
         panic!("expected `start`");
     };
-    assert_eq!(args.round_budget, DEFAULT_ROUND_BUDGET_SECONDS);
+    assert_eq!(
+        args.dag_graph, DAG_GRAPH_OFF,
+        "a plan runs with no agent graph unless one is asked for"
+    );
     assert_eq!(args.heartbeat_interval, DEFAULT_HEARTBEAT_INTERVAL_SECONDS);
+}
+
+/// The verbs an agent used to drive the engine with, which no longer exist.
+///
+/// Refused rather than merely absent: a caller that still spells one is told, by
+/// clap, that there is no such command — and this is what stops them being
+/// reintroduced by habit.
+#[test]
+fn the_round_verbs_are_gone_from_the_command_surface() {
+    for retired in [
+        vec!["round", "run", "run-1"],
+        vec!["round", "next", "run-1"],
+    ] {
+        Cli::try_parse_from(std::iter::once("onepipeline").chain(retired.iter().copied()))
+            .expect_err("a round verb still parses");
+    }
+    Cli::try_parse_from(["onepipeline", "start", "p.json", "--round-budget", "10"])
+        .expect_err("--round-budget still parses");
+    assert!(
+        !CONTRACT.contains("round run") && !CONTRACT.contains("--round-budget"),
+        "the contract still names a retired verb or flag"
+    );
 }
 
 #[test]
@@ -1289,8 +1435,6 @@ fn every_command_the_contract_names_parses() {
     let invocations: &[(&str, &[&str])] = &[
         ("start", &["start", "plan.json"]),
         ("adopt", &["adopt", "run-1"]),
-        ("round run", &["round", "run", "run-1"]),
-        ("round next", &["round", "next", "run-1"]),
         ("channel serve", &["channel", "serve", "run-1"]),
         ("next", &["next", "run-1"]),
         ("reply", &["reply", "run-1"]),
@@ -1343,12 +1487,8 @@ fn the_contract_names_every_command_and_view_this_crate_offers() {
         ],
     );
     assert_contract_names(
-        "engine verb",
-        &[
-            "onepipeline round run|next",
-            "onepipeline channel serve RUN",
-            "onepipeline adopt RUN",
-        ],
+        "driver verb",
+        &["onepipeline channel serve RUN", "onepipeline adopt RUN"],
     );
 
     // The views, as the contract lists them.
@@ -1429,9 +1569,8 @@ fn a_command_outside_the_surface_is_refused() {
 }
 
 #[test]
-fn the_dag_scope_graph_is_an_orchestrator_plus_a_resettable_check_in() {
-    assert!(CONTRACT
-        .contains("shipped default: `orchestrator` member + resettable-cron `check-in` member"));
+fn the_dag_scope_graph_is_a_monitor_plus_a_resettable_check_in() {
+    assert!(CONTRACT.contains("shipped: `monitor` member + resettable-cron `check-in` member"));
 
     let text = std::fs::read_to_string(repo_root().join("graphs/dag-scope.yaml"))
         .expect("the dag-scope graph ships");
@@ -1439,18 +1578,15 @@ fn the_dag_scope_graph_is_an_orchestrator_plus_a_resettable_check_in() {
     let graph: GraphConfig = serde_norway::from_str(&text).expect("it is a valid graph config");
     assert_eq!(graph.name, "dag-scope");
 
-    let orchestrator = graph
-        .members
-        .get("orchestrator")
-        .expect("an orchestrator member");
-    let Member::Onejudge(orchestrator) = orchestrator else {
-        panic!("the orchestrator is a two-party member");
+    let monitor = graph.members.get("monitor").expect("a monitor member");
+    let Member::Onejudge(monitor) = monitor else {
+        panic!("the monitor is a two-party member");
     };
-    match &orchestrator.judge {
+    match &monitor.judge {
         JudgeSide::Command(judge) => assert_eq!(
             judge.command[..3],
             ["onepipeline", "channel", "serve"],
-            "the orchestrator's judge side is this crate's channel server"
+            "the monitor's judge side is this crate's channel server"
         ),
         JudgeSide::Harness(_) => panic!("the contract makes the judge side a command provider"),
     }
@@ -1493,22 +1629,43 @@ fn the_default_node_scope_graph_is_a_worker_and_a_judge() {
     );
 }
 
+/// The shipped persona files, and the role each one carries.
+///
+/// The monitor's file keeps the `orchestrator.yaml` name it shipped under: the
+/// orchestrator persona was **rewritten** into the observer, not replaced by a
+/// file beside it, so the path a consumer already names keeps resolving. The
+/// role is what changed, and the role is what the contract, the graph member,
+/// and the channel's author allowlist all spell `monitor`.
+const SHIPPED_PERSONAS: [(&str, &str); 3] = [
+    ("orchestrator", "monitor"),
+    ("check-in", "check-in"),
+    ("pr-author", "pr-author"),
+];
+
 #[test]
 fn every_persona_the_contract_ships_is_present_and_has_both_sides() {
-    assert!(CONTRACT.contains("personas `orchestrator`, `check-in`, `pr-author`"));
-    for name in ["orchestrator", "check-in", "pr-author"] {
-        let path = repo_root().join("personas").join(format!("{name}.yaml"));
+    assert!(CONTRACT.contains(
+        "personas `monitor` (at `personas/orchestrator.yaml`, the shipped file the \
+         orchestrator persona was rewritten into), `check-in`, `pr-author`"
+    ));
+    for (file, role) in SHIPPED_PERSONAS {
+        let path = repo_root().join("personas").join(format!("{file}.yaml"));
         let text =
-            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{name} persona ships: {e}"));
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{file} persona ships: {e}"));
         let persona: Value =
-            serde_norway::from_str(&text).unwrap_or_else(|e| panic!("{name} parses: {e}"));
+            serde_norway::from_str(&text).unwrap_or_else(|e| panic!("{file} parses: {e}"));
+        assert_eq!(
+            persona.pointer("/agent/name").and_then(Value::as_str),
+            Some(role),
+            "personas/{file}.yaml carries the {role} role"
+        );
         assert!(
             persona.pointer("/agent/instructions").is_some(),
-            "{name} states the agent's role"
+            "{file} states the agent's role"
         );
         assert!(
             persona.pointer("/user/persona").is_some(),
-            "{name} states the supervisor's review bar"
+            "{file} states the supervisor's review bar"
         );
     }
 }
@@ -1545,7 +1702,13 @@ const RULINGS: &[(&str, &str)] = &[
     ("7.", "completed_steps"),
     ("8.", "cross-dag-satisfied"),
     ("9.", "publication_wait"),
+    ("23.", "drive GRAPH"),
     ("24.", "NodeControls"),
+    ("25.", "drive-run RUN"),
+    ("26.", "nothing else able to move"),
+    ("27.", "ending that parked driver politely"),
+    ("28.", "`attempt`, `attempts`"),
+    ("29.", "inherits both"),
 ];
 
 #[test]

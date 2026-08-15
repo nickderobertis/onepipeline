@@ -12,7 +12,7 @@
 //! was done, and whether it should be done again is the planner's judgement, not
 //! this crate's.
 //!
-//! Reading is unlocked, exactly as every other reader of a journal is. A round
+//! Reading is unlocked, exactly as every other reader of a journal is. A loop
 //! that observes an upstream mid-write sees a prefix of it, which resolves
 //! toward blocked and is re-read on the next pass.
 
@@ -99,7 +99,7 @@ pub fn extent(root: &Path, run: &str) -> Option<u64> {
 
 /// How a node of another run last settled, as that run's ledger records it.
 ///
-/// The *last* settlement wins: a node that failed in one round and succeeded in
+/// The *last* settlement wins: a node that failed once and succeeded in
 /// a later one is done, which is the whole point of a planner retrying it.
 /// A record this build cannot read is skipped, the same way every other reader
 /// of a journal skips one.
@@ -147,9 +147,10 @@ pub fn edges(graph: &Graph) -> BTreeMap<String, Vec<String>> {
 
 /// Resolves this run's cross-DAG edges and remembers what it has already said.
 ///
-/// The memory is the run's **own journal**, not this process: a round is one
-/// process and a watch outlives many, so a baseline held only in memory would be
-/// re-captured every round and a report would be re-sent every round.
+/// The memory is the run's **own journal**, not this process: a watch outlives
+/// the process that captured it — an `adopt` starts a fresh one — so a baseline
+/// held only in memory would be re-captured, and the report re-sent, every time
+/// a driver restarted.
 #[derive(Debug)]
 pub struct Observer {
     root: PathBuf,
@@ -195,7 +196,6 @@ impl Observer {
         &mut self,
         graph: &Graph,
         paths: &RunPaths,
-        round: u64,
         journal: &mut Journal,
     ) -> Result<BTreeMap<String, NodeStatus>> {
         let mut resolved = BTreeMap::new();
@@ -225,7 +225,7 @@ impl Observer {
                     if let Some(first) = consumers.first() {
                         journal.emit(
                             journal::PipelineKind::CrossDagSatisfied,
-                            journal::labels(&paths.run, Some(round), Some(first)),
+                            journal::labels(&paths.run, Some(first)),
                             journal::payload(&[
                                 ("dependency", json!(dependency)),
                                 ("last_seq", json!(extent)),
@@ -248,7 +248,7 @@ impl Observer {
                 // planner's call.
                 journal.emit(
                     journal::PipelineKind::UpstreamModified,
-                    journal::labels(&paths.run, Some(round), Some(&consumer)),
+                    journal::labels(&paths.run, Some(&consumer)),
                     journal::payload(&[
                         ("dependency", json!(dependency)),
                         ("captured_last_seq", json!(baseline)),
@@ -263,9 +263,9 @@ impl Observer {
 
 /// Resolve a graph's edges without recording anything.
 ///
-/// For the readers that must not write: a view, and the transition's own check
-/// for whether the next round has anything startable in it. Both need the same
-/// answer the round would get; neither may append to the journal.
+/// For the readers that must not write — a view, and the submission check an
+/// edit is judged against. Both need the same answer the loop would get; neither
+/// may append to the journal.
 pub fn resolve_quietly(root: &Path, graph: &Graph) -> BTreeMap<String, NodeStatus> {
     edges(graph)
         .into_keys()

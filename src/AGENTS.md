@@ -23,7 +23,7 @@ Rules:
   Roles belong to the consuming graph: a member's persona, or its own `task`
   composed from `{task}`.
 - **Exit codes are spent.** `0` / `1` / `2` are `reply`'s applied / queued /
-  refused verdicts, `3` is "nothing is driving the run", and a round carries `0`
+  refused verdicts, `3` is "nothing is driving the run", and a driver carries `0`
   for a complete graph and `1` for one that settled unfinished. Do not mint a
   fifth without the contract naming it.
 
@@ -32,11 +32,14 @@ Rules:
 - `plan.rs` reads a plan file; `graph.rs` decides whether the graph it describes
   is legal and what may run now. Both halves of "is this input acceptable" are
   there, at the trust boundary.
-- `engine.rs` is the reconcile loop and the round transition — the **single
-  writer**, holding the run's ownership lock.
+- `engine.rs` is the one continuous reconcile loop — the **single writer**,
+  holding the run's ownership lock for as long as it drives. There are no
+  rounds: a node dispatches on the pass that observed its last dependency
+  settle, and the only thing that pauses anything is a decision point, which
+  pauses only the subtree depending on it.
 - `edits.rs` is the one validator both the submission check and the reconciler
   run, which is what makes "applied or rejected with a reason" true.
-- `projection.rs` folds the journal into the plan of record. A round's
+- `projection.rs` folds the journal into the plan of record. The run's
   `plan.json` is its launch record and is never rewritten.
 - `agentgraph.rs` and `vcs.rs` are the sibling CLIs, reached as subprocesses.
   Nothing here reimplements what they own.
@@ -45,11 +48,12 @@ Two ordering rules in `engine.rs` are load-bearing and easy to undo:
 
 - `start_ready` runs **before** the terminal check. A ready human action derives
   as `waiting`, a settled status, so a terminal check that ran first would end
-  the round with that settlement unrecorded — and a later `attest` would have
+  the loop with that settlement unrecorded — and a later `attest` would have
   nothing to validate against.
-- `attest` and `complete` are legal at a round boundary; every other command
-  needs a live round. Refusing an attestation between rounds strands every
-  human-gated run, because no later round can open until the action is recorded.
+- `drive_run` takes the ownership lock **before** it claims the run in the launch
+  record. A driver that wrote its pid there and then lost the race for the lock
+  would leave the record naming a process that is gone, and every reader would
+  call the run undriven while the driver that won was still working.
 
 ## The siblings
 

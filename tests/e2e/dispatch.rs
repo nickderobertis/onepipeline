@@ -31,18 +31,17 @@ fn prompt_of(event: &Value) -> Option<String> {
     args.get(at + 1)?.as_str().map(str::to_string)
 }
 
-fn open_second_round(world: &World, run: &str, node: Value) {
-    world.script("driver.wait", "hold");
+/// Leave a run whose one dispatchable node is ready and whose driver has gone.
+///
+/// A human gate that has been attested: the loop settled on it and returned, so
+/// the run is undriven with work still to do — which is exactly the state an
+/// `adopt` picks up, and the state a corrupt ledger has to be refused from.
+fn ready_and_undriven(world: &World, run: &str, node: Value) {
     let path = world.plan(run, &plan_of(run, vec![human("approve", &[]), node]));
     world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .run(&["start", &path.to_string_lossy(), "--attach"])
         .exited(0);
-    world.run(&["round", "run", run]).exited(1);
     world.run(&["attest", run, "approve"]).exited(0);
-    world
-        .run(&["round", "next", run])
-        .exited(0)
-        .out_has("continuing");
 }
 
 /// Both shipped relative graph paths are bound to the directory `start` was
@@ -56,10 +55,16 @@ fn relative_default_graphs_dispatch_from_the_launch_directory() {
         "relative-defaults",
         &plan_of("relative-defaults", vec![agent("build", &[])]),
     );
-    let mut command = world.agentgraph_cmd(&["start", &path.to_string_lossy(), "--attach"]);
+    let mut command = world.agentgraph_cmd(&[
+        "start",
+        &path.to_string_lossy(),
+        "--attach",
+        // Relative, and resolved against the launch directory below.
+        "--dag-graph",
+        "graphs/dag-scope.yaml",
+    ]);
     command
         .current_dir(&world.root)
-        .env_remove("ONEPIPELINE_DAG_GRAPH")
         .env_remove("ONEPIPELINE_NODE_GRAPH");
 
     let started = world.run_on(command, "start relative defaults");
@@ -192,26 +197,22 @@ fn lifecycle_and_title_drafting_keep_the_node_graph_resolved_at_launch() {
             vec![human("approve", &[]), service],
         ),
     );
-    let mut start = world.cmd(&["start", &path.to_string_lossy(), "--detach"]);
+    let mut start = world.cmd(&["start", &path.to_string_lossy(), "--attach"]);
     start.env("ONEPIPELINE_NODE_GRAPH", &launch_graph);
     world
         .run_on(start, "start recorded lifecycle graph")
         .exited(0);
     world
-        .run(&["round", "run", "recorded-lifecycle-graph"])
-        .exited(1);
-    world
         .run(&["attest", "recorded-lifecycle-graph", "approve"])
         .exited(0);
+    // A fresh driver, under an environment naming a *different* node graph: what
+    // the dispatch runs under is the reference resolved at launch and recorded,
+    // never whatever this process happens to be pointed at.
+    let mut adopted = world.cmd(&["adopt", "recorded-lifecycle-graph"]);
+    adopted.env("ONEPIPELINE_NODE_GRAPH", &later_graph);
     world
-        .run(&["round", "next", "recorded-lifecycle-graph"])
+        .run_on(adopted, "adopt with a changed live node graph")
         .exited(0);
-    let mut round = world.cmd(&["round", "run", "recorded-lifecycle-graph"]);
-    round.env("ONEPIPELINE_NODE_GRAPH", &later_graph);
-    world
-        .run_on(round, "round with changed live node graph")
-        .exited(0);
-    world.release("driver.go");
 
     let invocations = world.invocations();
     let relevant: Vec<&Value> = invocations
@@ -247,10 +248,14 @@ fn an_unreadable_relative_graph_names_its_launch_base() {
         "relative-error",
         &plan_of("relative-error", vec![agent("build", &[])]),
     );
-    let mut command = world.agentgraph_cmd(&["start", &path.to_string_lossy(), "--attach"]);
-    command
-        .current_dir(&world.root)
-        .env("ONEPIPELINE_DAG_GRAPH", "graphs/missing-dag.yaml");
+    let mut command = world.agentgraph_cmd(&[
+        "start",
+        &path.to_string_lossy(),
+        "--attach",
+        "--dag-graph",
+        "graphs/missing-dag.yaml",
+    ]);
+    command.current_dir(&world.root);
 
     let failed = world.run_on(command, "start missing relative graph");
     failed.exited(crate::harness::REFUSED);
@@ -322,7 +327,7 @@ fn unreadable_relative_plan_graphs_name_their_path_and_launch_base() {
 }
 
 #[test]
-fn broken_launch_records_refuse_rounds_before_direct_or_lifecycle_dispatch() {
+fn broken_launch_records_refuse_the_adoption_before_direct_or_lifecycle_dispatch() {
     // llmlint: ignore-block[tests_mirror_real_usage] no CLI command corrupts or removes
     // its own ledger. These are external-state faults (partial write or cleanup), so the
     // arrangement mutates that persisted boundary; every observation and asserted
@@ -330,27 +335,25 @@ fn broken_launch_records_refuse_rounds_before_direct_or_lifecycle_dispatch() {
     let direct = World::new("corrupt-launch-direct");
     let mut build = agent("build", &["approve"]);
     build["deps"] = json!(["approve"]);
-    open_second_round(&direct, "corrupt-direct", build);
+    ready_and_undriven(&direct, "corrupt-direct", build);
     std::fs::write(direct.run_file("corrupt-direct", "launch.json"), "not json")
         .expect("the launch record is corrupted");
     direct
-        .run(&["round", "run", "corrupt-direct"])
+        .run(&["adopt", "corrupt-direct"])
         .exited(crate::harness::REFUSED)
         .err_has("launch.json");
-    direct.release("driver.go");
 
     let lifecycle_world = World::new("missing-launch-lifecycle");
     lifecycle_world.repository("local-direct", &["true"]);
     let mut service = crate::harness::lifecycle("service", &["approve"]);
     service["deps"] = json!(["approve"]);
-    open_second_round(&lifecycle_world, "missing-lifecycle", service);
+    ready_and_undriven(&lifecycle_world, "missing-lifecycle", service);
     std::fs::remove_file(lifecycle_world.run_file("missing-lifecycle", "launch.json"))
         .expect("the launch record is removed");
     lifecycle_world
-        .run(&["round", "run", "missing-lifecycle"])
+        .run(&["adopt", "missing-lifecycle"])
         .exited(crate::harness::REFUSED)
         .err_has("launch.json");
-    lifecycle_world.release("driver.go");
     // llmlint: ignore-end[tests_mirror_real_usage]
 }
 
@@ -358,11 +361,11 @@ fn broken_launch_records_refuse_rounds_before_direct_or_lifecycle_dispatch() {
 fn a_legacy_launch_without_a_node_graph_fails_instead_of_reading_live_environment() {
     // llmlint: ignore-block[tests_mirror_real_usage] an older launch-record producer is
     // not a CLI operation this build can invoke. Writing that historical schema shape is
-    // the necessary fault arrangement; the round and refusal use the compiled CLI.
+    // the necessary fault arrangement; the adoption and its refusal use the compiled CLI.
     let world = World::new("legacy-empty-node-graph");
     let mut build = agent("build", &["approve"]);
     build["deps"] = json!(["approve"]);
-    open_second_round(&world, "legacy-empty", build);
+    ready_and_undriven(&world, "legacy-empty", build);
     let path = world.run_file("legacy-empty", "launch.json");
     let mut launch: Value =
         serde_json::from_str(&std::fs::read_to_string(&path).expect("the launch record reads"))
@@ -371,16 +374,15 @@ fn a_legacy_launch_without_a_node_graph_fails_instead_of_reading_live_environmen
     std::fs::write(&path, serde_json::to_vec_pretty(&launch).unwrap())
         .expect("the legacy launch record is written");
 
-    let mut round = world.cmd(&["round", "run", "legacy-empty"]);
-    round.env(
+    let mut driving = world.cmd(&["adopt", "legacy-empty"]);
+    driving.env(
         "ONEPIPELINE_NODE_GRAPH",
         world.graphs().join("node-scope.yaml"),
     );
     world
-        .run_on(round, "round run legacy-empty")
+        .run_on(driving, "adopt legacy-empty")
         .exited(crate::harness::REFUSED)
         .err_has("has no resolved node graph");
-    world.release("driver.go");
     // llmlint: ignore-end[tests_mirror_real_usage]
 }
 
@@ -407,8 +409,10 @@ fn launch_overrides_reach_the_graphs_that_actually_run() {
         "start",
         &path.to_string_lossy(),
         "--attach",
+        "--dag-graph",
+        &world.dag_graph(),
         "--set",
-        "members.orchestrator.oneharness_config=./dag-override.toml",
+        "members.monitor.oneharness_config=./dag-override.toml",
         "--node-set",
         "members.worker.oneharness_config=./node-override.toml",
     ]);
@@ -423,12 +427,12 @@ fn launch_overrides_reach_the_graphs_that_actually_run() {
         configs.iter().any(|call| {
             call["args"][0]
                 .as_str()
-                .is_some_and(|prompt| prompt.contains("onepipeline round run"))
+                .is_some_and(|prompt| prompt.contains("Observe this run"))
                 && call["args"][1]
                     .as_str()
                     .is_some_and(|config| config.contains("DAG_OVERRIDE"))
         }),
-        "the running dag member did not receive its override: {configs:?}"
+        "the observing dag member did not receive its override: {configs:?}"
     );
     assert!(
         configs.iter().any(|call| {
@@ -500,7 +504,9 @@ fn a_plan_persona_reaches_the_member_that_actually_runs() {
 fn adoption_retains_node_overrides_for_later_dispatches() {
     let world = World::new("real-adopted-node-override");
     world.write_graphs();
-    world.script("driver.wait", "hold");
+    // The first dispatch fails, so the run settles with work still to do and
+    // nothing driving it — which is the state `adopt` is for.
+    world.script("harness.fail", "");
     std::fs::write(
         world.graphs().join("adopted-node.toml"),
         "run_mode = \"fallback\"\nharnesses = [\"claude-code\"]\n# ADOPTED_NODE_OVERRIDE\n",
@@ -513,31 +519,44 @@ fn adoption_retains_node_overrides_for_later_dispatches() {
     let mut start = world.agentgraph_cmd(&[
         "start",
         &path.to_string_lossy(),
-        "--detach",
+        "--attach",
         "--node-set",
         "members.worker.oneharness_config=./adopted-node.toml",
     ]);
     start
         .current_dir(&world.root)
-        .env("ONEPIPELINE_DAG_GRAPH", "graphs/dag-scope.yaml")
         .env("ONEPIPELINE_NODE_GRAPH", "graphs/node-scope.yaml");
-    world.run_on(start, "start adopted-override").exited(0);
-
-    world.until("the original driver to park before dispatch", |world| {
-        let mut status = world.agentgraph_cmd(&["status", "adopted-override"]);
-        status.env("ONEPIPELINE_PARKED_AFTER_SECONDS", "1");
-        String::from_utf8_lossy(&status.output().expect("status runs").stdout).contains("PARKED")
+    world.run_on(start, "start adopted-override");
+    world.until("the run to settle on the failure", |world| {
+        world.run_file("adopted-override", "result.json").is_file()
     });
-    // Only the original driver saw this rendezvous. Removing its trigger lets
-    // the fresh graph launched by adopt drive immediately, while the original
-    // remains held until the assertion is complete.
-    std::fs::remove_file(world.root.join("fakes/driver.wait")).expect("the adoption is not held");
+
+    // A replacement for the failed node, applied to a run nothing is driving.
+    std::fs::remove_file(world.fakes.join("harness.fail")).expect("the failure is cleared");
+    world
+        .run_with_stdin(
+            &["reply", "adopted-override"],
+            &json!({
+                "version": 1,
+                "commands": [{
+                    "op": "retry",
+                    "id": "build",
+                    "node": {"id": "build-2", "persona": "engineer",
+                             "task": "## What\nDo build.\n\n## Why\nIt failed.\n\n\
+                                      ## Acceptance criteria\n- build is done."},
+                }],
+            })
+            .to_string(),
+        )
+        .exited(0);
+
+    // The adopted driver dispatches it, from another directory and under an
+    // environment naming no graph at all: what it runs under is the overrides
+    // the launch recorded.
     let mut adopt = world.agentgraph_cmd(&["adopt", "adopted-override"]);
     adopt
         .current_dir(&world.project)
-        .env("ONEPIPELINE_DAG_GRAPH", "missing-dag.yaml")
-        .env("ONEPIPELINE_NODE_GRAPH", "missing-node.yaml")
-        .env("ONEPIPELINE_PARKED_AFTER_SECONDS", "1");
+        .env("ONEPIPELINE_NODE_GRAPH", "missing-node.yaml");
     let adopted = world.run_on(adopt, "adopt adopted-override");
     adopted.exited(0).settled();
 
@@ -547,14 +566,13 @@ fn adoption_retains_node_overrides_for_later_dispatches() {
             call["tool"] == "oneharness-config"
                 && call["args"][0]
                     .as_str()
-                    .is_some_and(|prompt| prompt.contains("Do build."))
+                    .is_some_and(|prompt| prompt.contains("It failed."))
                 && call["args"][1]
                     .as_str()
                     .is_some_and(|config| config.contains("ADOPTED_NODE_OVERRIDE"))
         }),
         "the node dispatched after adoption did not run under its retained override: {configs:?}"
     );
-    world.release("driver.go");
 }
 
 /// A whole run, dispatched through the real sibling: the plan is launched, its
@@ -570,7 +588,13 @@ fn a_plan_dispatches_through_the_real_oneagentgraph_and_its_members_run() {
     world.write_graphs();
     let path = world.plan("real", &plan_of("real", vec![agent("build", &[])]));
 
-    let started = world.run_on_agentgraph(&["start", &path.to_string_lossy(), "--attach"]);
+    let started = world.run_on_agentgraph(&[
+        "start",
+        &path.to_string_lossy(),
+        "--attach",
+        "--dag-graph",
+        &world.dag_graph(),
+    ]);
     started.exited(0).settled();
     let run = started.json()["run_id"]
         .as_str()
@@ -590,8 +614,8 @@ fn a_plan_dispatches_through_the_real_oneagentgraph_and_its_members_run() {
     assert!(
         launches
             .iter()
-            .any(|task| task.contains("onepipeline round run")),
-        "no member was launched to drive the run: {launches:?}"
+            .any(|task| task.contains("Observe this run")),
+        "no member was launched to observe the run: {launches:?}"
     );
     assert!(
         launches.iter().any(|task| task.contains("Do build.")),
@@ -628,7 +652,7 @@ fn a_plan_dispatches_through_the_real_oneagentgraph_and_its_members_run() {
 
     // And the node settled on what that member did.
     assert_eq!(
-        world.run_json(&run, "round-01/result.json")["state"],
+        world.run_json(&run, "result.json")["state"],
         "complete",
         "the run did not settle: {}",
         world.dump()
@@ -689,7 +713,7 @@ fn events_reported(status: &str, node: &str) -> u64 {
 
 /// What a live node is doing, read while it is doing it.
 ///
-/// Mid-round, `status` used to say a node had been in flight for thirty-four
+/// Mid-run, `status` used to say a node had been in flight for thirty-four
 /// minutes and nothing else — the readout a healthy node has twice been
 /// reported dead against. The producer emits the tool summary this needs; the
 /// claim here is that it is read, and that it **advances** between two readings
@@ -735,7 +759,7 @@ fn status_says_what_a_live_dispatch_is_doing_and_the_readout_advances() {
 
     world.release("turn.settle");
     world.until("the run to settle", |world| {
-        !world.events_of("watched", "round-finished").is_empty()
+        world.run_file("watched", "result.json").is_file()
     });
 }
 
@@ -794,7 +818,13 @@ fn a_launch_the_graph_refuses_fails_with_the_graphs_own_words() {
     let path = world.plan("refused", &plan_of("refused", vec![agent("build", &[])]));
 
     for form in ["--detach", "--attach"] {
-        let started = world.run_on_agentgraph(&["start", &path.to_string_lossy(), form]);
+        let started = world.run_on_agentgraph(&[
+            "start",
+            &path.to_string_lossy(),
+            form,
+            "--dag-graph",
+            &world.dag_graph(),
+        ]);
 
         started.exited(crate::harness::REFUSED);
         started.err_has("oneagentgraph");
@@ -817,14 +847,20 @@ fn a_launch_the_graph_refuses_fails_with_the_graphs_own_words() {
 fn an_adoption_the_graph_refuses_fails_rather_than_leaving_the_run_undriven() {
     let world = World::new("real-adopt-refusal");
     world.write_graphs();
-    // A human action settles the round without a person, so the driver finishes
-    // and the run is left intact and undriven — which is what `adopt` is for.
+    // A human action nothing can clear, so the loop returns and the run is left
+    // intact and undriven — which is what `adopt` is for.
     let path = world.plan(
         "orphaned",
         &plan_of("orphaned", vec![human("approve", &[])]),
     );
     world
-        .run_on_agentgraph(&["start", &path.to_string_lossy(), "--detach"])
+        .run_on_agentgraph(&[
+            "start",
+            &path.to_string_lossy(),
+            "--detach",
+            "--dag-graph",
+            &world.dag_graph(),
+        ])
         .exited(0);
     world.until("the driver to be gone", |world| {
         world
@@ -1075,15 +1111,21 @@ fn a_note_delivered_through_the_real_sibling_records_what_its_lever_answered() {
 ///
 /// What happens to the signal *after* it lands is the sibling's: it starts a
 /// scheduled member's clock only once every member of that member's wave has
-/// settled, and the orchestrator shares the pacemaker's wave and runs for the
-/// whole run — so nothing consumes the signal while the run it paces is alive.
+/// settled, and the monitor shares the pacemaker's wave and runs for the whole
+/// run — so nothing consumes the signal while the run it paces is alive.
 #[test]
 fn consuming_a_surface_restarts_the_real_pacemakers_clock() {
     let world = World::new("real-pacemaker");
     world.write_graphs_with_pacemaker();
     let path = world.plan("paced", &plan_of("paced", vec![human("approve", &[])]));
     world
-        .run_on_agentgraph(&["start", &path.to_string_lossy(), "--detach"])
+        .run_on_agentgraph(&[
+            "start",
+            &path.to_string_lossy(),
+            "--detach",
+            "--dag-graph",
+            &world.dag_graph(),
+        ])
         .exited(0);
 
     // The sibling minted this, and it is not this run's id. Everything below
@@ -1196,7 +1238,13 @@ fn a_document_the_runner_accepts_launches_whichever_way_it_is_asked_for() {
         world.write_graphs_at_the_runners_schema();
         let path = world.plan("schema", &plan_of("schema", vec![agent("build", &[])]));
 
-        let mut command = world.agentgraph_cmd(&["start", &path.to_string_lossy(), form]);
+        let mut command = world.agentgraph_cmd(&[
+            "start",
+            &path.to_string_lossy(),
+            form,
+            "--dag-graph",
+            &world.dag_graph(),
+        ]);
         command.env("PATH", world.empty_path());
         let started = world.run_on(command, &format!("start {form}"));
         // The whole of the defect, in one exit code: the launch that refused
@@ -1205,7 +1253,7 @@ fn a_document_the_runner_accepts_launches_whichever_way_it_is_asked_for() {
         started.exited(0);
 
         // And it is a launch rather than a parse: the run reaches settlement,
-        // which takes the graph running, its driver driving, and the node it
+        // which takes the graph running, the loop driving, and the node it
         // dispatched reporting back. Read through `status`, where an operator
         // reads it.
         world.until("the run to settle", |world| {
@@ -1233,7 +1281,13 @@ fn every_dag_scope_member_is_given_the_runs_description_and_its_own_job() {
     let path = world.plan("neutral", &plan_of("neutral", vec![agent("build", &[])]));
     world
         .run_on(
-            world.agentgraph_cmd(&["start", &path.to_string_lossy(), "--attach"]),
+            world.agentgraph_cmd(&[
+                "start",
+                &path.to_string_lossy(),
+                "--attach",
+                "--dag-graph",
+                &world.dag_graph(),
+            ]),
             "start neutral",
         )
         .exited(0)
@@ -1259,10 +1313,10 @@ fn every_dag_scope_member_is_given_the_runs_description_and_its_own_job() {
             .map(|(_, prompt)| prompt.clone())
             .unwrap_or_else(|| panic!("no member '{member}' was started: {prompts:?}"))
     };
-    let driver = given("orchestrator");
+    let monitor = given("monitor");
     let reporter = given(REPORTING_MEMBER);
 
-    for (member, prompt) in [("orchestrator", &driver), (REPORTING_MEMBER, &reporter)] {
+    for (member, prompt) in [("monitor", &monitor), (REPORTING_MEMBER, &reporter)] {
         // What the run is, and what it is for. `plan_of` states the goal, so a
         // member that never received it is one the run description did not reach.
         for expected in ["neutral", "Deliver neutral"] {
@@ -1272,18 +1326,16 @@ fn every_dag_scope_member_is_given_the_runs_description_and_its_own_job() {
             );
         }
     }
-    // And each member's job is its own: the reporter carrying the driver's verbs
-    // is the defect.
+    // And each member's job is its own: the reporter carrying the monitor's is
+    // the defect.
     assert!(
-        driver.contains("onepipeline round run") && driver.contains("onepipeline round next"),
-        "the driver was not given its own job: {driver}"
+        monitor.contains("Observe this run"),
+        "the monitor was not given its own job: {monitor}"
     );
-    for verb in ["onepipeline round run", "onepipeline round next"] {
-        assert!(
-            !reporter.contains(verb),
-            "a member whose job is not the driver's was told to {verb}: {reporter}"
-        );
-    }
+    assert!(
+        !reporter.contains("Observe this run"),
+        "a member whose job is not the monitor's was given it: {reporter}"
+    );
     assert!(
         reporter.contains("Report on this run"),
         "the reporter was not given its own job: {reporter}"

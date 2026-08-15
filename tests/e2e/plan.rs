@@ -10,7 +10,7 @@
 // model turns to produce, and `dispatch.rs` is where the real `oneagentgraph` binary is
 // driven instead. `harness.rs` carries the same suppression and the full rationale.
 
-use crate::harness::{agent, human, plan_of, World, QUEUED, REFUSED};
+use crate::harness::{agent, human, plan_of, World, NOTHING_DRIVING, REFUSED};
 use serde_json::json;
 
 /// Run a plan to settlement, attached, and return the run id.
@@ -20,7 +20,7 @@ fn settle(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
         .run(&["start", &path.to_string_lossy(), "--detach"])
         .exited(0);
     world.until("the run to settle", |world| {
-        !world.events_of(name, "round-finished").is_empty()
+        world.run_file(name, "result.json").is_file()
     });
     name.to_string()
 }
@@ -39,7 +39,7 @@ fn a_cross_dag_dependency_is_accepted_and_gates_only_the_node_that_names_it() {
         vec![agent("independent", &[]), consumer],
     );
 
-    let result = world.run_json(&run, "round-01/result.json");
+    let result = world.run_json(&run, "result.json");
     let node = |id: &str| {
         result["nodes"]
             .as_array()
@@ -132,21 +132,15 @@ fn a_node_pinned_to_an_executor_the_rules_do_not_declare_is_refused_by_name() {
     // before any provider time is spent rather than silently falling back.
     pinned["executor"] = json!("a-cluster-nobody-declared");
     let path = world.plan("pinned", &plan_of("pinned", vec![pinned]));
-    // The driver is held, so this round is run once and by this test. Left to
-    // race, the driver's own `round run` takes the ownership lock first and the
-    // refusal being asserted has already happened somewhere nothing can read.
-    world.script("driver.wait", "hold");
-    world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
-    let mut command = world.cmd(&["round", "run", "pinned"]);
+    // The launch drives the run itself, so the refusal is the launch's own: it
+    // reaches the operator on the stderr they are already reading.
+    let mut command = world.cmd(&["start", &path.to_string_lossy(), "--attach"]);
     command.env("ONEPIPELINE_EXECUTOR_RULES", &rules);
     let refused = command.output().expect("the binary runs");
-    world.release("driver.go");
     let said = String::from_utf8_lossy(&refused.stderr).to_string();
     assert!(
         !refused.status.success(),
-        "the round dispatched anyway: {said}"
+        "the run dispatched anyway: {said}"
     );
     assert!(said.contains("a-cluster-nobody-declared"), "{said}");
     assert!(said.contains("do not declare"), "{said}");
@@ -158,9 +152,9 @@ fn a_single_node_plan_runs_to_completion_and_records_its_evidence() {
     let run = settle(&world, "single", vec![agent("build", &[])]);
 
     world.until("the graph to complete", |world| {
-        world.run_file(&run, "round-01/result.json").exists()
+        world.run_file(&run, "result.json").exists()
     });
-    let result = world.run_json(&run, "round-01/result.json");
+    let result = world.run_json(&run, "result.json");
     assert_eq!(result["state"], "complete", "{result}");
     assert_eq!(result["ok"], true);
     assert_eq!(result["nodes"][0]["id"], "build");
@@ -174,10 +168,9 @@ fn a_single_node_plan_runs_to_completion_and_records_its_evidence() {
     let kinds = world.kinds(&run);
     for expected in [
         "run-started",
-        "round-started",
+        "node-ready",
         "node-dispatched",
         "node-settled",
-        "round-finished",
     ] {
         assert!(
             kinds.contains(&expected.to_string()),
@@ -231,7 +224,7 @@ fn a_failed_dependency_skips_its_descendant_rather_than_blocking_it() {
         vec![agent("build", &[]), agent("ship", &["build"])],
     );
 
-    let result = world.run_json(&run, "round-01/result.json");
+    let result = world.run_json(&run, "result.json");
     assert_eq!(result["state"], "failed", "{result}");
     assert_eq!(result["ok"], false);
     let status = |id: &str| {
@@ -262,7 +255,7 @@ fn a_ready_human_action_waits_and_blocks_what_it_unblocks() {
         ],
     );
 
-    let result = world.run_json(&run, "round-01/result.json");
+    let result = world.run_json(&run, "result.json");
     assert_eq!(result["state"], "waiting", "{result}");
     let node = |id: &str| {
         result["nodes"]
@@ -296,7 +289,7 @@ fn an_expects_no_diff_node_settles_without_spending_a_dispatch() {
         })],
     );
 
-    let result = world.run_json(&run, "round-01/result.json");
+    let result = world.run_json(&run, "result.json");
     assert_eq!(result["nodes"][0]["status"], "done");
     assert_eq!(result["nodes"][0]["outcome"], "no-changes");
     assert!(
@@ -339,7 +332,7 @@ fn concurrency_bounds_how_many_nodes_are_in_flight_at_once() {
         world.release(&format!("{node}.go"));
     }
     world.until("the run to settle", |world| {
-        !world.events_of("bounded", "round-finished").is_empty()
+        world.run_file("bounded", "result.json").is_file()
     });
     assert_eq!(world.events_of("bounded", "node-dispatched").len(), 3);
 }
@@ -519,7 +512,7 @@ fn a_json_plan_keeps_json_escape_semantics_all_the_way_to_the_dispatch() {
         .run(&["start", &path.to_string_lossy(), "--detach"])
         .exited(0);
     world.until("the run to settle", |world| {
-        !world.events_of("emoji", "round-finished").is_empty()
+        world.run_file("emoji", "result.json").is_file()
     });
 
     let relayed = world
@@ -534,24 +527,31 @@ fn a_json_plan_keeps_json_escape_semantics_all_the_way_to_the_dispatch() {
     );
 }
 
+/// A graph that settled unfinished is reported as unfinished, not as a failure
+/// of the command that drove it.
+///
+/// Read where an operator reads it: an attached launch, which stays for the run
+/// and answers with the settlement. `3` is the code, because nothing is driving
+/// a run whose graph has stopped moving — and the record says *failed*, which is
+/// the distinction a bare exit code cannot draw.
 #[test]
-fn a_round_that_settles_unfinished_exits_one_rather_than_zero() {
+fn a_graph_that_settles_unfinished_is_reported_rather_than_erroring() {
     let world = World::new("plan-exit");
     world.script("build.fail", "1");
     let path = world.plan("exit", &plan_of("exit", vec![agent("build", &[])]));
     world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
-    world.until("the round to finish", |world| {
-        !world.events_of("exit", "round-finished").is_empty()
-    });
-    // Driving the same round again is the engine verb a caller reads the exit
-    // status off: a failed graph is unfinished, not an error.
-    world.run(&["round", "run", "exit"]).exited(QUEUED);
+        .run(&["start", &path.to_string_lossy(), "--attach"])
+        .exited(NOTHING_DRIVING)
+        .out_has("\"settlement\":\"unattended\"");
+
+    let result = world.run_json("exit", "result.json");
+    assert_eq!(result["state"], "failed", "{result}");
+    assert_eq!(result["ok"], json!(false), "{result}");
+    world.run(&["results", "exit"]).exited(0).out_has("failed");
 }
 
 #[test]
-fn a_worker_that_goes_quiet_is_surfaced_without_blocking_the_round() {
+fn a_worker_that_goes_quiet_is_surfaced_without_holding_anything_back() {
     let world = World::new("plan-quiet");
     world.script("slow.wait", "hold");
     let path = world.plan(
@@ -563,7 +563,7 @@ fn a_worker_that_goes_quiet_is_surfaced_without_blocking_the_round() {
     command.output().expect("the binary runs");
 
     // A stall is evidence rather than a verdict, so the surface is
-    // non-blocking: the round's other workers are not stopped to ask.
+    // non-blocking: nothing is held back to ask.
     world.until("the slow worker to be surfaced", |world| {
         world
             .events_of("quiet", "planner-surface-queued")
@@ -582,7 +582,7 @@ fn a_worker_that_goes_quiet_is_surfaced_without_blocking_the_round() {
     assert_eq!(surfaced["payload"]["blocking"], false);
 
     // The other worker settles while `slow` is still held, proving that the
-    // non-blocking surface did not stop the round from making progress.
+    // non-blocking surface held nothing back.
     world.until("the busy worker to settle", |world| {
         world
             .events_of("quiet", "node-settled")
@@ -612,38 +612,53 @@ fn a_worker_that_goes_quiet_is_surfaced_without_blocking_the_round() {
 
     world.release("slow.go");
     world.until("the run to settle", |world| {
-        !world.events_of("quiet", "round-finished").is_empty()
+        world.run_file("quiet", "result.json").is_file()
     });
 }
 
+/// A node the planner cancels is parked, not failed.
+///
+/// `cancel` is the one op that means stop this node, and what it leaves behind
+/// is a gate rather than a failure: a parked node holds its dependents where a
+/// failed one skips them, so the planner still decides what happens next. The
+/// run around it settles either way.
 #[test]
-fn a_round_that_outlives_its_budget_cancels_its_workers_and_asks_the_planner() {
-    let world = World::new("plan-budget");
+fn a_node_the_planner_cancels_settles_parked_and_the_run_still_settles() {
+    let world = World::new("plan-cancel");
     world.script("slow.wait", "hold");
-    let path = world.plan("budgeted", &plan_of("budgeted", vec![agent("slow", &[])]));
+    let path = world.plan(
+        "cancelled",
+        &plan_of("cancelled", vec![agent("slow", &[]), agent("keep", &[])]),
+    );
+    world.script("keep.wait", "hold");
     world
-        .run(&[
-            "start",
-            &path.to_string_lossy(),
-            "--detach",
-            "--round-budget",
-            "1",
-        ])
+        .run(&["start", &path.to_string_lossy(), "--detach"])
         .exited(0);
-
-    // Blocking, so a wedged dispatch layer cannot leave the planner silent.
-    let surfaced = world.surfaced("budgeted", "round-budget");
-    assert_eq!(surfaced["payload"]["blocking"], true);
-
-    // Written before the surface was raised, so it is there once the surface is.
-    let exceeded = world.events_of("budgeted", "round-budget-exceeded");
-    assert_eq!(exceeded[0]["payload"]["budget_seconds"], 1);
-
-    world.release("slow.go");
-    world.until("the round to finish", |world| {
-        !world.events_of("budgeted", "round-finished").is_empty()
+    world.until("the held node to be in flight", |world| {
+        world
+            .events_of("cancelled", "node-dispatched")
+            .iter()
+            .any(|event| event["labels"]["node"] == "slow")
     });
-    // The in-flight work was cancelled cooperatively rather than killed.
-    let result = world.run_json("budgeted", "round-01/result.json");
-    assert_eq!(result["nodes"][0]["status"], "cancelled", "{result}");
+
+    world
+        .run_with_stdin(
+            &["reply", "cancelled"],
+            &json!({"version": 1, "commands": [{"op": "cancel", "id": "slow"}]}).to_string(),
+        )
+        .exited(0);
+    world.release("slow.go");
+    world.release("keep.go");
+    world.until("the run to settle", |world| {
+        world.run_file("cancelled", "result.json").is_file()
+    });
+
+    let result = world.run_json("cancelled", "result.json");
+    let slow = result["nodes"]
+        .as_array()
+        .expect("nodes")
+        .iter()
+        .find(|node| node["id"] == "slow")
+        .expect("the cancelled node is still named");
+    assert_eq!(slow["status"], "parked", "{result}");
 }

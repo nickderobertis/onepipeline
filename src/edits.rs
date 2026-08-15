@@ -114,8 +114,8 @@ pub enum Operation {
 ///
 /// The fact `edit-committed` records, and what tells replay whether the note is
 /// still owed to a later dispatch: a note the running turn took has been read,
-/// so carrying it into the next round would repeat a correction the worker has
-/// already acted on.
+/// so carrying it onto the node's next dispatch would repeat a correction the
+/// worker has already acted on.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Delivery {
@@ -352,7 +352,10 @@ fn compile_retry(
             replacement.id
         )));
     }
-    let replacement = pin_retry_branch(validate_retry_pin(replacement)?);
+    let replacement = pin_retry_branch(inherit_preserved_branch(
+        validate_retry_pin(replacement)?,
+        &target,
+    ));
     graph::validate_node(&replacement).map_err(|e| refuse(e.to_string()))?;
 
     let mut replacement = replacement;
@@ -406,6 +409,16 @@ fn compile_retry(
             to: dependent.clone(),
         });
     }
+    // The superseded node leaves the graph, exactly as a `drop` would take it:
+    // its dependents are already rewired onto the replacement, and its work is
+    // the replacement's now. Left in, it would hold the whole run in `waiting`
+    // for a node nothing will ever dispatch again — a graph that can never
+    // settle because something was retried.
+    graph.remove(id);
+    operations.push(Operation::NodeDropped {
+        node: id.to_string(),
+        dependents: Dependents::Detach,
+    });
     Ok(operations)
 }
 
@@ -429,6 +442,27 @@ fn validate_retry_pin(node: &Node) -> Result<Node> {
     Ok(node.clone())
 }
 
+/// A replacement that names no branch of its own continues the one the node it
+/// supersedes left behind.
+///
+/// The superseded node's attempt ran, committed, and stopped, so its branch
+/// holds work. A replacement that cut a fresh branch beside it would retry the
+/// publication against an empty tree and leave the committed work for a person
+/// to find. The pin is on the node because the fold put it there when the
+/// attempt settled — see `projection::pin_preserved_branch` — so this reads what
+/// the run recorded rather than guessing a name.
+///
+/// A planner who named either field is answered with what they named: naming a
+/// branch is a decision somebody made after reading the result.
+fn inherit_preserved_branch(mut node: Node, superseded: &Node) -> Node {
+    if node.branch.is_some() || node.resume.is_some() {
+        return node;
+    }
+    node.branch.clone_from(&superseded.branch);
+    node.resume.clone_from(&superseded.resume);
+    node
+}
+
 /// A retry that states a `resume` and no `branch` is pinned to the resume's own
 /// branch, because naming a continuation is naming the branch it lives on.
 fn pin_retry_branch(mut node: Node) -> Node {
@@ -447,7 +481,7 @@ fn compile_cancel(graph: &mut Graph, frontier: &Frontier, id: &str) -> Result<Ve
         return Err(refuse(format!("cancel: no node '{id}'")));
     };
     // The definition is the authoritative record of parking, not the frontier: a
-    // node carried into a later round is parked with nothing journalled about it
+    // node parked before it was ever dispatched has nothing journalled about it
     // there, so a frontier lookup alone would let the same node be parked twice.
     if node.parked {
         return Err(refuse(format!("cancel: node '{id}' is already parked")));
@@ -1291,7 +1325,7 @@ mod tests {
     }
 
     /// A note the running turn took is not also owed to the next dispatch —
-    /// otherwise the round transition would re-state a correction the worker has
+    /// otherwise that dispatch would re-state a correction the worker has
     /// already acted on.
     #[test]
     fn a_note_delivered_live_leaves_nothing_on_the_node_for_a_later_dispatch() {

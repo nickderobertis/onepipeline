@@ -11,16 +11,39 @@
 // model turns to produce, and `dispatch.rs` is where the real `oneagentgraph` binary is
 // driven instead. `harness.rs` carries the same suppression and the full rationale.
 
-use crate::harness::{agent, human, plan_of, World, REFUSED};
+use crate::harness::{agent, human, plan_of, World, NOTHING_DRIVING, REFUSED};
+use serde_json::json;
 
-/// Start a run detached and wait until its first round is open.
+/// Start a run detached and wait until it is executing.
 fn running(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
     let path = world.plan(name, &plan_of(name, nodes));
     world
         .run(&["start", &path.to_string_lossy(), "--detach"])
         .exited(0);
-    world.until("the run to open a round", |world| {
-        !world.events_of(name, "round-started").is_empty()
+    world.until("the run to dispatch something", |world| {
+        !world.events_of(name, "node-dispatched").is_empty()
+    });
+    name.to_string()
+}
+
+/// The same, with an observer graph attached.
+///
+/// Only the pacemaker journeys need one: the clock a surface resets belongs to a
+/// member of that graph, and a run launched with `--dag-graph off` — the shipped
+/// default — has no member to address.
+fn observed(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
+    let path = world.plan(name, &plan_of(name, nodes));
+    world
+        .run(&[
+            "start",
+            &path.to_string_lossy(),
+            "--detach",
+            "--dag-graph",
+            &world.shipped_dag_graph(),
+        ])
+        .exited(0);
+    world.until("the run to dispatch something", |world| {
+        !world.events_of(name, "node-dispatched").is_empty()
     });
     name.to_string()
 }
@@ -54,14 +77,19 @@ fn a_surface_is_queued_sent_and_then_read_exactly_once() {
     world.release("build.go");
 }
 
+/// A surface outlives nothing: there is no round for it to be left over from.
+///
+/// Execution is one continuous run, so a queued surface stays consumable until
+/// somebody reads it — which is the whole reason the round-scoped discard is
+/// gone. What still replaces a surface is a *newer check-in*, at the queue
+/// rather than at the read.
 #[test]
-fn a_surface_left_over_from_a_finished_round_is_discarded_rather_than_delivered() {
-    let world = World::new("channel-stale");
+fn a_surface_queued_before_a_node_settled_is_still_delivered_afterwards() {
+    let world = World::new("channel-durable");
     world.script("flaky.wait", "hold");
     world.script("flaky.fail", "1");
-    let run = running(&world, "stale", vec![agent("flaky", &[])]);
+    let run = running(&world, "durable", vec![agent("flaky", &[])]);
 
-    // Queued while round one is the round that is running.
     world
         .run(&[
             "surface",
@@ -69,44 +97,45 @@ fn a_surface_left_over_from_a_finished_round_is_discarded_rather_than_delivered(
             "--kind",
             "check-in",
             "--message",
-            "from round one",
+            "queued while it ran",
         ])
         .exited(0);
     world.release("flaky.go");
-    world.until("round one to finish", |world| {
-        !world.events_of(&run, "round-finished").is_empty()
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
     });
 
-    // Round two, held open so the read below happens inside it.
-    std::fs::remove_file(world.fakes.join("flaky.go")).expect("the rendezvous is re-armed");
-    world.run(&["round", "next", &run]).exited(0);
-    let mut second = world
-        .cmd(&["round", "run", &run])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .expect("the round starts");
-    world.until("round two to open", |world| {
-        world.events_of(&run, "round-started").len() >= 2
-    });
-
-    // It describes work in a round that has finished. Delivering it would send
-    // the planner to look at a node this round is not running, and the check-in
-    // that replaces it describes the round that is.
+    // Still there, and still the planner's to read: nothing about the node
+    // settling makes what was said about it undeliverable.
     let read = world.run(&["next", &run]);
-    read.exited(0);
+    read.exited(0).out_has("queued while it ran");
+    assert_eq!(world.events_of(&run, "planner-surfaced").len(), 1);
+}
+
+/// A newer check-in replaces the one nobody read, so being ignored makes the
+/// harness louder rather than quieter.
+#[test]
+fn a_second_check_in_replaces_the_one_still_waiting_to_be_read() {
+    let world = World::new("channel-supersede");
+    world.script("build.wait", "hold");
+    let run = running(&world, "superseded", vec![agent("build", &[])]);
+
+    for message in ["the first update", "the second update"] {
+        world
+            .run(&["surface", &run, "--kind", "check-in", "--message", message])
+            .exited(0);
+    }
+
+    let read = world.run(&["next", &run]);
+    read.exited(0).out_has("the second update");
     assert!(
-        !read.stdout.contains("from round one"),
-        "a surface from a finished round was delivered: {}",
+        !read.stdout.contains("the first update"),
+        "a superseded check-in was delivered: {}",
         read.stdout
     );
-    assert!(
-        world.events_of(&run, "planner-surfaced").is_empty(),
-        "a stale surface was consumed"
-    );
-
-    world.release("flaky.go");
-    second.wait().expect("the round finishes");
+    let again = world.run(&["next", &run]);
+    assert_eq!(again.json()["status"], "running");
+    world.release("build.go");
 }
 
 /// Consumption resets the pacemaker, addressed by the **graph** run's id.
@@ -121,7 +150,7 @@ fn a_surface_left_over_from_a_finished_round_is_discarded_rather_than_delivered(
 fn consuming_a_surface_resets_the_check_in_pacemaker() {
     let world = World::new("channel-pacemaker");
     world.script("build.wait", "hold");
-    let run = running(&world, "paced", vec![agent("build", &[])]);
+    let run = observed(&world, "paced", vec![agent("build", &[])]);
     world
         .run(&["surface", &run, "--kind", "check-in", "--message", "steady"])
         .exited(0);
@@ -304,7 +333,7 @@ fn a_settled_run_refuses_a_reply_nothing_will_ever_read() {
         .run(&["start", &path.to_string_lossy(), "--detach"])
         .exited(0);
     world.until("the run to settle", |world| {
-        !world.events_of("settled", "round-finished").is_empty()
+        world.run_file("settled", "result.json").is_file()
     });
     world.until("the driver to exit", |world| {
         world
@@ -348,7 +377,7 @@ fn attest_completes_a_ready_waiting_human_action() {
     world.release("build.go");
 
     world.until("the run to settle", |world| {
-        !world.events_of(&run, "round-finished").is_empty()
+        world.run_file(&run, "result.json").is_file()
     });
     world.run(&["results", &run]).exited(0).out_has("approve");
 }
@@ -371,15 +400,15 @@ fn attesting_something_that_is_not_a_ready_human_action_is_refused_by_name() {
 }
 
 #[test]
-fn the_channel_server_relays_a_boundary_frame_and_writes_back_the_verdict() {
+fn the_channel_server_relays_an_observer_frame_and_writes_back_the_verdict() {
     use std::io::{BufRead, BufReader, Write};
 
     let world = World::new("channel-serve");
     world.script("build.wait", "hold");
     let run = running(&world, "served", vec![agent("build", &[])]);
 
-    // This is the orchestrator member's judge side: it reads the frame the
-    // orchestrator emits at a round boundary, relays it to the planner, and
+    // This is an observer member's judge side: it reads the frame that member
+    // emits when it has something to raise, relays it to the planner, and
     // writes the answer back into the conversation.
     let mut serving = world
         .cmd(&["channel", "serve", &run])
@@ -496,55 +525,122 @@ fn the_channel_server_refuses_a_frame_it_cannot_read() {
     world.release("build.go");
 }
 
+/// The whole decision-point contract, end to end and with no driver but the
+/// engine's own loop.
+///
+/// A `kind: human` node mid-graph holds **its own subtree** and nothing else:
+/// the independent branch beside it runs to completion while the dependent one
+/// waits. Clearing it with `attest` releases exactly that subtree, inside the
+/// loop that was already running — nothing external drives the resumption.
 #[test]
-fn a_human_action_is_attested_at_a_round_boundary_and_the_next_round_opens() {
-    let world = World::new("channel-boundary-attest");
-    world.script("driver.wait", "hold");
+fn a_human_decision_holds_its_subtree_while_another_branch_runs_and_attest_resumes_it() {
+    let world = World::new("channel-decision");
+    // A third branch, held open, so the loop is still running when the
+    // attestation arrives: what is under test is the resumption *inside* it.
+    world.script("hold.wait", "hold");
     let path = world.plan(
-        "gatedrun",
+        "decided",
         &plan_of(
-            "gatedrun",
-            vec![human("approve", &[]), agent("ship", &["approve"])],
+            "decided",
+            vec![
+                agent("seed", &[]),
+                human("approve", &["seed"]),
+                agent("ship", &["approve"]),
+                agent("probe", &[]),
+                agent("report", &["probe"]),
+                agent("hold", &[]),
+            ],
         ),
     );
     world
         .run(&["start", &path.to_string_lossy(), "--detach"])
         .exited(0);
-    world.run(&["round", "run", "gatedrun"]).exited(1);
 
-    // The round has settled: nothing is executing, and no later round can open
-    // until a person's action is recorded. An attestation is not a graph edit,
-    // so it is legal here — refusing it would strand the run.
-    let result = world.run_json("gatedrun", "round-01/result.json");
-    assert_eq!(result["state"], "waiting", "{result}");
+    // The decision is reported the moment it begins holding dependents back,
+    // and it names what it holds.
+    world.until("the decision to be reported", |world| {
+        !world.events_of("decided", "decision-pending").is_empty()
+    });
+    let pending = world.events_of("decided", "decision-pending");
+    assert_eq!(pending.len(), 1, "{pending:?}");
+    assert_eq!(pending[0]["payload"]["reference"], "approve");
+    assert_eq!(pending[0]["payload"]["kind"], "attestation");
+    assert_eq!(pending[0]["payload"]["unblocks"], json!(["ship"]));
+
+    // The independent branch runs to completion beside it. Nothing about a
+    // decision on one branch reaches another.
+    world.until("the independent branch to finish", |world| {
+        world
+            .events_of("decided", "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "report")
+    });
+    assert!(
+        world
+            .events_of("decided", "node-dispatched")
+            .iter()
+            .all(|event| event["labels"]["node"] != "ship"),
+        "the paused subtree ran while its decision was outstanding: {:?}",
+        world.kinds("decided")
+    );
+
+    // Cleared by the person who took the action, and released by the loop that
+    // was already running: no `adopt`, no second driver, nothing else typed.
+    world.run(&["attest", "decided", "approve"]).exited(0);
+    world.until("the paused subtree to resume", |world| {
+        world
+            .events_of("decided", "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "ship")
+    });
+    let cleared = world.events_of("decided", "decision-cleared");
+    assert_eq!(cleared.len(), 1, "{cleared:?}");
+    assert_eq!(cleared[0]["payload"]["reference"], "approve");
+    assert_eq!(cleared[0]["payload"]["released"], json!(["ship"]));
+
+    world.release("hold.go");
+    world.until("the run to settle", |world| {
+        world.run_file("decided", "result.json").is_file()
+    });
+    assert_eq!(
+        world.run_json("decided", "result.json")["state"],
+        "complete"
+    );
+}
+
+/// An edit needs no live round, because there are none: a run nothing is
+/// driving takes one under the ownership lock and applies it there.
+#[test]
+fn an_edit_to_a_run_nothing_is_driving_is_applied_rather_than_refused() {
+    let world = World::new("channel-undriven-edit");
+    let path = world.plan(
+        "settledgraph",
+        &plan_of("settledgraph", vec![human("approve", &[])]),
+    );
+    world
+        .run(&["start", &path.to_string_lossy(), "--attach"])
+        .exited(0);
+
     world
         .run_with_stdin(
-            &["reply", "gatedrun"],
+            &["reply", "settledgraph"],
             r#"{"version":1,"commands":[{"op":"add","node":{"id":"late","persona":"e","task":"t"}}]}"#,
         )
-        .exited(REFUSED)
-        .err_has("no round executing");
+        .exited(0)
+        .out_has("\"applied\"");
+    assert_eq!(world.events_of("settledgraph", "edit-committed").len(), 1);
 
-    world.run(&["attest", "gatedrun", "approve"]).exited(0);
-    assert_eq!(world.events_of("gatedrun", "human-attested").len(), 1);
-
-    // With the action recorded, the dependent becomes eligible and the
-    // transition opens the round that runs it.
-    let transitioned = world.run(&["round", "next", "gatedrun"]);
-    transitioned.exited(0).out_has("\"continuing\"");
-    assert_eq!(transitioned.json()["next_round"], 2);
-
-    world.run(&["round", "run", "gatedrun"]).exited(0);
-    let second = world.run_json("gatedrun", "round-02/result.json");
-    assert_eq!(second["state"], "complete", "{second}");
-    let ids: Vec<&str> = second["nodes"]
-        .as_array()
-        .expect("nodes")
-        .iter()
-        .filter_map(|node| node["id"].as_str())
-        .collect();
-    assert_eq!(ids, vec!["ship"], "the attested human was carried forward");
-    world.release("driver.go");
+    // And the adoption that picks the run back up dispatches what was added.
+    world.run(&["attest", "settledgraph", "approve"]).exited(0);
+    world.run(&["adopt", "settledgraph"]).exited(0);
+    assert!(
+        world
+            .events_of("settledgraph", "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "late"),
+        "the edit an undriven run took was never executed: {:?}",
+        world.kinds("settledgraph")
+    );
 }
 
 #[test]
@@ -552,7 +648,7 @@ fn a_read_survives_a_pacemaker_it_could_not_reset_and_says_so() {
     let world = World::new("channel-reset-fails");
     world.script("build.wait", "hold");
     world.script("reset-timer.fail", "");
-    let run = running(&world, "unresettable", vec![agent("build", &[])]);
+    let run = observed(&world, "unresettable", vec![agent("build", &[])]);
     world
         .run(&["surface", &run, "--kind", "check-in", "--message", "steady"])
         .exited(0);
@@ -606,4 +702,466 @@ fn the_channel_server_refuses_a_frame_missing_what_a_surface_needs() {
         "a refused frame still reached the planner"
     );
     world.release("build.go");
+}
+
+/// The observer contract, end to end: the graph a `--dag-graph REF` launch
+/// attaches watches the run and authors over the channel — and what it may
+/// author is enforced.
+///
+/// Three things at once, because they are one journey: the graph really is
+/// launched and really is only an observer, an op outside the monitor's
+/// allowlist is refused with the reason, and an allowed one is applied *and*
+/// surfaced to the planner, who owns the graph and did not ask for it.
+#[test]
+fn a_dag_graph_observes_while_the_monitors_edits_are_held_to_its_allowlist() {
+    let world = World::new("channel-monitor");
+    world.script("slow.wait", "hold");
+    let path = world.plan(
+        "watched",
+        &plan_of("watched", vec![agent("slow", &[]), human("approve", &[])]),
+    );
+    world
+        .run(&[
+            "start",
+            &path.to_string_lossy(),
+            "--detach",
+            "--dag-graph",
+            &world.shipped_dag_graph(),
+        ])
+        .exited(0);
+    world.until("the run to dispatch something", |world| {
+        !world.events_of("watched", "node-dispatched").is_empty()
+    });
+
+    // The graph was launched, and as an observer: it ran no engine verb, because
+    // there is none to run.
+    assert!(
+        world.was_invoked("oneagentgraph", &["run"]),
+        "the named dag-scope graph was never launched: {:?}",
+        world.invocations()
+    );
+    assert!(
+        !world.observer_saw().is_empty(),
+        "the observer never read the run it was launched for"
+    );
+
+    // Every op the monitor may not issue is refused by name, with the reason and
+    // what to do instead — and nothing durable is written on any of their
+    // behalf. All four, because an op granted by omission is the whole failure
+    // this allowlist exists to prevent.
+    for (op, command, said) in [
+        (
+            "attest",
+            json!({"op": "attest", "ref": "approve"}),
+            "never by a watcher",
+        ),
+        (
+            "complete",
+            json!({"op": "complete", "reason": "looks finished to me"}),
+            "not an observation",
+        ),
+        (
+            "drop",
+            json!({"op": "drop", "id": "slow", "dependents": "detach"}),
+            "decomposition decision the planner owns",
+        ),
+        (
+            "reparent",
+            json!({"op": "reparent", "id": "slow", "deps": []}),
+            "decomposition decision the planner owns",
+        ),
+    ] {
+        let refused = world.run_with_stdin(
+            &["reply", "watched"],
+            &json!({"version": 1, "author": "monitor", "commands": [command]}).to_string(),
+        );
+        refused
+            .exited(REFUSED)
+            .err_has(op)
+            .err_has(said)
+            .err_has("Surface it to the planner");
+    }
+    assert!(
+        world.events_of("watched", "human-attested").is_empty(),
+        "a refused monitor edit still reached the run"
+    );
+    assert!(
+        world
+            .events_of("watched", "completion-requested")
+            .is_empty(),
+        "a refused monitor edit still reached the run"
+    );
+    assert!(
+        world.events_of("watched", "edit-committed").is_empty(),
+        "a refused monitor edit still reached the graph: {:?}",
+        world.kinds("watched")
+    );
+
+    // And every op it *may* issue is applied. In an order each one is legal in:
+    // a note to the running node, a node added, that node parked and brought
+    // back, and finally the running node superseded — which is the one that
+    // stops it, so it goes last.
+    for command in [
+        json!({"op": "context", "id": "slow", "note": "the fixture moved", "deliver": "next"}),
+        // Behind the held node, so it is still pending when it is parked: a
+        // node that had already run is not a node `cancel` can idle.
+        json!({"op": "add", "node": {"id": "extra", "persona": "engineer",
+                                     "task": "## What\nsweep", "deps": ["slow"]}}),
+        json!({"op": "cancel", "id": "extra"}),
+        json!({"op": "requeue", "id": "extra"}),
+        json!({"op": "retry", "id": "slow",
+               "node": {"id": "slow-2", "persona": "engineer", "task": "## What\nagain"}}),
+    ] {
+        world
+            .run_with_stdin(
+                &["reply", "watched"],
+                &json!({"version": 1, "author": "monitor", "commands": [command]}).to_string(),
+            )
+            .exited(0)
+            .out_has("\"applied\"");
+    }
+
+    let committed = world.events_of("watched", "edit-committed");
+    assert_eq!(committed.len(), 5, "{committed:?}");
+    for edit in &committed {
+        assert_eq!(edit["payload"]["author"], "monitor", "{edit}");
+    }
+
+    world.until("the planner to be told what the monitor did", |world| {
+        world
+            .events_of("watched", "planner-surface-queued")
+            .iter()
+            .filter(|event| event["payload"]["kind"] == "monitor-edit")
+            .count()
+            >= 5
+    });
+    let surfaced = world
+        .events_of("watched", "planner-surface-queued")
+        .into_iter()
+        .find(|event| event["payload"]["kind"] == "monitor-edit")
+        .expect("the monitor's edit was surfaced");
+    assert_eq!(
+        surfaced["payload"]["blocking"],
+        json!(false),
+        "a monitor's edit held the graph back to report itself: {surfaced}"
+    );
+    assert_eq!(surfaced["payload"]["source"], "monitor", "{surfaced}");
+
+    world.release("slow.go");
+}
+
+/// The other decision point: a **blocking surface** an observer raised holds the
+/// subtree that depends on the node it named, and answering it releases exactly
+/// that subtree.
+///
+/// A `kind: human` node is structural — its dependents are blocked by the graph.
+/// This one is not: the node the surface names has *settled*, and what holds its
+/// dependents back is the unanswered question about it. Nothing else in the run
+/// is touched.
+#[test]
+fn a_blocking_surface_holds_the_subtree_of_the_node_it_names_until_it_is_answered() {
+    use std::io::{BufRead, BufReader, Write};
+
+    let world = World::new("channel-surface-decision");
+    // `seed` is held so the frame below lands before it settles: the loop starts
+    // what became ready on the same pass it sees the settlement, so a surface
+    // that arrived afterwards would be racing a dispatch that had already gone.
+    world.script("seed.wait", "hold");
+    world.script("keep.wait", "hold");
+    let path = world.plan(
+        "surfacegate",
+        &plan_of(
+            "surfacegate",
+            vec![
+                agent("seed", &[]),
+                agent("after", &["seed"]),
+                agent("keep", &[]),
+            ],
+        ),
+    );
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+    world.until("the held node to be in flight", |world| {
+        world
+            .events_of("surfacegate", "node-dispatched")
+            .iter()
+            .any(|event| event["labels"]["node"] == "seed")
+    });
+
+    // The observer raises a blocking question about `seed`.
+    let mut serving = world
+        .cmd(&["channel", "serve", "surfacegate"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the channel server starts");
+    let mut stdin = serving.stdin.take().expect("stdin is piped");
+    writeln!(
+        stdin,
+        r#"{{"kind":"blocker","message":"seed wrote something unexpected; go on?","node":"seed"}}"#
+    )
+    .expect("the frame is written");
+    stdin.flush().expect("flushed");
+
+    world.until("the decision to be reported", |world| {
+        !world
+            .events_of("surfacegate", "decision-pending")
+            .is_empty()
+    });
+    let pending = world.events_of("surfacegate", "decision-pending");
+    assert_eq!(pending.len(), 1, "{pending:?}");
+    assert_eq!(pending[0]["payload"]["kind"], "blocker");
+    assert!(
+        pending[0]["payload"]["reference"]
+            .as_str()
+            .is_some_and(|reference| reference.starts_with("surface:")),
+        "a surface decision named something other than a surface: {pending:?}"
+    );
+    assert_eq!(pending[0]["payload"]["unblocks"], json!(["after"]));
+
+    // The node it names settles — and its dependent does *not* go, because the
+    // question about it has not been answered.
+    world.release("seed.go");
+    world.until("the named node to settle", |world| {
+        world
+            .events_of("surfacegate", "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "seed")
+    });
+    assert!(
+        world
+            .events_of("surfacegate", "node-dispatched")
+            .iter()
+            .all(|event| event["labels"]["node"] != "after"),
+        "the held subtree ran while the question about it was outstanding: {:?}",
+        world.kinds("surfacegate")
+    );
+
+    // Answered: read it, then reply. The subtree is released and nothing else
+    // waited on it.
+    world.run(&["next", "surfacegate"]).exited(0);
+    world
+        .run_with_stdin(
+            &["reply", "surfacegate"],
+            r#"{"completion":false,"reason":"go on"}"#,
+        )
+        .exited(0);
+    world.until("the released subtree to settle", |world| {
+        world
+            .events_of("surfacegate", "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "after")
+    });
+    let cleared = world.events_of("surfacegate", "decision-cleared");
+    assert_eq!(cleared.len(), 1, "{cleared:?}");
+    assert_eq!(cleared[0]["payload"]["released"], json!(["after"]));
+
+    // The verdict reached the observer's own conversation, which is what makes
+    // this a channel rather than a one-way report.
+    let stdout = serving.stdout.take().expect("stdout is piped");
+    let verdict = BufReader::new(stdout)
+        .lines()
+        .map_while(std::result::Result::ok)
+        .find(|line| line.contains("reason"))
+        .expect("the server wrote a verdict");
+    assert!(verdict.contains("go on"), "{verdict}");
+
+    drop(stdin);
+    world.release("keep.go");
+    let _ = serving.wait();
+}
+
+/// A blocking surface that names no node holds no subtree — and is still what
+/// the run is waiting on.
+///
+/// The other half of the decision contract: what a surface pauses is the
+/// subtree of the node it named, so one that named none pauses nothing. It does
+/// not therefore *cost* nothing: a run that cannot move with a question
+/// outstanding is awaiting the planner, not abandoned, and the two send an
+/// operator to different places.
+#[test]
+fn a_blocking_surface_naming_no_node_pauses_nothing_and_still_awaits_the_planner() {
+    use std::io::Write;
+
+    let world = World::new("channel-surface-runwide");
+    // The one node fails, so the graph stops moving with nothing ready, nothing
+    // waiting on a person, and — until the frame below — no question to answer.
+    world.script("build.fail", "1");
+    let path = world.plan("runwide", &plan_of("runwide", vec![agent("build", &[])]));
+    world
+        .run(&["start", &path.to_string_lossy(), "--attach"])
+        .exited(NOTHING_DRIVING)
+        .out_has("\"settlement\":\"unattended\"");
+
+    // A blocking question about the run rather than about any node in it.
+    let mut serving = world
+        .cmd(&["channel", "serve", "runwide"])
+        // Nobody answers this one, and the server's own wait is not what is
+        // under test: shortened so the journey is not the timeout.
+        .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the channel server starts");
+    let mut stdin = serving.stdin.take().expect("stdin is piped");
+    writeln!(
+        stdin,
+        r#"{{"kind":"blocker","message":"the whole plan looks wrong; what now?"}}"#
+    )
+    .expect("the frame is written");
+    stdin.flush().expect("flushed");
+    world.until("the question to reach the planner", |world| {
+        !world
+            .events_of("runwide", "planner-surface-queued")
+            .is_empty()
+    });
+
+    // The same run, driven again: it still cannot move, and now it says why.
+    world
+        .run(&["adopt", "runwide"])
+        .exited(0)
+        .out_has("\"settlement\":\"awaiting-planner\"");
+
+    // And it held nothing back: the surface named no node, so its subtree is
+    // empty and no dispatch was skipped on its account.
+    let pending = world.events_of("runwide", "decision-pending");
+    assert_eq!(pending.len(), 1, "{pending:?}");
+    assert_eq!(pending[0]["payload"]["unblocks"], json!([]));
+
+    drop(stdin);
+    let _ = serving.wait();
+}
+
+/// A frame naming a node the run does not have is refused, not queued.
+///
+/// The node decides what a blocking frame holds back, so a name the graph does
+/// not carry would raise a question about work nobody is doing — and hold
+/// nothing while reading as something the run is waiting on.
+#[test]
+fn the_channel_server_refuses_a_frame_about_a_node_the_run_does_not_have() {
+    use std::io::Write;
+
+    let world = World::new("channel-frame-node");
+    world.script("build.wait", "hold");
+    let run = running(&world, "unknownnode", vec![agent("build", &[])]);
+
+    let mut serving = world
+        .cmd(&["channel", "serve", &run])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the channel server starts");
+    let mut stdin = serving.stdin.take().expect("stdin is piped");
+    writeln!(
+        stdin,
+        r#"{{"kind":"blocker","message":"what about this?","node":"nowhere"}}"#
+    )
+    .expect("the frame is written");
+    stdin.flush().expect("flushed");
+    drop(stdin);
+
+    let output = serving.wait_with_output().expect("the server exits");
+    assert_eq!(output.status.code(), Some(REFUSED), "{output:?}");
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert!(said.contains("nowhere"), "{said}");
+    // And it names what the run does have, so the observer can correct itself.
+    assert!(said.contains("build"), "{said}");
+    assert!(
+        world.events_of(&run, "planner-surface-queued").is_empty(),
+        "a frame about a node nobody has still reached the planner"
+    );
+    world.release("build.go");
+}
+
+/// The monitor may not declare the run finished, in a verdict any more than in
+/// an op.
+///
+/// The legacy verdict says what `complete` says, in a field rather than in a
+/// command list — so an allowlist that guarded only the ops would let a
+/// commandless reply walk straight past it.
+#[test]
+fn a_monitor_cannot_declare_the_run_complete_with_a_commandless_verdict() {
+    let world = World::new("channel-monitor-verdict");
+    world.script("build.wait", "hold");
+    let run = running(&world, "verdict", vec![agent("build", &[])]);
+
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({
+                "author": "monitor",
+                "completion": true,
+                "reason": "looks finished to me",
+            })
+            .to_string(),
+        )
+        .exited(REFUSED)
+        .err_has("not something the monitor may do")
+        .err_has("Surface it to the planner");
+    assert!(
+        world.events_of(&run, "completion-requested").is_empty(),
+        "the monitor declared the run complete: {:?}",
+        world.kinds(&run)
+    );
+
+    // The planner's own verdict is unaffected, which is what makes the refusal
+    // about the author rather than about the field.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({"completion": true, "reason": "the run is finished"}).to_string(),
+        )
+        .exited(0);
+    assert_eq!(world.events_of(&run, "completion-requested").len(), 1);
+    world.release("build.go");
+}
+
+/// An edit the monitor applies to a run nothing is driving is surfaced to the
+/// planner exactly as one applied by the loop is.
+///
+/// Which of the two applied it is an accident of whether anything was driving
+/// the run; the planner owns the graph either way, and learning about the edit
+/// is not something they should have to be lucky to do.
+#[test]
+fn a_monitor_edit_applied_with_nothing_driving_is_still_surfaced_to_the_planner() {
+    let world = World::new("channel-monitor-undriven");
+    let path = world.plan(
+        "undrivenmonitor",
+        &plan_of("undrivenmonitor", vec![human("approve", &[])]),
+    );
+    world
+        .run(&["start", &path.to_string_lossy(), "--attach"])
+        .exited(0);
+
+    world
+        .run_with_stdin(
+            &["reply", "undrivenmonitor"],
+            &json!({
+                "version": 1,
+                "author": "monitor",
+                "commands": [{"op": "add", "node": {"id": "sweep", "persona": "engineer",
+                                                    "task": "## What\nsweep"}}],
+            })
+            .to_string(),
+        )
+        .exited(0)
+        .out_has("\"applied\"");
+
+    let committed = world
+        .events_of("undrivenmonitor", "edit-committed")
+        .into_iter()
+        .next()
+        .expect("the edit was applied");
+    assert_eq!(committed["payload"]["author"], "monitor", "{committed}");
+    let surfaced = world
+        .events_of("undrivenmonitor", "planner-surface-queued")
+        .into_iter()
+        .find(|event| event["payload"]["kind"] == "monitor-edit")
+        .expect("the monitor's edit was surfaced to the planner");
+    assert_eq!(surfaced["payload"]["blocking"], json!(false), "{surfaced}");
+    assert_eq!(surfaced["payload"]["source"], "monitor", "{surfaced}");
 }

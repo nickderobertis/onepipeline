@@ -14,7 +14,6 @@ use crate::harness::{plan_of, World};
 fn live_holders_refuse_unless_acknowledged_and_stale_holders_do_not_refuse() {
     let world = World::new("concurrent");
     let _repository = world.repository("local-direct", &["true"]);
-    world.script("driver.wait", "hold");
     world.script("build.wait", "hold");
 
     let lifecycle = || {
@@ -26,17 +25,11 @@ fn live_holders_refuse_unless_acknowledged_and_stale_holders_do_not_refuse() {
         })
     };
     let first_plan = world.plan("first", &plan_of("first", vec![lifecycle()]));
-    world
-        .run_on(
-            world.cmd(&["start", &first_plan.to_string_lossy(), "--detach"]),
-            "start first",
-        )
-        .exited(0);
 
-    // Drive the first launch's real lifecycle while its dag-scope driver is
-    // paused. This `round run` is the process that asks the linked `onevcs` to
-    // open the session, and the held worker keeps both owner and session live.
-    let mut first_owner = world.cmd(&["round", "run", "first"]);
+    // Attached, so the process this test holds *is* the run's driver: the loop
+    // runs in it, and it is what asks the linked `onevcs` to open the session.
+    // The held worker keeps both owner and session live.
+    let mut first_owner = world.cmd(&["start", &first_plan.to_string_lossy(), "--attach"]);
     let mut first_owner = first_owner
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -106,6 +99,11 @@ fn live_holders_refuse_unless_acknowledged_and_stale_holders_do_not_refuse() {
         .kill()
         .expect("the first session owner is terminated");
     first_owner.wait().expect("the first session owner exits");
+    // And so does the acknowledged run's: it drove itself the moment it was
+    // launched, so it opened a session of its own on the same identity, and a
+    // launch that met *that* one would be refused by a live holder rather than
+    // proceeding past a stale one — which is the claim below.
+    world.run(&["stop", "second"]).exited(0);
     world.release("build.go");
 
     let stale_plan = world.plan("third", &plan_of("third", vec![lifecycle()]));
@@ -118,5 +116,4 @@ fn live_holders_refuse_unless_acknowledged_and_stale_holders_do_not_refuse() {
         .err_has("stale repository holder")
         .err_has(&live_token)
         .err_has("proceeding");
-    world.release("driver.go");
 }

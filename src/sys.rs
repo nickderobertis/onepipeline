@@ -148,7 +148,7 @@ pub enum Stop {
 /// and nothing else. Not the process group: the paid agent puts itself in one of
 /// its own, so a group teardown sweeps the middle of the tree and leaves the leaf
 /// orphaned and still writing. Not one pid, for the same reason. And nothing
-/// wider: a round that is legitimately a child of something else is not a
+/// wider: a process that is legitimately a child of something else is not a
 /// descendant, and ending it would be ending work this run does not own.
 ///
 /// Best-effort about *individual* processes: one already gone, or one this user

@@ -440,11 +440,11 @@ fn a_lifecycle_node_opens_a_real_pull_request_merges_it_and_the_base_advances() 
         String::from_utf8_lossy(&started.stderr)
     );
     world.until("the run to settle", |world| {
-        !world.events_of("smoke", "round-finished").is_empty()
+        world.run_file("smoke", "result.json").is_file()
     });
 
     // What this crate made of it.
-    let result = world.run_json("smoke", "round-01/result.json");
+    let result = world.run_json("smoke", "result.json");
     assert_eq!(
         result["nodes"][0]["status"],
         "done",

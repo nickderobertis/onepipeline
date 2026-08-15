@@ -2,7 +2,7 @@
 //! anything is attempted.
 //!
 //! A usage error costs nothing; a command line that parses and then does the
-//! wrong thing costs a round of provider time. Everything here is checked at the
+//! wrong thing costs a run of provider time. Everything here is checked at the
 //! boundary.
 
 // llmlint: ignore-file[e2e_not_mocked] `World` substitutes the two *siblings* at their
@@ -18,7 +18,6 @@ use std::process::Command;
 const COMMANDS: &[(&str, &[&str])] = &[
     ("start", &["start", "plan.json"]),
     ("adopt", &["adopt", "run-1"]),
-    ("round", &["round", "run", "run-1"]),
     ("channel", &["channel", "serve", "run-1"]),
     ("next", &["next", "run-1"]),
     ("reply", &["reply", "run-1"]),
@@ -98,7 +97,6 @@ fn a_verb_that_names_a_run_nobody_recorded_refuses_and_says_where_it_looked() {
         vec!["status", "ghost"],
         vec!["stop", "ghost"],
         vec!["adopt", "ghost"],
-        vec!["round", "run", "ghost"],
     ] {
         world
             .run(&args)
@@ -118,7 +116,7 @@ fn every_optional_form_the_contract_names_reaches_the_binary() {
     let plan = plan.to_string_lossy().into_owned();
 
     for args in [
-        vec!["start", &plan, "--detach", "--round-budget", "14400"],
+        vec!["start", &plan, "--detach", "--dag-graph", "off"],
         vec!["start", &plan, "--detach", "--heartbeat-interval", "1800"],
     ] {
         world.run(&args).exited(0);
@@ -148,10 +146,9 @@ fn a_missing_required_argument_is_a_usage_error() {
     for args in [
         vec!["attest", "run-1"],
         vec!["surface", "run-1", "--kind", "check-in"],
-        vec!["round"],
-        // Both budgets are seconds, so a non-numeric value is rejected before
+        vec!["channel"],
+        // The interval is seconds, so a non-numeric value is rejected before
         // anything is launched rather than silently defaulted.
-        vec!["start", "plan.json", "--round-budget", "forever"],
         vec!["start", "plan.json", "--heartbeat-interval", "half-hourly"],
     ] {
         let output = onepipeline().args(&args).output().expect("it runs");

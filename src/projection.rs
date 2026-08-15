@@ -1,15 +1,13 @@
-//! Folding the journal into the state a round, a transition, and every view
-//! read from.
+//! Folding the journal into the state the engine loop and every view read from.
 //!
-//! **The plan of record is the graph the round executed.** A round's
-//! `round-NN/plan.json` is its launch record and is never rewritten, so a
-//! transition that derived the next round from it would lose every live edit the
-//! reconciler committed — a `retry` replacement's new id, an amended budget, a
-//! branch pin. This module folds the round's own authoritative journal instead,
-//! and the next round derives from what actually ran.
+//! **The plan of record is the graph the run is executing.** The plan file is
+//! the launch record and is never rewritten, so a reader that derived the live
+//! graph from it would lose every live edit the reconciler committed — a `retry`
+//! replacement's new id, an amended budget, a branch pin. This module folds the
+//! run's own authoritative journal instead.
 //!
-//! A journal that cannot be folded strictly falls back to the launch record,
-//! which is the same state that makes a recovery report rather than guess.
+//! There is no round here, and nothing is per-round: the frontier is continuous,
+//! so what a node last recorded stands until it records something else.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -44,30 +42,15 @@ pub enum StopState {
 /// Everything the journal says about a run.
 #[derive(Debug, Clone, Default)]
 pub struct RunState {
-    /// The desired graph the current round is converging toward, with every
-    /// committed edit applied.
+    /// The desired graph the loop is converging toward, with every committed
+    /// edit applied.
     pub graph: Graph,
     /// The plan the run was launched with, for the fields a graph does not
     /// carry — the goal and the name.
     pub plan: Option<Plan>,
-    /// The statuses the journal recorded *in the current round*. A node absent
-    /// from this map has not started, which is what `reparent` and `cancel`
-    /// test for.
+    /// The statuses the journal recorded. A node absent from this map has not
+    /// started, which is what `reparent` and `cancel` test for.
     pub recorded: BTreeMap<String, NodeStatus>,
-    /// The nodes a `retry` replaced *in the current round*.
-    ///
-    /// Per-round, like [`recorded`](Self::recorded). A superseded node stays in
-    /// the executed graph so the round's own record still names it, and the
-    /// transition then removes it exactly as an explicit `drop` would — this is
-    /// what tells the transition which nodes those are.
-    ///
-    /// Kept as its own set rather than read back off a `cancelled` status,
-    /// because that status is not only supersession's: a `cancel` parks a node
-    /// **and** stops its dispatch, so a node parked while it was running settles
-    /// `cancelled` too. Read off the status, the transition deleted the node a
-    /// `requeue` was supposed to bring back, and freed its dependents behind it
-    /// by taking their gate away with it.
-    pub superseded: BTreeSet<String>,
     /// Each settled node's outcome, when it recorded one.
     pub outcomes: BTreeMap<String, String>,
     /// The branch each settled node left behind, as its dispatch reported it.
@@ -80,13 +63,14 @@ pub struct RunState {
     pub change_urls: BTreeMap<String, String>,
     /// Whether each published node's change reached its base branch.
     ///
-    /// Kept across the round boundary, like [`branches`](Self::branches) and
-    /// [`change_urls`](Self::change_urls) and unlike
-    /// [`outcomes`](Self::outcomes): an unmerged change request outlives the
-    /// round that opened it, and a fact cleared at the transition would report
-    /// every earlier round's open change as one nobody had anything to say
-    /// about. A node that settles again overwrites its own entry, which is the
-    /// only way the answer changes.
+    /// Written only by a settlement that observed one, like
+    /// [`branches`](Self::branches) and [`change_urls`](Self::change_urls): an
+    /// unmerged change request outlives the settlement that opened it, so the
+    /// fact stands until the node settles again and overwrites its own entry,
+    /// which is the only way the answer changes. A landing dropped on any other
+    /// event would report an open change as one nobody had anything to say
+    /// about, which is precisely when a planner starts deciding there is nothing
+    /// left to do.
     pub landings: BTreeMap<String, Landing>,
     /// The declared steps each node's attempt finished.
     ///
@@ -97,12 +81,11 @@ pub struct RunState {
     pub dispatched_at: BTreeMap<String, u64>,
     /// When each node settled, in epoch milliseconds.
     pub settled_at: BTreeMap<String, u64>,
-    /// The current round number. `0` before the first round starts.
-    pub round: u64,
-    /// Whether a round is executing. Edits require a live round.
-    pub round_open: bool,
     /// Human actions attested across the whole run.
     pub attestations: BTreeSet<String>,
+    /// The decision points reported as holding dependents back and not yet
+    /// reported as released, by the reference that clears each.
+    pub decisions_pending: BTreeMap<String, PendingDecision>,
     /// The completion reasons the planner has journalled.
     pub completion_requests: Vec<String>,
     /// Surfaces sent, and surfaces a planner actually read.
@@ -124,8 +107,8 @@ pub struct RunState {
     /// Where each resolved upstream had got when this run first resolved it.
     ///
     /// Folded from the journal rather than held in a process, because a watch
-    /// outlives the round that captured it: a baseline this run re-derived every
-    /// round would never see the upstream move.
+    /// outlives the process that captured it: a baseline a fresh driver
+    /// re-derived would never see the upstream move.
     pub cross_dag_baselines: BTreeMap<String, u64>,
     /// The `(dependency, consumer)` pairs already reported as moved, so a watch
     /// reports once rather than once per reconcile pass.
@@ -138,22 +121,41 @@ pub struct RunState {
     /// waiting rather than inventing an answer about it. `crate::crossdag` is
     /// what fills this in.
     pub cross_dag: BTreeMap<String, NodeStatus>,
-    /// The notes each node was given *during the round just finished*.
+    /// The notes still owed to a node's **next dispatch**.
     ///
-    /// A note reports state observed while one attempt ran, so it is stale as
-    /// soon as the next attempt moves. The transition sets this set on the next
-    /// plan rather than appending to it, which is what stops a node
-    /// accumulating instructions.
-    pub notes_this_round: BTreeMap<String, String>,
+    /// A note carries exactly one dispatch: it attaches to the node's next one
+    /// and is consumed when that dispatch takes it, so a correction is stated
+    /// once rather than repeated at every later attempt. A note the running turn
+    /// already took never enters this set at all.
+    pub pending_context: BTreeMap<String, String>,
     /// What each node's dispatch is doing *now*, from the relayed stream.
     ///
     /// The one question no event of this crate's own can answer: a
     /// `node-dispatched` says a dispatch started and nothing after it, so a node
     /// in flight for half an hour reads the same whether it is working or
     /// wedged. The siblings say the rest, and this is where it is read.
-    /// Per-round, like [`recorded`](Self::recorded): a count carried across a
-    /// round boundary would describe an attempt that is over.
+    ///
+    /// Cumulative per node, because execution is: a node is dispatched, retried,
+    /// and requeued within one continuous run, and what the store holds for it
+    /// is everything it has recorded. How long the *current* attempt has been
+    /// going is [`dispatched_at`](Self::dispatched_at), which a view reports
+    /// beside this.
     pub activity: BTreeMap<String, NodeActivity>,
+}
+
+/// A decision point a driver reported as holding dependents back and has not
+/// reported as released.
+///
+/// Folded from the journal rather than held in a process, because a decision
+/// outlives the driver that reported it: an adoption picks up a run parked on
+/// one, and a fresh loop that did not know what its predecessor was holding
+/// would clear it silently — the pause reported, the release never.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PendingDecision {
+    /// What kind of decision it is, in the vocabulary its raiser used.
+    pub kind: String,
+    /// The nodes it was reported as holding back.
+    pub unblocks: Vec<String>,
 }
 
 /// What one node's dispatch has recorded, and what it last said it was doing.
@@ -194,6 +196,21 @@ impl RunState {
             recorded: self.recorded.clone(),
             attestations: self.attestations.clone(),
         }
+    }
+
+    /// Whether a ready human action is outstanding: one nobody has attested.
+    ///
+    /// Half of what makes a stalled run *waiting on a person* rather than
+    /// abandoned, re-derived from the graph rather than from any round state. The
+    /// other half is a blocking surface, which lives in the channel rather than
+    /// the graph and so cannot be read here — [`views::decision_outstanding`] is
+    /// the whole question, and every verdict about a stalled run asks that one.
+    ///
+    /// [`views::decision_outstanding`]: crate::views::decision_outstanding
+    pub fn awaiting_human_action(&self) -> bool {
+        self.statuses()
+            .values()
+            .any(|status| *status == NodeStatus::Waiting)
     }
 
     /// Every node's status, with the derived gates recomputed against the graph
@@ -245,30 +262,22 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
             }
         }
         Some(journal::PipelineKind::ConcurrentAcknowledged) => {}
-        Some(journal::PipelineKind::RoundStarted) => {
-            state.round = event.labels.round.unwrap_or(state.round + 1);
-            state.round_open = true;
-            // A round's recorded statuses are its own: the previous round's
-            // settlements are folded into the graph it was handed, not carried
-            // as live frontier state.
-            state.recorded.clear();
-            state.superseded.clear();
-            state.outcomes.clear();
-            state.notes_this_round.clear();
-            state.activity.clear();
-            if let Some(plan) = plan_of(payload) {
-                state.graph = Graph::from_plan(&plan);
-                if state.plan.is_none() {
-                    state.plan = Some(plan);
-                }
-            }
-        }
-        Some(journal::PipelineKind::RoundFinished) => state.round_open = false,
+        // A node becoming ready changes nothing about the state: it is derived
+        // from the graph and the recorded settlements, and this record is how a
+        // reader sees the moment it happened.
+        Some(journal::PipelineKind::NodeReady) => {}
         Some(journal::PipelineKind::NodeDispatched) => {
             if let Some(node) = &event.labels.node {
                 state.recorded.insert(node.clone(), NodeStatus::Running);
                 if let Some(ts) = millis_of(&event.ts) {
                     state.dispatched_at.insert(node.clone(), ts);
+                }
+                // The note rode this dispatch, so it is spent. Carrying it into
+                // a later one would repeat a correction the worker has already
+                // been given.
+                state.pending_context.remove(node);
+                if let Some(dispatched) = state.graph.get_mut(node) {
+                    dispatched.context = None;
                 }
             }
         }
@@ -286,9 +295,9 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
             if let Some(outcome) = payload.get("outcome").and_then(Value::as_str) {
                 state.outcomes.insert(node.clone(), outcome.to_string());
             }
-            // What the dispatch left behind, which nothing else records: the
-            // round result is derived from this fold, and a later round's
-            // continuation has no other way to find the branch the work is on.
+            // What the dispatch left behind, which nothing else records: a
+            // later continuation has no other way to find the branch the work
+            // is on.
             if let Some(branch) = payload.get("branch").and_then(Value::as_str) {
                 state.branches.insert(node.clone(), branch.to_string());
             }
@@ -309,8 +318,7 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
             // the node with none, which reads as nothing observed.
             //
             // llmlint: ignore-block[changed_behavior_has_e2e] no invocation a user can type
-            // reaches either half — an unreadable value needs a journal a *newer build* wrote,
-            // and the cross-round retention needs a node the transition does not re-dispatch.
+            // reaches this half: an unreadable value needs a journal a *newer build* wrote.
             // Held by this module's fold test instead; what a user can reach is held in
             // `tests/e2e/lifecycle.rs`.
             if let Some(landing) = payload
@@ -322,6 +330,9 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
             } // llmlint: ignore-end[changed_behavior_has_e2e]
             if let Some(ts) = millis_of(&event.ts) {
                 state.settled_at.insert(node.clone(), ts);
+            }
+            if let Some(status) = status {
+                pin_preserved_branch(state, node, status);
             }
         }
         Some(journal::PipelineKind::EditCommitted) => {
@@ -346,12 +357,10 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
                     // count one request twice.
                     Operation::CompletionRequested { .. } => {}
                     Operation::RetryRequested { node, .. } => {
-                        // The superseded node stays in the executed graph,
-                        // cancelled, so the transition removes it exactly as an
-                        // explicit `drop` would — and it is named here rather
-                        // than inferred from that status, which a park shares.
+                        // What the supersession did to the node it replaced. The
+                        // node itself leaves the graph with the same edit, so
+                        // this is what the run's record says became of it.
                         state.recorded.insert(node.clone(), NodeStatus::Cancelled);
-                        state.superseded.insert(node.clone());
                     }
                     Operation::NodeParked { node } => {
                         state.recorded.insert(node.clone(), NodeStatus::Parked);
@@ -360,15 +369,15 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
                         state.recorded.remove(node);
                     }
                     // Only a note that is still owed to a dispatch. One the
-                    // running turn already took is read, and carrying it into
-                    // the next round would re-state a correction the worker has
-                    // acted on.
+                    // running turn already took has been read, and holding it
+                    // for the next dispatch would re-state a correction the
+                    // worker has acted on.
                     Operation::ContextAdded {
                         node,
                         note,
                         delivery: edits::Delivery::Deferred,
                     } => {
-                        state.notes_this_round.insert(node.clone(), note.clone());
+                        state.pending_context.insert(node.clone(), note.clone());
                     }
                     Operation::ContextAdded { .. } => {}
                     _ => {}
@@ -388,6 +397,47 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
                 state.completion_requests.push(reason.to_string());
             }
         }
+        // A fresh driver means no dispatch the previous one started survives:
+        // the process that was running them is gone, and this crate's dispatches
+        // are threads of that process. A node still recorded `running` would
+        // otherwise be a node nothing is running and nothing will ever settle —
+        // never ready, so never dispatched again, and never terminal, so the
+        // loop that adopted it would spin on it forever. The record stands as
+        // history; what it means for the *frontier* ends here.
+        Some(journal::PipelineKind::DriverAdopted) => {
+            state
+                .recorded
+                .retain(|_, status| *status != NodeStatus::Running);
+        }
+        Some(journal::PipelineKind::DecisionPending) => {
+            if let Some(reference) = payload.get("reference").and_then(Value::as_str) {
+                state.decisions_pending.insert(
+                    reference.to_string(),
+                    PendingDecision {
+                        kind: payload
+                            .get("kind")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                        unblocks: payload
+                            .get("unblocks")
+                            .and_then(Value::as_array)
+                            .map(|held| {
+                                held.iter()
+                                    .filter_map(Value::as_str)
+                                    .map(str::to_string)
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                    },
+                );
+            }
+        }
+        Some(journal::PipelineKind::DecisionCleared) => {
+            if let Some(reference) = payload.get("reference").and_then(Value::as_str) {
+                state.decisions_pending.remove(reference);
+            }
+        }
         Some(journal::PipelineKind::PlannerSurfaceQueued) => state.surfaces_queued += 1,
         Some(journal::PipelineKind::PlannerSurfaced) => {
             state.surfaces_read += 1;
@@ -400,7 +450,6 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
                 | journal::StopTeardown::PartlySignalled
                 | journal::StopTeardown::Elsewhere => StopState::WorkersUndetermined,
             };
-            state.round_open = false;
         }
         Some(journal::PipelineKind::CrossDagSatisfied) => {
             if let (Some(dependency), Some(last)) = (
@@ -431,6 +480,55 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
         }
         _ => {}
     }
+}
+
+/// Statuses whose work is still on the branch the attempt left behind.
+///
+/// A node that settled one of these ran, committed, and stopped — so the branch
+/// holds work, and anything that runs the node again has to continue it rather
+/// than cut a fresh one beside it. `done` never reaches here, and `waiting` and
+/// `skipped` never dispatched, so there is nothing to preserve.
+fn preserves_its_branch(status: NodeStatus) -> bool {
+    matches!(
+        status,
+        NodeStatus::Failed | NodeStatus::Cancelled | NodeStatus::Parked
+    )
+}
+
+/// Pin a settled node to the branch its attempt left behind.
+///
+/// Without this a `requeue` cuts a fresh branch beside committed work nothing
+/// points at any more: the publication that failed is retried against an empty
+/// tree, and the branch that holds the work is left for a person to find. It is
+/// folded rather than held in a process, because the graph a later driver reads
+/// is this fold and nothing else.
+///
+/// A `branch` the *planner* wrote wins outright — naming one is a decision
+/// somebody made after reading the result — and the `resume` follows it rather
+/// than pointing somewhere else, which is the same agreement `retry` refuses to
+/// break.
+fn pin_preserved_branch(state: &mut RunState, id: &str, status: NodeStatus) {
+    if !preserves_its_branch(status) {
+        return;
+    }
+    let Some(preserved) = state.branches.get(id).cloned() else {
+        return;
+    };
+    let completed = state.completed_steps.get(id).cloned().unwrap_or_default();
+    let Some(node) = state.graph.get_mut(id) else {
+        return;
+    };
+    let branch = node.branch.clone().unwrap_or(preserved);
+    node.resume = Some(crate::plan::Resume {
+        // The checkpoint is the sibling's to name; this crate records the branch
+        // it was told about and nothing it was not.
+        checkpoint: node.resume.as_ref().and_then(|r| r.checkpoint.clone()),
+        branch: branch.clone(),
+        // What the attempt actually finished, so a continuation re-runs only
+        // what is left.
+        completed_steps: completed,
+    });
+    node.branch = Some(branch);
 }
 
 /// Fold one relayed envelope into the node's live activity.
@@ -596,7 +694,7 @@ mod tests {
             kind: kind.into(),
             labels: Labels {
                 node: node.map(str::to_string),
-                ..labels("demo", Some(1), None)
+                ..labels("demo", None)
             },
             payload: payload(fields),
             artifacts: Vec::new(),
@@ -651,17 +749,18 @@ mod tests {
         assert!(millis_of("2000-02-29T00:00:00.000Z").is_some(), "2000 is");
     }
 
-    /// A landing survives the round boundary, and an unreadable one records
-    /// nothing.
+    /// A landing outlives the dispatch that recorded it, only a re-settlement
+    /// moves it, and an unreadable one records nothing.
     ///
-    /// The boundary is the point. `outcomes` is per-round because it describes
-    /// the attempt that just ran, but an unmerged change request outlives every
-    /// round after the one that opened it — so a landing cleared at the
-    /// transition would have the run stop mentioning the change on the round
-    /// after it was published, which is precisely when a planner starts deciding
-    /// there is nothing left to do.
+    /// Execution is continuous, so the only thing that can change what this run
+    /// says about a published change is the node settling again. An open change
+    /// request that stopped being reported while the run carried on is precisely
+    /// when a planner starts deciding there is nothing left to do, and a landing
+    /// a *newer* build spelled a word this one cannot read has to fold as
+    /// nothing observed rather than as a guess.
     #[test]
-    fn a_landing_outlives_the_round_that_recorded_it_and_an_unreadable_one_records_nothing() {
+    fn a_landing_outlives_its_dispatch_moves_only_on_a_re_settlement_and_an_unreadable_one_records_nothing(
+    ) {
         let plan = plan_of_nodes(vec![agent("open", &[]), agent("guessy", &[])]);
         let settled = |seq: u64, node: &str, landing: Value| {
             pipeline(
@@ -682,47 +781,45 @@ mod tests {
                 None,
                 &[("plan", json!(plan))],
             ),
-            pipeline(
-                journal::PipelineKind::RoundStarted,
-                1,
-                None,
-                &[("plan", json!(plan))],
-            ),
-            settled(2, "open", json!("unlanded")),
+            settled(1, "open", json!("unlanded")),
             // A word a newer writer used and this build cannot interpret.
-            settled(3, "guessy", json!("half-landed")),
-            pipeline(journal::PipelineKind::RoundFinished, 4, None, &[]),
-            Envelope {
-                labels: labels("demo", Some(2), None),
-                ..pipeline(
-                    journal::PipelineKind::RoundStarted,
-                    5,
-                    None,
-                    &[("plan", json!(plan))],
-                )
-            },
+            settled(2, "guessy", json!("half-landed")),
+            // Work the loop kept doing after both settled. None of it is about
+            // either node's change, so neither claim may move.
+            pipeline(journal::PipelineKind::NodeDispatched, 3, Some("later"), &[]),
+            pipeline(
+                journal::PipelineKind::NodeSettled,
+                4,
+                Some("later"),
+                &[("status", json!("done"))],
+            ),
         ];
 
         let state = fold(&events);
-        assert_eq!(state.round, 2, "the fold reached the second round");
         assert_eq!(
             state.landings.get("open"),
             Some(&Landing::Unlanded),
-            "the open change stopped being reported on the round after it opened"
-        );
-        assert!(
-            !state.outcomes.contains_key("open"),
-            "this journey only says something if the round boundary really cleared the outcome"
+            "the open change stopped being reported while the run carried on"
         );
         assert_eq!(
             state.landings.get("guessy"),
             None,
             "a landing this build cannot read was folded as one it could"
         );
+
+        // The one thing that moves it: the node settling again, on a change the
+        // host has since merged.
+        let mut relanded = events;
+        relanded.push(settled(5, "open", json!("landed")));
+        assert_eq!(
+            fold(&relanded).landings.get("open"),
+            Some(&Landing::Landed),
+            "a node that settled again did not overwrite its own landing"
+        );
     }
 
     #[test]
-    fn the_fold_reconstructs_the_graph_the_round_executed() {
+    fn the_fold_reconstructs_the_graph_the_run_is_executing() {
         let plan = plan_of_nodes(vec![agent("build", &[]), agent("ship", &["build"])]);
         let retry = Operation::NodeAdded {
             node: Box::new(agent("build-2", &[])),
@@ -735,12 +832,7 @@ mod tests {
                 None,
                 &[("plan", json!(plan))],
             ),
-            pipeline(
-                journal::PipelineKind::RoundStarted,
-                1,
-                None,
-                &[("plan", json!(plan))],
-            ),
+            pipeline(journal::PipelineKind::NodeReady, 1, Some("build"), &[]),
             pipeline(journal::PipelineKind::NodeDispatched, 2, Some("build"), &[]),
             pipeline(
                 journal::PipelineKind::NodeSettled,
@@ -774,8 +866,6 @@ mod tests {
 
         let state = fold(&events);
         assert!(state.strict);
-        assert_eq!(state.round, 1);
-        assert!(state.round_open);
         assert!(
             state.graph.contains("build-2"),
             "the replacement is not in the plan of record"
@@ -807,17 +897,97 @@ mod tests {
         assert!(!state.strict, "an unfoldable operation was folded anyway");
     }
 
+    /// The frontier is continuous: what a node last recorded stands until it
+    /// records something else, and a settled node stays settled without a round
+    /// boundary to clear it.
     #[test]
-    fn a_new_round_clears_the_previous_rounds_frontier() {
+    fn a_settled_node_keeps_its_status_and_its_dependent_becomes_ready() {
+        let plan = plan_of_nodes(vec![agent("build", &[]), agent("ship", &["build"])]);
+        let state = fold(&[
+            pipeline(
+                journal::PipelineKind::RunStarted,
+                0,
+                None,
+                &[("plan", json!(plan))],
+            ),
+            pipeline(journal::PipelineKind::NodeDispatched, 1, Some("build"), &[]),
+            pipeline(
+                journal::PipelineKind::NodeSettled,
+                2,
+                Some("build"),
+                &[("status", json!("done"))],
+            ),
+        ]);
+        assert_eq!(state.recorded["build"], NodeStatus::Done);
+        assert_eq!(
+            state.statuses()["ship"],
+            NodeStatus::Ready,
+            "a dependent did not become ready on its dependency's settlement"
+        );
+    }
+
+    /// A note carries exactly one dispatch. The dispatch that takes it consumes
+    /// it, so a later attempt is not handed a correction the worker has already
+    /// acted on.
+    #[test]
+    fn a_carried_note_attaches_to_the_next_dispatch_and_is_consumed_by_it() {
         let plan = plan_of_nodes(vec![agent("build", &[])]);
-        let mut second = pipeline(
-            journal::PipelineKind::RoundStarted,
-            3,
+        let note = pipeline(
+            journal::PipelineKind::EditCommitted,
+            1,
+            None,
+            &[(
+                "operations",
+                json!([Operation::ContextAdded {
+                    node: "build".into(),
+                    note: "the gate needs the lockfile".into(),
+                    delivery: edits::Delivery::Deferred,
+                }]),
+            )],
+        );
+        let started = pipeline(
+            journal::PipelineKind::RunStarted,
+            0,
             None,
             &[("plan", json!(plan))],
         );
-        second.labels.round = Some(2);
-        let events = vec![
+        let attached = fold(&[started.clone(), note.clone()]);
+        assert_eq!(
+            attached.pending_context["build"],
+            "the gate needs the lockfile"
+        );
+        assert_eq!(
+            attached
+                .graph
+                .get("build")
+                .expect("build")
+                .context
+                .as_deref(),
+            Some("the gate needs the lockfile"),
+            "the note did not reach the node it is for"
+        );
+
+        let consumed = fold(&[
+            started,
+            note,
+            pipeline(journal::PipelineKind::NodeDispatched, 2, Some("build"), &[]),
+        ]);
+        assert!(
+            !consumed.pending_context.contains_key("build"),
+            "a note outlived the dispatch that took it"
+        );
+        assert_eq!(
+            consumed.graph.get("build").expect("build").context,
+            None,
+            "a note outlived the dispatch that took it"
+        );
+    }
+
+    /// A live delivery is not also owed to the next dispatch.
+    #[test]
+    fn a_note_the_running_turn_took_is_never_owed_to_a_later_dispatch() {
+        let plan = plan_of_nodes(vec![agent("build", &[])]);
+        let state = fold(&[
             pipeline(
                 journal::PipelineKind::RunStarted,
                 0,
@@ -825,27 +995,116 @@ mod tests {
                 &[("plan", json!(plan))],
             ),
             pipeline(
-                journal::PipelineKind::RoundStarted,
+                journal::PipelineKind::EditCommitted,
                 1,
+                None,
+                &[(
+                    "operations",
+                    json!([Operation::ContextAdded {
+                        node: "build".into(),
+                        note: "look at the lockfile".into(),
+                        delivery: edits::Delivery::Live,
+                    }]),
+                )],
+            ),
+        ]);
+        assert!(state.pending_context.is_empty());
+        assert_eq!(state.graph.get("build").expect("build").context, None);
+    }
+
+    /// A driver that takes a run over ends the dispatches the one before it left
+    /// in flight: they were threads of a process that is gone.
+    ///
+    /// Left recorded as running, such a node is never ready — so nothing
+    /// dispatches it again — and never terminal, so the loop that adopted the
+    /// run spins on it for good. This is the boundary at which the frontier
+    /// learns that.
+    #[test]
+    fn an_adoption_ends_the_dispatches_the_driver_before_it_left_running() {
+        let plan = plan_of_nodes(vec![agent("build", &[]), agent("ship", &["build"])]);
+        let events = vec![
+            pipeline(
+                journal::PipelineKind::RunStarted,
+                0,
+                None,
+                &[("plan", json!(plan))],
+            ),
+            pipeline(journal::PipelineKind::NodeDispatched, 1, Some("build"), &[]),
+        ];
+        let held = fold(&events);
+        assert_eq!(held.recorded["build"], NodeStatus::Running);
+        assert_eq!(held.statuses()["build"], NodeStatus::Running);
+
+        let mut adopted = events;
+        adopted.push(pipeline(
+            journal::PipelineKind::DriverAdopted,
+            2,
+            None,
+            &[("adoption", json!(1))],
+        ));
+        let state = fold(&adopted);
+        assert!(!state.recorded.contains_key("build"));
+        assert_eq!(
+            state.statuses()["build"],
+            NodeStatus::Ready,
+            "a node the dead driver left running was not offered to the fresh one"
+        );
+    }
+
+    /// A node that failed with work on a branch is pinned to it, so whatever
+    /// runs it again continues that branch rather than cutting a fresh one
+    /// beside committed work nothing points at.
+    #[test]
+    fn a_settlement_that_preserved_a_branch_pins_the_node_to_it() {
+        let plan = plan_of_nodes(vec![agent("build", &[])]);
+        let state = fold(&[
+            pipeline(
+                journal::PipelineKind::RunStarted,
+                0,
                 None,
                 &[("plan", json!(plan))],
             ),
             pipeline(
                 journal::PipelineKind::NodeSettled,
-                2,
+                1,
                 Some("build"),
-                &[("status", json!("failed"))],
+                &[
+                    ("status", json!("failed")),
+                    ("branch", json!("onepipeline/build")),
+                    ("completed_steps", json!(["implement"])),
+                ],
             ),
-            pipeline(journal::PipelineKind::RoundFinished, 4, None, &[]),
-            second,
-        ];
-        let state = fold(&events);
-        assert_eq!(state.round, 2);
-        assert!(state.round_open);
-        assert!(
-            state.recorded.is_empty(),
-            "round 1's frontier leaked into round 2"
-        );
+        ]);
+        let node = state.graph.get("build").expect("build");
+        assert_eq!(node.branch.as_deref(), Some("onepipeline/build"));
+        let resume = node.resume.as_ref().expect("the node resumes its branch");
+        assert_eq!(resume.branch, "onepipeline/build");
+        assert_eq!(resume.completed_steps, vec!["implement".to_string()]);
+    }
+
+    /// A node that finished has nothing to preserve: pinning one would make
+    /// every later reader believe there is work on a branch nobody wrote.
+    #[test]
+    fn a_node_that_completed_is_not_pinned_to_a_branch_to_continue() {
+        let plan = plan_of_nodes(vec![agent("build", &[])]);
+        let state = fold(&[
+            pipeline(
+                journal::PipelineKind::RunStarted,
+                0,
+                None,
+                &[("plan", json!(plan))],
+            ),
+            pipeline(
+                journal::PipelineKind::NodeSettled,
+                1,
+                Some("build"),
+                &[
+                    ("status", json!("done")),
+                    ("branch", json!("onepipeline/build")),
+                ],
+            ),
+        ]);
+        assert_eq!(state.graph.get("build").expect("build").resume, None);
     }
 
     #[test]
@@ -894,7 +1153,6 @@ mod tests {
         assert_eq!(state.completion_requests, vec!["verified".to_string()]);
         assert_eq!(state.cross_dag_watches["run:o#n"], 1);
         assert!(state.stop_recorded());
-        assert!(!state.round_open);
     }
 
     #[test]
@@ -981,25 +1239,27 @@ mod tests {
         assert_eq!(state.activity["build"].events, 2);
     }
 
+    /// Activity is the node's whole record, not one attempt's: a dispatch that
+    /// starts again does not erase what the node has already been seen doing.
     #[test]
-    fn a_new_round_starts_the_activity_count_over() {
-        let plan = plan_of_nodes(vec![agent("build", &[])]);
-        let mut relayed = pipeline(journal::PipelineKind::NodeDispatched, 1, Some("build"), &[]);
-        relayed.source = Source::Agentgraph;
-        relayed.kind = crate::event::EventKind(TURN_ACTIVITY.into());
-        let mut second = pipeline(
-            journal::PipelineKind::RoundStarted,
-            2,
-            None,
-            &[("plan", json!(plan))],
-        );
-        second.labels.round = Some(2);
-
-        let state = fold(&[relayed, second]);
-        assert!(
-            state.activity.is_empty(),
-            "a finished attempt's activity was carried into the next round"
-        );
+    fn a_nodes_activity_accumulates_across_the_attempts_it_was_dispatched_for() {
+        let activity = |seq: u64| {
+            let mut event = pipeline(
+                journal::PipelineKind::NodeDispatched,
+                seq,
+                Some("build"),
+                &[],
+            );
+            event.source = Source::Agentgraph;
+            event.kind = crate::event::EventKind(TURN_ACTIVITY.into());
+            event
+        };
+        let state = fold(&[
+            activity(1),
+            pipeline(journal::PipelineKind::NodeDispatched, 2, Some("build"), &[]),
+            activity(3),
+        ]);
+        assert_eq!(state.activity["build"].events, 2);
     }
 
     #[test]

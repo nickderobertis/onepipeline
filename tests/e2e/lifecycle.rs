@@ -1,6 +1,6 @@
 //! A lifecycle node is this crate composing a `onevcs` session with the
 //! dispatches that work in it. The branch, the worktree, the gate, and the
-//! publication are all the sibling's; the DAG, the rounds, and the pr-author
+//! publication are all the sibling's; the DAG, the loop, and the pr-author
 //! composition are this one's.
 //!
 //! Every journey here drives the **real** repository side: `onevcs` is a library
@@ -29,30 +29,24 @@ fn settle(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
         .run(&["start", &path.to_string_lossy(), "--attach"])
         .settled();
     world.until("the run to settle", |world| {
-        !world.events_of(name, "round-finished").is_empty()
+        world.run_file(name, "result.json").is_file()
     });
     name.to_string()
 }
 
-/// Run one round from this test rather than from the driver, and keep what it
-/// said.
+/// Drive one run from this test, attached, and keep what it said.
 ///
-/// The orchestrator member runs `round run` as a subprocess of a subprocess, so
-/// its diagnostics reach no descriptor a test can read. This is the same command
-/// that member runs, with its stderr in hand.
+/// A detached driver's diagnostics go to a log rather than to a descriptor this
+/// test holds. Attached, the loop runs in the process this command started, so
+/// what it says lands on the stderr the assertion reads.
 fn driven(
     world: &World,
     name: &str,
     nodes: Vec<serde_json::Value>,
 ) -> (String, crate::harness::Run) {
-    world.script("driver.wait", "hold");
     let path = world.plan(name, &plan_of(name, nodes));
-    world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
-    let round = world.run(&["round", "run", name]);
-    world.release("driver.go");
-    (name.to_string(), round)
+    let launched = world.run(&["start", &path.to_string_lossy(), "--attach"]);
+    (name.to_string(), launched)
 }
 
 /// A repository whose gate passes, publishing straight onto its base.
@@ -219,7 +213,7 @@ fn a_lifecycle_node_opens_a_session_works_in_it_and_publishes_through_onevcs() {
         "the publication is missing from the merged store"
     );
 
-    let result = world.run_json(&run, "round-01/result.json");
+    let result = world.run_json(&run, "result.json");
     assert_eq!(
         result["nodes"][0]["status"],
         "done",
@@ -295,10 +289,7 @@ fn several_steps_share_one_branch_and_run_serially_in_topological_order() {
         branches.windows(2).all(|pair| pair[0] == pair[1]),
         "the steps did not share one branch: {branches:?}"
     );
-    assert_eq!(
-        world.run_json(&run, "round-01/result.json")["state"],
-        "complete"
-    );
+    assert_eq!(world.run_json(&run, "result.json")["state"], "complete");
 }
 
 /// A workstream whose session record goes missing between two steps.
@@ -334,14 +325,10 @@ fn a_session_record_that_cannot_be_read_falls_back_to_opening_a_session() {
         ],
     });
     let path = world.plan("norecord", &plan_of("norecord", vec![node]));
-    world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
-
-    // The round runs from here rather than from the driver, so the fallback's
-    // own words land on a descriptor this test holds.
-    let round = world
-        .cmd(&["round", "run", "norecord"])
+    // Attached, so the fallback's own words land on a descriptor this test
+    // holds: the loop runs in the process this command started.
+    let driving = world
+        .cmd(&["start", &path.to_string_lossy(), "--attach"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -368,7 +355,7 @@ fn a_session_record_that_cannot_be_read_falls_back_to_opening_a_session() {
     // deliberately, because a closed session is still addressable. So there is nothing
     // else to reach it with. It fails loudly rather than silently if the sibling
     // relocates its records, and everything asserted afterwards is through the binary:
-    // the round is `onepipeline round run`, and the claim is what it said and what
+    // the run is `onepipeline start --attach`, and the claim is what it said and what
     // sessions it recorded.
     let record = world
         .onevcs_home()
@@ -379,8 +366,7 @@ fn a_session_record_that_cannot_be_read_falls_back_to_opening_a_session() {
     // llmlint: ignore-end[tests_mirror_real_usage]
 
     world.release("service.implement.go");
-    let settled = round.wait_with_output().expect("the round runs");
-    world.release("driver.go");
+    let settled = driving.wait_with_output().expect("the run drives");
     let said = String::from_utf8_lossy(&settled.stderr).into_owned();
 
     assert!(
@@ -399,14 +385,14 @@ fn a_session_record_that_cannot_be_read_falls_back_to_opening_a_session() {
         why(&world, "norecord")
     );
     assert_eq!(opened[0], token, "{opened:?}");
-    // And the round settled rather than the driver going down with it. It
+    // And the run settled rather than the driver going down with it. It
     // settles *failed*: the sibling reclaims a run root nothing holds a lease
     // on, so opening the second session took the first one's workspace with it
     // — divergence 14 in `docs/contract-divergences.md`, and the reason a node
     // opens one session when it can.
     assert!(
-        !world.events_of("norecord", "round-finished").is_empty(),
-        "the round never settled:\n{said}"
+        world.run_file("norecord", "result.json").is_file(),
+        "the run never settled:\n{said}"
     );
 }
 
@@ -424,7 +410,7 @@ fn a_human_step_holds_the_workstream_rather_than_being_inferred() {
     });
     let run = settle(&world, "gatedstream", vec![node]);
 
-    let result = world.run_json(&run, "round-01/result.json");
+    let result = world.run_json(&run, "result.json");
     assert_eq!(result["nodes"][0]["status"], "waiting", "{result}");
     // Nothing was published: the workstream is held at its human step, so the
     // sibling never ran a gate and never pushed.
@@ -435,6 +421,28 @@ fn a_human_step_holds_the_workstream_rather_than_being_inferred() {
             "a workstream published past its human step: {kinds:?}"
         );
     }
+
+    // It is a decision point like any other: a workstream stopped at a human
+    // step waits on a person exactly as a `kind: human` node does, and the same
+    // `attest` clears it. Reported as one, and released as one.
+    let pending = world.events_of(&run, "decision-pending");
+    assert_eq!(pending.len(), 1, "{pending:?}");
+    assert_eq!(pending[0]["payload"]["reference"], "service");
+    assert_eq!(pending[0]["payload"]["kind"], "attestation");
+
+    world.run(&["attest", &run, "service"]).exited(0);
+    // The run had settled on the decision, so a fresh driver picks it up — and
+    // finds the action recorded, which is what releases it.
+    world.run(&["adopt", &run]).exited(0);
+    let cleared = world.events_of(&run, "decision-cleared");
+    assert_eq!(cleared.len(), 1, "{cleared:?}");
+    assert_eq!(cleared[0]["payload"]["reference"], "service");
+    assert_eq!(
+        world.run_json(&run, "result.json")["state"],
+        "complete",
+        "the attested workstream did not settle:\n{}",
+        why(&world, &run)
+    );
 }
 
 #[test]
@@ -464,10 +472,7 @@ fn the_pr_author_dispatch_drafts_the_title_and_never_blocks_publication() {
         repo.base_commits(&world),
         why(&world, &run)
     );
-    assert_eq!(
-        world.run_json(&run, "round-01/result.json")["state"],
-        "complete"
-    );
+    assert_eq!(world.run_json(&run, "result.json")["state"], "complete");
 }
 
 #[test]
@@ -506,7 +511,7 @@ fn a_drafting_failure_falls_back_deterministic_and_still_publishes() {
     world.script("service.pr-author.fail", "1");
     let run = settle(&world, "fallback", vec![lifecycle("service", &[])]);
 
-    let result = world.run_json(&run, "round-01/result.json");
+    let result = world.run_json(&run, "result.json");
     assert_eq!(
         result["state"],
         "complete",
@@ -581,7 +586,7 @@ fn a_publications_own_records_reach_the_journal_while_it_is_still_publishing() {
 
     world.release("gate.go");
     world.until("the run to settle", |world| {
-        world.run(&["results", "watched"]).stdout.contains("done")
+        world.run_file("watched", "result.json").is_file()
     });
     // And the rest of the publication landed too, exactly once each: `monitor`
     // renders one line per event, so a record relayed twice — by a follow and by
@@ -704,7 +709,7 @@ fn a_publication_that_its_gate_rejects_settles_the_node_failed_by_name() {
     world.script("service.work", "the worker wrote this\n");
     let run = settle(&world, "rejected", vec![lifecycle("service", &[])]);
 
-    let result = world.run_json(&run, "round-01/result.json");
+    let result = world.run_json(&run, "result.json");
     assert_eq!(
         result["nodes"][0]["status"],
         "failed",
@@ -740,7 +745,7 @@ fn a_title_the_sibling_will_not_commit_under_fails_the_node_before_it_publishes(
     ));
     let run = settle(&world, "longtitle", vec![node]);
 
-    let result = world.run_json(&run, "round-01/result.json");
+    let result = world.run_json(&run, "result.json");
     assert_eq!(
         result["nodes"][0]["status"],
         "failed",
@@ -778,7 +783,7 @@ fn a_node_whose_publication_failed_continues_the_branch_it_preserved() {
     world.script("service.work", "the worker wrote this\n");
     let run = settle(&world, "preserved", vec![lifecycle("service", &[])]);
 
-    let result = world.run_json(&run, "round-01/result.json");
+    let result = world.run_json(&run, "result.json");
     assert_eq!(
         result["nodes"][0]["status"],
         "failed",
@@ -805,18 +810,43 @@ fn a_node_whose_publication_failed_continues_the_branch_it_preserved() {
         .expect("the failed node named the branch it left behind")
         .to_string();
 
-    world.run(&["round", "next", &run]).exited(0);
-
-    // Carried forward *pinned*. A continuation that cut a fresh branch would
-    // redo work that is already committed and leave the preserved branch for a
-    // person to find — the failure a planner otherwise catches by hand-writing
-    // the pin, or pays for twice by missing it.
-    let next = world.run_json(&run, "round-02/plan.json");
-    let node = &next["tasks"][0];
-    assert_eq!(node["id"], "service", "{next}");
-    assert_eq!(node["resume"]["branch"], json!(preserved), "{next}");
+    // A `retry` that names no branch of its own continues the one the failed
+    // attempt left behind. A replacement that cut a fresh branch would redo work
+    // that is already committed and leave the preserved branch for a person to
+    // find — the failure a planner otherwise catches by hand-writing the pin, or
+    // pays for twice by missing it.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({
+                "version": 1,
+                "commands": [{
+                    "op": "retry",
+                    "id": "service",
+                    "node": {"id": "service-2", "repo": "service", "persona": "engineer",
+                             "task": "## What\nPublish again.\n\n## Why\nIt failed.\n\n\
+                                      ## Acceptance criteria\n- published."},
+                }],
+            })
+            .to_string(),
+        )
+        .exited(0);
+    let committed = world
+        .events_of(&run, "edit-committed")
+        .into_iter()
+        .find(|event| event["payload"]["command"]["op"] == "retry")
+        .expect("the retry was committed");
+    let node = committed["payload"]["operations"]
+        .as_array()
+        .expect("operations")
+        .iter()
+        .find(|operation| operation["kind"] == "node-added")
+        .expect("the replacement was added")["node"]
+        .clone();
+    assert_eq!(node["id"], "service-2", "{node}");
+    assert_eq!(node["resume"]["branch"], json!(preserved), "{node}");
     // The pin and the resume agree, which is the same invariant `retry` holds.
-    assert_eq!(node["branch"], json!(preserved), "{next}");
+    assert_eq!(node["branch"], json!(preserved), "{node}");
     // And the branch the plan points at is one the repository actually holds:
     // a pin naming a branch nobody kept is a continuation that starts from
     // nothing while reporting that it resumed.
@@ -837,7 +867,7 @@ fn a_published_node_reports_where_a_human_reads_the_change_it_opened() {
     // The URL the sibling handed back is the one piece of evidence a person
     // actually opens, and until it reaches the run's own record it lives only
     // inside a journal payload nobody reads by hand.
-    let node = world.run_json(&run, "round-01/result.json")["nodes"][0].clone();
+    let node = world.run_json(&run, "result.json")["nodes"][0].clone();
     let published = node["change_url"]
         .as_str()
         .unwrap_or_else(|| panic!("{node}\n{}", why(&world, &run)))
@@ -883,7 +913,7 @@ fn a_publication_that_had_nothing_to_publish_says_so_rather_than_claiming_it_lan
     // carries exactly what its base does.
     let run = settle(&world, "empty", vec![lifecycle("service", &[])]);
 
-    let node = world.run_json(&run, "round-01/result.json")["nodes"][0].clone();
+    let node = world.run_json(&run, "result.json")["nodes"][0].clone();
     // Done: nothing failed, and there was nothing to do.
     assert_eq!(node["status"], "done", "{node}\n{}", why(&world, &run));
     assert_eq!(node["outcome"], "no-changes", "{node}");
@@ -919,7 +949,7 @@ fn a_change_the_host_merged_settles_the_node_on_the_merge_rather_than_the_reques
     world.script("service.work", "the worker wrote this\n");
     let run = settle(&world, "landed", vec![lifecycle("service", &[])]);
 
-    let node = world.run_json(&run, "round-01/result.json")["nodes"][0].clone();
+    let node = world.run_json(&run, "result.json")["nodes"][0].clone();
     assert_eq!(node["status"], "done", "{node}\n{}", why(&world, &run));
     assert_eq!(node["outcome"], "merged", "{node}");
     // The host was observed landing it, which is the one thing that makes a node
@@ -968,9 +998,9 @@ fn a_change_the_host_is_holding_settles_the_node_as_queued() {
     let run = settle(&world, "queued", vec![lifecycle("service", &[])]);
 
     // The host has it and will land it once its checks pass. The node is done —
-    // there is nothing more for this round to do — and it says so as queued
+    // there is nothing more for the run to do with it — and it says so as queued
     // rather than as merged, which would claim the base already carries it.
-    let node = world.run_json(&run, "round-01/result.json")["nodes"][0].clone();
+    let node = world.run_json(&run, "result.json")["nodes"][0].clone();
     assert_eq!(node["status"], "done", "{node}\n{}", why(&world, &run));
     assert_eq!(node["outcome"], "queued", "{node}");
     assert!(
@@ -984,70 +1014,68 @@ fn a_change_the_host_is_holding_settles_the_node_as_queued() {
     assert_eq!(node["landing"], "unlanded", "{node}");
 }
 
-/// The document `round run` prints carries the landing, at a stated version, and
+/// The document a consumer reads carries the landing, at a stated version, and
 /// says nothing where there was nothing to observe.
 ///
-/// This is the **read interface** rather than a file this suite goes looking for:
-/// `round run` writes the round result to stdout, and that is what a consumer
-/// driving the engine parses. `round-NN/result.json` is the same document, and
-/// the journey checks they agree — a version stated on one and not the other
-/// would be a contract with two answers.
+/// This is the **read interface**. Execution is continuous, so there is no round
+/// to serve a result for: the ledger holds one `result.json` per run, rewritten
+/// whenever the driver closes out, and that document is what a consumer driving
+/// the engine parses. Its version is the only statement they get about what
+/// changed in it.
 ///
-/// All three of the landing's cases are read here. The first round carries two:
-/// a change the host is holding, and a plain agent node that published nothing
-/// and therefore carries **no `landing` key at all**. The third — a change
-/// observed on its base — is the second half, under the same policy once the host
-/// lands what it is handed, because a version that round-trips one value and
-/// drops the other is the defect a golden exists to catch.
+/// All three of the landing's cases are read here. The first run carries two: a
+/// change the host is holding, and a plain agent node that published nothing and
+/// therefore carries **no `landing` key at all**. The third — a change observed
+/// on its base — is the second half, under the same policy once the host lands
+/// what it is handed, because a version that round-trips one value and drops the
+/// other is the defect a golden exists to catch.
 ///
-/// Each half gets its own world. The round is run from the test rather than from
-/// the driver, which is what puts its stdout in hand, and the rendezvous holding
-/// that driver is per-world: two halves sharing one would have the second run's
-/// driver take the round before the test could.
+/// Each half gets its own world: the rendezvous holding a run's driver is
+/// per-world, and two halves sharing one would have the second launch wait on the
+/// first run's driver.
 #[test]
-fn the_round_result_a_consumer_reads_states_its_version_and_carries_the_landing() {
-    // The host is holding the change it was handed.
-    let world = World::new("lifecycle-result-contract");
-    world.repository("change-auto", &["true"]);
-    world.script("service.work", "the worker wrote this\n");
-    let (open, round) = driven(
-        &world,
-        "readapi",
-        vec![lifecycle("service", &[]), agent("build", &[])],
-    );
-    let printed = printed_result(&round);
-    assert_eq!(
-        printed["schema_version"], 2,
-        "the round result a consumer parses states no version, or not this one: {printed}"
-    );
-    // The same document, on disk, agreeing with the one that was printed.
-    assert_eq!(
-        world.run_json(&open, "round-01/result.json"),
-        printed,
-        "`round run` printed a different document from the one it recorded"
-    );
-
-    let node = |printed: &serde_json::Value, id: &str| {
-        printed["nodes"]
+fn the_run_result_a_consumer_reads_states_its_version_and_carries_the_landing() {
+    let node = |recorded: &serde_json::Value, id: &str| {
+        recorded["nodes"]
             .as_array()
             .expect("the result carries nodes")
             .iter()
             .find(|node| node["id"] == id)
-            .unwrap_or_else(|| panic!("{id} is missing from {printed}"))
+            .unwrap_or_else(|| panic!("{id} is missing from {recorded}"))
             .clone()
     };
+
+    // The host is holding the change it was handed.
+    let world = World::new("lifecycle-result-contract");
+    world.repository("change-auto", &["true"]);
+    world.script("service.work", "the worker wrote this\n");
+    let (open, launched) = driven(
+        &world,
+        "readapi",
+        vec![lifecycle("service", &[]), agent("build", &[])],
+    );
+    launched.settled();
+    let recorded = world.run_json(&open, "result.json");
     assert_eq!(
-        node(&printed, "service")["landing"],
+        recorded["schema_version"], 3,
+        "the run result a consumer parses states no version, or not this one: {recorded}"
+    );
+    assert!(
+        recorded.get("round").is_none(),
+        "the run's own result document names a round: {recorded}"
+    );
+    assert_eq!(
+        node(&recorded, "service")["landing"],
         "unlanded",
-        "{printed}"
+        "{recorded}"
     );
     // A node that published nothing carries no landing *key*: a `null` on every
     // node would have a consumer branching on a field that is almost always
     // meaningless, which is how the distinction stops being read at all.
     assert!(
-        node(&printed, "build").get("landing").is_none(),
+        node(&recorded, "build").get("landing").is_none(),
         "a node with no change to land carries a landing key anyway: {}",
-        node(&printed, "build")
+        node(&recorded, "build")
     );
 
     // The same policy, and this time the host lands what it is handed.
@@ -1055,33 +1083,15 @@ fn the_round_result_a_consumer_reads_states_its_version_and_carries_the_landing(
     world.repository("change-auto", &["true"]);
     world.script("gh.merged", "");
     world.script("service.work", "the worker wrote this\n");
-    let (_, round) = driven(&world, "readapi", vec![lifecycle("service", &[])]);
-    let printed = printed_result(&round);
-    assert_eq!(printed["schema_version"], 2, "{printed}");
-    assert_eq!(node(&printed, "service")["landing"], "landed", "{printed}");
-}
-
-/// The round result `round run` printed, as a consumer parses it.
-///
-/// The **whole** of stdout, parsed in one go rather than searched for a line that
-/// happens to be JSON. That is the contract this reader holds the verb to: a
-/// consumer driving the engine pipes stdout into a parser, and a diagnostic
-/// sharing that descriptor would break it. Everything the verb has to say to a
-/// person goes to stderr.
-fn printed_result(round: &crate::harness::Run) -> serde_json::Value {
-    let document: serde_json::Value =
-        serde_json::from_str(round.stdout.trim()).unwrap_or_else(|error| {
-            panic!(
-                "`round run` stdout is not one machine-readable document ({error}):\n\
-                 stdout: {}\nstderr: {}",
-                round.stdout, round.stderr
-            )
-        });
-    assert!(
-        document.get("nodes").is_some(),
-        "`round run` printed something other than a round result: {document}"
+    let (landed, launched) = driven(&world, "readapi", vec![lifecycle("service", &[])]);
+    launched.settled();
+    let recorded = world.run_json(&landed, "result.json");
+    assert_eq!(recorded["schema_version"], 3, "{recorded}");
+    assert_eq!(
+        node(&recorded, "service")["landing"],
+        "landed",
+        "{recorded}"
     );
-    document
 }
 
 /// A settled node and a landed node are different facts, and one publication
@@ -1141,7 +1151,7 @@ fn a_settled_node_and_a_landed_node_are_told_apart_by_what_the_host_did_not_by_t
         "the ledger records a change that reached nobody as though it had landed: {record}"
     );
 
-    let node = world.run_json(&open, "round-01/result.json")["nodes"][0].clone();
+    let node = world.run_json(&open, "result.json")["nodes"][0].clone();
     assert_eq!(node["status"], "done", "{node}\n{}", why(&world, &open));
     assert_eq!(
         node["landing"], "unlanded",
@@ -1171,7 +1181,7 @@ fn a_settled_node_and_a_landed_node_are_told_apart_by_what_the_host_did_not_by_t
     world.script("service.work", "the change the host merged\n");
     let landed = settle(&world, "hostmerged", vec![lifecycle("service", &[])]);
 
-    let node = world.run_json(&landed, "round-01/result.json")["nodes"][0].clone();
+    let node = world.run_json(&landed, "result.json")["nodes"][0].clone();
     assert_eq!(node["status"], "done", "{node}\n{}", why(&world, &landed));
     assert_eq!(
         node["landing"],
@@ -1200,7 +1210,7 @@ fn a_settled_node_and_a_landed_node_are_told_apart_by_what_the_host_did_not_by_t
         status.stdout
     );
     let goals = world.run(&["goals", &landed]);
-    goals.exited(0).out_has("done)");
+    goals.exited(0).out_has("1/1 done");
     assert!(
         !goals.stdout.contains("not landed"),
         "a run whose only change landed still counts one against it:\n{}",
@@ -1241,17 +1251,41 @@ fn an_explicit_pin_the_planner_wrote_wins_over_a_branch_a_dispatch_preserved() {
     node["branch"] = json!("feature/the-planner-said-so");
     let run = settle(&world, "pinwins", vec![node]);
 
-    world.run(&["round", "next", &run]).exited(0);
-
-    // Naming a branch is a decision somebody made. The next round keeps it, and
-    // carries no `resume` pointing somewhere else — the two disagreeing is the
-    // state `retry` already refuses to construct.
-    let next = world.run_json(&run, "round-02/plan.json");
-    let node = &next["tasks"][0];
+    // Naming a branch is a decision somebody made. What continues the work keeps
+    // it, and carries no `resume` pointing somewhere else — the two disagreeing
+    // is the state `retry` already refuses to construct.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({
+                "version": 1,
+                "commands": [{
+                    "op": "retry",
+                    "id": "service",
+                    "node": {"id": "service-2", "repo": "service", "persona": "engineer",
+                             "task": "## What\nPublish again.\n\n## Why\nIt failed.\n\n\
+                                      ## Acceptance criteria\n- published."},
+                }],
+            })
+            .to_string(),
+        )
+        .exited(0);
+    let committed = world
+        .events_of(&run, "edit-committed")
+        .into_iter()
+        .find(|event| event["payload"]["command"]["op"] == "retry")
+        .expect("the retry was committed");
+    let node = committed["payload"]["operations"]
+        .as_array()
+        .expect("operations")
+        .iter()
+        .find(|operation| operation["kind"] == "node-added")
+        .expect("the replacement was added")["node"]
+        .clone();
     assert_eq!(
         node["branch"],
         json!("feature/the-planner-said-so"),
-        "{next}"
+        "{node}"
     );
     assert_eq!(
         node["resume"]["branch"],
@@ -1410,7 +1444,7 @@ fn a_session_stream_that_cannot_be_read_is_reported_and_does_not_fail_the_node()
 
     // The evidence is missing, not the result: the node published and settled.
     let run = run.0;
-    let result = world.run_json(&run, "round-01/result.json");
+    let result = world.run_json(&run, "result.json");
     assert_eq!(result["state"], "complete", "{result}");
     // `gate-verdict` is the first record the session writes after the gate has
     // taken its own stream away, so its absence from the store is the
@@ -1458,10 +1492,7 @@ fn a_session_line_this_build_cannot_read_is_reported_and_does_not_fail_the_node(
 
     // A sibling emitting a shape this build does not know must not stop the
     // node, and must not vanish silently either.
-    assert_eq!(
-        world.run_json(&run, "round-01/result.json")["state"],
-        "complete"
-    );
+    assert_eq!(world.run_json(&run, "result.json")["state"], "complete");
     assert!(
         world
             .journal(&run)
@@ -1471,6 +1502,7 @@ fn a_session_line_this_build_cannot_read_is_reported_and_does_not_fail_the_node(
     );
 }
 
+/// Every `(node, step)` a dispatch was asked for, in the order they were asked.
 fn steps_dispatched(world: &World) -> Vec<(String, String)> {
     world
         .invocations()
@@ -1482,13 +1514,13 @@ fn steps_dispatched(world: &World) -> Vec<(String, String)> {
                 .iter()
                 .filter_map(|arg| arg.as_str())
                 .collect();
-            let round = args
+            let node = args
                 .iter()
-                .find_map(|a| a.strip_prefix("onepipeline.round="))?;
+                .find_map(|a| a.strip_prefix("onepipeline.node="))?;
             let step = args
                 .iter()
                 .find_map(|a| a.strip_prefix("onepipeline.step="))?;
-            Some((round.to_string(), step.to_string()))
+            Some((node.to_string(), step.to_string()))
         })
         .collect()
 }
@@ -1511,35 +1543,72 @@ fn a_continuation_skips_the_steps_the_preserved_branch_already_carries() {
     });
     let run = settle(&world, "resumed", vec![node]);
     assert_eq!(
-        world.run_json(&run, "round-01/result.json")["nodes"][0]["status"],
+        world.run_json(&run, "result.json")["nodes"][0]["status"],
         "failed"
     );
 
-    // The next round names what the branch carries, and nothing it does not:
-    // `review` never finished, so it is not on the list.
-    world.run(&["round", "next", &run]).exited(0);
-    let carried = world.run_json(&run, "round-02/plan.json");
-    let resume = &carried["tasks"][0]["resume"];
+    // The continuation names what the branch carries, and nothing it does not:
+    // `review` never finished, so it is not on the list. A `retry` naming no
+    // branch of its own inherits both from the attempt that preserved them.
+    std::fs::remove_file(world.fakes.join("service.review.fail")).expect("the failure is cleared");
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({
+                "version": 1,
+                "commands": [{
+                    "op": "retry",
+                    "id": "service",
+                    "node": {"id": "service-2", "repo": "service", "steps": [
+                        {"id": "implement", "persona": "engineer", "task": "## What\nimplement"},
+                        {"id": "review", "persona": "reviewer", "task": "## What\nreview",
+                         "deps": ["implement"]},
+                    ]},
+                }],
+            })
+            .to_string(),
+        )
+        .exited(0);
+    let committed = world
+        .events_of(&run, "edit-committed")
+        .into_iter()
+        .find(|event| event["payload"]["command"]["op"] == "retry")
+        .expect("the retry was committed");
+    let resume = committed["payload"]["operations"]
+        .as_array()
+        .expect("operations")
+        .iter()
+        .find(|operation| operation["kind"] == "node-added")
+        .expect("the replacement was added")["node"]["resume"]
+        .clone();
     assert_eq!(
         resume["completed_steps"],
         json!(["implement"]),
-        "the continuation does not say what the branch carries: {carried}"
+        "the continuation does not say what the branch carries: {resume}"
     );
     assert!(
         resume["branch"].is_string(),
-        "a resume with completed steps but no branch: {carried}"
+        "a resume with completed steps but no branch: {resume}"
     );
 
-    // Run the second round with the failure cleared. `implement` is on the
-    // branch already, so re-running it would redo work — only `review` goes out.
-    std::fs::remove_file(world.fakes.join("service.review.fail")).expect("the failure is cleared");
-    world.run(&["round", "run", &run]).exited(0);
-
+    // The run had already settled on the failure, so nothing was driving it when
+    // the retry landed: a fresh driver picks the edited graph up and runs it.
+    // `implement` is on the branch already, so re-running it would redo work —
+    // only `review` goes out.
+    world.run(&["adopt", &run]).exited(0);
+    assert!(
+        world
+            .events_of(&run, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "service-2"),
+        "the continuation never ran:\n{}",
+        why(&world, &run)
+    );
     let dispatched = steps_dispatched(&world);
     assert_eq!(
         dispatched
             .iter()
-            .filter(|(round, step)| round == "2" && step == "implement")
+            .filter(|(node, step)| node == "service-2" && step == "implement")
             .count(),
         0,
         "the continuation re-ran a step the branch already carries: {dispatched:?}"
@@ -1547,7 +1616,7 @@ fn a_continuation_skips_the_steps_the_preserved_branch_already_carries() {
     assert_eq!(
         dispatched
             .iter()
-            .filter(|(round, step)| round == "2" && step == "review")
+            .filter(|(node, step)| node == "service-2" && step == "review")
             .count(),
         1,
         "the continuation did not re-run the step that failed: {dispatched:?}"

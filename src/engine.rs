@@ -1,15 +1,17 @@
-//! The round engine: the single writer that converges a round's frontier, and
-//! the transition that derives the next round from the graph this one executed.
+//! The continuous engine: the single writer that drives a run's whole graph.
 //!
-//! Execution is a long-lived reconcile loop rather than a stop-the-world barrier.
-//! It compares the round's live desired graph with the node state projected from
-//! the journal, starts the reachable frontier, and reacts to each completion
-//! until the graph is terminal — draining the planner's durable command queue on
-//! every pass, so a live edit takes effect without waiting for the round to
-//! settle.
+//! Execution is one long-lived reconcile loop and nothing else. It compares the
+//! live desired graph with the node state projected from the journal, dispatches
+//! every node the moment its dependencies settle `done`, and reacts to each
+//! completion until the graph is terminal — draining the planner's durable
+//! command queue on every pass, so a live edit takes effect immediately.
 //!
-//! Everything here runs under the run's ownership lock. The engine verbs are the
-//! only writers of the graph, the journal, and the round ledger; a second writer
+//! There are no rounds. A finished dependency starts its dependents on the pass
+//! that observed the settlement; the only thing that pauses anything is a
+//! **decision point**, and it pauses only the subtree that depends on it.
+//!
+//! Everything here runs under the run's ownership lock. The driving process is
+//! the only writer of the graph and the journal's graph records; a second writer
 //! would interleave with this loop and corrupt the ledger.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -30,7 +32,7 @@ use crate::executor::{
 use crate::graph::{self, Graph, GraphState, Landing, NodeStatus};
 use crate::journal::{self, Journal};
 use crate::ledger::{self, LaunchRecord, OwnershipLock, RunPaths};
-use crate::plan::{Node, NodeKind, Plan};
+use crate::plan::{Node, NodeKind};
 use crate::projection::{self, RunState};
 use crate::rules::ExecutorRules;
 use crate::sys;
@@ -48,8 +50,15 @@ pub const EXECUTOR_RULES_ENV: &str = "ONEPIPELINE_EXECUTOR_RULES";
 /// The environment variable naming the directory a direct agent node runs in.
 pub const PROJECT_DIR_ENV: &str = "ONEPIPELINE_PROJECT_DIR";
 
+/// The verb the retained driver of a detached launch is spelled with.
+///
+/// Hidden from `--help` and not part of the documented surface: it is how a
+/// launcher that is about to exit hands the engine loop to a process that will
+/// outlive it. Nothing but this crate's own launcher spells it.
+pub const DRIVE_VERB: &str = "drive-run";
+
 /// The environment variable overriding how long a dispatch may record nothing
-/// before the round surfaces a quiet-worker proposal.
+/// before the loop surfaces a quiet-worker proposal.
 pub const STALL_AFTER_ENV: &str = "ONEPIPELINE_STALL_AFTER_SECONDS";
 
 /// How long a dispatch may record nothing before it is reported quiet.
@@ -78,106 +87,90 @@ const BOUNDARY_BACKOFF_CEILING: Duration = Duration::from_secs(120);
 /// How often the reconcile loop wakes to drain edits and re-derive the frontier.
 const POLL: Duration = Duration::from_millis(25);
 
-/// The schema version a round result is written as.
+/// The schema version a run result is written as.
 ///
-/// `round-NN/result.json` — and the same document `round run` prints — is a
-/// machine-read artifact this crate writes and **never reads back**, so the
-/// number is a statement to its consumers rather than to a reader here.
+/// `result.json` is a machine-read artifact this crate writes and **never reads
+/// back**, so the number is a statement to its consumers rather than to a reader
+/// here.
 ///
-/// `2` is where a node carries [`landing`](NodeResult::landing). `1` is the
-/// unversioned shape before it, which carried no `schema_version` key at all and
-/// said only that a node had settled — a consumer reading a `1` cannot tell a
-/// change that merged from one still sitting in a pull request, because that
-/// document does not record it.
-pub const ROUND_RESULT_SCHEMA_VERSION: u32 = 2;
+/// `3` is this document: one result per run, carrying no round and every node's
+/// [`landing`](NodeResult::landing). `2` and `1` were the per-round
+/// `round-NN/result.json` — `1` unversioned and saying only that a node had
+/// settled, `2` where a landing was first recorded — and both named a round that
+/// continuous execution does not have.
+pub const RUN_RESULT_SCHEMA_VERSION: u32 = 3;
 
-/// The version a document carrying no `schema_version` key is.
-const FIRST_ROUND_RESULT_SCHEMA: u32 = 1;
-
-fn first_round_result_schema() -> u32 {
-    FIRST_ROUND_RESULT_SCHEMA
-}
-
-/// Read the version, refusing every number outside the range this build wrote.
+/// Read the version, refusing every number this build did not write.
 ///
-/// The upper bound is deliberately narrower than the telemetry document's rule,
-/// because the change this version records is additive: every `1` field means in
-/// `2` exactly what it meant in `1`, and the only difference is a field that was
-/// never recorded. So a `1` reads, and its nodes simply carry no landing — which
-/// is already how "this run observed nothing about where that change got to" is
-/// spelled. A number *above* is the case that cannot be read honestly: the
-/// document may state something this build has no field for.
-///
-/// Below `1` is refused too, and for a different reason: this crate has never
-/// written a `0`, so a document claiming one came from somewhere that is not this
-/// contract at all. Read leniently it would be normalised into a result that
-/// looks like every other, which is the shape of every defect this version exists
-/// to make visible. Both bounds refuse by name, with both numbers.
-fn readable_round_result_version<'de, D: serde::Deserializer<'de>>(
+/// One number rather than the range the landing's additive bump left, because
+/// this shape is not additive over that one: a `2` names a round there is no
+/// field for here, and read leniently it would be normalised into a run's result
+/// that looks like every other — which is the shape of every defect this version
+/// exists to make visible. A number *above* is refused for the reason it always
+/// was: the document may state something this build has no field for. A document
+/// carrying no key at all is a `1`, refused as the missing field it is. Every
+/// refusal names the version found and the one this build reads.
+fn readable_run_result_version<'de, D: serde::Deserializer<'de>>(
     reader: D,
 ) -> std::result::Result<u32, D::Error> {
     let found = u32::deserialize(reader)?;
-    if !(FIRST_ROUND_RESULT_SCHEMA..=ROUND_RESULT_SCHEMA_VERSION).contains(&found) {
+    if found != RUN_RESULT_SCHEMA_VERSION {
         return Err(serde::de::Error::custom(format!(
-            "round result schema_version {found}, and this build reads \
-             {FIRST_ROUND_RESULT_SCHEMA}..={ROUND_RESULT_SCHEMA_VERSION}"
+            "run result schema_version {found}, and this build reads \
+             {RUN_RESULT_SCHEMA_VERSION}"
         )));
     }
     Ok(found)
 }
 
-/// One round's recorded result.
+/// The run's recorded result, rewritten whenever the loop closes out.
 ///
-/// `ok` is on the wire but not on the type: it is `state == complete` and
-/// nothing else, so storing it would let a result claim a failed round
-/// succeeded. It is derived on the way out and re-derived on the way in, which
-/// is also what makes a hand-edited result file impossible to disagree with
-/// itself. `schema_version` is on the wire and not on the type for the same
-/// reason and one more: this crate writes exactly one version, so a result it
-/// produces states that one rather than whichever it happened to read.
+/// One document per run rather than one per round: there are no rounds, and the
+/// frontier the ledger records is the continuous one. `ok` is on the wire but
+/// not on the type — it is `state == complete` and nothing else, so storing it
+/// would let a result claim a failed run succeeded. It is derived on the way out
+/// and re-derived on the way in, which is also what makes a hand-edited result
+/// file impossible to disagree with itself. `schema_version` is on the wire and
+/// not on the type for the same reason and one more: this crate writes exactly
+/// one version, so a result it produces states that one rather than whichever it
+/// happened to read.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(into = "RoundResultWire", from = "RoundResultWire")]
-pub struct RoundResult {
+#[serde(into = "RunResultWire", from = "RunResultWire")]
+pub struct RunResult {
     /// The run.
     pub run_id: String,
-    /// The round within it.
-    pub round: u64,
     /// How the graph settled.
     pub state: GraphState,
-    /// Every node's settled status, in the order the plan wrote them.
+    /// Every node's status, in the order the plan wrote them.
     pub nodes: Vec<NodeResult>,
 }
 
-impl RoundResult {
+impl RunResult {
     /// True only for `complete`, as the recorded result renders it.
     pub fn ok(&self) -> bool {
         self.state == GraphState::Complete
     }
 }
 
-/// The shape a round result is written and read as.
+/// The shape a run result is written and read as.
 // llmlint: ignore-block[invalid_states_unrepresentable] `ok` and `schema_version` beside
 // `state` are the wire's shape, not states this crate can hold. The type is private, its
-// only constructor is the `From<RoundResult>` below — which computes both — and the `From`
+// only constructor is the `From<RunResult>` below — which computes both — and the `From`
 // back drops them, so a file claiming `state: failed, ok: true` is normalised rather than
 // believed. Removing `ok` from the wire is a different change: consumers filter on it, so
-// it would be a breaking bump rather than the additive one below. Raise that with the
-// planner who owns the contract.
+// it would be its own breaking bump. Raise that with the planner who owns the contract.
 // llmlint: ignore-block[changed_behavior_has_e2e] no invocation a user can type reads a
-// round result back: this crate writes the document and every consumer of it is outside
-// this repo, so the version rules below have no product path to be driven through. Held by
-// this module's golden and version tests, against the same bytes a consumer parses.
+// run result back: this crate writes the document and every consumer of it is outside this
+// repo, so the version rules below have no product path to be driven through. Held by this
+// module's golden and version tests, against the same bytes a consumer parses.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RoundResultWire {
-    /// Absent on a document written before the field existed, which is a `1`.
-    #[serde(
-        default = "first_round_result_schema",
-        deserialize_with = "readable_round_result_version"
-    )]
+struct RunResultWire {
+    /// Required, and never defaulted: a document with no key is a `1`, which
+    /// named a round this shape has no field for.
+    #[serde(deserialize_with = "readable_run_result_version")]
     schema_version: u32,
     run_id: String,
-    round: u64,
     state: GraphState,
     ok: bool,
     nodes: Vec<NodeResult>,
@@ -185,24 +178,22 @@ struct RoundResultWire {
 
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
-impl From<RoundResult> for RoundResultWire {
-    fn from(result: RoundResult) -> Self {
+impl From<RunResult> for RunResultWire {
+    fn from(result: RunResult) -> Self {
         Self {
-            schema_version: ROUND_RESULT_SCHEMA_VERSION,
+            schema_version: RUN_RESULT_SCHEMA_VERSION,
             ok: result.ok(),
             run_id: result.run_id,
-            round: result.round,
             state: result.state,
             nodes: result.nodes,
         }
     }
 }
 
-impl From<RoundResultWire> for RoundResult {
-    fn from(wire: RoundResultWire) -> Self {
+impl From<RunResultWire> for RunResult {
+    fn from(wire: RunResultWire) -> Self {
         Self {
             run_id: wire.run_id,
-            round: wire.round,
             state: wire.state,
             nodes: wire.nodes,
         }
@@ -232,7 +223,8 @@ pub struct NodeResult {
     /// change of its own reads as one making no claim — and a consumer branches
     /// on the key's presence instead of on a field that is there for every node
     /// and meaningless for most. This field is what
-    /// [`ROUND_RESULT_SCHEMA_VERSION`] `2` records.
+    /// [`RUN_RESULT_SCHEMA_VERSION`] `2` first recorded, and `3` carries into
+    /// the run's own document.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub landing: Option<Landing>,
     /// What a ready human action asks for.
@@ -308,10 +300,26 @@ impl Settlement {
 pub(crate) enum Message {
     /// One envelope, relayed from wherever the dispatch ran.
     Event(Box<Envelope>),
-    /// A dispatch that produced nothing is being asked again.
-    Retried(Box<BoundaryRetry>),
+    /// A dispatch that produced nothing is being started again.
+    ///
+    /// Recorded as another `node-dispatched`, because that is what it is: the
+    /// executor is being asked for the node a second time. The attempt number
+    /// rides the payload, so a reader can tell a first try from a recovery.
+    Redispatched(Box<Redispatch>),
     /// The dispatch settled.
     Settled(Box<Settlement>),
+}
+
+/// One re-asked dispatch, as the journal records it.
+pub(crate) struct Redispatch {
+    /// The node being asked again.
+    pub node: String,
+    /// Which attempt this is, counting from one.
+    pub attempt: u32,
+    /// How many attempts the budget allows.
+    pub attempts: u32,
+    /// A bounded reason, as the failing attempt reported it.
+    pub reason: String,
 }
 
 /// Everything a dispatch needs, resolved before it leaves the writer's thread.
@@ -331,12 +339,27 @@ struct Dispatch {
     control: Option<TurnAddress>,
 }
 
-/// Execute the run's open round, opening one if none is.
+/// Take the run's ownership lock, or report who holds it.
 ///
-/// Returns the round's settled state, whose exit code the binary carries: 0 for
-/// `complete`, 1 for `waiting` or `failed`.
-pub fn round_run(paths: &RunPaths) -> Result<GraphState> {
-    let lock = OwnershipLock::acquire(paths, "round run")?;
+/// Taken by the caller rather than by the loop, because a caller that is about
+/// to *claim* the run — in the launch record, or by launching an observer for
+/// it — has to lose the race first: writing its own pid there and then failing
+/// on the lock would leave the record naming a process that is gone, and every
+/// reader afterwards would call the run undriven while the driver that won was
+/// still working on it.
+pub fn claim(paths: &RunPaths) -> Result<OwnershipLock> {
+    OwnershipLock::acquire(paths, "drive")
+}
+
+/// Drive one run's graph to settlement, in this process, under a lock the
+/// caller already holds.
+///
+/// Returns the state the graph settled in, whose exit code the binary carries:
+/// 0 for `complete`, 1 for `waiting` or `failed`. The loop returns when the
+/// graph is terminal or when nothing can move without something arriving over
+/// the channel — a decision point cleared while the loop is still running
+/// resumes the subtree it held, without any external driver action.
+pub fn drive_holding(paths: &RunPaths, lock: OwnershipLock) -> Result<GraphState> {
     let launch: LaunchRecord = ledger::read_json(&paths.launch())?;
     // llmlint: ignore-block[boundary_inputs_validated] graph-reference syntax and
     // contents are oneagentgraph's validation boundary. Here the ledger boundary
@@ -351,42 +374,12 @@ pub fn round_run(paths: &RunPaths) -> Result<GraphState> {
     // llmlint: ignore-end[boundary_inputs_validated]
     let mut journal = Journal::open(paths);
     let mut state = projection::fold(&journal::read(&paths.journal()));
+    report_unreadable_records(paths, &state);
 
-    if !state.round_open {
-        let round = state.round + 1;
-        // A round's launch record is written once and never rewritten: the
-        // transition folds the journal instead, so this stays the record of
-        // what the round *started* with.
-        let plan = plan_of(&state);
-        ledger::write_json(&paths.round_plan(round), &plan)?;
-        journal.emit(
-            journal::PipelineKind::RoundStarted,
-            journal::labels(&paths.run, Some(round), None),
-            journal::payload(&[("plan", json!(plan))]),
-        )?;
-        state = projection::fold(&journal::read(&paths.journal()));
-    }
-
-    let round = state.round;
-    let outcome = converge(paths, &mut journal, &mut state, round, &launch)?;
-    let result = record_result(paths, &mut journal, &state, round, outcome)?;
-    println!(
-        "{}",
-        serde_json::to_string(&result).map_err(|e| Error::Invalid(format!("result: {e}")))?
-    );
+    let outcome = converge(paths, &mut journal, &mut state, &launch)?;
+    record_result(paths, &state, outcome)?;
     lock.release();
     Ok(outcome)
-}
-
-fn plan_of(state: &RunState) -> Plan {
-    let template = state.plan.clone().unwrap_or(Plan {
-        schema_version: crate::plan::PLAN_SCHEMA_VERSION,
-        goal: None,
-        name: None,
-        concurrency: state.graph.concurrency,
-        tasks: Vec::new(),
-    });
-    state.graph.to_plan(&template)
 }
 
 /// The reconcile loop: converge the actual frontier toward the desired graph.
@@ -394,86 +387,75 @@ fn converge(
     paths: &RunPaths,
     journal: &mut Journal,
     state: &mut RunState,
-    round: u64,
     launch: &LaunchRecord,
 ) -> Result<GraphState> {
     let channel = ChannelState::new(paths);
     let rules = executor_rules()?;
     let (tx, rx): (Sender<Message>, Receiver<Message>) = mpsc::channel();
     let mut in_flight: BTreeMap<String, Dispatch> = BTreeMap::new();
-    let started = Instant::now();
-    let budget = Duration::from_secs(launch.round_budget);
     let stall_after = Duration::from_secs(stall_after_seconds());
-    let mut budget_spent = false;
     let mut upstreams = crate::crossdag::Observer::of_run(paths, state);
+    // What the loop has already said out loud, so each fact is announced once
+    // and again only when it becomes true again.
+    let mut announced_ready: BTreeSet<String> = BTreeSet::new();
+    // Seeded from the journal, not started empty: a decision outlives the
+    // driver that reported it, and a fresh loop that did not know what its
+    // predecessor was holding would release it without saying so.
+    let mut held: BTreeMap<DecisionRef, Decision> = state
+        .decisions_pending
+        .iter()
+        .map(|(reference, pending)| {
+            (
+                DecisionRef::of_wire(reference),
+                Decision {
+                    reference: DecisionRef::of_wire(reference),
+                    kind: pending.kind.clone(),
+                    unblocks: pending.unblocks.clone(),
+                },
+            )
+        })
+        .collect();
 
     loop {
         reconcile_edits(paths, journal, state, &channel, &mut in_flight)?;
 
         // Another run's ledger is the only thing that can answer a cross-DAG
         // edge, and it is written by a process this one does not control — so
-        // the answer is re-read on every pass rather than taken once. This is
-        // also where an upstream that moved past what a consumer recorded is
-        // noticed, which cannot happen at any single moment in the round.
-        state.cross_dag = upstreams.resolve(&state.graph, paths, round, journal)?;
+        // the answer is re-read on every reconcile pass rather than taken once.
+        // This is also where an upstream that moved past what a consumer
+        // recorded is noticed.
+        state.cross_dag = upstreams.resolve(&state.graph, paths, journal)?;
 
-        if !budget_spent && started.elapsed() > budget {
-            budget_spent = true;
-            // Cooperatively cancel in flight work and surface a blocking
-            // proposal, so a wedged dispatch layer cannot leave the planner
-            // channel silent.
-            for dispatch in in_flight.values() {
-                dispatch.cancel.cancel();
-            }
-            journal.emit(
-                journal::PipelineKind::RoundBudgetExceeded,
-                journal::labels(&paths.run, Some(round), None),
-                journal::payload(&[("budget_seconds", json!(launch.round_budget))]),
-            )?;
-            raise(
-                paths,
-                journal,
-                round,
-                Surface {
-                    id: 0,
-                    kind: "round-budget".into(),
-                    message: format!(
-                        "round {round} exceeded its {}s budget; in-flight work was cancelled \
-                         cooperatively. Decide whether to retry, park, or raise the budget.",
-                        launch.round_budget
-                    ),
-                    source: crate::channel::source::PROPOSAL.into(),
-                    blocking: true,
-                    round,
-                    queued_at: sys::now_millis(),
-                    workstream: None,
-                },
-            )?;
-        }
+        let statuses = state.statuses();
+        announce_ready(paths, journal, &statuses, &mut announced_ready)?;
+        // The decision points holding subtrees back, and the nodes they hold.
+        // Diffed against the last pass, so each one is reported when it begins
+        // holding dependents back and again when it releases them.
+        let decisions = decisions_now(state, &statuses, &channel);
+        report_decisions(paths, journal, &decisions, &mut held)?;
+        let paused = paused_by(&decisions);
 
-        // Start what became actionable *before* asking whether the round is
-        // over. A ready human action derives as `waiting`, which is a settled
-        // status — so a check that ran first would call the round terminal and
-        // leave that settlement unrecorded, with nothing for a later `attest`
-        // to validate against.
-        if !budget_spent {
-            start_ready(
-                paths,
-                journal,
-                state,
-                round,
-                &rules,
-                &launch.node_graph,
-                &tx,
-                &mut in_flight,
-            )?;
-        }
+        // Start what became actionable *before* asking whether the run is over.
+        // A ready human action derives as `waiting`, which is a settled status —
+        // so a check that ran first would call the graph terminal and leave that
+        // settlement unrecorded, with nothing for a later `attest` to validate
+        // against.
+        start_ready(
+            paths,
+            journal,
+            state,
+            &rules,
+            &launch.node_graph,
+            &tx,
+            &mut in_flight,
+            &paused,
+        )?;
 
         if in_flight.is_empty() {
             // Nothing is running and nothing became ready, so no further
             // message can arrive: the graph is as converged as it will get.
             let statuses = state.statuses();
-            if graph::is_terminal(&statuses) || budget_spent {
+            if graph::is_terminal(&statuses) {
                 break;
             }
             // A node that is neither settled nor startable is gated by
@@ -497,32 +479,261 @@ fn converge(
                 }
                 journal.relay(&envelope)?;
             }
-            // Every retry reaches the journal, so a retry that saved a run is
-            // visible in the run's own record rather than only in a log.
-            Ok(Message::Retried(retry)) => journal.emit(
-                journal::PipelineKind::BoundaryRetried,
-                journal::labels(&paths.run, Some(round), Some(&retry.node)),
+            // A dispatch asked again is a dispatch started again, and it reaches
+            // the run's own record as one rather than only a log.
+            Ok(Message::Redispatched(again)) => journal.emit(
+                journal::PipelineKind::NodeDispatched,
+                journal::labels(&paths.run, Some(&again.node)),
                 journal::payload(&[
-                    ("role", json!(retry.role.as_str())),
-                    ("attempt", json!(retry.attempt)),
-                    ("attempts", json!(retry.attempts)),
-                    ("backoff_seconds", json!(retry.backoff_seconds)),
-                    ("reason", json!(bounded(&retry.reason))),
+                    ("attempt", json!(again.attempt)),
+                    ("attempts", json!(again.attempts)),
+                    ("reason", json!(bounded(&again.reason))),
                 ]),
             )?,
             Ok(Message::Settled(settlement)) => {
                 in_flight.remove(&settlement.node);
-                settle(paths, journal, round, &settlement)?;
+                settle(paths, journal, &settlement)?;
                 *state = projection::fold(&journal::read(&paths.journal()));
+                // A node that settled may have readied its dependents, and a
+                // node that is ready again — a requeue, a retry — is announced
+                // again.
+                announced_ready
+                    .retain(|id| state.statuses().get(id).copied() == Some(NodeStatus::Ready));
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
 
-        watch_for_quiet(paths, journal, round, stall_after, &mut in_flight)?;
+        watch_for_quiet(paths, journal, stall_after, &mut in_flight)?;
     }
 
     Ok(graph::state_of(&state.statuses()))
+}
+
+/// Say so when the graph this loop is about to converge was folded from a
+/// journal it could not read whole.
+///
+/// A record this build cannot read might have been an authoritative graph
+/// mutation — a `drop` that removed a node this loop is about to dispatch — so a
+/// driver that meets one reports rather than quietly executing a graph it knows
+/// is incomplete. It still drives: refusing would leave the run with nothing
+/// driving it, which is strictly worse than driving it with the operator told.
+fn report_unreadable_records(paths: &RunPaths, state: &RunState) {
+    if state.strict && !journal::has_unreadable_lines(&paths.journal()) {
+        return;
+    }
+    eprintln!(
+        "onepipeline: run '{}' has a journal record this build cannot read; the graph \
+         it is driving may be missing a committed edit.",
+        paths.run
+    );
+}
+
+/// One decision point: a blocking surface, and the dependents it holds back.
+///
+/// Two things are decision points, and they are the only things that pause
+/// anything. A node waiting on a person is one — a `kind: human` node, or a
+/// lifecycle node held at a human *step*, which settles the same way and is
+/// cleared by the same `attest` — and its dependents wait with it. A
+/// **blocking** planner surface is the other, and it holds whatever depends on
+/// the node that raised it. A non-blocking surface is a report and holds
+/// nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Decision {
+    /// What clears it.
+    reference: DecisionRef,
+    /// What kind of decision it is, in the vocabulary its raiser used.
+    kind: String,
+    /// The nodes it is holding back, in graph order.
+    unblocks: Vec<String>,
+}
+
+/// What clears one decision point.
+///
+/// The two are answered by different people through different verbs — a person
+/// attests the action, a planner replies to the surface — and the reference a
+/// reader sees has to say which. Spelled as the alternatives rather than as a
+/// string, so a surface reference can only be a surface's own id and a node
+/// reference can only be a node's.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum DecisionRef {
+    /// A node waiting on a person, cleared by `attest`.
+    ///
+    /// Named for what clears it rather than for the node's kind, because two
+    /// shapes reach it: a `kind: human` node, and a lifecycle node whose
+    /// workstream stopped at a human step. Both settle `waiting`, both are
+    /// attested by the reference below, and neither is a thing the harness may
+    /// infer happened.
+    Attestation(String),
+    /// A blocking surface, cleared by the reply that answers it.
+    Surface(u64),
+}
+
+impl DecisionRef {
+    /// The reference as the journal and the node label spell it.
+    fn as_wire(&self) -> String {
+        match self {
+            Self::Attestation(node) => node.clone(),
+            Self::Surface(id) => format!("surface:{id}"),
+        }
+    }
+
+    /// The reference a journal record spelled, read back.
+    ///
+    /// A node id cannot contain the separator — `graph::validate` refuses one —
+    /// so the two spellings cannot be confused for each other.
+    fn of_wire(reference: &str) -> Self {
+        reference
+            .strip_prefix("surface:")
+            .and_then(|id| id.parse().ok())
+            .map_or_else(|| Self::Attestation(reference.to_string()), Self::Surface)
+    }
+}
+
+/// The decision points outstanding right now.
+///
+/// The node half comes from the derived statuses, and the surface half from the
+/// **channel queue** rather than from the journal: a surface is outstanding
+/// until somebody answers it, and the queue is the only thing that knows that.
+/// A surface waiting to be read counts exactly as one already read and
+/// unanswered does — an unread question is not an answered one.
+fn decisions_now(
+    state: &RunState,
+    statuses: &BTreeMap<String, NodeStatus>,
+    channel: &ChannelState,
+) -> BTreeMap<DecisionRef, Decision> {
+    let mut decisions = BTreeMap::new();
+    for (id, status) in statuses {
+        if *status != NodeStatus::Waiting {
+            continue;
+        }
+        decisions.insert(
+            DecisionRef::Attestation(id.clone()),
+            Decision {
+                reference: DecisionRef::Attestation(id.clone()),
+                kind: "attestation".to_string(),
+                unblocks: descendants(&state.graph, std::slice::from_ref(id)),
+            },
+        );
+    }
+    let queue = channel.queue();
+    for surface in queue.waiting.iter().chain(queue.pending.iter()) {
+        if !surface.blocking {
+            continue;
+        }
+        let reference = DecisionRef::Surface(surface.id);
+        let unblocks = surface
+            .workstream
+            .clone()
+            .map(|node| descendants(&state.graph, std::slice::from_ref(&node)))
+            .unwrap_or_default();
+        decisions.insert(
+            reference.clone(),
+            Decision {
+                reference,
+                kind: surface.kind.clone(),
+                unblocks,
+            },
+        );
+    }
+    decisions
+}
+
+/// Every node reachable downstream of `roots`, excluding the roots themselves.
+fn descendants(graph: &Graph, roots: &[String]) -> Vec<String> {
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut pending: Vec<String> = roots.to_vec();
+    while let Some(current) = pending.pop() {
+        for dependent in graph.dependents_of(&current) {
+            if seen.insert(dependent.clone()) {
+                pending.push(dependent);
+            }
+        }
+    }
+    graph
+        .ids()
+        .filter(|id| seen.contains(*id))
+        .cloned()
+        .collect()
+}
+
+/// Report every decision that began holding dependents back, and every one that
+/// released them.
+fn report_decisions(
+    paths: &RunPaths,
+    journal: &mut Journal,
+    decisions: &BTreeMap<DecisionRef, Decision>,
+    held: &mut BTreeMap<DecisionRef, Decision>,
+) -> Result<()> {
+    for (reference, decision) in decisions {
+        if held.get(reference) == Some(decision) {
+            continue;
+        }
+        journal.emit(
+            journal::PipelineKind::DecisionPending,
+            journal::labels(&paths.run, Some(&decision.reference.as_wire())),
+            journal::payload(&[
+                ("reference", json!(decision.reference.as_wire())),
+                ("kind", json!(decision.kind)),
+                ("unblocks", json!(decision.unblocks)),
+            ]),
+        )?;
+    }
+    let cleared: Vec<Decision> = held
+        .iter()
+        .filter(|(reference, _)| !decisions.contains_key(*reference))
+        .map(|(_, decision)| decision.clone())
+        .collect();
+    for decision in cleared {
+        journal.emit(
+            journal::PipelineKind::DecisionCleared,
+            journal::labels(&paths.run, Some(&decision.reference.as_wire())),
+            journal::payload(&[
+                ("reference", json!(decision.reference.as_wire())),
+                ("kind", json!(decision.kind)),
+                ("released", json!(decision.unblocks)),
+            ]),
+        )?;
+    }
+    *held = decisions.clone();
+    Ok(())
+}
+
+/// The nodes no decision point will let start yet.
+fn paused_by(decisions: &BTreeMap<DecisionRef, Decision>) -> BTreeSet<String> {
+    decisions
+        .values()
+        .flat_map(|decision| decision.unblocks.iter().cloned())
+        .collect()
+}
+
+/// Say once, of each node, that its dependencies have settled and it may go.
+///
+/// The fact the whole roundless contract turns on: a dependency settling is what
+/// makes its dependents actionable, and this is where that is visible to a
+/// reader who is not watching dispatches.
+fn announce_ready(
+    paths: &RunPaths,
+    journal: &mut Journal,
+    statuses: &BTreeMap<String, NodeStatus>,
+    announced: &mut BTreeSet<String>,
+) -> Result<()> {
+    announced.retain(|id| statuses.get(id).copied() == Some(NodeStatus::Ready));
+    let fresh: Vec<String> = statuses
+        .iter()
+        .filter(|(_, status)| **status == NodeStatus::Ready)
+        .map(|(id, _)| id.clone())
+        .filter(|id| !announced.contains(id))
+        .collect();
+    for id in fresh {
+        journal.emit(
+            journal::PipelineKind::NodeReady,
+            journal::labels(&paths.run, Some(&id)),
+            journal::payload(&[]),
+        )?;
+        announced.insert(id);
+    }
+    Ok(())
 }
 
 /// Where a relayed envelope says its member's turn can be reached.
@@ -560,6 +771,11 @@ fn any_node_can_still_move(statuses: &BTreeMap<String, NodeStatus>) -> bool {
 /// Both edits that change only *eligibility* — `attest` and `reparent` — take
 /// effect on this same pass, because the derived statuses are recomputed from
 /// the graph rather than stored.
+///
+/// The author's allowlist is enforced here as well as at submission: the queue
+/// is durable, so an envelope reaching this loop may have been written by a
+/// build or a caller that did not check, and the reconciler is the last place a
+/// refusal still means something.
 fn reconcile_edits(
     paths: &RunPaths,
     journal: &mut Journal,
@@ -568,10 +784,13 @@ fn reconcile_edits(
     in_flight: &mut BTreeMap<String, Dispatch>,
 ) -> Result<()> {
     for envelope in channel.claim_commands()? {
+        let author = envelope.author;
         let mut applied = true;
         let mut reason = None;
         for command in &envelope.commands {
-            match compile_and_deliver(journal, state, command, in_flight) {
+            let compiled = crate::channel::allows(author, command)
+                .and_then(|()| compile_and_deliver(journal, state, command, in_flight));
+            match compiled {
                 Ok(operations) => {
                     // Dropping or retrying a running node raises its
                     // cooperative cancellation signal: the dispatch stops and,
@@ -583,30 +802,37 @@ fn reconcile_edits(
                     }
                     journal.emit(
                         journal::PipelineKind::EditCommitted,
-                        journal::labels(&paths.run, Some(state.round), None),
+                        journal::labels(&paths.run, None),
                         journal::payload(&[
+                            ("author", json!(author)),
                             ("command", json!(command)),
                             ("operations", json!(operations)),
                         ]),
                     )?;
                     // Two of the compiled operations are facts about the run
                     // rather than mutations of its graph, and a reader looking
-                    // for either should not have to know whether a round was
-                    // live when it arrived. Each gets its own kind here too.
+                    // for either should not have to read the operation list.
+                    // Each gets its own kind here too.
                     for operation in &operations {
                         match operation {
                             edits::Operation::CompletionRequested { reason } => journal.emit(
                                 journal::PipelineKind::CompletionRequested,
-                                journal::labels(&paths.run, Some(state.round), None),
+                                journal::labels(&paths.run, None),
                                 journal::payload(&[("reason", json!(reason))]),
                             )?,
                             edits::Operation::HumanAttested { node } => journal.emit(
                                 journal::PipelineKind::HumanAttested,
-                                journal::labels(&paths.run, Some(state.round), Some(node)),
+                                journal::labels(&paths.run, Some(node)),
                                 journal::payload(&[("ref", json!(node))]),
                             )?,
                             _ => {}
                         }
+                    }
+                    // An edit the monitor made is the planner's to review: it
+                    // was applied on the monitor's own judgement, so the planner
+                    // learns of it without being asked to approve it first.
+                    if author == crate::channel::Author::Monitor {
+                        raise(paths, journal, monitor_edit(command))?;
                     }
                     *state = projection::fold(&journal::read(&paths.journal()));
                 }
@@ -615,8 +841,9 @@ fn reconcile_edits(
                     reason = Some(error.to_string());
                     journal.emit(
                         journal::PipelineKind::EditRejected,
-                        journal::labels(&paths.run, Some(state.round), None),
+                        journal::labels(&paths.run, None),
                         journal::payload(&[
+                            ("author", json!(author)),
                             ("command", json!(command)),
                             ("reason", json!(error.to_string())),
                         ]),
@@ -626,14 +853,12 @@ fn reconcile_edits(
                     raise(
                         paths,
                         journal,
-                        state.round,
                         Surface {
                             id: 0,
                             kind: "edit-rejected".into(),
                             message: format!("reconciler: rejected — {error}"),
                             source: crate::channel::source::RECONCILER.into(),
                             blocking: false,
-                            round: state.round,
                             queued_at: sys::now_millis(),
                             workstream: None,
                         },
@@ -753,6 +978,11 @@ fn cancelled_by(command: &Command) -> Vec<String> {
 }
 
 /// Start every node whose dependencies have settled, bounded by `concurrency`.
+///
+/// The moment they settle: a node reaches this the same pass its last dependency
+/// recorded `done`, so nothing waits on a boundary. What it does *not* start is
+/// a node a decision point is holding — `paused` is that subtree, and every
+/// other branch runs on regardless.
 // llmlint: ignore-block[invalid_states_unrepresentable] the resolved graph stays a
 // string because LaunchRecord is the durable internal schema and oneagentgraph's
 // ConfigRef is transparent/string-valued. A second resolved-graph type across
@@ -766,11 +996,11 @@ fn start_ready(
     paths: &RunPaths,
     journal: &mut Journal,
     state: &mut RunState,
-    round: u64,
     rules: &ExecutorRules,
     node_graph: &str,
     tx: &Sender<Message>,
     in_flight: &mut BTreeMap<String, Dispatch>,
+    paused: &BTreeSet<String>,
 ) -> Result<()> {
     let statuses = state.statuses();
     let concurrency = state.graph.concurrency as usize;
@@ -787,6 +1017,7 @@ fn start_ready(
             _ => false,
         })
         .filter(|node| !in_flight.contains_key(&node.id))
+        .filter(|node| !paused.contains(&node.id))
         .cloned()
         .collect();
 
@@ -801,7 +1032,6 @@ fn start_ready(
             settle(
                 paths,
                 journal,
-                round,
                 &Settlement::plain(&node.id, NodeStatus::Done, Some("no-changes")),
             )?;
             settled_here = true;
@@ -813,7 +1043,6 @@ fn start_ready(
             settle(
                 paths,
                 journal,
-                round,
                 &Settlement::plain(&node.id, NodeStatus::Waiting, None),
             )?;
             settled_here = true;
@@ -823,18 +1052,10 @@ fn start_ready(
         let cancel = CancellationToken::new();
         journal.emit(
             journal::PipelineKind::NodeDispatched,
-            journal::labels(&paths.run, Some(round), Some(&node.id)),
-            journal::payload(&[("persona", json!(node.persona))]),
+            journal::labels(&paths.run, Some(&node.id)),
+            journal::payload(&[("persona", json!(node.persona)), ("attempt", json!(1))]),
         )?;
-        spawn(
-            paths,
-            round,
-            rules,
-            node_graph,
-            &node,
-            cancel.clone(),
-            tx.clone(),
-        )?;
+        spawn(paths, rules, node_graph, &node, cancel.clone(), tx.clone())?;
         let now = Instant::now();
         in_flight.insert(
             node.id.clone(),
@@ -858,7 +1079,6 @@ fn start_ready(
 /// Run one node's dispatch on a thread, reporting back to the single writer.
 fn spawn(
     paths: &RunPaths,
-    round: u64,
     rules: &ExecutorRules,
     node_graph: &str,
     node: &Node,
@@ -867,7 +1087,7 @@ fn spawn(
 ) -> Result<()> {
     // The labels a `node_label` rule selects on. An executor is chosen once per
     // node, before its steps run, so a node's own labels are what exists here.
-    let labels = dispatch_labels(&paths.run, round, &node.id, None, node.persona.as_deref());
+    let labels = dispatch_labels(&paths.run, &node.id, None, node.persona.as_deref());
     let executor_name = rules.select(node.executor.as_deref(), &labels, &|name| {
         rules
             .executors
@@ -891,25 +1111,9 @@ fn spawn(
         .spawn(move || {
             let executor = crate::rules::executor_for(&entry);
             let settlement = if node.repo.is_some() {
-                crate::lifecycle::execute(
-                    executor.as_ref(),
-                    &run,
-                    round,
-                    &node_graph,
-                    &node,
-                    &cancel,
-                    &tx,
-                )
+                crate::lifecycle::execute(executor.as_ref(), &run, &node_graph, &node, &cancel, &tx)
             } else {
-                execute_direct(
-                    executor.as_ref(),
-                    &run,
-                    round,
-                    &node_graph,
-                    &node,
-                    &cancel,
-                    &tx,
-                )
+                execute_direct(executor.as_ref(), &run, &node_graph, &node, &cancel, &tx)
             };
             let _ = tx.send(Message::Settled(Box::new(settlement)));
         })
@@ -921,7 +1125,6 @@ fn spawn(
 fn execute_direct(
     executor: &dyn Executor,
     run: &str,
-    round: u64,
     default_graph: &str,
     node: &Node,
     cancel: &CancellationToken,
@@ -935,8 +1138,8 @@ fn execute_direct(
     // journal a stale build wrote, or one edited by hand — and the answer there
     // is the same as the plan's, in the node's own settlement.
     // llmlint: ignore-block[changed_behavior_has_e2e] no invocation a user can type
-    // reaches this arm: `graph::validate` refuses the declaration at `start`, at every
-    // round transition, and at every live edit, so the only graph carrying one is
+    // reaches this arm: `graph::validate` refuses the declaration at `start` and at
+    // every live edit, so the only graph carrying one is
     // folded from a journal an *earlier build* wrote. This suite could reach that only
     // by writing that journal by hand, which would prove the fixture rather than the
     // code, and deleting the arm would reinstate the silent default this control
@@ -954,12 +1157,12 @@ fn execute_direct(
     let request = || DispatchRequest {
         graph: graph.clone(),
         task: node.rendered_task(),
-        labels: dispatch_labels(run, round, &node.id, None, node.persona.as_deref()),
+        labels: dispatch_labels(run, &node.id, None, node.persona.as_deref()),
         controls,
         workspace: WorkspaceSpec::Path(project_dir()),
         cancel: cancel.clone(),
     };
-    attempt(executor, &node.id, Role::Worker, cancel, tx, &request).settlement
+    attempt(executor, &node.id, cancel, tx, &request).settlement
 }
 
 /// How far one attempt got.
@@ -1004,7 +1207,6 @@ pub(crate) struct Drained {
 pub(crate) fn attempt(
     executor: &dyn Executor,
     node: &str,
-    role: Role,
     cancel: &CancellationToken,
     tx: &Sender<Message>,
     request: &dyn Fn() -> DispatchRequest,
@@ -1058,56 +1260,19 @@ pub(crate) fn attempt(
             }
             break;
         }
-        let _ = tx.send(Message::Retried(Box::new(BoundaryRetry {
-            node: node.to_string(),
-            role,
-            attempt,
-            attempts,
-            backoff_seconds: backoff.as_secs(),
-            reason: last.settlement.detail.clone().unwrap_or_default(),
-        })));
         std::thread::sleep(backoff);
         backoff = (backoff * 2).min(BOUNDARY_BACKOFF_CEILING);
+        // Announced only once the wait is over, so the record marks the moment
+        // the node was actually asked again rather than the moment the last
+        // attempt gave up.
+        let _ = tx.send(Message::Redispatched(Box::new(Redispatch {
+            node: node.to_string(),
+            attempt: attempt + 1,
+            attempts,
+            reason: last.settlement.detail.clone().unwrap_or_default(),
+        })));
     }
     last
-}
-
-/// Which side of a node's dispatch was retried.
-///
-/// One variant, because the boundary retry guards exactly one side today: a
-/// dispatch that produced nothing. The `pr-author` draft is off the publication
-/// path and falls back deterministically rather than being asked again, and a
-/// judge side is the sibling's to retry. The enum is here rather than a string
-/// so the journal's word has one source and a second side is additive.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Role {
-    /// The node's own work.
-    Worker,
-}
-
-impl Role {
-    /// The word the journal records this role as.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Worker => "worker",
-        }
-    }
-}
-
-/// One retried attempt, as the journal records it.
-pub(crate) struct BoundaryRetry {
-    /// The node whose dispatch was asked again.
-    pub node: String,
-    /// Which side was retried.
-    pub role: Role,
-    /// Which attempt this follows.
-    pub attempt: u32,
-    /// How many attempts the budget allows.
-    pub attempts: u32,
-    /// How long the next attempt waits.
-    pub backoff_seconds: u64,
-    /// A bounded reason, as the failing attempt reported it.
-    pub reason: String,
 }
 
 /// Relay a dispatch's events into the merged stream and settle on its outcome.
@@ -1199,14 +1364,14 @@ fn bounded(reason: &str) -> String {
 /// The labels a dispatch is stamped with. The reserved keys, and nothing else.
 pub(crate) fn dispatch_labels(
     run: &str,
-    round: u64,
     node: &str,
     step: Option<&str>,
     persona: Option<&str>,
 ) -> Labels {
     Labels {
         run_id: Some(run.to_string()),
-        round: Some(round),
+        // Never stamped: execution is continuous, so there is no round to name.
+        round: None,
         node: Some(node.to_string()),
         step: step.map(str::to_string),
         persona: persona.map(str::to_string),
@@ -1255,12 +1420,7 @@ fn executor_rules() -> Result<ExecutorRules> {
 }
 
 /// Record one node's settlement.
-fn settle(
-    paths: &RunPaths,
-    journal: &mut Journal,
-    round: u64,
-    settlement: &Settlement,
-) -> Result<()> {
+fn settle(paths: &RunPaths, journal: &mut Journal, settlement: &Settlement) -> Result<()> {
     let mut payload = journal::settled_payload(
         settlement.status.as_str(),
         settlement.outcome.as_deref(),
@@ -1280,17 +1440,38 @@ fn settle(
     }
     journal.emit(
         journal::PipelineKind::NodeSettled,
-        journal::labels(&paths.run, Some(round), Some(&settlement.node)),
+        journal::labels(&paths.run, Some(&settlement.node)),
         payload,
     )
 }
 
+/// The surface that tells the planner what the monitor did on its own judgement.
+///
+/// Non-blocking: the edit was applied, so holding anything back to report it
+/// would pause the run over a decision that has already been made. Raised by
+/// whichever side applied it — the loop, or a `reply` that found nothing
+/// driving the run — because which one that was is not the planner's concern.
+pub(crate) fn monitor_edit(command: &Command) -> Surface {
+    Surface {
+        id: 0,
+        kind: "monitor-edit".into(),
+        message: format!(
+            "monitor applied an edit: {}",
+            bounded(&serde_json::to_string(command).unwrap_or_default())
+        ),
+        source: crate::channel::source::MONITOR.into(),
+        blocking: false,
+        queued_at: sys::now_millis(),
+        workstream: crate::channel::target_of(command),
+    }
+}
+
 /// Surface something to the planner, recording that it was *sent*.
-fn raise(paths: &RunPaths, journal: &mut Journal, round: u64, surface: Surface) -> Result<()> {
+pub(crate) fn raise(paths: &RunPaths, journal: &mut Journal, surface: Surface) -> Result<()> {
     let queued = ChannelState::new(paths).push(surface)?;
     journal.emit(
         journal::PipelineKind::PlannerSurfaceQueued,
-        journal::labels(&paths.run, Some(round), queued.workstream.as_deref()),
+        journal::labels(&paths.run, queued.workstream.as_deref()),
         journal::payload(&[
             ("kind", json!(queued.kind)),
             ("message", json!(queued.message)),
@@ -1304,11 +1485,10 @@ fn raise(paths: &RunPaths, journal: &mut Journal, round: u64, surface: Surface) 
 ///
 /// Non-blocking, because a stall is evidence rather than a verdict: the planner
 /// decides whether to cancel the node, retry it, or let it run, and a blocking
-/// surface would stop the round's other workers to ask.
+/// surface would hold its dependents back to ask.
 fn watch_for_quiet(
     paths: &RunPaths,
     journal: &mut Journal,
-    round: u64,
     stall_after: Duration,
     in_flight: &mut BTreeMap<String, Dispatch>,
 ) -> Result<()> {
@@ -1337,7 +1517,7 @@ fn watch_for_quiet(
         };
         journal.emit(
             journal::PipelineKind::QuietWorker,
-            journal::labels(&paths.run, Some(round), Some(&node)),
+            journal::labels(&paths.run, Some(&node)),
             journal::payload(&[
                 ("quiet_for_seconds", json!(quiet_for)),
                 ("threshold_seconds", json!(stall_after.as_secs())),
@@ -1347,7 +1527,6 @@ fn watch_for_quiet(
         raise(
             paths,
             journal,
-            round,
             Surface {
                 id: 0,
                 kind: "quiet-worker".into(),
@@ -1359,7 +1538,6 @@ fn watch_for_quiet(
                 ),
                 source: crate::channel::source::PROPOSAL.into(),
                 blocking: false,
-                round,
                 queued_at: sys::now_millis(),
                 workstream: Some(node.clone()),
             },
@@ -1368,14 +1546,12 @@ fn watch_for_quiet(
     Ok(())
 }
 
-/// Write the round's result and close it.
-fn record_result(
-    paths: &RunPaths,
-    journal: &mut Journal,
-    state: &RunState,
-    round: u64,
-    settled: GraphState,
-) -> Result<RoundResult> {
+/// Write the run's result, as the loop closes out.
+///
+/// One document at the run's root, rewritten each time a driver closes out: the
+/// frontier is continuous, so what the ledger records is where the whole graph
+/// has got to rather than what one round did.
+fn record_result(paths: &RunPaths, state: &RunState, settled: GraphState) -> Result<RunResult> {
     let statuses = state.statuses();
     let nodes = state
         .graph
@@ -1416,18 +1592,12 @@ fn record_result(
         })
         .collect();
 
-    let result = RoundResult {
+    let result = RunResult {
         run_id: paths.run.clone(),
-        round,
         state: settled,
         nodes,
     };
-    ledger::write_json(&paths.round_result(round), &result)?;
-    journal.emit(
-        journal::PipelineKind::RoundFinished,
-        journal::labels(&paths.run, Some(round), None),
-        journal::payload(&[("state", json!(result.state)), ("ok", json!(result.ok()))]),
-    )?;
+    ledger::write_json(&paths.result(), &result)?;
     Ok(result)
 }
 
@@ -1460,231 +1630,13 @@ fn gating_humans(
     gates.into_iter().collect()
 }
 
-/// Transition to the next round.
-///
-/// The next round is derived from the graph the last round **executed**, folded
-/// from its own journal — not from its launch record, which every live edit the
-/// reconciler committed is absent from.
-pub fn round_next(paths: &RunPaths) -> Result<Option<u64>> {
-    let lock = OwnershipLock::acquire(paths, "round next")?;
-    let mut journal = Journal::open(paths);
-    let state = projection::fold(&journal::read(&paths.journal()));
-    if state.round_open {
-        return Err(Error::Refused(format!(
-            "run '{}' is still executing round {}",
-            paths.run, state.round
-        )));
-    }
-
-    // A record this build cannot read might have been an authoritative graph
-    // mutation, so a transition that meets one reports rather than folding a
-    // graph it knows is incomplete.
-    let strict = state.strict && !journal::has_unreadable_lines(&paths.journal());
-    let source = if strict {
-        state.clone()
-    } else {
-        // A journal that cannot be folded strictly falls back to the launch
-        // record, and says so, rather than deriving from a graph it knows is
-        // incomplete.
-        eprintln!(
-            "onepipeline: run '{}' has a journal record this build cannot read; \
-             deriving round {} from the launch record instead of the executed graph.",
-            paths.run,
-            state.round + 1
-        );
-        let plan: Plan = ledger::read_json(&paths.round_plan(state.round))?;
-        RunState {
-            graph: Graph::from_plan(&plan),
-            plan: Some(plan),
-            ..state.clone()
-        }
-    };
-
-    let next = derive_next(&source);
-    if next.is_empty() {
-        println!(
-            "{}",
-            json!({"run_id": paths.run, "state": "complete", "next_round": null})
-        );
-        lock.release();
-        return Ok(None);
-    }
-
-    // A round nothing could start is not a round. Every remaining node is
-    // gated by something only a person or a planner can clear — a waiting
-    // human, a parked node, an unresolved upstream — so opening one would
-    // dispatch nothing, settle identically, and do it again forever. The run
-    // waits instead, which is the state `results` and `status` already report.
-    // Resolved the same way the round would, and for the same reason: a next
-    // round whose only startable work is gated by an upstream that has *already*
-    // arrived would otherwise be judged empty, and the run would park on work it
-    // could start immediately. Reading only — the transition records the round it
-    // opens, and an edge's own evidence belongs to the round that acts on it.
-    let upstreams = crate::crossdag::resolve_quietly(
-        &paths
-            .dir
-            .parent()
-            .map_or_else(ledger::runs_root, std::path::Path::to_path_buf),
-        &next,
-    );
-    let ready = crate::graph::derive(&next, &BTreeMap::new(), &|dependency| {
-        upstreams.get(dependency).copied()
-    });
-    if !ready.values().any(|status| *status == NodeStatus::Ready) {
-        println!(
-            "{}",
-            json!({
-                "run_id": paths.run,
-                "state": graph::state_of(&ready).as_str(),
-                "next_round": null,
-            })
-        );
-        lock.release();
-        return Ok(None);
-    }
-
-    let round = state.round + 1;
-    let plan = next.to_plan(&plan_of(&source));
-    graph::validate(&plan)?;
-    ledger::write_json(&paths.round_plan(round), &plan)?;
-    journal.emit(
-        journal::PipelineKind::RoundStarted,
-        journal::labels(&paths.run, Some(round), None),
-        journal::payload(&[("plan", json!(plan))]),
-    )?;
-    println!(
-        "{}",
-        json!({"run_id": paths.run, "state": "continuing", "next_round": round})
-    );
-    lock.release();
-    Ok(Some(round))
-}
-
-/// The graph the next round executes.
-pub(crate) fn derive_next(state: &RunState) -> Graph {
-    let statuses = state.statuses();
-    let carried: BTreeSet<String> = state
-        .graph
-        .ids()
-        // A `done` node is never rescheduled. Everything else carries,
-        // including a parked node: its flag is what stops the next round
-        // dispatching it, and its preserved checkpoint is what a later
-        // `requeue` has to pick up rather than cutting a fresh branch beside it.
-        .filter(|id| statuses.get(*id).copied() != Some(NodeStatus::Done))
-        // A node the reconciler superseded stays in the executed graph,
-        // cancelled, so the transition removes it exactly as a `drop` would.
-        // Named by the retry that replaced it, not read off its `cancelled`
-        // status: a `cancel` parks a node *and* stops its dispatch, so a node
-        // parked mid-flight settles `cancelled` too, and reading the status
-        // deleted the very node `requeue` exists to bring back — along with the
-        // gate it was holding over its dependents, which then ran.
-        .filter(|id| !state.superseded.contains(*id))
-        .cloned()
-        .collect();
-
-    let mut next = Graph::with_concurrency(state.graph.concurrency);
-    for node in state.graph.iter() {
-        if !carried.contains(&node.id) {
-            continue;
-        }
-        let mut node = node.clone();
-        // A satisfied dependency id falls out. A cross-DAG reference is not a
-        // satisfied dependency id and is never removed by that rule: it names
-        // no node of this graph, so it was never in the round to be satisfied.
-        node.deps = node
-            .deps
-            .iter()
-            .filter(|dep| graph::is_cross_dag(dep) || carried.contains(*dep))
-            .cloned()
-            .collect();
-        // The watch passes through a consumer the transition carried out, to
-        // whatever still depends on that consumer.
-        let inherited: Vec<String> = state
-            .graph
-            .get(&node.id)
-            .map(|original| original.deps.clone())
-            .unwrap_or_default()
-            .iter()
-            .filter(|dep| !carried.contains(*dep) && !graph::is_cross_dag(dep))
-            .filter_map(|dep| state.graph.get(dep))
-            .flat_map(|dropped| {
-                dropped
-                    .deps
-                    .iter()
-                    .filter(|d| graph::is_cross_dag(d))
-                    .cloned()
-            })
-            .collect();
-        for reference in inherited {
-            if !node.deps.contains(&reference) {
-                node.deps.push(reference);
-            }
-        }
-        // Context follows a node id, and the set is replaced rather than
-        // appended: a note reports state observed while one attempt ran.
-        node.context = state.notes_this_round.get(&node.id).cloned();
-        let settled = statuses.get(&node.id).copied();
-        carry_preserved_branch(&mut node, state, settled);
-        next.insert(node);
-    }
-    next
-}
-
-/// Statuses whose work is still on the branch the round left behind.
-///
-/// A node that settled one of these ran, committed, and stopped — so the branch
-/// holds work, and the next round has to continue it rather than cut a fresh one
-/// beside it. `done` never reaches here (it falls out of the transition), and
-/// `waiting` and `skipped` never dispatched, so there is nothing to preserve.
-fn preserves_its_branch(status: Option<NodeStatus>) -> bool {
-    matches!(
-        status,
-        Some(NodeStatus::Failed | NodeStatus::Cancelled | NodeStatus::Parked)
-    )
-}
-
-/// Pin a carried node to the branch its last attempt left behind.
-///
-/// Without this the continuation cuts a fresh branch beside committed work
-/// nothing points at any more: the publication that failed is retried against an
-/// empty tree, and the branch that holds the work is left for a person to find.
-///
-/// A `branch` the *planner* wrote wins outright — naming one is a decision
-/// somebody made after reading the result — and the `resume` follows it rather
-/// than pointing somewhere else, which is the same agreement `retry` refuses to
-/// break.
-fn carry_preserved_branch(node: &mut Node, state: &RunState, status: Option<NodeStatus>) {
-    if !preserves_its_branch(status) {
-        return;
-    }
-    let Some(preserved) = state.branches.get(&node.id) else {
-        return;
-    };
-    let branch = node.branch.clone().unwrap_or_else(|| preserved.clone());
-    node.resume = Some(crate::plan::Resume {
-        // The checkpoint is the sibling's to name; this crate records the branch
-        // it was told about and nothing it was not.
-        checkpoint: node.resume.as_ref().and_then(|r| r.checkpoint.clone()),
-        branch: branch.clone(),
-        // What the attempt actually finished, so the continuation re-runs only
-        // what is left. Carried forward from an earlier continuation as well:
-        // steps a round skipped are still on the branch it preserved.
-        completed_steps: state
-            .completed_steps
-            .get(&node.id)
-            .cloned()
-            .unwrap_or_default(),
-    });
-    node.branch = Some(branch);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plan::PLAN_SCHEMA_VERSION;
+    use crate::plan::{Plan, PLAN_SCHEMA_VERSION};
 
-    /// The checked-in shape of a schema-2 round result.
-    const ROUND_RESULT_GOLDEN: &str = include_str!("../tests/golden/round-result-v2.json");
+    /// The checked-in shape of a schema-3 run result.
+    const RUN_RESULT_GOLDEN: &str = include_str!("../tests/golden/run-result-v3.json");
 
     use serde_json::Value;
 
@@ -1709,10 +1661,9 @@ mod tests {
     /// carrying one of them would pin a third of the change: a change observed on
     /// its base, one that had not reached it, and a node with no change of its
     /// own — which carries no `landing` key at all.
-    fn round_result_golden() -> RoundResult {
-        RoundResult {
+    fn run_result_golden() -> RunResult {
+        RunResult {
             run_id: "golden".into(),
-            round: 1,
             state: GraphState::Complete,
             nodes: vec![
                 NodeResult {
@@ -1737,15 +1688,15 @@ mod tests {
         }
     }
 
-    /// The shape a round result is written as, pinned to the checked-in golden.
+    /// The shape a run result is written as, pinned to the checked-in golden.
     #[test]
-    fn a_schema_2_round_result_is_the_shape_the_golden_pins() {
-        let rendered = serde_json::to_string_pretty(&round_result_golden()).expect("it serialises");
+    fn a_schema_3_run_result_is_the_shape_the_golden_pins() {
+        let rendered = serde_json::to_string_pretty(&run_result_golden()).expect("it serialises");
         assert_eq!(
             rendered.trim(),
-            ROUND_RESULT_GOLDEN.trim(),
-            "the round result changed shape. If that was deliberate, bump \
-             ROUND_RESULT_SCHEMA_VERSION and update tests/golden/round-result-v2.json together"
+            RUN_RESULT_GOLDEN.trim(),
+            "the run result changed shape. If that was deliberate, bump \
+             RUN_RESULT_SCHEMA_VERSION and update tests/golden/run-result-v3.json together"
         );
     }
 
@@ -1757,12 +1708,12 @@ mod tests {
     /// published nothing would have every consumer branching on a field that is
     /// always present and usually meaningless.
     #[test]
-    fn a_schema_2_round_result_round_trips_and_omits_a_landing_it_does_not_have() {
-        let value = round_result_golden();
-        let read: RoundResult = serde_json::from_str(ROUND_RESULT_GOLDEN)
-            .expect("the golden reads back into the types");
+    fn a_schema_3_run_result_round_trips_and_omits_a_landing_it_does_not_have() {
+        let value = run_result_golden();
+        let read: RunResult =
+            serde_json::from_str(RUN_RESULT_GOLDEN).expect("the golden reads back into the types");
         assert_eq!(read, value);
-        let again: RoundResult =
+        let again: RunResult =
             serde_json::from_str(&serde_json::to_string(&value).expect("it serialises"))
                 .expect("it reads back");
         assert_eq!(again, value);
@@ -1782,70 +1733,68 @@ mod tests {
     /// The version is a decision, not an accident: it moves when the shape does,
     /// and the golden is named for the one it pins.
     #[test]
-    fn the_round_result_schema_version_and_the_golden_name_the_same_number() {
-        assert_eq!(ROUND_RESULT_SCHEMA_VERSION, 2);
-        let document: Value =
-            serde_json::from_str(ROUND_RESULT_GOLDEN).expect("the golden is JSON");
-        assert_eq!(document["schema_version"], ROUND_RESULT_SCHEMA_VERSION);
+    fn the_run_result_schema_version_and_the_golden_name_the_same_number() {
+        assert_eq!(RUN_RESULT_SCHEMA_VERSION, 3);
+        let document: Value = serde_json::from_str(RUN_RESULT_GOLDEN).expect("the golden is JSON");
+        assert_eq!(document["schema_version"], RUN_RESULT_SCHEMA_VERSION);
+        assert!(
+            document.get("round").is_none(),
+            "the run's own result document names a round: {document}"
+        );
         let written: Value = serde_json::from_str(
-            &serde_json::to_string(&round_result_golden()).expect("it serialises"),
+            &serde_json::to_string(&run_result_golden()).expect("it serialises"),
         )
         .expect("it is JSON");
-        assert_eq!(written["schema_version"], ROUND_RESULT_SCHEMA_VERSION);
+        assert_eq!(written["schema_version"], RUN_RESULT_SCHEMA_VERSION);
     }
 
-    /// Which versions this build will read, and which it refuses by name.
+    /// Which version this build will read, and which it refuses by name.
     ///
-    /// A `1` is the unversioned shape and reads: the bump was additive, so every
-    /// field it carries means here exactly what it meant there, and its nodes
-    /// simply record no landing. A version *ahead* of this build is the one that
-    /// cannot be read honestly, because it may state something there is no field
-    /// for — and a result normalised into this build's shape would then claim a
-    /// node landed nothing when the document said otherwise.
+    /// One number, unlike the additive bump that first recorded a landing: `2`
+    /// and `1` were a *round's* result, and this document has no round to put
+    /// theirs in. Read leniently either would be normalised into a run result
+    /// that looks like every other, which is the shape of the defect the version
+    /// exists to make visible — and a version *ahead* of this build cannot be
+    /// read honestly at all, because it may state something there is no field
+    /// for.
     #[test]
-    fn a_round_result_from_an_older_build_reads_and_one_from_a_newer_build_is_refused() {
-        let mut document = serde_json::to_value(round_result_golden()).expect("it serialises");
-        let edit = |document: &mut Value, each: &dyn Fn(&mut serde_json::Map<String, Value>)| {
-            each(document.as_object_mut().expect("it is an object"));
+    fn only_this_build_s_run_result_version_reads_and_every_other_is_refused_by_name() {
+        let document = serde_json::to_value(run_result_golden()).expect("it serialises");
+        let edit = |document: &Value, each: &dyn Fn(&mut serde_json::Map<String, Value>)| {
+            let mut copy = document.clone();
+            each(copy.as_object_mut().expect("it is an object"));
+            copy
         };
 
-        // The unversioned shape: no key, and no landing on any node.
-        edit(&mut document, &|object| {
-            object.remove("schema_version");
-            for node in object["nodes"].as_array_mut().expect("nodes") {
-                node.as_object_mut().expect("a node").remove("landing");
-            }
-        });
-        let older: RoundResult =
-            serde_json::from_value(document.clone()).expect("a version-1 result still reads");
-        assert!(
-            older.nodes.iter().all(|node| node.landing.is_none()),
-            "a result written before landings were recorded claimed one: {older:?}"
-        );
-        // And what this build writes back is its own version, stated rather than
-        // carried over from whatever it read.
-        let rewritten = serde_json::to_value(&older).expect("it serialises");
-        assert_eq!(rewritten["schema_version"], ROUND_RESULT_SCHEMA_VERSION);
-
-        // Both bounds. Above is a build that knows more than this one; `0` is a
-        // number this crate has never written, so a document claiming it did not
-        // come from this contract and is refused rather than normalised into a
-        // result that looks like every other.
-        for outside in [ROUND_RESULT_SCHEMA_VERSION + 1, 0] {
-            let mut claimed = document.clone();
-            edit(&mut claimed, &|object| {
+        // Above is a build that knows more than this one. `2` and `1` are the
+        // per-round document this shape replaced, and `0` a number this crate has
+        // never written, so each came from somewhere that is not this contract.
+        for outside in [RUN_RESULT_SCHEMA_VERSION + 1, 2, 1, 0] {
+            let claimed = edit(&document, &|object| {
                 object.insert("schema_version".into(), json!(outside));
             });
-            let refused = serde_json::from_value::<RoundResult>(claimed).expect_err(
-                "a result outside the versions this build reads was read as one of them",
-            );
+            let refused = serde_json::from_value::<RunResult>(claimed)
+                .expect_err("a result this build never wrote was read as one it did");
             let refusal = refused.to_string();
             assert!(
                 refusal.contains(&outside.to_string())
-                    && refusal.contains(&ROUND_RESULT_SCHEMA_VERSION.to_string()),
+                    && refusal.contains(&RUN_RESULT_SCHEMA_VERSION.to_string()),
                 "the refusal of {outside} names neither version: {refusal}"
             );
         }
+
+        // A document with no key at all is the unversioned `1`, and is refused as
+        // the missing field it is rather than defaulted into this shape.
+        let unversioned = edit(&document, &|object| {
+            object.remove("schema_version");
+        });
+        let refusal = serde_json::from_value::<RunResult>(unversioned)
+            .expect_err("an unversioned result was read as this build's version")
+            .to_string();
+        assert!(
+            refusal.contains("schema_version"),
+            "the refusal of an unversioned result does not name the field: {refusal}"
+        );
     }
 
     fn agent(id: &str, deps: &[&str]) -> Node {
@@ -1877,7 +1826,6 @@ mod tests {
         let settlement = execute_direct(
             &crate::executor::LocalExecutor,
             "demo",
-            1,
             "graphs/node-scope.yaml",
             &node,
             &CancellationToken::new(),
@@ -1972,126 +1920,6 @@ mod tests {
     }
 
     #[test]
-    fn a_done_node_falls_out_and_its_dependents_lose_the_satisfied_id() {
-        let state = state_of(
-            vec![agent("build", &[]), agent("ship", &["build"])],
-            &[("build", NodeStatus::Done)],
-        );
-        let next = derive_next(&state);
-        assert!(!next.contains("build"), "a done node was rescheduled");
-        assert!(next.get("ship").expect("ship").deps.is_empty());
-    }
-
-    #[test]
-    fn a_superseded_node_is_removed_exactly_as_a_drop_would_remove_it() {
-        let mut state = state_of(
-            vec![agent("build", &[]), agent("build-2", &[])],
-            &[("build", NodeStatus::Cancelled)],
-        );
-        state.superseded.insert("build".into());
-        let next = derive_next(&state);
-        assert!(
-            !next.contains("build"),
-            "the superseded node was carried forward"
-        );
-        assert!(next.contains("build-2"));
-    }
-
-    /// A node parked while it was running is *not* a superseded node.
-    ///
-    /// `cancel` parks the node and stops its dispatch, and a stopped dispatch
-    /// settles `cancelled` — the same status a `retry` leaves on the node it
-    /// replaced. Read off that status, the transition deleted a node no `retry`
-    /// had replaced: `requeue` then had nothing to bring back, and the
-    /// dependents the park was holding lost their gate along with it and ran.
-    #[test]
-    fn a_node_parked_while_it_was_running_is_carried_rather_than_removed() {
-        let mut parked = agent("sweep", &[]);
-        parked.parked = true;
-        let state = state_of(
-            vec![parked, agent("after", &["sweep"])],
-            &[("sweep", NodeStatus::Cancelled)],
-        );
-        let next = derive_next(&state);
-        assert!(
-            next.get("sweep").is_some_and(|node| node.parked),
-            "a node parked mid-flight was removed instead of carried"
-        );
-        assert_eq!(
-            next.get("after").expect("after").deps,
-            vec!["sweep".to_string()],
-            "the parked node's dependent lost the gate it was held behind"
-        );
-    }
-
-    #[test]
-    fn a_parked_node_is_carried_forward_without_being_dispatched() {
-        let mut parked = agent("sweep", &[]);
-        parked.parked = true;
-        let state = state_of(vec![parked], &[]);
-        let next = derive_next(&state);
-        assert!(
-            next.get("sweep").expect("sweep").parked,
-            "the park did not carry"
-        );
-    }
-
-    #[test]
-    fn a_cross_dag_reference_is_never_removed_as_a_satisfied_dependency() {
-        let state = state_of(vec![agent("consume", &["run:other#build"])], &[]);
-        let next = derive_next(&state);
-        assert_eq!(
-            next.get("consume").expect("consume").deps,
-            vec!["run:other#build".to_string()]
-        );
-    }
-
-    #[test]
-    fn a_watch_passes_through_the_consumer_the_transition_carried_out() {
-        let state = state_of(
-            vec![
-                agent("consume", &["run:other#build"]),
-                agent("after", &["consume"]),
-            ],
-            &[("consume", NodeStatus::Done)],
-        );
-        let next = derive_next(&state);
-        assert!(!next.contains("consume"));
-        assert_eq!(
-            next.get("after").expect("after").deps,
-            vec!["run:other#build".to_string()],
-            "the watch ended with the consumer that carried it"
-        );
-    }
-
-    #[test]
-    fn only_this_rounds_notes_carry_and_they_replace_rather_than_append() {
-        let mut stale = agent("build", &[]);
-        stale.context = Some("last round's note".into());
-        let mut state = state_of(vec![stale, agent("other", &[])], &[]);
-        state
-            .notes_this_round
-            .insert("other".into(), "this round's note".into());
-
-        let next = derive_next(&state);
-        assert_eq!(
-            next.get("build").expect("build").context,
-            None,
-            "a stale note was carried forward"
-        );
-        assert_eq!(
-            next.get("other").expect("other").context.as_deref(),
-            Some("this round's note")
-        );
-    }
-
-    #[test]
-    fn a_graph_whose_every_node_is_done_derives_no_next_round() {
-        let state = state_of(vec![agent("build", &[])], &[("build", NodeStatus::Done)]);
-        assert!(derive_next(&state).is_empty());
-    }
-
-    #[test]
     fn a_blocked_node_names_the_ready_human_gating_it_transitively() {
         let human = Node {
             id: "approve".into(),
@@ -2115,9 +1943,161 @@ mod tests {
         );
     }
 
+    /// A decision point holds exactly the subtree that depends on it, and
+    /// nothing else: an independent branch is not in `unblocks`, so nothing
+    /// pauses it.
+    #[test]
+    fn a_waiting_human_holds_its_own_subtree_and_no_other_branch() {
+        let human = Node {
+            id: "approve".into(),
+            kind: NodeKind::Human,
+            task: Some("approve it".into()),
+            deps: vec!["seed".into()],
+            ..Node::default()
+        };
+        let state = state_of(
+            vec![
+                agent("seed", &[]),
+                human,
+                agent("ship", &["approve"]),
+                agent("after", &["ship"]),
+                agent("probe", &[]),
+                agent("report", &["probe"]),
+            ],
+            &[("seed", NodeStatus::Done), ("approve", NodeStatus::Waiting)],
+        );
+        let statuses = state.statuses();
+        let decisions = decisions_now(
+            &state,
+            &statuses,
+            &ChannelState::new(&RunPaths::under(
+                std::path::Path::new("/nonexistent"),
+                "demo",
+            )),
+        );
+        let held = decisions
+            .get(&DecisionRef::Attestation("approve".into()))
+            .expect("the human action holds");
+        assert_eq!(held.kind, "attestation");
+        assert_eq!(
+            held.unblocks,
+            vec!["ship".to_string(), "after".to_string()],
+            "the decision held more than its own subtree"
+        );
+        let paused = paused_by(&decisions);
+        assert!(
+            !paused.contains("probe"),
+            "an independent branch was paused"
+        );
+        assert!(
+            !paused.contains("report"),
+            "an independent branch was paused"
+        );
+    }
+
+    /// Cleared, a decision releases exactly what it held — and says so once.
+    /// The two references a decision can carry are the two things that clear
+    /// one, and each spells itself: a surface reference can only be a surface's
+    /// own id, and a node reference can only be a node's.
+    #[test]
+    fn a_decision_reference_spells_which_of_the_two_things_clears_it() {
+        assert_eq!(
+            DecisionRef::Attestation("approve".into()).as_wire(),
+            "approve"
+        );
+        assert_eq!(DecisionRef::Surface(7).as_wire(), "surface:7");
+    }
+
+    /// A reference read back off a journal record is the one that was written.
+    #[test]
+    fn a_decision_reference_reads_back_as_the_thing_that_wrote_it() {
+        for reference in [
+            DecisionRef::Attestation("approve".into()),
+            DecisionRef::Surface(7),
+        ] {
+            assert_eq!(DecisionRef::of_wire(&reference.as_wire()), reference);
+        }
+        // A node whose name merely starts like the other spelling is still a
+        // node: the id would have to carry the separator, which validation
+        // refuses.
+        assert_eq!(
+            DecisionRef::of_wire("surface-check"),
+            DecisionRef::Attestation("surface-check".into())
+        );
+    }
+
+    #[test]
+    fn a_decision_is_reported_when_it_begins_holding_and_again_when_it_releases() {
+        let root = std::env::temp_dir().join(format!("onepipeline-decisions-{}", sys::pid()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = RunPaths::under(&root, "demo");
+        paths.create().expect("the run directory");
+        let mut journal = Journal::open(&paths);
+
+        let decision = Decision {
+            reference: DecisionRef::Attestation("approve".into()),
+            kind: "attestation".into(),
+            unblocks: vec!["ship".into()],
+        };
+        let mut held = BTreeMap::new();
+        let pending: BTreeMap<DecisionRef, Decision> = [(
+            DecisionRef::Attestation("approve".to_string()),
+            decision.clone(),
+        )]
+        .into();
+
+        report_decisions(&paths, &mut journal, &pending, &mut held).expect("reported");
+        // Reported once: a decision that has not changed is not re-announced on
+        // every pass of a loop that wakes forty times a second.
+        report_decisions(&paths, &mut journal, &pending, &mut held).expect("reported");
+        report_decisions(&paths, &mut journal, &BTreeMap::new(), &mut held).expect("reported");
+
+        let kinds: Vec<String> = journal::read(&paths.journal())
+            .iter()
+            .map(|event| event.kind.0.clone())
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                journal::PipelineKind::DecisionPending.as_str().to_string(),
+                journal::PipelineKind::DecisionCleared.as_str().to_string(),
+            ]
+        );
+        let cleared = &journal::read(&paths.journal())[1];
+        assert_eq!(cleared.payload["released"], json!(["ship"]));
+        assert_eq!(cleared.labels.node.as_deref(), Some("approve"));
+        assert_eq!(cleared.labels.round, None, "a round was stamped");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_node_is_announced_ready_once_and_again_when_it_becomes_ready_again() {
+        let root = std::env::temp_dir().join(format!("onepipeline-ready-{}", sys::pid()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = RunPaths::under(&root, "demo");
+        paths.create().expect("the run directory");
+        let mut journal = Journal::open(&paths);
+        let mut announced = BTreeSet::new();
+
+        let ready: BTreeMap<String, NodeStatus> = [("build".to_string(), NodeStatus::Ready)].into();
+        let running: BTreeMap<String, NodeStatus> =
+            [("build".to_string(), NodeStatus::Running)].into();
+        announce_ready(&paths, &mut journal, &ready, &mut announced).expect("announced");
+        announce_ready(&paths, &mut journal, &ready, &mut announced).expect("announced");
+        announce_ready(&paths, &mut journal, &running, &mut announced).expect("announced");
+        announce_ready(&paths, &mut journal, &ready, &mut announced).expect("announced");
+
+        assert_eq!(
+            journal::read(&paths.journal()).len(),
+            2,
+            "a node was announced ready more than once per time it became ready"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn the_stall_threshold_falls_back_when_the_environment_is_unusable() {
-        // Read through the same helper the round uses, so an unusable value
+        // Read through the same helper the loop uses, so an unusable value
         // cannot silently disable the watch it configures.
         assert!(stall_after_seconds() > 0);
     }
@@ -2146,11 +2126,12 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_labels_carry_only_the_reserved_keys() {
-        let labels = dispatch_labels("demo", 2, "build", Some("implement"), Some("engineer"));
+    fn dispatch_labels_carry_only_the_reserved_keys_and_never_a_round() {
+        let labels = dispatch_labels("demo", "build", Some("implement"), Some("engineer"));
         assert_eq!(labels.run_id.as_deref(), Some("demo"));
-        assert_eq!(labels.round, Some(2));
+        assert_eq!(labels.node.as_deref(), Some("build"));
         assert_eq!(labels.step.as_deref(), Some("implement"));
+        assert_eq!(labels.round, None, "a dispatch was stamped with a round");
         assert!(labels.extra.is_empty());
     }
 }

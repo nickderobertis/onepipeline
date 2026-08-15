@@ -83,12 +83,12 @@ fn a_lifecycle_node_publishes_through_the_real_onevcs_and_the_base_advances() {
         .run(&["start", &path.to_string_lossy(), "--attach"])
         .settled();
     world.until("the run to settle", |world| {
-        !world.events_of("landed", "round-finished").is_empty()
+        world.run_file("landed", "result.json").is_file()
     });
 
     // The node settled on what the sibling actually did, which is the assertion
     // that fails when this crate cannot read the sibling's answer.
-    let result = world.run_json("landed", "round-01/result.json");
+    let result = world.run_json("landed", "result.json");
     assert_eq!(
         result["nodes"][0]["status"],
         "done",
@@ -160,10 +160,10 @@ fn a_real_gate_that_rejects_the_branch_fails_the_node_and_leaves_the_base_alone(
         .run(&["start", &path.to_string_lossy(), "--attach"])
         .settled();
     world.until("the run to settle", |world| {
-        !world.events_of("refused", "round-finished").is_empty()
+        world.run_file("refused", "result.json").is_file()
     });
 
-    let result = world.run_json("refused", "round-01/result.json");
+    let result = world.run_json("refused", "result.json");
     assert_eq!(
         result["nodes"][0]["status"],
         "failed",
