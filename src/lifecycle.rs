@@ -252,7 +252,7 @@ fn publish(
                 // nothing report as one that landed work.
                 outcome: Some(crate::vcs::outcome_of(&published.outcome).to_owned()),
                 // The node is done either way — publishing is the whole of what
-                // this round asked of it — so whether the change *landed* is
+                // the plan asked of it — so whether the change *landed* is
                 // carried beside the status rather than folded into it. Taken
                 // from what the publication answered and never from the policy
                 // it ran under: an identity that asks the host to merge

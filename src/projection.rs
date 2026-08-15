@@ -63,13 +63,14 @@ pub struct RunState {
     pub change_urls: BTreeMap<String, String>,
     /// Whether each published node's change reached its base branch.
     ///
-    /// Kept across the round boundary, like [`branches`](Self::branches) and
-    /// [`change_urls`](Self::change_urls) and unlike
-    /// [`outcomes`](Self::outcomes): an unmerged change request outlives the
-    /// round that opened it, and a fact cleared at the transition would report
-    /// every earlier round's open change as one nobody had anything to say
-    /// about. A node that settles again overwrites its own entry, which is the
-    /// only way the answer changes.
+    /// Written only by a settlement that observed one, like
+    /// [`branches`](Self::branches) and [`change_urls`](Self::change_urls): an
+    /// unmerged change request outlives the settlement that opened it, so the
+    /// fact stands until the node settles again and overwrites its own entry,
+    /// which is the only way the answer changes. A landing dropped on any other
+    /// event would report an open change as one nobody had anything to say
+    /// about, which is precisely when a planner starts deciding there is nothing
+    /// left to do.
     pub landings: BTreeMap<String, Landing>,
     /// The declared steps each node's attempt finished.
     ///
@@ -317,8 +318,7 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
             // the node with none, which reads as nothing observed.
             //
             // llmlint: ignore-block[changed_behavior_has_e2e] no invocation a user can type
-            // reaches either half — an unreadable value needs a journal a *newer build* wrote,
-            // and the cross-round retention needs a node the transition does not re-dispatch.
+            // reaches this half: an unreadable value needs a journal a *newer build* wrote.
             // Held by this module's fold test instead; what a user can reach is held in
             // `tests/e2e/lifecycle.rs`.
             if let Some(landing) = payload
@@ -749,17 +749,18 @@ mod tests {
         assert!(millis_of("2000-02-29T00:00:00.000Z").is_some(), "2000 is");
     }
 
-    /// A landing survives the round boundary, and an unreadable one records
-    /// nothing.
+    /// A landing outlives the dispatch that recorded it, only a re-settlement
+    /// moves it, and an unreadable one records nothing.
     ///
-    /// The boundary is the point. `outcomes` is per-round because it describes
-    /// the attempt that just ran, but an unmerged change request outlives every
-    /// round after the one that opened it — so a landing cleared at the
-    /// transition would have the run stop mentioning the change on the round
-    /// after it was published, which is precisely when a planner starts deciding
-    /// there is nothing left to do.
+    /// Execution is continuous, so the only thing that can change what this run
+    /// says about a published change is the node settling again. An open change
+    /// request that stopped being reported while the run carried on is precisely
+    /// when a planner starts deciding there is nothing left to do, and a landing
+    /// a *newer* build spelled a word this one cannot read has to fold as
+    /// nothing observed rather than as a guess.
     #[test]
-    fn a_landing_outlives_the_round_that_recorded_it_and_an_unreadable_one_records_nothing() {
+    fn a_landing_outlives_its_dispatch_moves_only_on_a_re_settlement_and_an_unreadable_one_records_nothing(
+    ) {
         let plan = plan_of_nodes(vec![agent("open", &[]), agent("guessy", &[])]);
         let settled = |seq: u64, node: &str, landing: Value| {
             pipeline(
@@ -780,42 +781,40 @@ mod tests {
                 None,
                 &[("plan", json!(plan))],
             ),
-            pipeline(
-                journal::PipelineKind::RoundStarted,
-                1,
-                None,
-                &[("plan", json!(plan))],
-            ),
-            settled(2, "open", json!("unlanded")),
+            settled(1, "open", json!("unlanded")),
             // A word a newer writer used and this build cannot interpret.
-            settled(3, "guessy", json!("half-landed")),
-            pipeline(journal::PipelineKind::RoundFinished, 4, None, &[]),
-            Envelope {
-                labels: labels("demo", Some(2), None),
-                ..pipeline(
-                    journal::PipelineKind::RoundStarted,
-                    5,
-                    None,
-                    &[("plan", json!(plan))],
-                )
-            },
+            settled(2, "guessy", json!("half-landed")),
+            // Work the loop kept doing after both settled. None of it is about
+            // either node's change, so neither claim may move.
+            pipeline(journal::PipelineKind::NodeDispatched, 3, Some("later"), &[]),
+            pipeline(
+                journal::PipelineKind::NodeSettled,
+                4,
+                Some("later"),
+                &[("status", json!("done"))],
+            ),
         ];
 
         let state = fold(&events);
-        assert_eq!(state.round, 2, "the fold reached the second round");
         assert_eq!(
             state.landings.get("open"),
             Some(&Landing::Unlanded),
-            "the open change stopped being reported on the round after it opened"
-        );
-        assert!(
-            !state.outcomes.contains_key("open"),
-            "this journey only says something if the round boundary really cleared the outcome"
+            "the open change stopped being reported while the run carried on"
         );
         assert_eq!(
             state.landings.get("guessy"),
             None,
             "a landing this build cannot read was folded as one it could"
+        );
+
+        // The one thing that moves it: the node settling again, on a change the
+        // host has since merged.
+        let mut relanded = events;
+        relanded.push(settled(5, "open", json!("landed")));
+        assert_eq!(
+            fold(&relanded).landings.get("open"),
+            Some(&Landing::Landed),
+            "a node that settled again did not overwrite its own landing"
         );
     }
 

@@ -1297,7 +1297,7 @@ mod tests {
     ///
     /// Three halves, and the middle one is a drift gate. A landing reaches a
     /// reader by two routes that are written independently: `serde` puts it in
-    /// `round-NN/result.json`, and [`Landing::as_str`] puts it in the journal
+    /// the run's `result.json`, and [`Landing::as_str`] puts it in the journal
     /// payload the views fold. Nothing but this makes the two spellings agree, and
     /// a run whose result file and whose ledger disagree about a word is a run
     /// nobody can reconcile.

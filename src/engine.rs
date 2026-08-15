@@ -1741,9 +1741,10 @@ mod tests {
             document.get("round").is_none(),
             "the run's own result document names a round: {document}"
         );
-        let written: Value =
-            serde_json::from_str(&serde_json::to_string(&run_result_golden()).expect("it serialises"))
-                .expect("it is JSON");
+        let written: Value = serde_json::from_str(
+            &serde_json::to_string(&run_result_golden()).expect("it serialises"),
+        )
+        .expect("it is JSON");
         assert_eq!(written["schema_version"], RUN_RESULT_SCHEMA_VERSION);
     }
 

@@ -1014,70 +1014,68 @@ fn a_change_the_host_is_holding_settles_the_node_as_queued() {
     assert_eq!(node["landing"], "unlanded", "{node}");
 }
 
-/// The document `round run` prints carries the landing, at a stated version, and
+/// The document a consumer reads carries the landing, at a stated version, and
 /// says nothing where there was nothing to observe.
 ///
-/// This is the **read interface** rather than a file this suite goes looking for:
-/// `round run` writes the round result to stdout, and that is what a consumer
-/// driving the engine parses. `round-NN/result.json` is the same document, and
-/// the journey checks they agree — a version stated on one and not the other
-/// would be a contract with two answers.
+/// This is the **read interface**. Execution is continuous, so there is no round
+/// to serve a result for: the ledger holds one `result.json` per run, rewritten
+/// whenever the driver closes out, and that document is what a consumer driving
+/// the engine parses. Its version is the only statement they get about what
+/// changed in it.
 ///
-/// All three of the landing's cases are read here. The first round carries two:
-/// a change the host is holding, and a plain agent node that published nothing
-/// and therefore carries **no `landing` key at all**. The third — a change
-/// observed on its base — is the second half, under the same policy once the host
-/// lands what it is handed, because a version that round-trips one value and
-/// drops the other is the defect a golden exists to catch.
+/// All three of the landing's cases are read here. The first run carries two: a
+/// change the host is holding, and a plain agent node that published nothing and
+/// therefore carries **no `landing` key at all**. The third — a change observed
+/// on its base — is the second half, under the same policy once the host lands
+/// what it is handed, because a version that round-trips one value and drops the
+/// other is the defect a golden exists to catch.
 ///
-/// Each half gets its own world. The round is run from the test rather than from
-/// the driver, which is what puts its stdout in hand, and the rendezvous holding
-/// that driver is per-world: two halves sharing one would have the second run's
-/// driver take the round before the test could.
+/// Each half gets its own world: the rendezvous holding a run's driver is
+/// per-world, and two halves sharing one would have the second launch wait on the
+/// first run's driver.
 #[test]
-fn the_round_result_a_consumer_reads_states_its_version_and_carries_the_landing() {
-    // The host is holding the change it was handed.
-    let world = World::new("lifecycle-result-contract");
-    world.repository("change-auto", &["true"]);
-    world.script("service.work", "the worker wrote this\n");
-    let (open, round) = driven(
-        &world,
-        "readapi",
-        vec![lifecycle("service", &[]), agent("build", &[])],
-    );
-    let printed = printed_result(&round);
-    assert_eq!(
-        printed["schema_version"], 2,
-        "the round result a consumer parses states no version, or not this one: {printed}"
-    );
-    // The same document, on disk, agreeing with the one that was printed.
-    assert_eq!(
-        world.run_json(&open, "round-01/result.json"),
-        printed,
-        "`round run` printed a different document from the one it recorded"
-    );
-
-    let node = |printed: &serde_json::Value, id: &str| {
-        printed["nodes"]
+fn the_run_result_a_consumer_reads_states_its_version_and_carries_the_landing() {
+    let node = |recorded: &serde_json::Value, id: &str| {
+        recorded["nodes"]
             .as_array()
             .expect("the result carries nodes")
             .iter()
             .find(|node| node["id"] == id)
-            .unwrap_or_else(|| panic!("{id} is missing from {printed}"))
+            .unwrap_or_else(|| panic!("{id} is missing from {recorded}"))
             .clone()
     };
+
+    // The host is holding the change it was handed.
+    let world = World::new("lifecycle-result-contract");
+    world.repository("change-auto", &["true"]);
+    world.script("service.work", "the worker wrote this\n");
+    let (open, launched) = driven(
+        &world,
+        "readapi",
+        vec![lifecycle("service", &[]), agent("build", &[])],
+    );
+    launched.settled();
+    let recorded = world.run_json(&open, "result.json");
     assert_eq!(
-        node(&printed, "service")["landing"],
+        recorded["schema_version"], 3,
+        "the run result a consumer parses states no version, or not this one: {recorded}"
+    );
+    assert!(
+        recorded.get("round").is_none(),
+        "the run's own result document names a round: {recorded}"
+    );
+    assert_eq!(
+        node(&recorded, "service")["landing"],
         "unlanded",
-        "{printed}"
+        "{recorded}"
     );
     // A node that published nothing carries no landing *key*: a `null` on every
     // node would have a consumer branching on a field that is almost always
     // meaningless, which is how the distinction stops being read at all.
     assert!(
-        node(&printed, "build").get("landing").is_none(),
+        node(&recorded, "build").get("landing").is_none(),
         "a node with no change to land carries a landing key anyway: {}",
-        node(&printed, "build")
+        node(&recorded, "build")
     );
 
     // The same policy, and this time the host lands what it is handed.
@@ -1085,33 +1083,15 @@ fn the_round_result_a_consumer_reads_states_its_version_and_carries_the_landing(
     world.repository("change-auto", &["true"]);
     world.script("gh.merged", "");
     world.script("service.work", "the worker wrote this\n");
-    let (_, round) = driven(&world, "readapi", vec![lifecycle("service", &[])]);
-    let printed = printed_result(&round);
-    assert_eq!(printed["schema_version"], 2, "{printed}");
-    assert_eq!(node(&printed, "service")["landing"], "landed", "{printed}");
-}
-
-/// The round result `round run` printed, as a consumer parses it.
-///
-/// The **whole** of stdout, parsed in one go rather than searched for a line that
-/// happens to be JSON. That is the contract this reader holds the verb to: a
-/// consumer driving the engine pipes stdout into a parser, and a diagnostic
-/// sharing that descriptor would break it. Everything the verb has to say to a
-/// person goes to stderr.
-fn printed_result(round: &crate::harness::Run) -> serde_json::Value {
-    let document: serde_json::Value =
-        serde_json::from_str(round.stdout.trim()).unwrap_or_else(|error| {
-            panic!(
-                "`round run` stdout is not one machine-readable document ({error}):\n\
-                 stdout: {}\nstderr: {}",
-                round.stdout, round.stderr
-            )
-        });
-    assert!(
-        document.get("nodes").is_some(),
-        "`round run` printed something other than a round result: {document}"
+    let (landed, launched) = driven(&world, "readapi", vec![lifecycle("service", &[])]);
+    launched.settled();
+    let recorded = world.run_json(&landed, "result.json");
+    assert_eq!(recorded["schema_version"], 3, "{recorded}");
+    assert_eq!(
+        node(&recorded, "service")["landing"],
+        "landed",
+        "{recorded}"
     );
-    document
 }
 
 /// A settled node and a landed node are different facts, and one publication
@@ -1171,7 +1151,7 @@ fn a_settled_node_and_a_landed_node_are_told_apart_by_what_the_host_did_not_by_t
         "the ledger records a change that reached nobody as though it had landed: {record}"
     );
 
-    let node = world.run_json(&open, "round-01/result.json")["nodes"][0].clone();
+    let node = world.run_json(&open, "result.json")["nodes"][0].clone();
     assert_eq!(node["status"], "done", "{node}\n{}", why(&world, &open));
     assert_eq!(
         node["landing"], "unlanded",
@@ -1201,7 +1181,7 @@ fn a_settled_node_and_a_landed_node_are_told_apart_by_what_the_host_did_not_by_t
     world.script("service.work", "the change the host merged\n");
     let landed = settle(&world, "hostmerged", vec![lifecycle("service", &[])]);
 
-    let node = world.run_json(&landed, "round-01/result.json")["nodes"][0].clone();
+    let node = world.run_json(&landed, "result.json")["nodes"][0].clone();
     assert_eq!(node["status"], "done", "{node}\n{}", why(&world, &landed));
     assert_eq!(
         node["landing"],
@@ -1230,7 +1210,7 @@ fn a_settled_node_and_a_landed_node_are_told_apart_by_what_the_host_did_not_by_t
         status.stdout
     );
     let goals = world.run(&["goals", &landed]);
-    goals.exited(0).out_has("done)");
+    goals.exited(0).out_has("1/1 done");
     assert!(
         !goals.stdout.contains("not landed"),
         "a run whose only change landed still counts one against it:\n{}",
