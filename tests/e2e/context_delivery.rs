@@ -238,8 +238,7 @@ fn a_deferred_note_rides_the_next_dispatch_and_is_consumed_by_it() {
     // is for that one — and a third that stays in flight throughout, so the loop
     // is still running when the requeue below asks for a second dispatch.
     world.script("keep.wait", "hold");
-    let run =
-        held_beside_a_pending_node_with(&world, "defernote", vec![agent("keep", &[])]);
+    let run = held_beside_a_pending_node_with(&world, "defernote", vec![agent("keep", &[])]);
     world.script("later.wait", "hold");
 
     world

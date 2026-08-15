@@ -16,9 +16,7 @@ use std::path::{Path, PathBuf};
 use clap::{CommandFactory, Parser};
 use oneagentgraph::config::{ConfigRef, GraphConfig, JudgeSide, Member};
 use onepipeline::channel::{allows, Author, Command as Edit, Dependents, Reply, SurfaceKind};
-use onepipeline::cli::{
-    Cli, Command, DAG_GRAPH_OFF, DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
-};
+use onepipeline::cli::{Cli, Command, DAG_GRAPH_OFF, DEFAULT_HEARTBEAT_INTERVAL_SECONDS};
 use onepipeline::controls::NodeControls;
 use onepipeline::error::{EXIT_NOTHING_DRIVING, EXIT_QUEUED, EXIT_REFUSED, EXIT_SUCCESS};
 use onepipeline::event::{
@@ -972,7 +970,10 @@ fn the_monitor_may_issue_exactly_the_ops_the_contract_allows_it() {
         let refusal = verdict
             .expect_err(&format!("the monitor was allowed `{op}`"))
             .to_string();
-        assert!(refusal.contains(op), "the refusal does not name the op: {refusal}");
+        assert!(
+            refusal.contains(op),
+            "the refusal does not name the op: {refusal}"
+        );
         // With a reason, not merely a no: the monitor has to know what to do
         // instead, and "surface it" is the whole answer.
         assert!(
@@ -991,9 +992,8 @@ fn the_monitor_may_issue_exactly_the_ops_the_contract_allows_it() {
             .contains("author"),
         "the default author is written out"
     );
-    let watched: Reply =
-        serde_json::from_str(r#"{"version":1,"author":"monitor","commands":[]}"#)
-            .expect("it parses");
+    let watched: Reply = serde_json::from_str(r#"{"version":1,"author":"monitor","commands":[]}"#)
+        .expect("it parses");
     assert_eq!(watched.author, Author::Monitor);
     assert_eq!(Author::Monitor.as_str(), "monitor");
     assert_eq!(Author::Planner.as_str(), "planner");

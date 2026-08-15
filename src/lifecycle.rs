@@ -217,17 +217,10 @@ fn publish(
     token: &str,
     branch: Option<String>,
 ) -> Settlement {
-    let title = node.title.clone().unwrap_or_else(|| {
-        draft_title(
-            executor,
-            run,
-            default_graph,
-            node,
-            worktree,
-            cancel,
-            tx,
-        )
-    });
+    let title = node
+        .title
+        .clone()
+        .unwrap_or_else(|| draft_title(executor, run, default_graph, node, worktree, cancel, tx));
 
     match crate::vcs::publish(token, node.merge_policy, Some(&title)) {
         Ok(published) => {
@@ -243,8 +236,7 @@ fn publish(
                     ..Settlement::plain(&node.id, NodeStatus::Failed, Some("publication-failed"))
                 };
             }
-            let labels =
-                engine::dispatch_labels(run, &node.id, None, node.persona.as_deref());
+            let labels = engine::dispatch_labels(run, &node.id, None, node.persona.as_deref());
             let _ = tx.send(Message::Event(Box::new(crate::vcs::published_event(
                 &published, &labels,
             ))));

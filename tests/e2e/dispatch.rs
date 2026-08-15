@@ -612,7 +612,9 @@ fn a_plan_dispatches_through_the_real_oneagentgraph_and_its_members_run() {
         .filter_map(prompt_of)
         .collect();
     assert!(
-        launches.iter().any(|task| task.contains("Observe this run")),
+        launches
+            .iter()
+            .any(|task| task.contains("Observe this run")),
         "no member was launched to observe the run: {launches:?}"
     );
     assert!(

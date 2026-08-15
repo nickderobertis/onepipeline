@@ -1014,11 +1014,7 @@ mod tests {
                     None,
                     &[("plan", json!(plan()))],
                 ),
-                event(
-                    crate::journal::PipelineKind::NodeReady,
-                    Some("build"),
-                    &[],
-                ),
+                event(crate::journal::PipelineKind::NodeReady, Some("build"), &[]),
                 event(
                     crate::journal::PipelineKind::NodeDispatched,
                     Some("build"),
@@ -1038,7 +1034,10 @@ mod tests {
         // The run's own state has no node, so it has no typed id: it reaches the
         // reader as a trailer, naming the run it belongs to.
         assert!(stream.contains("-- demo  0/1 done"), "{stream}");
-        assert!(!stream.contains("round"), "a round reached a view: {stream}");
+        assert!(
+            !stream.contains("round"),
+            "a round reached a view: {stream}"
+        );
 
         let views = vec![view];
         assert!(status(&views).contains("build: running"));

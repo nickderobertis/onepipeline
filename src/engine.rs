@@ -484,9 +484,8 @@ fn converge(
                 // A node that settled may have readied its dependents, and a
                 // node that is ready again — a requeue, a retry — is announced
                 // again.
-                announced_ready.retain(|id| {
-                    state.statuses().get(id).copied() == Some(NodeStatus::Ready)
-                });
+                announced_ready
+                    .retain(|id| state.statuses().get(id).copied() == Some(NodeStatus::Ready));
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -1064,14 +1063,7 @@ fn spawn(
         .spawn(move || {
             let executor = crate::rules::executor_for(&entry);
             let settlement = if node.repo.is_some() {
-                crate::lifecycle::execute(
-                    executor.as_ref(),
-                    &run,
-                    &node_graph,
-                    &node,
-                    &cancel,
-                    &tx,
-                )
+                crate::lifecycle::execute(executor.as_ref(), &run, &node_graph, &node, &cancel, &tx)
             } else {
                 execute_direct(executor.as_ref(), &run, &node_graph, &node, &cancel, &tx)
             };
@@ -1908,7 +1900,10 @@ mod tests {
         let decisions = decisions_now(
             &state,
             &statuses,
-            &ChannelState::new(&RunPaths::under(std::path::Path::new("/nonexistent"), "demo")),
+            &ChannelState::new(&RunPaths::under(
+                std::path::Path::new("/nonexistent"),
+                "demo",
+            )),
         );
         let held = decisions.get("approve").expect("the human action holds");
         assert_eq!(held.kind, "human");
@@ -1918,8 +1913,14 @@ mod tests {
             "the decision held more than its own subtree"
         );
         let paused = paused_by(&decisions);
-        assert!(!paused.contains("probe"), "an independent branch was paused");
-        assert!(!paused.contains("report"), "an independent branch was paused");
+        assert!(
+            !paused.contains("probe"),
+            "an independent branch was paused"
+        );
+        assert!(
+            !paused.contains("report"),
+            "an independent branch was paused"
+        );
     }
 
     /// Cleared, a decision releases exactly what it held — and says so once.
@@ -1973,8 +1974,7 @@ mod tests {
         let mut journal = Journal::open(&paths);
         let mut announced = BTreeSet::new();
 
-        let ready: BTreeMap<String, NodeStatus> =
-            [("build".to_string(), NodeStatus::Ready)].into();
+        let ready: BTreeMap<String, NodeStatus> = [("build".to_string(), NodeStatus::Ready)].into();
         let running: BTreeMap<String, NodeStatus> =
             [("build".to_string(), NodeStatus::Running)].into();
         announce_ready(&paths, &mut journal, &ready, &mut announced).expect("announced");
