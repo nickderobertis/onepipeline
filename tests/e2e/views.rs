@@ -802,6 +802,10 @@ fn a_run_root_the_views_refuse_is_named_with_its_reason() {
         r#"{"oops": true}"#,
     )
     .expect("a launch record this build refuses");
+    // And one whose launch record is there and is not a record at all: absent
+    // and "present as something else" are different things to tell a reader.
+    std::fs::create_dir_all(world.runs.join("impostor").join("launch.json"))
+        .expect("a launch record that is a directory");
     // llmlint: ignore-end[tests_mirror_real_usage]
 
     for view in [vec!["runs"], vec!["status"], vec!["goals"]] {
@@ -809,17 +813,18 @@ fn a_run_root_the_views_refuse_is_named_with_its_reason() {
             .run(&view)
             .exited(0)
             .out_has(&run)
-            .out_has("2 run root(s) skipped")
+            .out_has("3 run root(s) skipped")
             .out_has("half-written")
             .out_has("launch.json")
-            .out_has("unknown field `oops`");
+            .out_has("unknown field `oops`")
+            .out_has("is not a file");
     }
     // `host` lists dispatches rather than runs, so the run it read is not on it
     // — but a root it could not read is a dispatch it cannot see, and it says so.
     world
         .run(&["host"])
         .exited(0)
-        .out_has("2 run root(s) skipped")
+        .out_has("3 run root(s) skipped")
         .out_has("half-written");
 }
 
@@ -1002,9 +1007,14 @@ fn host_never_renders_a_dispatch_whose_driver_this_host_can_prove_is_gone() {
     // claim that one exists.
     std::fs::write(&lock, "not json at all").expect("the lock is rewritten");
     unproven("cannot be read");
+    // A lock that is there and is not a lock: absent is a proof that nothing
+    // drives the run, and this is not absence.
+    std::fs::remove_file(&lock).expect("the lock is removed");
+    std::fs::create_dir_all(&lock).expect("a lock that is a directory");
+    unproven("is not a file");
+    std::fs::remove_dir_all(&lock).expect("the lock is removed");
 
     // And with nothing holding the run at all, nothing is driving it.
-    std::fs::remove_file(&lock).expect("the lock is removed");
     world
         .run(&["host"])
         .exited(0)

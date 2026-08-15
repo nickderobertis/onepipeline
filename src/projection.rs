@@ -628,6 +628,12 @@ fn fold_activity(state: &mut RunState, event: &Envelope) {
 /// refusal to whatever wrote it would be the invented attribution this exists to
 /// replace.
 fn fold_refusal(state: &mut RunState, event: &Envelope) {
+    // llmlint: ignore-block[changed_behavior_has_e2e] the three guards here are about
+    // envelopes no producer in this stack writes: only `oneagentgraph` publishes this kind,
+    // it labels a dispatch's envelopes with the node, and the payload is its own declared
+    // type. Reaching any of them needs a store a *newer* build — or something wearing a
+    // producer's clothes — wrote. Held by this module's and `src/views.rs`'s own tests;
+    // what a user can reach is driven in `tests/e2e/views.rs`.
     if event.source != Source::Agentgraph || !is_fallback_advanced(&event.kind) {
         return;
     }
@@ -645,6 +651,7 @@ fn fold_refusal(state: &mut RunState, event: &Envelope) {
     ) else {
         return;
     };
+    // llmlint: ignore-end[changed_behavior_has_e2e]
     let refusal = Refusal {
         advanced,
         member: event

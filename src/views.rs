@@ -374,7 +374,10 @@ fn skipped_lines(skipped: &[Skipped]) -> String {
 /// `no runs recorded`, and only one of them means there is nothing running.
 fn nothing_to_report(survey: &Survey) -> String {
     let mut out = if survey.views.is_empty() && !survey.skipped.is_empty() {
-        format!("no run under {} could be read\n", survey.root.display())
+        format!(
+            "no run under {} could be read\n",
+            one_line(&survey.root.display().to_string())
+        )
     } else {
         "no runs recorded\n".to_string()
     };
@@ -577,7 +580,13 @@ fn refusal_phrase(refusal: &Refusal) -> String {
         // Neither was stamped. The identity is still the thing to act on, and
         // naming a side the record does not carry would send the fix at a chain
         // nobody named — which is the failure this line exists to end.
+        //
+        // llmlint: ignore-block[changed_behavior_has_e2e] `oneagentgraph` labels a
+        // member's envelopes with the member, so no producer reaches this arm; it is
+        // written for one that stamps neither. The two a producer does reach are driven
+        // in `tests/e2e/views.rs`.
         (None, None) => "a side the record does not name".to_string(),
+        // llmlint: ignore-end[changed_behavior_has_e2e]
     };
     // llmlint: ignore-block[changed_behavior_has_e2e] `FallbackAdvanced::reason` is a
     // required `String`, so no producer reaches the empty half; it is written for a newer
@@ -670,18 +679,36 @@ enum Proof {
 /// claim made now rather than one made at launch. Its pid says which process,
 /// and its start token says the pid is still that process — a pid alone is what a
 /// two-day-old lock has, and a reused one answers a liveness probe as alive.
-///
-/// Measured on a real host before this existed: six rows aged 12h–52h rendered
-/// as a live fleet while one agent process was running and none of them matched.
 fn dispatch_proof(view: &RunView) -> Proof {
     if view.state.stop_recorded() {
         return Proof::Stale("the run was stopped".to_string());
     }
     let path = view.paths.lock();
-    if !path.is_file() {
-        return Proof::Stale(
-            "nothing holds the run's ownership lock, so no driver is running it".to_string(),
-        );
+    // Asked for, rather than tested with `is_file`: that helper answers `false`
+    // for a lock that is not there *and* for one this host would not describe,
+    // and only the first is a proof. Reading the second as absence would turn a
+    // question into a verdict that nothing is driving the run.
+    match std::fs::metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Proof::Stale(
+                "nothing holds the run's ownership lock, so no driver is running it".to_string(),
+            )
+        }
+        // llmlint: ignore-block[changed_behavior_has_e2e] a lock this host will not describe
+        // at all is a host condition no portable journey can set; the answer beside it — a
+        // lock that is there and is not a file — is driven in `tests/e2e/views.rs`.
+        Err(error) => {
+            return Proof::Unproven(format!(
+                "the run's ownership lock cannot be described: {error}"
+            ))
+        }
+        // llmlint: ignore-end[changed_behavior_has_e2e]
+        Ok(about) if !about.is_file() => {
+            return Proof::Unproven(
+                "the run's ownership lock is not a file, so nothing here holds it".to_string(),
+            )
+        }
+        Ok(_) => {}
     }
     let Some(held) = ledger::read_json_opt::<LockRecord>(&path) else {
         // A claim this build cannot read is still a claim — it is what stops a
@@ -737,7 +764,10 @@ pub fn host(survey: &Survey) -> String {
     // cannot see past — a run recorded under another runs root is a live
     // dispatch this view will never list — and a reader who does not know which
     // root was read cannot tell that absence from an idle host.
-    out.push_str(&format!("  reading {}\n", survey.root.display()));
+    out.push_str(&format!(
+        "  reading {}\n",
+        one_line(&survey.root.display().to_string())
+    ));
     let mut rendered = false;
     let mut ignored: Vec<String> = Vec::new();
     for view in &survey.views {
