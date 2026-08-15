@@ -947,8 +947,9 @@ dependencies = [
 
 [[package]]
 name = "onevcs"
-version = "0.2.7"
-source = "git+https://github.com/nickderobertis/onevcs?rev=d3c495d050c5d5e70a56d1fac50b8a0f27150cc8#d3c495d050c5d5e70a56d1fac50b8a0f27150cc8"
+version = "0.2.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "386e93167f2969d3fac613ec98e9034f5217129561a92d18bdc061887dcb5b54"
 dependencies = [
  "clap",
  "dunce",
@@ -966,8 +967,9 @@ dependencies = [
 
 [[package]]
 name = "onevcs-testing"
-version = "0.1.7"
-source = "git+https://github.com/nickderobertis/onevcs?rev=d3c495d050c5d5e70a56d1fac50b8a0f27150cc8#d3c495d050c5d5e70a56d1fac50b8a0f27150cc8"
+version = "0.1.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7acd27a7e4d35c70ca7e816f9f84d4f3f05d2e30c04ab9acc6bfd8eb23b5a992"
 dependencies = [
  "onevcs",
  "serde",

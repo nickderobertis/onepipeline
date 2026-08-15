@@ -450,6 +450,16 @@ fn a_plan_the_schema_refuses_never_starts_a_run() {
             r#"{"schema_version":7,"tasks":[{"id":"a","persona":"e","task":"t"}]}"#,
             "schema_version",
         ),
+        // A title that is only spacing publishes a commit with no subject at
+        // all, which `onevcs` refuses at publication — after a whole dispatch.
+        // The over-long title beside it is `lifecycle.rs`'s journey, where a
+        // real publication is what proves the bound.
+        (
+            "blanktitle",
+            r#"{"schema_version":2,"tasks":[{"id":"a","repo":"o/r","persona":"e","task":"t",
+                "title":"   "}]}"#,
+            "the title is blank",
+        ),
     ];
 
     for (name, body, expected) in cases {

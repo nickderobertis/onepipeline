@@ -12,6 +12,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use onevcs::provenance::SUBJECT_LIMIT;
 use serde::{Deserialize, Serialize};
 
 use crate::controls::NodeControls;
@@ -409,6 +410,15 @@ pub fn validate_edited(plan: &Plan) -> Result<()> {
 pub fn validate_node(node: &Node) -> Result<()> {
     let named = |what: &str| Error::Invalid(format!("node '{}': {what}", node.id));
 
+    // A title is only ever the subject of a publication, and only a node that
+    // names a repo publishes — so this holds exactly the nodes whose title
+    // `onevcs` will read, and holds them here rather than there: it checks the
+    // title after a whole dispatch and its gate, by which point a retry can only
+    // recompute the same title from the same plan and be refused identically.
+    if let (Some(_), Some(title)) = (&node.repo, &node.title) {
+        validate_title(title).map_err(|why| named(&why))?;
+    }
+
     if node.kind == NodeKind::Human {
         if node.id.contains(STEP_SEPARATOR) {
             return Err(named(
@@ -489,6 +499,30 @@ pub fn validate_node(node: &Node) -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// Check one explicit change-request title against the rule its publication is
+/// held to.
+///
+/// The bound is [`onevcs::provenance::SUBJECT_LIMIT`] itself, and the length is
+/// measured on the trimmed title as the sibling measures it, so nothing is
+/// refused here that would have published. Blank is its own refusal because a
+/// title that is only spacing publishes a commit with no subject at all, which
+/// is the one shape a length check reads as fine.
+// llmlint: ignore[invalid_states_unrepresentable] the validated title is `onevcs::Subject`, which the sibling owns and builds at the publication request; this reads the plain `String` a plan document wrote, which serde parses before any type could constrain it.
+fn validate_title(title: &str) -> std::result::Result<(), String> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err("the title is blank, and a publication needs a subject".to_owned());
+    }
+    if title.len() > SUBJECT_LIMIT {
+        return Err(format!(
+            "the title is {} characters, over the {SUBJECT_LIMIT}-character limit onevcs \
+             holds a publication subject to",
+            title.len()
+        ));
+    }
+    Ok(())
 }
 
 fn validate_steps(node: &Node, steps: &[Step]) -> Result<()> {
@@ -1079,6 +1113,83 @@ mod tests {
                 node.id
             );
         }
+    }
+
+    /// A title `onevcs` will refuse at publication is refused at the plan's own
+    /// boundary.
+    ///
+    /// The lengths are built from [`SUBJECT_LIMIT`], never written out: a number
+    /// spelled here would be a second copy of a bound this crate does not own.
+    #[test]
+    fn a_title_the_publication_would_refuse_is_refused_before_anything_is_dispatched() {
+        let titled = |title: &str| Node {
+            title: Some(title.to_owned()),
+            repo: Some("owner/repo".into()),
+            ..agent("publish", &[])
+        };
+
+        let over = "t".repeat(SUBJECT_LIMIT + 1);
+        let message = validate(&plan_of(vec![titled(&over)]))
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("node 'publish'"), "{message}");
+        assert!(
+            message.contains(&format!("{} characters", SUBJECT_LIMIT + 1)),
+            "the refusal does not say how long the title is: {message}"
+        );
+        assert!(
+            message.contains(&format!("{SUBJECT_LIMIT}-character limit")),
+            "the refusal does not name the limit: {message}"
+        );
+
+        validate(&plan_of(vec![titled(&"t".repeat(SUBJECT_LIMIT))]))
+            .expect("a title at the limit is publishable, so the plan is legal");
+
+        validate(&plan_of(vec![titled(&format!(
+            "  {}  ",
+            "t".repeat(SUBJECT_LIMIT)
+        ))]))
+        .expect("the surrounding spacing was counted against the limit");
+
+        let message = validate(&plan_of(vec![titled("   ")]))
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("node 'publish'"), "{message}");
+        assert!(message.contains("blank"), "{message}");
+
+        // A node that names no repository publishes nothing, so its title is
+        // read by no one and is held to no publication's rule.
+        validate(&plan_of(vec![Node {
+            title: Some(over),
+            ..agent("direct", &[])
+        }]))
+        .expect("a title on a node that never publishes was held to the publication's limit");
+    }
+
+    /// An ordinary title takes the path where this check does nothing at all.
+    ///
+    /// Every length above is built from [`SUBJECT_LIMIT`] and moves with it,
+    /// which proves the arithmetic at the edge and only there. This one is
+    /// deliberately *not* derived from the bound: it is the length a planner
+    /// actually writes, well inside the limit, and the case that would catch a
+    /// check that refused far more than the publication does.
+    #[test]
+    fn a_title_a_planner_would_actually_write_is_left_alone() {
+        // 100 characters — a real subject, not a fixture built out of the bound.
+        let title = "feat(plan): refuse a node title that the publication would not commit under, \
+                     before it is dispatched";
+        assert!(
+            title.len() < SUBJECT_LIMIT,
+            "this is only an ordinary title while it is inside the bound: {} characters",
+            title.len()
+        );
+
+        validate(&plan_of(vec![Node {
+            title: Some(title.to_owned()),
+            repo: Some("owner/repo".into()),
+            ..agent("publish", &[])
+        }]))
+        .expect("an ordinary title was refused");
     }
 
     /// The version this schema replaced is refused *deliberately*.
