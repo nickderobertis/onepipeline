@@ -848,6 +848,14 @@ fn execute_direct(
     // this arm means the graph came from somewhere validation did not run — a
     // journal a stale build wrote, or one edited by hand — and the answer there
     // is the same as the plan's, in the node's own settlement.
+    // llmlint: ignore-block[changed_behavior_has_e2e] no invocation a user can type
+    // reaches this arm: `graph::validate` refuses the declaration at `start`, at every
+    // round transition, and at every live edit, so the only graph carrying one is
+    // folded from a journal an *earlier build* wrote. This suite could reach that only
+    // by writing that journal by hand, which would prove the fixture rather than the
+    // code, and deleting the arm would reinstate the silent default this control
+    // exists to remove. Held instead by the unit test below, which drives the real
+    // `LocalExecutor`.
     let controls = match crate::controls::NodeControls::of_node(node) {
         Ok(controls) => controls,
         Err(why) => {
@@ -856,7 +864,7 @@ fn execute_direct(
                 ..Settlement::plain(&node.id, NodeStatus::Failed, Some("invalid-node"))
             }
         }
-    };
+    }; // llmlint: ignore-end[changed_behavior_has_e2e]
     let request = || DispatchRequest {
         graph: graph.clone(),
         task: node.rendered_task(),

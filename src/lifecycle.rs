@@ -53,6 +53,14 @@ pub fn execute(
     // workstream that cannot dispatch one of its steps must not first cut a
     // branch and run the steps before it, because that leaves work on a branch
     // for a node that was never going to finish.
+    // llmlint: ignore-block[changed_behavior_has_e2e] what this arm newly carries — a
+    // step whose declaration no dispatch can run under — is refused by `graph::validate`
+    // at `start`, at every round transition, and at every live edit, so only a graph
+    // folded from a journal an *earlier build* wrote reaches it. Reaching that end to
+    // end means writing that journal by hand, which proves the fixture rather than the
+    // code, and deleting the arm would reinstate the silent default this control exists
+    // to remove. Held instead by the unit test below, which drives the real
+    // `LocalExecutor`; the step cycle this arm already reported keeps its own journey.
     let steps = match dispatchable_steps(node) {
         Ok(steps) => steps,
         Err(reason) => {
@@ -61,7 +69,7 @@ pub fn execute(
                 ..Settlement::plain(&node.id, NodeStatus::Failed, Some("invalid-node"))
             }
         }
-    };
+    }; // llmlint: ignore-end[changed_behavior_has_e2e]
 
     let mut session: Option<String> = None;
     // The session's own stream, followed from the moment there is a token to
