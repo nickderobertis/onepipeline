@@ -1444,12 +1444,12 @@ fn runs(args: &RunsArgs) -> Result<i32> {
 }
 
 /// A view that covers one run, or every run when given none.
-fn report(args: &OptionalRunArgs, render: fn(&[RunView]) -> String) -> Result<i32> {
-    let views = match &args.run {
-        Some(run) => vec![RunView::open(&resolve(run)?)?],
-        None => RunView::all(&ledger::runs_root()),
+fn report(args: &OptionalRunArgs, render: fn(&views::Survey) -> String) -> Result<i32> {
+    let survey = match &args.run {
+        Some(run) => views::Survey::of_one(RunView::open(&resolve(run)?)?),
+        None => views::Survey::of(&ledger::runs_root()),
     };
-    print!("{}", render(&views));
+    print!("{}", render(&survey));
     Ok(EXIT_SUCCESS)
 }
 
@@ -1480,11 +1480,11 @@ fn transcript(args: &TranscriptArgs) -> Result<i32> {
 
 /// `onepipeline telemetry`.
 fn report_telemetry(args: &TelemetryArgs) -> Result<i32> {
-    let views = match &args.run {
-        Some(run) => vec![RunView::open(&resolve(run)?)?],
-        None => RunView::all(&ledger::runs_root()),
+    let survey = match &args.run {
+        Some(run) => views::Survey::of_one(RunView::open(&resolve(run)?)?),
+        None => views::Survey::of(&ledger::runs_root()),
     };
-    for view in &views {
+    for view in &survey.views {
         let aggregated = telemetry::of_run(&view.paths, &view.events);
         if args.breakdown {
             print!("{}", telemetry::render_breakdown(&aggregated));

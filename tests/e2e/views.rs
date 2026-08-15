@@ -775,6 +775,176 @@ fn runs_summarises_every_recorded_run_and_says_whose_it_is() {
         .out_has("done");
 }
 
+/// A directory under the runs root that records no launch is a **rejection**,
+/// and every whole-root view names it.
+///
+/// The reading it replaces: the views listed what they could open and said
+/// nothing at all about the rest, so an operator on a host holding thirty run
+/// roots read `no runs recorded` and took it for an idle machine.
+#[test]
+fn a_run_root_the_views_refuse_is_named_with_its_reason() {
+    let world = World::new("views-skipped");
+    let run = settled(&world, "readable", vec![agent("build", &[])]);
+    // A run root left half-written: the directory is there and the launch record
+    // that says who owns it is not.
+    std::fs::create_dir_all(world.runs.join("half-written")).expect("a run root with no launch");
+
+    for view in [vec!["runs"], vec!["status"], vec!["goals"]] {
+        world
+            .run(&view)
+            .exited(0)
+            .out_has(&run)
+            .out_has("1 run root(s) skipped")
+            .out_has("half-written")
+            .out_has("launch.json");
+    }
+}
+
+/// A root whose every run was refused is not a root with nothing in it.
+///
+/// The two used to render identically, and only one of them means there is
+/// nothing running — which is the reading a planner acts on by starting more
+/// work on a machine that is already full.
+#[test]
+fn a_root_whose_every_run_is_refused_does_not_read_as_an_empty_one() {
+    let world = World::new("views-allrefused");
+    std::fs::create_dir_all(world.runs.join("half-written")).expect("a run root with no launch");
+
+    for view in [vec!["runs"], vec!["status"], vec!["goals"]] {
+        let rendered = world.run(&view);
+        rendered
+            .exited(0)
+            .out_has("no run under")
+            .out_has("1 run root(s) skipped")
+            .out_has("half-written");
+        assert!(
+            !rendered.stdout.contains("no runs recorded"),
+            "a rejected run root was reported as an absence:\n{}",
+            rendered.stdout
+        );
+    }
+}
+
+// llmlint: ignore-block[tests_mirror_real_usage] one fact below is written into the run's
+// ledger by hand: the pid inside its ownership lock. That is a driver that died without
+// releasing what it held — the state this journey is about, and the state measured on a
+// real host — and no command a user can type produces it on demand, because a command that
+// could would be one that kills a live driver. Everything else here is real: the run is
+// launched and driven by the compiled binary, its dispatch is genuinely in flight, and
+// every claim afterwards is read off the CLI.
+/// A `host` row is a claim that a dispatch exists **now**, and it is acted on.
+///
+/// Measured on a real host: six rows aged 12h–52h rendered as a live fleet while
+/// one agent process was running and none of them matched. So the row is
+/// rendered only while this host can prove the run behind it is still being
+/// driven — the ownership lock's pid, and the start token that says the pid is
+/// still the process that took it.
+#[test]
+fn host_never_renders_a_dispatch_whose_driver_this_host_can_prove_is_gone() {
+    let world = World::new("views-ghosted");
+    world.script("build.wait", "hold");
+    let path = world.plan("ghosted", &plan_of("ghosted", vec![agent("build", &[])]));
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+    world.until("the dispatch to be in flight", |world| {
+        !world.events_of("ghosted", "node-dispatched").is_empty()
+    });
+
+    // A driver is holding the run, so the dispatch is exactly what the row says.
+    world.run(&["host"]).exited(0).out_has("build");
+
+    // Now the driver dies without releasing what it held, which is the only
+    // thing that changes.
+    let lock = world.run_file("ghosted", "owner.lock");
+    let mut held = world.run_json("ghosted", "owner.lock");
+    held["pid"] = serde_json::json!(reaped_pid());
+    std::fs::write(&lock, held.to_string()).expect("the lock is rewritten");
+
+    world
+        .run(&["host"])
+        .exited(0)
+        .out_has("no live dispatches")
+        .out_has("1 stale registry entry ignored")
+        .out_has("ghosted/build")
+        .out_has("is gone")
+        // And the scope of the claim, because this scan cannot see a run
+        // recorded under another runs root.
+        .out_has(&world.runs.display().to_string());
+    world.release("build.go");
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+/// A pid this host can prove is gone: a real process, started and reaped.
+///
+/// Picked out of the air it would not be one — the kernel may have handed it to
+/// something else — and the whole journey above turns on the difference.
+fn reaped_pid() -> u32 {
+    let mut child = std::process::Command::new(crate::harness::binary())
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("the binary starts");
+    let pid = child.id();
+    child.wait().expect("it exits");
+    pid
+}
+
+/// A node that failed because its identity chains ran out says which side asked
+/// and which identity refused.
+///
+/// Both sides, because that is the fact: a two-party member runs one chain per
+/// side and they prefer different identities, so a fix aimed at the wrong one
+/// changes nothing and the run fails the same way again. An unattributed quota
+/// failure once cost a whole night aimed at the wrong chain.
+#[test]
+fn a_provider_refusal_names_the_side_and_the_identity_in_results_and_status() {
+    let world = World::new("views-refused");
+    world.script(
+        "build.refused",
+        "agent claude-code quota\njudge codex rate_limit\n",
+    );
+    world.script("build.fail", "1");
+    let run = settled(&world, "refused", vec![agent("build", &[])]);
+
+    world
+        .run(&["results", &run])
+        .exited(0)
+        .out_has("failed")
+        .out_has("provider: the agent side: identity 'claude-code' refused (quota)")
+        .out_has("provider: the judge side: identity 'codex' refused (rate_limit)");
+
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("build: failed —")
+        .out_has("the judge side")
+        .out_has("codex");
+}
+
+/// A single-sided member has one side and stamps no role, so the member it ran
+/// under is what names the side. It is never given one it did not carry.
+#[test]
+fn a_refusal_that_names_no_side_is_attributed_to_its_member_rather_than_invented() {
+    let world = World::new("views-refused-side");
+    world.script("build.refused", "- codex auth\n");
+    world.script("build.fail", "1");
+    let run = settled(&world, "sideless", vec![agent("build", &[])]);
+
+    let results = world.run(&["results", &run]);
+    results
+        .exited(0)
+        .out_has("provider: member 'worker': identity 'codex' refused (auth)");
+    for invented in ["the agent side", "the judge side"] {
+        assert!(
+            !results.stdout.contains(invented),
+            "a side the record never carried was invented:\n{}",
+            results.stdout
+        );
+    }
+}
+
 #[test]
 fn a_view_of_a_run_with_no_events_still_renders() {
     let world = World::new("views-empty");

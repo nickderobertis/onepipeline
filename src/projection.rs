@@ -128,6 +128,16 @@ pub struct RunState {
     /// once rather than repeated at every later attempt. A note the running turn
     /// already took never enters this set at all.
     pub pending_context: BTreeMap<String, String>,
+    /// Every candidate each node's identity chains stepped past, in the order
+    /// the store recorded them.
+    ///
+    /// The only record in the merged store that says *which* identity refused
+    /// and *which side* of the conversation asked it. Without it a node that
+    /// failed on an exhausted subscription reads exactly like one that failed
+    /// its own gate, and the two sides of a member prefer different identities —
+    /// so a fix aimed at the wrong chain changes nothing and the run fails the
+    /// same way again.
+    pub refusals: BTreeMap<String, Vec<Refusal>>,
     /// What each node's dispatch is doing *now*, from the relayed stream.
     ///
     /// The one question no event of this crate's own can answer: a
@@ -173,6 +183,48 @@ pub struct NodeActivity {
     /// When the last of them arrived, in epoch milliseconds.
     pub last_at: Option<u64>,
 }
+
+/// One candidate a node's identity chain stepped past, and what it cost.
+///
+/// `oneagentgraph` publishes one `fallback-advanced` per candidate, naming the
+/// identity, `oneharness`'s classification of why it could not run, and — for a
+/// two-party member — which side of the conversation the chain belonged to.
+/// Every field here is the producer's own vocabulary, carried rather than
+/// narrowed: this crate renders them and decides nothing about them.
+///
+/// The side is [`role`](Self::role) where the producer stamped one and
+/// [`member`](Self::member) where it did not, and **both** are optional because
+/// a record that named neither is a record this crate must not invent a side
+/// for. That is the whole failure being fixed: a fix aimed at the wrong side of
+/// a conversation changes nothing.
+// llmlint: ignore-block[invalid_states_unrepresentable] `role` stays the wire string for
+// the reason `src/report.rs` carries at the top of the file: it is `oneagentgraph`'s
+// vocabulary, read off a sibling's envelope, and narrowing it into an enum here would
+// re-declare a vocabulary that library owns and make a side a newer build emits
+// unrenderable — which for failure attribution is the wrong direction to fail in.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Refusal {
+    /// The identity the chain moved past, as the producer named it.
+    pub identity: String,
+    /// `oneharness`'s classification of why it could not run.
+    pub reason: String,
+    /// Which side of a two-party conversation refused. Absent for a
+    /// single-sided member, which has one side and so nothing to distinguish.
+    pub role: Option<String>,
+    /// The member whose chain it was, as the producer labelled it. What names
+    /// the side when [`role`](Self::role) does not.
+    pub member: Option<String>,
+    /// How many times this same side, identity, and reason were recorded.
+    ///
+    /// One chain refusing the same way on ten turns is one fact about ten turns.
+    pub turns: u64,
+}
+
+/// The kind `oneagentgraph` reports a candidate a chain stepped past as.
+///
+/// A wire string rather than one of [`journal::PipelineKind`]'s, like
+/// [`TURN_ACTIVITY`]: it is the sibling's vocabulary.
+const FALLBACK_ADVANCED: &str = "fallback-advanced";
 
 /// The kind `oneagentgraph` reports a bounded tool summary as.
 ///
@@ -249,8 +301,10 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
     if event.source != Source::Pipeline {
         // A relayed envelope does not decide this crate's graph state — a
         // sibling library does not settle a node — but it is the only evidence
-        // of what the node it belongs to is doing while it runs.
+        // of what the node it belongs to is doing while it runs, and the only
+        // evidence of which identity refused when it stops running.
         fold_activity(state, event);
+        fold_refusal(state, event);
         return;
     }
     let payload = &event.payload;
@@ -564,6 +618,47 @@ fn fold_activity(state: &mut RunState, event: &Envelope) {
     if !summary.is_empty() {
         activity.doing = Some(summary);
     }
+}
+
+/// Record one candidate a node's identity chain stepped past.
+///
+/// Only `oneagentgraph` publishes these: a `fallback-advanced` from any other
+/// source is a kind this crate has no reading of, and attributing a provider
+/// refusal to whatever wrote it would be the invented attribution this exists to
+/// replace.
+fn fold_refusal(state: &mut RunState, event: &Envelope) {
+    if event.source != Source::Agentgraph || event.kind.0 != FALLBACK_ADVANCED {
+        return;
+    }
+    let Some(node) = event.labels.node.as_deref() else {
+        return;
+    };
+    let text = |value: Option<&Value>| value.and_then(Value::as_str).map(str::to_string);
+    // An advance that names no identity is one nothing can be aimed at, and
+    // recording it with an empty one would report a chain as having stepped past
+    // a harness nobody can name — which is the reading the producer already
+    // refuses to write.
+    let Some(identity) = text(event.payload.get("identity")).filter(|id| !id.is_empty()) else {
+        return;
+    };
+    let refusal = Refusal {
+        identity,
+        reason: text(event.payload.get("reason")).unwrap_or_default(),
+        role: text(event.payload.get("role")),
+        member: text(event.labels.extra.get("member")),
+        turns: 1,
+    };
+    let recorded = state.refusals.entry(node.to_string()).or_default();
+    if let Some(same) = recorded.iter_mut().find(|seen| {
+        seen.identity == refusal.identity
+            && seen.role == refusal.role
+            && seen.member == refusal.member
+            && seen.reason == refusal.reason
+    }) {
+        same.turns += 1;
+        return;
+    }
+    recorded.push(refusal);
 }
 
 fn plan_of(payload: &serde_json::Map<String, Value>) -> Option<Plan> {
