@@ -516,6 +516,56 @@ fn the_plan_schema_carries_every_node_shape_the_contract_names() {
     );
 }
 
+/// The contract's schema version and this crate's are the same number, and the
+/// version it replaced is refused deliberately.
+///
+/// The plan schema is a serialized contract: a document says which version it
+/// was written at, and a reader decides by that. So the number the document
+/// states and the number the code writes are gated against each other here, and
+/// the previous version — which every plan on this host was written at — is
+/// refused with what to change rather than accepted as near enough.
+#[test]
+fn the_contracts_plan_schema_version_is_the_one_this_crate_writes() {
+    assert!(
+        CONTRACT.contains(&format!("Plan schema v{PLAN_SCHEMA_VERSION} =")),
+        "the contract states a different plan schema version than this crate writes \
+         ({PLAN_SCHEMA_VERSION})"
+    );
+    assert!(
+        CONTRACT.contains("a v1 plan is **refused deliberately**"),
+        "the contract no longer says the previous version is refused on purpose"
+    );
+
+    let root = std::env::temp_dir().join(format!("onepipeline-version-{}", std::process::id()));
+    std::fs::create_dir_all(&root).expect("a scratch root");
+    let path = root.join("legacy.plan.json");
+    // A legacy plan with nothing else wrong with it: the version alone is what
+    // stops it, and the refusal is what its author needs to act on.
+    std::fs::write(
+        &path,
+        r#"{"schema_version":1,"tasks":[{"id":"a","persona":"engineer","task":"Do it."}]}"#,
+    )
+    .expect("written");
+    // It parses — the schema's shape is not what is wrong with it — and what
+    // stops it is validation, which `tests/e2e/plan.rs` drives through the
+    // binary because that is where a planner meets the refusal.
+    let legacy = Plan::load(&path).expect("a legacy plan is still a readable document");
+    assert_ne!(
+        legacy.schema_version, PLAN_SCHEMA_VERSION,
+        "this fixture is meant to declare the version that was replaced"
+    );
+
+    // What this crate *writes* carries the current number, so a document it
+    // produces is one this contract describes and one an older reader refuses.
+    let current = Plan {
+        schema_version: PLAN_SCHEMA_VERSION,
+        ..legacy
+    };
+    let written = serde_json::to_value(&current).expect("it serialises");
+    assert_eq!(written["schema_version"], PLAN_SCHEMA_VERSION);
+    std::fs::remove_dir_all(&root).ok();
+}
+
 /// The retired field, refused **by name** at every boundary a plan crosses.
 ///
 /// `deny_unknown_fields` would answer a plan still carrying it with a bare
@@ -531,6 +581,8 @@ fn a_plan_still_carrying_done_when_is_refused_by_name_and_told_where_the_bar_goe
     let root = std::env::temp_dir().join(format!("onepipeline-donewhen-{}", std::process::id()));
     std::fs::create_dir_all(&root).expect("a scratch root");
     let path = root.join("retired.plan.json");
+    // At the retired version, as every plan carrying this field is: the field is
+    // what its author has to move, so the field is what they are told about.
     std::fs::write(
         &path,
         r#"{"schema_version":1,"tasks":[{"id":"contract","persona":"engineer",
@@ -559,6 +611,10 @@ fn a_plan_still_carrying_done_when_is_refused_by_name_and_told_where_the_bar_goe
         !message.contains("unknown field"),
         "the schema's bare refusal reached the planner instead: {message}"
     );
+    assert!(
+        !message.contains("schema_version"),
+        "the version refusal displaced the field's: {message}"
+    );
 
     // A step carries the same field and gets the same answer, named by the step.
     std::fs::write(
@@ -578,8 +634,11 @@ fn a_plan_still_carrying_done_when_is_refused_by_name_and_told_where_the_bar_goe
     // ever runs on a document the schema already refused.
     std::fs::write(
         &path,
-        r#"{"schema_version":1,"tasks":[{"id":"contract","persona":"engineer",
-            "task":"Do the thing.","max_turns":45}]}"#,
+        format!(
+            r#"{{"schema_version":{PLAN_SCHEMA_VERSION},"tasks":[
+                {{"id":"contract","persona":"engineer","task":"Do the thing.",
+                 "max_turns":45}}]}}"#
+        ),
     )
     .expect("written");
     assert_eq!(

@@ -1061,6 +1061,22 @@ impl Run {
         self
     }
 
+    /// Assert stderr does **not** contain a fragment.
+    ///
+    /// For a journey whose claim is that one diagnostic reached the caller
+    /// *instead of* another: two refusals a command could give are not
+    /// interchangeable when only one of them says what to do.
+    pub fn err_lacks(&self, fragment: &str) -> &Self {
+        assert!(
+            !self.stderr.contains(fragment),
+            "`onepipeline {}` stderr carries {fragment:?}, which displaces the refusal \
+             this journey is about:\n{}",
+            self.args,
+            self.stderr
+        );
+        self
+    }
+
     /// The last JSON document it printed on stdout.
     pub fn json(&self) -> Value {
         self.stdout
@@ -1542,7 +1558,7 @@ pub fn lifecycle(id: &str, deps: &[&str]) -> Value {
 /// A plan holding these nodes.
 pub fn plan_of(name: &str, nodes: Vec<Value>) -> Value {
     serde_json::json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "name": name,
         "concurrency": 4,
         "goal": {"text": format!("Deliver {name}")},

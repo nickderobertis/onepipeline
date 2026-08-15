@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "name": "tracked-release",
   "concurrency": 3,
   "goal": {

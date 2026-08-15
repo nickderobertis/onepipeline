@@ -28,7 +28,28 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, Result};
 
 /// The plan schema version this crate reads and writes.
-pub const PLAN_SCHEMA_VERSION: u32 = 1;
+///
+/// **2** since the judge controls were made honest: version 1 carried a
+/// `done_when` that no dispatch ever received, and a `max_turns` that no
+/// dispatch ever received either. Version 2 forwards the budget and does not
+/// carry the bar at all, so a document is a different shape and says so — a
+/// version-1 plan is refused with what to change, rather than read as if the two
+/// versions meant the same thing.
+pub const PLAN_SCHEMA_VERSION: u32 = 2;
+
+/// The version this schema replaced, which a plan on disk may still declare.
+pub const PLAN_SCHEMA_VERSION_RETIRED: u32 = 1;
+
+/// What a plan still declaring [`PLAN_SCHEMA_VERSION_RETIRED`] is told.
+///
+/// A bare "schema_version 1 is not 2" would leave a planner to guess what
+/// changed between them. What changed is one field removed and one field made to
+/// work, so the refusal says both and where the removed one's content goes.
+pub(crate) const RETIRED_VERSION_MIGRATION: &str =
+    "version 2 retired the judge-only `done_when` and forwards a node's `max_turns` to \
+     its dispatch, which version 1 never did. Move any `done_when` into that node's \
+     `## Acceptance criteria` — or, for a bar broader than one node, into the onejudge \
+     base config the node-scope graph's worker points at — and set `schema_version: 2`";
 
 /// The heading a carried planner note is rendered under.
 pub const PLANNER_CONTEXT_HEADING: &str = "## Planner context";
@@ -383,7 +404,7 @@ mod tests {
         // YAML it is two unpaired halves and the node fails on its own prose.
         std::fs::write(
             &path,
-            r#"{"schema_version":1,"tasks":[{"id":"a","persona":"engineer","task":"😀 ship it"}]}"#,
+            r#"{"schema_version":2,"tasks":[{"id":"a","persona":"engineer","task":"😀 ship it"}]}"#,
         )
         .expect("written");
         let plan = Plan::load(&path).expect("a JSON plan loads");
@@ -421,7 +442,7 @@ mod tests {
         let path = root.join("actually.plan.json");
         std::fs::write(
             &path,
-            "schema_version: 1\ntasks:\n  - id: a\n    persona: engineer\n    task: do it\n",
+            "schema_version: 2\ntasks:\n  - id: a\n    persona: engineer\n    task: do it\n",
         )
         .expect("written");
         let plan = Plan::load(&path).expect("the YAML reading is the fallback");
@@ -435,7 +456,7 @@ mod tests {
         let path = root.join("typo.plan.json");
         std::fs::write(
             &path,
-            r#"{"schema_version":1,"concurency":2,"tasks":[{"id":"a","persona":"e","task":"t"}]}"#,
+            r#"{"schema_version":2,"concurency":2,"tasks":[{"id":"a","persona":"e","task":"t"}]}"#,
         )
         .expect("written");
         let message = Plan::load(&path).unwrap_err().to_string();
@@ -532,7 +553,7 @@ mod tests {
 
     #[test]
     fn a_plan_round_trips_without_growing_the_fields_it_omitted() {
-        let source = r#"{"schema_version":1,"tasks":[{"id":"a","persona":"e","task":"t"}]}"#;
+        let source = r#"{"schema_version":2,"tasks":[{"id":"a","persona":"e","task":"t"}]}"#;
         let plan: Plan = serde_json::from_str(source).expect("it parses");
         let written = serde_json::to_string(&plan).expect("it serialises");
         assert!(
@@ -547,5 +568,73 @@ mod tests {
             !written.contains("\"parked\""),
             "{written} grew a false parked"
         );
+    }
+
+    /// A plan at the current version round-trips byte-for-byte through this
+    /// crate, and a node that declares no turn budget writes none.
+    ///
+    /// The version is on the wire, so it is asserted on the wire: a plan this
+    /// crate writes says `"schema_version":2`, and a reader on the previous
+    /// version is meant to see that and refuse rather than to read the document
+    /// as one of its own. `max_turns` is optional, so a node without one carries
+    /// no key at all — a `"max_turns":null` would be this crate inventing a
+    /// declaration the planner never wrote.
+    #[test]
+    fn a_current_version_plan_round_trips_and_omits_the_budget_it_does_not_declare() {
+        let source = format!(
+            r#"{{"schema_version":{PLAN_SCHEMA_VERSION},"name":"round-trip","tasks":[
+                {{"id":"budgeted","persona":"e","task":"t","max_turns":45}},
+                {{"id":"plain","persona":"e","task":"t"}}]}}"#
+        );
+        let plan: Plan = serde_json::from_str(&source).expect("it parses");
+        assert_eq!(plan.schema_version, PLAN_SCHEMA_VERSION);
+        assert_eq!(plan.tasks[0].max_turns, Some(45));
+        assert_eq!(plan.tasks[1].max_turns, None);
+
+        let written = serde_json::to_string(&plan).expect("it serialises");
+        assert!(
+            written.contains(&format!("\"schema_version\":{PLAN_SCHEMA_VERSION}")),
+            "the version a reader decides by is not on the wire: {written}"
+        );
+        assert_eq!(
+            written.matches("\"max_turns\"").count(),
+            1,
+            "a node that declared no turn budget was written one: {written}"
+        );
+        assert!(written.contains("\"max_turns\":45"), "{written}");
+        assert_eq!(
+            serde_json::from_str::<Plan>(&written).expect("it re-parses"),
+            plan,
+            "the plan did not survive a round trip through this crate"
+        );
+    }
+
+    /// A legacy plan carrying the retired field is answered about the *field*.
+    ///
+    /// Both things are wrong with it — the version it declares and the field it
+    /// carries — and only one of the two refusals says what to do with the review
+    /// bar its author wrote. The document never deserialises, so the version is
+    /// never reached, and that ordering is the point rather than an accident.
+    #[test]
+    fn a_legacy_plan_carrying_done_when_is_answered_about_the_field_not_the_version() {
+        let root = scratch("legacy");
+        let path = root.join("legacy.plan.json");
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{"schema_version":{PLAN_SCHEMA_VERSION_RETIRED},"tasks":[
+                    {{"id":"contract","persona":"e","task":"t",
+                     "done_when":"the gate is green"}}]}}"#
+            ),
+        )
+        .expect("written");
+        let message = Plan::load(&path).unwrap_err().to_string();
+        assert!(message.contains("'contract':"), "{message}");
+        assert!(message.contains(DONE_WHEN_RETIRED), "{message}");
+        assert!(
+            !message.contains("schema_version"),
+            "the version refusal displaced the field's: {message}"
+        );
+        std::fs::remove_dir_all(&root).ok();
     }
 }

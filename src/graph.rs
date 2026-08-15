@@ -269,8 +269,18 @@ pub fn validate(plan: &Plan) -> Result<()> {
 /// make the planner unable to abandon a graph it started.
 pub fn validate_edited(plan: &Plan) -> Result<()> {
     if plan.schema_version != crate::plan::PLAN_SCHEMA_VERSION {
+        // The version this one replaced is refused *deliberately*, with what to
+        // change: it is the version every plan on this host was written at, and a
+        // planner reading only that two numbers differ has to go and find out
+        // which fields moved. Any other version is a number this build has never
+        // written, so there is no migration to name.
+        let migration = if plan.schema_version == crate::plan::PLAN_SCHEMA_VERSION_RETIRED {
+            format!("; {}", crate::plan::RETIRED_VERSION_MIGRATION)
+        } else {
+            String::new()
+        };
         return Err(Error::Invalid(format!(
-            "plan schema_version {} is not {}",
+            "plan schema_version {} is not {}{migration}",
             plan.schema_version,
             crate::plan::PLAN_SCHEMA_VERSION
         )));
@@ -995,6 +1005,44 @@ mod tests {
                 node.id
             );
         }
+    }
+
+    /// The version this schema replaced is refused *deliberately*.
+    ///
+    /// Every plan written on this host before the judge controls were made
+    /// honest declares it, so its author is told which fields moved and what to
+    /// set — not that two numbers differ, which is all a version this build has
+    /// never written can be told.
+    #[test]
+    fn the_retired_schema_version_is_refused_with_the_migration_it_needs() {
+        let mut legacy = plan_of(vec![agent("a", &[])]);
+        legacy.schema_version = crate::plan::PLAN_SCHEMA_VERSION_RETIRED;
+        let message = validate(&legacy).unwrap_err().to_string();
+        assert!(
+            message.contains(&format!(
+                "schema_version {} is not {}",
+                crate::plan::PLAN_SCHEMA_VERSION_RETIRED,
+                crate::plan::PLAN_SCHEMA_VERSION
+            )),
+            "{message}"
+        );
+        assert!(message.contains("`done_when`"), "{message}");
+        assert!(message.contains("`max_turns`"), "{message}");
+        assert!(
+            message.contains("set `schema_version: 2`"),
+            "the refusal does not say what to set: {message}"
+        );
+
+        // A version this build has never written has no migration to name, so it
+        // is told the two numbers and nothing invented.
+        let mut unknown = plan_of(vec![agent("a", &[])]);
+        unknown.schema_version = 99;
+        let message = validate(&unknown).unwrap_err().to_string();
+        assert!(message.contains("schema_version 99"), "{message}");
+        assert!(
+            !message.contains("`done_when`"),
+            "a migration was offered for a version it does not describe: {message}"
+        );
     }
 
     #[test]
