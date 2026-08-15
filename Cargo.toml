@@ -17,9 +17,8 @@ resolver = "2"
 # requirement about *this* build rather than about any install: the dispatch path
 # links the crate, so the copy resolved here is the one that parses every graph
 # document and prepares every member. A version pinned anywhere else — a CLI
-# wheel, an installed binary — decides nothing, which is exactly how a fix that
-# had shipped went four hours undiagnosed while the defect it fixed was still in
-# production.
+# wheel, an installed binary — decides nothing about what a dispatch does, so
+# raising one of those is not raising this floor.
 #
 # 0.2.12 is the floor because it is where a two-party (`kind: onejudge`) member's
 # harness runs in the directory the graph was given rather than in the member's

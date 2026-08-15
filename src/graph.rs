@@ -116,10 +116,8 @@ impl NodeStatus {
 /// choice is the point. A node *settles* when it publishes, and for a `team`
 /// identity publishing opens a change request — so a node reports `done` while
 /// its work sits in a pull request nobody has merged. "Settled" and "landed" are
-/// different facts, and until this existed only the first was reported: a planner
-/// closing work on a settled node could close it on a change that never reached
-/// anyone. That is exactly how a worktree fix in a sibling came to be believed
-/// done while the behaviour it fixed was still in production.
+/// different facts, and reporting only the first lets a planner close work on a
+/// change that never reached anyone.
 ///
 /// A tenth [`NodeStatus`] would have said the same thing in a place where it
 /// changes what the run *does*: `done` is what makes a dependent eligible, what
@@ -1282,17 +1280,35 @@ mod tests {
         assert_eq!(NodeStatus::parse("invented"), None);
     }
 
-    /// A landing round-trips through its word, and an unreadable one is no
-    /// observation rather than a guess.
+    /// A landing round-trips through its word, spells it the same way on both
+    /// wires, and reads an unknown one as no observation rather than a guess.
     ///
-    /// Both halves matter. The word is what the journal carries between builds,
-    /// and a build meeting a landing it does not know has to answer "this run
-    /// observed nothing about where that change got to" — because the other two
-    /// answers are the two false reports this qualifier was added to stop.
+    /// Three halves, and the middle one is a drift gate. A landing reaches a
+    /// reader by two routes that are written independently: `serde` puts it in
+    /// `round-NN/result.json`, and [`Landing::as_str`] puts it in the journal
+    /// payload the views fold. Nothing but this makes the two spellings agree, and
+    /// a run whose result file and whose ledger disagree about a word is a run
+    /// nobody can reconcile.
+    ///
+    /// The third is compatibility: a build meeting a landing it does not know has
+    /// to answer "this run observed nothing about where that change got to",
+    /// because the other two answers are the two false reports this qualifier was
+    /// added to stop.
     #[test]
     fn a_landing_round_trips_through_its_word_and_an_unknown_one_is_no_landing() {
         for landing in [Landing::Landed, Landing::Unlanded] {
             assert_eq!(Landing::parse(landing.as_str()), Some(landing));
+            // The serialized spelling *is* the rendered one, both ways.
+            assert_eq!(
+                serde_json::to_value(landing).expect("a landing serialises"),
+                serde_json::Value::String(landing.as_str().to_string()),
+                "`serde` and `as_str` disagree about how to spell {landing:?}"
+            );
+            assert_eq!(
+                serde_json::from_value::<Landing>(serde_json::json!(landing.as_str()))
+                    .expect("the rendered word reads back"),
+                landing
+            );
         }
         for unreadable in ["", "invented", "done", "merged", "Landed"] {
             assert_eq!(

@@ -309,13 +309,26 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
             // it cannot read leaves the node with none, which reads as "this run
             // observed nothing about where that change got to" — the one honest
             // answer, and never the convenient one.
+            //
+            // llmlint: ignore-block[changed_behavior_has_e2e] neither half of this arm is
+            // reachable from an invocation a user can type. The unreadable-value path needs a
+            // journal a *newer build* wrote, and this suite could produce one only by writing
+            // that line by hand — which proves the fixture rather than the fold, the same
+            // reasoning `engine.rs` and `lifecycle.rs` already carry for their own
+            // unreachable arms. The cross-round retention needs a node that settles once and
+            // is not dispatched again, and the round transition does not produce one: a `done`
+            // node is carried into the next round whenever the attached driver has already
+            // opened it, so the node re-settles and records its landing afresh. What a user
+            // *can* reach — a landing written, folded, and rendered — is held end to end in
+            // `tests/e2e/lifecycle.rs`; both facts above are held by this module's own fold
+            // test, which is the only place they exist.
             if let Some(landing) = payload
                 .get(journal::SETTLED_LANDING)
                 .and_then(Value::as_str)
                 .and_then(Landing::parse)
             {
                 state.landings.insert(node.clone(), landing);
-            }
+            } // llmlint: ignore-end[changed_behavior_has_e2e]
             if let Some(ts) = millis_of(&event.ts) {
                 state.settled_at.insert(node.clone(), ts);
             }

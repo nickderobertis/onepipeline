@@ -832,6 +832,9 @@ fn a_published_node_reports_where_a_human_reads_the_change_it_opened() {
     // is done and the change has *not* reached its base — so it is named rather
     // than reported as a bare "published".
     assert_eq!(node["outcome"], "change-open", "{node}");
+    // And it did not land: the change is open for a person to review, so the
+    // status `done` is qualified rather than left to read as work that arrived.
+    assert_eq!(node["landing"], "unlanded", "{node}");
 
     // And the host's own identifier for it, which is what a later command
     // addresses the change by. Read off the sibling's own `change-opened`
@@ -895,6 +898,10 @@ fn a_change_the_host_merged_settles_the_node_on_the_merge_rather_than_the_reques
     let node = world.run_json(&run, "round-01/result.json")["nodes"][0].clone();
     assert_eq!(node["status"], "done", "{node}\n{}", why(&world, &run));
     assert_eq!(node["outcome"], "merged", "{node}");
+    // The host was observed landing it, which is the one thing that makes a node
+    // landed. The policy asked for the same thing in the queued journey above and
+    // did not get it.
+    assert_eq!(node["landing"], "landed", "{node}");
     // And the run's own record names nowhere to read it. That is what
     // `PublishOutcome::Merged` carries — the commit, not the change request — so
     // the operator-facing `change_url` a queued or open change would have is
@@ -948,6 +955,9 @@ fn a_change_the_host_is_holding_settles_the_node_as_queued() {
             .is_some_and(|url| url.contains("/pull/")),
         "a queued change named nowhere to read it: {node}"
     );
+    // Done, and not landed. The host has accepted it and the base does not carry
+    // it yet, so the settlement says both things rather than only the first.
+    assert_eq!(node["landing"], "unlanded", "{node}");
 }
 
 /// A settled node and a landed node are different facts, and one publication
@@ -960,11 +970,9 @@ fn a_change_the_host_is_holding_settles_the_node_as_queued() {
 /// publishing is the whole of what the round asked of them, and only one of them
 /// put anything on `main`.
 ///
-/// That is the whole of the defect. A planner reading a settled node closed work
-/// on a change that had reached nobody, which is how a worktree fix in a sibling
-/// came to be believed done while the behaviour it fixed was still in production.
-/// Everything a planner reads is checked here — the ledger record, the round
-/// result the read API serves, and every view that renders a node's status.
+/// Everything a planner reads is checked, because closing work on a settled node
+/// is a decision made from any of them: the ledger record, the round result the
+/// read API serves, and every view that renders a node's status.
 ///
 /// Nothing waits for the merge. The unlanded half settles and the round ends with
 /// the change still open, because a change request a person owns is not something
