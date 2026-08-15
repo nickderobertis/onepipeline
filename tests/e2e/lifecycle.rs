@@ -785,6 +785,21 @@ fn a_node_whose_publication_failed_continues_the_branch_it_preserved() {
         "{result}\n{}",
         why(&world, &run)
     );
+    // And it claims no landing. A publication that ran and did not land settles
+    // `failed` under its own name, which no reader mistakes for success — so
+    // qualifying it would put a second word on a fact already stated, and
+    // `unlanded` in particular would send a planner looking for a change request
+    // that was never opened.
+    assert_eq!(result["nodes"][0]["landing"], json!(null), "{result}");
+    let failed = world.run(&["results", &run]);
+    failed.exited(0).out_has("publication-failed");
+    assert!(
+        !failed.stdout.contains("landed"),
+        "a node whose publication failed is reported as one whose change did or did not \
+         land:\n{}",
+        failed.stdout
+    );
+
     let preserved = result["nodes"][0]["branch"]
         .as_str()
         .expect("the failed node named the branch it left behind")

@@ -125,11 +125,13 @@ pub fn outcome_of(outcome: &PublishOutcome) -> &'static str {
 /// git on the direct path and from the host's own answer on the change-request
 /// one.
 ///
-/// `None` where the node has no change of its own to land:
+/// `None` where the node has no change of its own to land.
 /// [`PublishOutcome::NothingToPublish`] is a branch whose base already carried
-/// its content, and [`PublishOutcome::Failed`] settles the node `failed` under
-/// its own name — a status no reader mistakes for success, so qualifying it
-/// would add a second word for a fact already stated.
+/// its content. [`PublishOutcome::Failed`] is here for totality rather than for
+/// use: `crate::lifecycle` settles that case before it asks, under its own
+/// `failed` status — which no reader mistakes for success, so qualifying it would
+/// put a second word on a fact already stated. Both answer `None`, so the arm and
+/// the early return agree if that ever changes.
 ///
 /// Nothing here waits. A change request a person has to merge is reported as
 /// unlanded and the round moves on; the run neither blocks nor polls for a merge
