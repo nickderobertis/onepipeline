@@ -110,6 +110,41 @@ pub fn outcome_of(outcome: &PublishOutcome) -> &'static str {
     }
 }
 
+/// Whether the publication's change reached its base branch.
+///
+/// Read off **what the publication answered**, and off nothing else. The
+/// repository's policy is not consulted here and must not be: a `change-direct`
+/// or `change-auto` identity asks the host to land the change immediately, and
+/// whether it did is the host's answer rather than the ask — a required check
+/// still running, a branch protection rule, or a merge queue all leave the same
+/// policy sitting at [`PublishOutcome::Queued`]. Deriving "landed" from the
+/// policy would report exactly the state this distinction exists to expose.
+///
+/// [`PublishOutcome::Merged`] is the one landed case, and it is an observation:
+/// `onevcs` produces it holding the commit the change reached its base at, from
+/// git on the direct path and from the host's own answer on the change-request
+/// one.
+///
+/// `None` where the node has no change of its own to land.
+/// [`PublishOutcome::NothingToPublish`] is a branch whose base already carried
+/// its content. [`PublishOutcome::Failed`] is here for totality rather than for
+/// use: `crate::lifecycle` settles that case before it asks, under its own
+/// `failed` status — which no reader mistakes for success, so qualifying it would
+/// put a second word on a fact already stated. Both answer `None`, so the arm and
+/// the early return agree if that ever changes.
+///
+/// Nothing here waits. A change request a person has to merge is reported as
+/// unlanded and the round moves on; the run neither blocks nor polls for a merge
+/// somebody else owns.
+pub fn landing_of(outcome: &PublishOutcome) -> Option<crate::graph::Landing> {
+    use crate::graph::Landing;
+    match outcome {
+        PublishOutcome::Merged(_) => Some(Landing::Landed),
+        PublishOutcome::ChangeOpen(_) | PublishOutcome::Queued(_) => Some(Landing::Unlanded),
+        PublishOutcome::NothingToPublish | PublishOutcome::Failed { .. } => None,
+    }
+}
+
 /// Where a human reads the change a publication produced, when there is one.
 ///
 /// A change request that is open, or that the host is holding, names its URL. A
@@ -481,6 +516,10 @@ pub fn published_event(published: &Publication, labels: &crate::event::Labels) -
             ("policy", serde_json::json!(published.policy)),
             ("outcome", serde_json::json!(outcome_of(&published.outcome))),
             ("url", serde_json::json!(change_url(&published.outcome))),
+            (
+                "landing",
+                serde_json::json!(landing_of(&published.outcome).map(crate::graph::Landing::as_str)),
+            ),
         ]),
         artifacts: Vec::new(),
     }
@@ -555,6 +594,47 @@ mod tests {
         );
     }
 
+    /// Which endings this crate is willing to call landed.
+    ///
+    /// Exactly one: the case `onevcs` produces holding the commit the change
+    /// reached its base at. The two that carry a change-request URL are the ones
+    /// a policy asking for an immediate merge produces when the host has not
+    /// merged, so a derivation that read the policy — or that read "the
+    /// publication succeeded" — would call both of them landed. That is the
+    /// false report this whole distinction exists to remove, so it is stated
+    /// case by case here rather than left to a catch-all.
+    #[test]
+    fn only_a_change_observed_on_its_base_is_called_landed() {
+        use crate::graph::Landing;
+        let url: onevcs::Url = "https://example.invalid/pull/7".parse().expect("a URL");
+        assert_eq!(
+            landing_of(&PublishOutcome::Merged(onevcs::Sha("abc".into()))),
+            Some(Landing::Landed)
+        );
+        // A change request somebody has to merge, and one the host is holding
+        // behind checks: both are a change that has not reached its base.
+        assert_eq!(
+            landing_of(&PublishOutcome::ChangeOpen(url.clone())),
+            Some(Landing::Unlanded)
+        );
+        assert_eq!(
+            landing_of(&PublishOutcome::Queued(url)),
+            Some(Landing::Unlanded)
+        );
+        // Neither of these has a change of its own to land, and neither is
+        // reported as though it might: a branch its base already carried settles
+        // `no-changes`, and a publication that failed settles `failed`.
+        assert_eq!(landing_of(&PublishOutcome::NothingToPublish), None);
+        assert_eq!(
+            landing_of(&PublishOutcome::Failed {
+                kind: onevcs::FailureKind::Gate,
+                reason: "the gate said no".into(),
+                retained: None,
+            }),
+            None
+        );
+    }
+
     #[test]
     fn a_change_request_is_where_a_human_reads_it_and_a_local_merge_names_none() {
         let url: onevcs::Url = "https://example.invalid/pull/7".parse().expect("a URL");
@@ -588,6 +668,26 @@ mod tests {
         assert_eq!(event.payload["policy"], "change-open");
         assert_eq!(event.payload["outcome"], "change-open");
         assert_eq!(event.payload["url"], "https://example.invalid/pull/7");
+        // The publication's own record says where the change got to, so a reader
+        // watching the stream sees it at the moment it happened rather than only
+        // in the settlement folded from it afterwards.
+        assert_eq!(event.payload["landing"], "unlanded");
+
+        let merged = Publication {
+            outcome: PublishOutcome::Merged(onevcs::Sha("abc".into())),
+            ..published
+        };
+        let event = published_event(&merged, &crate::event::Labels::default());
+        assert_eq!(event.payload["landing"], "landed");
+
+        // Nothing to publish is nothing to land, and the record says so by
+        // carrying no claim rather than by carrying the convenient one.
+        let empty = Publication {
+            outcome: PublishOutcome::NothingToPublish,
+            ..merged
+        };
+        let event = published_event(&empty, &crate::event::Labels::default());
+        assert_eq!(event.payload["landing"], serde_json::Value::Null);
     }
 
     /// What this crate reads from a session stream that is not whole.

@@ -327,7 +327,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -847,13 +847,13 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "oneagentgraph"
-version = "0.2.11"
+version = "0.2.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "060d3514133034d58435ddfe70efab2d7aa10788eb8ef008d8392f809d70d078"
+checksum = "3b9dffb6aced5cc70d08d07350c5f47b0773df07e8f0dcbd6da51f313c3fb7be"
 dependencies = [
  "clap",
  "libc",
- "oneharness-core",
+ "oneharness-core 0.8.0",
  "onejudge",
  "serde",
  "serde_json",
@@ -887,13 +887,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "oneharness-core"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "34aedaf60bd157b17835616aff1e021cd40ca6a07041a68f59c135a3af36e7fc"
+dependencies = [
+ "fs2",
+ "jsonschema",
+ "libc",
+ "regex",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "toml",
+ "uuid",
+ "wait-timeout",
+ "which",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "onejudge"
 version = "0.3.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2fa0d4ba61cb7c8752af70d05dcb0af31394961e0585a73017988df92b88651d"
 dependencies = [
  "clap",
- "oneharness-core",
+ "oneharness-core 0.6.13",
  "rustix",
  "serde",
  "serde_json",
@@ -1156,7 +1177,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1213,7 +1234,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1893,7 +1914,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

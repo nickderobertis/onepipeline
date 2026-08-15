@@ -1563,6 +1563,100 @@ fn a_nodes_turn_budget_reaches_its_dispatch_and_outranks_the_run_wide_one() {
     );
 }
 
+/// The directory a two-party member was started in, read off the run's own
+/// merged stream.
+///
+/// `oneagentgraph` publishes each member's prepared launch on its
+/// `member-started`, and for a `kind: onejudge` member that launch names the
+/// `worktree` it hands onejudge — which onejudge puts on the agent side's
+/// `oneharness run --cwd`. So the directory the member really works in is a fact
+/// of this crate's published surface, in the store `docs/contract.md` defines,
+/// rather than something recovered from a process nobody kept.
+///
+/// The two-party member is picked out by the engine its launch names: a
+/// single-sided member is a process of its own and its record carries `cwd`
+/// instead.
+fn two_party_worktree(world: &World, run: &str) -> String {
+    let started: Vec<Value> = world
+        .journal(run)
+        .into_iter()
+        .filter(|event| event["kind"] == "member-started")
+        .collect();
+    started
+        .iter()
+        .find(|event| event["payload"]["engine"] == "onejudge")
+        .and_then(|event| event["payload"]["worktree"].as_str().map(str::to_string))
+        .unwrap_or_else(|| panic!("no two-party member was started in {run}: {started:#?}"))
+}
+
+/// A two-party member is started in the directory the graph was given.
+///
+/// The whole of what a `kind: onejudge` member is *for* rests on this. Its agent
+/// side does the node's work, and a lifecycle node's work is in a repository — so
+/// a member started anywhere else has to guess where its checkout is, and
+/// whatever it writes to the one it guesses is never seen again: publication
+/// reads the session's own branch and nothing else. `oneagentgraph` below 0.2.12
+/// started that side in the member's own scratch,
+/// `<state>/runs/<graph run>/members/<member>`, which is not a repository at all.
+///
+/// Held against the **session's own worktree** — what this crate hands the
+/// sibling for a lifecycle node — rather than against a directory this test
+/// names, so what is asserted is the composition and not a literal. Both values
+/// come off the run's merged store, and the sibling that wrote one of them is
+/// real: a dependency that is merely *pinned* rather than linked cannot pass
+/// this.
+///
+/// What this journey deliberately does not assert is a *settled* two-party
+/// member. onejudge spawns the agent side as `oneharness run … --prompt-file -`,
+/// which `fake-oneharness` does not speak — it stands in for the single-sided
+/// invocation `oneagentgraph` builds itself — so the conversation cannot complete
+/// offline. The launch is the fact under test and it is published before the turn
+/// runs, which is why every two-party journey in this file reads one.
+#[test]
+fn a_two_party_member_is_started_in_the_directory_the_graph_was_given() {
+    let world = World::new("real-two-party-cwd");
+    world.write_graphs();
+    write_supervised_node_graph(&world);
+    write_persona(&world, "engineer");
+    world.repository("local-direct", &["true"]);
+
+    let node = json!({
+        "id": "service",
+        "repo": "service",
+        "persona": "./engineer.yaml",
+        "task": "## What\nship the thing",
+        // Its own title, so the run spends no `pr-author` dispatch: that one has
+        // nothing to say about where a member works.
+        "title": "feat: land what the member made",
+    });
+    let path = world.plan("twoparty", &plan_of("twoparty", vec![node]));
+    world
+        .run_on_agentgraph(&["start", &path.to_string_lossy(), "--attach"])
+        .settled();
+
+    // Where `onevcs` cut this node's worktree, read off the run's own record of
+    // opening the session rather than reconstructed from the sibling's layout.
+    // Compared as the two sides spell it rather than as the filesystem resolves
+    // it: the session is closed by the time this runs and its worktree is gone,
+    // so there is nothing left to canonicalise. Both spellings descend from the
+    // world root, which `World::new` already resolved, so there is one spelling
+    // of this directory on every platform.
+    let session_worktree = world
+        .journal("twoparty")
+        .into_iter()
+        .filter(|event| event["source"] == "vcs" && event["kind"] == "session-opened")
+        .find_map(|event| event["payload"]["worktree"].as_str().map(str::to_string))
+        .expect("the lifecycle node's session opened a worktree");
+
+    assert_eq!(
+        two_party_worktree(&world, "twoparty"),
+        session_worktree,
+        "the two-party member was started somewhere other than the directory the graph was \
+         given. A member started in its own scratch has no repository to work in, and the work \
+         it leaves there is discarded at publication as `no-changes`."
+    );
+}
+
 /// A step's turn budget reaches that step's own dispatch.
 ///
 /// A workstream's steps are dispatched one at a time on one branch, each with its

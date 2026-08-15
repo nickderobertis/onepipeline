@@ -264,6 +264,13 @@ fn publish(
                 // "published", which is what let a node whose worker wrote
                 // nothing report as one that landed work.
                 outcome: Some(crate::vcs::outcome_of(&published.outcome).to_owned()),
+                // The node is done either way — publishing is the whole of what
+                // this round asked of it — so whether the change *landed* is
+                // carried beside the status rather than folded into it. Taken
+                // from what the publication answered and never from the policy
+                // it ran under: an identity that asks the host to merge
+                // immediately still has to be observed doing it.
+                landing: crate::vcs::landing_of(&published.outcome),
                 ..Settlement::plain(&node.id, NodeStatus::Done, None)
             }
         }

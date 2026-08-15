@@ -20,7 +20,7 @@
 // opened and merged offline. `harness.rs` carries the same suppression and the full
 // rationale.
 
-use crate::harness::{gate_script, lifecycle, plan_of, Repository, World};
+use crate::harness::{agent, gate_script, lifecycle, plan_of, Repository, World};
 use serde_json::json;
 
 fn settle(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
@@ -785,6 +785,21 @@ fn a_node_whose_publication_failed_continues_the_branch_it_preserved() {
         "{result}\n{}",
         why(&world, &run)
     );
+    // And it claims no landing. A publication that ran and did not land settles
+    // `failed` under its own name, which no reader mistakes for success — so
+    // qualifying it would put a second word on a fact already stated, and
+    // `unlanded` in particular would send a planner looking for a change request
+    // that was never opened.
+    assert_eq!(result["nodes"][0]["landing"], json!(null), "{result}");
+    let failed = world.run(&["results", &run]);
+    failed.exited(0).out_has("publication-failed");
+    assert!(
+        !failed.stdout.contains("landed"),
+        "a node whose publication failed is reported as one whose change did or did not \
+         land:\n{}",
+        failed.stdout
+    );
+
     let preserved = result["nodes"][0]["branch"]
         .as_str()
         .expect("the failed node named the branch it left behind")
@@ -832,6 +847,9 @@ fn a_published_node_reports_where_a_human_reads_the_change_it_opened() {
     // is done and the change has *not* reached its base — so it is named rather
     // than reported as a bare "published".
     assert_eq!(node["outcome"], "change-open", "{node}");
+    // And it did not land: the change is open for a person to review, so the
+    // status `done` is qualified rather than left to read as work that arrived.
+    assert_eq!(node["landing"], "unlanded", "{node}");
 
     // And the host's own identifier for it, which is what a later command
     // addresses the change by. Read off the sibling's own `change-opened`
@@ -870,10 +888,26 @@ fn a_publication_that_had_nothing_to_publish_says_so_rather_than_claiming_it_lan
     assert_eq!(node["status"], "done", "{node}\n{}", why(&world, &run));
     assert_eq!(node["outcome"], "no-changes", "{node}");
     assert_eq!(node["change_url"], json!(null), "{node}");
-    world
-        .run(&["results", &run])
-        .exited(0)
-        .out_has("no-changes");
+    // And it claims no landing either way. There was no change of this node's,
+    // so "landed" would say work reached the base that never existed and "not
+    // landed" would send a planner looking for a change request nobody opened.
+    assert_eq!(node["landing"], json!(null), "{node}");
+    // The sibling's own record of the publication claims nothing either.
+    let published = world.events_of(&run, "published");
+    assert_eq!(published.len(), 1, "{}", why(&world, &run));
+    assert_eq!(
+        published[0]["payload"]["landing"],
+        json!(null),
+        "{}",
+        published[0]
+    );
+    let results = world.run(&["results", &run]);
+    results.exited(0).out_has("no-changes");
+    assert!(
+        !results.stdout.contains("landed"),
+        "a node with nothing to publish is reported as one whose change did or did not land:\n{}",
+        results.stdout
+    );
 }
 
 #[test]
@@ -888,6 +922,10 @@ fn a_change_the_host_merged_settles_the_node_on_the_merge_rather_than_the_reques
     let node = world.run_json(&run, "round-01/result.json")["nodes"][0].clone();
     assert_eq!(node["status"], "done", "{node}\n{}", why(&world, &run));
     assert_eq!(node["outcome"], "merged", "{node}");
+    // The host was observed landing it, which is the one thing that makes a node
+    // landed. The policy asked for the same thing in the queued journey above and
+    // did not get it.
+    assert_eq!(node["landing"], "landed", "{node}");
     // And the run's own record names nowhere to read it. That is what
     // `PublishOutcome::Merged` carries — the commit, not the change request — so
     // the operator-facing `change_url` a queued or open change would have is
@@ -940,6 +978,257 @@ fn a_change_the_host_is_holding_settles_the_node_as_queued() {
             .as_str()
             .is_some_and(|url| url.contains("/pull/")),
         "a queued change named nowhere to read it: {node}"
+    );
+    // Done, and not landed. The host has accepted it and the base does not carry
+    // it yet, so the settlement says both things rather than only the first.
+    assert_eq!(node["landing"], "unlanded", "{node}");
+}
+
+/// The document `round run` prints carries the landing, at a stated version, and
+/// says nothing where there was nothing to observe.
+///
+/// This is the **read interface** rather than a file this suite goes looking for:
+/// `round run` writes the round result to stdout, and that is what a consumer
+/// driving the engine parses. `round-NN/result.json` is the same document, and
+/// the journey checks they agree — a version stated on one and not the other
+/// would be a contract with two answers.
+///
+/// All three of the landing's cases are read here. The first round carries two:
+/// a change the host is holding, and a plain agent node that published nothing
+/// and therefore carries **no `landing` key at all**. The third — a change
+/// observed on its base — is the second half, under the same policy once the host
+/// lands what it is handed, because a version that round-trips one value and
+/// drops the other is the defect a golden exists to catch.
+///
+/// Each half gets its own world. The round is run from the test rather than from
+/// the driver, which is what puts its stdout in hand, and the rendezvous holding
+/// that driver is per-world: two halves sharing one would have the second run's
+/// driver take the round before the test could.
+#[test]
+fn the_round_result_a_consumer_reads_states_its_version_and_carries_the_landing() {
+    // The host is holding the change it was handed.
+    let world = World::new("lifecycle-result-contract");
+    world.repository("change-auto", &["true"]);
+    world.script("service.work", "the worker wrote this\n");
+    let (open, round) = driven(
+        &world,
+        "readapi",
+        vec![lifecycle("service", &[]), agent("build", &[])],
+    );
+    let printed = printed_result(&round);
+    assert_eq!(
+        printed["schema_version"], 2,
+        "the round result a consumer parses states no version, or not this one: {printed}"
+    );
+    // The same document, on disk, agreeing with the one that was printed.
+    assert_eq!(
+        world.run_json(&open, "round-01/result.json"),
+        printed,
+        "`round run` printed a different document from the one it recorded"
+    );
+
+    let node = |printed: &serde_json::Value, id: &str| {
+        printed["nodes"]
+            .as_array()
+            .expect("the result carries nodes")
+            .iter()
+            .find(|node| node["id"] == id)
+            .unwrap_or_else(|| panic!("{id} is missing from {printed}"))
+            .clone()
+    };
+    assert_eq!(
+        node(&printed, "service")["landing"],
+        "unlanded",
+        "{printed}"
+    );
+    // A node that published nothing carries no landing *key*: a `null` on every
+    // node would have a consumer branching on a field that is almost always
+    // meaningless, which is how the distinction stops being read at all.
+    assert!(
+        node(&printed, "build").get("landing").is_none(),
+        "a node with no change to land carries a landing key anyway: {}",
+        node(&printed, "build")
+    );
+
+    // The same policy, and this time the host lands what it is handed.
+    let world = World::new("lifecycle-result-contract-landed");
+    world.repository("change-auto", &["true"]);
+    world.script("gh.merged", "");
+    world.script("service.work", "the worker wrote this\n");
+    let (_, round) = driven(&world, "readapi", vec![lifecycle("service", &[])]);
+    let printed = printed_result(&round);
+    assert_eq!(printed["schema_version"], 2, "{printed}");
+    assert_eq!(node(&printed, "service")["landing"], "landed", "{printed}");
+}
+
+/// The round result `round run` printed, as a consumer parses it.
+///
+/// The **whole** of stdout, parsed in one go rather than searched for a line that
+/// happens to be JSON. That is the contract this reader holds the verb to: a
+/// consumer driving the engine pipes stdout into a parser, and a diagnostic
+/// sharing that descriptor would break it. Everything the verb has to say to a
+/// person goes to stderr.
+fn printed_result(round: &crate::harness::Run) -> serde_json::Value {
+    let document: serde_json::Value =
+        serde_json::from_str(round.stdout.trim()).unwrap_or_else(|error| {
+            panic!(
+                "`round run` stdout is not one machine-readable document ({error}):\n\
+                 stdout: {}\nstderr: {}",
+                round.stdout, round.stderr
+            )
+        });
+    assert!(
+        document.get("nodes").is_some(),
+        "`round run` printed something other than a round result: {document}"
+    );
+    document
+}
+
+/// A settled node and a landed node are different facts, and one publication
+/// policy produces both.
+///
+/// The identity is `change-auto` for **both** halves — it asks the host to land
+/// the change once its checks pass — so nothing about the ask distinguishes
+/// them. What distinguishes them is the host: in the first half it holds the
+/// change, and in the second it lands it. Both nodes settle `done`, because
+/// publishing is the whole of what the round asked of them, and only one of them
+/// put anything on `main`.
+///
+/// Everything a planner reads is checked, because closing work on a settled node
+/// is a decision made from any of them: the ledger record, the round result the
+/// read API serves, and every view that renders a node's status.
+///
+/// Nothing waits for the merge. The unlanded half settles and the round ends with
+/// the change still open, because a change request a person owns is not something
+/// a run may block or poll on.
+#[test]
+fn a_settled_node_and_a_landed_node_are_told_apart_by_what_the_host_did_not_by_the_policy() {
+    let world = World::new("lifecycle-landing");
+    // Asks the host to land it once its checks pass. One policy, both answers.
+    world.repository("change-auto", &["true"]);
+
+    // The host is holding the change and has not landed it.
+    world.script("service.work", "the change nobody merged\n");
+    // Named for the scenario and not for the answer: a run id is printed on every
+    // view line, so `heldopen` cannot satisfy an assertion looking for the word
+    // this journey is about.
+    let open = settle(&world, "heldopen", vec![lifecycle("service", &[])]);
+
+    // The sibling's own record of the publication says it too, so a reader
+    // watching the merged stream sees where the change got to at the moment it
+    // was published rather than only in the settlement folded from it.
+    let published = world.events_of(&open, "published");
+    assert_eq!(
+        published.len(),
+        1,
+        "the publication is missing from the merged store\n{}",
+        why(&world, &open)
+    );
+    assert_eq!(
+        published[0]["payload"]["landing"], "unlanded",
+        "{}",
+        published[0]
+    );
+
+    let settled = world.events_of(&open, "node-settled");
+    let record = settled
+        .iter()
+        .find(|event| event["labels"]["node"] == "service")
+        .unwrap_or_else(|| panic!("the node never settled\n{}", why(&world, &open)));
+    assert_eq!(record["payload"]["status"], "done", "{record}");
+    assert_eq!(
+        record["payload"]["landing"], "unlanded",
+        "the ledger records a change that reached nobody as though it had landed: {record}"
+    );
+
+    let node = world.run_json(&open, "round-01/result.json")["nodes"][0].clone();
+    assert_eq!(node["status"], "done", "{node}\n{}", why(&world, &open));
+    assert_eq!(
+        node["landing"], "unlanded",
+        "the read API serves a settled node and a landed one as the same node: {node}"
+    );
+
+    // Every view a planner decides from. `results` is the per-node one; `status`
+    // otherwise reports only what is in flight, so a run gone quiet reads as one
+    // whose work landed; `goals` is the `n/n done` line that says a run is
+    // finished; `monitor` is the stream.
+    world
+        .run(&["results", &open])
+        .exited(0)
+        .out_has("NOT landed");
+    world
+        .run(&["status", &open])
+        .exited(0)
+        .out_has("1 node(s) settled without landing: service");
+    world
+        .run(&["goals", &open])
+        .exited(0)
+        .out_has("1 not landed");
+    world.run(&["monitor", &open]).exited(0).out_has("unlanded");
+
+    // The same policy, and this time the host lands what it is handed.
+    world.script("gh.merged", "");
+    world.script("service.work", "the change the host merged\n");
+    let landed = settle(&world, "hostmerged", vec![lifecycle("service", &[])]);
+
+    let node = world.run_json(&landed, "round-01/result.json")["nodes"][0].clone();
+    assert_eq!(node["status"], "done", "{node}\n{}", why(&world, &landed));
+    assert_eq!(
+        node["landing"],
+        "landed",
+        "a change the host was observed landing is not reported as landed: {node}\n{}",
+        why(&world, &landed)
+    );
+    assert_eq!(
+        world.events_of(&landed, "published")[0]["payload"]["landing"],
+        "landed",
+        "{}",
+        why(&world, &landed)
+    );
+    let results = world.run(&["results", &landed]);
+    results.exited(0).out_has("landed on its base");
+    assert!(
+        !results.stdout.contains("NOT landed"),
+        "a landed change is reported as one that did not land:\n{}",
+        results.stdout
+    );
+    let status = world.run(&["status", &landed]);
+    status.exited(0);
+    assert!(
+        !status.stdout.contains("settled without landing"),
+        "a run with nothing outstanding is reported as holding an unlanded change:\n{}",
+        status.stdout
+    );
+    let goals = world.run(&["goals", &landed]);
+    goals.exited(0).out_has("done)");
+    assert!(
+        !goals.stdout.contains("not landed"),
+        "a run whose only change landed still counts one against it:\n{}",
+        goals.stdout
+    );
+
+    // And side by side, which is how `runs` presents them: the two runs did the
+    // same work under the same policy, and only one of them still owes somebody
+    // a merge.
+    let listed = world.run(&["runs"]);
+    listed.exited(0);
+    let row = |run: &str| {
+        listed
+            .stdout
+            .lines()
+            .find(|line| line.contains(run))
+            .unwrap_or_else(|| panic!("`runs` never listed {run}:\n{}", listed.stdout))
+            .to_string()
+    };
+    assert!(
+        row(&open).contains("1 not landed"),
+        "`runs` reports a run holding an open change as finished work:\n{}",
+        row(&open)
+    );
+    assert!(
+        !row(&landed).contains("not landed"),
+        "`runs` reports a run whose change landed as one that did not:\n{}",
+        row(&landed)
     );
 }
 

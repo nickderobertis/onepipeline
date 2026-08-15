@@ -27,7 +27,7 @@ use crate::event::{Envelope, Labels};
 use crate::executor::{
     CancelMode, CancellationToken, DispatchHandle, DispatchRequest, Executor, WorkspaceSpec,
 };
-use crate::graph::{self, Graph, GraphState, NodeStatus};
+use crate::graph::{self, Graph, GraphState, Landing, NodeStatus};
 use crate::journal::{self, Journal};
 use crate::ledger::{self, LaunchRecord, OwnershipLock, RunPaths};
 use crate::plan::{Node, NodeKind, Plan};
@@ -78,13 +78,63 @@ const BOUNDARY_BACKOFF_CEILING: Duration = Duration::from_secs(120);
 /// How often the reconcile loop wakes to drain edits and re-derive the frontier.
 const POLL: Duration = Duration::from_millis(25);
 
+/// The schema version a round result is written as.
+///
+/// `round-NN/result.json` — and the same document `round run` prints — is a
+/// machine-read artifact this crate writes and **never reads back**, so the
+/// number is a statement to its consumers rather than to a reader here.
+///
+/// `2` is where a node carries [`landing`](NodeResult::landing). `1` is the
+/// unversioned shape before it, which carried no `schema_version` key at all and
+/// said only that a node had settled — a consumer reading a `1` cannot tell a
+/// change that merged from one still sitting in a pull request, because that
+/// document does not record it.
+pub const ROUND_RESULT_SCHEMA_VERSION: u32 = 2;
+
+/// The version a document carrying no `schema_version` key is.
+const FIRST_ROUND_RESULT_SCHEMA: u32 = 1;
+
+fn first_round_result_schema() -> u32 {
+    FIRST_ROUND_RESULT_SCHEMA
+}
+
+/// Read the version, refusing every number outside the range this build wrote.
+///
+/// The upper bound is deliberately narrower than the telemetry document's rule,
+/// because the change this version records is additive: every `1` field means in
+/// `2` exactly what it meant in `1`, and the only difference is a field that was
+/// never recorded. So a `1` reads, and its nodes simply carry no landing — which
+/// is already how "this run observed nothing about where that change got to" is
+/// spelled. A number *above* is the case that cannot be read honestly: the
+/// document may state something this build has no field for.
+///
+/// Below `1` is refused too, and for a different reason: this crate has never
+/// written a `0`, so a document claiming one came from somewhere that is not this
+/// contract at all. Read leniently it would be normalised into a result that
+/// looks like every other, which is the shape of every defect this version exists
+/// to make visible. Both bounds refuse by name, with both numbers.
+fn readable_round_result_version<'de, D: serde::Deserializer<'de>>(
+    reader: D,
+) -> std::result::Result<u32, D::Error> {
+    let found = u32::deserialize(reader)?;
+    if !(FIRST_ROUND_RESULT_SCHEMA..=ROUND_RESULT_SCHEMA_VERSION).contains(&found) {
+        return Err(serde::de::Error::custom(format!(
+            "round result schema_version {found}, and this build reads \
+             {FIRST_ROUND_RESULT_SCHEMA}..={ROUND_RESULT_SCHEMA_VERSION}"
+        )));
+    }
+    Ok(found)
+}
+
 /// One round's recorded result.
 ///
 /// `ok` is on the wire but not on the type: it is `state == complete` and
 /// nothing else, so storing it would let a result claim a failed round
 /// succeeded. It is derived on the way out and re-derived on the way in, which
 /// is also what makes a hand-edited result file impossible to disagree with
-/// itself.
+/// itself. `schema_version` is on the wire and not on the type for the same
+/// reason and one more: this crate writes exactly one version, so a result it
+/// produces states that one rather than whichever it happened to read.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(into = "RoundResultWire", from = "RoundResultWire")]
 pub struct RoundResult {
@@ -106,28 +156,39 @@ impl RoundResult {
 }
 
 /// The shape a round result is written and read as.
-// llmlint: ignore-block[invalid_states_unrepresentable] `ok` beside `state` is the wire's
-// shape, not a state this crate can hold. The type is private, its only constructor is the
-// `From<RoundResult>` below — which computes `ok` from `state` — and the `From` back drops
-// the field, so a file claiming `state: failed, ok: true` is normalised rather than
-// believed. Removing `ok` from the wire is a different change: `round-NN/result.json` is a
-// machine-read artifact whose consumers filter on it, so it would need a schema version and
-// a golden. Raise that with the planner who owns the contract.
+// llmlint: ignore-block[invalid_states_unrepresentable] `ok` and `schema_version` beside
+// `state` are the wire's shape, not states this crate can hold. The type is private, its
+// only constructor is the `From<RoundResult>` below — which computes both — and the `From`
+// back drops them, so a file claiming `state: failed, ok: true` is normalised rather than
+// believed. Removing `ok` from the wire is a different change: consumers filter on it, so
+// it would be a breaking bump rather than the additive one below. Raise that with the
+// planner who owns the contract.
+// llmlint: ignore-block[changed_behavior_has_e2e] no invocation a user can type reads a
+// round result back: this crate writes the document and every consumer of it is outside
+// this repo, so the version rules below have no product path to be driven through. Held by
+// this module's golden and version tests, against the same bytes a consumer parses.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RoundResultWire {
+    /// Absent on a document written before the field existed, which is a `1`.
+    #[serde(
+        default = "first_round_result_schema",
+        deserialize_with = "readable_round_result_version"
+    )]
+    schema_version: u32,
     run_id: String,
     round: u64,
     state: GraphState,
     ok: bool,
     nodes: Vec<NodeResult>,
-}
+} // llmlint: ignore-end[changed_behavior_has_e2e]
 
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
 impl From<RoundResult> for RoundResultWire {
     fn from(result: RoundResult) -> Self {
         Self {
+            schema_version: ROUND_RESULT_SCHEMA_VERSION,
             ok: result.ok(),
             run_id: result.run_id,
             round: result.round,
@@ -159,6 +220,21 @@ pub struct NodeResult {
     /// The named outcome, when it had one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<String>,
+    /// Whether the change this node published reached its base branch.
+    ///
+    /// The one field on this record that a `done` node's *status* does not
+    /// already imply: a change request open for review settles the node exactly
+    /// as a merge does, and a reader closing work on the status alone would
+    /// close it on a change that reached nobody. Absent where there was no
+    /// change of this node's to land — see [`Landing`].
+    ///
+    /// Omitted when absent rather than written as `null`, so a node with no
+    /// change of its own reads as one making no claim — and a consumer branches
+    /// on the key's presence instead of on a field that is there for every node
+    /// and meaningless for most. This field is what
+    /// [`ROUND_RESULT_SCHEMA_VERSION`] `2` records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub landing: Option<Landing>,
     /// What a ready human action asks for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<String>,
@@ -192,6 +268,14 @@ pub struct Settlement {
     pub status: NodeStatus,
     /// The named outcome, when it had one.
     pub outcome: Option<String>,
+    /// Whether the change this node published reached its base branch.
+    ///
+    /// Narrowed like `status` and unlike the three strings above, because this
+    /// one is a claim rather than a label: an unrecognised word here would have
+    /// to be read as *some* landing, and both readings are a false report. The
+    /// journal writes it as a word and [`Landing::parse`] reads an unknown one
+    /// back as no observation at all.
+    pub landing: Option<Landing>,
     /// The failure's own words.
     pub detail: Option<String>,
     /// The branch a lifecycle node left behind.
@@ -210,6 +294,8 @@ impl Settlement {
             node: node.to_string(),
             status,
             outcome: outcome.map(str::to_string),
+            // A settlement nothing published has nothing to say about landing.
+            landing: None,
             detail: None,
             branch: None,
             change_url: None,
@@ -1186,6 +1272,9 @@ fn settle(
     if let Some(url) = &settlement.change_url {
         payload.insert("change_url".into(), json!(url));
     }
+    if let Some(landing) = settlement.landing {
+        payload.insert(journal::SETTLED_LANDING.into(), json!(landing.as_str()));
+    }
     if !settlement.completed_steps.is_empty() {
         payload.insert("completed_steps".into(), json!(settlement.completed_steps));
     }
@@ -1300,6 +1389,7 @@ fn record_result(
                 id: node.id.clone(),
                 status,
                 outcome: state.outcomes.get(&node.id).cloned(),
+                landing: state.landings.get(&node.id).copied(),
                 action: (status == NodeStatus::Waiting)
                     .then(|| node.task.clone())
                     .flatten(),
@@ -1592,6 +1682,171 @@ fn carry_preserved_branch(node: &mut Node, state: &RunState, status: Option<Node
 mod tests {
     use super::*;
     use crate::plan::PLAN_SCHEMA_VERSION;
+
+    /// The checked-in shape of a schema-2 round result.
+    const ROUND_RESULT_GOLDEN: &str = include_str!("../tests/golden/round-result-v2.json");
+
+    use serde_json::Value;
+
+    /// One node that settled `done` with nothing else to say about it.
+    fn settled(id: &str) -> NodeResult {
+        NodeResult {
+            id: id.into(),
+            status: NodeStatus::Done,
+            outcome: None,
+            landing: None,
+            action: None,
+            unblocks: Vec::new(),
+            blocked_by: Vec::new(),
+            branch: None,
+            change_url: None,
+        }
+    }
+
+    /// The document the golden pins, built through the types.
+    ///
+    /// Three nodes because the landing has three cases on the wire and a golden
+    /// carrying one of them would pin a third of the change: a change observed on
+    /// its base, one that had not reached it, and a node with no change of its
+    /// own — which carries no `landing` key at all.
+    fn round_result_golden() -> RoundResult {
+        RoundResult {
+            run_id: "golden".into(),
+            round: 1,
+            state: GraphState::Complete,
+            nodes: vec![
+                NodeResult {
+                    id: "merged".into(),
+                    status: NodeStatus::Done,
+                    outcome: Some("merged".into()),
+                    landing: Some(Landing::Landed),
+                    branch: Some("onepipeline/merged".into()),
+                    ..settled("merged")
+                },
+                NodeResult {
+                    id: "opened".into(),
+                    status: NodeStatus::Done,
+                    outcome: Some("change-open".into()),
+                    landing: Some(Landing::Unlanded),
+                    branch: Some("onepipeline/opened".into()),
+                    change_url: Some("https://example.invalid/pull/7".into()),
+                    ..settled("opened")
+                },
+                settled("built"),
+            ],
+        }
+    }
+
+    /// The shape a round result is written as, pinned to the checked-in golden.
+    #[test]
+    fn a_schema_2_round_result_is_the_shape_the_golden_pins() {
+        let rendered = serde_json::to_string_pretty(&round_result_golden()).expect("it serialises");
+        assert_eq!(
+            rendered.trim(),
+            ROUND_RESULT_GOLDEN.trim(),
+            "the round result changed shape. If that was deliberate, bump \
+             ROUND_RESULT_SCHEMA_VERSION and update tests/golden/round-result-v2.json together"
+        );
+    }
+
+    /// Both landings survive the wire, and a node with none carries no key.
+    ///
+    /// The omission is the half that has to be checked at the wire rather than
+    /// through the types: `None` and `landed` are different values in Rust
+    /// whatever the serializer does, but a `landing: null` key on a node that
+    /// published nothing would have every consumer branching on a field that is
+    /// always present and usually meaningless.
+    #[test]
+    fn a_schema_2_round_result_round_trips_and_omits_a_landing_it_does_not_have() {
+        let value = round_result_golden();
+        let read: RoundResult = serde_json::from_str(ROUND_RESULT_GOLDEN)
+            .expect("the golden reads back into the types");
+        assert_eq!(read, value);
+        let again: RoundResult =
+            serde_json::from_str(&serde_json::to_string(&value).expect("it serialises"))
+                .expect("it reads back");
+        assert_eq!(again, value);
+
+        let document: Value =
+            serde_json::from_str(&serde_json::to_string(&value).expect("it serialises"))
+                .expect("it is JSON");
+        assert_eq!(document["nodes"][0]["landing"], json!("landed"));
+        assert_eq!(document["nodes"][1]["landing"], json!("unlanded"));
+        assert!(
+            document["nodes"][2].get("landing").is_none(),
+            "a node with no change to land carries a landing key anyway: {}",
+            document["nodes"][2]
+        );
+    }
+
+    /// The version is a decision, not an accident: it moves when the shape does,
+    /// and the golden is named for the one it pins.
+    #[test]
+    fn the_round_result_schema_version_and_the_golden_name_the_same_number() {
+        assert_eq!(ROUND_RESULT_SCHEMA_VERSION, 2);
+        let document: Value =
+            serde_json::from_str(ROUND_RESULT_GOLDEN).expect("the golden is JSON");
+        assert_eq!(document["schema_version"], ROUND_RESULT_SCHEMA_VERSION);
+        let written: Value = serde_json::from_str(
+            &serde_json::to_string(&round_result_golden()).expect("it serialises"),
+        )
+        .expect("it is JSON");
+        assert_eq!(written["schema_version"], ROUND_RESULT_SCHEMA_VERSION);
+    }
+
+    /// Which versions this build will read, and which it refuses by name.
+    ///
+    /// A `1` is the unversioned shape and reads: the bump was additive, so every
+    /// field it carries means here exactly what it meant there, and its nodes
+    /// simply record no landing. A version *ahead* of this build is the one that
+    /// cannot be read honestly, because it may state something there is no field
+    /// for — and a result normalised into this build's shape would then claim a
+    /// node landed nothing when the document said otherwise.
+    #[test]
+    fn a_round_result_from_an_older_build_reads_and_one_from_a_newer_build_is_refused() {
+        let mut document = serde_json::to_value(round_result_golden()).expect("it serialises");
+        let edit = |document: &mut Value, each: &dyn Fn(&mut serde_json::Map<String, Value>)| {
+            each(document.as_object_mut().expect("it is an object"));
+        };
+
+        // The unversioned shape: no key, and no landing on any node.
+        edit(&mut document, &|object| {
+            object.remove("schema_version");
+            for node in object["nodes"].as_array_mut().expect("nodes") {
+                node.as_object_mut().expect("a node").remove("landing");
+            }
+        });
+        let older: RoundResult =
+            serde_json::from_value(document.clone()).expect("a version-1 result still reads");
+        assert!(
+            older.nodes.iter().all(|node| node.landing.is_none()),
+            "a result written before landings were recorded claimed one: {older:?}"
+        );
+        // And what this build writes back is its own version, stated rather than
+        // carried over from whatever it read.
+        let rewritten = serde_json::to_value(&older).expect("it serialises");
+        assert_eq!(rewritten["schema_version"], ROUND_RESULT_SCHEMA_VERSION);
+
+        // Both bounds. Above is a build that knows more than this one; `0` is a
+        // number this crate has never written, so a document claiming it did not
+        // come from this contract and is refused rather than normalised into a
+        // result that looks like every other.
+        for outside in [ROUND_RESULT_SCHEMA_VERSION + 1, 0] {
+            let mut claimed = document.clone();
+            edit(&mut claimed, &|object| {
+                object.insert("schema_version".into(), json!(outside));
+            });
+            let refused = serde_json::from_value::<RoundResult>(claimed).expect_err(
+                "a result outside the versions this build reads was read as one of them",
+            );
+            let refusal = refused.to_string();
+            assert!(
+                refusal.contains(&outside.to_string())
+                    && refusal.contains(&ROUND_RESULT_SCHEMA_VERSION.to_string()),
+                "the refusal of {outside} names neither version: {refusal}"
+            );
+        }
+    }
 
     fn agent(id: &str, deps: &[&str]) -> Node {
         Node {
