@@ -423,9 +423,13 @@ fn start(args: &StartArgs) -> Result<i32> {
     // The observer, if the launch named one. It watches and reports; the loop
     // below is what drives the run either way, so a graph that refuses to start
     // fails the launch rather than leaving a run nothing executes.
+    // The lock before anything is launched: this process is about to be the
+    // run's single writer, and a launch that started an observer and then lost
+    // that race would leave a graph watching a run it does not drive.
+    let lock = engine::claim(&paths)?;
     let mut observer = observe(&paths, &mut record, goal, agentgraph::GraphOutput::Relayed)?;
     ledger::write_json(&paths.launch(), &record)?;
-    attach(&paths, observer.as_mut())
+    attach(&paths, observer.as_mut(), lock)
 }
 
 /// Launch the run's observer graph, when it was launched with one.
@@ -682,7 +686,11 @@ impl Settlement {
 /// resumes the paused subtree inside the running loop, with no external driver
 /// action — and returns when the graph is terminal or when nothing at all can
 /// move without the channel. Only then does this return.
-fn attach(paths: &RunPaths, observer: Option<&mut agentgraph::GraphRun>) -> Result<i32> {
+fn attach(
+    paths: &RunPaths,
+    observer: Option<&mut agentgraph::GraphRun>,
+    lock: ledger::OwnershipLock,
+) -> Result<i32> {
     let (tx, rx) = std::sync::mpsc::channel();
     let mut watched = observer;
     if let Some(run) = watched.as_deref_mut() {
@@ -705,7 +713,7 @@ fn attach(paths: &RunPaths, observer: Option<&mut agentgraph::GraphRun>) -> Resu
     let driving = paths.clone();
     let engine = std::thread::Builder::new()
         .name(format!("engine-{}", paths.run))
-        .spawn(move || engine::drive(&driving))
+        .spawn(move || engine::drive_holding(&driving, lock))
         .map_err(|e| Error::Invalid(format!("cannot start the engine loop: {e}")))?;
 
     loop {
@@ -844,7 +852,11 @@ fn adopt(args: &RunArgs) -> Result<i32> {
     // still being driven was refused, and this is the same taking-over `adopt`
     // has always been. A dead one is signalled to no effect, which is the
     // ordinary case.
-    displace_the_parked_driver(&record)?;
+    displace_the_parked_driver(&record);
+    // And the lock decides, before anything is written: an adoption that
+    // recorded itself and *then* lost the race would leave the record naming
+    // this process while the driver that won carried on.
+    let lock = engine::claim(&paths)?;
 
     record.adoptions += 1;
     record.pid = sys::pid();
@@ -901,18 +913,20 @@ fn adopt(args: &RunArgs) -> Result<i32> {
     // mid-decision: the fold reconstructs the outstanding decision points from
     // the settlements that produced them, so a subtree that was paused stays
     // paused and is released by the same `attest` it always was.
-    attach(&paths, observer.as_mut())
+    attach(&paths, observer.as_mut(), lock)
 }
 
 /// End a driver that holds a run nothing is driving, and wait for it to go.
 ///
 /// The lock the engine loop takes is reclaimable only from a holder this host
-/// can prove is gone, so an adoption that started its loop beside a parked
-/// driver would lose the race and refuse — leaving the one documented way back
-/// from `PARKED` closed.
-fn displace_the_parked_driver(record: &LaunchRecord) -> Result<()> {
+/// can prove is gone, so an adoption that took its lock beside a parked driver
+/// would lose the race — leaving the one documented way back from `PARKED`
+/// closed. The wait is bounded and answers nothing itself: whether the run may
+/// be taken over is the **lock's** question, and a driver that outlasts this is
+/// answered by the lock's own refusal, which names the pid still holding it.
+fn displace_the_parked_driver(record: &LaunchRecord) {
     if record.host != sys::hostname() || !sys::process_may_be_live(record.pid) {
-        return Ok(());
+        return;
     }
     eprintln!(
         "onepipeline: run '{}' is held by driver pid {}, which is not working; \
@@ -921,17 +935,9 @@ fn displace_the_parked_driver(record: &LaunchRecord) -> Result<()> {
     );
     sys::stop(record.pid, sys::Stop::Politely);
     let deadline = Instant::now() + DRIVER_HANDOVER;
-    while Instant::now() < deadline {
-        if !sys::process_may_be_live(record.pid) {
-            return Ok(());
-        }
+    while Instant::now() < deadline && sys::process_may_be_live(record.pid) {
         std::thread::sleep(ATTACH_POLL);
     }
-    Err(Error::Refused(format!(
-        "run '{}' is held by driver pid {}, which did not end when asked; \
-         end it by hand and adopt the run again",
-        record.run_id, record.pid
-    )))
 }
 
 /// `onepipeline stop`.
