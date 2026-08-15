@@ -50,6 +50,81 @@ pub const MONITOR_PROFILE: &str = "monitor";
 /// The matcher fields the grammar has, for the refusal that names them.
 const MATCHER_FIELDS: &str = "`source`, `kind`, `run_id`, `node`, `step`, `member`, `persona`";
 
+/// The launch-config schema version this build writes and reads.
+pub const LAUNCH_CONFIG_SCHEMA_VERSION: u32 = 1;
+
+/// A launch config: what a launch declares about its run, as one document.
+///
+/// The `filters:` block is long enough to be worth keeping in a file beside the
+/// plan rather than pasted onto one line of argv, and it is the kind of thing a
+/// team writes once and reuses across launches — so `start --launch-config FILE`
+/// reads it, and the repeatable flags spell exactly the same block for a launch
+/// that would rather say it inline.
+///
+/// A block rather than a bare `filters:` key at the document root, because what
+/// a launch declares is a subject of its own: this is where a second launch-level
+/// decision goes, rather than beside the filters that happen to be the first one.
+///
+/// Versioned and closed. It is **external input** — a file an operator wrote —
+/// so an unknown key is refused by name rather than silently dropped, and a
+/// document declaring a version this build does not read is refused by its
+/// number rather than read as though it said something else.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchConfig {
+    /// Schema version; [`LAUNCH_CONFIG_SCHEMA_VERSION`] for anything this crate
+    /// writes.
+    pub schema_version: u32,
+    /// What this launch says about its run's events.
+    ///
+    /// Omitted when empty, so a config that declares nothing about events
+    /// round-trips as the file wrote it.
+    #[serde(default, skip_serializing_if = "Filters::is_empty")]
+    pub filters: Filters,
+}
+
+impl Default for LaunchConfig {
+    fn default() -> Self {
+        Self {
+            schema_version: LAUNCH_CONFIG_SCHEMA_VERSION,
+            filters: Filters::default(),
+        }
+    }
+}
+
+impl LaunchConfig {
+    /// Read a launch config file: JSON, or the YAML the document is written in,
+    /// of which JSON is a subset.
+    ///
+    /// Read the way [`Plan::load`](crate::plan::Plan::load) reads a plan, and
+    /// refused at the same boundary: this is a file an operator wrote, and the
+    /// only place it can be refused *before* a run exists is where it is read.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Ledger`] for a file that cannot be read, and [`Error::Invalid`]
+    /// — naming the path — for a document this schema does not accept, a version
+    /// this build does not read, or a filter that could not be honoured.
+    pub fn load(path: &Path) -> Result<Self> {
+        let text = std::fs::read_to_string(path).map_err(|source| Error::Ledger {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let named = |why: String| Error::Invalid(format!("{}: {why}", path.display()));
+        let config: Self =
+            serde_norway::from_str(&text).map_err(|failure| named(failure.to_string()))?;
+        if config.schema_version != LAUNCH_CONFIG_SCHEMA_VERSION {
+            return Err(named(format!(
+                "launch config schema_version {}, and this build reads \
+                 {LAUNCH_CONFIG_SCHEMA_VERSION} — set `schema_version: \
+                 {LAUNCH_CONFIG_SCHEMA_VERSION}`",
+                config.schema_version
+            )));
+        }
+        Ok(config)
+    }
+}
+
 /// What one launch says about its run's events.
 ///
 /// Empty is what every launch made before this block existed says, and goes on
@@ -549,4 +624,165 @@ fn glob(pattern: &str, text: &str) -> bool {
         }
     }
     pattern[p..].iter().all(|character| *character == '*')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The checked-in shape of a schema-1 launch config.
+    ///
+    /// Read rather than restated: this is the document an operator writes and a
+    /// later build parses, and the only thing that stops a key being renamed, an
+    /// omitted block becoming an explicit empty one, or the version moving
+    /// without anyone deciding to move it.
+    const GOLDEN: &str = include_str!("../tests/golden/launch-config-v1.json");
+
+    /// The document the golden pins, built through the types.
+    ///
+    /// Both source filters and both shipped profile names, because each is a
+    /// distinct shape on the wire — an `exclude`-only filter, an `include` of
+    /// several matchers, an overridden profile, and the empty filter that means
+    /// "unfiltered" — and a golden carrying one of them would pin a quarter of
+    /// the document.
+    fn golden() -> LaunchConfig {
+        let kind = |glob: &str| Matcher {
+            kind: Some(glob.to_string()),
+            ..Matcher::default()
+        };
+        LaunchConfig {
+            schema_version: LAUNCH_CONFIG_SCHEMA_VERSION,
+            filters: Filters {
+                agentgraph: Some(EventFilter {
+                    include: Vec::new(),
+                    exclude: vec![kind("turn-activity")],
+                }),
+                vcs: Some(EventFilter {
+                    include: vec![kind("gate-*"), kind("session-closed")],
+                    exclude: Vec::new(),
+                }),
+                profiles: [
+                    (
+                        DEFAULT_PROFILE.to_string(),
+                        shipped_profile(DEFAULT_PROFILE).expect("planner ships"),
+                    ),
+                    (
+                        MONITOR_PROFILE.to_string(),
+                        shipped_profile(MONITOR_PROFILE).expect("monitor ships"),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            },
+        }
+    }
+
+    #[test]
+    fn a_schema_1_launch_config_is_the_shape_the_golden_pins() {
+        let rendered = serde_json::to_string_pretty(&golden()).expect("it serialises");
+        assert_eq!(
+            rendered.trim(),
+            GOLDEN.trim(),
+            "the launch config changed shape. If that was deliberate, bump \
+             LAUNCH_CONFIG_SCHEMA_VERSION and update tests/golden/launch-config-v1.json \
+             together"
+        );
+    }
+
+    #[test]
+    fn the_schema_version_and_the_golden_name_the_same_number() {
+        let parsed: LaunchConfig = serde_json::from_str(GOLDEN).expect("the golden parses");
+        assert_eq!(parsed.schema_version, LAUNCH_CONFIG_SCHEMA_VERSION);
+        assert_eq!(parsed, golden(), "the golden is not the document it pins");
+    }
+
+    /// A config that declares no events round-trips as the file wrote it.
+    ///
+    /// The backward-compatible half, checked at the wire rather than through the
+    /// types: `Filters::default()` and an explicit `filters: {}` are the same
+    /// value in Rust whatever the serializer does, but writing the empty block
+    /// out would have every consumer branching on a key that is always present
+    /// and usually meaningless — and would stop a document written before the
+    /// block existed from being what this build writes back.
+    #[test]
+    fn a_launch_config_declaring_no_events_omits_the_block_and_round_trips() {
+        let bare = LaunchConfig::default();
+        let rendered = serde_json::to_string(&bare).expect("it serialises");
+        assert_eq!(rendered, r#"{"schema_version":1}"#);
+        assert_eq!(
+            serde_json::from_str::<LaunchConfig>(&rendered).expect("it re-parses"),
+            bare
+        );
+
+        // And the version alone is a whole document: a config that says nothing
+        // else is what a launch naming no filters already means.
+        let minimal: LaunchConfig =
+            serde_norway::from_str("schema_version: 1\n").expect("a bare config parses");
+        assert_eq!(minimal, bare);
+        assert!(minimal.filters.is_empty());
+    }
+
+    /// Every filter shape survives the wire, and an empty list is never written.
+    #[test]
+    fn a_launch_config_round_trips_without_losing_or_inventing_a_field() {
+        let full = golden();
+        let text = serde_norway::to_string(&full).expect("it serialises as YAML too");
+        assert_eq!(
+            serde_norway::from_str::<LaunchConfig>(&text).expect("it re-parses"),
+            full
+        );
+
+        // The unfiltered profile is `{}` on the wire — both lists empty, and
+        // neither written — so a reader can tell "admits everything" from a
+        // profile that was never declared.
+        let value: Value = serde_json::from_str(GOLDEN).expect("the golden is JSON");
+        assert_eq!(
+            value["filters"]["profiles"]["monitor"],
+            serde_json::json!({})
+        );
+        assert!(
+            value["filters"]["agentgraph"].get("include").is_none(),
+            "an empty include was written out: {value}"
+        );
+    }
+
+    /// The version is refused by its number, and an unknown key by its name.
+    #[test]
+    fn a_launch_config_this_build_cannot_read_is_refused_by_name() {
+        let root = std::env::temp_dir().join(format!("onepipeline-config-{}", std::process::id()));
+        std::fs::create_dir_all(&root).expect("a scratch directory");
+        let written = |name: &str, body: &str| {
+            let path = root.join(name);
+            std::fs::write(&path, body).expect("the config is written");
+            path
+        };
+
+        let later = LaunchConfig::load(&written("later.yaml", "schema_version: 2\n"))
+            .expect_err("a version this build does not read is refused");
+        let said = later.to_string();
+        assert!(said.contains("schema_version 2"), "{said}");
+        assert!(said.contains("schema_version: 1"), "{said}");
+
+        let stray = LaunchConfig::load(&written(
+            "stray.yaml",
+            "schema_version: 1\nfilterz:\n  vcs: {}\n",
+        ))
+        .expect_err("a key this schema does not declare is refused");
+        assert!(stray.to_string().contains("filterz"), "{stray}");
+
+        // The filter grammar's own refusals reach here too: the config is one
+        // more boundary the same spec crosses.
+        let unusable = LaunchConfig::load(&written(
+            "unusable.yaml",
+            "schema_version: 1\nfilters:\n  vcs:\n    include:\n      - role: agent\n",
+        ))
+        .expect_err("a matcher field the grammar does not have is refused");
+        assert!(unusable.to_string().contains("role"), "{unusable}");
+
+        let missing = LaunchConfig::load(&root.join("nothing-here.yaml"))
+            .expect_err("a file that is not there is refused");
+        assert!(missing.to_string().contains("nothing-here"), "{missing}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

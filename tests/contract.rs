@@ -27,7 +27,9 @@ use onepipeline::executor::{
     CancelMode, CancellationToken, Capabilities, CapacityReport, DispatchRequest, Executor,
     LocalExecutor, WorkspaceSpec,
 };
-use onepipeline::filter::{EventFilter, Filters, Matcher};
+use onepipeline::filter::{
+    EventFilter, Filters, LaunchConfig, Matcher, LAUNCH_CONFIG_SCHEMA_VERSION,
+};
 use onepipeline::plan::{Node, NodeKind, Plan, Resume, Step, PLAN_SCHEMA_VERSION};
 use onepipeline::rules::{ExecutorKind, ExecutorRules, Predicate};
 use onevcs::registry::{RepoType, Workflow};
@@ -368,14 +370,14 @@ fn dispatching_goes_through_the_oneagentgraph_seam_and_says_so_when_it_cannot() 
 /// shared across the stack with no shared crate, so the committed text is the one
 /// source and a copy that stopped matching it fails this gate.
 #[test]
-fn the_contracts_filters_example_parses_and_round_trips() {
-    #[derive(serde::Deserialize)]
-    struct Block {
-        filters: Filters,
-    }
-    let yaml = fenced_block_naming("yaml", "profiles:");
-    let block: Block = serde_norway::from_str(&yaml).expect("the filters example parses");
-    let filters = block.filters;
+fn the_contracts_launch_config_example_parses_and_round_trips() {
+    let yaml = fenced_block_naming("yaml", "schema_version: 1");
+    let config: LaunchConfig = serde_norway::from_str(&yaml).expect("the launch config parses");
+    assert_eq!(
+        config.schema_version, LAUNCH_CONFIG_SCHEMA_VERSION,
+        "the contract's example declares a version this build does not read"
+    );
+    let filters = config.filters;
 
     let agentgraph = filters
         .agentgraph
@@ -407,6 +409,41 @@ fn the_contracts_filters_example_parses_and_round_trips() {
         serde_json::from_str(&serde_json::to_string(&filters).expect("serializes"))
             .expect("re-parses");
     assert_eq!(round_tripped, filters);
+
+    // The checked-in golden **is** the contract's own example. Two documents that
+    // both claim to pin the launch config's shape and could disagree would be two
+    // sources; this is the one place they are held to being one.
+    let golden: LaunchConfig = serde_json::from_str(
+        &std::fs::read_to_string(repo_root().join("tests/golden/launch-config-v1.json"))
+            .expect("the golden ships"),
+    )
+    .expect("the golden parses");
+    assert_eq!(
+        golden.filters, filters,
+        "tests/golden/launch-config-v1.json and the contract's own example are \
+         different documents"
+    );
+}
+
+/// A launch config declaring only its version is a launch that says nothing.
+///
+/// The contract's promise to a document written before the block existed, and to
+/// one that never wanted it: the block is optional, an empty one is omitted from
+/// what this crate writes, and neither is an error.
+#[test]
+fn the_contracts_launch_config_omits_an_empty_block_and_still_reads() {
+    let bare: LaunchConfig =
+        serde_norway::from_str("schema_version: 1\n").expect("a config may declare only a version");
+    assert!(bare.filters.is_empty());
+    assert_eq!(
+        serde_json::to_string(&bare).expect("serializes"),
+        format!(r#"{{"schema_version":{LAUNCH_CONFIG_SCHEMA_VERSION}}}"#),
+        "an empty filters block was written out"
+    );
+    assert_contract_names(
+        "launch config surface",
+        &["--launch-config FILE", "schema_version: 1"],
+    );
 }
 
 /// The shipped defaults are the contract's, and both are overridable by name.
@@ -1925,6 +1962,9 @@ const RULINGS: &[(&str, &str)] = &[
     ("27.", "ending that parked driver politely"),
     ("28.", "`attempt`, `attempts`"),
     ("29.", "inherits both"),
+    ("30.", "--launch-config FILE"),
+    ("31.", "shaped event view beside the surface"),
+    ("32.", "any run of characters including none"),
 ];
 
 #[test]

@@ -242,13 +242,23 @@ fn mint_run_id(plan: &Plan, path: &Path, root: &Path) -> String {
 
 /// The `filters:` block one launch declared, read and checked at its boundary.
 ///
-/// Each spec is read where the operator typed it and refused there, with the
+/// The launch config is the base and each flag overrides the part of it that it
+/// names — the two source filters wholesale, and a profile *by name*, so a
+/// config holding a team's five profiles beside a plan can have one of them
+/// replaced for one launch without restating the other four. A launch naming no
+/// config is the same code path with an empty base, which is what makes the two
+/// surfaces the same block rather than two blocks that have to agree.
+///
+/// Every spec is read where the operator wrote it and refused there, with the
 /// offending matcher named — the two source filters because a launch cannot
 /// honour a spec its sources will not take, and the profiles because a profile
 /// only refused at read time would be refused to a planner who did not write it,
 /// long after the launch that did.
 fn declared_filters(args: &StartArgs) -> Result<crate::filter::Filters> {
-    let mut profiles = std::collections::BTreeMap::new();
+    let mut filters = match &args.launch_config {
+        Some(path) => crate::filter::LaunchConfig::load(path)?.filters,
+        None => crate::filter::Filters::default(),
+    };
     for declaration in &args.filter_profiles {
         let (name, spec) = declaration.split_once('=').ok_or_else(|| {
             Error::Invalid(format!(
@@ -260,21 +270,17 @@ fn declared_filters(args: &StartArgs) -> Result<crate::filter::Filters> {
                 "--filter-profile takes NAME=SPEC; '{declaration}' has an empty name"
             )));
         }
-        profiles.insert(name.to_string(), EventFilter::read(spec)?);
+        filters
+            .profiles
+            .insert(name.to_string(), EventFilter::read(spec)?);
     }
-    Ok(crate::filter::Filters {
-        agentgraph: args
-            .filter_agentgraph
-            .as_deref()
-            .map(EventFilter::read)
-            .transpose()?,
-        vcs: args
-            .filter_vcs
-            .as_deref()
-            .map(EventFilter::read)
-            .transpose()?,
-        profiles,
-    })
+    if let Some(spec) = args.filter_agentgraph.as_deref() {
+        filters.agentgraph = Some(EventFilter::read(spec)?);
+    }
+    if let Some(spec) = args.filter_vcs.as_deref() {
+        filters.vcs = Some(EventFilter::read(spec)?);
+    }
+    Ok(filters)
 }
 
 /// The filter a read verb shapes its event view with.

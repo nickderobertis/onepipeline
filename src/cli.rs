@@ -123,6 +123,10 @@ pub struct StartArgs {
     /// Proceed even when another live session holds a targeted repository.
     #[arg(long)]
     pub acknowledge_concurrent: bool,
+    /// The launch config: what this launch declares about its run, as one
+    /// document. Each flag below overrides the part of it that it names.
+    #[arg(long, value_name = "FILE")]
+    pub launch_config: Option<PathBuf>,
     /// Keep only the events a filter admits out of every `oneagentgraph` launch
     /// this run starts, as a file path or inline JSON.
     #[arg(long, value_name = "SPEC")]

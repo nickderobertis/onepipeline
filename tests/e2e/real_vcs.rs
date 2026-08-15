@@ -265,3 +265,56 @@ fn a_launchs_vcs_filter_reaches_the_real_sibling_and_narrows_what_it_relays() {
         .out_has("service")
         .out_has("merged");
 }
+
+/// `--filter-vcs` replaces the source filter a launch config supplied.
+///
+/// The vcs half of the override rule, and the only place it is observable: a
+/// source filter's effect is what the *real* `onevcs` did not relay, so a
+/// journey with no repository in it could only assert on the ask. The config
+/// here would silence the gate verdict; the flag replaces it with one that
+/// silences the push instead, so admitting the verdict is what proves the flag
+/// won rather than merely being read.
+#[test]
+fn a_vcs_filter_flag_replaces_the_one_a_launch_config_supplied() {
+    let world = World::new("real-vcs-filter-override");
+    let repo = world.repository("local-direct", &["true"]);
+    world.script("service.work", "the worker wrote this\n");
+
+    let config = world.root.join("launch.json");
+    std::fs::write(
+        &config,
+        r#"{"schema_version": 1,
+            "filters": {"vcs": {"exclude": [{"kind": "gate-verdict"}]}}}"#,
+    )
+    .expect("the launch config is written");
+
+    let path = world.plan(
+        "overridden",
+        &plan_of("overridden", vec![node(&repo.checkout)]),
+    );
+    world
+        .run(&[
+            "start",
+            &path.to_string_lossy(),
+            "--attach",
+            "--launch-config",
+            &config.to_string_lossy(),
+            "--filter-vcs",
+            r#"{"exclude": [{"kind": "push"}]}"#,
+        ])
+        .settled();
+
+    let relayed = world.run(&["monitor", "overridden", "--all"]).stdout;
+    assert!(
+        !relayed.contains("push"),
+        "the flag's own filter did not reach `onevcs`:\n{relayed}"
+    );
+    assert!(
+        relayed.contains("gate-verdict"),
+        "the config's filter was still applied beside the flag that replaced it:\n{relayed}"
+    );
+    world
+        .run(&["results", "overridden"])
+        .exited(0)
+        .out_has("merged");
+}

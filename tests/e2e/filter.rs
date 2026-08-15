@@ -79,6 +79,33 @@ fn raise_blocker(world: &World, run: &str) -> std::process::Child {
     serving
 }
 
+/// Every `--event-filter` this world's launches spelled onto the sibling they
+/// composed, as the documents they carried.
+///
+/// The doubled `oneagentgraph` is a stand-in that does not filter, so what a
+/// source filter *did* is proven against the real sibling in `dispatch.rs` and
+/// `real_vcs.rs`. What a journey here needs is the other half — that the block a
+/// launch was given reached the launch it makes — and the command line is where
+/// that exists.
+// llmlint: ignore-block[tests_mirror_real_usage] the substituted sibling is a foreign
+// binary, so the argv it was handed is the only place this claim lives: no product
+// surface of *this* crate renders the arguments of a process it started, and the events
+// that came back would be the double's answer rather than the ask. `channel.rs` asserts
+// the pacemaker's addressing the same way and for the same reason.
+fn source_filters(world: &World) -> Vec<serde_json::Value> {
+    world
+        .invocations()
+        .into_iter()
+        .filter(|call| call["tool"] == "oneagentgraph")
+        .filter_map(|call| {
+            let args = call["args"].as_array()?.clone();
+            let at = args.iter().position(|arg| arg == "--event-filter")?;
+            serde_json::from_str(args.get(at + 1)?.as_str()?).ok()
+        })
+        .collect()
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
 /// The shipped `planner` profile is what `monitor` reads through by default, and
 /// `--all` and the shipped `monitor` profile are the whole store.
 #[test]
@@ -577,4 +604,255 @@ fn a_next_that_refuses_its_filter_leaves_the_surface_unclaimed() {
 
     drop(serving.stdin.take());
     let _ = serving.wait();
+}
+
+/// A launch config declares the whole `filters:` block, and it is the same block
+/// the flags spell.
+///
+/// The surface a team actually uses: the block is long enough to be worth keeping
+/// beside the plan, versioned so a later build knows what it is reading, and
+/// written once rather than restated on every launch.
+#[test]
+fn a_launch_config_declares_the_filters_block_the_flags_otherwise_spell() {
+    let world = World::new("filter-config");
+    let config = world.root.join("launch.yaml");
+    std::fs::write(
+        &config,
+        "schema_version: 1\n\
+         filters:\n\
+         \x20 agentgraph:\n\
+         \x20   exclude:\n\
+         \x20     - kind: \"turn-*\"\n\
+         \x20 profiles:\n\
+         \x20   planner:\n\
+         \x20     include:\n\
+         \x20       - kind: node-dispatched\n\
+         \x20   dispatches:\n\
+         \x20     include:\n\
+         \x20       - kind: node-settled\n",
+    )
+    .expect("the launch config is written");
+
+    let run = settled(
+        &world,
+        "configured",
+        &["--launch-config", &config.to_string_lossy()],
+    );
+
+    // The source filter the config declared reached the launches this run made.
+    // What it then *does* is the real sibling's, and `dispatch.rs` proves that;
+    // what this journey is about is the config being read at all.
+    let spelled = source_filters(&world);
+    assert!(
+        !spelled.is_empty()
+            && spelled
+                .iter()
+                .all(|filter| *filter == serde_json::json!({"exclude": [{"kind": "turn-*"}]})),
+        "the config's source filter did not reach the launches: {spelled:?}"
+    );
+
+    // Its `planner` override is what a reader with no flag gets.
+    let default_view = world.run(&["monitor", &run]);
+    default_view.exited(0).out_has("node-dispatched");
+    assert!(
+        !default_view.stdout.contains("node-settled"),
+        "the shipped planner profile was read instead of the config's own:\n{}",
+        default_view.stdout
+    );
+
+    // And a profile the config named that ships with no default at all is a
+    // profile of this run like any other.
+    let named = world.run(&["monitor", &run, "--filter", "dispatches"]);
+    named.exited(0).out_has("node-settled");
+    assert!(
+        !named.stdout.contains("node-dispatched"),
+        "the config's own profile admitted a kind it did not name:\n{}",
+        named.stdout
+    );
+
+    // The block is retained, so a reader in a later process reads the same
+    // profiles this launch declared — which is what `adopt` replays too.
+    world
+        .run(&["monitor", &run, "--filter", "nope"])
+        .exited(REFUSED)
+        .err_has("dispatches");
+}
+
+/// A flag overrides the part of the config it names, and leaves the rest.
+///
+/// The reason the two surfaces are one block rather than two: an operator who
+/// wants one profile different for one launch says that, and the config's other
+/// profiles — and its source filters — go on meaning what the file says.
+#[test]
+fn a_flag_overrides_the_part_of_the_launch_config_it_names() {
+    let world = World::new("filter-config-override");
+    let config = world.root.join("launch.json");
+    std::fs::write(
+        &config,
+        r#"{"schema_version": 1, "filters": {
+             "agentgraph": {"exclude": [{"kind": "turn-*"}]},
+             "profiles": {
+               "planner": {"include": [{"kind": "node-dispatched"}]},
+               "dispatches": {"include": [{"kind": "node-settled"}]}
+             }}}"#,
+    )
+    .expect("the launch config is written");
+
+    let run = settled(
+        &world,
+        "overlaid",
+        &[
+            "--launch-config",
+            &config.to_string_lossy(),
+            "--filter-profile",
+            r#"planner={"include": [{"kind": "run-started"}]}"#,
+        ],
+    );
+
+    // A profile flag replaces one profile and leaves the source filter standing —
+    // asserted below. The source-filter flags are the other direction, and they
+    // replace their filter **wholesale**: a launch that meant to narrow a source
+    // further would say so in one spec, because two filters over one stream have
+    // no defined composition.
+    let overridden = World::new("filter-config-override-source");
+    let source_config = overridden.root.join("launch.json");
+    std::fs::write(
+        &source_config,
+        r#"{"schema_version": 1, "filters": {
+             "agentgraph": {"exclude": [{"kind": "turn-*"}]},
+             "vcs": {"exclude": [{"kind": "gate-*"}]}
+           }}"#,
+    )
+    .expect("the launch config is written");
+    settled(
+        &overridden,
+        "resourced",
+        &[
+            "--launch-config",
+            &source_config.to_string_lossy(),
+            "--filter-agentgraph",
+            r#"{"exclude": [{"kind": "member-started"}]}"#,
+        ],
+    );
+    let spelled = source_filters(&overridden);
+    assert!(
+        !spelled.is_empty()
+            && spelled
+                .iter()
+                .all(|filter| *filter
+                    == serde_json::json!({"exclude": [{"kind": "member-started"}]})),
+        "--filter-agentgraph did not replace the config's own source filter: {spelled:?}"
+    );
+
+    // The named profile is the flag's.
+    let default_view = world.run(&["monitor", &run]);
+    default_view.exited(0).out_has("run-started");
+    assert!(
+        !default_view.stdout.contains("node-dispatched"),
+        "the config's planner profile survived a flag that replaced it:\n{}",
+        default_view.stdout
+    );
+
+    // The profile the flag did not name is still the config's.
+    world
+        .run(&["monitor", &run, "--filter", "dispatches"])
+        .exited(0)
+        .out_has("node-settled");
+
+    // And so is the source filter, which the flag said nothing about.
+    let spelled = source_filters(&world);
+    assert!(
+        !spelled.is_empty()
+            && spelled
+                .iter()
+                .all(|filter| *filter == serde_json::json!({"exclude": [{"kind": "turn-*"}]})),
+        "a profile flag disturbed the config's source filter: {spelled:?}"
+    );
+}
+
+/// A launch config that declares nothing changes nothing, and a config this build
+/// cannot read is refused before a run exists.
+///
+/// The backward-compatible half: `filters:` is optional, so a document that only
+/// names its version is a launch that ingests exactly what it always did — the
+/// same thing a launch naming no config at all means.
+#[test]
+fn a_launch_config_may_declare_nothing_and_is_refused_when_it_cannot_be_read() {
+    let world = World::new("filter-config-bare");
+    let bare = world.root.join("bare.yaml");
+    std::fs::write(&bare, "schema_version: 1\n").expect("the launch config is written");
+
+    let run = settled(
+        &world,
+        "bare",
+        &["--launch-config", &bare.to_string_lossy()],
+    );
+
+    // Ingestion is unchanged: no launch was given a filter at all, and the
+    // detailed activity is all still there.
+    assert!(
+        source_filters(&world).is_empty(),
+        "a config declaring nothing still filtered a source: {:?}",
+        source_filters(&world)
+    );
+    world
+        .run(&["monitor", &run, "--all"])
+        .exited(0)
+        .out_has("turn-");
+    // And the shipped profiles are what a reader reads through.
+    let default_view = world.run(&["monitor", &run]);
+    default_view.exited(0).out_has("node-dispatched");
+    assert!(
+        !default_view.stdout.contains("agent:"),
+        "a config declaring nothing changed the shipped planner profile:\n{}",
+        default_view.stdout
+    );
+
+    // The record it wrote says nothing about events either, so a launch that
+    // declared nothing is the launch every build before the block wrote.
+    let plan = world
+        .plan("refusals", &plan_of("refusals", vec![agent("build", &[])]))
+        .to_string_lossy()
+        .to_string();
+    let written = |name: &str, body: &str| {
+        let path = world.root.join(name);
+        std::fs::write(&path, body).expect("the launch config is written");
+        path.to_string_lossy().to_string()
+    };
+    for (config, named) in [
+        (
+            written("later.yaml", "schema_version: 2\n"),
+            "schema_version",
+        ),
+        (
+            written("stray.yaml", "schema_version: 1\nfilterz: {}\n"),
+            "filterz",
+        ),
+        (
+            written(
+                "unusable.yaml",
+                "schema_version: 1\nfilters:\n  vcs:\n    include:\n      - role: agent\n",
+            ),
+            "role",
+        ),
+        (
+            world.root.join("absent.yaml").to_string_lossy().to_string(),
+            "absent.yaml",
+        ),
+    ] {
+        let refused = world.run(&["start", &plan, "--attach", "--launch-config", &config]);
+        refused.exited(REFUSED);
+        assert!(
+            refused.stderr.contains(named),
+            "the refusal for {config} does not name {named:?}:\n{}",
+            refused.stderr
+        );
+    }
+    let listed = world.run(&["runs"]);
+    listed.exited(0);
+    assert!(
+        !listed.stdout.contains("refusals"),
+        "a refused launch config minted a run anyway:\n{}",
+        listed.stdout
+    );
 }

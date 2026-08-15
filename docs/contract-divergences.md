@@ -6,19 +6,16 @@ code takes the nearest thing that does exist, and the divergence is recorded
 here as a proposal for the planner who owns the contract. Nothing on this list is
 resolved unilaterally.
 
-Entries **1–9, 23, and 24–29** have since been **ruled on by the planner who owns
+Entries **1–9 and 23–32** have since been **ruled on by the planner who owns
 the contract**, and `docs/contract.md` was amended to carry each ruling. They stay
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–22 and 30–32 are open**. Each states what the code does today and
-the proposal it is waiting on. **10–22** are every one of them a question for a
-*producer* rather than for this crate, because `oneagentgraph` and `onevcs` are
-independent tools that expose general integration hooks only and nothing in them
-may know about this one. **30–32** are questions for the planner who owns the
-contract: two corners of the event-filter delta this crate had to resolve to
-compile it, and one set of cross-repository agreements no single repository can
-enforce. An open entry is recorded here and never resolved from this repository.
+Entries **10–22 are open**. Each states what the code does today and the
+proposal it is waiting on — every one of them a question for a *producer* rather
+than for this crate, because `oneagentgraph` and `onevcs` are independent tools
+that expose general integration hooks only and nothing in them may know about
+this one. An open entry is recorded here and never resolved from this repository.
 
 ## 1. `ResolvedGraphRef` is not a type `oneagentgraph` exports — RESOLVED
 
@@ -845,42 +842,42 @@ edit, emitting the `node-dropped` operation the transition would have. What
 became of it is still in the run's record: its own `node-settled`, and the
 `edit-committed` that replaced it.
 
-## 30. The launch's `filters:` block is spelled as `start` flags, and the launch record is where it lives — OPEN
+## 30. There was no launch config for the `filters:` block to live in — RESOLVED
 
-**Proposal (for the planner who owns the contract): confirm that the three
-`start` flags are the whole of the launch-level input surface, or name the
-launch-config document `--filters FILE` would read the block from.**
+**Ruling: ship the launch config. `start --launch-config FILE` reads a versioned
+document whose `filters:` block is the approved one, and the flags stay, as
+overrides of the part of it they name.**
 
 The approved contract names a launch-level `filters:` block "in the launch config
-and equivalent `start` flags". This crate has no launch *config*: `start` takes a
-plan and flags, and the only launch-level document is `launch.json`, which the
-launcher **writes** and `adopt` replays. So there is nothing for an operator to
-hand `start` a whole block in, and the block reaches a run as three flags —
-`--filter-agentgraph SPEC`, `--filter-vcs SPEC`, and repeatable
-`--filter-profile NAME=SPEC` — each `SPEC` being the same file-or-inline-JSON
-spelling `oneagentgraph run --event-filter` takes, so a block *can* be kept in
-files beside the plan and named three times.
+and equivalent `start` flags". This crate had no launch *config*: `start` took a
+plan and flags, and the only launch-level document was `launch.json`, which the
+launcher **writes** and `adopt` replays — nothing an operator hands to `start`.
+The block reached a run as three flags only.
 
-What the code does: `cli::StartArgs` carries the three flags,
-`driver::declared_filters` reads and validates each one at the boundary, and the
-result is retained as `ledger::LaunchRecord::filters` — where `adopt` replays it
-onto the graphs it restarts and every later `next` and `monitor` reads the
-profiles from. `docs/contract.md` states the block and the flags as the same
-thing and shows the block in its serialized shape, which is the shape the record
-carries.
+Both halves now exist and they are one block.
+[`filter::LaunchConfig`](../src/filter.rs) is the document — `schema_version: 1`,
+an optional `filters:`, and nothing else, read as YAML or JSON by
+`LaunchConfig::load` — and `cli::StartArgs::launch_config` is the
+`--launch-config FILE` that names it. `driver::declared_filters` reads that
+config as the **base** and applies each flag over it: `--filter-agentgraph` and
+`--filter-vcs` replace their source filter wholesale, and each
+`--filter-profile NAME=SPEC` replaces one profile *by name*, leaving the rest of
+a config's profiles standing. A launch naming no config is the same code path
+with an empty base, which is what keeps the two surfaces one block rather than
+two that have to agree.
 
-The proposal is whether `start` should additionally take one `--filters FILE`
-naming a document holding the whole block. Nothing in this crate reads a
-launch-level config file today, so adding one is a new input surface rather than
-a spelling of an existing one — and it is the planner's call whether the three
-flags are the whole of it.
+The config is external input and is refused at its own boundary — unknown key by
+name, `schema_version` by its number, and a filter by the grammar's own rules —
+before a run is minted. It is versioned and pinned: `LAUNCH_CONFIG_SCHEMA_VERSION`
+beside `tests/golden/launch-config-v1.json`, gated the way the run result and the
+telemetry document already are, so the shape cannot move without someone deciding
+to move it.
 
-## 31. `next` had no event view for a profile to shape, so it grew one — OPEN
+## 31. `next` had no event view for a profile to shape, so it grew one — RESOLVED
 
-**Proposal (for the planner who owns the contract): confirm that `next` answers
-`{status, surface, events}`, with `events` the whole merged store shaped by the
-profile — the same view `monitor` renders — rather than a window since the
-reader last looked.**
+**Ruling: confirmed. `next` answers `{status, surface, events}`, with `events`
+the whole merged store shaped by the profile — the same view `monitor` renders —
+and no cursor. A profile is a view over events; the channel is never filtered.**
 
 The approved contract says a read-time profile "shapes the event view" of both
 `next` and `monitor`, and adds that a profile "must not change which surfaces
@@ -892,19 +889,18 @@ one thing the same sentence forbids.
 
 So `next` now answers `{status, surface, events}`, where `events` is the run's
 merged store shaped by the profile, exactly as `monitor` shapes what it renders.
-The three clauses above then become one guarantee, stated in `docs/contract.md`
-and held by `tests/e2e/filter.rs`: a profile is a view over **events**, and the
-channel — which surfaces exist, which one `next` claims, and the unread
-accounting over them — is never filtered.
+The three clauses above then become one guarantee, held by `tests/e2e/filter.rs`:
+a profile is a view over **events**, and the channel — which surfaces exist, which
+one `next` claims, and the unread accounting over them — is never filtered.
 
 The corner this leaves is cost rather than correctness: the view is the whole
 store each time, as `monitor`'s already is, so a planner polling `next` re-reads
 the pipeline spine on every call. A cursor — "since the `planner-surfaced` this
-reader last recorded" — is derivable from the store with no new state, and is the
-obvious next question if that cost bites. It is not taken here because the
-approved text says a profile shapes a view and says nothing about a cursor, and
-inventing one would make `next` and `monitor` disagree about what "the event
-view" means.
+reader last recorded" — is derivable from the store with no new state, and was
+put to the planner as the alternative. It was **not** taken: the approved text
+says a profile shapes a view and says nothing about a cursor, and a `next` that
+answered with a window while `monitor` answered with the whole store would make
+the two verbs disagree about what "the event view" means.
 
 <!-- llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] this entry
 *describes* the duplication rather than introducing it: `docs/contract.md` fixes the
@@ -916,23 +912,22 @@ step or drift gate instead is a change to three independently-released tools and
 approved contract, which is a proposal to the planner who owns it — which is what this
 entry is. -->
 
-## 32. Corners of the shared filter grammar, resolved as the other two producers resolve them — OPEN
+## 32. Corners of the shared filter grammar, resolved as the other two producers resolve them — RESOLVED
 
-**Proposal (for the planner who owns the contract): confirm these three
-resolutions, which all three producers must make identically for one spec to mean
-one thing across the stack.**
+**Ruling: confirmed, all three, as `oneagentgraph`'s `docs/event-filter-notes.md`
+records them. The glob dialect is now stated in the contract itself, so it is no
+longer a corner; the other two are implementation agreements it names.**
 
 **The grammar has one source and a drift gate, and this entry is not about
-that.** The source is the grammar committed in `docs/contract.md`, which the
-approved contract fixes as authoritative for all three producers; the gate is
-`tests/contract.rs`, which drives that document's own `filters:` example through
-`src/filter.rs`'s types and fails this repository's `just check` the moment its
-copy stops matching the text. `oneagentgraph` and `onevcs` each carry the same
-text and the same gate. There is deliberately no shared crate — the same decision
-the envelope beside it is under, and for the same reason: a shared crate would
-make three independently-released tools co-version.
+that.** The source is the committed grammar text, which the approved contract
+fixes as authoritative for all three producers; the gate is `tests/contract.rs`,
+which drives that text's own example through `src/filter.rs`'s types and fails
+this repository's `just check` the moment its copy stops matching. `oneagentgraph`
+and `onevcs` each carry the same text and the same gate. There is deliberately no
+shared crate — the same decision the envelope beside it is under, and for the same
+reason: a shared crate would make three independently-released tools co-version.
 
-What *is* open is narrower. Three corners of that text do not settle a question
+What this entry is about is narrower. Three corners of that text do not settle a question
 an implementation has to answer anyway, so each producer answers it — and two
 producers answering it differently is a spec that filters differently depending
 on who read it, which no contract test can catch because each copy would still
@@ -942,8 +937,7 @@ agreement is between repositories rather than inside one.
 
 **The glob dialect is `*` and nothing else.** `*` stands for any run of
 characters including none; every other character is itself, so `?` and `[a-z]`
-are literals. Stated in `docs/contract.md` rather than left to each
-implementation.
+are literals. Stated in the contract rather than left to each implementation.
 
 **A label matcher reads the key as the envelope carries it.** This crate's
 `event::Labels` has typed slots for `run_id`, `node`, `step`, and `persona`, and

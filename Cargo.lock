@@ -848,8 +848,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 [[package]]
 name = "oneagentgraph"
 version = "0.2.13"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2533669c64ba2af51c9cc45fb1b0d7452c5b2b4b39f79789139682f84eaad6ca"
+source = "git+https://github.com/nickderobertis/oneagentgraph?rev=7854b1941b235e05afaa9cbaa69a2daf63de722e#7854b1941b235e05afaa9cbaa69a2daf63de722e"
 dependencies = [
  "clap",
  "libc",
@@ -949,8 +948,7 @@ dependencies = [
 [[package]]
 name = "onevcs"
 version = "0.2.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "28d21d4992dace28b843a54cbd31a97b2b2d12f02220b4a4a5b14dabe3ead55e"
+source = "git+https://github.com/nickderobertis/onevcs?rev=d3c495d050c5d5e70a56d1fac50b8a0f27150cc8#d3c495d050c5d5e70a56d1fac50b8a0f27150cc8"
 dependencies = [
  "clap",
  "dunce",
@@ -969,8 +967,7 @@ dependencies = [
 [[package]]
 name = "onevcs-testing"
 version = "0.1.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "860d5e96f571b9b51a622aebabd8b8fbd0cbad6c3634404e0dced934faff93ec"
+source = "git+https://github.com/nickderobertis/onevcs?rev=d3c495d050c5d5e70a56d1fac50b8a0f27150cc8#d3c495d050c5d5e70a56d1fac50b8a0f27150cc8"
 dependencies = [
  "onevcs",
  "serde",
