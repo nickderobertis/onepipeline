@@ -1177,6 +1177,10 @@ fn submit(paths: &RunPaths, envelope: &Reply) -> Result<i32> {
     let channel = ChannelState::new(paths);
 
     if envelope.commands.is_empty() {
+        // The verdict is subject to the author's allowlist exactly as an op is:
+        // a commandless reply declaring the run finished says what `complete`
+        // says, and an allowlist that guarded only the ops would let it past.
+        crate::channel::allows_completion(envelope.author, envelope.completion)?;
         // A settled run has no reader left, now or later, so queuing a reply to
         // it would park it where nothing drains it. A surface still awaiting an
         // answer outranks that: the run asked for the reply.
@@ -1270,6 +1274,13 @@ fn submit(paths: &RunPaths, envelope: &Reply) -> Result<i32> {
                         _ => {}
                     }
                 }
+                // The planner is told what the monitor did here as well as in
+                // the loop: which of the two applied an edit is an accident of
+                // whether anything was driving the run, and the planner owns the
+                // graph either way.
+                if envelope.author == Author::Monitor {
+                    engine::raise(paths, &mut journal, engine::monitor_edit(command))?;
+                }
             }
             lock.release();
             channel.answer(envelope)?;
@@ -1338,6 +1349,23 @@ fn serve(args: &RunArgs) -> Result<i32> {
         }
         let frame: ObserverFrame = serde_json::from_str(line.trim())
             .map_err(|e| Error::Refused(format!("the observer emitted a bad frame: {e}")))?;
+        // The node is external input like the rest of the frame, and it decides
+        // what a *blocking* frame holds back: a name the graph does not carry
+        // would pass validation and then hold nothing, so a question raised
+        // about work nobody is doing would read as one the run is waiting on.
+        // Judged against the graph as it stands, because that is what the
+        // subtree is derived from.
+        if let Some(node) = &frame.node {
+            let graph = RunView::open(&paths)?.state.graph;
+            if !graph.contains(node) {
+                return Err(Error::Refused(format!(
+                    "the observer raised a frame about node '{node}', which run '{}' does not \
+                     have; it has: {}",
+                    paths.run,
+                    graph.ids().cloned().collect::<Vec<_>>().join(", ")
+                )));
+            }
+        }
         let queued = channel.push(Surface {
             id: 0,
             kind: frame.kind,

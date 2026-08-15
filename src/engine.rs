@@ -757,22 +757,7 @@ fn reconcile_edits(
                     // was applied on the monitor's own judgement, so the planner
                     // learns of it without being asked to approve it first.
                     if author == crate::channel::Author::Monitor {
-                        raise(
-                            paths,
-                            journal,
-                            Surface {
-                                id: 0,
-                                kind: "monitor-edit".into(),
-                                message: format!(
-                                    "monitor applied an edit: {}",
-                                    bounded(&serde_json::to_string(command).unwrap_or_default())
-                                ),
-                                source: crate::channel::source::MONITOR.into(),
-                                blocking: false,
-                                queued_at: sys::now_millis(),
-                                workstream: crate::channel::target_of(command),
-                            },
-                        )?;
+                        raise(paths, journal, monitor_edit(command))?;
                     }
                     *state = projection::fold(&journal::read(&paths.journal()));
                 }
@@ -1382,8 +1367,29 @@ fn settle(paths: &RunPaths, journal: &mut Journal, settlement: &Settlement) -> R
     )
 }
 
+/// The surface that tells the planner what the monitor did on its own judgement.
+///
+/// Non-blocking: the edit was applied, so holding anything back to report it
+/// would pause the run over a decision that has already been made. Raised by
+/// whichever side applied it — the loop, or a `reply` that found nothing
+/// driving the run — because which one that was is not the planner's concern.
+pub(crate) fn monitor_edit(command: &Command) -> Surface {
+    Surface {
+        id: 0,
+        kind: "monitor-edit".into(),
+        message: format!(
+            "monitor applied an edit: {}",
+            bounded(&serde_json::to_string(command).unwrap_or_default())
+        ),
+        source: crate::channel::source::MONITOR.into(),
+        blocking: false,
+        queued_at: sys::now_millis(),
+        workstream: crate::channel::target_of(command),
+    }
+}
+
 /// Surface something to the planner, recording that it was *sent*.
-fn raise(paths: &RunPaths, journal: &mut Journal, surface: Surface) -> Result<()> {
+pub(crate) fn raise(paths: &RunPaths, journal: &mut Journal, surface: Surface) -> Result<()> {
     let queued = ChannelState::new(paths).push(surface)?;
     journal.emit(
         journal::PipelineKind::PlannerSurfaceQueued,
