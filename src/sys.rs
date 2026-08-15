@@ -534,17 +534,41 @@ fn platform_process_start_token(pid: u32) -> Option<String> {
 }
 
 /// The creation time this platform keeps on the process itself, which is the
-/// same fact `lstart` reports on the other one.
+/// same fact `lstart` reports on the other one — asked together with whether the
+/// process has actually exited, because here the creation time alone is not a
+/// liveness proof.
+///
+/// A Windows process *object* outlives the process: while any handle to it is
+/// still open, the pid keeps resolving and `GetProcessTimes` keeps answering
+/// with the creation time of the run that has already ended. So the creation
+/// time on its own says "a process by this pid was created then", not "a process
+/// by this pid is running" — and a caller comparing it against a recorded token
+/// would get a match for a dispatch that died two days ago. That is the exact
+/// misreading this token exists to stop, so the exit is checked here rather than
+/// left to the caller: a signalled handle means the process has terminated, and
+/// a terminated process has no start to give.
+///
+/// The two rights are asked for together and a refusal of either is no answer at
+/// all. Downgrading to whichever right was granted would hand back a creation
+/// time this cannot pair with an exit check, which is the unproven half on its
+/// own — and `None` is already the honest way to say a host will not answer.
 #[cfg(windows)]
 fn platform_process_start_token(pid: u32) -> Option<String> {
-    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, WAIT_TIMEOUT};
     use windows_sys::Win32::System::Threading::{
-        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        GetProcessTimes, OpenProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION,
+        PROCESS_SYNCHRONIZE,
     };
 
     // SAFETY: `OpenProcess` returns a null handle on failure and a handle this
     // function closes on success; no borrowed memory crosses the boundary.
-    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    let handle = unsafe {
+        OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+            0,
+            pid,
+        )
+    };
     if handle.is_null() {
         return None;
     }
@@ -566,9 +590,23 @@ fn platform_process_start_token(pid: u32) -> Option<String> {
             &raw mut user,
         )
     };
+    // Asked after the times and not before, so the last thing this knows about
+    // the process is that it had not exited. Asked the way `process_may_be_live`
+    // asks it, and for that function's reason: a process handle becomes signalled
+    // when and only when the process has terminated, which `GetExitCodeProcess`
+    // cannot say as cleanly because its "still running" sentinel `STILL_ACTIVE`
+    // is also the genuine exit code 259.
+    //
+    // SAFETY: `handle` is a live handle and a zero timeout returns immediately.
+    let waited = unsafe { WaitForSingleObject(handle, 0) };
     // SAFETY: the handle came from `OpenProcess` above and is closed once.
     unsafe { CloseHandle(handle) };
-    (read != 0).then(|| format!("{}:{}", created.dwHighDateTime, created.dwLowDateTime))
+    // `WAIT_TIMEOUT` — still running — is the only answer that leaves a start to
+    // report. `WAIT_OBJECT_0` is a process that has exited, and `WAIT_FAILED` is
+    // a question this host would not take; neither is a proof of a live process,
+    // and both resolve to "this host will not say".
+    (read != 0 && waited == WAIT_TIMEOUT)
+        .then(|| format!("{}:{}", created.dwHighDateTime, created.dwLowDateTime))
 }
 
 /// Stop the processes this one starts from inheriting *its own* standard
@@ -748,6 +786,49 @@ mod tests {
             "pid {dead} was reaped and still answered with a start"
         );
         assert!(process_start_token(0).is_none());
+    }
+
+    /// The same absence, held under the one condition that makes a pid keep
+    /// answering after its process is gone: a handle to the exited process still
+    /// open.
+    ///
+    /// This is where the creation time stops being a liveness proof. Windows
+    /// keeps the process *object* alive for as long as any handle to it is, so
+    /// the pid still resolves and still reports the creation time of the run that
+    /// already ended — a start token that matches the one recorded at launch, for
+    /// a dispatch that is dead. [`reaped_pid`] does not pin that on its own: it
+    /// drops its handle, and whether the pid is still answerable afterwards is
+    /// the operating system's business rather than the test's. Here the handle is
+    /// deliberately held for the whole assertion, so the exited process is
+    /// guaranteed to be openable and the answer has to come from the exit check
+    /// rather than from the pid having gone away.
+    ///
+    /// Not `#[cfg(windows)]`: the contract is the same everywhere — a process
+    /// that has exited has no start to give — and a Unix host that started
+    /// keeping something around after `wait` should fail here too.
+    #[test]
+    fn an_exited_process_gives_no_start_even_while_a_handle_to_it_is_held() {
+        let mut child = std::process::Command::new(
+            std::env::current_exe().expect("the test binary knows its own path"),
+        )
+        .args(["--list", "--format", "terse"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("the test binary starts");
+        let dead = child.id();
+        child.wait().expect("it exits");
+        // `child` is *not* dropped before the assertions: on Windows dropping it
+        // closes the last handle, which is exactly the crutch this test refuses.
+        assert!(
+            process_start_token(dead).is_none(),
+            "pid {dead} has exited and still answered with a start"
+        );
+        assert!(
+            !process_may_be_live(dead),
+            "pid {dead} has exited and still read as live"
+        );
+        drop(child);
     }
 
     /// A stop reaches the leaf, not just the process whose pid it was given.
