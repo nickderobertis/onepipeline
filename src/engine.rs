@@ -591,6 +591,12 @@ impl DecisionRef {
 }
 
 /// The decision points outstanding right now.
+///
+/// The node half comes from the derived statuses, and the surface half from the
+/// **channel queue** rather than from the journal: a surface is outstanding
+/// until somebody answers it, and the queue is the only thing that knows that.
+/// A surface waiting to be read counts exactly as one already read and
+/// unanswered does — an unread question is not an answered one.
 fn decisions_now(
     state: &RunState,
     statuses: &BTreeMap<String, NodeStatus>,

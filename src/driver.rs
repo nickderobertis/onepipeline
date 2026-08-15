@@ -812,6 +812,11 @@ fn settlement_of(view: &RunView) -> Settlement {
 }
 
 /// Whether a blocking surface is outstanding, read or not.
+///
+/// Unread counts. A question nobody has looked at is still a question the run is
+/// waiting on, and a settlement that ignored it would report the run as
+/// abandoned — sending an operator to intervene in a run whose next move is
+/// already sitting in their own queue.
 fn blocking_surface(paths: &RunPaths) -> bool {
     let queue = ChannelState::new(paths).queue();
     queue
