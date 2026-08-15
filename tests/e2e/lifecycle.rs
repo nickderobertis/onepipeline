@@ -727,16 +727,12 @@ fn a_publication_that_its_gate_rejects_settles_the_node_failed_by_name() {
 /// A title the sibling will not commit under never reaches a dispatch.
 ///
 /// `onevcs` holds a publication subject to
-/// [`SUBJECT_LIMIT`](onevcs::provenance::SUBJECT_LIMIT), and a title the plan
-/// file states is knowable against that bound before anything runs — so the
-/// launch refuses it, naming the node, the length, and the limit. It used to be
-/// refused where the publication request is built, which is *after* the node's
-/// whole dispatch and its gate: the worker did all of its work, failed on the
-/// last step, and the automatic retry recomputed the same title from the same
-/// plan and failed identically.
-///
-/// The title that fits by one character is run right after it, on the same
-/// repository, because a bound is only proven by the side of it that publishes.
+/// [`SUBJECT_LIMIT`](onevcs::provenance::SUBJECT_LIMIT), and the plan file
+/// states the title — so the launch refuses it, naming the node, the length,
+/// and the limit, rather than the publication refusing it after the node's
+/// whole dispatch and its gate. The title that fits by one character runs right
+/// after it, on the same repository, because a bound is only proven by the side
+/// of it that publishes.
 #[test]
 fn a_title_the_sibling_will_not_commit_under_is_refused_before_any_dispatch() {
     let world = World::new("lifecycle-longtitle");
@@ -765,8 +761,6 @@ fn a_title_the_sibling_will_not_commit_under_is_refused_before_any_dispatch() {
         .err_has(&format!("{} characters", SUBJECT_LIMIT + 1))
         .err_has(&format!("{SUBJECT_LIMIT}-character limit"));
 
-    // Nothing was started, nothing was dispatched, and nothing reached the base:
-    // the refusal is the launch's own, on the stderr an operator is reading.
     assert!(
         !world.runs.join("longtitle").exists(),
         "a refused plan left a run directory behind"
@@ -781,7 +775,6 @@ fn a_title_the_sibling_will_not_commit_under_is_refused_before_any_dispatch() {
         "a title the sibling would refuse still reached the base"
     );
 
-    // One character shorter is a title a publication carries.
     let fits = titled(SUBJECT_LIMIT);
     let subject = fits["title"].as_str().expect("the title").to_string();
     let run = settle(&world, "fitstitle", vec![fits]);
