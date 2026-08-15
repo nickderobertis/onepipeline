@@ -204,7 +204,7 @@ pub struct Refusal {
     /// named neither is one this crate must not invent a side for. That is the
     /// whole failure being fixed — a fix aimed at the wrong side of a
     /// conversation changes nothing.
-    pub member: Option<String>,
+    pub member: MemberLabel,
     /// How many records carried this same side, identity, and reason.
     ///
     /// Non-zero because a refusal exists only by having been recorded once.
@@ -212,6 +212,24 @@ pub struct Refusal {
     /// advance and this does not read it, so claiming turns would be a
     /// measurement nothing here made.
     pub records: std::num::NonZeroU64,
+}
+
+/// The member an envelope named, as far as this build could read it.
+///
+/// Three answers rather than an [`Option`], because the third is a different
+/// fact and reading it as either of the others is a claim nothing supports: a
+/// label a producer stamped and this build cannot read is **not** a producer
+/// that stamped none, and a view saying "the record does not name a side" about
+/// one would be denying a record that does name one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MemberLabel {
+    /// The producer stamped one, and it reads.
+    Named(String),
+    /// The producer stamped none. A single-sided member's envelope is the
+    /// ordinary case.
+    Unstamped,
+    /// The producer stamped something this build cannot read as a member.
+    Unreadable,
 }
 
 /// Whether a relayed envelope is `oneagentgraph`'s "a chain stepped past a
@@ -654,12 +672,15 @@ fn fold_refusal(state: &mut RunState, event: &Envelope) {
     // llmlint: ignore-end[changed_behavior_has_e2e]
     let refusal = Refusal {
         advanced,
-        member: event
-            .labels
-            .extra
-            .get("member")
-            .and_then(Value::as_str)
-            .map(str::to_string),
+        // The label arrives in `extra`, because this crate's own envelope does
+        // not declare `member` — so it is checked here rather than by a schema.
+        // A value that is not a member name is kept apart from a producer that
+        // stamped none: they are different facts about the record.
+        member: match event.labels.extra.get("member") {
+            None => MemberLabel::Unstamped,
+            Some(Value::String(member)) => MemberLabel::Named(member.clone()),
+            Some(_) => MemberLabel::Unreadable,
+        },
         records: std::num::NonZeroU64::MIN,
     };
     let recorded = state.refusals.entry(node.to_string()).or_default();

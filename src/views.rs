@@ -53,7 +53,7 @@ use crate::event::{Envelope, Source};
 use crate::graph::{self, Landing, NodeStatus};
 use crate::journal::PipelineKind;
 use crate::ledger::{self, LaunchRecord, LockRecord, RunPaths};
-use crate::projection::{self, Refusal, RunState};
+use crate::projection::{self, MemberLabel, Refusal, RunState};
 use crate::sys;
 
 /// A run root a view refused, and the reason it gave.
@@ -576,16 +576,19 @@ fn refusal_phrase(refusal: &Refusal) -> String {
         &refusal.member,
     ) {
         (Some(role), _) => format!("the {role} side"),
-        (None, Some(member)) => format!("member '{member}'"),
+        (None, MemberLabel::Named(member)) => format!("member '{member}'"),
         // Neither was stamped. The identity is still the thing to act on, and
         // naming a side the record does not carry would send the fix at a chain
         // nobody named — which is the failure this line exists to end.
         //
         // llmlint: ignore-block[changed_behavior_has_e2e] `oneagentgraph` labels a
-        // member's envelopes with the member, so no producer reaches this arm; it is
-        // written for one that stamps neither. The two a producer does reach are driven
-        // in `tests/e2e/views.rs`.
-        (None, None) => "a side the record does not name".to_string(),
+        // member's envelopes with the member, so no producer reaches either arm; they are
+        // written for one that stamps neither, or stamps something that is not a member
+        // name. The arm a producer does reach is driven in `tests/e2e/views.rs`.
+        (None, MemberLabel::Unstamped) => "a side the record does not name".to_string(),
+        // Stamped, and not readable as a member. Saying the record names no
+        // side would be denying a record that does name one.
+        (None, MemberLabel::Unreadable) => "a side this build cannot read".to_string(),
         // llmlint: ignore-end[changed_behavior_has_e2e]
     };
     // llmlint: ignore-block[changed_behavior_has_e2e] `FallbackAdvanced::reason` is a
@@ -662,8 +665,15 @@ fn working(activity: &crate::projection::NodeActivity) -> String {
 /// registry row outlives the process it describes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Proof {
-    /// The run's lock is held, and by the process that took it.
-    Live,
+    /// The run's lock is held, and the pid holding it started when the record
+    /// says it did.
+    ///
+    /// Deliberately not named for liveness: what this establishes is that the
+    /// evidence agrees, to the resolution the host reports a process start at —
+    /// one second, where that is `ps`. A pid reused *inside* that resolution by
+    /// a process that also started then is the one case this cannot separate,
+    /// and it is why the word is about the lock rather than about the work.
+    Held,
     /// This host proved nothing is driving the run behind the row.
     Stale(String),
     /// This host cannot decide: the lock was taken elsewhere, cannot be read, or
@@ -741,7 +751,7 @@ fn dispatch_proof(view: &RunView) -> Proof {
             held.pid
         )),
         // llmlint: ignore-end[changed_behavior_has_e2e]
-        Some(token) if token.matches(&held.started) => Proof::Live,
+        Some(token) if token.matches(&held.started) => Proof::Held,
         Some(_) => Proof::Stale(format!(
             "pid {} is a different process from the one that took the run's lock",
             held.pid
@@ -1768,7 +1778,7 @@ mod tests {
         };
         let single = Refusal {
             advanced: advanced("auth"),
-            member: Some("worker".into()),
+            member: MemberLabel::Named("worker".into()),
             records: std::num::NonZeroU64::MIN,
         };
         assert_eq!(
@@ -1777,7 +1787,7 @@ mod tests {
         );
         let bare = Refusal {
             advanced: advanced(""),
-            member: None,
+            member: MemberLabel::Unstamped,
             records: std::num::NonZeroU64::MIN,
         };
         let phrase = refusal_phrase(&bare);

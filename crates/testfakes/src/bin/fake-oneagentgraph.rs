@@ -407,13 +407,19 @@ fn refuse_candidates(args: &[String], node: &str, step: Option<&str>, script: &s
             identity: identity.to_string(),
             reason: reason.to_string(),
             // `-` is a single-sided member: one side, so no side to name.
+            // Every word but `-` is read through the sibling's **own** `Role`, so
+            // the script's grammar is that library's spelling rather than a copy
+            // of it that keeps parsing after a rename.
             role: match role {
-                "agent" => Some(oneagentgraph::event::Role::Agent),
-                "judge" => Some(oneagentgraph::event::Role::Judge),
                 "-" => None,
-                other => fake::fail(&format!(
-                    "a `.refused` line names the role {other:?}, which is neither side"
-                )),
+                other => Some(
+                    serde_json::from_value::<oneagentgraph::event::Role>(other.into())
+                        .unwrap_or_else(|error| {
+                            fake::fail(&format!(
+                                "a `.refused` line names the role {other:?}: {error}"
+                            ))
+                        }),
+                ),
             },
             turn: Some(1),
         };
