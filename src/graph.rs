@@ -410,11 +410,12 @@ pub fn validate_edited(plan: &Plan) -> Result<()> {
 pub fn validate_node(node: &Node) -> Result<()> {
     let named = |what: &str| Error::Invalid(format!("node '{}': {what}", node.id));
 
-    // Before the kind rules: a title is only ever a publication subject, and
-    // `onevcs` checks it at publication — after a whole dispatch and its gate,
-    // by which point a retry can only recompute the same title from the same
-    // plan and be refused identically.
-    if let Some(title) = &node.title {
+    // A title is only ever the subject of a publication, and only a node that
+    // names a repo publishes — so this holds exactly the nodes whose title
+    // `onevcs` will read, and holds them here rather than there: it checks the
+    // title after a whole dispatch and its gate, by which point a retry can only
+    // recompute the same title from the same plan and be refused identically.
+    if let (Some(_), Some(title)) = (&node.repo, &node.title) {
         validate_title(title).map_err(|why| named(&why))?;
     }
 
@@ -1154,6 +1155,14 @@ mod tests {
             .to_string();
         assert!(message.contains("node 'publish'"), "{message}");
         assert!(message.contains("blank"), "{message}");
+
+        // A node that names no repository publishes nothing, so its title is
+        // read by no one and is held to no publication's rule.
+        validate(&plan_of(vec![Node {
+            title: Some(over),
+            ..agent("direct", &[])
+        }]))
+        .expect("a title on a node that never publishes was held to the publication's limit");
     }
 
     /// The version this schema replaced is refused *deliberately*.
