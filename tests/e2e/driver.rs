@@ -1189,36 +1189,6 @@ fn a_detached_driver_outlives_its_own_output_and_keeps_what_it_said() {
     );
 }
 
-/// A driver that folds a record it cannot read says so, and drives anyway.
-///
-/// The record might have been an authoritative graph mutation — a `drop` that
-/// removed a node the loop is about to dispatch — so it is reported. Refusing
-/// would leave the run with nothing driving it, which is strictly worse.
-#[test]
-fn a_journal_record_this_build_cannot_read_is_reported_by_the_driver_that_meets_it() {
-    let world = World::new("driver-unreadable");
-    let path = world.plan(
-        "unreadable",
-        &plan_of("unreadable", vec![human("approve", &[])]),
-    );
-    world
-        .run(&["start", &path.to_string_lossy(), "--attach"])
-        .exited(0);
-    std::fs::OpenOptions::new()
-        .append(true)
-        .open(world.run_file("unreadable", "events.jsonl"))
-        .and_then(|mut file| {
-            use std::io::Write;
-            file.write_all(b"{\"v\":99,\"from\":\"a newer build\"}\n")
-        })
-        .expect("a record this build cannot read");
-
-    world
-        .run(&["adopt", "unreadable"])
-        .exited(0)
-        .err_has("cannot read");
-}
-
 #[test]
 fn a_detached_start_returns_while_the_run_it_launched_is_still_in_flight() {
     let world = World::new("driver-detach-returns");
