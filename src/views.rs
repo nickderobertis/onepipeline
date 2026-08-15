@@ -119,6 +119,34 @@ pub fn parked_after_seconds() -> u64 {
         .unwrap_or(DEFAULT_PARKED_AFTER_SECONDS)
 }
 
+/// Whether a **decision point** is outstanding, in either of the two forms one
+/// takes: a ready human action nobody has attested, or a blocking surface nobody
+/// has answered.
+///
+/// The one question every verdict about a stalled run asks, so the settlement and
+/// the liveness verdict cannot disagree about the same run — a run reported
+/// `PARKED` invites an `adopt` that may end its driver, and doing that to a run
+/// whose next move is already sitting in a planner's queue costs the work it
+/// holds for nothing.
+pub fn decision_outstanding(state: &RunState, paths: &RunPaths) -> bool {
+    state.awaiting_human_action() || blocking_surface(paths)
+}
+
+/// Whether a blocking surface is outstanding, read or not.
+///
+/// Unread counts. A question nobody has looked at is still a question the run is
+/// waiting on, and a verdict that ignored it would report the run as abandoned —
+/// sending an operator to intervene in a run whose next move is already sitting
+/// in their own queue.
+fn blocking_surface(paths: &RunPaths) -> bool {
+    let queue = crate::channel::ChannelState::new(paths).queue();
+    queue
+        .waiting
+        .iter()
+        .chain(queue.pending.iter())
+        .any(|surface| surface.blocking)
+}
+
 /// Whether a run is being driven, and if not, why not.
 ///
 /// Every unreadable input resolves toward "still working", so a busy driver is
@@ -126,7 +154,7 @@ pub fn parked_after_seconds() -> u64 {
 /// write is enough to keep it reported as running. A pid recorded on another
 /// host is exactly such an unknown — a pid means nothing across machines — so a
 /// run another driver is holding reads as the live work it is.
-pub fn liveness(launch: &LaunchRecord, state: &RunState) -> DriverLiveness {
+pub fn liveness(launch: &LaunchRecord, state: &RunState, paths: &RunPaths) -> DriverLiveness {
     if state.stop_recorded() {
         return DriverLiveness::DriverDead;
     }
@@ -143,7 +171,9 @@ pub fn liveness(launch: &LaunchRecord, state: &RunState) -> DriverLiveness {
         // the loop that would be writing is deliberately holding a subtree back
         // until a person answers, and a driver reported dead there sends an
         // operator to intervene in work that is doing exactly what it should.
-        Some(seconds) if seconds > parked_after_seconds() && !state.awaiting_decision() => {
+        Some(seconds)
+            if seconds > parked_after_seconds() && !decision_outstanding(state, paths) =>
+        {
             DriverLiveness::Parked
         }
         _ => DriverLiveness::Driving,
@@ -208,7 +238,7 @@ impl RunView {
 
     /// How the run is being driven.
     pub fn liveness(&self) -> DriverLiveness {
-        liveness(&self.launch, &self.state)
+        liveness(&self.launch, &self.state, &self.paths)
     }
 
     /// The surfaces nobody has read yet, and how stale the oldest is.
@@ -901,6 +931,60 @@ mod tests {
         assert_eq!(view.liveness(), DriverLiveness::DriverDead);
         assert!(view.liveness().is_undriven());
         assert!(runs(&root, false, "session-a").contains("DRIVER DEAD"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A run this quiet is parked — unless a decision is outstanding.
+    ///
+    /// Both halves of the same setup, so the difference between them is only the
+    /// blocking surface: a live pid, and a last write old enough that silence
+    /// alone would park it.
+    fn quiet_run(root: &Path, run: &str) -> RunPaths {
+        let mut stale = event(
+            crate::journal::PipelineKind::RunStarted,
+            None,
+            &[("plan", json!(plan()))],
+        );
+        // Far older than `DEFAULT_PARKED_AFTER_SECONDS`, so the verdict does not
+        // depend on the threshold's environment override.
+        stale.ts = "2020-01-01T00:00:00Z".into();
+        write_run(root, run, sys::pid(), &[stale])
+    }
+
+    #[test]
+    fn a_live_driver_that_has_gone_quiet_with_nothing_outstanding_reads_as_parked() {
+        let root = scratch("quiet-parked");
+        let paths = quiet_run(&root, "demo");
+        let view = RunView::open(&paths).expect("the run reads");
+        assert_eq!(view.liveness(), DriverLiveness::Parked);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The same silence, with a blocking surface nobody has answered.
+    ///
+    /// A decision point takes two forms, and `settlement_of` already reports this
+    /// run `awaiting-planner`. A liveness verdict that read only the graph's human
+    /// actions called the very same run `PARKED` — inviting an `adopt` that may
+    /// end its driver while the answer sits unread in a planner's queue.
+    #[test]
+    fn a_live_driver_quiet_behind_a_blocking_surface_reads_as_active() {
+        let root = scratch("quiet-blocking");
+        let paths = quiet_run(&root, "demo");
+        crate::channel::ChannelState::new(&paths)
+            .push(crate::channel::Surface {
+                id: 0,
+                kind: "blocker".into(),
+                message: "Node build needs a decision; proceed?".into(),
+                source: "monitor".into(),
+                blocking: true,
+                queued_at: sys::now_millis(),
+                workstream: Some("build".into()),
+            })
+            .expect("the surface queues");
+
+        let view = RunView::open(&paths).expect("the run reads");
+        assert_eq!(view.liveness(), DriverLiveness::Driving);
+        assert!(!view.liveness().is_undriven());
         std::fs::remove_dir_all(&root).ok();
     }
 

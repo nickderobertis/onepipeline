@@ -197,12 +197,16 @@ impl RunState {
         }
     }
 
-    /// Whether a decision point is outstanding: a ready human action nobody has
-    /// attested.
+    /// Whether a ready human action is outstanding: one nobody has attested.
     ///
-    /// What makes a stalled run *waiting on a person* rather than abandoned, and
-    /// re-derived from the graph rather than from any round state.
-    pub fn awaiting_decision(&self) -> bool {
+    /// Half of what makes a stalled run *waiting on a person* rather than
+    /// abandoned, re-derived from the graph rather than from any round state. The
+    /// other half is a blocking surface, which lives in the channel rather than
+    /// the graph and so cannot be read here — [`views::decision_outstanding`] is
+    /// the whole question, and every verdict about a stalled run asks that one.
+    ///
+    /// [`views::decision_outstanding`]: crate::views::decision_outstanding
+    pub fn awaiting_human_action(&self) -> bool {
         self.statuses()
             .values()
             .any(|status| *status == NodeStatus::Waiting)

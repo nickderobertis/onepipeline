@@ -805,25 +805,10 @@ fn settlement_of(view: &RunView) -> Settlement {
     }
     // A *non-blocking* surface is deliberately not `awaiting-planner`: it is a
     // report, and it holds nothing back.
-    if view.state.awaiting_decision() || blocking_surface(&view.paths) {
+    if views::decision_outstanding(&view.state, &view.paths) {
         return Settlement::AwaitingPlanner;
     }
     Settlement::Unattended
-}
-
-/// Whether a blocking surface is outstanding, read or not.
-///
-/// Unread counts. A question nobody has looked at is still a question the run is
-/// waiting on, and a settlement that ignored it would report the run as
-/// abandoned — sending an operator to intervene in a run whose next move is
-/// already sitting in their own queue.
-fn blocking_surface(paths: &RunPaths) -> bool {
-    let queue = ChannelState::new(paths).queue();
-    queue
-        .waiting
-        .iter()
-        .chain(queue.pending.iter())
-        .any(|surface| surface.blocking)
 }
 
 /// `onepipeline adopt`.
