@@ -44,7 +44,7 @@ use serde_json::Value;
 /// The exit code a refused or malformed command carries.
 pub const REFUSED: i32 = onepipeline::error::EXIT_REFUSED;
 
-/// The exit code for accepted-but-not-yet-reconciled edits, and for a round
+/// The exit code for accepted-but-not-yet-reconciled edits, and for a graph
 /// that settled unfinished.
 pub const QUEUED: i32 = onepipeline::error::EXIT_QUEUED;
 
@@ -87,26 +87,27 @@ pub const OVERRIDE_TOOK_EFFECT: std::time::Duration = std::time::Duration::from_
 /// characters stand for themselves under every schema below this one.
 const CONSUMER_GRAPH_SCHEMA: u32 = oneagentgraph::config::FIRST_TASK_TOKEN_VERSION;
 
-/// The dag-scope driver's own `task`, in this world's graph configs.
+/// The dag-scope observer's own `task`, in this world's graph configs.
 ///
 /// `{task}` is the run description the launcher composed — what the run is and
 /// what it is for — and the rest is what *this* member does about it. The
-/// shipped graph says the same thing in the `orchestrator` persona, which a
-/// world with no persona files of its own cannot; either way it is the graph
-/// that says it, because the launcher no longer does.
-pub const DRIVER_TASK: &str = "{task}\n\nDrive this run to settlement: \
-                               `onepipeline round run` to run each round and \
-                               `onepipeline round next` to transition between them.";
+/// shipped graph says the same thing in the `monitor` persona, which a world
+/// with no persona files of its own cannot; either way it is the graph that
+/// says it, because the launcher never does.
+///
+/// It drives nothing. There is no engine verb for it to run: `onepipeline
+/// start` executes the plan itself, and this member watches.
+pub const MONITOR_TASK: &str =
+    "{task}\n\nObserve this run and surface what does not line up. Change nothing.";
 
-/// The dag-scope member whose job is not the driver's.
+/// The dag-scope member whose job is not the monitor's.
 pub const REPORTING_MEMBER: &str = "reporter";
 
 /// The prose [`REPORTING_MEMBER`] carries as its own `task`.
 ///
-/// Composed the same way [`DRIVER_TASK`] is, and deliberately a different job:
+/// Composed the same way [`MONITOR_TASK`] is, and deliberately a different job:
 /// the launcher hands one task to the whole graph, so what tells these two
-/// members apart is the prose each carries around it. A member given the
-/// driver's job instead of this one is the defect these journeys exist for.
+/// members apart is the prose each carries around it.
 pub const MEMBER_TASK: &str = "{task}\n\nReport on this run and change nothing about it.";
 
 /// One directory, in the single spelling the binary under test will report.
@@ -245,7 +246,6 @@ impl World {
             .env("ONEPIPELINE_LAUNCHER", "e2e")
             .env("ONEPIPELINE_LAUNCHER_SESSION", &self.session)
             .env("ONEPIPELINE_PROJECT_DIR", &self.project)
-            .env("ONEPIPELINE_DAG_GRAPH", repo_file("graphs/dag-scope.yaml"))
             .env(
                 "ONEPIPELINE_NODE_GRAPH",
                 repo_file("graphs/node-scope.yaml"),
@@ -318,10 +318,6 @@ impl World {
             )
             .env("ONEAGENTGRAPH_ONEHARNESS_BIN", double("fake-oneharness"))
             .env("ONEAGENTGRAPH_STATE_DIR", self.graph_state())
-            .env(
-                "ONEPIPELINE_DAG_GRAPH",
-                self.graphs().join("dag-scope.yaml"),
-            )
             .env(
                 "ONEPIPELINE_NODE_GRAPH",
                 self.graphs().join("node-scope.yaml"),
@@ -526,8 +522,7 @@ impl World {
     /// A per-member `task` is what a staler parser refuses, so this is the
     /// document that tells two parsers apart. The version is read off
     /// [`oneagentgraph::config::SCHEMA_VERSION`] rather than written here, so it
-    /// moves with the runner. A second member beside the driver, whose own
-    /// prompt is what makes the run advance at all.
+    /// moves with the runner.
     pub fn write_graphs_at_the_runners_schema(&self) {
         let extra = format!(
             "  {REPORTING_MEMBER}:\n    kind: oneharness\n    \
@@ -672,18 +667,15 @@ impl World {
             "run_mode = \"fallback\"\nharnesses = [\"claude-code\"]\n",
         )
         .expect("the harness config is written");
-        for (file, member) in [
-            ("dag-scope.yaml", "orchestrator"),
-            ("node-scope.yaml", "worker"),
-        ] {
-            // The dag-scope driver carries [`DRIVER_TASK`]; the node-scope
+        for (file, member) in [("dag-scope.yaml", "monitor"), ("node-scope.yaml", "worker")] {
+            // The dag-scope monitor carries [`MONITOR_TASK`]; the node-scope
             // worker carries none, because the task a *node* is dispatched with
             // is that member's whole job and the launcher composes it per
             // dispatch.
             let (extra, task) = if file == "dag-scope.yaml" {
                 (
                     dag_extra.unwrap_or_default(),
-                    format!("    task: {}\n", yaml_scalar(DRIVER_TASK)),
+                    format!("    task: {}\n", yaml_scalar(MONITOR_TASK)),
                 )
             } else {
                 ("", String::new())
@@ -784,12 +776,10 @@ impl World {
         );
     }
 
-    /// Every run's journal, as the kinds it recorded, and what the driver made
-    /// of each engine verb it ran. What a failure needs to say *why* it failed
-    /// — the alternative is a bare assertion with no evidence, which is a whole
-    /// debugging session per platform-only defect. The driver's own verbs are
-    /// in here because it runs them as a subprocess of a subprocess, so a
-    /// refusal one of them printed reaches no other descriptor a test can read.
+    /// Every run's journal, as the kinds it recorded, and what each observer the
+    /// launcher started found. What a failure needs to say *why* it failed — the
+    /// alternative is a bare assertion with no evidence, which is a whole
+    /// debugging session per platform-only defect.
     pub fn dump(&self) -> String {
         let mut out = String::new();
         match std::fs::read_dir(&self.runs) {
@@ -804,8 +794,8 @@ impl World {
                 }
             }
         }
-        for saw in self.driver_saw() {
-            out.push_str(&format!("  driver saw: {saw}\n"));
+        for saw in self.observer_saw() {
+            out.push_str(&format!("  observer saw: {saw}\n"));
         }
         out
     }
@@ -815,9 +805,23 @@ impl World {
         read_jsonl(&self.fakes.join("invocations.jsonl"))
     }
 
-    /// What each driver the launcher started found waiting for it, in order.
-    pub fn driver_saw(&self) -> Vec<Value> {
-        read_jsonl(&self.fakes.join("driver-saw.jsonl"))
+    /// What each observer the launcher started found waiting for it, in order.
+    pub fn observer_saw(&self) -> Vec<Value> {
+        read_jsonl(&self.fakes.join("observer-saw.jsonl"))
+    }
+
+    /// The dag-scope graph this world writes, as the flag `start` takes it.
+    ///
+    /// Passed rather than defaulted, because the shipped default is `off`: a
+    /// journey that wants an observer says so, and every other one proves a run
+    /// that launches no agent graph at all.
+    pub fn dag_graph(&self) -> String {
+        self.graphs().join("dag-scope.yaml").display().to_string()
+    }
+
+    /// The dag-scope graph *this repository* ships, as that same flag.
+    pub fn shipped_dag_graph(&self) -> String {
+        repo_file("graphs/dag-scope.yaml").display().to_string()
     }
 
     /// Whether a double was asked for a command whose arguments contain each of
@@ -848,8 +852,8 @@ impl World {
 
     /// Wait for the planner surface of one kind, and answer with it.
     ///
-    /// The engine journals the fact a surface is *about* — a spent budget, a
-    /// worker gone quiet — and then raises the surface, as two appends. A test
+    /// The engine journals the fact a surface is *about* — a worker gone quiet,
+    /// an edit refused — and then raises the surface, as two appends. A test
     /// that waited on the fact and went straight to the surface would be reading
     /// between them whenever the host put the two far enough apart, and would
     /// fail having never waited for the thing it asserts. Waiting on the surface

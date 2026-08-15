@@ -236,9 +236,8 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    // The dag-scope graph is the driver: its orchestrator member is what runs
-    // the engine verbs. Acting that out is how a test exercises `start` end to
-    // end rather than only the launch.
+    // The dag-scope graph is the run's *observer*: its monitor member watches
+    // and changes nothing, because `onepipeline start` drives the run itself.
     if graph.contains("dag-scope") {
         // Announced before any work, as the real CLI announces a run. This is
         // the line the launcher's startup handshake waits for; a double that
@@ -247,7 +246,7 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         // one to produce *nothing* is a scenario this suite needs, so the
         // announcement belongs to the launched graph rather than to every run.
         announce(args, &graph);
-        return fake::drive(dir);
+        return fake::observe(dir);
     }
 
     let node = fake::label(args, "onepipeline.node").unwrap_or_else(|| "unknown".into());

@@ -80,8 +80,8 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     // journey that means to reach a real change request has to have a turn that
     // made one. Every other journey here is about the dispatch, and a file
     // appearing in a worktree unasked would be a change nobody made.
-    let driving = prompt.contains("onepipeline round run");
-    if !driving {
+    let observing = prompt.contains("Observe this run");
+    if !observing {
         if let Some(body) = fake::node_script(dir, "harness", "work") {
             let path = std::path::Path::new(&cwd).join(WORK_FILE);
             if let Err(error) = std::fs::write(&path, format!("{body}\n")) {
@@ -94,9 +94,10 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         }
     }
 
-    // The turn itself. The orchestrator member's prompt names the engine verbs
-    // it is to drive the run with, so this turn drives them — the same work the
-    // `oneagentgraph` double does when it is standing in for the whole sibling.
+    // The turn itself. The monitor member's prompt says it is watching the run,
+    // so this turn watches it — the same work the `oneagentgraph` double does
+    // when it is standing in for the whole sibling. It changes nothing: no
+    // engine verb exists for it to run.
     //
     // `harness.fail` is the other way a turn ends: it did the work and did not
     // get there. Scripted rather than inferred, because a turn that fails
@@ -107,7 +108,7 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     // in, which never reaches a settlement at all.
     let outcome = if fake::node_script(dir, "harness", "fail").is_some() {
         Outcome::TurnFailed
-    } else if driving && fake::drive(dir) != ExitCode::SUCCESS {
+    } else if observing && fake::observe(dir) != ExitCode::SUCCESS {
         Outcome::TurnFailed
     } else {
         Outcome::DoneWhenMet
@@ -118,7 +119,7 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     // arrives; a second, released while the node is still in flight, proves the
     // readout *advances*. The driver's own turn is left alone — it is the
     // member running the engine verbs, not the one being watched.
-    if !driving && dir.join("turn.hold").exists() {
+    if !observing && dir.join("turn.hold").exists() {
         fake::wait_for(&dir.join("turn.go"));
         tool_event(2, "cargo llvm-cov --workspace");
         // Held again, so the node is *still in flight* when the second reading

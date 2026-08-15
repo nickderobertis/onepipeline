@@ -72,7 +72,7 @@ help="$(onepipeline --help 2>&1 | tr -d '\r')" || fail \
 # `the_smoke_scripts_command_list_is_the_binarys_whole_surface` parses this very
 # line and asserts it equals the binary's subcommands, so a command added or
 # renamed fails the gate here rather than leaving a published artifact unchecked.
-for command in start adopt round channel next reply surface attest stop runs status host monitor results goals transcript telemetry; do
+for command in start adopt channel next reply surface attest stop runs status host monitor results goals transcript telemetry; do
   case "$help" in
     *"$command"*) ;;
     *) fail "'--help' does not list the '$command' command" \
@@ -80,26 +80,34 @@ for command in start adopt round channel next reply surface attest stop runs sta
   esac
 done
 
-# The retained driver, which is deliberately absent from the list above: it is
-# hidden from `--help`, because it is not a surface a user types. `start
-# --detach` spawns *this binary* at it — that is what makes a detached launch
-# compose the same `oneagentgraph` an attached one validates and runs with — so
-# a published artifact without it cannot launch a detached run at all, and
-# `--help` gives nothing to notice that in.
+# The two hidden verbs, deliberately absent from the list above: neither is on
+# `--help`, because neither is a surface a user types. `start --detach` spawns
+# *this binary* at `drive-run`, which is the process that drives the whole run,
+# and at `drive` when that run was given an observer graph — so a published
+# artifact without either cannot launch a detached run at all, and `--help`
+# gives nothing to notice that in.
 #
 # What the binary actually said is carried into the failure rather than
 # discarded: "no such subcommand" is the artifact predating the verb, and
 # anything else is a build that has it and could not run it — two different
 # faults, and a probe that reported them identically would send the reader after
 # the wrong one.
-if ! drive_said="$(onepipeline drive --help 2>&1)"; then
-  case "${drive_said}" in
+hidden_action() {
+  case "$2" in
     *"unrecognized subcommand"* | *"unknown subcommand"* | *"not found"*)
-      drive_action="the installed binary predates the verb — reinstall the version under test" ;;
+      echo "the installed binary predates the verb — reinstall the version under test" ;;
     *)
-      drive_action="the verb is present and would not run — run 'onepipeline drive --help' by hand against the $label and fix what it reports; do not publish, because every detached launch spawns it" ;;
+      echo "the verb is present and would not run — run 'onepipeline $1 --help' by hand against the $label and fix what it reports; do not publish, because every detached launch spawns it" ;;
   esac
-  fail "the 'drive' command a detached launch retains did not run: ${drive_said}" "${drive_action}"
+}
+
+if ! said="$(onepipeline drive-run --help 2>&1)"; then
+  fail "the 'drive-run' command a detached launch retains did not run: ${said}" \
+    "$(hidden_action drive-run "${said}")"
+fi
+if ! said="$(onepipeline drive --help 2>&1)"; then
+  fail "the 'drive' command an observed detached launch retains did not run: ${said}" \
+    "$(hidden_action drive "${said}")"
 fi
 
 # Reading a run nobody recorded is the smallest command that reaches the ledger,

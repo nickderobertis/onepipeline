@@ -17,7 +17,7 @@ use clap::{CommandFactory, Parser};
 use oneagentgraph::config::{ConfigRef, GraphConfig, JudgeSide, Member};
 use onepipeline::channel::{Command as Edit, Dependents, Reply, SurfaceKind};
 use onepipeline::cli::{
-    Cli, Command, DEFAULT_HEARTBEAT_INTERVAL_SECONDS, DEFAULT_ROUND_BUDGET_SECONDS,
+    Cli, Command, DAG_GRAPH_OFF, DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
 };
 use onepipeline::controls::NodeControls;
 use onepipeline::error::{EXIT_NOTHING_DRIVING, EXIT_QUEUED, EXIT_REFUSED, EXIT_SUCCESS};
@@ -1167,7 +1167,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
     // undocumented wire; a kind the contract lists and the enum does not carry is
     // a promise nothing keeps. `PIPELINE_KINDS` is what `Journal::emit` accepts,
     // so this is the emitted set and not a second copy of it.
-    assert_eq!(PIPELINE_KINDS.len(), 20, "the closed set changed size");
+    assert_eq!(PIPELINE_KINDS.len(), 19, "the closed set changed size");
     let listed: BTreeSet<String> = backticked()
         .into_iter()
         .filter(|token| {
@@ -1219,7 +1219,7 @@ fn a_relayed_envelope_keeps_its_producers_own_kind() {
 #[test]
 fn the_driver_contracts_invocation_parses_exactly_as_written() {
     let documented = "onepipeline start plan.json [--attach|--detach] \
-                      [--round-budget 14400] [--heartbeat-interval 1800] \
+                      [--dag-graph off|REF] [--heartbeat-interval 1800] \
                       [--set PATH=VALUE]... [--node-set PATH=VALUE]... \
                       [--acknowledge-concurrent]";
     assert!(CONTRACT.contains(documented), "the driver invocation moved");
@@ -1229,12 +1229,12 @@ fn the_driver_contracts_invocation_parses_exactly_as_written() {
         "start",
         "plan.json",
         "--detach",
-        "--round-budget",
-        "14400",
+        "--dag-graph",
+        "graphs/dag-scope.yaml",
         "--heartbeat-interval",
         "1800",
         "--set",
-        "members.orchestrator.agent.model=dag one",
+        "members.monitor.agent.model=dag one",
         "--set=members.check-in.model=dag=two",
         "--node-set",
         "members.worker.agent.model=node one",
@@ -1248,13 +1248,13 @@ fn the_driver_contracts_invocation_parses_exactly_as_written() {
     assert_eq!(args.plan, PathBuf::from("plan.json"));
     assert!(args.detach);
     assert!(!args.attach);
-    assert_eq!(args.round_budget, 14_400);
+    assert_eq!(args.dag_graph, "graphs/dag-scope.yaml");
     assert_eq!(args.heartbeat_interval, 1_800);
     assert!(args.acknowledge_concurrent);
     assert_eq!(
         args.dag_sets,
         [
-            "members.orchestrator.agent.model=dag one",
+            "members.monitor.agent.model=dag one",
             "members.check-in.model=dag=two"
         ]
     );
@@ -1266,15 +1266,43 @@ fn the_driver_contracts_invocation_parses_exactly_as_written() {
         ]
     );
 
-    // The document's numbers are this crate's defaults.
-    assert_eq!(DEFAULT_ROUND_BUDGET_SECONDS, 14_400);
+    // The document's numbers and its default are this crate's.
     assert_eq!(DEFAULT_HEARTBEAT_INTERVAL_SECONDS, 1_800);
+    assert!(
+        CONTRACT.contains("`--dag-graph` defaults to `off`"),
+        "the contract no longer states the shipped default"
+    );
     let defaulted = Cli::try_parse_from(["onepipeline", "start", "plan.json"]).expect("parses");
     let Command::Start(args) = defaulted.command else {
         panic!("expected `start`");
     };
-    assert_eq!(args.round_budget, DEFAULT_ROUND_BUDGET_SECONDS);
+    assert_eq!(
+        args.dag_graph, DAG_GRAPH_OFF,
+        "a plan runs with no agent graph unless one is asked for"
+    );
     assert_eq!(args.heartbeat_interval, DEFAULT_HEARTBEAT_INTERVAL_SECONDS);
+}
+
+/// The verbs an agent used to drive the engine with, which no longer exist.
+///
+/// Refused rather than merely absent: a caller that still spells one is told, by
+/// clap, that there is no such command — and this is what stops them being
+/// reintroduced by habit.
+#[test]
+fn the_round_verbs_are_gone_from_the_command_surface() {
+    for retired in [
+        vec!["round", "run", "run-1"],
+        vec!["round", "next", "run-1"],
+    ] {
+        Cli::try_parse_from(std::iter::once("onepipeline").chain(retired.iter().copied()))
+            .expect_err("a round verb still parses");
+    }
+    Cli::try_parse_from(["onepipeline", "start", "p.json", "--round-budget", "10"])
+        .expect_err("--round-budget still parses");
+    assert!(
+        !CONTRACT.contains("round run") && !CONTRACT.contains("--round-budget"),
+        "the contract still names a retired verb or flag"
+    );
 }
 
 #[test]
@@ -1289,8 +1317,6 @@ fn every_command_the_contract_names_parses() {
     let invocations: &[(&str, &[&str])] = &[
         ("start", &["start", "plan.json"]),
         ("adopt", &["adopt", "run-1"]),
-        ("round run", &["round", "run", "run-1"]),
-        ("round next", &["round", "next", "run-1"]),
         ("channel serve", &["channel", "serve", "run-1"]),
         ("next", &["next", "run-1"]),
         ("reply", &["reply", "run-1"]),
@@ -1343,12 +1369,8 @@ fn the_contract_names_every_command_and_view_this_crate_offers() {
         ],
     );
     assert_contract_names(
-        "engine verb",
-        &[
-            "onepipeline round run|next",
-            "onepipeline channel serve RUN",
-            "onepipeline adopt RUN",
-        ],
+        "driver verb",
+        &["onepipeline channel serve RUN", "onepipeline adopt RUN"],
     );
 
     // The views, as the contract lists them.
@@ -1429,9 +1451,8 @@ fn a_command_outside_the_surface_is_refused() {
 }
 
 #[test]
-fn the_dag_scope_graph_is_an_orchestrator_plus_a_resettable_check_in() {
-    assert!(CONTRACT
-        .contains("shipped default: `orchestrator` member + resettable-cron `check-in` member"));
+fn the_dag_scope_graph_is_a_monitor_plus_a_resettable_check_in() {
+    assert!(CONTRACT.contains("shipped: `monitor` member + resettable-cron `check-in` member"));
 
     let text = std::fs::read_to_string(repo_root().join("graphs/dag-scope.yaml"))
         .expect("the dag-scope graph ships");
@@ -1439,18 +1460,15 @@ fn the_dag_scope_graph_is_an_orchestrator_plus_a_resettable_check_in() {
     let graph: GraphConfig = serde_norway::from_str(&text).expect("it is a valid graph config");
     assert_eq!(graph.name, "dag-scope");
 
-    let orchestrator = graph
-        .members
-        .get("orchestrator")
-        .expect("an orchestrator member");
-    let Member::Onejudge(orchestrator) = orchestrator else {
-        panic!("the orchestrator is a two-party member");
+    let monitor = graph.members.get("monitor").expect("a monitor member");
+    let Member::Onejudge(monitor) = monitor else {
+        panic!("the monitor is a two-party member");
     };
-    match &orchestrator.judge {
+    match &monitor.judge {
         JudgeSide::Command(judge) => assert_eq!(
             judge.command[..3],
             ["onepipeline", "channel", "serve"],
-            "the orchestrator's judge side is this crate's channel server"
+            "the monitor's judge side is this crate's channel server"
         ),
         JudgeSide::Harness(_) => panic!("the contract makes the judge side a command provider"),
     }
@@ -1495,8 +1513,8 @@ fn the_default_node_scope_graph_is_a_worker_and_a_judge() {
 
 #[test]
 fn every_persona_the_contract_ships_is_present_and_has_both_sides() {
-    assert!(CONTRACT.contains("personas `orchestrator`, `check-in`, `pr-author`"));
-    for name in ["orchestrator", "check-in", "pr-author"] {
+    assert!(CONTRACT.contains("personas `monitor`, `check-in`, `pr-author`"));
+    for name in ["monitor", "check-in", "pr-author"] {
         let path = repo_root().join("personas").join(format!("{name}.yaml"));
         let text =
             std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{name} persona ships: {e}"));

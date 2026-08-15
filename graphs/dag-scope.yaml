@@ -1,6 +1,11 @@
-# The dag-scope agent graph `onepipeline start` launches: the orchestrator that
-# drives the run, and the pacemaker that surfaces a status when nobody has
-# reported one for a while.
+# The dag-scope agent graph `onepipeline start --dag-graph REF` launches: a
+# monitor that watches the run, and a pacemaker that surfaces a status when
+# nobody has reported one for a while.
+#
+# Nothing here drives the run. `onepipeline start` runs the engine's own loop,
+# and this graph is optional — the shipped default is `--dag-graph off`, because
+# no agent is required to execute a plan. A member of this graph observes and
+# authors channel surfaces; it never runs an engine verb.
 #
 # The two `*_config` paths are the operator's own onejudge and oneharness
 # configs — this graph names them, it does not ship them, exactly as the
@@ -15,15 +20,15 @@
 version: 1
 name: dag-scope
 members:
-  orchestrator:
+  monitor:
     kind: onejudge
     base_config: ./onejudge.base.yaml
-    persona: ../personas/orchestrator.yaml
+    persona: ../personas/monitor.yaml
     agent:
       oneharness_config: ./oneharness.orchestrator.toml
-    # The judge side is this crate's own channel server, so the planner replies
-    # to the orchestrator through the same conversation the orchestrator runs
-    # in. The driver substitutes the run id.
+    # The judge side is this crate's own channel server, so the planner reads
+    # what the monitor raises through the same conversation the monitor runs in.
+    # The launcher substitutes the run id.
     judge:
       command: ["onepipeline", "channel", "serve", "${ONEPIPELINE_RUN_ID}"]
     mode: bypass
