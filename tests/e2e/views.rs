@@ -742,22 +742,22 @@ fn a_dispatch_that_has_named_no_tool_reports_its_count_rather_than_a_guess() {
     );
     world.release("service.go");
 }
-/// A run whose driver has not dispatched anything yet has no transcript, and
-/// says so rather than rendering an empty one.
+/// A run that has dispatched nothing has no transcript, and says so rather than
+/// rendering an empty one.
 #[test]
 fn a_run_that_has_dispatched_nothing_says_it_has_no_transcript() {
     let world = World::new("views-notranscript");
-    world.script("driver.wait", "hold");
-    let path = world.plan("quiet", &plan_of("quiet", vec![agent("build", &[])]));
+    // A human action and nothing else: the loop records it as waiting and
+    // dispatches nothing at all, which is the state under test.
+    let path = world.plan("quiet", &plan_of("quiet", vec![human("approve", &[])]));
     world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .run(&["start", &path.to_string_lossy(), "--attach"])
         .exited(0);
 
     world
         .run(&["transcript", "quiet"])
         .exited(0)
         .out_has("no dispatch has recorded a transcript");
-    world.release("driver.go");
 }
 
 #[test]

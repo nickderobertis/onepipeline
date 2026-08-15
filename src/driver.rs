@@ -162,7 +162,7 @@ fn recorded_dir(record: &LaunchRecord) -> Result<PathBuf> {
 // string from this source through LaunchRecord because that durable internal schema and
 // oneagentgraph's transparent ConfigRef are already string-valued. A second newtype would
 // duplicate the sibling type without adding an invariant: relative references are made
-// absolute here, and the nonempty launch-record invariant is checked before every round.
+// absolute here, and the nonempty launch-record invariant is checked before every run.
 fn resolve_graph(reference: &str, base: &Path) -> Result<String> {
     // llmlint: ignore-block[boundary_inputs_validated] absolute paths and URLs are
     // oneagentgraph's existing input boundary: it reads/fetches them and returns its own

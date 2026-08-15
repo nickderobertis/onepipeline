@@ -195,7 +195,7 @@ fn merged_order(events: &[Envelope]) -> Vec<usize> {
         let index = streams
             .get_mut(stream)
             .and_then(VecDeque::pop_front)
-            .expect("the stream this round chose has a head");
+            .expect("the stream this pass chose has a head");
         order.push(index);
     }
     order

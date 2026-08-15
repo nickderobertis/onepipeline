@@ -504,9 +504,9 @@ fn a_plan_persona_reaches_the_member_that_actually_runs() {
 fn adoption_retains_node_overrides_for_later_dispatches() {
     let world = World::new("real-adopted-node-override");
     world.write_graphs();
-    // Held, so the original driver is alive and demonstrably not working when
-    // the adoption takes the run over.
-    world.script("build.wait", "hold");
+    // The first dispatch fails, so the run settles with work still to do and
+    // nothing driving it — which is the state `adopt` is for.
+    world.script("harness.fail", "");
     std::fs::write(
         world.graphs().join("adopted-node.toml"),
         "run_mode = \"fallback\"\nharnesses = [\"claude-code\"]\n# ADOPTED_NODE_OVERRIDE\n",
@@ -519,29 +519,44 @@ fn adoption_retains_node_overrides_for_later_dispatches() {
     let mut start = world.agentgraph_cmd(&[
         "start",
         &path.to_string_lossy(),
-        "--detach",
+        "--attach",
         "--node-set",
         "members.worker.oneharness_config=./adopted-node.toml",
     ]);
     start
         .current_dir(&world.root)
         .env("ONEPIPELINE_NODE_GRAPH", "graphs/node-scope.yaml");
-    world.run_on(start, "start adopted-override").exited(0);
-
-    world.until("the original driver to park before its node settles", |world| {
-        let mut status = world.agentgraph_cmd(&["status", "adopted-override"]);
-        status.env("ONEPIPELINE_PARKED_AFTER_SECONDS", "1");
-        String::from_utf8_lossy(&status.output().expect("status runs").stdout).contains("PARKED")
+    world.run_on(start, "start adopted-override");
+    world.until("the run to settle on the failure", |world| {
+        world.run_file("adopted-override", "result.json").is_file()
     });
-    // The hold is released so the adopted driver's own dispatch can finish; the
-    // original is ended by the adoption, which is what taking the run over
-    // means now that the loop runs in the driver itself.
-    world.release("build.go");
+
+    // A replacement for the failed node, applied to a run nothing is driving.
+    std::fs::remove_file(world.fakes.join("harness.fail")).expect("the failure is cleared");
+    world
+        .run_with_stdin(
+            &["reply", "adopted-override"],
+            &json!({
+                "version": 1,
+                "commands": [{
+                    "op": "retry",
+                    "id": "build",
+                    "node": {"id": "build-2", "persona": "engineer",
+                             "task": "## What\nDo build.\n\n## Why\nIt failed.\n\n\
+                                      ## Acceptance criteria\n- build is done."},
+                }],
+            })
+            .to_string(),
+        )
+        .exited(0);
+
+    // The adopted driver dispatches it, from another directory and under an
+    // environment naming no graph at all: what it runs under is the overrides
+    // the launch recorded.
     let mut adopt = world.agentgraph_cmd(&["adopt", "adopted-override"]);
     adopt
         .current_dir(&world.project)
-        .env("ONEPIPELINE_NODE_GRAPH", "missing-node.yaml")
-        .env("ONEPIPELINE_PARKED_AFTER_SECONDS", "1");
+        .env("ONEPIPELINE_NODE_GRAPH", "missing-node.yaml");
     let adopted = world.run_on(adopt, "adopt adopted-override");
     adopted.exited(0).settled();
 
@@ -551,7 +566,7 @@ fn adoption_retains_node_overrides_for_later_dispatches() {
             call["tool"] == "oneharness-config"
                 && call["args"][0]
                     .as_str()
-                    .is_some_and(|prompt| prompt.contains("Do build."))
+                    .is_some_and(|prompt| prompt.contains("It failed."))
                 && call["args"][1]
                     .as_str()
                     .is_some_and(|config| config.contains("ADOPTED_NODE_OVERRIDE"))

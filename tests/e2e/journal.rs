@@ -214,9 +214,23 @@ fn the_graph_of_record_is_the_one_the_loop_executed_not_the_launch_file() {
     };
     assert_eq!(status("flaky-2"), "done");
     assert_eq!(status("after"), "done");
-    // The superseded node stays in the executed graph, cancelled, so the run's
-    // own record still names what was replaced.
-    assert_eq!(status("flaky"), "cancelled");
+    // The superseded node left the graph with the same edit that replaced it —
+    // left in, it would hold the run in `waiting` for work nothing will ever
+    // dispatch again. What became of it is in the journal, where the edit is.
+    assert!(
+        executed["nodes"]
+            .as_array()
+            .expect("nodes")
+            .iter()
+            .all(|node| node["id"] != "flaky"),
+        "the superseded node is still in the graph: {executed}"
+    );
+    let superseded = world
+        .events_of("record", "node-settled")
+        .into_iter()
+        .find(|event| event["labels"]["node"] == "flaky")
+        .expect("the superseded node's own settlement is recorded");
+    assert_eq!(superseded["payload"]["status"], "cancelled", "{superseded}");
     assert_eq!(executed["state"], "complete");
 }
 

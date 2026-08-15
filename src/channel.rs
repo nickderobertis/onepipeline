@@ -443,7 +443,7 @@ impl ChannelState {
 
     /// Claim the next readable surface.
     ///
-    /// No round to outlive: a surface describes the one continuous run, so it
+    /// Nothing to outlive: a surface describes the one continuous run, so it
     /// stays consumable until somebody reads it. A check-in that has been
     /// superseded is replaced at [`push`](Self::push) rather than discarded
     /// here.

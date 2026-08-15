@@ -51,13 +51,6 @@ pub struct RunState {
     /// The statuses the journal recorded. A node absent from this map has not
     /// started, which is what `reparent` and `cancel` test for.
     pub recorded: BTreeMap<String, NodeStatus>,
-    /// The nodes a `retry` replaced.
-    ///
-    /// Kept as its own set rather than read back off a `cancelled` status,
-    /// because that status is not only supersession's: a `cancel` parks a node
-    /// **and** stops its dispatch, so a node parked while it was running settles
-    /// `cancelled` too.
-    pub superseded: BTreeSet<String>,
     /// Each settled node's outcome, when it recorded one.
     pub outcomes: BTreeMap<String, String>,
     /// The branch each settled node left behind, as its dispatch reported it.
@@ -342,12 +335,10 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
                     // count one request twice.
                     Operation::CompletionRequested { .. } => {}
                     Operation::RetryRequested { node, .. } => {
-                        // The superseded node stays in the executed graph,
-                        // cancelled, so the transition removes it exactly as an
-                        // explicit `drop` would — and it is named here rather
-                        // than inferred from that status, which a park shares.
+                        // What the supersession did to the node it replaced. The
+                        // node itself leaves the graph with the same edit, so
+                        // this is what the run's record says became of it.
                         state.recorded.insert(node.clone(), NodeStatus::Cancelled);
-                        state.superseded.insert(node.clone());
                     }
                     Operation::NodeParked { node } => {
                         state.recorded.insert(node.clone(), NodeStatus::Parked);

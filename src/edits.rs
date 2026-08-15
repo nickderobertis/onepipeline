@@ -409,6 +409,16 @@ fn compile_retry(
             to: dependent.clone(),
         });
     }
+    // The superseded node leaves the graph, exactly as a `drop` would take it:
+    // its dependents are already rewired onto the replacement, and its work is
+    // the replacement's now. Left in, it would hold the whole run in `waiting`
+    // for a node nothing will ever dispatch again — a graph that can never
+    // settle because something was retried.
+    graph.remove(id);
+    operations.push(Operation::NodeDropped {
+        node: id.to_string(),
+        dependents: Dependents::Detach,
+    });
     Ok(operations)
 }
 

@@ -6,7 +6,7 @@
 //! Dependency direction is one-way: `onepipeline` → `{oneagentgraph, onevcs}`.
 //! Agent, harness, and model selection stay in the first; repository identities,
 //! sessions, and publication stay in the second. This crate composes them and
-//! owns the DAG, the rounds, the planner channel, and the
+//! owns the DAG, its continuous execution, the planner channel, and the
 //! [executor seam](executor) that decides *where* a dispatch runs.
 //!
 //! # The surface, and what is behind it
@@ -19,9 +19,9 @@
 //! types, so the two cannot drift.
 //!
 //! A run's durable state is one directory: the plan it was launched with, the
-//! merged event store every view reads, the round ledger, and the channel's
-//! transport. The engine verbs are that ledger's **single writer**, guarded by
-//! the run's ownership lock; everything else reads.
+//! merged event store every view reads, the run's own result, and the channel's
+//! transport. The process driving the run is that ledger's **single writer**,
+//! guarded by the run's ownership lock; everything else reads.
 //!
 //! Composition is by subprocess. The agents come from `oneagentgraph` and the
 //! clones, gates, and change requests from `onevcs`, each reached through its
