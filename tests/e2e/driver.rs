@@ -351,7 +351,7 @@ fn a_dependency_chain_runs_to_completion_under_start_with_no_agent_graph() {
 }
 
 #[test]
-fn the_launch_record_is_written_before_anything_the_launcher_starts_reads_it() {
+fn the_launch_record_exists_before_the_member_the_launcher_starts_reads_the_ledger() {
     let world = World::new("driver-ordering");
     // The observer is held at its first instruction, *after* it has recorded
     // what the ledger held. Holding it there is what makes this about the
@@ -372,10 +372,10 @@ fn the_launch_record_is_written_before_anything_the_launcher_starts_reads_it() {
     world.until("the observer to read the run's ledger", |world| {
         !world.observer_saw().is_empty()
     });
-    // Anything the launcher starts and that opens the run's ledger — the
-    // retained driver most of all — dies on a file nobody wrote if the record
-    // is written second, and the run then sits at `run-started` with nothing
-    // driving it: a mysteriously hung run rather than the ordering bug it is.
+    // A member that opens the run's ledger dies on a file nobody wrote if the
+    // record is written second, and the run then sits at `run-started` with
+    // nothing driving it: a mysteriously hung run rather than the ordering bug
+    // it is.
     let saw = world.observer_saw();
     assert_eq!(saw[0]["run"], "ordered");
     assert_eq!(
@@ -401,8 +401,6 @@ fn an_attached_start_returns_when_the_graph_completes() {
 #[test]
 fn an_attach_returns_exit_three_when_nothing_is_driving_the_run() {
     let world = World::new("driver-unattended");
-    // A human action nothing can clear and nothing else to run: the loop has
-    // nowhere to go, so the attach returns with the graph unfinished.
     let path = world.plan(
         "unattended",
         &plan_of("unattended", vec![agent("build", &[])]),
@@ -1202,14 +1200,8 @@ fn a_detached_launch_drives_the_whole_chain_and_records_one_result() {
 }
 
 #[test]
-fn a_detached_driver_outlives_its_own_output_and_keeps_what_it_said() {
+fn a_detached_run_settles_and_its_driver_is_left_a_log_to_write_to() {
     let world = World::new("driver-detached-output");
-    // A journal record this build cannot read, so the loop says so on its own
-    // stderr. That is the one thing a detached driver cannot be given a pipe
-    // for: the process that would read it is the launcher, and `--detach` means
-    // the launcher has already gone. Written into such a pipe, the loop dies of
-    // a broken one mid-run, and the run is left with nothing driving it — which
-    // surfaces much later, and as something else entirely.
     let path = world.plan(
         "detachedlog",
         &plan_of("detachedlog", vec![agent("build", &[])]),
@@ -1224,9 +1216,6 @@ fn a_detached_driver_outlives_its_own_output_and_keeps_what_it_said() {
     });
     assert_eq!(world.run_json(&run, "result.json")["state"], "complete");
 
-    // And what it was given to write to is a file rather than a pipe whose
-    // reader had gone: the run reached settlement, which it could not have done
-    // had its driver died on its first line of output.
     let log = world.run_file(&run, "driver.log");
     assert!(
         log.exists(),
@@ -1388,9 +1377,9 @@ fn a_graph_that_neither_starts_nor_exits_fails_the_launch_rather_than_outlasting
 ///
 /// The other end of the handshake: the answer came as an exit rather than as an
 /// envelope, and it was a *clean* one. The graph ran whatever it was given and
-/// stopped, which is a launch that worked and a run with nothing driving it —
-/// the state the ledger records and `adopt` is offered from. Reporting it as a
-/// refusal would fail the launch over the graph's own verdict.
+/// stopped, and the run settles either way — the observer it launched never
+/// drove it. Reporting that exit as a refusal would fail the launch over a
+/// verdict the observer was never asked for.
 #[test]
 fn a_graph_that_finished_before_announcing_anything_is_a_launch_that_worked() {
     let world = World::new("driver-quiet-exit");

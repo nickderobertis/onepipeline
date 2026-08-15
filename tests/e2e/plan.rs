@@ -616,13 +616,14 @@ fn a_worker_that_goes_quiet_is_surfaced_without_holding_anything_back() {
     });
 }
 
-/// A node the planner cancels stops cooperatively rather than being killed.
+/// A node the planner cancels is parked, not failed.
 ///
-/// What the round budget used to do on a timer is now the planner's own call,
-/// through the one op that means it: the dispatch is asked to stop and preserve
-/// what it committed, and the node settles `cancelled` rather than failing.
+/// `cancel` is the one op that means stop this node, and what it leaves behind
+/// is a gate rather than a failure: a parked node holds its dependents where a
+/// failed one skips them, so the planner still decides what happens next. The
+/// run around it settles either way.
 #[test]
-fn a_cancelled_node_stops_cooperatively_and_settles_as_cancelled() {
+fn a_node_the_planner_cancels_settles_parked_and_the_run_still_settles() {
     let world = World::new("plan-cancel");
     world.script("slow.wait", "hold");
     let path = world.plan(
