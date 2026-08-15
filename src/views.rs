@@ -340,6 +340,16 @@ impl Survey {
     }
 }
 
+// llmlint: ignore-block[cli_output_contract] the two renderings below are **part of the
+// answer**, not a failure of the command, which is why they are on the view's own output
+// rather than on standard error. The reader asked what is on this host and is being told
+// what could not be read — the whole fix, replacing a silent drop that rendered a host
+// holding thirty run roots as `no runs recorded`. The empty case is what settles the
+// stream: `no run under <root> could be read` *replaces* `no runs recorded`, and the answer
+// to "what is running" cannot live on a different stream from the answer it replaces. The
+// same decision, and the exit code that goes with it, is recorded at the two driver sites
+// that print these. A caller that named *one* run and could not have it is a different
+// case, and is still refused outright.
 /// What a view says about the run roots it refused, or nothing when it refused
 /// none.
 ///
@@ -377,6 +387,7 @@ fn nothing_to_report(survey: &Survey) -> String {
     out.push_str(&skipped_lines(&survey.skipped));
     out
 }
+// llmlint: ignore-end[cli_output_contract]
 
 /// The word a view prints for how a run is being driven.
 ///
@@ -555,7 +566,18 @@ fn refusals_of<'a>(state: &'a RunState, node: &str) -> &'a [Refusal] {
 /// role, and a member name, all read off a sibling's envelope — so the whole
 /// phrase goes through the same control strip the rest of this module uses.
 fn refusal_phrase(refusal: &Refusal) -> String {
-    let side = match (&refusal.role, &refusal.member) {
+    // The role's own spelling, taken from the producing library's serialization
+    // rather than matched into words of this crate's: the sides are that
+    // library's vocabulary, and a second spelling of them here is a second thing
+    // to keep true.
+    let role = refusal
+        .advanced
+        .role
+        .and_then(|role| serde_json::to_value(role).ok());
+    let side = match (
+        role.as_ref().and_then(serde_json::Value::as_str),
+        &refusal.member,
+    ) {
         (Some(role), _) => format!("the {role} side"),
         (None, Some(member)) => format!("member '{member}'"),
         // Neither was stamped. The identity is still the thing to act on, and
@@ -569,10 +591,10 @@ fn refusal_phrase(refusal: &Refusal) -> String {
     // build after this one — a newer sibling that relaxes the field — and says what it has
     // rather than rendering an empty pair of brackets that reads as a measured nothing.
     // The half a real producer does reach is driven end to end in `tests/e2e/views.rs`.
-    let reason = if refusal.reason.is_empty() {
+    let reason = if refusal.advanced.reason.is_empty() {
         "for a reason the record does not carry".to_string()
     } else {
-        format!("({})", refusal.reason)
+        format!("({})", refusal.advanced.reason)
     };
     // llmlint: ignore-end[changed_behavior_has_e2e]
     // What was counted, said as what it is: records carrying this same side,
@@ -586,7 +608,7 @@ fn refusal_phrase(refusal: &Refusal) -> String {
     };
     one_line(&format!(
         "{side}: identity '{}' refused {reason}{again}",
-        refusal.identity
+        refusal.advanced.identity
     ))
 }
 
@@ -1720,10 +1742,14 @@ mod tests {
     /// on is what this whole line exists to replace.
     #[test]
     fn an_unattributed_refusal_is_never_given_a_side_it_did_not_carry() {
-        let single = Refusal {
+        let advanced = |reason: &str| oneagentgraph::event::FallbackAdvanced {
             identity: "codex".into(),
-            reason: "auth".into(),
+            reason: reason.into(),
             role: None,
+            turn: None,
+        };
+        let single = Refusal {
+            advanced: advanced("auth"),
             member: Some("worker".into()),
             records: 1,
         };
@@ -1732,8 +1758,9 @@ mod tests {
             "member 'worker': identity 'codex' refused (auth)"
         );
         let bare = Refusal {
-            identity: "codex".into(),
-            ..Refusal::default()
+            advanced: advanced(""),
+            member: None,
+            records: 1,
         };
         let phrase = refusal_phrase(&bare);
         assert!(
@@ -1745,8 +1772,9 @@ mod tests {
             "{phrase}"
         );
 
-        // An advance carrying no identity names nothing to act on, so it is not
-        // recorded as an attribution at all.
+        // An advance carrying no identity names nothing to act on. It is not an
+        // advance the producing library's own type accepts, so nothing here
+        // assembles an attribution out of what is left of it.
         let mut nameless = relayed(
             EventKind("fallback-advanced".into()),
             Source::Agentgraph,

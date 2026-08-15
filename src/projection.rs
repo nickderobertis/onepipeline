@@ -184,35 +184,26 @@ pub struct NodeActivity {
     pub last_at: Option<u64>,
 }
 
-/// One candidate a node's identity chain stepped past, and what it cost.
+/// One candidate a node's identity chain stepped past, and how often it was
+/// recorded.
 ///
-/// `oneagentgraph` publishes one `fallback-advanced` per candidate, naming the
-/// identity, `oneharness`'s classification of why it could not run, and — for a
-/// two-party member — which side of the conversation the chain belonged to.
-/// Every field here is the producer's own vocabulary, carried rather than
-/// narrowed: this crate renders them and decides nothing about them.
-///
-/// The side is [`role`](Self::role) where the producer stamped one and
-/// [`member`](Self::member) where it did not, and **both** are optional because
-/// a record that named neither is a record this crate must not invent a side
-/// for. That is the whole failure being fixed: a fix aimed at the wrong side of
-/// a conversation changes nothing.
-// llmlint: ignore-block[invalid_states_unrepresentable] `role` stays the wire string for
-// the reason `src/report.rs` carries at the top of the file: it is `oneagentgraph`'s
-// vocabulary, read off a sibling's envelope, and narrowing it into an enum here would
-// re-declare a vocabulary that library owns and make a side a newer build emits
-// unrenderable — which for failure attribution is the wrong direction to fail in.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// The advance itself is `oneagentgraph`'s **own** payload type, held whole
+/// rather than copied field by field: the identity, `oneharness`'s
+/// classification of why the candidate could not run, and — for a two-party
+/// member — which side of the conversation the chain belonged to are that
+/// library's contract, and a second declaration of them here is a second thing
+/// to keep true. What this crate adds is what the *envelope* carried around it.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Refusal {
-    /// The identity the chain moved past, as the producer named it.
-    pub identity: String,
-    /// `oneharness`'s classification of why it could not run.
-    pub reason: String,
-    /// Which side of a two-party conversation refused. Absent for a
-    /// single-sided member, which has one side and so nothing to distinguish.
-    pub role: Option<String>,
-    /// The member whose chain it was, as the producer labelled it. What names
-    /// the side when [`role`](Self::role) does not.
+    /// The advance exactly as `oneagentgraph` published it.
+    pub advanced: oneagentgraph::event::FallbackAdvanced,
+    /// The member whose chain it was, as the producer labelled the envelope.
+    ///
+    /// What names the side when the advance's own `role` does not: a
+    /// single-sided member has one side and stamps none, and a record that
+    /// named neither is one this crate must not invent a side for. That is the
+    /// whole failure being fixed — a fix aimed at the wrong side of a
+    /// conversation changes nothing.
     pub member: Option<String>,
     /// How many records carried this same side, identity, and reason.
     ///
@@ -223,7 +214,6 @@ pub struct Refusal {
     /// claiming ten turns for it would be a measurement nothing here made.
     pub records: u64,
 }
-// llmlint: ignore-end[invalid_states_unrepresentable]
 
 /// Whether a relayed envelope is `oneagentgraph`'s "a chain stepped past a
 /// candidate".
@@ -645,35 +635,36 @@ fn fold_refusal(state: &mut RunState, event: &Envelope) {
     let Some(node) = event.labels.node.as_deref() else {
         return;
     };
-    let text = |value: Option<&Value>| value.and_then(Value::as_str).map(str::to_string);
-    // An advance that names no identity is one nothing can be aimed at, and
-    // recording it with an empty one would report a chain as having stepped past
-    // a harness nobody can name — which is the reading the producer already
-    // refuses to write.
-    //
-    // llmlint: ignore-block[changed_behavior_has_e2e] no user invocation reaches this
-    // guard: `oneagentgraph::event::FallbackAdvanced` declares `identity` as a required
-    // `String`, and that library already drops a candidate whose identity it cannot read
-    // rather than publishing one, so a real producer cannot put an unnamed chain on the
-    // wire. Reaching it needs a journal a *newer* build wrote. Held by this module's own
-    // fold test instead; what a user can reach is driven in `tests/e2e/views.rs`.
-    let Some(identity) = text(event.payload.get("identity")).filter(|id| !id.is_empty()) else {
+    // Read into `oneagentgraph`'s **own** declaration of an advance rather than
+    // by field name, exactly as that library reads `oneharness`'s: the shape
+    // this crate expects is then the shape the producer publishes, and a payload
+    // that is not one is a record this build has no reading of. Dropping it is
+    // the right direction — an attribution assembled out of whatever fields
+    // happened to be present is the invented attribution this exists to replace.
+    let Ok(advanced) = serde_json::from_value::<oneagentgraph::event::FallbackAdvanced>(
+        Value::Object(event.payload.clone()),
+    ) else {
         return;
     };
-    // llmlint: ignore-end[changed_behavior_has_e2e]
     let refusal = Refusal {
-        identity,
-        reason: text(event.payload.get("reason")).unwrap_or_default(),
-        role: text(event.payload.get("role")),
-        member: text(event.labels.extra.get("member")),
+        advanced,
+        member: event
+            .labels
+            .extra
+            .get("member")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         records: 1,
     };
     let recorded = state.refusals.entry(node.to_string()).or_default();
+    // The turn is deliberately not part of what makes two records the same: one
+    // side's chain refusing the same identity the same way is one fact about
+    // this node, however many turns asked it.
     if let Some(same) = recorded.iter_mut().find(|seen| {
-        seen.identity == refusal.identity
-            && seen.role == refusal.role
+        seen.advanced.identity == refusal.advanced.identity
+            && seen.advanced.role == refusal.advanced.role
+            && seen.advanced.reason == refusal.advanced.reason
             && seen.member == refusal.member
-            && seen.reason == refusal.reason
     }) {
         same.records += 1;
         return;
