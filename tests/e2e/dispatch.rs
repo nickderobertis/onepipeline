@@ -327,7 +327,7 @@ fn unreadable_relative_plan_graphs_name_their_path_and_launch_base() {
 }
 
 #[test]
-fn broken_launch_records_refuse_the_driver_before_direct_or_lifecycle_dispatch() {
+fn broken_launch_records_refuse_the_adoption_before_direct_or_lifecycle_dispatch() {
     // llmlint: ignore-block[tests_mirror_real_usage] no CLI command corrupts or removes
     // its own ledger. These are external-state faults (partial write or cleanup), so the
     // arrangement mutates that persisted boundary; every observation and asserted
@@ -339,7 +339,7 @@ fn broken_launch_records_refuse_the_driver_before_direct_or_lifecycle_dispatch()
     std::fs::write(direct.run_file("corrupt-direct", "launch.json"), "not json")
         .expect("the launch record is corrupted");
     direct
-        .run(&["drive-run", "corrupt-direct"])
+        .run(&["adopt", "corrupt-direct"])
         .exited(crate::harness::REFUSED)
         .err_has("launch.json");
 
@@ -351,7 +351,7 @@ fn broken_launch_records_refuse_the_driver_before_direct_or_lifecycle_dispatch()
     std::fs::remove_file(lifecycle_world.run_file("missing-lifecycle", "launch.json"))
         .expect("the launch record is removed");
     lifecycle_world
-        .run(&["drive-run", "missing-lifecycle"])
+        .run(&["adopt", "missing-lifecycle"])
         .exited(crate::harness::REFUSED)
         .err_has("launch.json");
     // llmlint: ignore-end[tests_mirror_real_usage]
@@ -361,7 +361,7 @@ fn broken_launch_records_refuse_the_driver_before_direct_or_lifecycle_dispatch()
 fn a_legacy_launch_without_a_node_graph_fails_instead_of_reading_live_environment() {
     // llmlint: ignore-block[tests_mirror_real_usage] an older launch-record producer is
     // not a CLI operation this build can invoke. Writing that historical schema shape is
-    // the necessary fault arrangement; the driver and its refusal use the compiled CLI.
+    // the necessary fault arrangement; the adoption and its refusal use the compiled CLI.
     let world = World::new("legacy-empty-node-graph");
     let mut build = agent("build", &["approve"]);
     build["deps"] = json!(["approve"]);
@@ -374,13 +374,13 @@ fn a_legacy_launch_without_a_node_graph_fails_instead_of_reading_live_environmen
     std::fs::write(&path, serde_json::to_vec_pretty(&launch).unwrap())
         .expect("the legacy launch record is written");
 
-    let mut driving = world.cmd(&["drive-run", "legacy-empty"]);
+    let mut driving = world.cmd(&["adopt", "legacy-empty"]);
     driving.env(
         "ONEPIPELINE_NODE_GRAPH",
         world.graphs().join("node-scope.yaml"),
     );
     world
-        .run_on(driving, "drive-run legacy-empty")
+        .run_on(driving, "adopt legacy-empty")
         .exited(crate::harness::REFUSED)
         .err_has("has no resolved node graph");
     // llmlint: ignore-end[tests_mirror_real_usage]

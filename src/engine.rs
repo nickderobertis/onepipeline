@@ -401,7 +401,7 @@ fn converge(
     // What the loop has already said out loud, so each fact is announced once
     // and again only when it becomes true again.
     let mut announced_ready: BTreeSet<String> = BTreeSet::new();
-    let mut held: BTreeMap<String, Decision> = BTreeMap::new();
+    let mut held: BTreeMap<DecisionRef, Decision> = BTreeMap::new();
 
     loop {
         reconcile_edits(paths, journal, state, &channel, &mut in_flight)?;
@@ -525,12 +525,37 @@ fn report_unreadable_records(paths: &RunPaths, state: &RunState) {
 /// a report and holds nothing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Decision {
-    /// What clears it: a node id for a human action, `surface:N` for a surface.
-    reference: String,
+    /// What clears it.
+    reference: DecisionRef,
     /// What kind of decision it is, in the vocabulary its raiser used.
     kind: String,
     /// The nodes it is holding back, in graph order.
     unblocks: Vec<String>,
+}
+
+/// What clears one decision point.
+///
+/// The two are answered by different people through different verbs — a person
+/// attests the action, a planner replies to the surface — and the reference a
+/// reader sees has to say which. Spelled as the alternatives rather than as a
+/// string, so a surface reference can only be a surface's own id and a node
+/// reference can only be a node's.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum DecisionRef {
+    /// A ready `kind: human` node, cleared by `attest`.
+    Human(String),
+    /// A blocking surface, cleared by the reply that answers it.
+    Surface(u64),
+}
+
+impl DecisionRef {
+    /// The reference as the journal and the node label spell it.
+    fn as_wire(&self) -> String {
+        match self {
+            Self::Human(node) => node.clone(),
+            Self::Surface(id) => format!("surface:{id}"),
+        }
+    }
 }
 
 /// The decision points outstanding right now.
@@ -538,16 +563,16 @@ fn decisions_now(
     state: &RunState,
     statuses: &BTreeMap<String, NodeStatus>,
     channel: &ChannelState,
-) -> BTreeMap<String, Decision> {
+) -> BTreeMap<DecisionRef, Decision> {
     let mut decisions = BTreeMap::new();
     for (id, status) in statuses {
         if *status != NodeStatus::Waiting {
             continue;
         }
         decisions.insert(
-            id.clone(),
+            DecisionRef::Human(id.clone()),
             Decision {
-                reference: id.clone(),
+                reference: DecisionRef::Human(id.clone()),
                 kind: "human".to_string(),
                 unblocks: descendants(&state.graph, std::slice::from_ref(id)),
             },
@@ -558,11 +583,11 @@ fn decisions_now(
         if !surface.blocking {
             continue;
         }
-        let reference = format!("surface:{}", surface.id);
+        let reference = DecisionRef::Surface(surface.id);
         let unblocks = surface
             .workstream
-            .as_deref()
-            .map(|node| descendants(&state.graph, std::slice::from_ref(&node.to_string())))
+            .clone()
+            .map(|node| descendants(&state.graph, std::slice::from_ref(&node)))
             .unwrap_or_default();
         decisions.insert(
             reference.clone(),
@@ -599,8 +624,8 @@ fn descendants(graph: &Graph, roots: &[String]) -> Vec<String> {
 fn report_decisions(
     paths: &RunPaths,
     journal: &mut Journal,
-    decisions: &BTreeMap<String, Decision>,
-    held: &mut BTreeMap<String, Decision>,
+    decisions: &BTreeMap<DecisionRef, Decision>,
+    held: &mut BTreeMap<DecisionRef, Decision>,
 ) -> Result<()> {
     for (reference, decision) in decisions {
         if held.get(reference) == Some(decision) {
@@ -608,9 +633,9 @@ fn report_decisions(
         }
         journal.emit(
             journal::PipelineKind::DecisionPending,
-            journal::labels(&paths.run, Some(&decision.reference)),
+            journal::labels(&paths.run, Some(&decision.reference.as_wire())),
             journal::payload(&[
-                ("reference", json!(decision.reference)),
+                ("reference", json!(decision.reference.as_wire())),
                 ("kind", json!(decision.kind)),
                 ("unblocks", json!(decision.unblocks)),
             ]),
@@ -624,9 +649,9 @@ fn report_decisions(
     for decision in cleared {
         journal.emit(
             journal::PipelineKind::DecisionCleared,
-            journal::labels(&paths.run, Some(&decision.reference)),
+            journal::labels(&paths.run, Some(&decision.reference.as_wire())),
             journal::payload(&[
-                ("reference", json!(decision.reference)),
+                ("reference", json!(decision.reference.as_wire())),
                 ("kind", json!(decision.kind)),
                 ("released", json!(decision.unblocks)),
             ]),
@@ -637,7 +662,7 @@ fn report_decisions(
 }
 
 /// The nodes no decision point will let start yet.
-fn paused_by(decisions: &BTreeMap<String, Decision>) -> BTreeSet<String> {
+fn paused_by(decisions: &BTreeMap<DecisionRef, Decision>) -> BTreeSet<String> {
     decisions
         .values()
         .flat_map(|decision| decision.unblocks.iter().cloned())
@@ -1905,7 +1930,9 @@ mod tests {
                 "demo",
             )),
         );
-        let held = decisions.get("approve").expect("the human action holds");
+        let held = decisions
+            .get(&DecisionRef::Human("approve".into()))
+            .expect("the human action holds");
         assert_eq!(held.kind, "human");
         assert_eq!(
             held.unblocks,
@@ -1924,6 +1951,15 @@ mod tests {
     }
 
     /// Cleared, a decision releases exactly what it held — and says so once.
+    /// The two references a decision can carry are the two things that clear
+    /// one, and each spells itself: a surface reference can only be a surface's
+    /// own id, and a node reference can only be a node's.
+    #[test]
+    fn a_decision_reference_spells_which_of_the_two_things_clears_it() {
+        assert_eq!(DecisionRef::Human("approve".into()).as_wire(), "approve");
+        assert_eq!(DecisionRef::Surface(7).as_wire(), "surface:7");
+    }
+
     #[test]
     fn a_decision_is_reported_when_it_begins_holding_and_again_when_it_releases() {
         let root = std::env::temp_dir().join(format!("onepipeline-decisions-{}", sys::pid()));
@@ -1933,13 +1969,13 @@ mod tests {
         let mut journal = Journal::open(&paths);
 
         let decision = Decision {
-            reference: "approve".into(),
+            reference: DecisionRef::Human("approve".into()),
             kind: "human".into(),
             unblocks: vec!["ship".into()],
         };
         let mut held = BTreeMap::new();
-        let pending: BTreeMap<String, Decision> =
-            [("approve".to_string(), decision.clone())].into();
+        let pending: BTreeMap<DecisionRef, Decision> =
+            [(DecisionRef::Human("approve".to_string()), decision.clone())].into();
 
         report_decisions(&paths, &mut journal, &pending, &mut held).expect("reported");
         // Reported once: a decision that has not changed is not re-announced on

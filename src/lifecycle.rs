@@ -279,8 +279,7 @@ fn publish(
 /// It runs in the node's **own** worktree, which is the only place the diff it is
 /// asked to read exists: a session of its own would be a fresh clone cut from the
 /// base, carrying nothing this node wrote — and opening one reclaims the session
-/// still holding the work. It used to ask for one, and a scripted double that
-/// answered the same worktree for the same branch is what kept that invisible.
+/// still holding the work.
 #[allow(
     clippy::too_many_arguments,
     reason = "the draft is a dispatch inside one lifecycle execution and needs that execution's \

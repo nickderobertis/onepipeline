@@ -745,60 +745,95 @@ fn a_dag_graph_observes_while_the_monitors_edits_are_held_to_its_allowlist() {
         "the observer never read the run it was launched for"
     );
 
-    // An op the monitor may not issue is refused by name, with the reason and
-    // what to do instead — and nothing durable is written on its behalf.
-    let refused = world.run_with_stdin(
-        &["reply", "watched"],
-        &json!({
-            "version": 1,
-            "author": "monitor",
-            "commands": [{"op": "attest", "ref": "approve"}],
-        })
-        .to_string(),
-    );
-    refused
-        .exited(REFUSED)
-        .err_has("attest")
-        .err_has("never by a watcher")
-        .err_has("Surface it to the planner");
+    // Every op the monitor may not issue is refused by name, with the reason and
+    // what to do instead — and nothing durable is written on any of their
+    // behalf. All four, because an op granted by omission is the whole failure
+    // this allowlist exists to prevent.
+    for (op, command, said) in [
+        (
+            "attest",
+            json!({"op": "attest", "ref": "approve"}),
+            "never by a watcher",
+        ),
+        (
+            "complete",
+            json!({"op": "complete", "reason": "looks finished to me"}),
+            "not an observation",
+        ),
+        (
+            "drop",
+            json!({"op": "drop", "id": "slow", "dependents": "detach"}),
+            "decomposition decision the planner owns",
+        ),
+        (
+            "reparent",
+            json!({"op": "reparent", "id": "slow", "deps": []}),
+            "decomposition decision the planner owns",
+        ),
+    ] {
+        let refused = world.run_with_stdin(
+            &["reply", "watched"],
+            &json!({"version": 1, "author": "monitor", "commands": [command]}).to_string(),
+        );
+        refused
+            .exited(REFUSED)
+            .err_has(op)
+            .err_has(said)
+            .err_has("Surface it to the planner");
+    }
     assert!(
         world.events_of("watched", "human-attested").is_empty(),
         "a refused monitor edit still reached the run"
     );
+    assert!(
+        world
+            .events_of("watched", "completion-requested")
+            .is_empty(),
+        "a refused monitor edit still reached the run"
+    );
+    assert!(
+        world.events_of("watched", "edit-committed").is_empty(),
+        "a refused monitor edit still reached the graph: {:?}",
+        world.kinds("watched")
+    );
 
-    // An allowed one is applied, attributed, and surfaced to the planner
-    // non-blocking: the monitor acted on its own judgement, so the planner
-    // learns of it without having been asked to approve it first.
-    world
-        .run_with_stdin(
-            &["reply", "watched"],
-            &json!({
-                "version": 1,
-                "author": "monitor",
-                "commands": [{
-                    "op": "context",
-                    "id": "slow",
-                    "note": "the fixture moved to tests/data",
-                    "deliver": "next",
-                }],
-            })
-            .to_string(),
-        )
-        .exited(0)
-        .out_has("\"applied\"");
+    // And every op it *may* issue is applied. In an order each one is legal in:
+    // a note to the running node, a node added, that node parked and brought
+    // back, and finally the running node superseded — which is the one that
+    // stops it, so it goes last.
+    for command in [
+        json!({"op": "context", "id": "slow", "note": "the fixture moved", "deliver": "next"}),
+        // Behind the held node, so it is still pending when it is parked: a
+        // node that had already run is not a node `cancel` can idle.
+        json!({"op": "add", "node": {"id": "extra", "persona": "engineer",
+                                     "task": "## What\nsweep", "deps": ["slow"]}}),
+        json!({"op": "cancel", "id": "extra"}),
+        json!({"op": "requeue", "id": "extra"}),
+        json!({"op": "retry", "id": "slow",
+               "node": {"id": "slow-2", "persona": "engineer", "task": "## What\nagain"}}),
+    ] {
+        world
+            .run_with_stdin(
+                &["reply", "watched"],
+                &json!({"version": 1, "author": "monitor", "commands": [command]}).to_string(),
+            )
+            .exited(0)
+            .out_has("\"applied\"");
+    }
 
-    let committed = world
-        .events_of("watched", "edit-committed")
-        .into_iter()
-        .next()
-        .expect("the allowed edit was committed");
-    assert_eq!(committed["payload"]["author"], "monitor", "{committed}");
+    let committed = world.events_of("watched", "edit-committed");
+    assert_eq!(committed.len(), 5, "{committed:?}");
+    for edit in &committed {
+        assert_eq!(edit["payload"]["author"], "monitor", "{edit}");
+    }
 
     world.until("the planner to be told what the monitor did", |world| {
         world
             .events_of("watched", "planner-surface-queued")
             .iter()
-            .any(|event| event["payload"]["kind"] == "monitor-edit")
+            .filter(|event| event["payload"]["kind"] == "monitor-edit")
+            .count()
+            >= 5
     });
     let surfaced = world
         .events_of("watched", "planner-surface-queued")
@@ -813,4 +848,127 @@ fn a_dag_graph_observes_while_the_monitors_edits_are_held_to_its_allowlist() {
     assert_eq!(surfaced["payload"]["source"], "monitor", "{surfaced}");
 
     world.release("slow.go");
+}
+
+/// The other decision point: a **blocking surface** an observer raised holds the
+/// subtree that depends on the node it named, and answering it releases exactly
+/// that subtree.
+///
+/// A `kind: human` node is structural — its dependents are blocked by the graph.
+/// This one is not: the node the surface names has *settled*, and what holds its
+/// dependents back is the unanswered question about it. Nothing else in the run
+/// is touched.
+#[test]
+fn a_blocking_surface_holds_the_subtree_of_the_node_it_names_until_it_is_answered() {
+    use std::io::{BufRead, BufReader, Write};
+
+    let world = World::new("channel-surface-decision");
+    // `seed` is held so the frame below lands before it settles: the loop starts
+    // what became ready on the same pass it sees the settlement, so a surface
+    // that arrived afterwards would be racing a dispatch that had already gone.
+    world.script("seed.wait", "hold");
+    world.script("keep.wait", "hold");
+    let path = world.plan(
+        "surfacegate",
+        &plan_of(
+            "surfacegate",
+            vec![
+                agent("seed", &[]),
+                agent("after", &["seed"]),
+                agent("keep", &[]),
+            ],
+        ),
+    );
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+    world.until("the held node to be in flight", |world| {
+        world
+            .events_of("surfacegate", "node-dispatched")
+            .iter()
+            .any(|event| event["labels"]["node"] == "seed")
+    });
+
+    // The observer raises a blocking question about `seed`.
+    let mut serving = world
+        .cmd(&["channel", "serve", "surfacegate"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the channel server starts");
+    let mut stdin = serving.stdin.take().expect("stdin is piped");
+    writeln!(
+        stdin,
+        r#"{{"kind":"blocker","message":"seed wrote something unexpected; go on?","node":"seed"}}"#
+    )
+    .expect("the frame is written");
+    stdin.flush().expect("flushed");
+
+    world.until("the decision to be reported", |world| {
+        !world
+            .events_of("surfacegate", "decision-pending")
+            .is_empty()
+    });
+    let pending = world.events_of("surfacegate", "decision-pending");
+    assert_eq!(pending.len(), 1, "{pending:?}");
+    assert_eq!(pending[0]["payload"]["kind"], "blocker");
+    assert!(
+        pending[0]["payload"]["reference"]
+            .as_str()
+            .is_some_and(|reference| reference.starts_with("surface:")),
+        "a surface decision named something other than a surface: {pending:?}"
+    );
+    assert_eq!(pending[0]["payload"]["unblocks"], json!(["after"]));
+
+    // The node it names settles — and its dependent does *not* go, because the
+    // question about it has not been answered.
+    world.release("seed.go");
+    world.until("the named node to settle", |world| {
+        world
+            .events_of("surfacegate", "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "seed")
+    });
+    assert!(
+        world
+            .events_of("surfacegate", "node-dispatched")
+            .iter()
+            .all(|event| event["labels"]["node"] != "after"),
+        "the held subtree ran while the question about it was outstanding: {:?}",
+        world.kinds("surfacegate")
+    );
+
+    // Answered: read it, then reply. The subtree is released and nothing else
+    // waited on it.
+    world.run(&["next", "surfacegate"]).exited(0);
+    world
+        .run_with_stdin(
+            &["reply", "surfacegate"],
+            r#"{"completion":false,"reason":"go on"}"#,
+        )
+        .exited(0);
+    world.until("the released subtree to settle", |world| {
+        world
+            .events_of("surfacegate", "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "after")
+    });
+    let cleared = world.events_of("surfacegate", "decision-cleared");
+    assert_eq!(cleared.len(), 1, "{cleared:?}");
+    assert_eq!(cleared[0]["payload"]["released"], json!(["after"]));
+
+    // The verdict reached the observer's own conversation, which is what makes
+    // this a channel rather than a one-way report.
+    let stdout = serving.stdout.take().expect("stdout is piped");
+    let verdict = BufReader::new(stdout)
+        .lines()
+        .map_while(std::result::Result::ok)
+        .find(|line| line.contains("reason"))
+        .expect("the server wrote a verdict");
+    assert!(verdict.contains("go on"), "{verdict}");
+
+    drop(stdin);
+    world.release("keep.go");
+    let _ = serving.wait();
 }

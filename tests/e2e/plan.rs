@@ -10,7 +10,7 @@
 // model turns to produce, and `dispatch.rs` is where the real `oneagentgraph` binary is
 // driven instead. `harness.rs` carries the same suppression and the full rationale.
 
-use crate::harness::{agent, human, plan_of, World, QUEUED, REFUSED};
+use crate::harness::{agent, human, plan_of, World, NOTHING_DRIVING, REFUSED};
 use serde_json::json;
 
 /// Run a plan to settlement, attached, and return the run id.
@@ -527,20 +527,27 @@ fn a_json_plan_keeps_json_escape_semantics_all_the_way_to_the_dispatch() {
     );
 }
 
+/// A graph that settled unfinished is reported as unfinished, not as a failure
+/// of the command that drove it.
+///
+/// Read where an operator reads it: an attached launch, which stays for the run
+/// and answers with the settlement. `3` is the code, because nothing is driving
+/// a run whose graph has stopped moving — and the record says *failed*, which is
+/// the distinction a bare exit code cannot draw.
 #[test]
-fn a_graph_that_settles_unfinished_exits_one_rather_than_zero() {
+fn a_graph_that_settles_unfinished_is_reported_rather_than_erroring() {
     let world = World::new("plan-exit");
     world.script("build.fail", "1");
     let path = world.plan("exit", &plan_of("exit", vec![agent("build", &[])]));
     world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
-    world.until("the run to settle", |world| {
-        world.run_file("exit", "result.json").is_file()
-    });
-    // Driving the same graph again is where a caller reads the exit status off:
-    // a failed graph is unfinished, not an error.
-    world.run(&["drive-run", "exit"]).exited(QUEUED);
+        .run(&["start", &path.to_string_lossy(), "--attach"])
+        .exited(NOTHING_DRIVING)
+        .out_has("\"settlement\":\"unattended\"");
+
+    let result = world.run_json("exit", "result.json");
+    assert_eq!(result["state"], "failed", "{result}");
+    assert_eq!(result["ok"], json!(false), "{result}");
+    world.run(&["results", "exit"]).exited(0).out_has("failed");
 }
 
 #[test]
