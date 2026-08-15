@@ -98,26 +98,29 @@ fn first_round_result_schema() -> u32 {
     FIRST_ROUND_RESULT_SCHEMA
 }
 
-/// Read the version, refusing only a document written *ahead* of this build.
+/// Read the version, refusing every number outside the range this build wrote.
 ///
-/// Deliberately narrower than the telemetry document's rule, because the change
-/// this version records is additive: every `1` field means in `2` exactly what it
-/// meant in `1`, and the only difference is a field that was never recorded. So a
-/// `1` reads, and its nodes simply carry no landing — which is already how "this
-/// run observed nothing about where that change got to" is spelled.
+/// The upper bound is deliberately narrower than the telemetry document's rule,
+/// because the change this version records is additive: every `1` field means in
+/// `2` exactly what it meant in `1`, and the only difference is a field that was
+/// never recorded. So a `1` reads, and its nodes simply carry no landing — which
+/// is already how "this run observed nothing about where that change got to" is
+/// spelled. A number *above* is the case that cannot be read honestly: the
+/// document may state something this build has no field for.
 ///
-/// A number *above* this build's is the case that cannot be read honestly: the
-/// document may state something this build has no field for, and guessing at it
-/// is the false report the landing qualifier exists to remove. Refused by name,
-/// with both numbers.
+/// Below `1` is refused too, and for a different reason: this crate has never
+/// written a `0`, so a document claiming one came from somewhere that is not this
+/// contract at all. Read leniently it would be normalised into a result that
+/// looks like every other, which is the shape of every defect this version exists
+/// to make visible. Both bounds refuse by name, with both numbers.
 fn readable_round_result_version<'de, D: serde::Deserializer<'de>>(
     reader: D,
 ) -> std::result::Result<u32, D::Error> {
     let found = u32::deserialize(reader)?;
-    if found > ROUND_RESULT_SCHEMA_VERSION {
+    if !(FIRST_ROUND_RESULT_SCHEMA..=ROUND_RESULT_SCHEMA_VERSION).contains(&found) {
         return Err(serde::de::Error::custom(format!(
             "round result schema_version {found}, and this build reads \
-             {ROUND_RESULT_SCHEMA_VERSION}"
+             {FIRST_ROUND_RESULT_SCHEMA}..={ROUND_RESULT_SCHEMA_VERSION}"
         )));
     }
     Ok(found)
@@ -160,6 +163,10 @@ impl RoundResult {
 // believed. Removing `ok` from the wire is a different change: consumers filter on it, so
 // it would be a breaking bump rather than the additive one below. Raise that with the
 // planner who owns the contract.
+// llmlint: ignore-block[changed_behavior_has_e2e] no invocation a user can type reads a
+// round result back: this crate writes the document and every consumer of it is outside
+// this repo, so the version rules below have no product path to be driven through. Held by
+// this module's golden and version tests, against the same bytes a consumer parses.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RoundResultWire {
@@ -174,7 +181,7 @@ struct RoundResultWire {
     state: GraphState,
     ok: bool,
     nodes: Vec<NodeResult>,
-}
+} // llmlint: ignore-end[changed_behavior_has_e2e]
 
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
@@ -221,12 +228,11 @@ pub struct NodeResult {
     /// close it on a change that reached nobody. Absent where there was no
     /// change of this node's to land — see [`Landing`].
     ///
-    /// Optional and omitted when absent, so a run with no lifecycle publication
-    /// writes the result file it always wrote and a consumer reading one is
-    /// unaffected. `round-NN/result.json` carries no schema version to bump;
-    /// widening it any way that was *not* additive would need one, and that is a
-    /// proposal to the planner who owns the contract rather than a change made
-    /// here.
+    /// Omitted when absent rather than written as `null`, so a node with no
+    /// change of its own reads as one making no claim — and a consumer branches
+    /// on the key's presence instead of on a field that is there for every node
+    /// and meaningless for most. This field is what
+    /// [`ROUND_RESULT_SCHEMA_VERSION`] `2` records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub landing: Option<Landing>,
     /// What a ready human action asks for.
@@ -1821,20 +1827,25 @@ mod tests {
         let rewritten = serde_json::to_value(&older).expect("it serialises");
         assert_eq!(rewritten["schema_version"], ROUND_RESULT_SCHEMA_VERSION);
 
-        edit(&mut document, &|object| {
-            object.insert(
-                "schema_version".into(),
-                json!(ROUND_RESULT_SCHEMA_VERSION + 1),
+        // Both bounds. Above is a build that knows more than this one; `0` is a
+        // number this crate has never written, so a document claiming it did not
+        // come from this contract and is refused rather than normalised into a
+        // result that looks like every other.
+        for outside in [ROUND_RESULT_SCHEMA_VERSION + 1, 0] {
+            let mut claimed = document.clone();
+            edit(&mut claimed, &|object| {
+                object.insert("schema_version".into(), json!(outside));
+            });
+            let refused = serde_json::from_value::<RoundResult>(claimed).expect_err(
+                "a result outside the versions this build reads was read as one of them",
             );
-        });
-        let refused = serde_json::from_value::<RoundResult>(document)
-            .expect_err("a result from a newer build is not read as one of this build's");
-        let refusal = refused.to_string();
-        assert!(
-            refusal.contains(&(ROUND_RESULT_SCHEMA_VERSION + 1).to_string())
-                && refusal.contains(&ROUND_RESULT_SCHEMA_VERSION.to_string()),
-            "the refusal names neither version: {refusal}"
-        );
+            let refusal = refused.to_string();
+            assert!(
+                refusal.contains(&outside.to_string())
+                    && refusal.contains(&ROUND_RESULT_SCHEMA_VERSION.to_string()),
+                "the refusal of {outside} names neither version: {refusal}"
+            );
+        }
     }
 
     fn agent(id: &str, deps: &[&str]) -> Node {
