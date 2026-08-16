@@ -43,8 +43,8 @@ A launch declares a `filters:` block, in a **launch config** — `onepipeline st
 Launch config (YAML or JSON, by path):
 
 ```yaml
-schema_version: 1                     # this build reads 1; another number is refused by it
-pr_author_graph: ./graphs/pr-author.yaml  # optional, the operator's own graph; --pr-author-graph overrides it
+schema_version: 2                     # this build reads 2 and 1; another number is refused by it
+pr_author_graph: ./graphs/pr-author.yaml  # a schema 2 key, the operator's own graph; --pr-author-graph overrides it
 filters:                              # optional, and omitted from what this crate writes when empty
   agentgraph:                         # forwarded to every oneagentgraph launch this run starts
     exclude: [{kind: turn-activity}]
@@ -56,7 +56,7 @@ filters:                              # optional, and omitted from what this cra
     monitor: {}
 ```
 
-The config is **external input**: an unknown key is refused by name rather than dropped, a `schema_version` this build does not read is refused by its number, and a filter it carries is refused by the grammar's own rules above — all of it before a run is minted, so a launch that could not be honoured never cuts a session. A document declaring only `schema_version: 1` is a launch that says nothing about its events, which is what a launch naming no config already means; the block is omitted from what this crate writes when it is empty, so a config round-trips as the file wrote it and a launch record from a build predating the block still reads.
+The config is **external input**: an unknown key is refused by name rather than dropped, a `schema_version` this build does not read is refused by its number — naming the ones it does — and a filter it carries is refused by the grammar's own rules above; all of it before a run is minted, so a launch that could not be honoured never cuts a session. `schema_version: 2` is `pr_author_graph`, and the bump is **additive** the way the plan schema's is: a version-1 config is a complete document this build still reads, and naming that key there is refused **by the key's own name** rather than by the number. A document declaring only its version is a launch that says nothing at all, which is what a launch naming no config already means; every optional key — the block, and the graph — is omitted from what this crate writes when it is empty, so a config round-trips as the file wrote it, a launch that names no drafting graph is written as a document a version-1 reader accepts, and a launch record from a build predating either still reads.
 
 The filter block itself has two halves, and they are not the same thing:
 

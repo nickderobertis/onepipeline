@@ -861,9 +861,9 @@ launcher **writes** and `adopt` replays — nothing an operator hands to `start`
 The block reached a run as three flags only.
 
 Both halves now exist and they are one block.
-[`filter::LaunchConfig`](../src/filter.rs) is the document — `schema_version: 1`,
-an optional `filters:`, and nothing else, read as YAML or JSON by
-`LaunchConfig::load` — and `cli::StartArgs::launch_config` is the
+[`filter::LaunchConfig`](../src/filter.rs) is the document — a `schema_version`,
+an optional `filters:`, and what a later version added beside it, read as YAML or
+JSON by `LaunchConfig::load` — and `cli::StartArgs::launch_config` is the
 `--launch-config FILE` that names it. `driver::declared_filters` reads that
 config as the **base** and applies each flag over it: `--filter-agentgraph` and
 `--filter-vcs` replace their source filter wholesale, and each
@@ -875,9 +875,17 @@ two that have to agree.
 The config is external input and is refused at its own boundary — unknown key by
 name, `schema_version` by its number, and a filter by the grammar's own rules —
 before a run is minted. It is versioned and pinned: `LAUNCH_CONFIG_SCHEMA_VERSION`
-beside `tests/golden/launch-config-v1.json`, gated the way the run result and the
+beside a checked-in golden **per version**, gated the way the run result and the
 telemetry document already are, so the shape cannot move without someone deciding
 to move it.
+
+**Version 2 is `pr_author_graph`**, the launch's second decision, and the bump was
+made deliberately with the golden that pins it —
+`tests/golden/launch-config-v2.json`, beside the version-1 one that stays checked
+in for what a single golden cannot pin: that a config written before the key is
+still a document this build reads. `LAUNCH_CONFIG_SCHEMA_VERSIONS_READ` is that
+set, and naming the key at version 1 is refused by the key's own name rather than
+by the number — the same rule the plan schema reads `body` by.
 
 ## 31. `next` had no event view for a profile to shape, so it grew one — RESOLVED
 

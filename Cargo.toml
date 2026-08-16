@@ -92,8 +92,9 @@ include = [
   # its own test binary.
   "tests/e2e/gate.sh",
   "tests/e2e/gate.bat",
-  # The checked-in telemetry golden, which `src/telemetry.rs` reads at compile
-  # time: without it the packaged crate does not build, let alone test.
+  # The checked-in goldens `src/telemetry.rs` and `src/filter.rs` read at compile
+  # time — the telemetry document, and one launch config per schema version this
+  # build reads. Without them the packaged crate does not build, let alone test.
   "tests/golden/*.json",
   "Cargo.toml",
   "README.md",

@@ -20,6 +20,8 @@
 // opened and merged offline. `harness.rs` carries the same suppression and the full
 // rationale.
 
+use std::path::PathBuf;
+
 use crate::harness::{agent, gate_script, lifecycle, plan_of, Repository, World, REFUSED};
 use onevcs::provenance::SUBJECT_LIMIT;
 use serde_json::json;
@@ -655,10 +657,7 @@ fn a_node_that_states_its_own_body_publishes_it_and_spends_no_dispatch() {
 #[test]
 fn a_drafting_dispatch_that_ends_badly_leaves_the_publication_untouched() {
     for (name, scenario) in [
-        // The dispatch ran and failed.
         ("failed", "service.pr-author.fail"),
-        // It ran, succeeded, and answered with nothing the schema accepted,
-        // which is not a body.
         ("unschematic", "pr-author.unschematic"),
     ] {
         let world = World::new(&format!("lifecycle-draft-{name}"));
@@ -694,11 +693,15 @@ fn a_drafting_dispatch_that_ends_badly_leaves_the_publication_untouched() {
     }
 }
 
-/// The launch config declares the drafting graph, and the flag overrides it.
+/// The launch config declares the drafting graph, the flag overrides it, and
+/// both are resolved against the directory the launch was made from.
 ///
 /// The same pair every other launch-level decision has: a team writes the graph
 /// down beside its plan, and one launch says otherwise on the command line
-/// without restating the rest of the document.
+/// without restating the rest of the document. Both references are **relative**,
+/// which is how a document beside a plan names a document beside a plan — and
+/// what the launch records is the resolved path, because every later driver
+/// replays that record from wherever it happens to be started.
 #[test]
 fn a_launch_config_names_the_drafting_graph_and_the_flag_overrides_it() {
     let world = World::new("lifecycle-draft-config");
@@ -709,9 +712,11 @@ fn a_launch_config_names_the_drafting_graph_and_the_flag_overrides_it() {
     let overriding = world.graphs().join("pr-author-override.yaml");
     std::fs::copy(&declared, &overriding).expect("the overriding graph is written");
     let config = world.root.join("launch.yaml");
+    // At the version that declares the key: `pr_author_graph` is what schema 2
+    // added, and a document below it naming one is refused by that key's name.
     std::fs::write(
         &config,
-        format!("schema_version: 1\npr_author_graph: {declared}\n"),
+        "schema_version: 2\npr_author_graph: graphs/pr-author.yaml\n",
     )
     .expect("the launch config is written");
 
@@ -726,8 +731,12 @@ fn a_launch_config_names_the_drafting_graph_and_the_flag_overrides_it() {
             config.to_string_lossy().into_owned(),
         ];
         args.extend(extra.iter().map(|arg| (*arg).to_string()));
+        let mut command = world.cmd(&args.iter().map(String::as_str).collect::<Vec<_>>());
+        // Launched from the directory both references are written against, which
+        // is what makes them relative to anything at all.
+        command.current_dir(&world.root);
         world
-            .run(&args.iter().map(String::as_str).collect::<Vec<_>>())
+            .run_on(command, "start with a declared drafting graph")
             .settled();
         world.run_json(run, "launch.json")["pr_author_graph"]
             .as_str()
@@ -735,22 +744,25 @@ fn a_launch_config_names_the_drafting_graph_and_the_flag_overrides_it() {
             .to_string()
     };
 
+    // Each run records the *resolved* reference: relative in the document,
+    // absolute in the record, against the directory the launch was made from.
     assert_eq!(
-        drafted("declared", &[]),
-        declared,
+        std::fs::canonicalize(drafted("declared", &[])).expect("the recorded graph resolves"),
+        std::fs::canonicalize(&declared).expect("the declared graph is there"),
         "the launch config's own graph did not reach the run"
     );
     assert_eq!(
-        drafted(
+        std::fs::canonicalize(drafted(
             "overridden",
-            &["--pr-author-graph", &overriding.to_string_lossy()]
-        ),
-        overriding.to_string_lossy(),
+            &["--pr-author-graph", "graphs/pr-author-override.yaml"]
+        ))
+        .expect("the recorded graph resolves"),
+        std::fs::canonicalize(&overriding).expect("the overriding graph is there"),
         "the flag did not override the config it names"
     );
     // And it is the graph each run *dispatched*, rather than only what each
     // recorded: the second run drafted through the document the flag named.
-    let graphs: Vec<String> = world
+    let graphs: Vec<PathBuf> = world
         .invocations()
         .iter()
         .filter(|call| {
@@ -760,11 +772,15 @@ fn a_launch_config_names_the_drafting_graph_and_the_flag_overrides_it() {
                         .any(|arg| arg == "onepipeline.persona=pr-author")
                 })
         })
-        .filter_map(|call| call["args"][1].as_str().map(str::to_string))
+        .filter_map(|call| call["args"][1].as_str())
+        .map(|graph| std::fs::canonicalize(graph).expect("the dispatched graph resolves"))
         .collect();
     assert_eq!(
         graphs,
-        vec![declared, overriding.to_string_lossy().into_owned()],
+        vec![
+            std::fs::canonicalize(&declared).expect("the declared graph is there"),
+            std::fs::canonicalize(&overriding).expect("the overriding graph is there"),
+        ],
         "the drafting dispatches did not run the graphs their launches decided"
     );
 }

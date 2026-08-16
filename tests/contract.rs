@@ -373,7 +373,7 @@ fn dispatching_goes_through_the_oneagentgraph_seam_and_says_so_when_it_cannot() 
 /// source and a copy that stopped matching it fails this gate.
 #[test]
 fn the_contracts_launch_config_example_parses_and_round_trips() {
-    let yaml = fenced_block_naming("yaml", "schema_version: 1");
+    let yaml = fenced_block_naming("yaml", "schema_version: 2");
     let config: LaunchConfig = serde_norway::from_str(&yaml).expect("the launch config parses");
     assert_eq!(
         config.schema_version, LAUNCH_CONFIG_SCHEMA_VERSION,
@@ -422,15 +422,37 @@ fn the_contracts_launch_config_example_parses_and_round_trips() {
     // both claim to pin the launch config's shape and could disagree would be two
     // sources; this is the one place they are held to being one.
     let golden: LaunchConfig = serde_json::from_str(
-        &std::fs::read_to_string(repo_root().join("tests/golden/launch-config-v1.json"))
+        &std::fs::read_to_string(repo_root().join("tests/golden/launch-config-v2.json"))
             .expect("the golden ships"),
     )
     .expect("the golden parses");
     assert_eq!(
-        (golden.filters, golden.pr_author_graph),
-        (filters, config.pr_author_graph),
-        "tests/golden/launch-config-v1.json and the contract's own example are \
+        (
+            golden.schema_version,
+            golden.filters,
+            golden.pr_author_graph
+        ),
+        (config.schema_version, filters, config.pr_author_graph),
+        "tests/golden/launch-config-v2.json and the contract's own example are \
          different documents"
+    );
+
+    // The version before it is still a document this build reads, and it ships
+    // as its own golden: the bump is additive, and that promise is to every
+    // config already written beside a plan.
+    let earlier: LaunchConfig = serde_json::from_str(
+        &std::fs::read_to_string(repo_root().join("tests/golden/launch-config-v1.json"))
+            .expect("the earlier golden ships"),
+    )
+    .expect("the earlier golden parses");
+    assert_eq!(earlier.schema_version, 1);
+    assert_eq!(
+        earlier.pr_author_graph, None,
+        "the earlier golden carries a key that version never had"
+    );
+    assert!(
+        CONTRACT.contains("a version-1 config is a complete document this build still reads"),
+        "the contract no longer says an earlier launch config still reads"
     );
 }
 
@@ -441,17 +463,23 @@ fn the_contracts_launch_config_example_parses_and_round_trips() {
 /// what this crate writes, and neither is an error.
 #[test]
 fn the_contracts_launch_config_omits_an_empty_block_and_still_reads() {
-    let bare: LaunchConfig =
-        serde_norway::from_str("schema_version: 1\n").expect("a config may declare only a version");
-    assert!(bare.filters.is_empty());
+    for version in [LAUNCH_CONFIG_SCHEMA_VERSION, 1] {
+        let bare: LaunchConfig = serde_norway::from_str(&format!("schema_version: {version}\n"))
+            .expect("a config may declare only a version");
+        assert!(bare.filters.is_empty());
+        assert_eq!(bare.pr_author_graph, None);
+    }
+    // And what this crate *writes* for one is the version alone: both optional
+    // keys are omitted, so a launch that declared neither is a document an
+    // earlier reader accepts.
     assert_eq!(
-        serde_json::to_string(&bare).expect("serializes"),
+        serde_json::to_string(&LaunchConfig::default()).expect("serializes"),
         format!(r#"{{"schema_version":{LAUNCH_CONFIG_SCHEMA_VERSION}}}"#),
-        "an empty filters block was written out"
+        "an empty filters block or an absent drafting graph was written out"
     );
     assert_contract_names(
         "launch config surface",
-        &["--launch-config FILE", "schema_version: 1"],
+        &["--launch-config FILE", "schema_version: 2"],
     );
 }
 
