@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.3](https://github.com/nickderobertis/onepipeline/compare/v0.6.2...v0.6.3) - 2026-08-16
+
+### Fixed
+
+- *(deps)* adopt the released oneagentgraph and onevcs ([#58](https://github.com/nickderobertis/onepipeline/pull/58))
+
 ## [0.6.1](https://github.com/nickderobertis/onepipeline/compare/v0.6.0...v0.6.1) - 2026-08-15
 
 ### Added
