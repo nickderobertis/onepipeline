@@ -338,6 +338,12 @@ fn start(args: &StartArgs) -> Result<i32> {
     // is the shipped default, and the flag overrides the config that names one.
     // Resolved against the launch directory like every other reference, so the
     // record carries what a driver started from anywhere else replays.
+    // llmlint: ignore-block[invalid_states_unrepresentable] a resolved reference stays the
+    // `String` `resolve_graph` answers with, from here into `LaunchRecord` and back out of
+    // it, for the reason that function's own suppression gives: the durable record and
+    // oneagentgraph's transparent `ConfigRef` are both string-valued, and a newtype here
+    // would duplicate the sibling's type without adding an invariant. It sits beside
+    // `graph_ref` above and is carried exactly as that one is.
     let pr_author_graph_ref: Option<String> = match args
         .pr_author_graph
         .as_deref()
@@ -345,7 +351,7 @@ fn start(args: &StartArgs) -> Result<i32> {
     {
         Some(reference) => Some(resolve_graph(reference, &launch_dir)?),
         None => None,
-    };
+    }; // llmlint: ignore-end[invalid_states_unrepresentable]
     let node_graph_ref = resolve_graph(&engine::configured_node_graph(), &launch_dir)?;
     resolve_plan_graphs(&mut plan, &launch_dir)?;
     // Before the run directory exists. A spec that could not be honoured is the

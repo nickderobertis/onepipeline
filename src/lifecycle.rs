@@ -27,6 +27,11 @@ use crate::plan::{Node, NodeKind, Step};
 /// The persona that drafts a change request's body.
 pub const PR_AUTHOR_PERSONA: &str = "pr-author";
 
+// llmlint: ignore-block[invalid_states_unrepresentable] the graph references below are the
+// same validated, launch-recorded strings the engine carries — the launch record's own
+// fields, read off it strictly and passed straight back into oneagentgraph's transparent
+// ConfigRef. Another newtype would duplicate that sibling type and widen this
+// path-resolution change across unrelated composition.
 /// What this run's launch decides about a lifecycle node's dispatches.
 ///
 /// One value rather than three parameters, and it is the launch record's own
@@ -47,10 +52,6 @@ pub struct Launch {
 }
 
 /// Run one lifecycle node to settlement.
-// llmlint: ignore-block[invalid_states_unrepresentable] the graph references on [`Launch`]
-// are the same validated, launch-recorded strings the engine carries. Lifecycle only passes
-// them into oneagentgraph's transparent ConfigRef; another newtype would duplicate that
-// sibling type and widen this path-resolution change across unrelated composition.
 pub fn execute(
     executor: &dyn Executor,
     paths: &RunPaths,
@@ -389,13 +390,22 @@ fn drafted(
         }
         let _ = tx.send(Message::Event(Box::new(envelope)));
     }
+    // llmlint: ignore-block[changed_behavior_has_e2e] the arm below is reached by a
+    // dispatch that failed, one that answered nothing the schema accepted, and one that was
+    // cancelled; the first two have journeys of their own in `tests/e2e/lifecycle.rs`, and
+    // the third has none because it is not separately reachable. Nothing cancels a
+    // drafting dispatch except the node's own token being flipped, which happens when the
+    // run is being stopped — and a run whose driver is being torn down has no publication
+    // left to protect, so a journey claiming "it published anyway" would be asserting the
+    // opposite of what a stop means. Deleting the arm is not the alternative either: it is
+    // the same `_` a failed settlement takes.
     match handle.wait() {
         Ok(outcome) if outcome.succeeded => retained
             .iter()
             .filter_map(|kept| crate::report::read(kept))
             .find_map(|report| crate::report::drafted_body(&report)),
         _ => None,
-    }
+    } // llmlint: ignore-end[changed_behavior_has_e2e]
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 

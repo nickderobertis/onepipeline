@@ -450,9 +450,24 @@ pub fn validate_edited(plan: &Plan) -> Result<()> {
     Ok(())
 }
 
+/// What a plan naming the reserved drafting persona is told.
+///
+/// The persona a dispatch runs under is what tells the change request's drafting
+/// apart from a node's own work — it is the one fact the executor has when it
+/// composes a launch, and the two are composed differently: a node's dispatch
+/// carries the run's node-scope overrides and its own persona, and the drafting
+/// dispatch carries the graph the operator named and nothing else. A node
+/// claiming this name would be composed as the drafting dispatch and lose the
+/// overrides it declared, silently, which is the one direction this crate
+/// refuses to fail in. So the name is refused where a plan is read.
+pub(crate) const RESERVED_PERSONA: &str = "`pr-author` is the persona this crate dispatches a      change request's drafting under, so a node's own worker cannot run as it";
+
 /// Check one node's shape.
 pub fn validate_node(node: &Node) -> Result<()> {
     let named = |what: &str| Error::Invalid(format!("node '{}': {what}", node.id));
+    if node.persona.as_deref() == Some(crate::lifecycle::PR_AUTHOR_PERSONA) {
+        return Err(named(RESERVED_PERSONA));
+    }
 
     // A title is only ever the subject of a publication, and only a node that
     // names a repo publishes — so this holds exactly the nodes whose title
@@ -606,6 +621,9 @@ fn validate_steps(node: &Node, steps: &[Step]) -> Result<()> {
         } else {
             if step.persona.is_none() {
                 return Err(named(format!("agent step '{}' needs a persona", step.id)));
+            }
+            if step.persona.as_deref() == Some(crate::lifecycle::PR_AUTHOR_PERSONA) {
+                return Err(named(format!("step '{}': {RESERVED_PERSONA}", step.id)));
             }
             // The same rule the node above is held to: a control this build
             // cannot apply stops the plan here rather than at the step's launch.

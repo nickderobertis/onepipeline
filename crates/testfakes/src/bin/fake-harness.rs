@@ -110,8 +110,13 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     // records as `nonzero` and `oneagentgraph` settles a member's death on.
     // Without it the only failing member this suite could produce was one that
     // refused on the way in, which never reaches a turn at all.
-    let failing = fake::node_script(dir, "harness", "fail").is_some()
-        || (observing && fake::observe(dir) != ExitCode::SUCCESS);
+    let ending = if fake::node_script(dir, "harness", "fail").is_some()
+        || (observing && fake::observe(dir) != ExitCode::SUCCESS)
+    {
+        Ending::Failed
+    } else {
+        Ending::Answered
+    };
 
     if shape == Shape::Stream {
         emit(&serde_json::json!({
@@ -135,23 +140,27 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         fake::wait_for(&dir.join("turn.settle"));
     }
 
-    if failing {
+    emit(&result(&prompt, args, ending));
+    match ending {
+        Ending::Answered => ExitCode::SUCCESS,
         // A turn that failed says so on both channels a harness has: the
         // terminal document, and the exit code `oneharness` classifies it by.
-        emit(&result(&prompt, args, true));
-        eprintln!("the turn did not get there");
-        return ExitCode::from(1);
+        Ending::Failed => {
+            eprintln!("the turn did not get there");
+            ExitCode::from(1)
+        }
     }
-    emit(&result(&prompt, args, false));
-    ExitCode::SUCCESS
 }
 
 /// The prompt this turn was given.
 ///
-/// The positional after `-p` on an ordinary launch. A prompt too large for the
-/// argv rides stdin instead (`-p --input-format text`, no positional), which is
-/// `oneharness`'s own delivery decision — so it is read rather than refused.
+/// Print mode is the launch, so `-p` decides both readings: without it there is
+/// no headless turn here to take, whichever way a prompt arrived. With it, the
+/// prompt is the positional after it — or stdin, for a prompt too large for the
+/// argv (`-p --input-format text`, no positional), which is `oneharness`'s own
+/// delivery decision and is read rather than refused.
 fn prompt(args: &[String]) -> Option<String> {
+    let at = args.iter().position(|arg| arg == "-p")?;
     // Whichever way it arrives, a prompt with no words in it is not one: read
     // leniently, an empty stdin would answer as a turn that was asked for
     // nothing, which is a launch prepared wrongly and settling anyway.
@@ -162,7 +171,6 @@ fn prompt(args: &[String]) -> Option<String> {
         std::io::stdin().read_to_string(&mut text).ok()?;
         return words(text);
     }
-    let at = args.iter().position(|arg| arg == "-p")?;
     args.get(at + 1)
         .filter(|next| !next.starts_with('-'))
         .cloned()
@@ -213,13 +221,29 @@ fn tool_call(command: &str) {
     }));
 }
 
+/// How a turn ended, which decides the whole terminal document at once.
+///
+/// One value rather than a flag per field: the subtype, the error marker, and
+/// whether there is a validated answer at all move together — a turn that did
+/// not get there has nothing the schema could have accepted — and three
+/// independent booleans is how a double comes to publish a failure carrying an
+/// answer, which is a shape no harness produces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ending {
+    /// It answered.
+    Answered,
+    /// It did the work and did not get there.
+    Failed,
+}
+
 /// The terminal document a headless run ends with.
 ///
 /// `structured_output` is the field a native structured-output run answers in —
 /// `--json-schema` is on the argv, and `oneharness` prefers that field over
 /// anything it could extract from the text. What goes in it is the answer this
 /// double is asked for: the change request body a `pr-author` dispatch drafts.
-fn result(prompt: &str, args: &[String], failed: bool) -> serde_json::Value {
+fn result(prompt: &str, args: &[String], ending: Ending) -> serde_json::Value {
+    let failed = ending == Ending::Failed;
     let mut document = serde_json::json!({
         "type": "result",
         "subtype": if failed { "error_during_execution" } else { "success" },
@@ -232,7 +256,7 @@ fn result(prompt: &str, args: &[String], failed: bool) -> serde_json::Value {
                   "cache_read_input_tokens": 4, "cache_creation_input_tokens": 1},
         "total_cost_usd": 0.002,
     });
-    if fake::flag(args, "--json-schema").is_some() && !failed {
+    if ending == Ending::Answered && fake::flag(args, "--json-schema").is_some() {
         document["structured_output"] = structured(prompt);
     }
     document

@@ -20,8 +20,8 @@
 use crate::harness::{agent, human, plan_of, World, REFUSED, REPORTING_MEMBER};
 use serde_json::{json, Value};
 
-/// The prose each turn this world ran was actually given, in the order the
-/// turns started.
+/// The prose each turn this world ran was given **on its argv**, in the order
+/// the turns started.
 ///
 /// Read off the **harness** the run spawned rather than off `member-started`:
 /// from `oneagentgraph` 0.2.16 both member kinds are `runner: library`, so a
@@ -29,7 +29,11 @@ use serde_json::{json, Value};
 /// published for it. The process that still receives the prompt is the harness
 /// under it, and that is the one this suite substitutes — so the record of what
 /// a member was asked to do is the invocation that harness itself wrote down.
-fn prompts(world: &World) -> Vec<String> {
+///
+/// On the argv, because that is where `oneharness` puts a prompt it can: one too
+/// large for it rides that process's stdin instead, which the invocation log
+/// does not carry and no journey here produces.
+fn prompts_on_argv(world: &World) -> Vec<String> {
     world
         .invocations()
         .iter()
@@ -105,7 +109,7 @@ fn relative_default_graphs_dispatch_from_the_launch_directory() {
     let started = world.run_on(command, "start relative defaults");
     started.exited(0).settled();
     assert!(
-        prompts(&world)
+        prompts_on_argv(&world)
             .iter()
             .any(|prompt| prompt.contains("Do build.")),
         "the node-scope graph did not dispatch its member: {}",
@@ -533,7 +537,7 @@ fn a_plan_persona_reaches_the_member_that_actually_runs() {
     let started = world.run_on_agentgraph(&["start", &path.to_string_lossy(), "--attach"]);
     started.exited(0).settled();
 
-    let invocations: Vec<String> = prompts(&world)
+    let invocations: Vec<String> = prompts_on_argv(&world)
         .into_iter()
         .filter(|prompt| prompt.contains("Do review."))
         .collect();
@@ -624,7 +628,7 @@ fn adoption_retains_node_overrides_for_later_dispatches() {
     // and it ran under the config the launch recorded, read out of the file the
     // sibling stamped for that member.
     assert!(
-        prompts(&world)
+        prompts_on_argv(&world)
             .iter()
             .any(|prompt| prompt.contains("It failed.")),
         "the replacement node never dispatched: {}",
@@ -668,7 +672,7 @@ fn a_plan_dispatches_through_the_real_oneagentgraph_and_its_members_run() {
     // Two members really ran, and what each was asked to do is the prose the
     // turn under it was launched with — recorded by the harness that received
     // it, which is the one process in this journey that is not the real thing.
-    let launches = prompts(&world);
+    let launches = prompts_on_argv(&world);
     assert!(
         launches
             .iter()
@@ -1504,7 +1508,7 @@ fn every_dag_scope_member_is_given_the_runs_description_and_its_own_job() {
 
     // The dag-scope members only: a node's dispatch is given that node's task,
     // which is a different composition entirely, and it names the node.
-    let prompts: Vec<String> = prompts(&world)
+    let prompts: Vec<String> = prompts_on_argv(&world)
         .into_iter()
         .filter(|prompt| !prompt.contains("Do build."))
         .collect();

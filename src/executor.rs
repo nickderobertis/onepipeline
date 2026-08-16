@@ -230,7 +230,7 @@ impl Executor for LocalExecutor {
             }
         };
         // Relayed: this dispatch is read turn by turn into the merged store.
-        let node_sets = node_sets(&req.graph, &req.labels, &req.controls)?;
+        let node_sets = node_sets(&req.labels, &req.controls)?;
         // Every node-scope launch a run starts is one of that run's
         // `oneagentgraph` sources, so it carries the same source filter the
         // observer graph does. Read from the launch record beside the overrides
@@ -273,20 +273,19 @@ impl Executor for LocalExecutor {
 /// drafted, and it declares its own members under its own names. Composing
 /// either onto it refuses the launch — `this graph has no worker` — which is a
 /// drafting dispatch that could never start.
-fn node_sets(graph: &ConfigRef, labels: &Labels, controls: &NodeControls) -> Result<Vec<String>> {
-    let launch = launched_with(labels)?;
-    // Both halves, because either alone can be true of a node's own dispatch: an
-    // operator may name one document for both purposes, and a plan may name a
-    // persona spelled like this crate's own.
-    let drafting = labels.persona.as_deref() == Some(crate::lifecycle::PR_AUTHOR_PERSONA)
-        && launch
-            .as_ref()
-            .and_then(crate::ledger::LaunchRecord::pr_author_graph)
-            == Some(graph.0.as_str());
-    if drafting {
+///
+/// The **persona** is what tells the two apart, and it can be: `pr-author` is
+/// this crate's own, and a plan naming it for a node or a step is refused where
+/// the plan is read — see [`RESERVED_PERSONA`](crate::graph::RESERVED_PERSONA) —
+/// so a dispatch arriving here under it is the drafting one and nothing else. A
+/// second condition on the graph would not narrow that: an operator may point
+/// `--pr-author-graph` at the same document a node dispatches under, and then
+/// the graph says nothing about which dispatch this is.
+fn node_sets(labels: &Labels, controls: &NodeControls) -> Result<Vec<String>> {
+    if labels.persona.as_deref() == Some(crate::lifecycle::PR_AUTHOR_PERSONA) {
         return Ok(Vec::new());
     }
-    let mut sets = launch.map_or_else(Vec::new, |record| record.node_sets);
+    let mut sets = launched_with(labels)?.map_or_else(Vec::new, |record| record.node_sets);
     if let Some(persona) = &labels.persona {
         sets.push(format!("members.{WORKER_MEMBER}.persona={persona}"));
     }
@@ -440,10 +439,9 @@ mod tests {
     ///
     /// Neither half of the node-scope composition is a statement about it: the
     /// persona override names a member only the node-scope graph has, and
-    /// `--node-set` is forwarded to node-scope launches. Held here as well as
-    /// end to end because *both* conditions have to hold — a node whose own
-    /// persona is spelled like this one, or a run that named one document for
-    /// both purposes, is still a node dispatch and keeps its overrides.
+    /// `--node-set` is forwarded to node-scope launches. Both are dropped on the
+    /// persona alone, which is a name a plan may not claim — so this is the one
+    /// dispatch that reaches it.
     #[test]
     fn the_drafting_dispatch_composes_nothing_onto_the_graph_the_launch_named() {
         let root = std::env::temp_dir().join(format!("onepipeline-drafting-{}", crate::sys::pid()));
@@ -457,9 +455,8 @@ mod tests {
         std::fs::write(paths.launch(), record).expect("the launch record is written");
         std::env::set_var(crate::ledger::RUNS_DIR_ENV, &root);
 
-        let sets = |graph: &str, persona: &str| {
+        let sets = |persona: &str| {
             node_sets(
-                &ConfigRef(graph.into()),
                 &Labels {
                     run_id: Some("demo".into()),
                     persona: Some(persona.into()),
@@ -470,22 +467,12 @@ mod tests {
             .expect("the launch record is readable")
         };
         assert!(
-            sets("./author.yaml", crate::lifecycle::PR_AUTHOR_PERSONA).is_empty(),
+            sets(crate::lifecycle::PR_AUTHOR_PERSONA).is_empty(),
             "the drafting dispatch was given a member this graph never declared"
         );
-        // The node's own work, under each half of that condition alone.
+        // The node's own work, under the same run and the same record.
         assert_eq!(
-            sets("./node.yaml", crate::lifecycle::PR_AUTHOR_PERSONA),
-            vec![
-                "members.worker.model=m".to_string(),
-                format!(
-                    "members.worker.persona={}",
-                    crate::lifecycle::PR_AUTHOR_PERSONA
-                ),
-            ]
-        );
-        assert_eq!(
-            sets("./author.yaml", "engineer"),
+            sets("engineer"),
             vec![
                 "members.worker.model=m".to_string(),
                 "members.worker.persona=engineer".to_string(),
@@ -501,7 +488,6 @@ mod tests {
         // budget is what the launch must still carry, because a dispatch that
         // dropped it here would run to the base config's default instead.
         let sets = node_sets(
-            &ConfigRef("./graphs/node-scope.yaml".into()),
             &Labels {
                 persona: Some("engineer".into()),
                 ..Labels::default()

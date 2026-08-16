@@ -469,6 +469,22 @@ fn a_plan_the_schema_refuses_never_starts_a_run() {
                 "task":"t"}]}"#,
             "node 'publish': a lifecycle node states the title its change request opens under",
         ),
+        // The persona this crate dispatches a change request's drafting under.
+        // A node claiming it would be composed as that dispatch — the graph the
+        // operator named, and none of the node's own overrides — so the name is
+        // refused where a plan is read rather than silently dropping them.
+        (
+            "reservedpersona",
+            r#"{"schema_version":3,"tasks":[{"id":"draft","persona":"pr-author",
+                "task":"t"}]}"#,
+            "node 'draft': `pr-author` is the persona this crate dispatches",
+        ),
+        (
+            "reservedsteppersona",
+            r#"{"schema_version":3,"tasks":[{"id":"service","repo":"o/r","title":"feat: x",
+                "steps":[{"id":"draft","persona":"pr-author","task":"t"}]}]}"#,
+            "step 'draft': `pr-author` is the persona this crate dispatches",
+        ),
         // ...and a plan below it that names `body` is refused by that field's
         // name, exactly as a field no schema ever had is. Silently dropping it
         // would leave its author to find out from the published change request.
