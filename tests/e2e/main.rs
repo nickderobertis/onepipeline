@@ -22,6 +22,7 @@
 mod harness;
 
 mod boundary;
+mod cancellation;
 mod channel;
 mod concurrency;
 mod context_delivery;

@@ -205,6 +205,53 @@ pub fn session_close(token: &str) -> Result<Session> {
     onevcs::close_session(&providers(), &SessionToken(token.to_owned())).map_err(refusal)
 }
 
+/// The change request one session's work reached, when it reached one.
+///
+/// Read off the session's **own stream**, which is where `onevcs` records a
+/// change request as it opens one — `change-opened` carries the URL. That is the
+/// only source this crate may ask: which host answers for a repository, and how
+/// a change request is addressed on it, are that library's business, and a
+/// second route to the same fact here would be host knowledge regrown in the
+/// composition layer.
+///
+/// It matters because the engine is not the only thing that publishes from a
+/// session: a dispatch that runs `onevcs publish` in its own final turn opens a
+/// change request the engine's publication step never ran, and the record of it
+/// is on this stream either way.
+///
+/// `None` when nothing opened one, and equally when the stream cannot be read —
+/// the caller settles exactly as it would have, because an unreadable record is
+/// not evidence of a change nobody opened.
+pub fn change_opened_in(token: &str) -> Option<String> {
+    let opened = kind_of(onevcs::EventKind::ChangeOpened);
+    // The last one wins: a session that opened a change request, closed it, and
+    // opened another names the one it ended with.
+    events(token, None)
+        .iter()
+        .rev()
+        .find(|envelope| envelope.kind == opened)
+        .and_then(|envelope| envelope.payload.get("url"))
+        .and_then(|url| url.as_str())
+        .filter(|url| !url.is_empty())
+        .map(str::to_string)
+}
+
+/// The sessions holding one repository's workspaces, as `onevcs` reports them.
+///
+/// The same enumeration the launch interlock reads, asked of one repository:
+/// what a node waiting to dispatch into an occupied workspace is waiting for.
+/// Empty where nothing holds it, and equally where the question cannot be
+/// answered — a view says what it can see, and never reports an unread answer as
+/// an empty one, which is why the refusal is printed rather than swallowed.
+pub fn holders_of(repo: &str) -> Vec<onevcs::SessionHolder> {
+    onevcs::session_holders(repo)
+        .map_err(|error| {
+            eprintln!("onepipeline: cannot read the session holders of {repo}: {error}");
+            error
+        })
+        .unwrap_or_default()
+}
+
 /// One session's stream, read from the start of what this reader has not seen.
 ///
 /// `None` when the stream cannot be opened or a line of it cannot be read. That

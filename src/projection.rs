@@ -261,11 +261,17 @@ impl RunState {
         self.stop != StopState::NotStopped
     }
 
-    /// The frontier an edit is judged against.
+    /// The frontier an edit is judged against, as far as the *ledger* says.
+    ///
+    /// Which dispatches are still running is not in it, because the journal
+    /// cannot say: a dispatch is a live process, and only the loop driving it
+    /// knows. That half is filled in by the reconciler, which is the caller that
+    /// has it — see [`Frontier::in_flight`].
     pub fn frontier(&self) -> Frontier {
         Frontier {
             recorded: self.recorded.clone(),
             attestations: self.attestations.clone(),
+            in_flight: BTreeMap::new(),
         }
     }
 

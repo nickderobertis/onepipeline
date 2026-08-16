@@ -259,15 +259,22 @@ impl RunView {
     /// reporting: every node can be done while every change is sitting in a pull
     /// request nobody merged. So the count of what has not landed rides the same
     /// line, and is absent — rather than a zero — when there is nothing to say.
+    ///
+    /// Dated, for the reason the per-node phrase is: it counts what each
+    /// settlement observed, and nothing has looked since — a count that read as
+    /// the state of things now would say a merged change had reached nobody.
+    /// Divergence 33 in
+    /// [the divergence record](../../../docs/contract-divergences.md) is why
+    /// nothing can look.
     pub fn summary(&self) -> String {
         let statuses = self.state.statuses();
         let done = statuses
             .values()
             .filter(|status| **status == NodeStatus::Done)
             .count();
-        let unlanded = match unlanded_nodes(&self.state).len() {
+        let unlanded = match unlanded_nodes(self).len() {
             0 => String::new(),
-            count => format!(", {count} not landed"),
+            count => format!(", {count} not landed as of settlement"),
         };
         format!("{done}/{} done{unlanded}", statuses.len())
     }
@@ -514,6 +521,21 @@ pub fn status(survey: &Survey) -> String {
             }
             out.push('\n');
         }
+        // A node that is ready and has not started. On its own that reads as
+        // "about to go", which is what a node waiting on an occupied workspace
+        // looks like for as long as it waits — one sat `ready` for forty minutes
+        // while a supervisor looked for a wedge that was not there. So the two
+        // are separate lines: what it is waiting for, or that it is waiting for
+        // nothing but a slot.
+        for (id, node_status) in &statuses {
+            if *node_status != NodeStatus::Ready {
+                continue;
+            }
+            match held_workspace(&view.state, id) {
+                Some(holder) => out.push_str(&format!("  {id}: ready — {holder}\n")),
+                None => out.push_str(&format!("  {id}: ready — queued for dispatch\n")),
+            }
+        }
         // What refused, for the nodes that failed. A failed node otherwise reads
         // the same whether its own gate failed or an identity chain ran out, and
         // the two call for opposite actions from whoever is reading this.
@@ -530,12 +552,14 @@ pub fn status(survey: &Survey) -> String {
         // a run go quiet and took that for a run whose work had landed. Named
         // here rather than left to `results`, because deciding there is nothing
         // left to do is a decision made from this view.
-        let unlanded = unlanded_nodes(&view.state);
+        let unlanded = unlanded_nodes(view);
         if !unlanded.is_empty() {
             out.push_str(&format!(
-                "  {} node(s) settled without landing: {}\n",
+                "  {} node(s) settled without landing: {} — as each settled, not as of now; \
+                 `results {}` names the change to open\n",
                 unlanded.len(),
-                unlanded.join(", ")
+                unlanded.join(", "),
+                view.paths.run
             ));
         }
         if let Some(health) = crate::agentgraph::health() {
@@ -616,19 +640,60 @@ fn refusal_phrase(refusal: &Refusal) -> String {
     ))
 }
 
-/// The nodes this run published a change for that had not reached its base, in
-/// id order.
+/// The nodes whose change had not reached its base when they settled, in id
+/// order.
 ///
 /// Read off what each settlement observed — never off a node's repository or its
 /// policy — so a node absent from this list is one that either landed or had no
 /// change to land, and never one nobody looked at.
-fn unlanded_nodes(state: &RunState) -> Vec<&str> {
-    state
+///
+/// It is deliberately not called what has *not landed now*: nothing here has
+/// looked since, and every line rendered from this list says so — see the
+/// per-node phrase below, and divergence 33 in
+/// [the divergence record](../../../docs/contract-divergences.md) for why
+/// nothing can look.
+fn unlanded_nodes(view: &RunView) -> Vec<String> {
+    view.state
         .landings
         .iter()
         .filter(|(_, landing)| **landing == Landing::Unlanded)
-        .map(|(node, _)| node.as_str())
+        .map(|(node, _)| node.clone())
         .collect()
+}
+
+/// What a ready node's own workspace is occupied by, when something holds it.
+///
+/// A lifecycle node cannot start until it can open a `onevcs` session over its
+/// repository, and a session is held under an occupancy lease — so a ready node
+/// whose repository somebody is already in is waiting on that lease, and waits
+/// silently. The commonest holder is the node's *own* previous dispatch, which
+/// is the state right after a cancel: the node is back on the frontier and the
+/// dispatch it cancelled has not let go.
+///
+/// `None` for a node with no repository to wait on, and for one whose repository
+/// nothing holds — both of which are a node waiting for nothing but a slot. The
+/// holders are `onevcs`'s own verdict, liveness included, because a pid alone
+/// cannot say whether a lease is real.
+fn held_workspace(state: &RunState, id: &str) -> Option<String> {
+    let repo = state.graph.get(id)?.repo.as_deref()?;
+    let held: Vec<String> = crate::vcs::holders_of(repo)
+        .into_iter()
+        .filter(|holder| {
+            holder.state == onevcs::Lifecycle::Open && holder.liveness == onevcs::Liveness::Live
+        })
+        .map(|holder| {
+            format!(
+                "session '{}' (owner_pid {})",
+                holder.token.0, holder.owner_pid
+            )
+        })
+        .collect();
+    (!held.is_empty()).then(|| {
+        format!(
+            "waiting for the '{repo}' workspace, held by {}",
+            held.join(", ")
+        )
+    })
 }
 
 /// What one in-flight dispatch is doing now, on the line that reports it.
@@ -896,14 +961,37 @@ fn summarize(event: &Envelope) -> String {
 
 /// How a landing reads on a rendered line.
 ///
-/// A phrase rather than the bare word, and it says *when* it was true: the run
-/// observed this at the moment the node settled and has not looked since, which
-/// is deliberate — a change request a person owns is not something a run blocks
-/// or polls on. A reader who wants today's answer opens the change.
-fn landed_phrase(landing: Landing) -> &'static str {
+/// A phrase rather than the bare word, and it says **when** it was true, because
+/// only one of the two answers stays true. A change observed on its base has
+/// reached it and a base does not stop carrying what it carries; a change that
+/// had not reached it is an observation of a moment, and the moment passes — a
+/// node that settled `done (queued)` was still reporting the settlement's answer
+/// hours after its change had merged, and a supervisor read that as work nobody
+/// had landed.
+///
+/// So the unlanded phrase is dated, and says nothing has looked since. Nothing
+/// here *can* look: a change request lives on the repository's host, `onevcs`
+/// owns every route to one, and the read that would answer this is not on that
+/// library's surface — recorded as a proposal to it in
+/// [`docs/contract-divergences.md`](../../../docs/contract-divergences.md).
+/// Until it is, a dated claim beside the change's own URL is the honest answer,
+/// and asserting the state of things now would not be.
+fn landed_phrase(landing: Landing, settled_at: Option<u64>) -> String {
+    let ago = match settled_at {
+        Some(at) => format!(
+            " {} ago",
+            crate::telemetry::duration(sys::now_millis().saturating_sub(at))
+        ),
+        // A settlement whose moment the ledger does not carry: the claim is
+        // still the settlement's, and saying *when* would be inventing one.
+        None => String::new(),
+    };
     match landing {
-        Landing::Landed => "landed on its base",
-        Landing::Unlanded => "NOT landed: the change had not reached its base when this settled",
+        Landing::Landed => "landed on its base".to_string(),
+        Landing::Unlanded => format!(
+            "NOT landed: the change had not reached its base when this settled{ago}, and \
+             nothing has re-read it since — open the change for where it is now"
+        ),
     }
 }
 
@@ -934,7 +1022,8 @@ pub fn results(view: &RunView) -> String {
         // open and nothing where it merged is reading the absence, which is what
         // every other node's absence already means.
         if let Some(landing) = view.state.landings.get(&node.id) {
-            out.push_str(&format!(" — {}", landed_phrase(*landing)));
+            let settled_at = view.state.settled_at.get(&node.id).copied();
+            out.push_str(&format!(" — {}", landed_phrase(*landing, settled_at)));
         }
         if status == NodeStatus::Running && view.state.stop_recorded() {
             out.push_str(&format!(" — {}", became_of_the_worker(&view.state)));

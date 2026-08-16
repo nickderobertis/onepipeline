@@ -1165,3 +1165,64 @@ fn a_view_of_a_run_with_no_events_still_renders() {
     }
     world.release("driver.go");
 }
+
+/// A node that is ready and *waiting on a workspace* is told apart from one
+/// merely queued behind a slot.
+///
+/// Both read as `ready`, and on a status view that says nothing about either
+/// they are the same line of silence — which is how a node sat waiting on the
+/// occupancy lease its own repository was under for forty minutes while a
+/// supervisor looked for a wedge that did not exist. Two lifecycle nodes on one
+/// repository at `concurrency: 1` is that state exactly: the second cannot open
+/// a session until the first lets go of the workspace.
+#[test]
+fn a_ready_node_waiting_on_a_held_workspace_is_told_apart_from_one_merely_queued() {
+    let world = World::new("views-ready-held");
+    world.repository("local-direct", &["true"]);
+    world.script("service.wait", "hold");
+    // One at a time, so the second lifecycle node stays ready while the first
+    // holds the repository's workspace open.
+    let mut plan = plan_of(
+        "readyheld",
+        vec![
+            lifecycle("service", &[]),
+            lifecycle("service-two", &[]),
+            agent("elsewhere", &[]),
+        ],
+    );
+    plan["concurrency"] = serde_json::json!(1);
+    // The second node works on the same repository as the first; the third has
+    // no repository at all and is the control.
+    plan["tasks"][1]["repo"] = serde_json::json!("service");
+    let path = world.plan("readyheld", &plan);
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+    world.until("the first node's session to be recorded", |world| {
+        !world.events_of("readyheld", "session-opened").is_empty()
+    });
+
+    let status = world.run(&["status", "readyheld"]);
+    status.exited(0);
+    assert!(
+        status
+            .stdout
+            .lines()
+            .any(|line| line.contains("service-two: ready")
+                && line.contains("waiting for the 'service' workspace")
+                && line.contains("owner_pid")),
+        "a node waiting on a workspace another dispatch holds reads as one merely \
+         queued:\n{}",
+        status.stdout
+    );
+    assert!(
+        status
+            .stdout
+            .lines()
+            .any(|line| line.contains("elsewhere: ready — queued for dispatch")),
+        "a node waiting for nothing but a slot does not say so:\n{}",
+        status.stdout
+    );
+
+    world.release("service.go");
+}

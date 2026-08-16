@@ -23,11 +23,12 @@ use serde_json::json;
 
 use crate::agentgraph::{self, Interrupted, TurnAddress};
 use crate::channel::{ChannelState, Command, CommandOutcome, Deliver, Surface};
-use crate::edits;
+use crate::edits::{self, Frontier};
 use crate::error::{Error, Result};
 use crate::event::{Envelope, Labels};
 use crate::executor::{
-    CancelMode, CancellationToken, DispatchHandle, DispatchRequest, Executor, WorkspaceSpec,
+    CancelMode, CancellationToken, DispatchHandle, DispatchOutcome, DispatchRequest, Executor,
+    WorkspaceSpec,
 };
 use crate::graph::{self, Graph, GraphState, Landing, NodeStatus};
 use crate::journal::{self, Journal};
@@ -83,6 +84,29 @@ pub const DEFAULT_BOUNDARY_BACKOFF_SECONDS: u64 = 5;
 
 /// The ceiling that backoff doubles up to.
 const BOUNDARY_BACKOFF_CEILING: Duration = Duration::from_secs(120);
+
+/// The environment variable setting how long a cancelled dispatch has to stop
+/// itself before it is torn down.
+pub const CANCEL_GRACE_ENV: &str = "ONEPIPELINE_CANCEL_GRACE_SECONDS";
+
+/// How long a cancelled dispatch has to stop itself before the teardown reaps
+/// it.
+///
+/// Long enough for a turn that took the redirection to finish the file it is
+/// writing and commit it — which is the whole reason for asking rather than
+/// killing — and short enough that a supervisor who cancelled a runaway is not
+/// still watching it commit.
+pub const DEFAULT_CANCEL_GRACE_SECONDS: u64 = 300;
+
+/// What a cancelled dispatch's live turn is asked to do instead.
+///
+/// Three things, in the order they have to happen: stop taking on work, put what
+/// is already done somewhere it survives, and end. A redirection that said only
+/// "stop" would lose whatever the turn had not committed, which is the work a
+/// cooperative cancel exists to keep.
+pub const CANCEL_INPUT: &str = "Stop this task now. Do not start any new work, and do not begin \
+     another file, command, or tool call. Commit anything you have not \
+     committed yet, then end your turn.";
 
 /// How often the reconcile loop wakes to drain edits and re-derive the frontier.
 const POLL: Duration = Duration::from_millis(25);
@@ -306,8 +330,49 @@ pub(crate) enum Message {
     /// executor is being asked for the node a second time. The attempt number
     /// rides the payload, so a reader can tell a first try from a recovery.
     Redispatched(Box<Redispatch>),
+    /// A cancellation reached a dispatch, or ran out of patience with one.
+    Cancelling(Box<Cancelling>),
     /// The dispatch settled.
     Settled(Box<Settlement>),
+}
+
+/// One transition of a cancellation, on its way to the planner.
+///
+/// Sent rather than written, because the thread that cancels a dispatch is not
+/// the run's single writer: the loop is, and it is what turns this into a
+/// surface the planner reads.
+pub(crate) struct Cancelling {
+    /// The node whose dispatch it is.
+    pub node: String,
+    /// Which transition this is.
+    pub phase: CancelPhase,
+    /// What happened, in the words of whatever answered.
+    pub detail: String,
+}
+
+/// The two transitions of a cancellation a supervisor has to be able to tell
+/// apart.
+///
+/// The follow-up differs. A turn that stopped when it was asked ended on its own
+/// terms and committed what it had; one the deadline reaped stopped wherever it
+/// was, and whatever it had not committed is gone. A run that reported only "the
+/// node was cancelled" left a supervisor unable to tell which had happened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CancelPhase {
+    /// The interrupt was asked for, and this is what the delivery said.
+    Interrupted,
+    /// The grace period expired and the teardown reaped the dispatch.
+    Killed,
+}
+
+impl CancelPhase {
+    /// The surface kind this transition is raised under.
+    fn kind(self) -> &'static str {
+        match self {
+            Self::Interrupted => "dispatch-interrupted",
+            Self::Killed => "dispatch-killed",
+        }
+    }
 }
 
 /// One re-asked dispatch, as the journal records it.
@@ -337,6 +402,16 @@ struct Dispatch {
     /// said. `None` until then, which is the same answer as a turn there is no
     /// lever for: a `context` note has nothing to be delivered into.
     control: Option<TurnAddress>,
+}
+
+impl Dispatch {
+    /// This dispatch as an edit judging the node has to see it.
+    fn live(&self) -> edits::LiveDispatch {
+        edits::LiveDispatch {
+            graph_run: self.control.as_ref().map(|at| at.run().to_string()),
+            running_for_seconds: self.started.elapsed().as_secs(),
+        }
+    }
 }
 
 /// Take the run's ownership lock, or report who holds it.
@@ -490,6 +565,11 @@ fn converge(
                     ("reason", json!(bounded(&again.reason))),
                 ]),
             )?,
+            // A cancellation that reached a live turn, and one that ran out of
+            // patience and reaped it. Surfaced rather than only journalled
+            // because a planner reading its own updates is who decides what to
+            // do next, and what to do next is not the same for the two.
+            Ok(Message::Cancelling(step)) => raise(paths, journal, cancelling_surface(&step))?,
             Ok(Message::Settled(settlement)) => {
                 in_flight.remove(&settlement.node);
                 settle(paths, journal, &settlement)?;
@@ -890,7 +970,17 @@ fn compile_and_deliver(
     command: &Command,
     in_flight: &BTreeMap<String, Dispatch>,
 ) -> Result<Vec<edits::Operation>> {
-    let frontier = state.frontier();
+    // The loop's own frontier, which is the ledger's plus what only this process
+    // knows: which dispatches are still running. A node the journal records as
+    // parked can still have one, and an edit judged without that is the edit
+    // that returns a node to a workspace its own predecessor is holding.
+    let frontier = Frontier {
+        in_flight: in_flight
+            .iter()
+            .map(|(id, dispatch)| (id.clone(), dispatch.live()))
+            .collect(),
+        ..state.frontier()
+    };
     let mut candidate = state.graph.clone();
     let operations = edits::compile(&mut candidate, &frontier, command)?;
     let Command::Context { id, note, deliver } = command else {
@@ -1292,26 +1382,95 @@ pub(crate) fn attempt(
 ///
 /// Reports whether the dispatch said anything at all, which is what decides
 /// whether asking again could produce a different answer.
+///
+/// It is also where a cancellation becomes something that *stops* the dispatch.
+/// Raising the token alone stops nothing — no agent process reads it — so a
+/// cancelled dispatch is asked, through the lever `oneagentgraph` already
+/// exposes, to commit what it has and end its turn, and is torn down if it has
+/// not exited by the deadline.
 pub(crate) fn drain(
     handle: &mut dyn DispatchHandle,
     tx: &Sender<Message>,
     node: &str,
     cancel: &CancellationToken,
 ) -> Drained {
-    let mut cancelled = false;
+    let grace = Duration::from_secs(cancel_grace_seconds());
+    // The stream is read on a thread of its own so this loop keeps a clock of
+    // its own. A dispatch that has gone quiet is exactly the one a supervisor
+    // cancels, and a drain blocked on the next envelope would notice the
+    // cancellation only if the dispatch spoke again — which is how a cancelled
+    // node kept committing for forty-five minutes.
+    let (relayed, arriving) = mpsc::channel();
+    let events = handle.events();
+    // Not waited on: the channel closing is what says the stream ended, and a
+    // thread that could not be started closes it immediately — which is a
+    // dispatch relayed as silent rather than a drain that hangs.
+    let _ = std::thread::Builder::new()
+        .name(format!("relay-{node}"))
+        .spawn(move || {
+            for envelope in events {
+                if relayed.send(envelope).is_err() {
+                    return;
+                }
+            }
+        });
+
     let mut spoke = false;
-    for envelope in handle.events() {
-        if let Ok(envelope) = envelope {
-            spoke = true;
-            let _ = tx.send(Message::Event(Box::new(envelope)));
+    // Where this dispatch's turns can be reached, learned from the stream: the
+    // graph run and member are `oneagentgraph`'s own labels and this crate has
+    // no second way to know either. Every member that has named a turn is asked,
+    // because which of them still has a live one is the sibling's answer rather
+    // than something to infer here.
+    let mut addresses: Vec<TurnAddress> = Vec::new();
+    let mut asked_at: Option<Instant> = None;
+    let mut killed = false;
+    loop {
+        match arriving.recv_timeout(POLL) {
+            Ok(Ok(envelope)) => {
+                spoke = true;
+                if let Some(address) = addressed_by(&envelope) {
+                    if !addresses.contains(&address) {
+                        addresses.push(address);
+                    }
+                }
+                let _ = tx.send(Message::Event(Box::new(envelope)));
+            }
+            // A line this build cannot read, skipped exactly as it always was.
+            Ok(Err(_)) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
-        if !cancelled && cancel.is_cancelled() {
-            cancelled = true;
-            // Cooperative: the dispatch is asked to stop and preserve its work,
-            // which killing the process would not.
-            handle.cancel(CancelMode::Cooperative);
+        match asked_at {
+            None if cancel.is_cancelled() => {
+                // Cooperative: the dispatch is asked to stop and preserve its
+                // work, which killing the process would not.
+                handle.cancel(CancelMode::Cooperative);
+                let said = interrupt_turns(tx, node, &addresses, grace);
+                report(tx, node, CancelPhase::Interrupted, said);
+                asked_at = Some(Instant::now());
+            }
+            // It was asked and it is still here. The work it has committed is
+            // safe on its branch; whatever it has not is what the ask was for,
+            // and the deadline is what stops a dispatch that ignored it.
+            Some(asked) if !killed && asked.elapsed() >= grace => {
+                killed = true;
+                handle.cancel(CancelMode::Kill);
+                report(
+                    tx,
+                    node,
+                    CancelPhase::Killed,
+                    format!(
+                        "the dispatch had not exited {}s after it was asked to stop, so it \
+                         was killed and its process tree reaped; anything its turn had not \
+                         committed is gone",
+                        grace.as_secs()
+                    ),
+                );
+            }
+            _ => {}
         }
     }
+
     let waited = handle.wait();
     let (session, branch) = match &waited {
         Ok(outcome) => (outcome.session.clone(), outcome.branch.clone()),
@@ -1321,11 +1480,15 @@ pub(crate) fn drain(
         Ok(outcome) if outcome.succeeded && !cancel.is_cancelled() => {
             Settlement::plain(node, NodeStatus::Done, None)
         }
-        Ok(_) if cancel.is_cancelled() => Settlement::plain(node, NodeStatus::Cancelled, None),
-        Ok(outcome) => Settlement {
-            detail: (!outcome.detail.is_empty()).then_some(outcome.detail),
-            ..failed(node, "task-failed")
+        Ok(_) if cancel.is_cancelled() => Settlement {
+            // How it stopped, on the settlement itself: the surfaces say it as
+            // it happens, and this is what a reader of the settled node sees
+            // afterwards. Absent where the cancellation arrived after the
+            // dispatch had already ended, which asked nothing of anybody.
+            detail: asked_at.map(|_| stopped_how(killed, grace)),
+            ..Settlement::plain(node, NodeStatus::Cancelled, None)
         },
+        Ok(outcome) => failed_task(node, &outcome, session.as_deref()),
         Err(error) => Settlement {
             detail: Some(error.to_string()),
             ..failed(node, "infrastructure-failure")
@@ -1341,6 +1504,141 @@ pub(crate) fn drain(
         session,
         branch,
     }
+}
+
+/// Ask every turn this dispatch has named to stop, and say what each answered.
+///
+/// None of the three answers is a failure. A member on a harness with no
+/// out-of-band control, a turn that was already over, and a redirection the
+/// sibling would not take are all *facts* about the lever, and the deadline
+/// applies either way — so each is recorded and the cancellation carries on.
+fn interrupt_turns(
+    tx: &Sender<Message>,
+    node: &str,
+    addresses: &[TurnAddress],
+    grace: Duration,
+) -> String {
+    if addresses.is_empty() {
+        return format!(
+            "nothing of this dispatch has named a turn to interrupt, so there was nothing to \
+             ask; it is killed in {}s if it has not exited by then",
+            grace.as_secs()
+        );
+    }
+    let mut answers = Vec::new();
+    for address in addresses {
+        let interrupt = agentgraph::interrupt(address, CANCEL_INPUT);
+        // Whatever it answered, the sibling published an envelope saying the
+        // lever was pulled and what came of it. It belongs in the merged store
+        // like any other, stamped with the node it is about — which its producer
+        // could not know.
+        for mut event in interrupt.events {
+            if event.labels.node.is_none() {
+                event.labels.node = Some(node.to_string());
+            }
+            let _ = tx.send(Message::Event(Box::new(event)));
+        }
+        answers.push(format!(
+            "{}: {}",
+            address.member(),
+            answered(&interrupt.outcome)
+        ));
+    }
+    format!(
+        "asked {} turn(s) to stop, commit, and end without starting new work — {}; the \
+         dispatch is killed in {}s if it has not exited by then",
+        addresses.len(),
+        answers.join("; "),
+        grace.as_secs()
+    )
+}
+
+/// What one interrupt answered, as a planner reads it.
+fn answered(outcome: &Interrupted) -> String {
+    match outcome {
+        Interrupted::Delivered => "the running turn took the redirection".to_string(),
+        Interrupted::NoTurn(reason) => format!("no turn to redirect ({reason})"),
+        Interrupted::Failed(reason) => format!("the lever failed ({reason})"),
+    }
+}
+
+/// How a cancelled dispatch ended, on its own settlement.
+fn stopped_how(killed: bool, grace: Duration) -> String {
+    if killed {
+        format!(
+            "the dispatch was asked to stop and had not exited {}s later, so it was killed",
+            grace.as_secs()
+        )
+    } else {
+        "the dispatch stopped after its turn was asked to commit and end".to_string()
+    }
+}
+
+/// Tell the run's single writer about one transition of a cancellation.
+fn report(tx: &Sender<Message>, node: &str, phase: CancelPhase, detail: String) {
+    let _ = tx.send(Message::Cancelling(Box::new(Cancelling {
+        node: node.to_string(),
+        phase,
+        detail,
+    })));
+}
+
+/// The surface one transition of a cancellation is raised as.
+///
+/// Non-blocking: the planner asked for this, so holding its dependents back to
+/// report it would pause a run over a decision already made. It is raised
+/// against the node, so it reaches whoever is reading that workstream.
+fn cancelling_surface(step: &Cancelling) -> Surface {
+    Surface {
+        id: 0,
+        kind: step.phase.kind().into(),
+        message: format!("{}: {}", step.phase.kind(), bounded(&step.detail)),
+        source: crate::channel::source::RECONCILER.into(),
+        blocking: false,
+        queued_at: sys::now_millis(),
+        workstream: Some(step.node.clone()),
+    }
+}
+
+/// How a dispatch that failed its own verdict settles.
+///
+/// The agent-graph outcome is not the whole answer. A dispatch can fail its
+/// judge having *already* opened a change request from the session it worked in
+/// — `onevcs publish` in its own final turn — and a node reported `task-failed`
+/// over a change that is open for review sends a planner to re-run work that is
+/// waiting to be read. So the session is asked what became of its branch, and a
+/// node that left a change behind settles under an outcome of its own, carrying
+/// the URL a reviewer opens.
+///
+/// Every unknown degrades to the plain failure this arm always produced: a
+/// dispatch with no session, a stream that cannot be read, and one that records
+/// no change request are all answered exactly as before.
+fn failed_task(node: &str, outcome: &DispatchOutcome, session: Option<&str>) -> Settlement {
+    let detail = (!outcome.detail.is_empty()).then(|| outcome.detail.clone());
+    let Some(url) = session.and_then(crate::vcs::change_opened_in) else {
+        return Settlement {
+            detail,
+            ..failed(node, "task-failed")
+        };
+    };
+    Settlement {
+        detail,
+        change_url: Some(url),
+        ..failed(node, "task-failed-change-open")
+    }
+}
+
+/// How long a cancelled dispatch has to stop itself before it is torn down.
+///
+/// An unusable value falls back to the default rather than disabling the
+/// deadline it configures — or, worse, making it zero, which would turn every
+/// cooperative cancel into an immediate kill.
+fn cancel_grace_seconds() -> u64 {
+    std::env::var(CANCEL_GRACE_ENV)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|seconds| *seconds > 0)
+        .unwrap_or(DEFAULT_CANCEL_GRACE_SECONDS)
 }
 
 /// How many attempts a dispatch that produced nothing gets.

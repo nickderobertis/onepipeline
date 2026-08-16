@@ -134,6 +134,46 @@ pub struct Frontier {
     pub recorded: BTreeMap<String, NodeStatus>,
     /// The human actions already attested.
     pub attestations: BTreeSet<String>,
+    /// The dispatches the loop still has running, by node.
+    ///
+    /// Not derivable from [`recorded`](Self::recorded), which is the whole
+    /// reason it is carried: a `cancel` parks the node the moment it is
+    /// committed and the dispatch it cancelled goes on running until it stops
+    /// itself, so the journal says `parked` while a process still holds the
+    /// node's workspace. Only the loop knows this, so only the loop fills it in;
+    /// a caller judging an edit from the ledger alone leaves it empty and the
+    /// reconciler is where the refusal lands.
+    pub in_flight: BTreeMap<String, LiveDispatch>,
+}
+
+/// One dispatch the loop still has in flight, as an edit sees it.
+///
+/// Enough to *name* the thing an edit has to wait for: a refusal that said only
+/// "it is still running" leaves a supervisor looking for something to look at.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LiveDispatch {
+    /// The `oneagentgraph` run carrying it, once its stream has named one.
+    /// Absent before the dispatch has said anything, which is also when there is
+    /// nothing to address.
+    pub graph_run: Option<String>,
+    /// How long it has been running.
+    pub running_for_seconds: u64,
+}
+
+impl LiveDispatch {
+    /// The dispatch as a refusal names it.
+    fn named(&self) -> String {
+        let run = match &self.graph_run {
+            Some(run) => format!("graph run '{run}'"),
+            // Nothing has named a turn yet, which is a dispatch that has started
+            // and not spoken rather than no dispatch at all.
+            None => "a graph run it has not yet named".to_string(),
+        };
+        format!(
+            "{run}, running for {}",
+            crate::telemetry::duration(self.running_for_seconds * 1_000)
+        )
+    }
 }
 
 /// Validate one command against the live frontier and compile its mutations.
@@ -194,7 +234,7 @@ fn compile_into(
         Command::Reparent { id, deps } => compile_reparent(graph, frontier, id, deps),
         Command::Retry { id, node } => compile_retry(graph, frontier, id, node),
         Command::Cancel { id } => compile_cancel(graph, frontier, id),
-        Command::Requeue { id, amend } => compile_requeue(graph, id, amend.as_ref()),
+        Command::Requeue { id, amend } => compile_requeue(graph, frontier, id, amend.as_ref()),
         Command::Attest { reference } => compile_attest(frontier, reference),
         Command::Complete { reason } => Ok(vec![Operation::CompletionRequested {
             reason: reason.clone(),
@@ -505,6 +545,7 @@ fn compile_cancel(graph: &mut Graph, frontier: &Frontier, id: &str) -> Result<Ve
 
 fn compile_requeue(
     graph: &mut Graph,
+    frontier: &Frontier,
     id: &str,
     amend: Option<&Map<String, Value>>,
 ) -> Result<Vec<Operation>> {
@@ -513,6 +554,20 @@ fn compile_requeue(
     };
     if !node.parked {
         return Err(refuse(format!("requeue: node '{id}' is not parked")));
+    }
+    // Parked is not the same as stopped. A `cancel` parks the node and *asks*
+    // its dispatch to end; until that dispatch settles it still holds the
+    // node's workspace, so a requeue accepted here returns the node to the
+    // frontier where it waits on the occupancy lease its own predecessor holds,
+    // with nothing said about why. That is the state right after every cancel,
+    // and it is refused rather than accepted-and-stuck.
+    if let Some(live) = frontier.in_flight.get(id) {
+        return Err(refuse(format!(
+            "requeue: node '{id}' still has a dispatch in flight ({}); a cancel asks that \
+             dispatch to stop rather than stopping it, so wait for the node to settle and \
+             requeue it then",
+            live.named()
+        )));
     }
     // `id` names the node being requeued and `deps` is `reparent`'s to change;
     // letting an amendment rewrite either would make one op silently do the work
@@ -725,6 +780,7 @@ mod tests {
                 .map(|(id, status)| ((*id).to_string(), *status))
                 .collect(),
             attestations: BTreeSet::new(),
+            in_flight: BTreeMap::new(),
         }
     }
 

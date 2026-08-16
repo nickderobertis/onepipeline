@@ -71,6 +71,17 @@ pub const USAGE_ERROR: i32 = 2;
 /// test would fail on the elapsed time rather than passing a little slower.
 pub const STARTUP_TIMEOUT_ENV: &str = "ONEPIPELINE_STARTUP_TIMEOUT_SECONDS";
 
+/// The variable that moves the deadline a cancelled dispatch is torn down at.
+///
+/// The suite's own copy of a name the crate declares, for the same reason
+/// [`STARTUP_TIMEOUT_ENV`] is one: the module declaring it is private, and this
+/// crate publishes the contract's surface and nothing else. What proves the copy
+/// is still the name the binary reads is
+/// `a_dispatch_that_ignores_the_ask_is_killed_at_the_deadline` — renamed in the
+/// crate and not here, the override would be inert, the deadline would be the
+/// five-minute default, and that journey would fail on its own clock.
+pub const CANCEL_GRACE_ENV: &str = "ONEPIPELINE_CANCEL_GRACE_SECONDS";
+
 /// How long a launch given a one-second backstop may take before the override
 /// has to be presumed inert.
 ///

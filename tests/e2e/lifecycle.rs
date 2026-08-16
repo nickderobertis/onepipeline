@@ -1709,3 +1709,176 @@ fn a_continuation_skips_the_steps_the_preserved_branch_already_carries() {
         "the continuation did not re-run the step that failed: {dispatched:?}"
     );
 }
+
+/// A dispatch that opened a change request and *then* failed its own verdict
+/// settles as its own outcome, carrying the change.
+///
+/// The engine's publication step deliberately does not run for a step that did
+/// not settle `done`, so nothing this crate did opened this change: the worker
+/// ran `onevcs publish` in its own final turn, which is the incident. Reported
+/// as a plain `task-failed`, it sent a planner to re-run work that had already
+/// merged and released — the two call for opposite actions, so they are two
+/// outcomes.
+#[test]
+fn a_dispatch_that_failed_after_opening_a_change_settles_carrying_that_change() {
+    let world = World::new("lifecycle-failed-open");
+    // A policy that opens a change request and leaves it open, which is what the
+    // worker's own publication reaches.
+    world.repository("change-open", &["true"]);
+    world.script("service.work", "the work its judge would not pass\n");
+    world.script(
+        "service.publishes",
+        "chore: the change the dispatch opened itself",
+    );
+    world.script("service.fail", "1");
+    let run = settle(&world, "failedopen", vec![lifecycle("service", &[])]);
+
+    // The worker really reached that sibling: this is the real `onevcs`, over
+    // real git, opening a real change request through the host stand-in.
+    assert!(
+        world.was_invoked("onevcs", &["publish"]),
+        "the dispatch never published its own branch: {:?}",
+        world.invocations()
+    );
+    let opened = world
+        .journal(&run)
+        .into_iter()
+        .find(|event| event["kind"] == "change-opened")
+        .unwrap_or_else(|| panic!("no change request was opened\n{}", why(&world, &run)));
+    let url = opened["payload"]["url"]
+        .as_str()
+        .expect("the change request names where it is read")
+        .to_owned();
+
+    let settled = world
+        .events_of(&run, "node-settled")
+        .into_iter()
+        .find(|event| event["labels"]["node"] == "service")
+        .unwrap_or_else(|| panic!("the node never settled\n{}", why(&world, &run)));
+    assert_eq!(settled["payload"]["status"], "failed", "{settled}");
+    assert_eq!(
+        settled["payload"]["outcome"], "task-failed-change-open",
+        "a failure with an open change request settled as a plain task failure: {settled}"
+    );
+    assert_eq!(
+        settled["payload"]["change_url"], url,
+        "the settlement does not carry the change a reviewer opens: {settled}"
+    );
+
+    // And every view a planner decides from carries it, so "review the change"
+    // is reachable without reading the merged stream by hand.
+    let node = world.run_json(&run, "result.json")["nodes"][0].clone();
+    assert_eq!(node["status"], "failed", "{node}");
+    assert_eq!(node["change_url"], url, "{node}");
+    world
+        .run(&["results", &run])
+        .exited(0)
+        .out_has("task-failed-change-open")
+        .out_has(&url);
+}
+
+/// The same failure with nothing published settles exactly as it always did.
+///
+/// The pair is the point: an outcome that is *distinct* is only distinct if the
+/// ordinary case still reads the way it did, and a lookup that answered the same
+/// way for both would have qualified every failure in the run.
+#[test]
+fn a_dispatch_that_failed_with_nothing_published_settles_as_a_plain_task_failure() {
+    let world = World::new("lifecycle-failed-plain");
+    world.repository("change-open", &["true"]);
+    world.script("service.work", "the work its judge would not pass\n");
+    world.script("service.fail", "1");
+    let run = settle(&world, "failedplain", vec![lifecycle("service", &[])]);
+
+    assert!(
+        !world.was_invoked("onevcs", &["publish"]),
+        "this journey's worker published something: {:?}",
+        world.invocations()
+    );
+    let settled = world
+        .events_of(&run, "node-settled")
+        .into_iter()
+        .find(|event| event["labels"]["node"] == "service")
+        .unwrap_or_else(|| panic!("the node never settled\n{}", why(&world, &run)));
+    assert_eq!(settled["payload"]["status"], "failed", "{settled}");
+    assert_eq!(
+        settled["payload"]["outcome"], "task-failed",
+        "a failure with nothing published was qualified anyway: {settled}"
+    );
+    assert!(
+        settled["payload"]["change_url"].is_null(),
+        "a failure with nothing published carries a change request: {settled}"
+    );
+}
+
+/// A change that has merged since the node settled is not reported as work
+/// nobody landed.
+///
+/// The settlement is an observation of a moment: the host was holding this
+/// change when the node settled, and the run neither blocks nor polls for a
+/// merge somebody else owns. Hours later that snapshot was still being rendered
+/// as the state of things now, and `just runs` reported a change that had merged
+/// and released as one that had reached nobody.
+///
+/// So every line that carries the count says *when* it was true and points at
+/// the change. What it does not say is that the change is still open, because
+/// nothing here has looked: a change request lives on the repository's host,
+/// `onevcs` owns every route to one, and the read that would answer this is not
+/// on that library's surface — the proposal is recorded in
+/// `docs/contract-divergences.md`.
+#[test]
+fn a_change_that_merged_after_settlement_is_reported_as_of_settlement_not_as_now() {
+    let world = World::new("lifecycle-landing-stale");
+    // The host is asked to land it and is holding it, so the node settles with
+    // its change unlanded — the state the incident started from.
+    let repository = world.repository("change-auto", &["true"]);
+    world.script("service.work", "the change that merged later\n");
+    let run = settle(&world, "mergedlater", vec![lifecycle("service", &[])]);
+
+    let node = world.run_json(&run, "result.json")["nodes"][0].clone();
+    assert_eq!(node["landing"], "unlanded", "{node}\n{}", why(&world, &run));
+    let branch = node["branch"]
+        .as_str()
+        .expect("the node names the branch its work is on")
+        .to_owned();
+
+    // And then the world moves on: the change reaches the base, and nothing
+    // tells the settled run about it. This is the state every assertion below
+    // is about.
+    crate::harness::git(&world, &repository.checkout, &["fetch", "origin"]);
+    crate::harness::git(
+        &world,
+        &repository.checkout,
+        &["merge", "--no-ff", "-m", "chore: land the change", &branch],
+    );
+    crate::harness::git(&world, &repository.checkout, &["push", "origin", "main"]);
+    assert!(
+        repository
+            .base_commits(&world)
+            .iter()
+            .any(|subject| subject == "chore: land the change"),
+        "the change never reached the base, so there is nothing stale to report"
+    );
+
+    // The per-node view: dated, and pointing at the change rather than claiming
+    // to know where it is now.
+    let results = world.run(&["results", &run]);
+    results.exited(0).out_has("NOT landed");
+    results.out_has("when this settled");
+    results.out_has("nothing has re-read it since");
+    results.out_has("open the change for where it is now");
+
+    // The counting views, which are the ones a planner closes work from.
+    world
+        .run(&["runs"])
+        .exited(0)
+        .out_has("1 not landed as of settlement");
+    world
+        .run(&["goals", &run])
+        .exited(0)
+        .out_has("1 not landed as of settlement");
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("as each settled, not as of now");
+}

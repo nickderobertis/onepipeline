@@ -11,7 +11,7 @@ the contract**, and `docs/contract.md` was amended to carry each ruling. They st
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–22 are open**. Each states what the code does today and the
+Entries **10–22 and 33 are open**. Each states what the code does today and the
 proposal it is waiting on — every one of them a question for a *producer* rather
 than for this crate, because `oneagentgraph` and `onevcs` are independent tools
 that expose general integration hooks only and nothing in them may know about
@@ -974,3 +974,41 @@ the matcher reader like any other non-field, rather than quietly accepted as a
 key nothing can satisfy.
 
 <!-- llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate] -->
+
+## 33. Nothing on `onevcs`'s surface says whether a published change has landed *since* — OPEN
+
+**Proposal (for `onevcs`): a read that answers "has this branch reached its
+base?" for a branch that was pushed — the change request's state, or the
+comparison against the base that `Vcs::recoverable` already makes internally.**
+
+A node's `landing` is an observation made at settlement: `onevcs publish`
+answers `ChangeOpen` or `Queued`, this crate records `unlanded`, and the run
+neither blocks nor polls for a merge somebody else owns. That is deliberate. What
+is not deliberate is that the snapshot is all any later reader has — a node that
+settled `done (queued)` was still rendering `NOT landed` hours after its change
+had merged and released, and `just runs` counted it against the run.
+
+Re-reading it needs one of two answers, and this crate can reach neither:
+
+* **The host's.** `RemoteHost::find_changes(head, base)` is exactly the read —
+  but a `RemoteHost` comes from `Hosting::for_repo(slug)`, and the `owner/name`
+  slug is derived from an identity key by `onevcs`'s own private `gh::slug`.
+  Deriving it here would be a second copy of a sibling's rule, which
+  `src/AGENTS.md` forbids — and it would fail in the direction that matters: a
+  copy that drifted, or an identity on a host that is not GitHub, would address
+  *some other repository* and answer confidently about it.
+* **Git's.** `Vcs::recoverable` makes precisely the comparison —
+  `git diff --quiet <base> <branch>`, "whether the base already carries this
+  branch's content" — but only for branches `unpublished_branches` returns
+  first, which is those with commits on no `origin` remote-tracking ref. A change
+  request's branch was pushed to open it, so it is excluded whether it merged or
+  not, and its absence from that list says nothing. The comparison is there; it
+  is not reachable for the branches that need it.
+
+Until one exists, **no view claims to know where a change is now.** Every line
+that carries an unlanded node dates its answer to the settlement, says nothing
+has re-read it since, and names the change to open —
+`views::landed_phrase`, `RunView::summary`, and the `status` line, all held by
+`a_change_that_merged_after_settlement_is_reported_as_of_settlement_not_as_now`.
+That is the honest half of what the change asked for: the stale fact is no longer
+asserted, and it still cannot be corrected from here.
