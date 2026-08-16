@@ -31,39 +31,40 @@ resolver = "2"
 # `tests/e2e/dispatch.rs` holds the first end to end: it fails against 0.2.11
 # rather than merely reading differently.
 #
-# **`oneagentgraph` is pinned to a git revision, and carries a `version` beside
-# it.** The filter grammar this crate passes through to both siblings is a
-# *cross-repository* contract with no shared crate, so what must be pinned is the
-# revision that sibling's copy of it was merged at, before a release carries it.
-# `rev` is what a build resolves; the `version` beside it is what `cargo publish`
-# records, which a git-only dependency would make impossible for a crate that
-# ships on crates.io. The two must name the same release: `7854b19` *is*
-# `oneagentgraph` v0.2.13, the release commit of the pull request that merged its
-# filter support (#40). `tests/e2e/dispatch.rs` drives that surface against the
-# real sibling, so a pin moved to a revision without it fails rather than reads
-# differently.
+# **Both siblings are registry releases**, and the filter grammar this crate
+# passes through to them — a *cross-repository* contract with no shared crate — is
+# carried by both pins: `oneagentgraph` merged it at v0.2.13 and `onevcs` at
+# v0.2.7, and each pin below is above its own. `tests/e2e/dispatch.rs` and
+# `tests/e2e/real_vcs.rs` drive those surfaces against the real siblings, so a pin
+# moved below one fails rather than reads differently.
 #
-# **`onevcs` is a registry release**, and is one again because the revision it
-# was pinned at is *published*: `d3c495d` is the tag `v0.2.7` exactly — the
-# release commit of the pull request that merged its filter support (#26) — and
-# v0.2.7 is an ancestor of v0.2.10, so 0.2.10 carries that grammar and three
-# fixes above it. Holding the pin would hold this crate at 0.2.7, and
+# Two further floors, each a **requirement** of what this crate composes today:
+#
+# - `oneagentgraph` 0.2.16 lets a `kind: oneharness` member's own oneharness
+#   config decide its run — `schema_file` there asks for a validated JSON answer,
+#   which is what the pr-author graph a launch names declares and what puts the
+#   drafted body at `results[].structured` of the report that member's
+#   `member-settled` names. Below it that member is always run with `--stream`,
+#   which oneharness refuses beside a schema, so the drafting dispatch is a usage
+#   error rather than a structured answer.
+# - `onevcs` 0.4.0 carries `PublishRequest.body`, which is the whole of what a
+#   drafted body is *for*: below it a change request opens with the boilerplate
+#   this crate has no way to replace. 0.4.1 adds a stacked-branch publish above it.
+#
 # `src/graph.rs` reads `onevcs::provenance::SUBJECT_LIMIT` to refuse an
-# unpublishable node title at plan load: that constant is 72 at v0.2.7 and 120
-# from v0.2.8 on, so a build behind the pin would refuse at load every title
-# between the two that the publication commits without complaint.
-# `tests/e2e/real_vcs.rs` drives the surface.
+# unpublishable node title at plan load, so the `onevcs` pin also decides which
+# titles a plan may state.
 [workspace.dependencies]
-oneagentgraph = { git = "https://github.com/nickderobertis/oneagentgraph", rev = "7854b1941b235e05afaa9cbaa69a2daf63de722e", version = "0.2.13" }
-onevcs = "0.2.10"
+oneagentgraph = "0.2.18"
+onevcs = "0.4.1"
 # The sibling's own test-support crate, from the **same** revision as the library
 # it implements — here by resolving both from the registry at the releases cut
-# from one commit: `onevcs-testing` v0.1.10 and `onevcs` v0.2.10 are the same tag,
-# and v0.1.10 requires `onevcs = "0.2.10"`, so the build has one copy. Two copies
-# is not a version skew but a compile error: `tests/onevcs_seam.rs` — whose whole
-# job is to drive this crate's seam against those providers — would not build,
-# because the two copies' types are different types.
-onevcs-testing = "0.1.10"
+# from one commit: `onevcs-testing` v0.2.1 requires `onevcs = "0.4.1"`, so the
+# build has one copy. Two copies is not a version skew but a compile error:
+# `tests/onevcs_seam.rs` — whose whole job is to drive this crate's seam against
+# those providers — would not build, because the two copies' types are different
+# types.
+onevcs-testing = "0.2.1"
 
 [package]
 name = "onepipeline"
@@ -124,9 +125,8 @@ serde_json = { version = "1", features = ["preserve_order"] }
 serde_norway = "0.9"
 thiserror = "2"
 
-# The siblings this crate composes, at the workspace's own pins — a git revision
-# each, with the registry version beside it that publishing records. See
-# `[workspace.dependencies]` for why the revision rather than the release.
+# The siblings this crate composes, at the workspace's own pins. See
+# `[workspace.dependencies]` for what each pin's floor is a requirement of.
 oneagentgraph = { workspace = true }
 onevcs = { workspace = true }
 

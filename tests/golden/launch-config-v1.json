@@ -28,5 +28,6 @@
         ]
       }
     }
-  }
+  },
+  "pr_author_graph": "./graphs/pr-author.yaml"
 }

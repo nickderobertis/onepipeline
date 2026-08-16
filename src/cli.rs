@@ -109,6 +109,14 @@ pub struct StartArgs {
     /// drives the engine.
     #[arg(long, value_name = "REF", default_value = DAG_GRAPH_OFF)]
     pub dag_graph: String,
+    /// The agent graph a lifecycle node's change request body is drafted by.
+    ///
+    /// Naming none is the shipped default, exactly as `--dag-graph` defaults to
+    /// `off`: this crate ships the flag and not the document, and a launch that
+    /// names no graph opens its change requests with the body its plan states,
+    /// or with none. Given here it overrides the launch config's own field.
+    #[arg(long, value_name = "REF")]
+    pub pr_author_graph: Option<String>,
     /// How often the durable planner-update pacemaker comes due, in seconds.
     #[arg(long, value_name = "SECONDS", default_value_t = DEFAULT_HEARTBEAT_INTERVAL_SECONDS)]
     pub heartbeat_interval: u64,

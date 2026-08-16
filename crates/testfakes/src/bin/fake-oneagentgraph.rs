@@ -16,11 +16,16 @@ use std::process::ExitCode;
 /// A readable document a settlement can be made to *point at* but which nothing
 /// should ever read back.
 ///
-/// One recognisable string, in a valid report shape: a test asserts it never
-/// reaches a rendered transcript, so a reader that followed the path it was
-/// handed fails on the words rather than on a missing file.
-pub const PLANTED: &str =
-    r#"{"transcript":{"messages":[{"role":"assistant","content":"planted-and-never-read"}]}}"#;
+/// One recognisable string, in a valid report shape — and in **both** valid
+/// report shapes, because two readers open a retained report: a transcript is
+/// read out of a two-party member's conversation, and a drafted change request
+/// body out of a single-sided member's validated answer. A test asserts the
+/// words below reach neither, so a reader that followed the path it was handed
+/// fails on them rather than on a missing file.
+pub const PLANTED: &str = r#"{"transcript":{"messages":[{"role":"assistant",
+    "content":"planted-and-never-read"}]},
+    "results":[{"harness":"claude-code","status":"ok","text":"planted-and-never-read",
+    "structured":{"body":"planted-and-never-read"},"schema_valid":true}]}"#;
 
 /// The exit code the real CLI answers an invalid configuration with — its own
 /// constant, so a double cannot answer a refusal with a code the sibling stopped
@@ -667,8 +672,6 @@ fn emit(
             // including the rendered planner-context section.
             "task": task,
             "dir": fake::flag(args, "--dir"),
-            // A pr-author dispatch answers with the title it drafted.
-            "title": drafted_title(task),
             // What this turn was told to do instead, while it was running.
             "redirected": redirected,
         }),
@@ -775,13 +778,36 @@ fn emit(
     );
 }
 
-/// The onejudge report a settled member stores.
+/// The report a settled member stores.
 ///
 /// Two-party, because the shipped node-scope graph's `worker` is a two-party
 /// member: its agent side does the work and its judge side supervises it, and
 /// the split between what each spent is what the report carries and nothing on
 /// the wire does.
+///
+/// A **drafting** dispatch's member is single-sided instead, and its graph asks
+/// oneharness for an answer validated against a schema — so its report carries
+/// the run's per-harness `results`, and the validated answer is at
+/// `results[].structured` of the one that ran. That is the channel this stack
+/// reads a drafted change request body out of, so it is what this double
+/// answers a `pr-author` dispatch with.
 fn report_of(task: &str) -> serde_json::Value {
+    if let Some(body) = drafted_body(task, &fake::script_dir()) {
+        return serde_json::json!({
+            "schema_version": "0.6",
+            "results": [
+                // A candidate the identity chain stepped past: it ran nothing,
+                // so it answered nothing, and a consumer that read the first
+                // entry rather than the one that ran would find no body here.
+                {"harness": "codex", "status": "skipped", "text": null,
+                 "structured": null, "schema_valid": null},
+                {"harness": "claude-code", "status": "ok",
+                 "text": "Drafted the change request's body.",
+                 "structured": {"body": body}, "schema_valid": true},
+            ],
+            "usage": {"input_tokens": 40, "output_tokens": 20, "cost_usd": 0.01},
+        });
+    }
     serde_json::json!({
         "schema_version": 7,
         "transcript": {"messages": [
@@ -812,8 +838,19 @@ fn report_of(task: &str) -> serde_json::Value {
     })
 }
 
-/// The title a `pr-author` dispatch drafts, when it is one.
-fn drafted_title(task: &str) -> Option<String> {
-    task.starts_with("Read this branch's diff")
-        .then(|| "feat: drafted from the diff".to_string())
+/// The body a `pr-author` dispatch drafts, when it is one.
+///
+/// Recognised by the task this crate composes for a drafting dispatch and by
+/// nothing else, so an ordinary node's dispatch never answers as one. Scripted
+/// with `pr-author.body` where a journey wants to read its own words back out
+/// of the change request; `pr-author.unschematic` is the other ending — a turn
+/// that answered with nothing the schema accepted, which is not a body.
+fn drafted_body(task: &str, dir: &std::path::Path) -> Option<String> {
+    if !task.starts_with("Read this branch's diff") || dir.join("pr-author.unschematic").exists() {
+        return None;
+    }
+    Some(
+        fake::node_script(dir, "pr-author", "body")
+            .unwrap_or_else(|| "## What\nDrafted from the diff.".to_string()),
+    )
 }

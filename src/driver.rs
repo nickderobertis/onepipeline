@@ -254,11 +254,11 @@ fn mint_run_id(plan: &Plan, path: &Path, root: &Path) -> String {
 /// honour a spec its sources will not take, and the profiles because a profile
 /// only refused at read time would be refused to a planner who did not write it,
 /// long after the launch that did.
-fn declared_filters(args: &StartArgs) -> Result<crate::filter::Filters> {
-    let mut filters = match &args.launch_config {
-        Some(path) => crate::filter::LaunchConfig::load(path)?.filters,
-        None => crate::filter::Filters::default(),
-    };
+fn declared_filters(
+    config: crate::filter::Filters,
+    args: &StartArgs,
+) -> Result<crate::filter::Filters> {
+    let mut filters = config;
     for declaration in &args.filter_profiles {
         let (name, spec) = declaration.split_once('=').ok_or_else(|| {
             Error::Invalid(format!(
@@ -321,18 +321,37 @@ fn start(args: &StartArgs) -> Result<i32> {
     let mut plan = Plan::load(&args.plan)?;
     graph::validate(&plan)?;
     let launch_dir = launch_dir()?;
+    // The launch config is read once, here, and both halves of what it declares
+    // are taken off that one strict reading: a second, later read would be a
+    // second chance for a document this build refuses to reach a run.
+    let declared = match &args.launch_config {
+        Some(path) => crate::filter::LaunchConfig::load(path)?,
+        None => crate::filter::LaunchConfig::default(),
+    };
     // Resolved only when one was named: `off` is the shipped default, and a
     // launch that names no observer resolves nothing and launches nothing.
     let graph_ref: Option<String> = match args.dag_graph.as_str() {
         DAG_GRAPH_OFF => None,
         reference => Some(resolve_graph(reference, &launch_dir)?),
     };
+    // The same, for the graph a change request's body is drafted by: naming none
+    // is the shipped default, and the flag overrides the config that names one.
+    // Resolved against the launch directory like every other reference, so the
+    // record carries what a driver started from anywhere else replays.
+    let pr_author_graph_ref: Option<String> = match args
+        .pr_author_graph
+        .as_deref()
+        .or(declared.pr_author_graph.as_deref())
+    {
+        Some(reference) => Some(resolve_graph(reference, &launch_dir)?),
+        None => None,
+    };
     let node_graph_ref = resolve_graph(&engine::configured_node_graph(), &launch_dir)?;
     resolve_plan_graphs(&mut plan, &launch_dir)?;
     // Before the run directory exists. A spec that could not be honoured is the
     // exit 2 it is, rather than a launch that has already minted a run and cut
     // sessions for it before a source refuses the filter it was handed.
-    let filters = declared_filters(args)?;
+    let filters = declared_filters(declared.filters, args)?;
 
     let root = ledger::runs_root();
     let run = mint_run_id(&plan, &args.plan, &root);
@@ -397,6 +416,7 @@ fn start(args: &StartArgs) -> Result<i32> {
         // the launch below has produced it.
         graph_run: String::new(),
         node_graph: node_graph_ref,
+        pr_author_graph: pr_author_graph_ref.unwrap_or_default(),
         launcher: sys::launcher(),
         session: sys::launching_session(),
         // Replaced below by the graph process's own pid. What drives the run

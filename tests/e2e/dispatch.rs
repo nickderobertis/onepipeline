@@ -20,15 +20,50 @@
 use crate::harness::{agent, human, plan_of, World, REFUSED, REPORTING_MEMBER};
 use serde_json::{json, Value};
 
-/// The prose a `member-started` says its member was launched with.
+/// The prose each turn this world ran was actually given, in the order the
+/// turns started.
 ///
-/// `oneagentgraph` publishes the whole argv it prepared, so the task a member
-/// was actually given is in the run's own merged store rather than only in the
-/// process it was passed to.
-fn prompt_of(event: &Value) -> Option<String> {
-    let args = event["payload"]["args"].as_array()?;
-    let at = args.iter().position(|arg| arg == "--prompt")?;
-    args.get(at + 1)?.as_str().map(str::to_string)
+/// Read off the **harness** the run spawned rather than off `member-started`:
+/// from `oneagentgraph` 0.2.16 both member kinds are `runner: library`, so a
+/// member's turn is no longer a process that library launched and no argv is
+/// published for it. The process that still receives the prompt is the harness
+/// under it, and that is the one this suite substitutes — so the record of what
+/// a member was asked to do is the invocation that harness itself wrote down.
+fn prompts(world: &World) -> Vec<String> {
+    world
+        .invocations()
+        .iter()
+        .filter(|call| call["tool"] == "harness")
+        .filter_map(|call| {
+            let args = call["args"].as_array()?;
+            let at = args.iter().position(|arg| arg == "-p")?;
+            args.get(at + 1)?.as_str().map(str::to_string)
+        })
+        .collect()
+}
+
+/// The oneharness config one member's turn actually ran under.
+///
+/// `member-started` names the file the sibling stamped into that member's own
+/// scratch, which is the layered config that turn was run with — so a journey
+/// asserting that an override reached a member reads the bytes the member ran
+/// with, published by the sibling itself, rather than a double's account of
+/// them.
+fn config_of(event: &Value) -> String {
+    let named = event["payload"]["config"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a member-started names no config: {event}"));
+    std::fs::read_to_string(named)
+        .unwrap_or_else(|error| panic!("cannot read the member's config {named}: {error}"))
+}
+
+/// Every `member-started` a run recorded for one member, in order.
+fn members_started(world: &World, run: &str, member: &str) -> Vec<Value> {
+    world
+        .journal(run)
+        .into_iter()
+        .filter(|event| event["kind"] == "member-started" && event["labels"]["member"] == member)
+        .collect()
 }
 
 /// Leave a run whose one dispatchable node is ready and whose driver has gone.
@@ -70,10 +105,8 @@ fn relative_default_graphs_dispatch_from_the_launch_directory() {
     let started = world.run_on(command, "start relative defaults");
     started.exited(0).settled();
     assert!(
-        world
-            .journal("relative-defaults")
+        prompts(&world)
             .iter()
-            .filter_map(prompt_of)
             .any(|prompt| prompt.contains("Do build.")),
         "the node-scope graph did not dispatch its member: {}",
         world.dump()
@@ -128,6 +161,7 @@ fn relative_node_and_step_graph_overrides_dispatch_from_the_launch_directory() {
     let node = json!({
         "id": "service",
         "repo": "service",
+        "title": "feat: land the workstream",
         "agent_graph": "node-override.yaml",
         "steps": [
             {"id": "implement", "persona": "engineer", "task": "## What\nimplement"},
@@ -179,8 +213,16 @@ fn relative_node_and_step_graph_overrides_dispatch_from_the_launch_directory() {
     }
 }
 
+/// Both graphs a lifecycle node dispatches under are the ones its **launch**
+/// resolved, and a fresh driver replays them.
+///
+/// The node-scope graph its work runs under, and the pr-author graph its change
+/// request's body is drafted by: each is resolved once, at `start`, against the
+/// directory the operator launched from, and recorded. `adopt` runs from
+/// somewhere else, under an environment naming a *different* node graph — what
+/// the dispatches run under is the launch record either way.
 #[test]
-fn lifecycle_and_title_drafting_keep_the_node_graph_resolved_at_launch() {
+fn a_lifecycle_nodes_two_graphs_are_the_ones_its_launch_resolved() {
     let world = World::new("lifecycle-recorded-default-graph");
     world.repository("local-direct", &["true"]);
     world.script("driver.wait", "hold");
@@ -188,6 +230,7 @@ fn lifecycle_and_title_drafting_keep_the_node_graph_resolved_at_launch() {
     let launch_graph = crate::harness::repo_file("graphs/node-scope.yaml");
     let later_graph = world.root.join("later-node-scope.yaml");
     std::fs::copy(&launch_graph, &later_graph).expect("the later graph is written");
+    let drafting = world.pr_author_graph();
     let mut service = crate::harness::lifecycle("service", &["approve"]);
     service["deps"] = json!(["approve"]);
     let path = world.plan(
@@ -197,17 +240,31 @@ fn lifecycle_and_title_drafting_keep_the_node_graph_resolved_at_launch() {
             vec![human("approve", &[]), service],
         ),
     );
-    let mut start = world.cmd(&["start", &path.to_string_lossy(), "--attach"]);
+    let mut start = world.cmd(&[
+        "start",
+        &path.to_string_lossy(),
+        "--attach",
+        "--pr-author-graph",
+        &drafting,
+    ]);
     start.env("ONEPIPELINE_NODE_GRAPH", &launch_graph);
     world
         .run_on(start, "start recorded lifecycle graph")
         .exited(0);
+    // Recorded, which is what makes it replayable at all: a launcher that
+    // resolved the reference and kept it to itself would leave every later
+    // driver to guess.
+    assert_eq!(
+        world.run_json("recorded-lifecycle-graph", "launch.json")["pr_author_graph"],
+        json!(drafting),
+        "the launch record does not name the graph the launch was given"
+    );
     world
         .run(&["attest", "recorded-lifecycle-graph", "approve"])
         .exited(0);
     // A fresh driver, under an environment naming a *different* node graph: what
-    // the dispatch runs under is the reference resolved at launch and recorded,
-    // never whatever this process happens to be pointed at.
+    // the dispatches run under is the state the launch recorded, never whatever
+    // this process happens to be pointed at.
     let mut adopted = world.cmd(&["adopt", "recorded-lifecycle-graph"]);
     adopted.env("ONEPIPELINE_NODE_GRAPH", &later_graph);
     world
@@ -224,20 +281,37 @@ fn lifecycle_and_title_drafting_keep_the_node_graph_resolved_at_launch() {
                     .is_some_and(|args| args.iter().any(|arg| arg == "onepipeline.node=service"))
         })
         .collect();
-    assert!(
+    let under = |persona: &str| -> Vec<&Value> {
         relevant
             .iter()
-            .any(|call| call["args"].as_array().is_some_and(|args| {
-                args.iter()
-                    .any(|arg| arg == "onepipeline.persona=pr-author")
-            })),
-        "the title drafting dispatch did not run: {relevant:?}"
+            .filter(|call| {
+                call["args"]
+                    .as_array()
+                    .is_some_and(|args| args.iter().any(|arg| arg == persona))
+            })
+            .copied()
+            .collect()
+    };
+    let drafts = under("onepipeline.persona=pr-author");
+    assert_eq!(
+        drafts.len(),
+        1,
+        "the body drafting dispatch did not run after adoption: {relevant:?}"
+    );
+    assert_eq!(
+        drafts[0]["args"][1], drafting,
+        "the drafting dispatch ran a graph the launch did not record: {drafts:?}"
+    );
+    let worked = under("onepipeline.persona=engineer");
+    assert!(
+        !worked.is_empty(),
+        "the node never dispatched: {relevant:?}"
     );
     assert!(
-        relevant
+        worked
             .iter()
             .all(|call| call["args"][1] == launch_graph.to_string_lossy().as_ref()),
-        "a lifecycle dispatch re-read the live graph instead of launch state: {relevant:?}"
+        "a lifecycle dispatch re-read the live graph instead of launch state: {worked:?}"
     );
 }
 
@@ -303,6 +377,7 @@ fn unreadable_relative_plan_graphs_name_their_path_and_launch_base() {
             json!({
                 "id": "service",
                 "repo": "service",
+                "title": "feat: land the workstream",
                 "steps": [{
                     "id": "implement",
                     "persona": "engineer",
@@ -418,33 +493,24 @@ fn launch_overrides_reach_the_graphs_that_actually_run() {
     ]);
     started.exited(0).settled();
 
-    let configs: Vec<Value> = world
-        .invocations()
-        .into_iter()
-        .filter(|call| call["tool"] == "oneharness-config")
-        .collect();
-    assert!(
-        configs.iter().any(|call| {
-            call["args"][0]
-                .as_str()
-                .is_some_and(|prompt| prompt.contains("Observe this run"))
-                && call["args"][1]
-                    .as_str()
-                    .is_some_and(|config| config.contains("DAG_OVERRIDE"))
-        }),
-        "the observing dag member did not receive its override: {configs:?}"
-    );
-    assert!(
-        configs.iter().any(|call| {
-            call["args"][0]
-                .as_str()
-                .is_some_and(|prompt| prompt.contains("Do build."))
-                && call["args"][1]
-                    .as_str()
-                    .is_some_and(|config| config.contains("NODE_OVERRIDE"))
-        }),
-        "the running node member did not receive its override: {configs:?}"
-    );
+    // Each member's own stamped config, named by the `member-started` the
+    // sibling published for it — so the override is read out of the bytes that
+    // member's turn actually ran under, paired with the member by its producer's
+    // own label rather than by anything this suite inferred.
+    for (member, override_marker) in [("monitor", "DAG_OVERRIDE"), ("worker", "NODE_OVERRIDE")] {
+        let started = members_started(&world, "overrides", member);
+        assert!(
+            !started.is_empty(),
+            "no member '{member}' ran: {}",
+            world.dump()
+        );
+        assert!(
+            started
+                .iter()
+                .any(|event| config_of(event).contains(override_marker)),
+            "member '{member}' did not run under its override: {started:?}"
+        );
+    }
 }
 
 /// The plan's persona is a graph setting, not merely a label on the dispatch.
@@ -467,15 +533,9 @@ fn a_plan_persona_reaches_the_member_that_actually_runs() {
     let started = world.run_on_agentgraph(&["start", &path.to_string_lossy(), "--attach"]);
     started.exited(0).settled();
 
-    let invocations: Vec<Value> = world
-        .invocations()
+    let invocations: Vec<String> = prompts(&world)
         .into_iter()
-        .filter(|call| {
-            call["tool"] == "oneharness-config"
-                && call["args"][0]
-                    .as_str()
-                    .is_some_and(|prompt| prompt.contains("Do review."))
-        })
+        .filter(|prompt| prompt.contains("Do review."))
         .collect();
     assert!(
         !invocations.is_empty(),
@@ -560,18 +620,22 @@ fn adoption_retains_node_overrides_for_later_dispatches() {
     let adopted = world.run_on(adopt, "adopt adopted-override");
     adopted.exited(0).settled();
 
-    let configs = world.invocations();
+    // The replacement node really ran — the prompt its turn was given says so —
+    // and it ran under the config the launch recorded, read out of the file the
+    // sibling stamped for that member.
     assert!(
-        configs.iter().any(|call| {
-            call["tool"] == "oneharness-config"
-                && call["args"][0]
-                    .as_str()
-                    .is_some_and(|prompt| prompt.contains("It failed."))
-                && call["args"][1]
-                    .as_str()
-                    .is_some_and(|config| config.contains("ADOPTED_NODE_OVERRIDE"))
-        }),
-        "the node dispatched after adoption did not run under its retained override: {configs:?}"
+        prompts(&world)
+            .iter()
+            .any(|prompt| prompt.contains("It failed.")),
+        "the replacement node never dispatched: {}",
+        world.dump()
+    );
+    let started = members_started(&world, "adopted-override", "worker");
+    assert!(
+        started
+            .iter()
+            .any(|event| config_of(event).contains("ADOPTED_NODE_OVERRIDE")),
+        "the node dispatched after adoption did not run under its retained override: {started:?}"
     );
 }
 
@@ -601,16 +665,10 @@ fn a_plan_dispatches_through_the_real_oneagentgraph_and_its_members_run() {
         .expect("the launch named its run")
         .to_string();
 
-    // Two members really ran, and the run's own record is where that is
-    // readable: `oneagentgraph` publishes the launch it prepared for each — the
-    // program, its arguments, and the prose it was given — into the stream this
-    // crate merges. Nothing here is asserted from anywhere a user could not look.
-    let launches: Vec<String> = world
-        .journal(&run)
-        .iter()
-        .filter(|event| event["kind"] == "member-started")
-        .filter_map(prompt_of)
-        .collect();
+    // Two members really ran, and what each was asked to do is the prose the
+    // turn under it was launched with — recorded by the harness that received
+    // it, which is the one process in this journey that is not the real thing.
+    let launches = prompts(&world);
     assert!(
         launches
             .iter()
@@ -761,6 +819,79 @@ fn status_says_what_a_live_dispatch_is_doing_and_the_readout_advances() {
     world.until("the run to settle", |world| {
         world.run_file("watched", "result.json").is_file()
     });
+}
+
+/// A change request body drafted through the **real** siblings, end to end.
+///
+/// Every layer between the plan and the published body is the real thing: real
+/// `oneagentgraph` resolves the pr-author graph and prepares its member, real
+/// `oneharness` reads that member's own config, sees the `schema_file` it
+/// declares, runs the turn buffered rather than streamed, validates what comes
+/// back against that schema, and stores it at `results[].structured` of the
+/// result that ran. This crate retains that report as it ingests the settlement,
+/// reads the body out of its own copy, and hands it to `onevcs`, which opens the
+/// change request with it. Only the paid model turn stands in.
+///
+/// That chain is a cross-repository contract with no shared type, so it is
+/// proven rather than assumed: a sibling that stopped putting a validated answer
+/// where this crate reads it would publish an empty change request and nothing
+/// else would say so.
+#[test]
+fn a_drafted_body_reaches_the_change_request_through_the_real_siblings() {
+    let world = World::new("real-pr-author");
+    world.write_graphs();
+    // A change request left open for review: a body is prose on one, and a
+    // direct merge opens none.
+    world.repository("change-open", &["true"]);
+    world.script("harness.work", "the worker wrote this");
+    let drafted = "## What\nRead off the branch's own diff.\n\n## Why\nSo a reviewer knows.";
+    world.script("harness.body", drafted);
+    let drafting = world.pr_author_graph();
+    let node = json!({
+        "id": "service",
+        "repo": "service",
+        "persona": "engineer",
+        "title": "feat: land what the member made",
+        "task": "## What\nship the thing",
+    });
+    let path = world.plan("authored", &plan_of("authored", vec![node]));
+    let launched = world.run_on_agentgraph(&[
+        "start",
+        &path.to_string_lossy(),
+        "--attach",
+        "--pr-author-graph",
+        &drafting,
+    ]);
+    launched.settled();
+    // What the host was asked to open the change request with.
+    let opened = world.changes_opened();
+    assert_eq!(opened.len(), 1, "{opened:?}\n{}", world.dump());
+    assert_eq!(
+        opened[0]["body"],
+        drafted,
+        "the drafted body did not reach the change request: {opened:?}\n{}",
+        world.dump()
+    );
+
+    // And it came off this run's **own** copy of the report, which is the file
+    // the reader opens: the run kept one, and the validated answer is where the
+    // producing library puts it rather than where this crate hoped.
+    let kept: Vec<serde_json::Value> = std::fs::read_dir(world.run_file("authored", "reports"))
+        .expect("the run kept the reports its dispatches settled with")
+        .filter_map(Result::ok)
+        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+        .filter_map(|text| serde_json::from_str(&text).ok())
+        .collect();
+    assert!(
+        kept.iter().any(|report| {
+            report["results"]
+                .as_array()
+                .is_some_and(|results| results.iter().any(|result| {
+                    result["schema_valid"] == json!(true) && result["structured"]["body"] == drafted
+                }))
+        }),
+        "no report this run retained carries the validated answer the body was read from: {kept:#?}"
+    );
 }
 
 /// The tools a real dispatched turn used, read back off the CLI.
@@ -975,16 +1106,24 @@ fn the_siblings_own_refusals_still_exit_with_the_codes_this_crate_maps_onto() {
 } // llmlint: ignore-end[tests_mirror_real_usage]
 
 /// The `oneharness` executable the sibling drives is still named by the
-/// variable this crate restates — and reaches an interrupt's delivery too.
+/// variable this crate restates.
 ///
 /// The third restated key. Pointed at something that is not there, the sibling
 /// says so, and the failure names what it could not start: that is the variable
 /// having been read. Asked through a real dispatch rather than a probe, because
 /// what has to keep working is a member launch.
+///
+/// A **two-party** member, because that is the launch the variable still
+/// decides: from `oneagentgraph` 0.2.16 a single-sided member's turn is an
+/// in-process `oneharness` library call with no executable to name, while a
+/// two-party member's agent side is still an `oneharness run` onejudge spawns at
+/// exactly this key. A journey that kept asking the single-sided member would
+/// pass while the variable went unread.
 #[test]
 fn the_sibling_still_takes_its_harness_from_the_variable_this_crate_restates() {
     let world = World::new("harness-bin-drift");
     world.write_graphs();
+    write_supervised_node_graph(&world);
     let path = world.plan(
         "harness-bin",
         &plan_of("harness-bin", vec![agent("build", &[])]),
@@ -1271,9 +1410,9 @@ fn a_document_the_runner_accepts_launches_whichever_way_it_is_asked_for() {
 /// of its own, so it names the run and its goal and stops; a member that must be
 /// told what to do about it composes its own `task` from `{task}`.
 ///
-/// Read off the argv `oneagentgraph` published for each member, which is what
-/// those processes were actually launched with rather than anything this crate
-/// wrote down about it.
+/// Read off the prompt each member's turn was actually launched with, recorded
+/// by the harness that received it, rather than off anything this crate wrote
+/// down about it.
 #[test]
 fn every_dag_scope_member_is_given_the_runs_description_and_its_own_job() {
     let world = World::new("neutral-run-task");
@@ -1293,52 +1432,47 @@ fn every_dag_scope_member_is_given_the_runs_description_and_its_own_job() {
         .exited(0)
         .settled();
 
-    // The dag-scope members only: a node's dispatch carries the node label and
-    // is given that node's task, which is a different composition entirely.
-    let prompts: Vec<(String, String)> = world
-        .journal("neutral")
-        .iter()
-        .filter(|event| event["kind"] == "member-started" && event["labels"]["node"].is_null())
-        .filter_map(|event| {
-            Some((
-                event["labels"]["member"].as_str()?.to_string(),
-                prompt_of(event)?,
-            ))
-        })
+    // The dag-scope members only: a node's dispatch is given that node's task,
+    // which is a different composition entirely, and it names the node.
+    let prompts: Vec<String> = prompts(&world)
+        .into_iter()
+        .filter(|prompt| !prompt.contains("Do build."))
         .collect();
-    let given = |member: &str| {
-        prompts
-            .iter()
-            .find(|(name, _)| name == member)
-            .map(|(_, prompt)| prompt.clone())
-            .unwrap_or_else(|| panic!("no member '{member}' was started: {prompts:?}"))
-    };
-    let monitor = given("monitor");
-    let reporter = given(REPORTING_MEMBER);
+    assert_eq!(
+        prompts.len(),
+        2,
+        "the dag-scope graph declares two members and this is what they were given: {prompts:?}"
+    );
 
-    for (member, prompt) in [("monitor", &monitor), (REPORTING_MEMBER, &reporter)] {
+    for prompt in &prompts {
         // What the run is, and what it is for. `plan_of` states the goal, so a
         // member that never received it is one the run description did not reach.
         for expected in ["neutral", "Deliver neutral"] {
             assert!(
                 prompt.contains(expected),
-                "member '{member}' was not told {expected:?}: {prompt}"
+                "a dag-scope member was not told {expected:?}: {prompt}"
             );
         }
     }
-    // And each member's job is its own: the reporter carrying the monitor's is
-    // the defect.
-    assert!(
-        monitor.contains("Observe this run"),
-        "the monitor was not given its own job: {monitor}"
+    // And each member's job is its own: one turn carrying both is the defect —
+    // the monitor's job reaching the member whose job is to report.
+    let carrying = |job: &str| prompts.iter().filter(|prompt| prompt.contains(job)).count();
+    assert_eq!(
+        carrying("Observe this run"),
+        1,
+        "the monitor's job did not reach exactly one member: {prompts:?}"
+    );
+    assert_eq!(
+        carrying("Report on this run"),
+        1,
+        "the {REPORTING_MEMBER}'s job did not reach exactly one member: {prompts:?}"
     );
     assert!(
-        !reporter.contains("Observe this run"),
-        "a member whose job is not the monitor's was given it: {reporter}"
-    );
-    assert!(
-        reporter.contains("Report on this run"),
-        "the reporter was not given its own job: {reporter}"
+        !prompts
+            .iter()
+            .any(|prompt| prompt.contains("Observe this run")
+                && prompt.contains("Report on this run")),
+        "one member was given both jobs: {prompts:?}"
     );
 }
 
@@ -1660,9 +1794,9 @@ fn two_party_worktree(world: &World, run: &str) -> String {
 ///
 /// What this journey deliberately does not assert is a *settled* two-party
 /// member. onejudge spawns the agent side as `oneharness run … --prompt-file -`,
-/// which `fake-oneharness` does not speak — it stands in for the single-sided
-/// invocation `oneagentgraph` builds itself — so the conversation cannot complete
-/// offline. The launch is the fact under test and it is published before the turn
+/// which the harness double does not speak — it stands in for the provider CLI
+/// `oneharness` itself spawns, one layer further down — so the conversation
+/// cannot complete offline. The launch is the fact under test and it is published before the turn
 /// runs, which is why every two-party journey in this file reads one.
 #[test]
 fn a_two_party_member_is_started_in_the_directory_the_graph_was_given() {
@@ -1677,8 +1811,8 @@ fn a_two_party_member_is_started_in_the_directory_the_graph_was_given() {
         "repo": "service",
         "persona": "./engineer.yaml",
         "task": "## What\nship the thing",
-        // Its own title, so the run spends no `pr-author` dispatch: that one has
-        // nothing to say about where a member works.
+        // The title its change request opens under, which a lifecycle node
+        // states from plan schema 3 on.
         "title": "feat: land what the member made",
     });
     let path = world.plan("twoparty", &plan_of("twoparty", vec![node]));
@@ -1726,9 +1860,8 @@ fn a_steps_turn_budget_reaches_that_steps_own_dispatch() {
     let node = json!({
         "id": "service",
         "repo": "service",
-        // Its own title, so the run spends no `pr-author` dispatch: that one runs
-        // under a persona this world has not written, and this journey is about
-        // the step.
+        // The title its change request opens under, which a lifecycle node
+        // states from plan schema 3 on.
         "title": "feat: land what the step made",
         "steps": [
             {"id": "implement", "persona": "./implementer.yaml", "task": "## What\nimplement",

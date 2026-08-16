@@ -1202,6 +1202,7 @@ mod tests {
             graph: "graphs/dag-scope.yaml".into(),
             graph_run: String::new(),
             node_graph: String::new(),
+            pr_author_graph: String::new(),
             launcher: "claude-code".into(),
             session: "session-a".into(),
             pid,

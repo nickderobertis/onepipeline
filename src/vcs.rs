@@ -78,11 +78,19 @@ pub fn session_open(request: &SessionRequest) -> Result<Session> {
 /// The title is checked here, where the request is built, because
 /// [`Subject`]'s conversion is where the sibling checks it — a title too long to
 /// be a commit subject is refused before a session's work is committed rather
-/// than after.
+/// than after. A title of `None` is the plan stating none: the sibling then
+/// derives the subject from the branch's own conventional commits, which is a
+/// better subject than anything this crate could compose about work it did not
+/// do.
+///
+/// The body crosses as the prose it is. Nothing checks it, here or there — a
+/// host places no shape on a change request's body, so there is no rule to hold
+/// it to and inventing one would refuse a body the host would have taken.
 pub fn publish(
     token: &str,
     policy: Option<MergePolicy>,
     title: Option<&str>,
+    body: Option<&str>,
 ) -> Result<Publication> {
     let title = title
         .map(|title| title.parse::<Subject>().map_err(sibling))
@@ -90,7 +98,11 @@ pub fn publish(
     onevcs::publish(
         &providers(),
         &SessionToken(token.to_owned()),
-        &PublishRequest { policy, title },
+        &PublishRequest {
+            policy,
+            title,
+            body: body.map(str::to_owned),
+        },
     )
     .map_err(refusal)
 }

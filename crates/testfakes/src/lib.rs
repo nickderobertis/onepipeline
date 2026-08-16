@@ -6,10 +6,10 @@
 //! real executable speaking `oneagentgraph`'s command surface, so the code under
 //! test composes it exactly as it composes the real one, by executing a program
 //! and reading its stdout. The other two stand one layer further out than a
-//! sibling: `oneharness`'s surface, for the journeys that drive the real
-//! `oneagentgraph` and need only the paid model turn replaced, and `gh`'s, at
-//! `onevcs`'s own override, for the journeys that need a host to decide
-//! something without a network or a credential.
+//! sibling: the *harness* CLI `oneharness` spawns, for the journeys that drive
+//! the real `oneagentgraph` and need only the paid model turn replaced, and
+//! `gh`'s, at `onevcs`'s own override, for the journeys that need a host to
+//! decide something without a network or a credential.
 //!
 //! Each is scripted from a directory the test prepares: what a node's dispatch
 //! does, whether it waits for a rendezvous, and what it exits with are all files
@@ -241,8 +241,8 @@ pub fn now() -> String {
 ///
 /// Shared by both doubles, because the monitor is a *member* rather than a
 /// graph: the `oneagentgraph` double acts it out when it is standing in for the
-/// whole sibling, and the `oneharness` double acts it out when the real sibling
-/// is running the graph and only the paid turn is being replaced.
+/// whole sibling, and the harness double acts it out when the real sibling is
+/// running the graph and only the paid turn is being replaced.
 pub fn observe(dir: &Path) -> std::process::ExitCode {
     // Required, not defaulted: an empty run id would leave every assertion
     // about what this observer saw pointing at a run named by nothing.

@@ -377,6 +377,12 @@ fn the_contracts_launch_config_example_parses_and_round_trips() {
         config.schema_version, LAUNCH_CONFIG_SCHEMA_VERSION,
         "the contract's example declares a version this build does not read"
     );
+    assert_eq!(
+        config.pr_author_graph.as_deref(),
+        Some("./graphs/pr-author.yaml"),
+        "the contract's example declares the launch's other decision and this build \
+         does not read it"
+    );
     let filters = config.filters;
 
     let agentgraph = filters
@@ -419,7 +425,8 @@ fn the_contracts_launch_config_example_parses_and_round_trips() {
     )
     .expect("the golden parses");
     assert_eq!(
-        golden.filters, filters,
+        (golden.filters, golden.pr_author_graph),
+        (filters, config.pr_author_graph),
         "tests/golden/launch-config-v1.json and the contract's own example are \
          different documents"
     );
@@ -1589,7 +1596,8 @@ fn a_relayed_envelope_keeps_its_producers_own_kind() {
 #[test]
 fn the_driver_contracts_invocation_parses_exactly_as_written() {
     let documented = "onepipeline start plan.json [--attach|--detach] \
-                      [--dag-graph off|REF] [--heartbeat-interval 1800] \
+                      [--dag-graph off|REF] [--pr-author-graph REF] \
+                      [--heartbeat-interval 1800] \
                       [--set PATH=VALUE]... [--node-set PATH=VALUE]... \
                       [--acknowledge-concurrent]";
     assert!(CONTRACT.contains(documented), "the driver invocation moved");
@@ -1601,6 +1609,8 @@ fn the_driver_contracts_invocation_parses_exactly_as_written() {
         "--detach",
         "--dag-graph",
         "graphs/dag-scope.yaml",
+        "--pr-author-graph",
+        "graphs/pr-author.yaml",
         "--heartbeat-interval",
         "1800",
         "--set",
@@ -1619,6 +1629,10 @@ fn the_driver_contracts_invocation_parses_exactly_as_written() {
     assert!(args.detach);
     assert!(!args.attach);
     assert_eq!(args.dag_graph, "graphs/dag-scope.yaml");
+    assert_eq!(
+        args.pr_author_graph.as_deref(),
+        Some("graphs/pr-author.yaml")
+    );
     assert_eq!(args.heartbeat_interval, 1_800);
     assert!(args.acknowledge_concurrent);
     assert_eq!(
@@ -1649,6 +1663,10 @@ fn the_driver_contracts_invocation_parses_exactly_as_written() {
     assert_eq!(
         args.dag_graph, DAG_GRAPH_OFF,
         "a plan runs with no agent graph unless one is asked for"
+    );
+    assert_eq!(
+        args.pr_author_graph, None,
+        "a change request is drafted by no graph unless one is asked for"
     );
     assert_eq!(args.heartbeat_interval, DEFAULT_HEARTBEAT_INTERVAL_SECONDS);
 }
@@ -1926,7 +1944,15 @@ fn every_persona_the_contract_ships_is_present_and_has_both_sides() {
 #[test]
 fn the_pr_author_never_blocks_publication() {
     assert!(
-        CONTRACT.contains("drafting failure falls back deterministic and never blocks publication")
+        CONTRACT.contains("Drafting is never on the publication path."),
+        "the contract no longer keeps the drafting dispatch off the publication path"
+    );
+    assert!(
+        CONTRACT.contains(
+            "the change request opens with no body and the node settles on its \
+                           publication as before"
+        ),
+        "the contract no longer says what a drafting dispatch that ended badly costs"
     );
     let text = std::fs::read_to_string(repo_root().join("personas/pr-author.yaml"))
         .expect("the pr-author persona ships");

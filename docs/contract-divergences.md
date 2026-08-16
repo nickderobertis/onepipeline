@@ -545,7 +545,7 @@ make it one rule rather than two.
 **Proposal (for `oneagentgraph`): a sentinel in
 `oneagentgraph-fake-harness` that runs a command and settles on its exit code.**
 
-`crates/testfakes`'s `fake-oneharness` is the one hand-written double this
+`crates/testfakes`'s `fake-harness` is the one hand-written double this
 repository still needs, and it needs it for exactly one behaviour that no
 upstream double has: the dag-scope graph's `orchestrator` member is an agent
 whose whole job is to run this crate's own engine verbs, so a double standing in
@@ -554,20 +554,25 @@ table — `fake:complete-now`, `fake:hold`, `fake:park`, `fake:did-work`, and th
 `FAKE_HARNESS_*` variables — steers what a turn answers and never what it
 executes.
 
-The other two candidate seams were rejected on evidence, not preference:
+**Where it is reached moved, and the seam this entry rejected is now the only
+one there is.** `oneagentgraph` 0.2.16 runs a `kind: oneharness` member's turn
+through `oneharness_core::io::run::run_supervised` in its own process, so
+`ONEAGENTGRAPH_ONEHARNESS_BIN` no longer reaches that member's turn at all — it
+names the binary onejudge spawns for a *two-party* member's agent side and
+nothing else. The double is therefore the provider CLI now, reached at
+`ONEHARNESS_BIN_CLAUDE_CODE`, and it speaks that CLI's headless wire shape. Both
+objections that ruled the seam out are gone with the subprocess: `oneharness-core`
+is in this repository's dependency graph either way, because the crate it composes
+links it, and there is no `oneharness` binary to provision on any leg.
+
+The remaining candidate is still rejected on evidence rather than preference:
 
 * **`oneharness run --mock-harness ID`** is unreachable. onejudge 0.3.8 has no
   passthrough for it, and `oneagentgraph`'s own `src/bin/fake_harness.rs`
   records the rest of the reason at length: the `MOCK_*` contract fixes one
   response per process environment, and a member needs several from one binary.
-* **`ONEHARNESS_BIN_<ID>`** is the right seam and is what the sentinel above
-  would be reached through — but it substitutes the *provider* below a real
-  `oneharness`, and this repository has no `oneharness` binary in its dependency
-  graph on any platform. Taking it would add a second `oneharness-core` major to
-  the tree and a provisioning step to three CI legs, to arrive at a double that
-  still could not run the orchestrator's command.
 
-Until one exists, the double stays and is reached at `ONEAGENTGRAPH_ONEHARNESS_BIN`.
+Until an upstream double can answer these journeys, this one stays.
 
 ## 22. `onevcs-testing`'s providers cannot reach a consumer's subprocess — OPEN
 

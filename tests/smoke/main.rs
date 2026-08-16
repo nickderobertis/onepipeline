@@ -262,7 +262,7 @@ fn work_file(world: &World) -> String {
     let wrote = world
         .invocations()
         .iter()
-        .find(|invocation| invocation["tool"] == "oneharness-work")
+        .find(|invocation| invocation["tool"] == "harness-work")
         .and_then(|invocation| invocation["args"][0].as_str().map(str::to_owned))
         .unwrap_or_else(|| {
             panic!(
@@ -310,7 +310,7 @@ fn why(world: &World, run: &str) -> String {
         .filter(|invocation| {
             invocation["tool"]
                 .as_str()
-                .is_some_and(|tool| tool.starts_with("oneharness"))
+                .is_some_and(|tool| tool.starts_with("harness"))
         })
         .map(|invocation| format!("{}: {}", invocation["tool"], invocation["args"]))
         .collect();

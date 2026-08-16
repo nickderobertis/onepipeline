@@ -41,6 +41,9 @@ use onevcs::{
 };
 use onevcs_testing::{HostState, MemoryHost, MemoryVcs, VcsState};
 
+/// The body a publication carries, as a drafting dispatch would have written it.
+const DRAFTED: &str = "## What\nIt landed.\n\n## Why\nUsers were waiting.";
+
 /// One test, not four, because every case here needs `ONEVCS_HOME` pointed at a
 /// scratch root and that variable is process-global: four tests would set it from
 /// four threads at once and read one another's state root.
@@ -109,6 +112,10 @@ fn every_operation_this_crate_performs_is_served_by_the_provider_seam() {
         &PublishRequest {
             policy: Some(MergePolicy::ChangeOpen),
             title: Some("feat: land it".parse().expect("a usable subject")),
+            // The prose a reviewer reads, which `src/vcs.rs` hands on exactly as
+            // it was drafted: nothing here composes or validates one, so this is
+            // the whole of what the host is given.
+            body: Some(DRAFTED.to_owned()),
         },
     )
     .expect("the seam publishes a session it opened");
@@ -119,6 +126,14 @@ fn every_operation_this_crate_performs_is_served_by_the_provider_seam() {
         panic!("a change-open publication ended as {:?}", published.outcome);
     };
     assert!(url.as_str().contains("owner/repo"), "{url}");
+    // And it reached the host, on the change request it opened: a body this
+    // crate passed and the host never saw would be a drafted change request
+    // nobody reads.
+    assert_eq!(
+        host.state().bodies.values().collect::<Vec<_>>(),
+        vec![DRAFTED],
+        "the change request was not opened with the body the request carried"
+    );
 
     // What the publication wrote reaches the reader as the records appended since
     // the last read — never the whole stream again, which is what would put every

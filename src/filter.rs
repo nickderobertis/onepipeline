@@ -81,6 +81,15 @@ pub struct LaunchConfig {
     /// round-trips as the file wrote it.
     #[serde(default, skip_serializing_if = "Filters::is_empty")]
     pub filters: Filters,
+    /// The agent graph this launch drafts change request bodies with, if any.
+    ///
+    /// The second launch-level decision, and it is one a team writes down beside
+    /// a plan for the same reason the filters are: which graph authors a change
+    /// request is a property of how a team works rather than of one launch.
+    /// `--pr-author-graph` spells the same thing for a launch that would rather
+    /// say it inline, and overrides this when both are given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_author_graph: Option<String>,
 }
 
 impl Default for LaunchConfig {
@@ -88,6 +97,7 @@ impl Default for LaunchConfig {
         Self {
             schema_version: LAUNCH_CONFIG_SCHEMA_VERSION,
             filters: Filters::default(),
+            pr_author_graph: None,
         }
     }
 }
@@ -644,7 +654,13 @@ mod tests {
     /// distinct shape on the wire — an `exclude`-only filter, an `include` of
     /// several matchers, an overridden profile, and the empty filter that means
     /// "unfiltered" — and a golden carrying one of them would pin a quarter of
-    /// the document.
+    /// the document. The launch's other decision is here for the same reason.
+    ///
+    /// It stays at [`LAUNCH_CONFIG_SCHEMA_VERSION`] 1 with that field on it: the
+    /// version is what a *reader* decides by and this build reads 1, an absent
+    /// value is written as no key at all, and bumping the number for a field an
+    /// older document simply does not carry would refuse every config an
+    /// operator has already written.
     fn golden() -> LaunchConfig {
         let kind = |glob: &str| Matcher {
             kind: Some(glob.to_string()),
@@ -652,6 +668,7 @@ mod tests {
         };
         LaunchConfig {
             schema_version: LAUNCH_CONFIG_SCHEMA_VERSION,
+            pr_author_graph: Some("./graphs/pr-author.yaml".to_string()),
             filters: Filters {
                 agentgraph: Some(EventFilter {
                     include: Vec::new(),

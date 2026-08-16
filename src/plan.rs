@@ -29,27 +29,55 @@ use crate::error::{Error, Result};
 
 /// The plan schema version this crate reads and writes.
 ///
-/// **2** since the judge controls were made honest: version 1 carried a
-/// `done_when` that no dispatch ever received, and a `max_turns` that no
-/// dispatch ever received either. Version 2 forwards the budget and does not
-/// carry the bar at all, so a document is a different shape and says so — a
-/// version-1 plan is refused with what to change, rather than read as if the two
-/// versions meant the same thing.
-pub const PLAN_SCHEMA_VERSION: u32 = 2;
+/// **3** since a lifecycle node states the change request it publishes: a
+/// [`title`](Node::title) is required on one, and a [`body`](Node::body) may be
+/// carried beside it. Unlike the version before it this one is **additive**, so
+/// [`PLAN_SCHEMA_VERSION_LEGACY`] still loads and still runs: a node written
+/// there states no title, and its publication takes the subject `onevcs` derives
+/// from the branch's own conventional commits.
+pub const PLAN_SCHEMA_VERSION: u32 = 3;
 
-/// The version this schema replaced, which a plan on disk may still declare.
+/// The version before it, which this build still reads.
+///
+/// A plan written at it is a legal document rather than one being tolerated: the
+/// two rules version 3 adds are both keyed to the version the document itself
+/// declares, so a version-2 plan means exactly what it meant.
+pub const PLAN_SCHEMA_VERSION_LEGACY: u32 = 2;
+
+/// The version this schema retired, which a plan on disk may still declare.
 pub const PLAN_SCHEMA_VERSION_RETIRED: u32 = 1;
 
 /// What a plan still declaring [`PLAN_SCHEMA_VERSION_RETIRED`] is told.
 ///
-/// A bare "schema_version 1 is not 2" would leave a planner to guess what
-/// changed between them. What changed is one field removed and one field made to
-/// work, so the refusal says both and where the removed one's content goes.
+/// A bare "schema_version 1 is not read" would leave a planner to guess what
+/// changed. What changed is one field removed and one field made to work, so the
+/// refusal says both and where the removed one's content goes.
 pub(crate) const RETIRED_VERSION_MIGRATION: &str =
     "version 2 retired the judge-only `done_when` and forwards a node's `max_turns` to \
      its dispatch, which version 1 never did. Move any `done_when` into that node's \
      `## Acceptance criteria` — or, for a bar broader than one node, into the onejudge \
      base config the node-scope graph's worker points at — and set `schema_version: 2`";
+
+/// What a lifecycle node at [`PLAN_SCHEMA_VERSION`] stating no `title` is told.
+///
+/// The node and the field, because both are what its author has to act on: a
+/// plan may carry many lifecycle nodes and only one of them be missing its
+/// subject.
+pub(crate) const TITLE_IS_REQUIRED: &str = "a lifecycle node states the title its change request \
+     opens under, and this one names no `title`";
+
+/// What a plan below [`PLAN_SCHEMA_VERSION`] naming `body` is told.
+///
+/// The same rule this schema already applies to a field it never had — refused
+/// by the field's own name — rather than a value silently dropped: a planner who
+/// wrote a change request body and had it ignored would find that out from the
+/// published change request.
+pub(crate) fn body_is_newer(declared: u32) -> String {
+    format!(
+        "`body` is a schema {PLAN_SCHEMA_VERSION} field and this plan declares schema_version \
+         {declared} — set `schema_version: {PLAN_SCHEMA_VERSION}`"
+    )
+}
 
 /// The heading a carried planner note is rendered under.
 pub const PLANNER_CONTEXT_HEADING: &str = "## Planner context";
@@ -311,10 +339,15 @@ pub struct Node {
     /// Pin the work to a named branch instead of generating one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
-    /// The change request's title, when the planner sets it rather than leaving
-    /// it to the `pr-author` dispatch.
+    /// The change request's title. Required on a lifecycle node from
+    /// [`PLAN_SCHEMA_VERSION`] on; absent, the publication takes the subject
+    /// `onevcs` derives from the branch's own conventional commits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// The change request's body, when the planner writes it rather than
+    /// leaving it to the `pr-author` graph a launch names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
     /// The registered checkout the per-run clone is cut from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_checkout: Option<String>,

@@ -322,7 +322,42 @@ pub fn validate(plan: &Plan) -> Result<()> {
     if plan.tasks.is_empty() {
         return Err(Error::Invalid("a plan needs at least one node".into()));
     }
-    validate_edited(plan)
+    validate_edited(plan)?;
+    validate_declared_version(plan)
+}
+
+/// The two rules a plan's **own declared version** decides.
+///
+/// A plan file is a document written at a version and read by a build, so what
+/// it may say is the version it declares rather than the one this build writes.
+/// Version 3 states the change request a lifecycle node publishes: a `title` is
+/// required on one, and a `body` may be carried beside it. A plan declaring
+/// [`PLAN_SCHEMA_VERSION_LEGACY`](crate::plan::PLAN_SCHEMA_VERSION_LEGACY) is
+/// read as that version — its untitled lifecycle nodes publish under the subject
+/// `onevcs` derives from the branch's own conventional commits — and naming a
+/// field that version never had is refused **by the field's name**, exactly as
+/// an unknown field is.
+///
+/// Here rather than in [`validate_node`], which is the shape check every
+/// *edited* graph is also held to: an edit is compiled against the version this
+/// build writes, and a graph folded from a version-2 run carries the untitled
+/// lifecycle nodes that run was launched with. Requiring a title there would
+/// refuse every later edit to those runs — a `retry` of a node clones it — which
+/// is the whole graph held hostage to a field the plan was never written with.
+fn validate_declared_version(plan: &Plan) -> Result<()> {
+    for node in &plan.tasks {
+        let named = |what: String| Error::Invalid(format!("node '{}': {what}", node.id));
+        if node.body.is_some() && plan.schema_version < crate::plan::PLAN_SCHEMA_VERSION {
+            return Err(named(crate::plan::body_is_newer(plan.schema_version)));
+        }
+        if plan.schema_version >= crate::plan::PLAN_SCHEMA_VERSION
+            && node.repo.is_some()
+            && node.title.is_none()
+        {
+            return Err(named(crate::plan::TITLE_IS_REQUIRED.to_owned()));
+        }
+    }
+    Ok(())
 }
 
 /// Check a graph an edit produced.
@@ -332,21 +367,30 @@ pub fn validate(plan: &Plan) -> Result<()> {
 /// do, which is a settled run rather than a malformed plan — refusing it would
 /// make the planner unable to abandon a graph it started.
 pub fn validate_edited(plan: &Plan) -> Result<()> {
-    if plan.schema_version != crate::plan::PLAN_SCHEMA_VERSION {
-        // The version this one replaced is refused *deliberately*, with what to
-        // change: it is the version every plan on this host was written at, and a
-        // planner reading only that two numbers differ has to go and find out
-        // which fields moved. Any other version is a number this build has never
-        // written, so there is no migration to name.
+    // Two versions, because the current one is **additive**: what version 3 adds
+    // is keyed to the version a document declares, so a version-2 plan describes
+    // a graph this engine executes exactly as it always did. Version 1 is not
+    // one of them — it carried a `done_when` and a `max_turns` that no dispatch
+    // ever received — and it is refused *deliberately*, with what to change,
+    // because it is the version every plan on this host was once written at and
+    // a planner reading only that two numbers differ has to go and find out
+    // which fields moved. Any other number is one this build has never written,
+    // so there is no migration to name.
+    let read = [
+        crate::plan::PLAN_SCHEMA_VERSION,
+        crate::plan::PLAN_SCHEMA_VERSION_LEGACY,
+    ];
+    if !read.contains(&plan.schema_version) {
         let migration = if plan.schema_version == crate::plan::PLAN_SCHEMA_VERSION_RETIRED {
             format!("; {}", crate::plan::RETIRED_VERSION_MIGRATION)
         } else {
             String::new()
         };
         return Err(Error::Invalid(format!(
-            "plan schema_version {} is not {}{migration}",
+            "plan schema_version {} is not {} or {}{migration}",
             plan.schema_version,
-            crate::plan::PLAN_SCHEMA_VERSION
+            crate::plan::PLAN_SCHEMA_VERSION,
+            crate::plan::PLAN_SCHEMA_VERSION_LEGACY
         )));
     }
     if plan.concurrency == 0 {
@@ -906,6 +950,7 @@ mod tests {
                 repo: Some("owner/repo".into()),
                 persona: Some("engineer".into()),
                 task: Some("## What\nship".into()),
+                title: Some("feat: ship it".into()),
                 deps: vec!["approve".into()],
                 ..Node::default()
             },

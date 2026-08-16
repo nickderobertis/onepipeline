@@ -460,6 +460,24 @@ fn a_plan_the_schema_refuses_never_starts_a_run() {
                 "title":"   "}]}"#,
             "the title is blank",
         ),
+        // The two rules this schema version added, each keyed to the version the
+        // *document* declares: a lifecycle node at 3 states the title its change
+        // request opens under...
+        (
+            "untitled",
+            r#"{"schema_version":3,"tasks":[{"id":"publish","repo":"o/r","persona":"e",
+                "task":"t"}]}"#,
+            "node 'publish': a lifecycle node states the title its change request opens under",
+        ),
+        // ...and a plan below it that names `body` is refused by that field's
+        // name, exactly as a field no schema ever had is. Silently dropping it
+        // would leave its author to find out from the published change request.
+        (
+            "earlybody",
+            r#"{"schema_version":2,"tasks":[{"id":"publish","repo":"o/r","persona":"e",
+                "task":"t","title":"feat: ship it","body":"what it landed"}]}"#,
+            "node 'publish': `body` is a schema 3 field",
+        ),
     ];
 
     for (name, body, expected) in cases {
@@ -469,7 +487,7 @@ fn a_plan_the_schema_refuses_never_starts_a_run() {
         if *name == "donewhen" {
             // The document declares the retired version too, and the field is
             // still what it is answered about.
-            refused.err_lacks("is not 2");
+            refused.err_lacks("is not 3 or 2");
         }
         assert!(
             !world.runs.join(name).exists(),
@@ -486,7 +504,7 @@ fn a_plan_the_schema_refuses_never_starts_a_run() {
     world
         .run(&["start", &legacy.to_string_lossy()])
         .exited(REFUSED)
-        .err_has("schema_version 1 is not 2")
+        .err_has("schema_version 1 is not 3 or 2")
         .err_has("retired the judge-only `done_when`")
         .err_has("forwards a node's `max_turns` to its dispatch")
         .err_has("set `schema_version: 2`");
@@ -505,7 +523,7 @@ fn a_plan_the_schema_refuses_never_starts_a_run() {
         .exited(REFUSED)
         .err_has("`done_when` is no longer a plan field")
         .err_has("`## Acceptance criteria` section of its own task")
-        .err_lacks("is not 2");
+        .err_lacks("is not 3 or 2");
 }
 
 #[test]

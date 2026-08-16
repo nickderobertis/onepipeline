@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "name": "tracked-release",
   "concurrency": 3,
   "goal": {
@@ -43,6 +43,8 @@
       "repo": "nickderobertis/some-docs",
       "repo_type": "team",
       "persona": "docs-writer",
+      "title": "docs: document the approved API and rollout",
+      "body": "## What\nDocuments the approved API and its rollout steps.\n\n## Why\nUsers adopting the release need accurate operating instructions to follow.",
       "agent_graph": "./graphs/node-scope.yaml",
       "task": "## What\nDocument the approved API and rollout.\n\n## Why\nEnable users to adopt the release confidently with accurate operating instructions.\n\n## Acceptance criteria\n- The approved API and rollout are documented.\n- Every command is verified against the implementation.",
       "deps": ["design-approval"]
