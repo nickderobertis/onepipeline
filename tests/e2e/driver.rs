@@ -788,12 +788,13 @@ fn a_launch_records_the_directory_the_process_resolves_not_the_route_to_it() {
 /// sibling, rather than a directory this build invented for it. The second is
 /// what stops the field from being trusted just because it is there: it is a
 /// file on disk, and it decides where every member of the run works.
-// llmlint: ignore-block[tests_mirror_real_usage] both states are reached by writing the
-// launch record directly because no command of this crate can produce either: the
-// no-directory case is what a *previous build* wrote, and no build writes it any more,
-// while the unusable-directory case is what a moved runs root or an edited record leaves.
-// Every other step here — `start`, `status`, `adopt` — is the real binary, and the record
-// is this crate's own file rather than a sibling's internals.
+// llmlint: ignore-block[tests_mirror_real_usage] neither state has an engine-side
+// constructor: `start` resolves an absolute launch directory and `adopt` replays it, so no
+// verb writes a launch record with **no `dir`**, nor one whose **`dir` is relative or is
+// not a directory**. Nothing here is assembled by hand — what is mutated is the record
+// `start` itself wrote, one field at a time, and the removal asserts it removed something
+// so a renamed field cannot leave this journey arranging nothing. Every other step —
+// `start`, `status`, `adopt` — is the real binary.
 #[test]
 fn a_launch_record_without_a_directory_is_replayed_from_the_adopting_process() {
     let world = World::new("driver-legacy-dir");
@@ -807,12 +808,19 @@ fn a_launch_record_without_a_directory_is_replayed_from_the_adopting_process() {
         std::fs::write(&path, record.to_string()).expect("the record is rewritten");
     };
 
-    // A record from before the field: no `dir` at all.
+    // A record from before the field: no `dir` at all. Taking away a field this
+    // build no longer writes would arrange nothing, and every assertion below
+    // would then be made against an ordinary record — so the removal has to have
+    // removed something.
     let mut record = world.run_json(&run, "launch.json");
-    record
-        .as_object_mut()
-        .expect("the record is an object")
-        .remove("dir");
+    assert!(
+        record
+            .as_object_mut()
+            .expect("the record is an object")
+            .remove("dir")
+            .is_some(),
+        "the record this build wrote carries no `dir` to take away: {record}"
+    );
     rewrite(&mut record);
 
     let adopted_from = world.project.clone();
@@ -922,14 +930,15 @@ fn adoption_re_addresses_the_pacemaker_at_the_graph_run_now_driving() {
 /// address, so there is nothing to send. Saying so is the point — the reset is
 /// best-effort, and a silent no-op here is exactly the failure that went
 /// unnoticed for as long as it did.
-// llmlint: ignore-block[tests_mirror_real_usage] the record is written directly for the
-// same reason as above: no build writes a record without this field any more, and a value
-// the sibling would refuse is what an edited or interfered-with record carries. What is
-// mostly asserted is the product's own answer — `next`'s exit code, its surface, and its
-// stderr — but the closing claim is that *nothing was sent*, and the only place a value
-// that never crossed the seam can be observed is the log of what did. A product surface
-// reporting "no reset was attempted" does not exist, and inventing one to make the
-// assertion product-shaped would be a surface nobody asked for.
+// llmlint: ignore-block[tests_mirror_real_usage] no verb writes a launch record with **no
+// `graph_run`**, nor one whose **`graph_run` is a path the sibling would refuse**: every
+// launch records the run it started and every `adopt` rewrites it. As above the record is
+// the one `start` wrote and the mutation is one field of it, with the removal asserting it
+// removed something. What is mostly asserted is the product's own answer — `next`'s exit
+// code, its surface, and its stderr — but the closing claim is that *nothing was sent*, and
+// the only place a value that never crossed the seam can be observed is the log of what
+// did. A product surface reporting "no reset was attempted" does not exist, and inventing
+// one to make the assertion product-shaped would be a surface nobody asked for.
 #[test]
 fn a_run_with_no_recorded_graph_run_says_why_the_pacemaker_was_not_reset() {
     let world = World::new("driver-no-graph-run");
@@ -942,11 +951,17 @@ fn a_run_with_no_recorded_graph_run_says_why_the_pacemaker_was_not_reset() {
         .run(&["surface", &run, "--kind", "check-in", "--message", "steady"])
         .exited(0);
 
+    // As above, the removal has to have removed something: a record this build
+    // never wrote the field into would make every claim below vacuous.
     let mut record = world.run_json(&run, "launch.json");
-    record
-        .as_object_mut()
-        .expect("the record is an object")
-        .remove("graph_run");
+    assert!(
+        record
+            .as_object_mut()
+            .expect("the record is an object")
+            .remove("graph_run")
+            .is_some(),
+        "the record this build wrote carries no `graph_run` to take away: {record}"
+    );
     std::fs::write(world.run_file(&run, "launch.json"), record.to_string())
         .expect("the record is rewritten");
 
