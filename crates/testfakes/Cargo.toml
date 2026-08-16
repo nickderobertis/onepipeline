@@ -38,7 +38,17 @@ name = "fake-gh"
 path = "src/bin/fake-gh.rs"
 
 # One layer further out than the other two: this stands in for the paid model
-# turn only, for the journeys that drive the real `oneagentgraph` binary.
+# turn only, for the journeys that drive the real `oneagentgraph` binary. It is
+# the *harness* rather than `oneharness`, because a single-sided member's turn is
+# an `oneharness_core` library call from `oneagentgraph 0.2.18` on and the only
+# process left below it is the one oneharness spawns for the identity chain.
+[[bin]]
+name = "fake-claude"
+path = "src/bin/fake-claude.rs"
+
+# `oneharness` itself, at the seam the library conversion left behind: the
+# executable a two-party member's composed provider block names, and the one an
+# in-flight redirection is delivered by. No single-sided turn comes through it.
 [[bin]]
 name = "fake-oneharness"
 path = "src/bin/fake-oneharness.rs"

@@ -97,6 +97,16 @@ build another member's binaries.
 The doubles are the only honest way to test this crate: it *is* a composition
 layer, so a test that stubbed the seam would be testing nothing.
 
+`tests/e2e/dispatch.rs` drives the **real** `oneagentgraph` and substitutes only
+the paid turn — and that substitution is `fake-claude` at oneharness's own
+`ONEHARNESS_BIN_CLAUDE_CODE`, not `oneharness` itself: from `oneagentgraph
+0.2.18` a single-sided member's turn is an `oneharness_core` library call, so it
+has no argv, no exit status and no stderr for a journey to read. What a turn was
+asked to do is therefore readable only from the turn's own record
+(`World::turns`), and which member it was rides that member's harness config
+`[env]` block; `member-started` carries the composed `config` and the `worktree`
+instead.
+
 Each sibling also has a journey driving its **real** binary, built from the
 version `Cargo.lock` pins: `tests/e2e/dispatch.rs` for `oneagentgraph`,
 `tests/e2e/real_vcs.rs` for `onevcs`, and `tests/smoke/` for both at once plus a

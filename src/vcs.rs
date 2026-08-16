@@ -79,6 +79,13 @@ pub fn session_open(request: &SessionRequest) -> Result<Session> {
 /// [`Subject`]'s conversion is where the sibling checks it — a title too long to
 /// be a commit subject is refused before a session's work is committed rather
 /// than after.
+///
+/// `body` is `None`, and that is this crate's answer rather than a field it has
+/// not got around to: [`PublishRequest::body`] is the change request's body
+/// *verbatim*, and nothing in the plan schema is one. A node's `task` is the
+/// brief its agent was given, not a description of what the branch turned out to
+/// hold, so sending it would put a prediction where a reviewer reads a report.
+/// Opening the change request with no body leaves that to whoever writes one.
 pub fn publish(
     token: &str,
     policy: Option<MergePolicy>,
@@ -90,7 +97,11 @@ pub fn publish(
     onevcs::publish(
         &providers(),
         &SessionToken(token.to_owned()),
-        &PublishRequest { policy, title },
+        &PublishRequest {
+            policy,
+            title,
+            body: None,
+        },
     )
     .map_err(refusal)
 }

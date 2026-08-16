@@ -5,11 +5,13 @@
 //! double here, because that sibling is called rather than spawned. One is a
 //! real executable speaking `oneagentgraph`'s command surface, so the code under
 //! test composes it exactly as it composes the real one, by executing a program
-//! and reading its stdout. The other two stand one layer further out than a
-//! sibling: `oneharness`'s surface, for the journeys that drive the real
-//! `oneagentgraph` and need only the paid model turn replaced, and `gh`'s, at
-//! `onevcs`'s own override, for the journeys that need a host to decide
-//! something without a network or a credential.
+//! and reading its stdout. The other three stand further out than a sibling:
+//! Claude Code's headless surface, at oneharness's own
+//! `ONEHARNESS_BIN_CLAUDE_CODE`, which is where the paid model turn is replaced
+//! for the journeys that drive the real `oneagentgraph`; `oneharness`'s, at the
+//! process boundary that sibling still has; and `gh`'s, at `onevcs`'s own
+//! override, for the journeys that need a host to decide something without a
+//! network or a credential.
 //!
 //! Each is scripted from a directory the test prepares: what a node's dispatch
 //! does, whether it waits for a rendezvous, and what it exits with are all files

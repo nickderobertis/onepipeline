@@ -109,6 +109,12 @@ fn every_operation_this_crate_performs_is_served_by_the_provider_seam() {
         &PublishRequest {
             policy: Some(MergePolicy::ChangeOpen),
             title: Some("feat: land it".parse().expect("a usable subject")),
+            // The request `src/vcs.rs::publish` builds, field for field. It sends
+            // no body, and the assertion below is that the sibling opens the
+            // change request without one rather than composing something in its
+            // place — which is what it used to do, and what this crate would then
+            // be shipping as its reviewers' description.
+            body: None,
         },
     )
     .expect("the seam publishes a session it opened");
@@ -119,6 +125,17 @@ fn every_operation_this_crate_performs_is_served_by_the_provider_seam() {
         panic!("a change-open publication ended as {:?}", published.outcome);
     };
     assert!(url.as_str().contains("owner/repo"), "{url}");
+    let opened = host.state();
+    assert!(
+        opened.bodies.is_empty(),
+        "a publication this crate gave no body opened a change request carrying one: {:?}",
+        opened.bodies
+    );
+    assert!(
+        opened.titles.values().any(|title| title == "feat: land it"),
+        "the title the request named is not the one the change request carries: {:?}",
+        opened.titles
+    );
 
     // What the publication wrote reaches the reader as the records appended since
     // the last read — never the whole stream again, which is what would put every
