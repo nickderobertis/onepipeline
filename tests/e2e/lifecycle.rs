@@ -1046,6 +1046,42 @@ fn a_record_written_after_the_follow_ended_still_reaches_the_merged_store_once()
     assert_eq!(closed["source"], "vcs", "{closed}");
 }
 
+/// A drafting graph the launch directory cannot produce is refused before a run
+/// exists.
+///
+/// The reference is external input and it is *relative*, so this crate owns the
+/// base it resolves against and is the only thing that can say it does not
+/// resolve. Refused at launch rather than at the first publication: a run minted
+/// against a graph nothing can read would dispatch every node, do the work, and
+/// discover at the change request that the drafting it was launched for was
+/// never going to happen — so the refusal is worth nothing unless no run was
+/// minted, which is the second half of what this asserts.
+#[test]
+fn a_drafting_graph_the_launch_directory_cannot_produce_is_refused_before_a_run_starts() {
+    let world = World::new("lifecycle-nodrafting");
+    world.repository("local-direct", &["true"]);
+    let path = world.plan(
+        "nodrafting",
+        &plan_of("nodrafting", vec![lifecycle("service", &[])]),
+    );
+    world
+        .run(&[
+            "start",
+            &path.to_string_lossy(),
+            "--attach",
+            "--pr-author-graph",
+            "graphs/no-such-pr-author.yaml",
+        ])
+        .exited(2)
+        // Naming the reference as it was given and the directory it was resolved
+        // against: a launch refused for a relative path says which path and
+        // relative to what, or the operator cannot tell a typo from a launch run
+        // from the wrong directory.
+        .err_has("cannot read graph 'graphs/no-such-pr-author.yaml'")
+        .err_has("resolved against launch directory");
+    assert!(!world.run_file("nodrafting", "launch.json").exists());
+}
+
 #[test]
 fn an_unresolvable_repository_is_refused_before_a_run_starts() {
     let world = World::new("lifecycle-nosession");

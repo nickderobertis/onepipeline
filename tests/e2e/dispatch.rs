@@ -896,6 +896,83 @@ fn a_drafted_body_reaches_the_change_request_through_the_real_siblings() {
     );
 }
 
+/// An answer the schema accepted that carries no body publishes without one.
+///
+/// The other ending of a drafting dispatch that *worked*: the member ran, the
+/// harness answered, and the producing library validated what came back — so
+/// every failure path is untaken and `schema_valid` is true — and the body in it
+/// is blank. Distinct from the refused-graph journey below, where no answer
+/// exists at all: here one does, this crate reads it, and what it decides is
+/// that blank prose is not a body worth publishing.
+///
+/// Worth driving rather than leaving to the reader's unit tests, because the
+/// blankness has to survive four hand-offs to be observable — the harness's
+/// structured answer, the library's validation, the report this run retains, and
+/// the publish request — and a crate that passed `Some("")` on would open a
+/// change request whose body is a blank line nobody wrote.
+#[test]
+fn a_validated_answer_carrying_no_body_publishes_the_change_request_without_one() {
+    let world = World::new("blank-pr-author");
+    world.write_graphs();
+    world.repository("change-open", &["true"]);
+    world.script("harness.work", "the worker wrote this");
+    // Spacing only, which is what a turn that answered the schema and said
+    // nothing looks like: the schema requires the key, not prose under it.
+    world.script("harness.body", "   \n");
+    let drafting = world.pr_author_graph();
+    let node = json!({
+        "id": "service",
+        "repo": "service",
+        "persona": "engineer",
+        "title": "feat: land it with a blank draft",
+        "task": "## What\nship the thing",
+    });
+    let path = world.plan("blankdraft", &plan_of("blankdraft", vec![node]));
+    let launched = world.run_on_agentgraph(&[
+        "start",
+        &path.to_string_lossy(),
+        "--attach",
+        "--pr-author-graph",
+        &drafting,
+    ]);
+    launched.settled();
+
+    // Published, with the plan's own title and no body — not a body of spaces.
+    let opened = world.changes_opened();
+    assert_eq!(opened.len(), 1, "{opened:?}\n{}", world.dump());
+    assert_eq!(opened[0]["title"], "feat: land it with a blank draft");
+    assert_eq!(
+        opened[0]["body"], "",
+        "a validated answer with no body in it still put one on the change request: {opened:?}"
+    );
+    assert_eq!(
+        world.run_json("blankdraft", "result.json")["state"],
+        "complete",
+        "a drafting dispatch that answered blank took the publication with it:\n{}",
+        world.dump()
+    );
+
+    // And the answer really was accepted: the emptiness is this crate's reading
+    // of a validated answer, not a validation the dispatch failed. Without this
+    // the journey would pass just as well against a member that never ran.
+    let kept: Vec<serde_json::Value> = std::fs::read_dir(world.run_file("blankdraft", "reports"))
+        .expect("the run kept the reports its dispatches settled with")
+        .filter_map(Result::ok)
+        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+        .filter_map(|text| serde_json::from_str(&text).ok())
+        .collect();
+    assert!(
+        kept.iter().any(|report| {
+            report["results"].as_array().is_some_and(|results| {
+                results.iter().any(|result| {
+                    result["schema_valid"] == json!(true) && result["structured"]["body"] == ""
+                })
+            })
+        }),
+        "no report this run retained carries a validated answer with a blank body: {kept:#?}"
+    );
+}
+
 /// A drafting graph the runner refuses costs the change request its body and
 /// nothing else.
 ///

@@ -348,6 +348,17 @@ pub fn validate(plan: &Plan) -> Result<()> {
 fn validate_declared_version(plan: &Plan) -> Result<()> {
     for node in &plan.tasks {
         let named = |what: String| Error::Invalid(format!("node '{}': {what}", node.id));
+        // The version is the whole of what `body` is checked for, and deliberately.
+        // It is one of seven publication-only optional fields the common node shape
+        // carries — `title`, `branch`, `merge_policy`, `base_branch`, `repo_type` and
+        // `workflow` are the others — and what makes a node a lifecycle node is
+        // `repo`. None of the other six is refused on a node kind that never
+        // publishes, so refusing this one alone would answer a planner differently
+        // for the same mistake depending on which field they made it in.
+        // llmlint: ignore[boundary_inputs_validated] the paragraph above is the decision:
+        // the schema struct's `deny_unknown_fields` is this document's boundary, and what a
+        // node kind does with a field it does not use is the plan shape's own convention
+        // rather than a validation this field is missing.
         if node.body.is_some() && plan.schema_version < crate::plan::PLAN_SCHEMA_VERSION {
             return Err(named(crate::plan::body_is_newer(plan.schema_version)));
         }

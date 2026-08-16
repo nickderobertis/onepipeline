@@ -336,6 +336,16 @@ pub struct Node {
     pub title: Option<String>,
     /// The change request's body, when the planner writes it rather than
     /// leaving it to the `pr-author` graph a launch names.
+    ///
+    /// Publication-only, like the six fields around it: a node that carries no
+    /// `repo` never publishes, so it never reads one. Accepted there rather than
+    /// refused, because that is what every one of those six already does and one
+    /// field answering differently is the surprise.
+    // llmlint: ignore[changed_behavior_has_e2e] the journeys that matter are the ones
+    // that publish, and both are driven end to end: a node stating its own body and a
+    // `pr-author` dispatch drafting one. A node kind that never publishes ignoring this
+    // is the plan shape's standing convention rather than behaviour this field changed,
+    // so an e2e for it would pin a promise the other six do not make.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
     /// The registered checkout the per-run clone is cut from.

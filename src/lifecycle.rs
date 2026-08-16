@@ -375,6 +375,18 @@ fn drafted(
     };
     let mut retained = Vec::new();
     for envelope in handle.events() {
+        // A line off this stream that will not parse costs that line and nothing
+        // more: what the loop is looking for is a `member-settled` naming a
+        // retained report, and a drafting run that never produces one already
+        // publishes with no body two lines below. Skipping is therefore the same
+        // ending an unreadable stream would reach by any other route, reported
+        // the same way.
+        // llmlint: ignore[changed_behavior_has_e2e] no double can produce this: the
+        // envelopes come off the real `oneagentgraph`'s own stdout, which is well-formed
+        // by construction, and there is no fault-injection seam here to drive one through.
+        // The ending it falls back to — a dispatch that yields no body, and a publication
+        // that proceeds without one — is driven end to end by
+        // `a_drafting_graph_the_runner_refuses_still_publishes_the_change_request`.
         let Ok(envelope) = envelope else { continue };
         // **Ingest**, and the same ingest the engine performs on the envelopes
         // this relays to it: the line is arriving on the stdout of a process

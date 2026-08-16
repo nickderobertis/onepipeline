@@ -434,7 +434,7 @@ fn a_plan_the_schema_refuses_never_starts_a_run() {
         // because the schema is what refuses it either way.
         (
             "donewhencurrent",
-            r#"{"schema_version":2,"tasks":[{"id":"a","persona":"e","task":"t",
+            r#"{"schema_version":3,"tasks":[{"id":"a","persona":"e","task":"t",
                 "done_when":"the gate is green"}]}"#,
             "`done_when` is no longer a plan field",
         ),
