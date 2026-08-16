@@ -152,16 +152,21 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
 /// argv rides stdin instead (`-p --input-format text`, no positional), which is
 /// `oneharness`'s own delivery decision — so it is read rather than refused.
 fn prompt(args: &[String]) -> Option<String> {
+    // Whichever way it arrives, a prompt with no words in it is not one: read
+    // leniently, an empty stdin would answer as a turn that was asked for
+    // nothing, which is a launch prepared wrongly and settling anyway.
+    let words = |text: String| (!text.trim().is_empty()).then_some(text);
     if fake::flag(args, "--input-format").as_deref() == Some("text") {
         use std::io::Read;
         let mut text = String::new();
         std::io::stdin().read_to_string(&mut text).ok()?;
-        return Some(text);
+        return words(text);
     }
     let at = args.iter().position(|arg| arg == "-p")?;
     args.get(at + 1)
         .filter(|next| !next.starts_with('-'))
         .cloned()
+        .and_then(words)
 }
 
 /// The output shape `oneharness` asked this turn for, on its own

@@ -894,6 +894,76 @@ fn a_drafted_body_reaches_the_change_request_through_the_real_siblings() {
     );
 }
 
+/// A drafting graph the runner refuses costs the change request its body and
+/// nothing else.
+///
+/// The document exists — a launch resolves the reference against its own
+/// directory and refuses one it cannot read, so a reference that got this far
+/// names a file — and the **runner** is what will not have it. That refusal
+/// arrives where the drafting dispatch is built, after the branch is verified
+/// and while the session still holds the work, which is exactly the moment
+/// nothing may take the publication down with it.
+///
+/// The real sibling, because the refusal is its: a launcher holding a second
+/// opinion about what a graph document may contain is the defect this file
+/// exists for.
+#[test]
+fn a_drafting_graph_the_runner_refuses_still_publishes_the_change_request() {
+    let world = World::new("real-pr-author-refused");
+    world.write_graphs();
+    world.repository("change-open", &["true"]);
+    world.script("harness.work", "the worker wrote this");
+    // A readable file that is not a graph the runner will run: it names a member
+    // kind that does not exist, which `oneagentgraph` refuses in its own words.
+    let refused = world.graphs().join("unrunnable.yaml");
+    std::fs::write(
+        &refused,
+        format!(
+            "version: {}\nname: pr-author\nmembers:\n  author:\n    kind: nonesuch\n",
+            oneagentgraph::config::SCHEMA_VERSION
+        ),
+    )
+    .expect("the unrunnable graph is written");
+    let node = json!({
+        "id": "service",
+        "repo": "service",
+        "persona": "engineer",
+        "title": "feat: land it with no body",
+        "task": "## What\nship the thing",
+    });
+    let path = world.plan("refuseddraft", &plan_of("refuseddraft", vec![node]));
+    let launched = world.run_on_agentgraph(&[
+        "start",
+        &path.to_string_lossy(),
+        "--attach",
+        "--pr-author-graph",
+        &refused.to_string_lossy(),
+    ]);
+    launched.settled();
+
+    // The node published, and the change request carries the plan's own title
+    // and no body at all.
+    let opened = world.changes_opened();
+    assert_eq!(opened.len(), 1, "{opened:?}\n{}", world.dump());
+    assert_eq!(opened[0]["title"], "feat: land it with no body");
+    assert_eq!(opened[0]["body"], "", "{opened:?}");
+    assert_eq!(
+        world.run_json("refuseddraft", "result.json")["state"],
+        "complete",
+        "a drafting graph the runner refused took the publication with it:\n{}",
+        world.dump()
+    );
+    // And it is not silent: a launch that named a drafting graph and drafted
+    // nothing reads exactly like one that named none.
+    assert!(
+        launched
+            .stderr
+            .contains("the drafting dispatch could not start"),
+        "the refusal never reached the operator:\n{}",
+        launched.stderr
+    );
+}
+
 /// The tools a real dispatched turn used, read back off the CLI.
 ///
 /// There was no transcript verb at all: the evidence was retained — the

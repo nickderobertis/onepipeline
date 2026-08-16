@@ -309,10 +309,14 @@ const DRAFTING_TASK: &str = "Read this branch's diff and write the change reques
 /// launch named a graph to draft it with and the node carries none of its own.
 ///
 /// It runs **after** the branch has been verified and is not on the publication
-/// path: every way it can end badly — never starting, failing, being cancelled,
-/// or answering with nothing the schema accepted — leaves the change request to
-/// open with no body, and the node settles on its publication as before. That is
-/// the whole point of running it here rather than making it a step.
+/// path: every way it can end badly leaves the change request to open with no
+/// body, and the node settles on its publication as before. That is the whole
+/// point of running it here rather than making it a step. There are three such
+/// endings and they take two arms — a dispatch that never started, and one that
+/// settled without succeeding, which is where a failed turn and a cancelled one
+/// both land because the difference between them is not a difference to a
+/// publication that carries no body either way. An answer the schema did not
+/// accept is the third, and it is a dispatch that succeeded and drafted nothing.
 ///
 /// It runs in the node's **own** worktree, which is the only place the diff it is
 /// asked to read exists: a session of its own would be a fresh clone cut from the

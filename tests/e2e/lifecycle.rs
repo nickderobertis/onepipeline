@@ -340,12 +340,19 @@ fn several_steps_share_one_branch_and_run_serially_in_topological_order() {
 ///
 /// The record is removed while the first step is held at a rendezvous, so the
 /// window is the test's rather than the host's.
+///
+/// It is also the one world where the **drafting** dispatch has no worktree to
+/// run in — the node's own is what it reads the diff from, and there is no
+/// record left to name one — so the launch names a graph to draft with and this
+/// journey holds that ending too: the change request keeps its title and gets no
+/// body, said out loud rather than dispatching an agent to read an empty diff.
 #[test]
 fn a_session_record_that_cannot_be_read_falls_back_to_opening_a_session() {
     use std::process::Stdio;
 
     let world = World::new("lifecycle-norecord");
     published_locally(&world);
+    let drafting = world.pr_author_graph();
     world.script("service.implement.wait", "hold");
     world.script("driver.wait", "hold");
     let node = json!({
@@ -363,7 +370,13 @@ fn a_session_record_that_cannot_be_read_falls_back_to_opening_a_session() {
     // Attached, so the fallback's own words land on a descriptor this test
     // holds: the loop runs in the process this command started.
     let driving = world
-        .cmd(&["start", &path.to_string_lossy(), "--attach"])
+        .cmd(&[
+            "start",
+            &path.to_string_lossy(),
+            "--attach",
+            "--pr-author-graph",
+            &drafting,
+        ])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -407,6 +420,19 @@ fn a_session_record_that_cannot_be_read_falls_back_to_opening_a_session() {
     assert!(
         said.contains("cannot read session") && said.contains("record"),
         "the fallback was silent about the record it could not read:\n{said}"
+    );
+    // And the drafting dispatch, which had nowhere to read the diff from, said
+    // so rather than running somewhere it could not read one.
+    assert!(
+        said.contains("no worktree to draft its change request in"),
+        "a launch that named a drafting graph drafted nothing and said nothing:\n{said}"
+    );
+    assert!(
+        !world.was_invoked(
+            "oneagentgraph",
+            &["--label", "onepipeline.persona=pr-author"]
+        ),
+        "a drafting dispatch ran with no worktree to read a diff in"
     );
     // It fell back rather than running nowhere: the second step asked for a
     // session of its own, which is what it would have done had the first never
