@@ -35,6 +35,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
+use onepipeline_testfakes::{MEMBER_ENV, SCRIPT_DIR_ENV};
 use serde_json::Value;
 
 // The exit codes are the crate's own, not a second copy of them. A suite that
@@ -102,14 +103,6 @@ pub const MONITOR_TASK: &str =
 
 /// The dag-scope member whose job is not the monitor's.
 pub const REPORTING_MEMBER: &str = "reporter";
-
-/// The variable a member's own harness config stamps its name into, and the one
-/// the substituted turn reports itself under.
-///
-/// Spelled once here and read by `fake-claude`; see
-/// [`World::harness_config`] for why the attribution has to ride the harness
-/// process's environment at all.
-pub const FAKE_MEMBER_ENV: &str = "ONEPIPELINE_FAKE_MEMBER";
 
 /// One model turn that really ran.
 #[derive(Debug, Clone)]
@@ -261,7 +254,7 @@ impl World {
             .env("GIT_AUTHOR_EMAIL", GIT_EMAIL)
             .env("GIT_COMMITTER_NAME", GIT_WHO)
             .env("GIT_COMMITTER_EMAIL", GIT_EMAIL)
-            .env("ONEPIPELINE_FAKE_DIR", &self.fakes)
+            .env(SCRIPT_DIR_ENV, &self.fakes)
             .env("ONEPIPELINE_FAKE_DRIVER_BIN", binary())
             .env("ONEPIPELINE_LAUNCHER", "e2e")
             .env("ONEPIPELINE_LAUNCHER_SESSION", &self.session)
@@ -588,7 +581,7 @@ impl World {
             dir.join(&file),
             format!(
                 "run_mode = \"fallback\"\nharnesses = [\"claude-code\"]\n\n[env]\n\
-                 {FAKE_MEMBER_ENV} = \"{member}\"\n"
+                 {MEMBER_ENV} = \"{member}\"\n"
             ),
         )
         .expect("the member's harness config is written");

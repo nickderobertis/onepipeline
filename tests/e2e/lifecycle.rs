@@ -944,6 +944,34 @@ fn a_published_node_reports_where_a_human_reads_the_change_it_opened() {
     );
     assert_eq!(opened["payload"]["url"], json!(published), "{opened}");
 
+    // And it carries **no body of this crate's writing**. `onevcs` used to
+    // compose one — the branch's own subject echoed back — for a request naming
+    // none, and this crate would have been shipping that to reviewers as its
+    // description of the change. `PublishRequest::body` is where a body would
+    // come from and this crate names none, so what the host is given is empty.
+    // Read off the argv the host was actually invoked with.
+    let created = world
+        .invocations()
+        .into_iter()
+        .find(|call| {
+            call["tool"] == "gh"
+                && call["args"]
+                    .as_array()
+                    .is_some_and(|args| args.first().is_some_and(|arg| arg == "pr"))
+                && call["args"][1] == "create"
+        })
+        .unwrap_or_else(|| panic!("no change request was opened: {}", why(&world, &run)));
+    let args: Vec<String> = serde_json::from_value(created["args"].clone()).expect("the argv");
+    let at = args
+        .iter()
+        .position(|arg| arg == "--body")
+        .unwrap_or_else(|| panic!("the host was given no --body at all: {args:?}"));
+    assert_eq!(
+        args[at + 1],
+        "",
+        "a publication this crate gave no body opened a change request carrying one: {args:?}"
+    );
+
     world.run(&["results", &run]).exited(0).out_has(&published);
 }
 

@@ -58,7 +58,8 @@ fn configs_of(world: &World, run: &str, member: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// The same, for the one dispatch a journey means: the member's first.
+/// The same for a member dispatched once, which is every journey that does not
+/// retry one.
 fn config_of(world: &World, run: &str, member: &str) -> String {
     configs_of(world, run, member).swap_remove(0).1
 }
@@ -783,9 +784,17 @@ fn status_says_what_a_live_dispatch_is_doing_and_the_readout_advances() {
 /// The tools a real dispatched turn used, read back off the CLI.
 ///
 /// There was no transcript verb at all: the evidence was retained — the
-/// sibling stores each settled member's full onejudge report and says where —
-/// and nothing read it, so an agent supervising a run could see that a turn
-/// happened and never what it did.
+/// sibling stores each settled member's full report and says where — and nothing
+/// read it, so an agent supervising a run could see that a turn happened and
+/// never what it did.
+///
+/// The member here is `kind: oneharness`, so the retained report is
+/// **oneharness's own run report** rather than onejudge's conversation: one entry
+/// per harness the chain attempted, carrying that harness's final answer and the
+/// actions it took. `src/report.rs::turns` reads both shapes, and this is where
+/// the second one is driven — through the verb, against a report the real
+/// `oneharness_core` composed. A reader that knew only the first answered
+/// `it carries no transcript` for every single-sided dispatch.
 #[test]
 fn transcript_renders_a_real_dispatched_turns_tools_and_words() {
     let world = World::new("real-transcript");
@@ -816,6 +825,64 @@ fn transcript_renders_a_real_dispatched_turns_tools_and_words() {
         .exited(crate::harness::REFUSED)
         .err_has("has recorded nothing for node 'nowhere'")
         .err_has("build");
+}
+
+/// A transcript names the identity that answered, and shows no turn for the ones
+/// the chain stepped past.
+///
+/// A single-sided member's report is one entry per harness the run **attempted**,
+/// so a two-candidate chain whose first is not installed retains two — and the
+/// one it stepped past neither answered nor acted. Rendered, that is a turn with
+/// a provider's name and nothing under it, above the only turn a reader came for;
+/// a chain of four would bury it entirely. And the turn that did run has to be
+/// attributed, because a reader with two entries in front of them has no other
+/// way to tell which identity said which.
+///
+/// The chain is real rather than scripted: `codex` is not on the `PATH` this
+/// launch is given and no `ONEHARNESS_BIN_CODEX` names one, so oneharness falls
+/// through it exactly as it would on a host where that harness is not installed.
+#[test]
+fn a_transcript_names_the_harness_that_answered_and_skips_the_ones_it_stepped_past() {
+    let world = World::new("real-fallback-transcript");
+    world.write_graphs();
+    std::fs::write(
+        world.graphs().join("chain.toml"),
+        "run_mode = \"fallback\"\nharnesses = [\"codex\", \"claude-code\"]\n",
+    )
+    .expect("the two-candidate chain is written");
+    let path = world.plan("chained", &plan_of("chained", vec![agent("build", &[])]));
+    world
+        .run_on_agentgraph(&[
+            "start",
+            &path.to_string_lossy(),
+            "--attach",
+            "--node-set",
+            "members.worker.oneharness_config=./chain.toml",
+        ])
+        .exited(0)
+        .settled();
+
+    // The chain really did step past the first candidate, which is what makes
+    // the transcript below a claim about a fall-through rather than about a
+    // one-candidate run.
+    let advanced = world.events_of("chained", "fallback-advanced");
+    assert!(
+        advanced
+            .iter()
+            .any(|event| event["payload"]["identity"] == "codex"),
+        "the chain never stepped past its first candidate: {advanced:#?}"
+    );
+
+    let transcript = world.run(&["transcript", "chained", "build"]);
+    transcript
+        .exited(0)
+        .out_has("claude-code")
+        .out_has("Ran what the task asked for.");
+    assert!(
+        !transcript.stdout.contains("codex"),
+        "a candidate the chain stepped past was rendered as a turn:\n{}",
+        transcript.stdout
+    );
 }
 
 /// A launch the sibling refuses is a failed launch.
@@ -1234,6 +1301,52 @@ fn a_view_renders_with_the_health_block_read_through_the_library() {
         !status.stdout.contains("fake-provider"),
         "the view carried the override's health block on the default path:\n{}",
         status.stdout
+    );
+}
+
+/// A launch's own environment reaches the turn the library backend runs.
+///
+/// The launcher hands the observer graph two pairs — the run's id, and where its
+/// ledger lives — and a member of that graph is an agent whose job is to look at
+/// the run they name. The subprocess backend sets them on the child it spawns.
+/// The library backend has no child to set them on: `oneagentgraph 0.2.18` runs a
+/// single-sided member's turn in this process and the harness it spawns inherits
+/// *this* process's environment, so a launch that only put them in the map it
+/// hands the sibling would hand its members nothing — and the member would go
+/// looking for a run named by nothing.
+///
+/// Read through the observer's own record of what it found: it writes the run it
+/// was started for and whether that run's ledger was there to read, which is both
+/// halves at once and is what the member itself saw rather than anything this
+/// crate wrote down. `--attach` and no `ONEPIPELINE_ONEAGENTGRAPH_BIN`, because
+/// that pair is what selects the library backend.
+#[test]
+fn a_launchs_own_environment_reaches_the_member_the_library_backend_runs() {
+    let world = World::new("real-launch-env");
+    world.write_graphs();
+    let path = world.plan("carried", &plan_of("carried", vec![agent("build", &[])]));
+    world
+        .run_on_agentgraph(&[
+            "start",
+            &path.to_string_lossy(),
+            "--attach",
+            "--dag-graph",
+            &world.dag_graph(),
+        ])
+        .exited(0)
+        .settled();
+
+    let saw = world.observer_saw();
+    assert_eq!(
+        saw.first().map(|saw| saw["run"].clone()),
+        Some(json!("carried")),
+        "the observer was not told which run it was started for: {saw:?}\n{}",
+        world.dump()
+    );
+    assert_eq!(
+        saw[0]["launch_record"],
+        json!(true),
+        "the observer was not told where the run's ledger lives: {saw:?}"
     );
 }
 

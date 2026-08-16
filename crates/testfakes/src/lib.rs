@@ -23,6 +23,15 @@ use std::path::{Path, PathBuf};
 /// The environment variable naming the directory a double is scripted from.
 pub const SCRIPT_DIR_ENV: &str = "ONEPIPELINE_FAKE_DIR";
 
+/// The environment variable a member's own harness config stamps its name into.
+///
+/// A single-sided member's turn is a library call inside `oneagentgraph`, so the
+/// harness oneharness spawns for it is handed no member name and the run
+/// publishes no argv to read one off. What it *is* handed is that member's
+/// resolved oneharness config `[env]` block, which is where a journey writing one
+/// puts this key so the turn can say which member it was.
+pub const MEMBER_ENV: &str = "ONEPIPELINE_FAKE_MEMBER";
+
 /// The directory this double reads its script from and records into.
 ///
 /// A double with no script directory has nothing to act out, which is a

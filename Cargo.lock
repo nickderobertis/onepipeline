@@ -929,6 +929,7 @@ dependencies = [
  "clap",
  "libc",
  "oneagentgraph",
+ "onepipeline-testfakes",
  "onevcs",
  "onevcs-testing",
  "serde",

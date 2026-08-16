@@ -109,11 +109,6 @@ fn every_operation_this_crate_performs_is_served_by_the_provider_seam() {
         &PublishRequest {
             policy: Some(MergePolicy::ChangeOpen),
             title: Some("feat: land it".parse().expect("a usable subject")),
-            // The request `src/vcs.rs::publish` builds, field for field. It sends
-            // no body, and the assertion below is that the sibling opens the
-            // change request without one rather than composing something in its
-            // place — which is what it used to do, and what this crate would then
-            // be shipping as its reviewers' description.
             body: None,
         },
     )
@@ -125,6 +120,9 @@ fn every_operation_this_crate_performs_is_served_by_the_provider_seam() {
         panic!("a change-open publication ended as {:?}", published.outcome);
     };
     assert!(url.as_str().contains("owner/repo"), "{url}");
+    // The sibling used to compose a body of its own — the branch's subject echoed
+    // back — for a request that named none, and this crate would have been
+    // shipping it as its reviewers' description.
     let opened = host.state();
     assert!(
         opened.bodies.is_empty(),

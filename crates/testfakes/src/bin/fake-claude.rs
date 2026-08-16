@@ -21,18 +21,7 @@
 use onepipeline_testfakes as fake;
 use std::process::ExitCode;
 
-/// What a scripted `harness.work` turn writes into the worktree it was given.
 pub const WORK_FILE: &str = "work.md";
-
-/// The variable a member's own oneharness config stamps its name into.
-///
-/// The turn is no longer a process this crate's suite launched, so there is no
-/// argv to read a member's identity off and oneharness hands the harness no
-/// name of its own. What it does hand over is the member config's `[env]`
-/// block, which `World::write_graphs_with` writes one of per member — so the
-/// attribution rides the same seam the binary override does, and a journey can
-/// still say *which* member was given which job.
-const MEMBER_ENV: &str = "ONEPIPELINE_FAKE_MEMBER";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -53,21 +42,55 @@ fn main() -> ExitCode {
     turn(&args, &dir)
 }
 
-/// One headless turn.
+/// The `--permission-mode` values oneharness maps its own modes onto.
+// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] this is a copy of a
+// *provider's* CLI, which no crate in this dependency graph declares as data —
+// oneharness's mapping onto it is a private function in `domain::harness`, and the
+// values themselves are Claude Code's. The reconciling gate is not a shared
+// constant but `tests/e2e/dispatch.rs`: it drives the real `oneagentgraph` and the
+// real `oneharness_core` against this binary, so a mode oneharness starts sending
+// that is not below is a refusal there rather than a double that reads differently.
+const MODES: [&str; 5] = [
+    "plan",
+    "dontAsk",
+    "acceptEdits",
+    "bypassPermissions",
+    "auto",
+];
+
+/// The `--output-format` values oneharness names for this harness: the buffered
+/// document its `output_format` selects, and the stream its `events_format` does.
+///
+/// `text` is not one of them and is refused: oneharness never asks Claude Code
+/// for it, and a double that accepted it would have to answer in a format nothing
+/// here produces.
+// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the same gate as
+// `MODES` above, and for the same reason.
+const FORMATS: [&str; 2] = ["json", "stream-json"];
+
 fn turn(args: &[String], dir: &std::path::Path) -> ExitCode {
     let Some(prompt) = prompt(args) else {
         return fake::refuse("claude -p was given no prompt, on the argv or on stdin");
     };
-    // Both are things `oneharness` decided rather than passed through: the mode
-    // comes off the member's resolved config and the format off whether its run
-    // streams. A double that ran without them would settle a member whose turn
-    // was prepared against neither.
-    for flag in ["--permission-mode", "--output-format"] {
-        if fake::flag(args, flag).is_none() {
-            return fake::refuse(&format!("claude -p requires {flag}"));
-        }
+    // Both are decisions `oneharness` made rather than values it passed through:
+    // the mode comes off the member's resolved config and the format off whether
+    // its run streams. Checked against what the real CLI accepts, not merely for
+    // presence — a value the real `claude` refuses has to be refused here too, or
+    // a member prepared with one settles green against a double and dies against
+    // a provider.
+    let Some(mode) = fake::flag(args, "--permission-mode") else {
+        return fake::refuse("claude -p requires --permission-mode");
+    };
+    if !MODES.contains(&mode.as_str()) {
+        return fake::refuse(&format!("claude takes no --permission-mode {mode:?}"));
     }
-    let streaming = fake::flag(args, "--output-format").as_deref() == Some("stream-json");
+    let Some(format) = fake::flag(args, "--output-format") else {
+        return fake::refuse("claude -p requires --output-format");
+    };
+    if !FORMATS.contains(&format.as_str()) {
+        return fake::refuse(&format!("claude takes no --output-format {format:?}"));
+    }
+    let streaming = format == "stream-json";
     // The working directory is `oneharness run --cwd` as it now reaches the
     // harness: the member's own worktree, entered by the process that spawned
     // this one. A turn that wrote its work anywhere else would leave a
@@ -76,7 +99,7 @@ fn turn(args: &[String], dir: &std::path::Path) -> ExitCode {
         Ok(cwd) => cwd,
         Err(error) => return fake::refuse(&format!("claude has no working directory: {error}")),
     };
-    let member = std::env::var(MEMBER_ENV).unwrap_or_default();
+    let member = std::env::var(fake::MEMBER_ENV).unwrap_or_default();
     fake::record(
         dir,
         "claude-turn",
@@ -115,8 +138,13 @@ fn turn(args: &[String], dir: &std::path::Path) -> ExitCode {
     // is what a caller reading the graph's settlement sees. Without it the only
     // failing member this suite could produce was one that refused on the way
     // in, which never reaches a settlement at all.
-    let failed = fake::node_script(dir, "harness", "fail").is_some()
-        || (observing && fake::observe(dir) != ExitCode::SUCCESS);
+    let outcome = if fake::node_script(dir, "harness", "fail").is_some()
+        || (observing && fake::observe(dir) != ExitCode::SUCCESS)
+    {
+        Outcome::TurnFailed
+    } else {
+        Outcome::Answered
+    };
     if streaming {
         tool_call(1, "echo the turn ran");
     }
@@ -138,12 +166,8 @@ fn turn(args: &[String], dir: &std::path::Path) -> ExitCode {
     if streaming {
         assistant_text();
     }
-    result(failed);
-    if failed {
-        ExitCode::from(1)
-    } else {
-        ExitCode::SUCCESS
-    }
+    result(outcome);
+    outcome.exit_code()
 }
 
 /// The prompt this turn was given.
@@ -170,6 +194,11 @@ fn prompt(args: &[String]) -> Option<String> {
 /// The shape oneharness's own normalizer reads a `tool_call` out of — a
 /// `tool_use` block on an assistant message — rather than any envelope of this
 /// suite's own devising.
+// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] a provider's wire
+// shape, which no crate here declares as data. Its gate is
+// `tests/e2e/dispatch.rs`'s `transcript_renders_a_real_dispatched_turns_tools_and_words`:
+// the real `oneharness_core` normalizes these lines, so a shape it stops reading
+// is a transcript missing its tools rather than a double nobody checks.
 fn tool_call(index: u64, command: &str) {
     println!(
         "{}",
@@ -185,36 +214,77 @@ fn tool_call(index: u64, command: &str) {
     );
 }
 
-/// The turn's visible answer, as the last assistant message.
 fn assistant_text() {
     println!(
         "{}",
         serde_json::json!({
             "type": "assistant",
-            "message": {"content": [
-                {"type": "text", "text": "Ran what the task asked for."},
-            ]},
+            "message": {"content": [{"type": "text", "text": ANSWER}]},
         })
     );
 }
 
+/// How the turn ended.
+///
+/// One value rather than a boolean beside four uses of it: the terminal
+/// document's `subtype`, its `is_error`, the text it carries and this process's
+/// exit status are four spellings of one fact, and held apart any of them could
+/// say something the others do not — a turn reporting success on a non-zero exit
+/// is exactly the pair a caller settles a member on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Outcome {
+    /// The turn reached what it was asked for.
+    Answered,
+    /// It did not, and says so with a non-zero exit as well as in the document.
+    TurnFailed,
+}
+
+impl Outcome {
+    /// The `subtype` the terminal document carries.
+    fn subtype(self) -> &'static str {
+        match self {
+            Self::Answered => "success",
+            Self::TurnFailed => "error_during_execution",
+        }
+    }
+
+    /// The visible answer, which is also the last assistant message's text.
+    fn text(self) -> &'static str {
+        match self {
+            Self::Answered => ANSWER,
+            Self::TurnFailed => "The turn did the work and did not get there.",
+        }
+    }
+
+    fn exit_code(self) -> ExitCode {
+        match self {
+            Self::Answered => ExitCode::SUCCESS,
+            Self::TurnFailed => ExitCode::from(1),
+        }
+    }
+}
+
+/// What a turn that reached its task answers with, on the stream and in the
+/// terminal document alike — a real one says the same thing twice, and a reader
+/// of the retained report meets whichever of them oneharness kept.
+const ANSWER: &str = "Ran what the task asked for.";
+
 /// The terminal document a headless run ends on.
 ///
-/// `is_error` and the non-zero exit are the pair a caller settles a failed turn
-/// on; `session_id` is what a continuation resumes, and `usage` is what an
-/// accounting reader adds up.
-fn result(failed: bool) {
+/// `session_id` is what a continuation resumes, and `usage` is what an accounting
+/// reader adds up.
+// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the same provider
+// wire shape as `tool_call` above, gated the same way: `oneharness_core` reads
+// `is_error`, `result`, `session_id` and `usage` out of this document, so a field
+// it stops reading settles a member differently in `tests/e2e/dispatch.rs`.
+fn result(outcome: Outcome) {
     println!(
         "{}",
         serde_json::json!({
             "type": "result",
-            "subtype": if failed { "error_during_execution" } else { "success" },
-            "is_error": failed,
-            "result": if failed {
-                "The turn did the work and did not get there."
-            } else {
-                "Ran what the task asked for."
-            },
+            "subtype": outcome.subtype(),
+            "is_error": outcome == Outcome::TurnFailed,
+            "result": outcome.text(),
             "session_id": "fake-claude-session",
             "num_turns": 1,
             "total_cost_usd": 0,

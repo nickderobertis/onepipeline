@@ -354,6 +354,19 @@ pub fn read(kept: &Path) -> Option<Value> {
 ///
 /// Empty for a report carrying neither, which is a report this build can say
 /// nothing further about rather than a conversation that never happened.
+///
+/// **Read leniently, on purpose, and only ever rendered.** The document is a
+/// producer's, not this crate's, and nothing here acts on it: [`read`] has
+/// already refused anything that is not a plain file this run retained, and what
+/// survives is printed for a person. So a field a newer producer spells
+/// differently costs that field rather than the whole transcript — refusing the
+/// document would answer a real, retained, readable report by claiming this build
+/// cannot read it, which is the failure this function exists to remove. What is
+/// *not* lenient is attribution: a turn nothing names is dropped rather than
+/// rendered under a blank identity.
+// llmlint: ignore-block[boundary_inputs_validated] the leniency above is the
+// decision, and it is the same one the onejudge arm has always made; `read` is the
+// boundary this document is validated at.
 pub fn turns(document: &Value) -> Vec<Turn> {
     if let Some(messages) = document
         .get("transcript")
@@ -368,6 +381,7 @@ pub fn turns(document: &Value) -> Vec<Turn> {
         .map(|results| results.iter().filter_map(Turn::of_result).collect())
         .unwrap_or_default()
 }
+// llmlint: ignore-end[boundary_inputs_validated]
 
 /// One turn of a retained transcript.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -400,17 +414,19 @@ impl Turn {
     /// `None` for an entry that neither answered nor acted, which is a candidate
     /// the chain stepped past. Rendered, it would be a turn with a harness name
     /// and nothing under it, and a chain that fell through four times before it
-    /// ran would bury the one turn that did.
+    /// ran would bury the one turn that did. `None` too for an entry naming no
+    /// harness: a turn is attributed or it is not shown, because an unnamed one
+    /// among several is a reader guessing which identity said it.
     fn of_result(result: &Value) -> Option<Self> {
         let turn = Self {
             role: string(result, "harness"),
             text: string(result, "text"),
             tools: Self::tools_of(result),
         };
-        (!turn.text.is_empty() || !turn.tools.is_empty()).then_some(turn)
+        let said_something = !turn.text.is_empty() || !turn.tools.is_empty();
+        (!turn.role.is_empty() && said_something).then_some(turn)
     }
 
-    /// The actions one turn took, from the `events` both shapes name them under.
     fn tools_of(value: &Value) -> Vec<Tool> {
         value
             .get("events")
@@ -684,6 +700,9 @@ mod tests {
         // A run whose every candidate was stepped past said nothing and did
         // nothing, which is a report with no turns rather than two blank ones.
         assert!(turns(&json!({"results": [{"harness": "codex", "status": "skipped"}]})).is_empty());
+        // And an entry that answered but named no producer is not shown under a
+        // blank identity.
+        assert!(turns(&json!({"results": [{"text": "done"}]})).is_empty());
     }
 
     #[test]
