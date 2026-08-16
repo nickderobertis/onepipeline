@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1](https://github.com/nickderobertis/onepipeline/compare/v0.7.0...v0.7.1) - 2026-08-16
+
+### Fixed
+
+- stop a cancelled dispatch, and stop lying about what a settled node did ([#62](https://github.com/nickderobertis/onepipeline/pull/62))
+
 ## [0.7.0](https://github.com/nickderobertis/onepipeline/compare/v0.6.3...v0.7.0) - 2026-08-16
 
 ### Added
