@@ -15,6 +15,7 @@
 use crate::harness::{agent, gate_script, human, plan_of, Run, World};
 
 use crate::harness::lifecycle;
+use onepipeline::event::{Envelope, Source};
 
 /// The document a double plants where a settlement points but nothing should
 /// read, and the words that prove it was read if they ever appear.
@@ -23,6 +24,22 @@ const PLANTED_DOCUMENT: &str =
 
 /// The one recognisable string inside it.
 const PLANTED_WORDS: &str = "planted-and-never-read";
+
+/// Whether a payload value is a path whose file name is the producing library's
+/// own report file.
+///
+/// Exactly the test the engine makes on the value it copies, and asked of the
+/// value rather than of a key this test names: both the key a report path rides
+/// under and the file name at the end of it are the producer's, so a settlement
+/// is picked out of a journal by asking the producing library rather than by
+/// restating its payload shape here.
+fn names_a_report_file(value: &serde_json::Value) -> bool {
+    value
+        .as_str()
+        .map(std::path::Path::new)
+        .and_then(std::path::Path::file_name)
+        == Some(std::ffi::OsStr::new(oneagentgraph::member::REPORT_FILE))
+}
 
 /// Drive one run from this test, attached, keeping what the launch said: a
 /// refusal made as an envelope is ingested reaches the driver's own stderr,
@@ -635,12 +652,6 @@ fn a_settlement_naming_a_directory_or_an_oversize_file_is_refused_at_ingest() {
     }
 }
 
-// llmlint: ignore-block[tests_mirror_real_usage] the *arrangement* below writes a line
-// into the run's store on purpose, because that is the threat: a settlement no producer
-// emitted. No command forges one — a user interface that could would be the defect — so
-// there is nothing else to reach this condition with. Everything asserted afterwards is
-// through the CLI, which is where the claim lives: `transcript` does not open what the
-// line named, and says so.
 /// A settlement written into the journal *after* the fact, naming a readable
 /// file outside anything this run owns.
 ///
@@ -656,23 +667,53 @@ fn a_journal_line_naming_a_file_outside_the_run_is_never_read() {
     // directory this run owns.
     let outside = world.root.join("outside");
     std::fs::create_dir_all(&outside).expect("a directory outside the run");
-    let planted = outside.join("report.json");
+    let planted = outside.join(oneagentgraph::member::REPORT_FILE);
     std::fs::write(&planted, PLANTED_DOCUMENT).expect("a planted report");
 
-    let forged = serde_json::json!({
-        "v": 1,
-        "ts": "2099-01-01T00:00:00.000Z",
-        "stream": "forged",
-        "seq": 0,
-        "source": "agentgraph",
-        "kind": "member-settled",
-        "labels": {"node": "build", "onepipeline.node": "build"},
-        "payload": {"report_path": planted.display().to_string()},
-    });
+    // llmlint: ignore-block[tests_mirror_real_usage] the state is **a settlement no
+    // producer emitted**, and it has no engine-side constructor: a verb that appended one
+    // to a run's journal would be the very defect this journey exists to catch, so
+    // appending it here is the only way to reach the condition. The line is not written by
+    // hand — it is the settlement this run really recorded, read back as an
+    // `event::Envelope` and re-serialised by the implementation the journal writer
+    // serialises with, so its kind, the labels the enricher stamped, and the key a report
+    // path rides under cannot drift from what a producer's line carries. Everything
+    // asserted after it is through the CLI, which is where the claim lives.
+    //
+    // Four fields are the forgery's: the path, of course; a timestamp after everything the
+    // run really wrote; and a stream and sequence no producer used, which matter because
+    // the run names its own copy of a report from exactly those two — so this is a
+    // settlement whose report was never kept.
+    let mut forged = world
+        .journal(&run)
+        .into_iter()
+        .filter_map(|event| serde_json::from_value::<Envelope>(event).ok())
+        .find(|event| {
+            event.source == Source::Agentgraph && event.payload.values().any(names_a_report_file)
+        })
+        .expect("the settled run recorded a settlement naming a report");
+    forged.ts = "2099-01-01T00:00:00.000Z".to_string();
+    forged.stream = "forged".to_string();
+    forged.seq = 0;
+    let mut repointed = 0;
+    for value in forged.payload.values_mut() {
+        if names_a_report_file(value) {
+            *value = serde_json::json!(planted.display().to_string());
+            repointed += 1;
+        }
+    }
+    assert_eq!(
+        repointed, 1,
+        "the settlement's report path was not the one thing repointed: {forged:?}"
+    );
     let journal = world.run_file(&run, "events.jsonl");
     let mut existing = std::fs::read_to_string(&journal).expect("the journal reads");
-    existing.push_str(&format!("{forged}\n"));
+    existing.push_str(&format!(
+        "{}\n",
+        serde_json::to_string(&forged).expect("the envelope serialises")
+    ));
     std::fs::write(&journal, existing).expect("the journal is appended to");
+    // llmlint: ignore-end[tests_mirror_real_usage]
 
     let transcript = world.run(&["transcript", &run]);
     transcript
@@ -691,7 +732,6 @@ fn a_journal_line_naming_a_file_outside_the_run_is_never_read() {
         "the real report still counts: {usage}"
     );
 }
-// llmlint: ignore-end[tests_mirror_real_usage]
 
 /// A report a harness produced without a transcript. It is a report this build
 /// can say nothing further about, which is not a dispatch that did nothing.
@@ -785,11 +825,14 @@ fn runs_summarises_every_recorded_run_and_says_whose_it_is() {
 fn a_run_root_the_views_refuse_is_named_with_its_reason() {
     let world = World::new("views-skipped");
     let run = settled(&world, "readable", vec![agent("build", &[])]);
-    // llmlint: ignore-block[tests_mirror_real_usage] a run root with no launch record is a
-    // state of the *filesystem* — a crash between the directory and the record, or a
-    // directory an operator left beside the runs — and no command makes one, which is why
-    // the views met it in the first place. The run beside it is launched through the CLI,
-    // and every claim is read off the CLI.
+    // llmlint: ignore-block[tests_mirror_real_usage] all three states are the
+    // *filesystem's* rather than any command's, which is why the views met them in the
+    // first place: **a run root with no launch record** (a crash between the directory and
+    // the record, or a directory an operator left beside the runs), **a launch record this
+    // build refuses** (nothing here writes an unknown field — that is the point of it), and
+    // **a launch record that is a directory**. None has an engine-side constructor, and a
+    // verb that made one would be the defect. The run beside them is launched through the
+    // CLI, and every claim is read off the CLI.
     // A run root left half-written: the directory is there and the launch record
     // that says who owns it is not.
     std::fs::create_dir_all(world.runs.join("half-written")).expect("a run root with no launch");
@@ -918,11 +961,15 @@ fn host_never_renders_a_dispatch_of_a_run_that_was_stopped() {
     world.release("build.go");
 }
 
-// llmlint: ignore-block[tests_mirror_real_usage] one fact is written by hand: the pid
-// inside the run's ownership lock. That is a driver that died without releasing what it
-// held, and no command produces it on demand — one that could would be one that kills a
-// live driver. The run is real, its dispatch is genuinely in flight, and every claim
-// afterwards is read off the CLI.
+// llmlint: ignore-block[tests_mirror_real_usage] every state below is one held ownership
+// lock a live driver did not release, and no command produces one on demand — a verb that
+// could would be a verb that kills a live driver mid-dispatch: **a lock whose pid is a
+// reaped process**, **one whose start token is another process's**, **one taken on another
+// host**, **one from a build that predates the start token**, **one that is not JSON**, and
+// **one that is a directory**. Nothing is assembled by hand: the lock the live driver took
+// is read back and each answer changes exactly one fact about it, with the removal
+// asserting it removed something. The run is real, its dispatch is genuinely in flight, and
+// every claim afterwards is read off the CLI.
 /// A `host` row is a claim that a dispatch exists **now**, and it is acted on —
 /// an operator leaves the work alone, or ends it. So the row is rendered only
 /// while this host can prove the run behind it is still being driven: the
@@ -994,12 +1041,18 @@ fn host_never_renders_a_dispatch_whose_driver_this_host_can_prove_is_gone() {
     // A lock taken on another machine, where a pid means nothing.
     rewrite(&|record| record["host"] = serde_json::json!("some-other-host"));
     unproven("some-other-host");
-    // A lock from a build that predates the start token.
+    // A lock from a build that predates the start token. Taking away a field
+    // this build always writes would arrange nothing, so the removal has to have
+    // removed something.
     rewrite(&|record| {
-        record
-            .as_object_mut()
-            .expect("a lock record")
-            .remove("started");
+        assert!(
+            record
+                .as_object_mut()
+                .expect("a lock record")
+                .remove("started")
+                .is_some(),
+            "the lock this build took carries no start token to take away: {record}"
+        );
     });
     unproven("no start token");
     // A lock this build cannot read at all. Still a claim — it is what stops a
