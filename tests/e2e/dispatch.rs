@@ -1058,6 +1058,64 @@ fn the_siblings_own_refusals_still_exit_with_the_codes_this_crate_maps_onto() {
     );
 } // llmlint: ignore-end[tests_mirror_real_usage]
 
+/// The double standing at the paid model turn refuses an argument Claude Code
+/// does not take.
+///
+/// Every journey in this file that reaches a member's turn reaches it through
+/// `fake-claude`, so what those journeys are worth is what that double refuses.
+/// An argv waved through here would let `oneharness` start sending a flag the
+/// real CLI exits on while every member in this file still settled green, and
+/// the first thing to say otherwise would be a provider. The accepting half is
+/// already the rest of the file — the real `oneharness` drives this binary and
+/// those members run — so this is the half no passing journey can show.
+// llmlint: ignore-block[tests_mirror_real_usage] the subject is a *double*, driven at the
+// process boundary the real `oneharness` reaches it on and with the argv that sibling sends
+// plus one flag. Going through `onepipeline` would prove the opposite of the point: this
+// crate never composes a harness argv, so there is no journey that can make the sibling send
+// an undeclared flag on purpose.
+#[test]
+fn the_model_turn_double_refuses_an_argument_the_real_claude_does_not_take() {
+    let world = World::new("claude-argv");
+    let sent = |extra: &[&str]| {
+        let mut args = vec![
+            "-p",
+            "Do build.",
+            "--permission-mode",
+            "acceptEdits",
+            "--output-format",
+            "json",
+        ];
+        args.extend_from_slice(extra);
+        std::process::Command::new(crate::harness::double("fake-claude"))
+            .args(&args)
+            .env(onepipeline_testfakes::SCRIPT_DIR_ENV, &world.fakes)
+            .output()
+            .expect("the double runs")
+    };
+
+    let refused = sent(&["--dangerously-skip-permissions"]);
+    let said = String::from_utf8_lossy(&refused.stderr).to_string();
+    assert_eq!(
+        refused.status.code(),
+        Some(i32::from(onepipeline_testfakes::USAGE)),
+        "an argv the real claude exits on ran a turn instead: {said}"
+    );
+    assert!(
+        said.contains("--dangerously-skip-permissions"),
+        "the refusal does not name what it refused: {said}"
+    );
+
+    // The same line without it, so the refusal is about that flag rather than
+    // about the argv every other journey here sends.
+    let ran = sent(&[]);
+    assert_eq!(
+        ran.status.code(),
+        Some(0),
+        "the argv `oneharness` really sends was refused: {}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+} // llmlint: ignore-end[tests_mirror_real_usage]
+
 /// The `oneharness` executable the sibling drives is still named by the
 /// variable this crate restates.
 ///

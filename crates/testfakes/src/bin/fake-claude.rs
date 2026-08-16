@@ -36,10 +36,54 @@ fn main() -> ExitCode {
     let dir = fake::script_dir();
     fake::record(&dir, "claude", &args);
 
+    // Recorded first, so an argv this double refuses is still readable by the
+    // journey that has to explain why the member died.
+    if let Err(refusal) = declared(&args) {
+        return fake::refuse(&refusal);
+    }
     if !args.iter().any(|arg| arg == "-p") {
         return fake::refuse("claude is only driven headless here, which is `-p`");
     }
     turn(&args, &dir)
+}
+
+/// The flags the headless surface above is made of, and whether each takes a
+/// value after it.
+// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the same gate as
+// `MODES` below, and for the same reason.
+const FLAGS: [(&str, bool); 5] = [
+    ("-p", false),
+    ("--input-format", true),
+    ("--permission-mode", true),
+    ("--output-format", true),
+    ("--verbose", false),
+];
+
+/// Refuses an argv the real `claude` would not take.
+///
+/// The value checks in `turn` are about a flag oneharness chose the *wrong*
+/// value for; this is about one it should not be sending at all. Both are the
+/// same property, which is the only thing a double is worth: where the real CLI
+/// says no, this one has to. An argument waved through here is one no journey
+/// can catch — oneharness grows a flag Claude Code does not take, every member
+/// settles green, and the first thing that ever says otherwise is a provider.
+fn declared(args: &[String]) -> Result<(), String> {
+    let mut at = 0;
+    while at < args.len() {
+        let arg = &args[at];
+        let Some((_, takes_value)) = FLAGS.iter().find(|(name, _)| name == arg) else {
+            return Err(format!("claude takes no argument {arg:?}"));
+        };
+        at += 1;
+        if *takes_value {
+            // Its value, which `fake::flags` refuses separately if it is absent.
+            at += 1;
+        } else if arg == "-p" && args.get(at).is_some_and(|next| !next.starts_with('-')) {
+            // The prompt, on the argv rather than on stdin.
+            at += 1;
+        }
+    }
+    Ok(())
 }
 
 /// The `--permission-mode` values oneharness maps its own modes onto.
@@ -68,6 +112,14 @@ const MODES: [&str; 5] = [
 // `MODES` above, and for the same reason.
 const FORMATS: [&str; 2] = ["json", "stream-json"];
 
+/// The `--input-format` values oneharness names: `text` alone, which is how it
+/// says the prompt it is about to send — on the argv or on stdin — is prose. The
+/// other value the real CLI takes, `stream-json`, arrives as a stream of
+/// envelopes this double neither reads nor answers in.
+// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the same gate as
+// `MODES` above, and for the same reason.
+const INPUT_FORMATS: [&str; 1] = ["text"];
+
 fn turn(args: &[String], dir: &std::path::Path) -> ExitCode {
     let Some(prompt) = prompt(args) else {
         return fake::refuse("claude -p was given no prompt, on the argv or on stdin");
@@ -89,6 +141,14 @@ fn turn(args: &[String], dir: &std::path::Path) -> ExitCode {
     };
     if !FORMATS.contains(&format.as_str()) {
         return fake::refuse(&format!("claude takes no --output-format {format:?}"));
+    }
+    // Optional, unlike the two above: oneharness sends it only when it has
+    // decided how the prompt travels, so its absence is a live case and only a
+    // value it did send is checked.
+    if let Some(input) = fake::flag(args, "--input-format") {
+        if !INPUT_FORMATS.contains(&input.as_str()) {
+            return fake::refuse(&format!("claude takes no --input-format {input:?}"));
+        }
     }
     let streaming = format == "stream-json";
     // The working directory is `oneharness run --cwd` as it now reaches the

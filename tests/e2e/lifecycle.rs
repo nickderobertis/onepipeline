@@ -949,7 +949,11 @@ fn a_published_node_reports_where_a_human_reads_the_change_it_opened() {
     // none, and this crate would have been shipping that to reviewers as its
     // description of the change. `PublishRequest::body` is where a body would
     // come from and this crate names none, so what the host is given is empty.
-    // Read off the argv the host was actually invoked with.
+    // llmlint: ignore-block[tests_mirror_real_usage] the argv is the *host* boundary here,
+    // not an internal seam: `gh pr create --body` is the whole of what GitHub is told the
+    // description is, and this suite's host is `gh` at `onevcs`'s own override. There is no
+    // reply-side surface to read it back from — `onevcs::Publication` carries the URL and no
+    // body — so what a reviewer would open is observable only as what the host was sent.
     let created = world
         .invocations()
         .into_iter()
@@ -971,6 +975,7 @@ fn a_published_node_reports_where_a_human_reads_the_change_it_opened() {
         "",
         "a publication this crate gave no body opened a change request carrying one: {args:?}"
     );
+    // llmlint: ignore-end[tests_mirror_real_usage]
 
     world.run(&["results", &run]).exited(0).out_has(&published);
 }

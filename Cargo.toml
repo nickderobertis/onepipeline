@@ -114,9 +114,9 @@ serde_json = { version = "1", features = ["preserve_order"] }
 serde_norway = "0.9"
 thiserror = "2"
 
-# The siblings this crate composes, at the workspace's own pins — a git revision
-# each, with the registry version beside it that publishing records. See
-# `[workspace.dependencies]` for why the revision rather than the release.
+# The siblings this crate composes, at the workspace's own pins. See
+# `[workspace.dependencies]` for what each floor buys and why both are registry
+# releases.
 oneagentgraph = { workspace = true }
 onevcs = { workspace = true }
 
