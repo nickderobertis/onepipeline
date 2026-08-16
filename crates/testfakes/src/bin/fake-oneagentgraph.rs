@@ -286,8 +286,20 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
 
     // Hold the dispatch open until the test releases it, so an edit, a stall
     // watch, or a driver death can happen while a node is genuinely in flight.
+    //
+    // `<key>.stops-when-interrupted` is a worker that *takes* the ask: a
+    // redirection delivered into its open turn ends the hold exactly as the
+    // test's own release would, so the dispatch stops on its own and nothing
+    // has to reap it. Without it every held dispatch ignores an interrupt,
+    // which is the other scenario — and a suite that could only script that
+    // one cannot tell a turn that stopped politely from one that was killed.
     if dir.join(format!("{key}.wait")).exists() {
-        fake::wait_for(&dir.join(format!("{key}.go")));
+        let go = dir.join(format!("{key}.go"));
+        if dir.join(format!("{key}.stops-when-interrupted")).exists() {
+            fake::wait_for_any(&[go, dir.join(format!("{key}.redirect"))]);
+        } else {
+            fake::wait_for(&go);
+        }
     }
     // Whatever an `interrupt` delivered while the turn was held. Read after the
     // hold, because that is when the running turn would have acted on it.
@@ -352,6 +364,15 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     // asked for.
     if let Some(body) = fake::node_script(dir, &key, "work") {
         write_work(args, &fake::segment(&key), &body);
+    }
+
+    // A worker that publishes its own branch before it is finished with. This is
+    // the incident: an agent that ran `onevcs publish` in its final turn opened
+    // a change request the engine's own publication step never ran, and then
+    // failed its judge. Scripted here because it is the *agent's* behaviour, and
+    // an agent is what this program stands in for.
+    if let Some(title) = fake::node_script(dir, &key, "publishes") {
+        publish_session(args, &title);
     }
 
     // Every candidate this dispatch's identity chains stepped past, published
@@ -458,6 +479,68 @@ fn refuse_candidates(args: &[String], node: &str, step: Option<&str>, script: &s
     }
 }
 
+/// Publish the session this dispatch is working in, as its own final act.
+///
+/// It runs the **real** `onevcs`, resolved from the `PATH` the process under
+/// test was given and against the same state root — the one thing a double must
+/// never do is answer *for* a sibling, and this does not: what is scripted here
+/// is the agent's behaviour, and an agent is what this program stands in for. A
+/// hand-written `change-opened` on the session's stream would be a second
+/// producer of a record that library owns, and the journey would prove the
+/// fixture rather than the composition.
+///
+/// The session's token is the name of the directory above the worktree —
+/// `$ONEVCS_HOME/<identity>/runs/<token>/worktree` — which is the same
+/// derivation `tests/e2e/gate.sh` documents and uses. A `--dir` that is not one
+/// is a misconfigured test rather than a scenario, so it ends the process.
+fn publish_session(args: &[String], title: &str) {
+    let Some(workspace) = fake::flag(args, "--dir") else {
+        fake::fail("publishing a dispatch's session needs its --dir to find the session from");
+    };
+    let worktree = std::path::Path::new(&workspace);
+    if worktree.file_name().and_then(|name| name.to_str()) != Some("worktree") {
+        fake::fail(&format!(
+            "a dispatch scripted to publish ran in {workspace}, which is not a session worktree"
+        ));
+    }
+    let token = worktree
+        .parent()
+        .and_then(|run| run.file_name())
+        .and_then(|token| token.to_str())
+        .unwrap_or_else(|| fake::fail(&format!("no session token above {workspace}")));
+
+    let published = std::process::Command::new("onevcs")
+        .args(["publish", token, "--title", title])
+        .current_dir(worktree)
+        .stdin(std::process::Stdio::null())
+        .output();
+    let published = match published {
+        Ok(published) => published,
+        Err(error) => fake::fail(&format!("cannot run `onevcs publish {token}`: {error}")),
+    };
+    // Recorded whatever it answered, so a journey can assert the agent really
+    // reached that sibling — and refused when it did not land, because a
+    // publication nobody made is a journey asserting against a change request
+    // that was never opened.
+    fake::record(
+        &fake::script_dir(),
+        "onevcs",
+        &[
+            "publish".to_owned(),
+            token.to_owned(),
+            "--title".to_owned(),
+            title.to_owned(),
+        ],
+    );
+    if !published.status.success() {
+        fake::fail(&format!(
+            "`onevcs publish {token}` exited {}: {}",
+            published.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&published.stderr).trim()
+        ));
+    }
+}
+
 /// Write one document into the dispatch's workspace.
 ///
 /// `--dir` is this process's external input, and these writes are the one thing
@@ -493,6 +576,13 @@ fn write_work(args: &[String], name: &str, body: &str) {
 /// its turn like any other and records nothing, so an `interrupt` finds no turn
 /// to reach. That is the case a harness without out-of-band control produces,
 /// and it is the one `auto` must fall through on.
+///
+/// `<key>.also-member` names a **second** member of the same graph run, which
+/// announces a turn of its own. A graph is a graph — several members work under
+/// one run — and a caller that addressed only the last member it saw would leave
+/// the others working. The second member's turn is announced and not recorded,
+/// so an interrupt sent to it answers as one whose turn is over: two members,
+/// two answers, which is what a caller has to carry on from.
 fn open_turn(args: &[String], dir: &std::path::Path, key: &str, node: &str, step: Option<&str>) {
     let labels = member_labels(args, node, step);
     for (seq, kind) in [(0, "member-started"), (1, "turn-started")] {
@@ -505,6 +595,23 @@ fn open_turn(args: &[String], dir: &std::path::Path, key: &str, node: &str, step
                 "seq": seq,
                 "source": "agentgraph",
                 "kind": kind,
+                "labels": labels,
+                "payload": {},
+            })
+        );
+    }
+    if let Some(member) = fake::node_script(dir, key, "also-member") {
+        let mut labels = labels.clone();
+        labels.insert("member".to_string(), member.into());
+        println!(
+            "{}",
+            serde_json::json!({
+                "v": 1,
+                "ts": fake::now(),
+                "stream": stream(),
+                "seq": 5,
+                "source": "agentgraph",
+                "kind": "turn-started",
                 "labels": labels,
                 "payload": {},
             })

@@ -1517,6 +1517,91 @@ fn a_note_delivered_through_the_real_sibling_records_what_its_lever_answered() {
     world.release("turn.settle");
 }
 
+/// A `cancel` stops a dispatch running on the **library** backend, through that
+/// library's own two levers.
+///
+/// The other cancellation journeys state their scenario at
+/// `ONEPIPELINE_ONEAGENTGRAPH_BIN`, which is the process backend: the run is
+/// addressed through the sibling's CLI and the teardown reaps a child this
+/// crate started. This one takes the default, so both halves are library calls
+/// in this process — `oneagentgraph::control::interrupt` for the ask, and the
+/// sibling's own cancel for the teardown — and neither may go silent because of
+/// how the run happens to be reached.
+///
+/// The lever answers that there is no controllable turn, which is a genuine
+/// case rather than a contrivance: the harness standing in for the member's paid
+/// turn is not one `oneharness` can reach a lever into, exactly as
+/// `a_note_delivered_through_the_real_sibling_records_what_its_lever_answered`
+/// documents. That is the answer a cancellation must carry on from — and the
+/// deadline is what actually stops this dispatch, which is the escalation
+/// running end to end against the real sibling.
+#[test]
+fn a_cancel_against_a_real_dispatch_asks_its_lever_and_reaps_it_at_the_deadline() {
+    let world = World::new("real-cancel");
+    world.write_graphs();
+    // Held open and, being a harness with no out-of-band control, deaf to the
+    // ask: the dispatch is still there when the deadline arrives.
+    world.script("turn.hold", "hold");
+    let path = world.plan("stopped", &plan_of("stopped", vec![agent("build", &[])]));
+    let mut launch = world.agentgraph_cmd(&["start", &path.to_string_lossy(), "--detach"]);
+    launch.env(crate::harness::CANCEL_GRACE_ENV, "1");
+    world.run_on(launch, "start --detach").exited(0);
+    world.until("the dispatch to report a turn", |world| {
+        !world.events_of("stopped", "turn-activity").is_empty()
+    });
+
+    world
+        .run_with_stdin(
+            &["reply", "stopped"],
+            &json!({"version": 1, "commands": [{"op": "cancel", "id": "build"}]}).to_string(),
+        )
+        .exited(0);
+
+    // The ask reached the sibling and it answered, and the run says what it
+    // answered rather than only that a cancel was issued.
+    world.until("the interrupt to be recorded", |world| {
+        !world.events_of("stopped", "turn-interrupted").is_empty()
+    });
+    let interrupted = world.events_of("stopped", "turn-interrupted");
+    assert_eq!(interrupted[0]["payload"]["delivered"], json!(false));
+    assert_eq!(
+        interrupted[0]["labels"]["node"], "build",
+        "the envelope is not stamped with the node it is about: {}",
+        interrupted[0]
+    );
+    assert!(
+        interrupted[0]["payload"]["input_bytes"]
+            .as_u64()
+            .is_some_and(|bytes| bytes > 0),
+        "the cancellation offered the turn no redirection at all: {}",
+        interrupted[0]
+    );
+
+    // And the deadline tore it down, through the sibling's own cancel — which is
+    // what ends a held turn nothing could redirect.
+    world.until("the deadline to expire", |world| {
+        world
+            .events_of("stopped", "planner-surface-queued")
+            .iter()
+            .any(|event| event["payload"]["kind"] == "dispatch-killed")
+    });
+    world.until("the cancelled node to settle", |world| {
+        world
+            .events_of("stopped", "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "build")
+    });
+    let settled = world
+        .events_of("stopped", "node-settled")
+        .into_iter()
+        .find(|event| event["labels"]["node"] == "build")
+        .expect("the settlement was just seen");
+    assert_eq!(settled["payload"]["status"], "cancelled", "{settled}");
+
+    world.release("turn.go");
+    world.release("turn.settle");
+}
+
 /// Consuming a planner surface restarts the **real** pacemaker's clock.
 ///
 /// `next` is the channel's only consumer, and consumption is what resets the

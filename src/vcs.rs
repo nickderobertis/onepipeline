@@ -209,6 +209,73 @@ pub fn session_close(token: &str) -> Result<Session> {
     onevcs::close_session(&providers(), &SessionToken(token.to_owned())).map_err(refusal)
 }
 
+/// The change request one session's work reached, when it reached one.
+///
+/// Read off the session's **own stream**, which is where `onevcs` records a
+/// change request as it opens one — `change-opened` carries the URL. That is the
+/// only source this crate may ask: which host answers for a repository, and how
+/// a change request is addressed on it, are that library's business, and a
+/// second route to the same fact here would be host knowledge regrown in the
+/// composition layer.
+///
+/// It matters because the engine is not the only thing that publishes from a
+/// session: a dispatch that runs `onevcs publish` in its own final turn opens a
+/// change request the engine's publication step never ran, and the record of it
+/// is on this stream either way.
+///
+/// The URL is **validated where it enters**, through the parser `onevcs`
+/// re-exports for exactly this — a session's stream is a file on disk that any
+/// process holding the token appends to, so its payload is external input here
+/// however trusted its usual writer is. A value that is not an absolute URL is
+/// no change request a reviewer can open, and putting one on a settlement would
+/// hand every reader of that node something to follow that goes nowhere.
+///
+/// `None` when nothing opened one, when the record names no readable URL, and
+/// equally when the stream cannot be read — the caller settles exactly as it
+/// would have, because an unreadable record is not evidence of a change nobody
+/// opened.
+pub fn change_opened_in(token: &str) -> Option<String> {
+    let opened = kind_of(onevcs::EventKind::ChangeOpened);
+    // The last one wins: a session that opened a change request, closed it, and
+    // opened another names the one it ended with.
+    events(token, None)
+        .iter()
+        .rev()
+        .find(|envelope| envelope.kind == opened)
+        .and_then(|envelope| envelope.payload.get("url"))
+        .and_then(|url| url.as_str())
+        // llmlint: ignore-block[changed_behavior_has_e2e] no invocation a user can type
+        // reaches the refusal this line makes. The only producer of a `change-opened` is
+        // `onevcs`, which builds the payload from its own `Url` — so a record naming
+        // something that is not one can only come from a stream a hand-written line was
+        // appended to, and writing that line would make this suite an oracle for a
+        // payload nothing produces, which is the weakness `crates/testfakes` exists to
+        // avoid. The two answers a producer *can* give are both driven end to end in
+        // `tests/e2e/lifecycle.rs`: a change request that was opened, and a stream this
+        // build cannot read a record off at all.
+        .and_then(|url| onevcs::Url::parse(url.trim()).ok())
+        // llmlint: ignore-end[changed_behavior_has_e2e]
+        .map(|url| url.to_string())
+}
+
+/// The sessions holding one repository's workspaces, as `onevcs` reports them.
+///
+/// The same enumeration the launch interlock reads, asked of one repository:
+/// what a node waiting to dispatch into an occupied workspace is waiting for.
+///
+/// An empty list is a workspace nothing holds. A repository this host cannot
+/// answer for is the **error**, and the two are deliberately not the same value:
+/// a view never reports an unmeasured thing as a measured nothing, and rendering
+/// "nobody could be asked" as "nothing holds it" is what would tell a supervisor
+/// to stop looking for what a node is waiting on. The caller renders the
+/// refusal rather than deciding for itself what it meant.
+pub fn holders_of(repo: &str) -> std::result::Result<Vec<onevcs::SessionHolder>, String> {
+    onevcs::session_holders(repo).map_err(|error| {
+        eprintln!("onepipeline: cannot read the session holders of {repo}: {error}");
+        error.to_string()
+    })
+}
+
 /// One session's stream, read from the start of what this reader has not seen.
 ///
 /// `None` when the stream cannot be opened or a line of it cannot be read. That

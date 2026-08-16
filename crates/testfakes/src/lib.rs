@@ -183,17 +183,37 @@ pub fn node_script(dir: &Path, node: &str, suffix: &str) -> Option<String> {
 /// named had settled. That disguise cost this suite two rounds of diagnosis, so
 /// an expired rendezvous now says so and takes the dispatch with it.
 pub fn wait_for(path: &Path) {
+    wait_for_any(std::slice::from_ref(&path.to_path_buf()));
+}
+
+/// Wait until **any** of several rendezvous files appears.
+///
+/// The second one is what a turn that stops when it is asked to looks like: it
+/// is held open like any other dispatch, and the redirection an `interrupt`
+/// delivers is itself what releases it. A hold that only the test could release
+/// can act out a worker that ignores the ask, and nothing else — so a suite with
+/// one form of hold cannot tell a dispatch that stopped politely from one that
+/// had to be reaped.
+///
+/// Bounded exactly as [`wait_for`] is, and for the same reason: an expired
+/// rendezvous ends the process rather than continuing as though it had been
+/// released.
+pub fn wait_for_any(paths: &[PathBuf]) {
     let deadline =
         std::time::Instant::now() + std::time::Duration::from_secs(rendezvous_timeout_seconds());
     while std::time::Instant::now() < deadline {
-        if path.exists() {
+        if paths.iter().any(|path| path.exists()) {
             return;
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
+    let named: Vec<String> = paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect();
     fail(&format!(
-        "rendezvous {} never appeared: nothing released this dispatch",
-        path.display()
+        "no rendezvous of {} ever appeared: nothing released this dispatch",
+        named.join(", ")
     ));
 }
 

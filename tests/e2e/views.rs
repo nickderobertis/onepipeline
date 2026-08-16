@@ -1165,3 +1165,215 @@ fn a_view_of_a_run_with_no_events_still_renders() {
     }
     world.release("driver.go");
 }
+
+/// A node that is ready and *waiting on a workspace* is told apart from one
+/// merely queued behind a slot.
+///
+/// Both read as `ready`, and on a status view that says nothing about either
+/// they are the same line of silence — which is how a node sat waiting on the
+/// occupancy lease its own repository was under for forty minutes while a
+/// supervisor looked for a wedge that did not exist. Two lifecycle nodes on one
+/// repository at `concurrency: 1` is that state exactly: the second cannot open
+/// a session until the first lets go of the workspace.
+#[test]
+fn a_ready_node_waiting_on_a_held_workspace_is_told_apart_from_one_merely_queued() {
+    let world = World::new("views-ready-held");
+    world.repository("local-direct", &["true"]);
+    world.script("service.wait", "hold");
+    // One at a time, so the second lifecycle node stays ready while the first
+    // holds the repository's workspace open.
+    // A second repository, registered and idle: a node on it is repository-backed
+    // and waiting on nothing, which is the case a reader must not confuse with
+    // either of the other two.
+    idle_repository(&world, "other");
+    let mut plan = plan_of(
+        "readyheld",
+        vec![
+            lifecycle("service", &[]),
+            lifecycle("service-two", &[]),
+            lifecycle("other-repo", &[]),
+            agent("elsewhere", &[]),
+        ],
+    );
+    plan["concurrency"] = serde_json::json!(1);
+    // The second node works on the same repository as the first; the third on
+    // the idle one; the fourth has no repository at all.
+    plan["tasks"][1]["repo"] = serde_json::json!("service");
+    plan["tasks"][2]["repo"] = serde_json::json!("other");
+    let path = world.plan("readyheld", &plan);
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+    world.until("the first node's session to be recorded", |world| {
+        !world.events_of("readyheld", "session-opened").is_empty()
+    });
+
+    let status = world.run(&["status", "readyheld"]);
+    status.exited(0);
+    assert!(
+        status
+            .stdout
+            .lines()
+            .any(|line| line.contains("service-two: ready")
+                && line.contains("waiting for the 'service' workspace")
+                && line.contains("owner_pid")),
+        "a node waiting on a workspace another dispatch holds reads as one merely \
+         queued:\n{}",
+        status.stdout
+    );
+    for queued in ["other-repo", "elsewhere"] {
+        assert!(
+            status
+                .stdout
+                .lines()
+                .any(|line| line.contains(&format!("{queued}: ready — queued for dispatch"))),
+            "a node waiting for nothing but a slot does not say so:\n{}",
+            status.stdout
+        );
+    }
+
+    world.release("service.go");
+}
+
+/// A registered repository with nothing working in it.
+///
+/// [`World::repository`] builds the one every lifecycle journey publishes from
+/// and rewrites the rules file as it goes; this is the smaller half — an origin,
+/// a checkout of it, and a registration — for a journey that needs a *second*
+/// repository whose workspace nothing holds.
+fn idle_repository(world: &World, alias: &str) {
+    let origin = world.root.join(format!("{alias}.git"));
+    let checkout = world.root.join(alias);
+    std::fs::create_dir_all(&origin).expect("a scratch directory");
+    crate::harness::git(world, &origin, &["init", "--bare", "--initial-branch=main"]);
+    crate::harness::git(
+        world,
+        &world.root,
+        &["clone", &origin.to_string_lossy(), alias],
+    );
+    std::fs::write(checkout.join("README.md"), "another repository\n").expect("the seed file");
+    crate::harness::git(world, &checkout, &["add", "-A"]);
+    crate::harness::git(world, &checkout, &["commit", "-m", "chore: seed"]);
+    crate::harness::git(world, &checkout, &["push", "-u", "origin", "main"]);
+    world.register(
+        &checkout,
+        Some(&format!("https://github.com/owner/{alias}.git")),
+    );
+}
+
+/// A repository this host cannot answer for is said out loud, and the node it
+/// belongs to is still rendered.
+///
+/// The holder enumeration is `onevcs`'s, and it refuses a repository its state
+/// root has no record of — which is what a run read from a state root that has
+/// moved, or from a machine that never registered the checkout, meets. A view
+/// that swallowed the refusal would render the same line for "nothing holds this
+/// workspace" and "nobody could be asked", and only one of those is a reason to
+/// stop looking for what a node is waiting on.
+///
+/// The launch itself cannot reach this state: the interlock asks the same
+/// sibling about every repository a plan names and refuses a launch it cannot
+/// resolve. So the state root moves *after* the run is under way, which is the
+/// only way a reader meets it and exactly how one does.
+#[test]
+fn a_workspace_this_host_cannot_ask_about_is_reported_rather_than_read_as_free() {
+    let world = World::new("views-unknown-repo");
+    world.repository("local-direct", &["true"]);
+    world.script("service.wait", "hold");
+    let mut plan = plan_of(
+        "unknownrepo",
+        vec![lifecycle("service", &[]), lifecycle("second", &[])],
+    );
+    // One at a time, so the second node is still ready when `status` renders it.
+    plan["concurrency"] = serde_json::json!(1);
+    let path = world.plan("unknownrepo", &plan);
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+    world.until("the first node's session to be recorded", |world| {
+        !world.events_of("unknownrepo", "session-opened").is_empty()
+    });
+
+    // The same run, read against a state root that knows nothing about its
+    // repositories.
+    let elsewhere = world.root.join("another-state-root");
+    std::fs::create_dir_all(&elsewhere).expect("a state root with nothing in it");
+    let mut reader = world.cmd(&["status", "unknownrepo"]);
+    reader.env("ONEVCS_HOME", &elsewhere);
+    let status = world.run_on(reader, "status unknownrepo");
+    status.exited(0);
+    status.err_has("cannot read the session holders of service");
+    assert!(
+        status
+            .stdout
+            .lines()
+            .any(|line| line.contains("second: ready")
+                && line.contains("this host cannot say whether the 'service' workspace is free")),
+        "a workspace nobody could be asked about reads as one nothing holds:\n{}",
+        status.stdout
+    );
+
+    world.release("service.go");
+}
+
+/// A workspace whose only holder has *finished with it* reads as free.
+///
+/// A session record outlives the session: closing one releases the worktree and
+/// the lease and leaves the record behind, because the branch it names is still
+/// the only record of the work. So a repository worked in earlier in the run has
+/// holders, and none of them holds anything — and a ready node on it is waiting
+/// for a slot, not for a lease. Reported as waiting, it would send a supervisor
+/// looking for a dispatch that settled hours ago.
+#[test]
+fn a_ready_node_whose_repositorys_only_session_has_closed_reads_as_queued() {
+    let world = World::new("views-ready-closed");
+    world.repository("local-direct", &["true"]);
+    world.script("service.work", "the worker wrote this\n");
+    // One whole lifecycle first, so the repository has a session record and that
+    // session is closed.
+    let done = world.plan(
+        "worked",
+        &plan_of("worked", vec![lifecycle("service", &[])]),
+    );
+    world
+        .run(&["start", &done.to_string_lossy(), "--attach"])
+        .settled();
+    world.until("the first run to settle", |world| {
+        world.run_file("worked", "result.json").is_file()
+    });
+    assert!(
+        !world.events_of("worked", "session-closed").is_empty(),
+        "the first run's session never closed, so nothing left a spent holder behind:\n{}",
+        world.dump()
+    );
+
+    // Now a run whose lifecycle node is ready behind a node that is not: the
+    // repository's only holder is the closed one above.
+    world.script("blocker.wait", "hold");
+    let mut plan = plan_of(
+        "readyclosed",
+        vec![agent("blocker", &[]), lifecycle("service", &[])],
+    );
+    plan["concurrency"] = serde_json::json!(1);
+    let path = world.plan("readyclosed", &plan);
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+    world.until("the blocking node to be dispatched", |world| {
+        !world.events_of("readyclosed", "node-dispatched").is_empty()
+    });
+
+    let status = world.run(&["status", "readyclosed"]);
+    status.exited(0);
+    assert!(
+        status
+            .stdout
+            .lines()
+            .any(|line| line.contains("service: ready — queued for dispatch")),
+        "a workspace whose only session has closed reads as one something is \
+         holding:\n{}",
+        status.stdout
+    );
+
+    world.release("blocker.go");
+}
