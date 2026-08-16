@@ -1105,6 +1105,23 @@ fn the_model_turn_double_refuses_an_argument_the_real_claude_does_not_take() {
         "the refusal does not name what it refused: {said}"
     );
 
+    // A declared flag with nothing after it, which the real CLI refuses the same
+    // way it refuses an undeclared one. Read as a usage refusal rather than as
+    // the flag never having been sent: leniently, an option `oneharness` started
+    // sending without its value would settle every member here green and die
+    // against a provider, which is the one thing this double is worth.
+    let truncated = sent(&["--input-format"]);
+    let said = String::from_utf8_lossy(&truncated.stderr).to_string();
+    assert_eq!(
+        truncated.status.code(),
+        Some(i32::from(onepipeline_testfakes::USAGE)),
+        "an option sent with no value after it ran a turn instead: {said}"
+    );
+    assert!(
+        said.contains("--input-format"),
+        "the refusal does not name the option that was left without a value: {said}"
+    );
+
     // The same line without it, so the refusal is about that flag rather than
     // about the argv every other journey here sends.
     let ran = sent(&[]);

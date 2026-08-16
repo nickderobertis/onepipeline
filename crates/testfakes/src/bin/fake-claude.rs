@@ -47,16 +47,31 @@ fn main() -> ExitCode {
     turn(&args, &dir)
 }
 
-/// The flags the headless surface above is made of, and whether each takes a
-/// value after it.
+/// What follows a flag on the argv, as Claude Code's own grammar has it.
+///
+/// Three cases rather than "takes a value or does not", because `-p` is neither:
+/// the prompt after it is optional, and oneharness sends it on stdin whenever a
+/// node's task prose is too large for an argv. Named, the reader of [`declared`]
+/// no longer has to recognise that one flag by its spelling to parse the line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Takes {
+    /// Nothing: the flag is the whole of it.
+    Nothing,
+    /// A value, which the real CLI refuses to be without.
+    AValue,
+    /// The prompt, when it came on the argv rather than on stdin.
+    ThePromptIfItIsHere,
+}
+
+/// The flags the headless surface above is made of, and what follows each.
 // llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the same gate as
 // `MODES` below, and for the same reason.
-const FLAGS: [(&str, bool); 5] = [
-    ("-p", false),
-    ("--input-format", true),
-    ("--permission-mode", true),
-    ("--output-format", true),
-    ("--verbose", false),
+const FLAGS: [(&str, Takes); 5] = [
+    ("-p", Takes::ThePromptIfItIsHere),
+    ("--input-format", Takes::AValue),
+    ("--permission-mode", Takes::AValue),
+    ("--output-format", Takes::AValue),
+    ("--verbose", Takes::Nothing),
 ];
 
 /// Refuses an argv the real `claude` would not take.
@@ -71,16 +86,29 @@ fn declared(args: &[String]) -> Result<(), String> {
     let mut at = 0;
     while at < args.len() {
         let arg = &args[at];
-        let Some((_, takes_value)) = FLAGS.iter().find(|(name, _)| name == arg) else {
+        let Some((_, takes)) = FLAGS.iter().find(|(name, _)| name == arg) else {
             return Err(format!("claude takes no argument {arg:?}"));
         };
         at += 1;
-        if *takes_value {
-            // Its value, which `fake::flags` refuses separately if it is absent.
-            at += 1;
-        } else if arg == "-p" && args.get(at).is_some_and(|next| !next.starts_with('-')) {
-            // The prompt, on the argv rather than on stdin.
-            at += 1;
+        match takes {
+            Takes::Nothing => {}
+            // Refused here rather than left to the read in `turn`: an option
+            // with nothing after it is indistinguishable, to every `fake::flag`
+            // below, from one that was never sent — so an optional one would be
+            // waved through, and the required ones would end the process on a
+            // misconfiguration exit that says the *test* was set up wrongly
+            // rather than that oneharness sent this.
+            Takes::AValue if at == args.len() => {
+                return Err(format!(
+                    "claude's {arg} takes a value, and nothing followed it"
+                ))
+            }
+            Takes::AValue => at += 1,
+            Takes::ThePromptIfItIsHere => {
+                if args.get(at).is_some_and(|next| !next.starts_with('-')) {
+                    at += 1;
+                }
+            }
         }
     }
     Ok(())
