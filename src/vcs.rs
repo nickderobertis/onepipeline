@@ -85,7 +85,10 @@ pub fn session_open(request: &SessionRequest) -> Result<Session> {
 ///
 /// The body crosses as the prose it is. Nothing checks it, here or there — a
 /// host places no shape on a change request's body, so there is no rule to hold
-/// it to and inventing one would refuse a body the host would have taken.
+/// it to and inventing one would refuse a body the host would have taken. What
+/// it is *not* is a node's `task`: that is the brief its agent was given, not a
+/// description of what the branch turned out to hold, so a body is one that was
+/// drafted from the diff or there is none.
 pub fn publish(
     token: &str,
     policy: Option<MergePolicy>,

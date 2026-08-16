@@ -126,13 +126,21 @@ fn every_operation_this_crate_performs_is_served_by_the_provider_seam() {
         panic!("a change-open publication ended as {:?}", published.outcome);
     };
     assert!(url.as_str().contains("owner/repo"), "{url}");
-    // And it reached the host, on the change request it opened: a body this
-    // crate passed and the host never saw would be a drafted change request
-    // nobody reads.
+    // And both reached the host, on the change request it opened. The sibling
+    // used to compose a body of its own — the branch's subject echoed back — for
+    // a request that named none, and this crate would have been shipping that as
+    // its reviewers' description; a body this crate passed and the host never saw
+    // would be a drafted change request nobody reads.
+    let opened = host.state();
     assert_eq!(
-        host.state().bodies.values().collect::<Vec<_>>(),
+        opened.bodies.values().collect::<Vec<_>>(),
         vec![DRAFTED],
         "the change request was not opened with the body the request carried"
+    );
+    assert!(
+        opened.titles.values().any(|title| title == "feat: land it"),
+        "the title the request named is not the one the change request carries: {:?}",
+        opened.titles
     );
 
     // What the publication wrote reaches the reader as the records appended since

@@ -5,11 +5,13 @@
 //! double here, because that sibling is called rather than spawned. One is a
 //! real executable speaking `oneagentgraph`'s command surface, so the code under
 //! test composes it exactly as it composes the real one, by executing a program
-//! and reading its stdout. The other two stand one layer further out than a
-//! sibling: the *harness* CLI `oneharness` spawns, for the journeys that drive
-//! the real `oneagentgraph` and need only the paid model turn replaced, and
-//! `gh`'s, at `onevcs`'s own override, for the journeys that need a host to
-//! decide something without a network or a credential.
+//! and reading its stdout. The other three stand further out than a sibling:
+//! Claude Code's headless surface, at oneharness's own
+//! `ONEHARNESS_BIN_CLAUDE_CODE`, which is where the paid model turn is replaced
+//! for the journeys that drive the real `oneagentgraph`; `oneharness`'s, at the
+//! process boundary that sibling still has; and `gh`'s, at `onevcs`'s own
+//! override, for the journeys that need a host to decide something without a
+//! network or a credential.
 //!
 //! Each is scripted from a directory the test prepares: what a node's dispatch
 //! does, whether it waits for a rendezvous, and what it exits with are all files
@@ -20,6 +22,15 @@ use std::path::{Path, PathBuf};
 
 /// The environment variable naming the directory a double is scripted from.
 pub const SCRIPT_DIR_ENV: &str = "ONEPIPELINE_FAKE_DIR";
+
+/// The environment variable a member's own harness config stamps its name into.
+///
+/// A single-sided member's turn is a library call inside `oneagentgraph`, so the
+/// harness oneharness spawns for it is handed no member name and the run
+/// publishes no argv to read one off. What it *is* handed is that member's
+/// resolved oneharness config `[env]` block, which is where a journey writing one
+/// puts this key so the turn can say which member it was.
+pub const MEMBER_ENV: &str = "ONEPIPELINE_FAKE_MEMBER";
 
 /// The directory this double reads its script from and records into.
 ///

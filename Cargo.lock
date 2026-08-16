@@ -924,11 +924,12 @@ dependencies = [
 
 [[package]]
 name = "onepipeline"
-version = "0.6.1"
+version = "0.6.3"
 dependencies = [
  "clap",
  "libc",
  "oneagentgraph",
+ "onepipeline-testfakes",
  "onevcs",
  "onevcs-testing",
  "serde",

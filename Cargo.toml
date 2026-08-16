@@ -31,14 +31,17 @@ resolver = "2"
 # `tests/e2e/dispatch.rs` holds the first end to end: it fails against 0.2.11
 # rather than merely reading differently.
 #
-# **Both siblings are registry releases**, and the filter grammar this crate
-# passes through to them — a *cross-repository* contract with no shared crate — is
-# carried by both pins: `oneagentgraph` merged it at v0.2.13 and `onevcs` at
-# v0.2.7, and each pin below is above its own. `tests/e2e/dispatch.rs` and
-# `tests/e2e/real_vcs.rs` drive those surfaces against the real siblings, so a pin
-# moved below one fails rather than reads differently.
+# **Both siblings are registry releases**, and **neither may carry a `git`/`rev`
+# pin**, because a revision is content this host cannot reproduce from crates.io
+# and a crate that itself ships there cannot publish against one.
 #
-# Two further floors, each a **requirement** of what this crate composes today:
+# The filter grammar this crate passes through to them — a *cross-repository*
+# contract with no shared crate — is carried by both pins: `oneagentgraph` merged
+# it at v0.2.13 and `onevcs` at v0.2.7, and each pin below is above its own.
+# `tests/e2e/dispatch.rs` and `tests/e2e/real_vcs.rs` drive those surfaces against
+# the real siblings, so a pin moved below one fails rather than reads differently.
+#
+# Four further floors, each a **requirement** of what this crate composes today:
 #
 # - `oneagentgraph` 0.2.16 lets a `kind: oneharness` member's own oneharness
 #   config decide its run — `schema_file` there asks for a validated JSON answer,
@@ -47,28 +50,33 @@ resolver = "2"
 #   `member-settled` names. Below it that member is always run with `--stream`,
 #   which oneharness refuses beside a schema, so the drafting dispatch is a usage
 #   error rather than a structured answer.
+# - `oneagentgraph` 0.2.18 runs a single-sided member's turn through the
+#   oneharness *library*. Below it that turn is a process, and every seam this
+#   build reads it through — the classification a death is reported under, the
+#   teardown of the harness tree, `member-started`'s fields — is the other one.
+# - `onevcs` 0.2.8 raises `provenance::SUBJECT_LIMIT` from 72 to 120, which
+#   `src/graph.rs` reads to refuse an unpublishable node title at plan load — so
+#   the `onevcs` pin also decides which titles a plan may state. Below it a load
+#   refuses every title between the two that the publication commits without
+#   complaint. `tests/e2e/real_vcs.rs` drives the surface.
 # - `onevcs` 0.4.0 carries `PublishRequest.body`, which is the whole of what a
 #   drafted body is *for*: below it a change request opens with the boilerplate
 #   this crate has no way to replace. 0.4.1 adds a stacked-branch publish above it.
-#
-# `src/graph.rs` reads `onevcs::provenance::SUBJECT_LIMIT` to refuse an
-# unpublishable node title at plan load, so the `onevcs` pin also decides which
-# titles a plan may state.
 [workspace.dependencies]
 oneagentgraph = "0.2.18"
 onevcs = "0.4.1"
 # The sibling's own test-support crate, from the **same** revision as the library
 # it implements — here by resolving both from the registry at the releases cut
-# from one commit: `onevcs-testing` v0.2.1 requires `onevcs = "0.4.1"`, so the
-# build has one copy. Two copies is not a version skew but a compile error:
-# `tests/onevcs_seam.rs` — whose whole job is to drive this crate's seam against
-# those providers — would not build, because the two copies' types are different
-# types.
+# from one commit: `onevcs-testing` v0.2.1 and `onevcs` v0.4.1 are the same tag,
+# and v0.2.1 requires `onevcs = "0.4.1"`, so the build has one copy. Two copies
+# is not a version skew but a compile error: `tests/onevcs_seam.rs` — whose whole
+# job is to drive this crate's seam against those providers — would not build,
+# because the two copies' types are different types.
 onevcs-testing = "0.2.1"
 
 [package]
 name = "onepipeline"
-version = "0.6.1"
+version = "0.6.3"
 edition = "2021"
 rust-version = "1.88"
 description = "Execute a task DAG over oneagentgraph and onevcs, merging their event streams into one."
@@ -127,7 +135,8 @@ serde_norway = "0.9"
 thiserror = "2"
 
 # The siblings this crate composes, at the workspace's own pins. See
-# `[workspace.dependencies]` for what each pin's floor is a requirement of.
+# `[workspace.dependencies]` for what each pin's floor is a requirement of, and
+# why both are registry releases.
 oneagentgraph = { workspace = true }
 onevcs = { workspace = true }
 
@@ -145,20 +154,25 @@ windows-sys = { version = "0.61", features = [
   "Win32_System_Threading",
 ] }
 
-# One dev-dependency, and it is not a test framework. The e2e suite drives the
+# Two dev-dependencies, and neither is a test framework. The e2e suite drives the
 # compiled binary as a subprocess with `std::process` and reads what it wrote, so
-# it needs no command-assertion crate — `tests/e2e/harness.rs` is the whole of
-# it — and the subprocess doubles are a workspace member rather than a
-# dependency, because a dev-dep would build that crate's *library* and what the
-# suite needs is its binaries.
+# it needs no command-assertion crate — `tests/e2e/harness.rs` is the whole of it.
+#
+# `onepipeline-testfakes` is here for its **library** only: the doubles' binaries
+# come from the workspace member, which `tests/e2e/harness.rs` builds on demand,
+# because a dev-dep builds a crate's library and not its binaries. What the
+# library carries is the vocabulary the two sides share — the environment keys a
+# double reads its scenario out of — so the writer and the reader of each key have
+# one spelling instead of two that drift apart in silence.
 #
 # `onevcs-testing` is the sibling's own implementations of the two interfaces it
 # is built around, which is what `tests/onevcs_seam.rs` drives to hold every
 # operation `src/vcs.rs` performs to the seam it performs it on — in code rather
-# than in prose, with no git, no host, and no process. It is a dev-dependency and
-# must stay one: what it implements must never be reachable from a release
+# than in prose, with no git, no host, and no process. Both are dev-dependencies
+# and must stay so: what they implement must never be reachable from a release
 # binary.
 [dev-dependencies]
+onepipeline-testfakes = { path = "crates/testfakes" }
 onevcs-testing = { workspace = true }
 
 [[test]]

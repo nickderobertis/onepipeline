@@ -241,57 +241,56 @@ fn the_recorded_position_survives_the_driver_that_recorded_it() {
 
 /// A complete-looking run planted *outside* the runs root, so reaching it is
 /// proof of escape rather than of a plausible-looking string being refused.
-// llmlint: ignore-block[tests_mirror_real_usage] a run *outside* the runs root cannot be
-// produced by the CLI by construction — every verb that creates one creates it inside the
-// root — and that is precisely the property under test: reaching this store would prove a
-// run id climbed out. Fabricating the persisted stores directly is the only way to place
-// a plausible target there for the escape to be proved against.
+///
+/// Launched by the real binary into a runs root of its own, so the ledger an
+/// escape would reach is one this build actually wrote rather than an imitation
+/// of one — and the node the escaping reference names is genuinely `done` there,
+/// read back through the product's own view of that root, so an unrefused edge
+/// really would resolve against it. Answers with the run id that climbs out of
+/// *this* world's runs root to reach it.
 fn plant_outside(world: &World) -> String {
-    let outside = world.root.join("elsewhere");
-    std::fs::create_dir_all(&outside).expect("a run outside the root");
-    std::fs::write(
-        outside.join("launch.json"),
-        json!({
-            "run_id": "elsewhere", "plan": "/dev/null", "graph": "g",
-            "launcher": "e2e", "session": "someone", "pid": 1, "host": "h",
-            "started_at": "2026-01-01T00:00:00.000Z",
-            "heartbeat_interval": 1, "adoptions": 0,
-        })
-        .to_string(),
-    )
-    .expect("its launch record");
-    std::fs::write(
-        outside.join("events.jsonl"),
-        format!(
-            "{}\n",
-            json!({
-                "v": 1, "ts": "2026-01-01T00:00:00.000Z", "stream": "s", "seq": 0,
-                "source": "pipeline", "kind": "node-settled",
-                "labels": {"run_id": "elsewhere", "node": "build"},
-                "payload": {"status": "done"},
-            })
-        ),
-    )
-    .expect("its journal");
-    "elsewhere".to_string()
+    let root = world.root.join("outside");
+    std::fs::create_dir_all(&root).expect("a runs root beside this world's");
+    let path = world.plan(
+        "elsewhere",
+        &plan_of("elsewhere", vec![agent("build", &[])]),
+    );
+    let mut start = world.cmd(&["start", &path.to_string_lossy(), "--attach"]);
+    start.env("ONEPIPELINE_RUNS_DIR", &root);
+    world
+        .run_on(start, "start elsewhere in a runs root of its own")
+        .settled();
+
+    let mut results = world.cmd(&["results", "elsewhere"]);
+    results.env("ONEPIPELINE_RUNS_DIR", &root);
+    let planted = world.run_on(results, "read the planted run's ledger");
+    planted.exited(0);
+    assert!(
+        planted
+            .stdout
+            .lines()
+            .any(|line| line.contains("build") && line.contains("done")),
+        "the planted run would not satisfy the edge even if it were read:\n{}",
+        planted.stdout
+    );
+    "../outside/elsewhere".to_string()
 }
-// llmlint: ignore-end[tests_mirror_real_usage]
 
 #[test]
 fn a_run_id_that_climbs_out_of_the_runs_root_reaches_nothing() {
     let world = World::new("crossdag-escape");
-    plant_outside(&world);
+    let planted = plant_outside(&world);
 
     // Every verb takes a run id, and it is joined onto the runs root. A run id
     // that navigates would render, drive, or stop a run in a root this process
     // was never pointed at.
     for verb in [
-        vec!["status", "../elsewhere"],
-        vec!["monitor", "../elsewhere"],
-        vec!["results", "../elsewhere"],
-        vec!["stop", "../elsewhere"],
-        vec!["next", "../elsewhere"],
-        vec!["adopt", "../elsewhere"],
+        vec!["status", planted.as_str()],
+        vec!["monitor", planted.as_str()],
+        vec!["results", planted.as_str()],
+        vec!["stop", planted.as_str()],
+        vec!["next", planted.as_str()],
+        vec!["adopt", planted.as_str()],
     ] {
         let refused = world.run(&verb);
         assert_eq!(
@@ -317,16 +316,18 @@ fn a_run_id_that_climbs_out_of_the_runs_root_reaches_nothing() {
 #[test]
 fn a_plan_whose_upstream_climbs_out_of_the_runs_root_is_refused() {
     let world = World::new("crossdag-escape-plan");
-    let outside = plant_outside(&world);
     // Planted so it would genuinely satisfy the edge if it were ever read: the
     // node this reference names is `done` in that ledger.
-    assert_eq!(outside, "elsewhere");
+    let outside = plant_outside(&world);
 
     // A plan file is external input, and this half is joined onto the runs root
     // to find the ledger that answers the edge.
     let path = world.plan(
         "escaping",
-        &plan_of("escaping", vec![consumer("ship", "run:../elsewhere#build")]),
+        &plan_of(
+            "escaping",
+            vec![consumer("ship", &format!("run:{outside}#build"))],
+        ),
     );
     world
         .run(&["start", &path.to_string_lossy(), "--attach"])

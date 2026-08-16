@@ -35,6 +35,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
+use onepipeline_testfakes::{MEMBER_ENV, SCRIPT_DIR_ENV};
 use serde_json::Value;
 
 // The exit codes are the crate's own, not a second copy of them. A suite that
@@ -102,6 +103,18 @@ pub const MONITOR_TASK: &str =
 
 /// The dag-scope member whose job is not the monitor's.
 pub const REPORTING_MEMBER: &str = "reporter";
+
+/// One model turn that really ran.
+#[derive(Debug, Clone)]
+pub struct Turn {
+    /// The prose the turn was given.
+    pub prompt: String,
+    /// The directory it worked in.
+    pub cwd: String,
+    /// The member it was, from its own config's `[env]`. Empty for a turn whose
+    /// config a journey wrote itself and did not stamp.
+    pub member: String,
+}
 
 /// The prose [`REPORTING_MEMBER`] carries as its own `task`.
 ///
@@ -241,7 +254,7 @@ impl World {
             .env("GIT_AUTHOR_EMAIL", GIT_EMAIL)
             .env("GIT_COMMITTER_NAME", GIT_WHO)
             .env("GIT_COMMITTER_EMAIL", GIT_EMAIL)
-            .env("ONEPIPELINE_FAKE_DIR", &self.fakes)
+            .env(SCRIPT_DIR_ENV, &self.fakes)
             .env("ONEPIPELINE_FAKE_DRIVER_BIN", binary())
             .env("ONEPIPELINE_LAUNCHER", "e2e")
             .env("ONEPIPELINE_LAUNCHER_SESSION", &self.session)
@@ -316,15 +329,18 @@ impl World {
                         .to_path_buf(),
                 ]),
             )
-            // The paid model turn, at the seam that still reaches it: a
-            // single-sided member's turn is an in-process `oneharness` library
-            // call, so what a journey substitutes is the *harness* that library
-            // spawns, at its own `ONEHARNESS_BIN_<ID>`. The variable beside it
-            // is what a two-party member's judge side still spawns, and is
-            // pointed at the same place so nothing here resolves a sibling by
-            // name.
-            .env("ONEHARNESS_BIN_CLAUDE_CODE", double("fake-harness"))
-            .env("ONEAGENTGRAPH_ONEHARNESS_BIN", double("fake-harness"))
+            .env("ONEAGENTGRAPH_ONEHARNESS_BIN", double("fake-oneharness"))
+            // The paid turn, at oneharness's own per-harness binary seam. A
+            // single-sided member's turn is an `oneharness_core` library call
+            // from `oneagentgraph 0.2.18` on, so `ONEAGENTGRAPH_ONEHARNESS_BIN`
+            // above no longer stands between this suite and a provider — the
+            // only process left below the library is the harness its identity
+            // chain selects, which is this one. Set here rather than only in the
+            // graphs' `oneharness.toml`, because a journey that writes its own
+            // config would otherwise reach for a `claude` nobody in this suite
+            // chose; the environment beats a config-file `bin`, so one value
+            // covers every member of every graph a journey writes.
+            .env("ONEHARNESS_BIN_CLAUDE_CODE", double("fake-claude"))
             .env("ONEAGENTGRAPH_STATE_DIR", self.graph_state())
             .env(
                 "ONEPIPELINE_NODE_GRAPH",
@@ -534,10 +550,42 @@ impl World {
     pub fn write_graphs_at_the_runners_schema(&self) {
         let extra = format!(
             "  {REPORTING_MEMBER}:\n    kind: oneharness\n    \
-             oneharness_config: ./oneharness.toml\n    task: {}\n",
+             oneharness_config: {}\n    task: {}\n",
+            self.harness_config(REPORTING_MEMBER),
             yaml_scalar(MEMBER_TASK)
         );
         self.write_graphs_with(Some(&extra), oneagentgraph::config::SCHEMA_VERSION);
+    }
+
+    /// Write one member's own oneharness config, and return the reference a
+    /// graph names it by.
+    ///
+    /// One file per member rather than one shared by all of them, because its
+    /// `[env]` block is the only thing that reaches the harness carrying the
+    /// member's name. A single-sided member's turn is an `oneharness_core`
+    /// library call from `oneagentgraph 0.2.18` on, so the turn has no argv for
+    /// the run to publish and no process for a journey to read a name off — and
+    /// `[env]` is oneharness's own per-harness-process environment, which is
+    /// exactly the seam the substituted binary already arrives on. Without it a
+    /// journey can see that two members were given two different jobs and not
+    /// which member got which.
+    ///
+    /// The binary itself is **not** named here: it rides
+    /// `ONEHARNESS_BIN_CLAUDE_CODE` on every command, so a journey writing a
+    /// config of its own gets the double without having to know about it.
+    pub fn harness_config(&self, member: &str) -> String {
+        let file = format!("oneharness-{member}.toml");
+        let dir = self.graphs();
+        std::fs::create_dir_all(&dir).expect("a directory for the graph configs");
+        std::fs::write(
+            dir.join(&file),
+            format!(
+                "run_mode = \"fallback\"\nharnesses = [\"claude-code\"]\n\n[env]\n\
+                 {MEMBER_ENV} = \"{member}\"\n"
+            ),
+        )
+        .expect("the member's harness config is written");
+        format!("./{file}")
     }
 
     /// A `PATH` with nothing on it, in this world.
@@ -657,9 +705,11 @@ impl World {
             })
             .expect("the shipped dag-scope graph declares a pacemaker");
         let pacemaker = format!(
-            "  {member}:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n    \
+            "  {member}:\n    kind: oneharness\n    oneharness_config: {}\n    \
              schedule: {{every: {}, resettable: {}}}\n",
-            schedule.every, schedule.resettable
+            self.harness_config(member),
+            schedule.every,
+            schedule.resettable
         );
         self.write_graphs_with(Some(&pacemaker), CONSUMER_GRAPH_SCHEMA);
     }
@@ -710,7 +760,9 @@ impl World {
         std::fs::create_dir_all(&dir).expect("a directory for the graph configs");
         // The identity chain is the operator's own file, which the graph names
         // and this suite never selects out of: one harness family, so the model
-        // pairing rule holds.
+        // pairing rule holds. This unattributed copy is what a two-party
+        // member's two sides name and what a journey copying a graph elsewhere
+        // takes with it; each single-sided member below gets one of its own.
         std::fs::write(
             dir.join("oneharness.toml"),
             "run_mode = \"fallback\"\nharnesses = [\"claude-code\"]\n",
@@ -745,9 +797,9 @@ impl World {
                 dir.join(file),
                 format!(
                     "version: {version}\nname: {}\nmembers:\n  {member}:\n    \
-                     kind: oneharness\n    oneharness_config: ./oneharness.toml\n\
-                     {task}{extra}{env}",
+                     kind: oneharness\n    oneharness_config: {}\n{task}{extra}{env}",
                     file.trim_end_matches(".yaml"),
+                    self.harness_config(member),
                 ),
             )
             .expect("the graph config is written");
@@ -865,6 +917,40 @@ impl World {
     /// Everything the doubles were asked for, in order.
     pub fn invocations(&self) -> Vec<Value> {
         read_jsonl(&self.fakes.join("invocations.jsonl"))
+    }
+
+    /// Every model turn that really ran, in order: what it was asked to do,
+    /// where it worked, and which member it was.
+    ///
+    /// The one place a journey can read a member's *prose* from. A single-sided
+    /// member's turn is a library call inside `oneagentgraph` from 0.2.18 on, so
+    /// its `member-started` names the config and worktree it was prepared with
+    /// and there is no argv on it to read a prompt off — the turn itself is the
+    /// last process in the stack, and this is what it recorded about the one it
+    /// was given.
+    pub fn turns(&self) -> Vec<Turn> {
+        self.invocations()
+            .into_iter()
+            .filter(|call| call["tool"] == "claude-turn")
+            .map(|call| Turn {
+                prompt: call["args"][0].as_str().unwrap_or_default().to_string(),
+                cwd: call["args"][1].as_str().unwrap_or_default().to_string(),
+                member: call["args"][2].as_str().unwrap_or_default().to_string(),
+            })
+            .collect()
+    }
+
+    /// The prose one named member's turn was given.
+    ///
+    /// Panics when that member never ran, naming what did: a journey asserting
+    /// on a job nobody was handed would otherwise read as a job handed wrongly.
+    pub fn turn_of(&self, member: &str) -> String {
+        let turns = self.turns();
+        turns
+            .iter()
+            .find(|turn| turn.member == member)
+            .map(|turn| turn.prompt.clone())
+            .unwrap_or_else(|| panic!("no member '{member}' ran a turn: {turns:?}"))
     }
 
     /// What each observer the launcher started found waiting for it, in order.

@@ -57,6 +57,13 @@
 //! `a_graphs_env_block_is_exported_into_this_process_and_not_into_the_run_alone`
 //! observes it. The shipped graphs declare no `env:` block, so nothing here
 //! trips it today.
+//!
+//! From `oneagentgraph 0.2.18` that model covers a **single-sided** member too:
+//! its turn is an `oneharness_core` library call, so the harness process
+//! oneharness spawns inherits this process's environment rather than one
+//! composed per member. [`export`] is what keeps [`Launch::env`] meaning the
+//! same thing on both backends under it, and says why the pairs it carries are
+//! safe to put there.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader};
@@ -957,6 +964,31 @@ impl ProcessGraphRun {
     }
 }
 
+/// Put a launch's own pairs on **this** process, so the library path exports
+/// what [`Launch::env`] promises.
+///
+/// The subprocess path sets them on the command it spawns, and every member of
+/// that graph inherits them. The library path had the same effect until
+/// `oneagentgraph 0.2.18` composed a member's environment per launch; from there
+/// a member's turn is an `oneharness_core` call whose harness child inherits
+/// *the hosting process's* environment, and the map handed to
+/// [`oneagentgraph::run::start`] reaches only the `${VAR}` expansion of the
+/// graph's own `env:` block. A pair set nowhere else therefore reached nothing —
+/// silently, and on one backend of two. That is the split
+/// [`GraphRun::start`]'s `dir` exists to prevent, so it is closed the same way:
+/// both backends give a graph's members one answer.
+///
+/// Process-wide, which is what the module's **Concurrency** note is about, and
+/// what makes it safe here is *which* pairs these are: a launch carries the
+/// run's own id and where its ledger lives, both constant for the life of a
+/// driver, and one driver drives one run. A per-node value must never come
+/// through here.
+fn export(env: &[(String, String)]) {
+    for (key, value) in env {
+        std::env::set_var(key, value);
+    }
+}
+
 impl GraphRun {
     /// Start a graph through the sibling library. Detached launches retain the
     /// process boundary because a library scheduler thread cannot survive this
@@ -1004,6 +1036,7 @@ impl GraphRun {
     ) -> Result<Self> {
         let mut run_env = process_env();
         run_env.extend(env.iter().cloned());
+        export(env);
         let labels = labels
             .iter()
             .map(|label| {

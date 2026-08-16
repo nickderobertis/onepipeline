@@ -515,6 +515,20 @@ The shipped graphs declare no `env:` block, so nothing in this repository trips
 it today — which is why the test is a characterisation rather than a failure,
 and why it is the thing that will say so when upstream confines it.
 
+**It widened at `oneagentgraph 0.2.18`, and this crate now writes into its own
+process too.** A single-sided member's turn became an `oneharness_core` library
+call there, so the harness oneharness spawns inherits *the hosting process's*
+environment rather than one composed per member — and the map a caller hands
+`run::start` reaches only the `${VAR}` expansion of the graph's own `env:` block.
+The pairs `agentgraph::Launch::env` promises to export therefore reached nothing
+on the library backend while the subprocess backend still set them on its child:
+one launch, two answers, silently. `agentgraph::export` closes that split by
+setting them on this process, which is the same process-wide write this entry is
+about — so the proposal above is unchanged and would close this half with it.
+What makes it tolerable meanwhile is which pairs they are: a launch carries the
+run's own id and where its ledger lives, both constant for the life of a driver,
+and one driver drives one run.
+
 What would close it: the member launch already builds a `member_env` map beside
 the export. Handing that to the spawn — and to the in-process side — instead of
 mutating the process would need nothing from this crate.
@@ -545,7 +559,7 @@ make it one rule rather than two.
 **Proposal (for `oneagentgraph`): a sentinel in
 `oneagentgraph-fake-harness` that runs a command and settles on its exit code.**
 
-`crates/testfakes`'s `fake-harness` is the one hand-written double this
+`crates/testfakes`'s `fake-claude` is the one hand-written double this
 repository still needs, and it needs it for exactly one behaviour that no
 upstream double has: the dag-scope graph's `orchestrator` member is an agent
 whose whole job is to run this crate's own engine verbs, so a double standing in
@@ -554,25 +568,27 @@ table — `fake:complete-now`, `fake:hold`, `fake:park`, `fake:did-work`, and th
 `FAKE_HARNESS_*` variables — steers what a turn answers and never what it
 executes.
 
-**Where it is reached moved, and the seam this entry rejected is now the only
-one there is.** `oneagentgraph` 0.2.16 runs a `kind: oneharness` member's turn
-through `oneharness_core::io::run::run_supervised` in its own process, so
-`ONEAGENTGRAPH_ONEHARNESS_BIN` no longer reaches that member's turn at all — it
-names the binary onejudge spawns for a *two-party* member's agent side and
-nothing else. The double is therefore the provider CLI now, reached at
-`ONEHARNESS_BIN_CLAUDE_CODE`, and it speaks that CLI's headless wire shape. Both
-objections that ruled the seam out are gone with the subprocess: `oneharness-core`
-is in this repository's dependency graph either way, because the crate it composes
-links it, and there is no `oneharness` binary to provision on any leg.
-
-The remaining candidate is still rejected on evidence rather than preference:
+Of the other two candidate seams, one is still unreachable and the other stopped
+being a cost:
 
 * **`oneharness run --mock-harness ID`** is unreachable. onejudge 0.3.8 has no
   passthrough for it, and `oneagentgraph`'s own `src/bin/fake_harness.rs`
   records the rest of the reason at length: the `MOCK_*` contract fixes one
   response per process environment, and a member needs several from one binary.
+* **`ONEHARNESS_BIN_<ID>` is now what the double is reached at.** It was
+  rejected here while it meant substituting the provider below a real
+  `oneharness` binary this repository had none of. `oneagentgraph 0.2.18` runs a
+  single-sided member's turn through `oneharness_core` as a **library**, so there
+  is no `oneharness` binary in the picture on any platform, that crate is already
+  in this repository's dependency graph through the sibling, and the process
+  oneharness spawns is the harness the member's chain selected — which is what
+  `fake-claude` is. No second `oneharness-core` major, and no provisioning step
+  on any CI leg. What the move did not give is a double that needs no writing:
+  the seam names an executable, and what stands at it is still this
+  repository's own.
 
-Until an upstream double can answer these journeys, this one stays.
+Until an upstream one exists, the double stays and is reached at
+`ONEHARNESS_BIN_CLAUDE_CODE`.
 
 ## 22. `onevcs-testing`'s providers cannot reach a consumer's subprocess — OPEN
 
