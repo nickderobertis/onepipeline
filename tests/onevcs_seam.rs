@@ -109,6 +109,7 @@ fn every_operation_this_crate_performs_is_served_by_the_provider_seam() {
         &PublishRequest {
             policy: Some(MergePolicy::ChangeOpen),
             title: Some("feat: land it".parse().expect("a usable subject")),
+            body: None,
         },
     )
     .expect("the seam publishes a session it opened");
@@ -119,6 +120,26 @@ fn every_operation_this_crate_performs_is_served_by_the_provider_seam() {
         panic!("a change-open publication ended as {:?}", published.outcome);
     };
     assert!(url.as_str().contains("owner/repo"), "{url}");
+
+    // `src/vcs.rs::publish` names no body, and since `onevcs` 0.4.0 nothing
+    // downstream composes one. The title is the control: both are recorded at the
+    // same point, so a title present and a body absent is the field being carried
+    // rather than nothing being recorded.
+    let host_state = host.state();
+    assert_eq!(
+        host_state
+            .titles
+            .values()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["feat: land it"],
+        "the title the publication was given is not the one the host opened under"
+    );
+    assert!(
+        host_state.bodies.is_empty(),
+        "a publication that named no body opened a change request carrying one: {:?}",
+        host_state.bodies
+    );
 
     // What the publication wrote reaches the reader as the records appended since
     // the last read — never the whole stream again, which is what would put every

@@ -90,7 +90,17 @@ pub fn publish(
     onevcs::publish(
         &providers(),
         &SessionToken(token.to_owned()),
-        &PublishRequest { policy, title },
+        // Every field named, so a field the sibling adds is a compile error here
+        // rather than a silently-defaulted one. `body` is `None` because a plan
+        // has no body to give: the contract's publication carries a `policy` and a
+        // `title` and nothing else, and composing one out of what this crate
+        // already knows would put the title back under a heading — which is the
+        // boilerplate `onevcs` stopped writing when it made the field a caller's.
+        &PublishRequest {
+            policy,
+            title,
+            body: None,
+        },
     )
     .map_err(refusal)
 }

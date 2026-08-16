@@ -488,7 +488,7 @@ fn a_lifecycle_node_opens_a_real_pull_request_merges_it_and_the_base_advances() 
         "view",
         &url,
         "--json",
-        "number,state,title,mergeCommit,headRefName,baseRefName",
+        "number,state,title,body,mergeCommit,headRefName,baseRefName",
     ]))
     .expect("gh answers with JSON");
     assert_eq!(
@@ -499,6 +499,15 @@ fn a_lifecycle_node_opens_a_real_pull_request_merges_it_and_the_base_advances() 
     assert_eq!(view["headRefName"], json!(branch), "{view}");
     // The title the plan gave the node is the one the change request carries.
     assert_eq!(view["title"], json!(title), "{view}");
+    // And nothing else does. A plan gives a node a title and no body, so the
+    // request `src/vcs.rs` builds names none — where `onevcs` once composed three
+    // lines of its own that told a reviewer nothing the title had not. Read off
+    // GitHub, so what is asserted is the change request a human opens.
+    assert_eq!(
+        view["body"],
+        json!(""),
+        "the change request carries a body nobody drafted: {view}"
+    );
 
     // The branch the change landed on, as GitHub names it. Required rather than
     // defaulted to `main`: this is what the two reads below are addressed to, and

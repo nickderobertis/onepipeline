@@ -31,39 +31,26 @@ resolver = "2"
 # `tests/e2e/dispatch.rs` holds the first end to end: it fails against 0.2.11
 # rather than merely reading differently.
 #
-# **`oneagentgraph` is pinned to a git revision, and carries a `version` beside
-# it.** The filter grammar this crate passes through to both siblings is a
-# *cross-repository* contract with no shared crate, so what must be pinned is the
-# revision that sibling's copy of it was merged at, before a release carries it.
-# `rev` is what a build resolves; the `version` beside it is what `cargo publish`
-# records, which a git-only dependency would make impossible for a crate that
-# ships on crates.io. The two must name the same release: `7854b19` *is*
-# `oneagentgraph` v0.2.13, the release commit of the pull request that merged its
-# filter support (#40). `tests/e2e/dispatch.rs` drives that surface against the
-# real sibling, so a pin moved to a revision without it fails rather than reads
-# differently.
+# **Both siblings are registry releases**, so `deny.toml` allows no git source and
+# the whole graph resolves from crates.io — which is all a host installing off
+# PyPI or npm can reach. Each was pinned by revision while the filter grammar this
+# crate passes through to them was merged but unreleased; `tests/e2e/dispatch.rs`
+# and `tests/e2e/real_vcs.rs` drive that grammar, so a version without it fails.
 #
-# **`onevcs` is a registry release**, and is one again because the revision it
-# was pinned at is *published*: `d3c495d` is the tag `v0.2.7` exactly — the
-# release commit of the pull request that merged its filter support (#26) — and
-# v0.2.7 is an ancestor of v0.2.10, so 0.2.10 carries that grammar and three
-# fixes above it. Holding the pin would hold this crate at 0.2.7, and
-# `src/graph.rs` reads `onevcs::provenance::SUBJECT_LIMIT` to refuse an
-# unpublishable node title at plan load: that constant is 72 at v0.2.7 and 120
-# from v0.2.8 on, so a build behind the pin would refuse at load every title
-# between the two that the publication commits without complaint.
-# `tests/e2e/real_vcs.rs` drives the surface.
+# A third `onevcs` floor, read in code rather than driven: `src/graph.rs` refuses
+# a node title longer than `onevcs::provenance::SUBJECT_LIMIT` at plan load. That
+# constant was raised to 120, and under the old 72 a load refuses titles the
+# publication itself commits without complaint.
 [workspace.dependencies]
-oneagentgraph = { git = "https://github.com/nickderobertis/oneagentgraph", rev = "7854b1941b235e05afaa9cbaa69a2daf63de722e", version = "0.2.13" }
-onevcs = "0.2.10"
-# The sibling's own test-support crate, from the **same** revision as the library
-# it implements — here by resolving both from the registry at the releases cut
-# from one commit: `onevcs-testing` v0.1.10 and `onevcs` v0.2.10 are the same tag,
-# and v0.1.10 requires `onevcs = "0.2.10"`, so the build has one copy. Two copies
-# is not a version skew but a compile error: `tests/onevcs_seam.rs` — whose whole
-# job is to drive this crate's seam against those providers — would not build,
-# because the two copies' types are different types.
-onevcs-testing = "0.1.10"
+oneagentgraph = "0.2.17"
+onevcs = "0.4.1"
+# The sibling's own test-support crate, which must resolve to **one** copy of the
+# library it implements together with the dependency above. Nothing here has to
+# assert that it does: two copies is not a version skew but a compile error, since
+# `tests/onevcs_seam.rs` hands the providers to `onevcs`'s own entry points and
+# the two copies' types are different types. So raise this with `onevcs`, and the
+# build is the check.
+onevcs-testing = "0.2.1"
 
 [package]
 name = "onepipeline"
