@@ -531,10 +531,10 @@ pub fn status(survey: &Survey) -> String {
             if *node_status != NodeStatus::Ready {
                 continue;
             }
-            match held_workspace(&view.state, id) {
-                Some(holder) => out.push_str(&format!("  {id}: ready — {holder}\n")),
-                None => out.push_str(&format!("  {id}: ready — queued for dispatch\n")),
-            }
+            out.push_str(&format!(
+                "  {id}: ready — {}\n",
+                waiting_on(&view.state, id)
+            ));
         }
         // What refused, for the nodes that failed. A failed node otherwise reads
         // the same whether its own gate failed or an identity chain ran out, and
@@ -661,22 +661,39 @@ fn unlanded_nodes(view: &RunView) -> Vec<String> {
         .collect()
 }
 
-/// What a ready node's own workspace is occupied by, when something holds it.
+/// What a ready node is waiting on, as far as this host can tell.
 ///
 /// A lifecycle node cannot start until it can open a `onevcs` session over its
 /// repository, and a session is held under an occupancy lease — so a ready node
 /// whose repository somebody is already in is waiting on that lease, and waits
 /// silently. The commonest holder is the node's *own* previous dispatch, which
 /// is the state right after a cancel: the node is back on the frontier and the
-/// dispatch it cancelled has not let go.
+/// dispatch it cancelled has not let go. Reported so that node reads differently
+/// from one waiting for nothing but a concurrency slot, because a supervisor
+/// spent forty minutes looking for a wedge in the second when it was the first.
 ///
-/// `None` for a node with no repository to wait on, and for one whose repository
-/// nothing holds — both of which are a node waiting for nothing but a slot. The
-/// holders are `onevcs`'s own verdict, liveness included, because a pid alone
-/// cannot say whether a lease is real.
-fn held_workspace(state: &RunState, id: &str) -> Option<String> {
-    let repo = state.graph.get(id)?.repo.as_deref()?;
-    let held: Vec<String> = crate::vcs::holders_of(repo)
+/// Three answers and not two. A workspace this host **could not ask about** is
+/// neither held nor free, and saying "queued" there would report an unmeasured
+/// thing as a measured nothing — the one rule every view here is written to. The
+/// holders themselves are `onevcs`'s own verdict, liveness included, because a
+/// pid alone cannot say whether a lease is real.
+fn waiting_on(state: &RunState, id: &str) -> String {
+    const QUEUED: &str = "queued for dispatch";
+    // A node with no repository has no workspace to be held out of.
+    let Some(repo) = state.graph.get(id).and_then(|node| node.repo.as_deref()) else {
+        return QUEUED.to_string();
+    };
+    let holders = match crate::vcs::holders_of(repo) {
+        Ok(holders) => holders,
+        Err(why) => {
+            return format!(
+                "{QUEUED}, and this host cannot say whether the '{repo}' workspace is \
+                 free: {}",
+                one_line(&why)
+            )
+        }
+    };
+    let held: Vec<String> = holders
         .into_iter()
         .filter(|holder| {
             holder.state == onevcs::Lifecycle::Open && holder.liveness == onevcs::Liveness::Live
@@ -688,12 +705,13 @@ fn held_workspace(state: &RunState, id: &str) -> Option<String> {
             )
         })
         .collect();
-    (!held.is_empty()).then(|| {
-        format!(
-            "waiting for the '{repo}' workspace, held by {}",
-            held.join(", ")
-        )
-    })
+    if held.is_empty() {
+        return QUEUED.to_string();
+    }
+    format!(
+        "waiting for the '{repo}' workspace, held by {}",
+        held.join(", ")
+    )
 }
 
 /// What one in-flight dispatch is doing now, on the line that reports it.

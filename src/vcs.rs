@@ -240,7 +240,17 @@ pub fn change_opened_in(token: &str) -> Option<String> {
         .find(|envelope| envelope.kind == opened)
         .and_then(|envelope| envelope.payload.get("url"))
         .and_then(|url| url.as_str())
+        // llmlint: ignore-block[changed_behavior_has_e2e] no invocation a user can type
+        // reaches the refusal this line makes. The only producer of a `change-opened` is
+        // `onevcs`, which builds the payload from its own `Url` — so a record naming
+        // something that is not one can only come from a stream a hand-written line was
+        // appended to, and writing that line would make this suite an oracle for a
+        // payload nothing produces, which is the weakness `crates/testfakes` exists to
+        // avoid. The two answers a producer *can* give are both driven end to end in
+        // `tests/e2e/lifecycle.rs`: a change request that was opened, and a stream this
+        // build cannot read a record off at all.
         .and_then(|url| onevcs::Url::parse(url.trim()).ok())
+        // llmlint: ignore-end[changed_behavior_has_e2e]
         .map(|url| url.to_string())
 }
 
@@ -248,16 +258,18 @@ pub fn change_opened_in(token: &str) -> Option<String> {
 ///
 /// The same enumeration the launch interlock reads, asked of one repository:
 /// what a node waiting to dispatch into an occupied workspace is waiting for.
-/// Empty where nothing holds it, and equally where the question cannot be
-/// answered — a view says what it can see, and never reports an unread answer as
-/// an empty one, which is why the refusal is printed rather than swallowed.
-pub fn holders_of(repo: &str) -> Vec<onevcs::SessionHolder> {
-    onevcs::session_holders(repo)
-        .map_err(|error| {
-            eprintln!("onepipeline: cannot read the session holders of {repo}: {error}");
-            error
-        })
-        .unwrap_or_default()
+///
+/// An empty list is a workspace nothing holds. A repository this host cannot
+/// answer for is the **error**, and the two are deliberately not the same value:
+/// a view never reports an unmeasured thing as a measured nothing, and rendering
+/// "nobody could be asked" as "nothing holds it" is what would tell a supervisor
+/// to stop looking for what a node is waiting on. The caller renders the
+/// refusal rather than deciding for itself what it meant.
+pub fn holders_of(repo: &str) -> std::result::Result<Vec<onevcs::SessionHolder>, String> {
+    onevcs::session_holders(repo).map_err(|error| {
+        eprintln!("onepipeline: cannot read the session holders of {repo}: {error}");
+        error.to_string()
+    })
 }
 
 /// One session's stream, read from the start of what this reader has not seen.

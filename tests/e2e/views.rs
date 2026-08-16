@@ -1273,8 +1273,9 @@ fn a_workspace_this_host_cannot_ask_about_is_reported_rather_than_read_as_free()
         status
             .stdout
             .lines()
-            .any(|line| line.contains("second: ready — queued for dispatch")),
-        "a node whose workspace could not be asked about is missing from the view:\n{}",
+            .any(|line| line.contains("second: ready")
+                && line.contains("this host cannot say whether the 'service' workspace is free")),
+        "a workspace nobody could be asked about reads as one nothing holds:\n{}",
         status.stdout
     );
 

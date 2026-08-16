@@ -135,8 +135,24 @@ fn a_cancel_asks_the_running_turn_to_stop_and_the_worker_stops() {
         interrupted[0]
     );
 
-    // And what it carried is what makes asking worth more than killing: stop,
-    // commit, and end the turn without starting anything else.
+    // It stopped on its own, so nothing was reaped — and the settlement says so,
+    // which is the difference a supervisor acts on. Waited for before the
+    // redirection is read: what the turn *did* with the ask is reported by that
+    // turn, and it has not reported anything until it has ended.
+    let settled = settlement(&world, &run, "slow");
+    assert_eq!(settled["payload"]["status"], "cancelled", "{settled}");
+    let detail = settled["payload"]["detail"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a cancelled node says nothing about how it stopped: {settled}"));
+    assert!(
+        detail.contains("stopped after its turn was asked"),
+        "the settlement does not say the dispatch stopped when it was asked: {detail}"
+    );
+
+    // And what the ask carried is what makes it worth more than killing: stop,
+    // commit, and end the turn without starting anything else. Read off what
+    // the turn reported it was doing, so this is the worker's own account of
+    // having taken it rather than the run's account of having sent it.
     let asked = redirected(&world, &run, "slow");
     let asked = asked
         .as_str()
@@ -152,18 +168,6 @@ fn a_cancel_asks_the_running_turn_to_stop_and_the_worker_stops() {
             "the cancellation's redirection does not ask the turn to {instruction:?}: {asked}"
         );
     }
-
-    // It stopped on its own, so nothing was reaped — and the settlement says so,
-    // which is the difference a supervisor acts on.
-    let settled = settlement(&world, &run, "slow");
-    assert_eq!(settled["payload"]["status"], "cancelled", "{settled}");
-    let detail = settled["payload"]["detail"]
-        .as_str()
-        .unwrap_or_else(|| panic!("a cancelled node says nothing about how it stopped: {settled}"));
-    assert!(
-        detail.contains("stopped after its turn was asked"),
-        "the settlement does not say the dispatch stopped when it was asked: {detail}"
-    );
 
     // Both transitions are the planner's to read, and only the first happened.
     let asked_for = surfaces(&world, &run, "dispatch-interrupted");
@@ -402,9 +406,11 @@ fn a_cancel_of_a_silent_dispatch_asks_nothing_and_still_carries_a_deadline() {
         &plan_of("cancelsilent", vec![agent("slow", &[])]),
     );
     let mut launch = world.cmd(&["start", &path.to_string_lossy(), "--detach"]);
-    // Not a number of seconds at all: the deadline falls back to the default,
-    // which the surface below names.
-    launch.env(CANCEL_GRACE_ENV, "when-it-feels-like-it");
+    // A deadline of zero, which is the value that must not be honoured: taken
+    // literally it would make every cooperative cancel an immediate kill, and
+    // the ask this whole change exists for would never be waited on. It falls
+    // back to the default, which the surface below names.
+    launch.env(CANCEL_GRACE_ENV, "0");
     world.run_on(launch, "start --detach").exited(0);
     world.until("the node to be dispatched", |world| {
         !world
