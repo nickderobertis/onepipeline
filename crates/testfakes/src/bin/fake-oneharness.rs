@@ -1,21 +1,23 @@
-//! A real `oneharness` executable, for the journeys that drive the **real**
-//! `oneagentgraph`.
+//! A real `oneharness` executable, at `ONEAGENTGRAPH_ONEHARNESS_BIN`.
 //!
-//! This double stands one layer further out than the other two. Where
-//! `fake-oneagentgraph` replaces a whole sibling, this one replaces only the
-//! thing a gate genuinely cannot run: the paid model turn. Real `oneagentgraph`
-//! resolves the graph, prepares the member, spawns this process at its own
-//! documented `ONEAGENTGRAPH_ONEHARNESS_BIN` seam, reads the two NDJSON lines
-//! below off its stdout, and settles the member on them.
+//! **A single-sided member's turn no longer comes through here.** From
+//! `oneagentgraph 0.2.18` that turn is an `oneharness_core` library call inside
+//! the sibling's own process, and the only process left below it is the harness
+//! the member's identity chain selected — which is `fake-claude`, at
+//! oneharness's own `ONEHARNESS_BIN_CLAUDE_CODE`. What still names *this* one is
+//! the sibling's remaining process boundary: the provider block it composes for
+//! a `kind: onejudge` member, and the `oneharness interrupt` an in-flight
+//! redirection is delivered by.
 //!
-//! It speaks the surface `oneagentgraph` invokes — `run --config C --cwd D
-//! --events --stream --prompt P` — and answers as onejudge's `docs/streaming.md`
-//! describes: `{"type":"event",…}` lines, then one terminal
-//! `{"type":"result","report":{…}}`.
-//!
-//! What it *does* with the turn is what a real agent would do with the same
-//! prompt: an orchestrator member is told to drive a run with the engine verbs,
-//! so this one runs them.
+//! So what this double is for now is being the executable that variable names,
+//! and refusing what it does not speak. The `run` surface below is the one
+//! `oneagentgraph` used to invoke — `run --config C --cwd D --events --stream
+//! --prompt P` — answering as onejudge's `docs/streaming.md` describes:
+//! `{"type":"event",…}` lines, then one terminal
+//! `{"type":"result","report":{…}}`. A two-party member's agent side is
+//! `oneharness run … --prompt-file -`, which this does **not** speak and
+//! deliberately refuses: no offline stand-in for that conversation exists, and
+//! every two-party journey here reads the launch rather than a settlement.
 
 use onepipeline_testfakes as fake;
 use std::process::ExitCode;

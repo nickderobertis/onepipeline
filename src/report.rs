@@ -342,16 +342,46 @@ pub fn read(kept: &Path) -> Option<Value> {
 
 /// The turns a report's transcript carries, in order.
 ///
-/// Empty for a report that carries no transcript, which is a report this build
-/// can say nothing further about rather than a conversation that never happened.
+/// **Two report shapes, because a node is dispatched to either member kind.** A
+/// two-party `kind: onejudge` member settles with onejudge's report, whose
+/// `transcript.messages` is a conversation of turns. A single-sided
+/// `kind: oneharness` member settles with **oneharness's own** run report, which
+/// has no conversation at all: it is one entry per harness the run attempted,
+/// carrying that harness's final answer and the actions it took. Both are
+/// contract-shipped node graphs, so a reader that knew only the first answered
+/// `it carries no transcript` for every single-sided dispatch — a report that was
+/// retained, named, and readable, reported as one this build cannot read.
+///
+/// Empty for a report carrying neither, which is a report this build can say
+/// nothing further about rather than a conversation that never happened.
+///
+/// **Read leniently, on purpose, and only ever rendered.** The document is a
+/// producer's, not this crate's, and nothing here acts on it: [`read`] has
+/// already refused anything that is not a plain file this run retained, and what
+/// survives is printed for a person. So a field a newer producer spells
+/// differently costs that field rather than the whole transcript — refusing the
+/// document would answer a real, retained, readable report by claiming this build
+/// cannot read it, which is the failure this function exists to remove. What is
+/// *not* lenient is attribution: a turn nothing names is dropped rather than
+/// rendered under a blank identity.
+// llmlint: ignore-block[boundary_inputs_validated] the leniency above is the
+// decision, and it is the same one the onejudge arm has always made; `read` is the
+// boundary this document is validated at.
 pub fn turns(document: &Value) -> Vec<Turn> {
-    document
+    if let Some(messages) = document
         .get("transcript")
         .and_then(|transcript| transcript.get("messages"))
         .and_then(Value::as_array)
-        .map(|messages| messages.iter().map(Turn::of).collect())
+    {
+        return messages.iter().map(Turn::of).collect();
+    }
+    document
+        .get("results")
+        .and_then(Value::as_array)
+        .map(|results| results.iter().filter_map(Turn::of_result).collect())
         .unwrap_or_default()
 }
+// llmlint: ignore-end[boundary_inputs_validated]
 
 /// One turn of a retained transcript.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -369,12 +399,40 @@ impl Turn {
         Self {
             role: string(message, "role"),
             text: string(message, "content"),
-            tools: message
-                .get("events")
-                .and_then(Value::as_array)
-                .map(|events| events.iter().map(Tool::of).collect())
-                .unwrap_or_default(),
+            tools: Self::tools_of(message),
         }
+    }
+
+    /// One entry of an oneharness run report's `results`, as a turn.
+    ///
+    /// The role is the **harness** that produced it rather than `assistant`: a
+    /// fallback chain records every candidate it attempted, so a reader with two
+    /// entries in front of it needs to know which identity said which — and one
+    /// that named them all `assistant` would read as a conversation that never
+    /// happened.
+    ///
+    /// `None` for an entry that neither answered nor acted, which is a candidate
+    /// the chain stepped past. Rendered, it would be a turn with a harness name
+    /// and nothing under it, and a chain that fell through four times before it
+    /// ran would bury the one turn that did. `None` too for an entry naming no
+    /// harness: a turn is attributed or it is not shown, because an unnamed one
+    /// among several is a reader guessing which identity said it.
+    fn of_result(result: &Value) -> Option<Self> {
+        let turn = Self {
+            role: string(result, "harness"),
+            text: string(result, "text"),
+            tools: Self::tools_of(result),
+        };
+        let said_something = !turn.text.is_empty() || !turn.tools.is_empty();
+        (!turn.role.is_empty() && said_something).then_some(turn)
+    }
+
+    fn tools_of(value: &Value) -> Vec<Tool> {
+        value
+            .get("events")
+            .and_then(Value::as_array)
+            .map(|events| events.iter().map(Tool::of).collect())
+            .unwrap_or_default()
     }
 }
 
@@ -605,11 +663,46 @@ mod tests {
         assert!(turns[1].tools[1].name.is_empty());
     }
 
+    /// A single-sided member's report is oneharness's own, and it reads as the
+    /// turns the chain actually took.
+    ///
+    /// The candidate that was stepped past carries neither an answer nor an
+    /// action, and it is *not* a turn: a chain that fell through twice before it
+    /// ran would otherwise show two empty ones above the only one a reader came
+    /// for. What survives is named by the harness that produced it, because that
+    /// is the identity the chain landed on.
+    #[test]
+    fn a_single_sided_members_report_reads_as_the_turns_its_chain_took() {
+        let document = json!({
+            "schema_version": "0.6",
+            "results": [
+                {"harness": "codex", "status": "skipped", "text": null},
+                {"harness": "claude-code", "status": "ok", "text": "Ran the gate.",
+                 "events": [
+                     {"kind": "tool_call", "name": "bash",
+                      "input": {"command": "just check"}, "index": 0},
+                 ]},
+            ],
+        });
+        let turns = turns(&document);
+        assert_eq!(turns.len(), 1, "{turns:?}");
+        assert_eq!(turns[0].role, "claude-code");
+        assert_eq!(turns[0].text, "Ran the gate.");
+        assert_eq!(turns[0].tools[0].name, "bash");
+        assert!(turns[0].tools[0].detail.contains("just check"));
+    }
+
     #[test]
     fn a_report_carrying_no_transcript_has_no_turns_rather_than_a_refusal() {
         assert!(turns(&json!({"usage": {"input_tokens": 1}})).is_empty());
         assert!(turns(&json!({"transcript": {}})).is_empty());
         assert!(turns(&Value::Null).is_empty());
+        // A run whose every candidate was stepped past said nothing and did
+        // nothing, which is a report with no turns rather than two blank ones.
+        assert!(turns(&json!({"results": [{"harness": "codex", "status": "skipped"}]})).is_empty());
+        // And an entry that answered but named no producer is not shown under a
+        // blank identity.
+        assert!(turns(&json!({"results": [{"text": "done"}]})).is_empty());
     }
 
     #[test]

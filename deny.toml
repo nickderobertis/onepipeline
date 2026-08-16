@@ -38,6 +38,15 @@ exceptions = []
 [bans]
 multiple-versions = "allow"
 wildcards = "deny"
+# Narrows that `deny` to the one requirement nobody chose: a `path` dependency on
+# a workspace member. There is exactly one — the `onepipeline-testfakes`
+# dev-dependency — and it is `publish = false`, so no release exists for a version
+# to name. Naming one anyway is not merely redundant but breaks publishing: cargo
+# strips a version-less path dev-dependency from the packaged manifest and
+# resolves a versioned one, so `cargo package` fails on a crate crates.io has
+# never seen. cargo-deny still refuses a `*` that could reach a published
+# artifact, so this buys that member and nothing else.
+allow-wildcard-paths = true
 allow = []
 deny = []
 skip = []
@@ -47,21 +56,14 @@ skip-tree = []
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# Exactly the one sibling repository this crate pins by revision, and nothing
-# else. `onevcs` was the second entry and no longer needs to be one: the revision
-# it was pinned at is published, so `Cargo.toml` resolves it from the registry
-# and an allowance kept here would permit a git source no build asks for.
+# Empty, and `oneagentgraph` was the last entry. Both siblings now resolve from
+# the registry, and an allowance for a pin no build asks for is one a revision
+# could quietly come back through. With `unknown-git` at `deny` this is the whole
+# of what a git source may be, so any of them — a sibling pinned back, or a
+# transitive dependency that grew one — fails here.
 #
-# `unknown-git` stays `deny`, so this list is the whole of what a git source may
-# be: a second one — a transitive dependency that grew a git pin, or another
-# repository added here by hand — still fails this check. What it buys is the
-# thing the filter grammar needs: that grammar is a *cross-repository* contract
-# with no shared crate, so what has to be pinned is the revision the sibling's
-# copy of it was merged at, before a release carries it.
-#
-# The reproducibility this replaced is not lost. The dependency pins an exact
-# `rev` rather than a branch, and carries the registry `version` beside it — so
-# the graph resolves to one commit, `Cargo.lock` records it, and `cargo publish`
-# still records a registry dependency. `cargo publish --dry-run` is what holds
-# that last part honest.
-allow-git = ["https://github.com/nickderobertis/oneagentgraph"]
+# That is the property publishing needs rather than a preference: a revision is
+# content crates.io cannot reproduce, and a crate that ships there cannot record
+# a dependency on one. `cargo publish --dry-run` holds the same line from the
+# other side.
+allow-git = []

@@ -31,39 +31,29 @@ resolver = "2"
 # `tests/e2e/dispatch.rs` holds the first end to end: it fails against 0.2.11
 # rather than merely reading differently.
 #
-# **`oneagentgraph` is pinned to a git revision, and carries a `version` beside
-# it.** The filter grammar this crate passes through to both siblings is a
-# *cross-repository* contract with no shared crate, so what must be pinned is the
-# revision that sibling's copy of it was merged at, before a release carries it.
-# `rev` is what a build resolves; the `version` beside it is what `cargo publish`
-# records, which a git-only dependency would make impossible for a crate that
-# ships on crates.io. The two must name the same release: `7854b19` *is*
-# `oneagentgraph` v0.2.13, the release commit of the pull request that merged its
-# filter support (#40). `tests/e2e/dispatch.rs` drives that surface against the
-# real sibling, so a pin moved to a revision without it fails rather than reads
-# differently.
+# Two more floors, and both are registry releases: **neither sibling may carry a
+# `git`/`rev` pin**, because a revision is content this host cannot reproduce
+# from crates.io and a crate that itself ships there cannot publish against one.
 #
-# **`onevcs` is a registry release**, and is one again because the revision it
-# was pinned at is *published*: `d3c495d` is the tag `v0.2.7` exactly — the
-# release commit of the pull request that merged its filter support (#26) — and
-# v0.2.7 is an ancestor of v0.2.10, so 0.2.10 carries that grammar and three
-# fixes above it. Holding the pin would hold this crate at 0.2.7, and
-# `src/graph.rs` reads `onevcs::provenance::SUBJECT_LIMIT` to refuse an
-# unpublishable node title at plan load: that constant is 72 at v0.2.7 and 120
-# from v0.2.8 on, so a build behind the pin would refuse at load every title
-# between the two that the publication commits without complaint.
-# `tests/e2e/real_vcs.rs` drives the surface.
+# - 0.2.18 runs a single-sided member's turn through the oneharness *library*.
+#   Below it that turn is a process, and every seam this build reads it through —
+#   the classification a death is reported under, the teardown of the harness
+#   tree, `member-started`'s fields — is the other one.
+# - `onevcs` 0.2.8 raises `provenance::SUBJECT_LIMIT` from 72 to 120, which
+#   `src/graph.rs` reads to refuse an unpublishable node title at plan load.
+#   Below it a load refuses every title between the two that the publication
+#   commits without complaint. `tests/e2e/real_vcs.rs` drives the surface.
 [workspace.dependencies]
-oneagentgraph = { git = "https://github.com/nickderobertis/oneagentgraph", rev = "7854b1941b235e05afaa9cbaa69a2daf63de722e", version = "0.2.13" }
-onevcs = "0.2.10"
+oneagentgraph = "0.2.18"
+onevcs = "0.4.1"
 # The sibling's own test-support crate, from the **same** revision as the library
 # it implements — here by resolving both from the registry at the releases cut
-# from one commit: `onevcs-testing` v0.1.10 and `onevcs` v0.2.10 are the same tag,
-# and v0.1.10 requires `onevcs = "0.2.10"`, so the build has one copy. Two copies
+# from one commit: `onevcs-testing` v0.2.1 and `onevcs` v0.4.1 are the same tag,
+# and v0.2.1 requires `onevcs = "0.4.1"`, so the build has one copy. Two copies
 # is not a version skew but a compile error: `tests/onevcs_seam.rs` — whose whole
 # job is to drive this crate's seam against those providers — would not build,
 # because the two copies' types are different types.
-onevcs-testing = "0.1.10"
+onevcs-testing = "0.2.1"
 
 [package]
 name = "onepipeline"
@@ -124,9 +114,9 @@ serde_json = { version = "1", features = ["preserve_order"] }
 serde_norway = "0.9"
 thiserror = "2"
 
-# The siblings this crate composes, at the workspace's own pins — a git revision
-# each, with the registry version beside it that publishing records. See
-# `[workspace.dependencies]` for why the revision rather than the release.
+# The siblings this crate composes, at the workspace's own pins. See
+# `[workspace.dependencies]` for what each floor buys and why both are registry
+# releases.
 oneagentgraph = { workspace = true }
 onevcs = { workspace = true }
 
@@ -144,20 +134,25 @@ windows-sys = { version = "0.61", features = [
   "Win32_System_Threading",
 ] }
 
-# One dev-dependency, and it is not a test framework. The e2e suite drives the
+# Two dev-dependencies, and neither is a test framework. The e2e suite drives the
 # compiled binary as a subprocess with `std::process` and reads what it wrote, so
-# it needs no command-assertion crate — `tests/e2e/harness.rs` is the whole of
-# it — and the subprocess doubles are a workspace member rather than a
-# dependency, because a dev-dep would build that crate's *library* and what the
-# suite needs is its binaries.
+# it needs no command-assertion crate — `tests/e2e/harness.rs` is the whole of it.
+#
+# `onepipeline-testfakes` is here for its **library** only: the doubles' binaries
+# come from the workspace member, which `tests/e2e/harness.rs` builds on demand,
+# because a dev-dep builds a crate's library and not its binaries. What the
+# library carries is the vocabulary the two sides share — the environment keys a
+# double reads its scenario out of — so the writer and the reader of each key have
+# one spelling instead of two that drift apart in silence.
 #
 # `onevcs-testing` is the sibling's own implementations of the two interfaces it
 # is built around, which is what `tests/onevcs_seam.rs` drives to hold every
 # operation `src/vcs.rs` performs to the seam it performs it on — in code rather
-# than in prose, with no git, no host, and no process. It is a dev-dependency and
-# must stay one: what it implements must never be reachable from a release
+# than in prose, with no git, no host, and no process. Both are dev-dependencies
+# and must stay so: what they implement must never be reachable from a release
 # binary.
 [dev-dependencies]
+onepipeline-testfakes = { path = "crates/testfakes" }
 onevcs-testing = { workspace = true }
 
 [[test]]
