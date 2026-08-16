@@ -1182,18 +1182,24 @@ fn a_ready_node_waiting_on_a_held_workspace_is_told_apart_from_one_merely_queued
     world.script("service.wait", "hold");
     // One at a time, so the second lifecycle node stays ready while the first
     // holds the repository's workspace open.
+    // A second repository, registered and idle: a node on it is repository-backed
+    // and waiting on nothing, which is the case a reader must not confuse with
+    // either of the other two.
+    idle_repository(&world, "other");
     let mut plan = plan_of(
         "readyheld",
         vec![
             lifecycle("service", &[]),
             lifecycle("service-two", &[]),
+            lifecycle("other-repo", &[]),
             agent("elsewhere", &[]),
         ],
     );
     plan["concurrency"] = serde_json::json!(1);
-    // The second node works on the same repository as the first; the third has
-    // no repository at all and is the control.
+    // The second node works on the same repository as the first; the third on
+    // the idle one; the fourth has no repository at all.
     plan["tasks"][1]["repo"] = serde_json::json!("service");
+    plan["tasks"][2]["repo"] = serde_json::json!("other");
     let path = world.plan("readyheld", &plan);
     world
         .run(&["start", &path.to_string_lossy(), "--detach"])
@@ -1215,16 +1221,44 @@ fn a_ready_node_waiting_on_a_held_workspace_is_told_apart_from_one_merely_queued
          queued:\n{}",
         status.stdout
     );
-    assert!(
-        status
-            .stdout
-            .lines()
-            .any(|line| line.contains("elsewhere: ready — queued for dispatch")),
-        "a node waiting for nothing but a slot does not say so:\n{}",
-        status.stdout
-    );
+    for queued in ["other-repo", "elsewhere"] {
+        assert!(
+            status
+                .stdout
+                .lines()
+                .any(|line| line.contains(&format!("{queued}: ready — queued for dispatch"))),
+            "a node waiting for nothing but a slot does not say so:\n{}",
+            status.stdout
+        );
+    }
 
     world.release("service.go");
+}
+
+/// A registered repository with nothing working in it.
+///
+/// [`World::repository`] builds the one every lifecycle journey publishes from
+/// and rewrites the rules file as it goes; this is the smaller half — an origin,
+/// a checkout of it, and a registration — for a journey that needs a *second*
+/// repository whose workspace nothing holds.
+fn idle_repository(world: &World, alias: &str) {
+    let origin = world.root.join(format!("{alias}.git"));
+    let checkout = world.root.join(alias);
+    std::fs::create_dir_all(&origin).expect("a scratch directory");
+    crate::harness::git(world, &origin, &["init", "--bare", "--initial-branch=main"]);
+    crate::harness::git(
+        world,
+        &world.root,
+        &["clone", &origin.to_string_lossy(), alias],
+    );
+    std::fs::write(checkout.join("README.md"), "another repository\n").expect("the seed file");
+    crate::harness::git(world, &checkout, &["add", "-A"]);
+    crate::harness::git(world, &checkout, &["commit", "-m", "chore: seed"]);
+    crate::harness::git(world, &checkout, &["push", "-u", "origin", "main"]);
+    world.register(
+        &checkout,
+        Some(&format!("https://github.com/owner/{alias}.git")),
+    );
 }
 
 /// A repository this host cannot answer for is said out loud, and the node it
