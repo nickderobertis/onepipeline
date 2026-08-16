@@ -19,15 +19,18 @@
 //! credential, or a repository it is not allowed to touch all fail loudly and
 //! name what is missing. Nothing here falls back to a provider or a double on
 //! the repository or host side — the one thing standing in is the paid model
-//! turn, at `oneagentgraph`'s own `ONEAGENTGRAPH_ONEHARNESS_BIN` override, which
-//! `dispatch.rs` substitutes for the same reason.
+//! turn, at oneharness's own `ONEHARNESS_BIN_CLAUDE_CODE` override, which
+//! `dispatch.rs` substitutes for the same reason. That is the *only* process
+//! left under the sibling for a single-sided member: from `oneagentgraph 0.2.18`
+//! the turn is an `oneharness_core` library call, so the harness its identity
+//! chain selects is the last thing spawned and the last thing that can stand in.
 
 // llmlint: ignore-file[e2e_not_mocked] nothing on the layer under test is substituted:
 // the real `onevcs` binary drives real `git` against a real GitHub remote and the real
-// `gh`-backed host opens and merges a real pull request. The only stand-in is one layer
-// below the sibling — the provider turn `oneagentgraph` spawns, swapped at that library's
-// own documented override — because there is no offline stand-in for a paid model turn
-// and this journey is about the repository and host sides.
+// `gh`-backed host opens and merges a real pull request. The only stand-in is two layers
+// below the sibling — the provider turn oneharness spawns, swapped at that library's own
+// documented per-harness override — because there is no offline stand-in for a paid model
+// turn and this journey is about the repository and host sides.
 
 #[path = "../e2e/harness.rs"]
 mod harness;
@@ -252,6 +255,19 @@ fn rules(home: &Path) {
     .expect("the rules file is written");
 }
 
+/// How every double records the file a scripted worker turn left behind: its
+/// own name, then this.
+///
+/// Read as a suffix rather than as one double's whole record name, because
+/// *which* double runs the turn is not this journey's subject and has already
+/// moved once — through `oneagentgraph 0.2.18` a single-sided member's turn
+/// stopped being a spawned `oneharness` and became an `oneharness_core` library
+/// call, so the program that writes the file went from `fake-oneharness` to the
+/// harness below it, `fake-claude`. A journey holding one double's name went red
+/// saying the turn had written nothing, on a run that had opened and merged a
+/// real pull request carrying the file.
+const WROTE_RECORD: &str = "-work";
+
 /// The file the substituted worker turn wrote, named by the turn itself.
 ///
 /// Read out of what the double recorded rather than restated here: a journey
@@ -259,15 +275,28 @@ fn rules(home: &Path) {
 /// turn had stopped writing one, and "the base carries no such file" would read
 /// as a publication that lost work.
 fn work_file(world: &World) -> String {
-    let wrote = world
-        .invocations()
+    let invocations = world.invocations();
+    let wrote = invocations
         .iter()
-        .find(|invocation| invocation["tool"] == "oneharness-work")
+        .find(|invocation| {
+            invocation["tool"]
+                .as_str()
+                .is_some_and(|tool| tool.ends_with(WROTE_RECORD))
+        })
         .and_then(|invocation| invocation["args"][0].as_str().map(str::to_owned))
         .unwrap_or_else(|| {
+            // Naming what the doubles *did* record, because the two things this
+            // can mean are told apart by exactly that: a turn that ran and left
+            // the tree clean has its own turn record beside no `-work` one, and
+            // a turn nothing ran has neither.
+            let recorded: Vec<&str> = invocations
+                .iter()
+                .filter_map(|invocation| invocation["tool"].as_str())
+                .collect();
             panic!(
-                "the substituted worker turn wrote nothing into the session's worktree, so \
-                    there was never anything for this run to publish"
+                "no substituted turn recorded writing into the session's worktree, so there \
+                    was never anything for this run to publish. What the doubles recorded: \
+                    {recorded:?}"
             )
         });
     Path::new(&wrote)
@@ -303,15 +332,13 @@ fn why(world: &World, run: &str) -> String {
         .collect();
     // The one substituted turn is where a run that published nothing usually
     // went wrong — a worker that never wrote leaves a clean tree, and `onevcs
-    // publish` then succeeds having done nothing.
+    // publish` then succeeds having done nothing. Every double's record, not one
+    // program's: this is the readout a failure is diagnosed from, and filtering
+    // it to the process that used to run the turn is how a readout that says
+    // nothing gets mistaken for a turn that did nothing.
     let turns: Vec<String> = world
         .invocations()
         .iter()
-        .filter(|invocation| {
-            invocation["tool"]
-                .as_str()
-                .is_some_and(|tool| tool.starts_with("oneharness"))
-        })
         .map(|invocation| format!("{}: {}", invocation["tool"], invocation["args"]))
         .collect();
     format!(
