@@ -571,6 +571,13 @@ fn write_work(args: &[String], name: &str, body: &str) {
 /// its turn like any other and records nothing, so an `interrupt` finds no turn
 /// to reach. That is the case a harness without out-of-band control produces,
 /// and it is the one `auto` must fall through on.
+///
+/// `<key>.also-member` names a **second** member of the same graph run, which
+/// announces a turn of its own. A graph is a graph — several members work under
+/// one run — and a caller that addressed only the last member it saw would leave
+/// the others working. The second member's turn is announced and not recorded,
+/// so an interrupt sent to it answers as one whose turn is over: two members,
+/// two answers, which is what a caller has to carry on from.
 fn open_turn(args: &[String], dir: &std::path::Path, key: &str, node: &str, step: Option<&str>) {
     let labels = member_labels(args, node, step);
     for (seq, kind) in [(0, "member-started"), (1, "turn-started")] {
@@ -583,6 +590,23 @@ fn open_turn(args: &[String], dir: &std::path::Path, key: &str, node: &str, step
                 "seq": seq,
                 "source": "agentgraph",
                 "kind": kind,
+                "labels": labels,
+                "payload": {},
+            })
+        );
+    }
+    if let Some(member) = fake::node_script(dir, key, "also-member") {
+        let mut labels = labels.clone();
+        labels.insert("member".to_string(), member.into());
+        println!(
+            "{}",
+            serde_json::json!({
+                "v": 1,
+                "ts": fake::now(),
+                "stream": stream(),
+                "seq": 5,
+                "source": "agentgraph",
+                "kind": "turn-started",
                 "labels": labels,
                 "payload": {},
             })

@@ -1882,3 +1882,59 @@ fn a_change_that_merged_after_settlement_is_reported_as_of_settlement_not_as_now
         .exited(0)
         .out_has("as each settled, not as of now");
 }
+
+/// A change request this crate cannot read the record of settles the failure it
+/// always did.
+///
+/// The lookup that names an open change on a failed node reads the session's own
+/// stream, and that stream is a file another build of `onevcs` may have written
+/// a line of. `EventStream` refuses a whole read over one line it cannot parse —
+/// so the change request really is there and the record of it really is
+/// unreadable, which is the case the settlement must degrade on. It reports
+/// `task-failed`, exactly as it did before there was a lookup at all: an
+/// unreadable record is not evidence of a change nobody opened, and a settlement
+/// that failed here would fail every node whose stream a newer sibling had
+/// touched.
+#[test]
+fn a_change_this_crate_cannot_read_the_record_of_settles_as_a_plain_task_failure() {
+    let world = World::new("lifecycle-failed-unreadable");
+    // llmlint: ignore-block[tests_mirror_real_usage] the same extension point the two
+    // journeys above use, and the same reason: a repository's gate is a command an
+    // operator wrote, `Stream::emit` is the only writer of a stream and it appends whole
+    // envelopes, and the stream exists only once the session has opened. The gate runs on
+    // the publication path, so the line it appends is on the stream *before* the change
+    // request is opened — which is what makes the whole read refuse. Everything asserted
+    // is through the binary.
+    let gate = gate(&world, &["append-future-event"]);
+    world.repository(
+        "change-open",
+        &gate.iter().map(String::as_str).collect::<Vec<_>>(),
+    );
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    world.script("service.work", "the work its judge would not pass\n");
+    world.script("service.publishes", "chore: a change nobody can read about");
+    world.script("service.fail", "1");
+    let run = settle(&world, "failedunread", vec![lifecycle("service", &[])]);
+
+    // The change request was opened — this is not a journey about a publication
+    // that did not happen.
+    assert!(
+        world.was_invoked("onevcs", &["publish"]),
+        "the dispatch never published its own branch: {:?}",
+        world.invocations()
+    );
+    let settled = world
+        .events_of(&run, "node-settled")
+        .into_iter()
+        .find(|event| event["labels"]["node"] == "service")
+        .unwrap_or_else(|| panic!("the node never settled\n{}", why(&world, &run)));
+    assert_eq!(settled["payload"]["status"], "failed", "{settled}");
+    assert_eq!(
+        settled["payload"]["outcome"], "task-failed",
+        "a settlement that could not read the record claimed one anyway: {settled}"
+    );
+    assert!(
+        settled["payload"]["change_url"].is_null(),
+        "a settlement carries a change request it could not read: {settled}"
+    );
+}

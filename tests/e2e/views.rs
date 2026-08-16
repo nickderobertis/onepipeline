@@ -1226,3 +1226,57 @@ fn a_ready_node_waiting_on_a_held_workspace_is_told_apart_from_one_merely_queued
 
     world.release("service.go");
 }
+
+/// A repository this host cannot answer for is said out loud, and the node it
+/// belongs to is still rendered.
+///
+/// The holder enumeration is `onevcs`'s, and it refuses a repository its state
+/// root has no record of — which is what a run read from a state root that has
+/// moved, or from a machine that never registered the checkout, meets. A view
+/// that swallowed the refusal would render the same line for "nothing holds this
+/// workspace" and "nobody could be asked", and only one of those is a reason to
+/// stop looking for what a node is waiting on.
+///
+/// The launch itself cannot reach this state: the interlock asks the same
+/// sibling about every repository a plan names and refuses a launch it cannot
+/// resolve. So the state root moves *after* the run is under way, which is the
+/// only way a reader meets it and exactly how one does.
+#[test]
+fn a_workspace_this_host_cannot_ask_about_is_reported_rather_than_read_as_free() {
+    let world = World::new("views-unknown-repo");
+    world.repository("local-direct", &["true"]);
+    world.script("service.wait", "hold");
+    let mut plan = plan_of(
+        "unknownrepo",
+        vec![lifecycle("service", &[]), lifecycle("second", &[])],
+    );
+    // One at a time, so the second node is still ready when `status` renders it.
+    plan["concurrency"] = serde_json::json!(1);
+    let path = world.plan("unknownrepo", &plan);
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+    world.until("the first node's session to be recorded", |world| {
+        !world.events_of("unknownrepo", "session-opened").is_empty()
+    });
+
+    // The same run, read against a state root that knows nothing about its
+    // repositories.
+    let elsewhere = world.root.join("another-state-root");
+    std::fs::create_dir_all(&elsewhere).expect("a state root with nothing in it");
+    let mut reader = world.cmd(&["status", "unknownrepo"]);
+    reader.env("ONEVCS_HOME", &elsewhere);
+    let status = world.run_on(reader, "status unknownrepo");
+    status.exited(0);
+    status.err_has("cannot read the session holders of service");
+    assert!(
+        status
+            .stdout
+            .lines()
+            .any(|line| line.contains("second: ready — queued for dispatch")),
+        "a node whose workspace could not be asked about is missing from the view:\n{}",
+        status.stdout
+    );
+
+    world.release("service.go");
+}

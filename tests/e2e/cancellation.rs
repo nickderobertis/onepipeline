@@ -383,3 +383,143 @@ fn a_requeue_of_a_parked_node_whose_dispatch_has_settled_is_applied() {
     world.release("slow.go");
     world.release("keep.go");
 }
+
+/// A dispatch that has said **nothing** is cancelled on the loop's own clock.
+///
+/// This is the case that made the defect expensive. A dispatch nothing has heard
+/// from has named no turn, so there is nothing to ask — and a deadline that
+/// waited for the dispatch to speak before it started would never start at all.
+/// It is also where the grace period is read: an unusable value falls back to
+/// the default rather than to zero, which would turn every cooperative cancel
+/// into an immediate kill.
+#[test]
+fn a_cancel_of_a_silent_dispatch_asks_nothing_and_still_carries_a_deadline() {
+    let world = World::new("cancel-silent");
+    // Held before it announces anything: no member, no turn, no address.
+    world.script("slow.wait", "hold");
+    let path = world.plan(
+        "cancelsilent",
+        &plan_of("cancelsilent", vec![agent("slow", &[])]),
+    );
+    let mut launch = world.cmd(&["start", &path.to_string_lossy(), "--detach"]);
+    // Not a number of seconds at all: the deadline falls back to the default,
+    // which the surface below names.
+    launch.env(CANCEL_GRACE_ENV, "when-it-feels-like-it");
+    world.run_on(launch, "start --detach").exited(0);
+    world.until("the node to be dispatched", |world| {
+        !world
+            .events_of("cancelsilent", "node-dispatched")
+            .is_empty()
+    });
+    let run = "cancelsilent".to_string();
+
+    cancel(&world, &run, "slow");
+
+    let asked_for = world.surfaced(&run, "dispatch-interrupted");
+    let message = asked_for["payload"]["message"]
+        .as_str()
+        .expect("the surface says what it did");
+    assert!(
+        message.contains("has named a turn to interrupt"),
+        "a dispatch that had named no turn was reported as one that was asked: {message}"
+    );
+    assert!(
+        message.contains("killed in 300s"),
+        "an unusable grace period did not fall back to the default: {message}"
+    );
+    assert!(
+        !world.was_invoked("oneagentgraph", &["interrupt"]),
+        "an interrupt was addressed at a turn nothing had named: {:?}",
+        world.invocations()
+    );
+
+    // Released rather than left to the deadline: what this journey is about is
+    // the ask and the clock, and waiting out the default would be waiting on it.
+    world.release("slow.go");
+    let settled = settlement(&world, &run, "slow");
+    assert_eq!(settled["payload"]["status"], "cancelled", "{settled}");
+}
+
+/// A lever that was pulled and *broke* is an answer too, and the deadline still
+/// does the work.
+///
+/// The three answers an interrupt can give are not interchangeable — a delivery
+/// that landed, a fact that there was no turn to land it in, and a lever that
+/// failed — and only the first means the worker was told anything. None of them
+/// may fail the cancellation, because the dispatch is running either way.
+#[test]
+fn a_lever_that_failed_does_not_fail_the_cancellation() {
+    let world = World::new("cancel-lever-broken");
+    world.script("interrupt.fail", "");
+    let run = held(&world, "cancelbroke", SHORT_GRACE);
+
+    cancel(&world, &run, "slow");
+
+    let asked_for = world.surfaced(&run, "dispatch-interrupted");
+    let message = asked_for["payload"]["message"]
+        .as_str()
+        .expect("the surface says what it did");
+    assert!(
+        message.contains("the lever failed"),
+        "a delivery that broke was reported as one that landed or found no turn: {message}"
+    );
+    assert!(
+        message.contains("the control socket refused"),
+        "the failure does not carry what the lever said: {message}"
+    );
+
+    world.until("the deadline to expire", |world| {
+        !surfaces(world, &run, "dispatch-killed").is_empty()
+    });
+    let settled = settlement(&world, &run, "slow");
+    assert_eq!(settled["payload"]["status"], "cancelled", "{settled}");
+}
+
+/// Every member of the dispatch's graph run that has named a turn is asked.
+///
+/// A graph is a graph: several members work under one run, and a cancellation
+/// that addressed only the last member it saw on the stream would leave the
+/// others working. Their answers differ — one turn is live and the other is
+/// over — and both are recorded, because "asked and there was nothing there" is
+/// what tells a supervisor the ask reached everyone it could.
+#[test]
+fn every_member_that_has_named_a_turn_is_asked_to_stop() {
+    let world = World::new("cancel-members");
+    // A second member of the same graph run, whose turn is announced and not
+    // controllable: two addresses, two different answers.
+    world.script("slow.also-member", "reviewer");
+    world.script("slow.stops-when-interrupted", "");
+    let run = held(&world, "cancelmembers", SHORT_GRACE);
+    world.until("the second member's turn to be announced", |world| {
+        world
+            .events_of(&run, "turn-started")
+            .iter()
+            .any(|event| event["labels"]["member"] == "reviewer")
+    });
+
+    cancel(&world, &run, "slow");
+
+    let asked_for = world.surfaced(&run, "dispatch-interrupted");
+    let message = asked_for["payload"]["message"]
+        .as_str()
+        .expect("the surface says what it did");
+    assert!(
+        message.contains("asked 2 turn(s)"),
+        "only one member of a two-member dispatch was asked to stop: {message}"
+    );
+    assert!(
+        message.contains("worker: the running turn took the redirection")
+            && message.contains("reviewer: no turn to redirect"),
+        "the surface does not carry what each member answered: {message}"
+    );
+    for member in ["worker", "reviewer"] {
+        assert!(
+            world.was_invoked("oneagentgraph", &["interrupt", member]),
+            "member {member:?} was never asked to stop: {:?}",
+            world.invocations()
+        );
+    }
+
+    let settled = settlement(&world, &run, "slow");
+    assert_eq!(settled["payload"]["status"], "cancelled", "{settled}");
+}

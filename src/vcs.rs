@@ -219,9 +219,17 @@ pub fn session_close(token: &str) -> Result<Session> {
 /// change request the engine's publication step never ran, and the record of it
 /// is on this stream either way.
 ///
-/// `None` when nothing opened one, and equally when the stream cannot be read —
-/// the caller settles exactly as it would have, because an unreadable record is
-/// not evidence of a change nobody opened.
+/// The URL is **validated where it enters**, through the parser `onevcs`
+/// re-exports for exactly this — a session's stream is a file on disk that any
+/// process holding the token appends to, so its payload is external input here
+/// however trusted its usual writer is. A value that is not an absolute URL is
+/// no change request a reviewer can open, and putting one on a settlement would
+/// hand every reader of that node something to follow that goes nowhere.
+///
+/// `None` when nothing opened one, when the record names no readable URL, and
+/// equally when the stream cannot be read — the caller settles exactly as it
+/// would have, because an unreadable record is not evidence of a change nobody
+/// opened.
 pub fn change_opened_in(token: &str) -> Option<String> {
     let opened = kind_of(onevcs::EventKind::ChangeOpened);
     // The last one wins: a session that opened a change request, closed it, and
@@ -232,8 +240,8 @@ pub fn change_opened_in(token: &str) -> Option<String> {
         .find(|envelope| envelope.kind == opened)
         .and_then(|envelope| envelope.payload.get("url"))
         .and_then(|url| url.as_str())
-        .filter(|url| !url.is_empty())
-        .map(str::to_string)
+        .and_then(|url| onevcs::Url::parse(url.trim()).ok())
+        .map(|url| url.to_string())
 }
 
 /// The sessions holding one repository's workspaces, as `onevcs` reports them.
