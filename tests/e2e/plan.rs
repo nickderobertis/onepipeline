@@ -420,14 +420,7 @@ fn a_plan_the_schema_refuses_never_starts_a_run() {
             r#"{"schema_version":2,"tasks":[{"id":"a","persona":"e","task":"t","max_turns":0}]}"#,
             "no turn at all",
         ),
-        // The version this schema replaced, refused deliberately: a planner is
-        // told what moved between the two, not that two numbers differ.
-        (
-            "legacyversion",
-            r#"{"schema_version":1,"tasks":[{"id":"a","persona":"e","task":"t"}]}"#,
-            "set `schema_version: 2`",
-        ),
-        // A legacy plan carrying the retired field is answered with the *field's*
+        // A plan carrying the retired field is answered with the *field's*
         // refusal, not the version's: the field is the thing its author has to
         // move, and a planner told only to change a number would carry the bar
         // straight into the new version.
@@ -437,18 +430,20 @@ fn a_plan_the_schema_refuses_never_starts_a_run() {
                 "done_when":"the gate is green"}]}"#,
             "`done_when` is no longer a plan field",
         ),
-        // Written at this version and still carrying it: the same answer, because
-        // the schema is what refuses it either way.
+        // Written at the current version and still carrying it: the same answer,
+        // because the schema is what refuses it either way.
         (
             "donewhencurrent",
             r#"{"schema_version":2,"tasks":[{"id":"a","persona":"e","task":"t",
                 "done_when":"the gate is green"}]}"#,
             "`done_when` is no longer a plan field",
         ),
+        // The one version refusal there is: a number this build has never
+        // written, told the versions that are read rather than left to guess.
         (
             "version",
             r#"{"schema_version":7,"tasks":[{"id":"a","persona":"e","task":"t"}]}"#,
-            "schema_version",
+            "schema_version 7 is not one this build reads (3, 2, 1)",
         ),
         // A title that is only spacing publishes a commit with no subject at
         // all, which `onevcs` refuses at publication — after a whole dispatch.
@@ -494,36 +489,33 @@ fn a_plan_the_schema_refuses_never_starts_a_run() {
                 "task":"t","title":"feat: ship it","body":"what it landed"}]}"#,
             "node 'publish': `body` is a schema 3 field",
         ),
+        // The same answer at the oldest version this build reads, and it is the
+        // *field's*: version 1 is a document this build executes, so a planner
+        // who wrote a body there has one thing to act on and it is the field.
+        (
+            "earlybodyv1",
+            r#"{"schema_version":1,"tasks":[{"id":"publish","repo":"o/r","persona":"e",
+                "task":"t","body":"what it landed"}]}"#,
+            "node 'publish': `body` is a schema 3 field",
+        ),
     ];
 
     for (name, body, expected) in cases {
         let path = world.raw_plan(&format!("{name}.plan.json"), body);
         let refused = world.run(&["start", &path.to_string_lossy()]);
         refused.exited(REFUSED).err_has(expected);
-        if *name == "donewhen" {
-            // The document declares the retired version too, and the field is
-            // still what it is answered about.
-            refused.err_lacks("is not 3 or 2");
+        if name.starts_with("donewhen") || name.starts_with("earlybody") {
+            // Each of these declares a version *earlier* than this build writes,
+            // and each is answered about the field it names rather than about
+            // that number: an earlier version is a document this build reads, so
+            // the field is the only thing its author has to act on.
+            refused.err_lacks("is not one this build reads");
         }
         assert!(
             !world.runs.join(name).exists(),
             "a refused plan left a run directory behind"
         );
     }
-
-    // The whole migration, in the words its author gets: what moved between the
-    // versions, and what to set once it has been moved.
-    let legacy = world.raw_plan(
-        "legacy.plan.json",
-        r#"{"schema_version":1,"tasks":[{"id":"a","persona":"e","task":"t"}]}"#,
-    );
-    world
-        .run(&["start", &legacy.to_string_lossy()])
-        .exited(REFUSED)
-        .err_has("schema_version 1 is not 3 or 2")
-        .err_has("retired the judge-only `done_when`")
-        .err_has("forwards a node's `max_turns` to its dispatch")
-        .err_has("set `schema_version: 2`");
 
     // A plan file is read with its own format's escape semantics, so the two
     // formats reach the schema by different paths. The retired field is named on
@@ -539,7 +531,7 @@ fn a_plan_the_schema_refuses_never_starts_a_run() {
         .exited(REFUSED)
         .err_has("`done_when` is no longer a plan field")
         .err_has("`## Acceptance criteria` section of its own task")
-        .err_lacks("is not 3 or 2");
+        .err_lacks("is not one this build reads");
 }
 
 #[test]

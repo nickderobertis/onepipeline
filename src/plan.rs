@@ -27,36 +27,26 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 
-/// The plan schema version this crate reads and writes.
+/// The plan schema version this crate writes.
 ///
 /// **3** since a lifecycle node states the change request it publishes: a
 /// [`title`](Node::title) is required on one, and a [`body`](Node::body) may be
-/// carried beside it. Unlike the version before it this one is **additive**, so
-/// [`PLAN_SCHEMA_VERSION_LEGACY`] still loads and still runs: a node written
-/// there states no title, and its publication takes the subject `onevcs` derives
-/// from the branch's own conventional commits.
+/// carried beside it.
 pub const PLAN_SCHEMA_VERSION: u32 = 3;
 
-/// The version before it, which this build still reads.
+/// Every version this build **reads**, newest first.
 ///
-/// A plan written at it is a legal document rather than one being tolerated: the
-/// two rules version 3 adds are both keyed to the version the document itself
-/// declares, so a version-2 plan means exactly what it meant.
-pub const PLAN_SCHEMA_VERSION_LEGACY: u32 = 2;
-
-/// The version this schema retired, which a plan on disk may still declare.
-pub const PLAN_SCHEMA_VERSION_RETIRED: u32 = 1;
-
-/// What a plan still declaring [`PLAN_SCHEMA_VERSION_RETIRED`] is told.
+/// A plan is a document written at a version and read by a build, so an earlier
+/// one is a legal document rather than one being tolerated: what version 3 adds
+/// is keyed to the version the document itself declares, and a plan written
+/// before it means exactly what it meant. Its untitled lifecycle nodes publish
+/// with no subject of their own, which is `onevcs` deriving one from the
+/// branch's own conventional commits, and a field a version never had is refused
+/// by that field's name whatever number the document carries.
 ///
-/// A bare "schema_version 1 is not read" would leave a planner to guess what
-/// changed. What changed is one field removed and one field made to work, so the
-/// refusal says both and where the removed one's content goes.
-pub(crate) const RETIRED_VERSION_MIGRATION: &str =
-    "version 2 retired the judge-only `done_when` and forwards a node's `max_turns` to \
-     its dispatch, which version 1 never did. Move any `done_when` into that node's \
-     `## Acceptance criteria` — or, for a bar broader than one node, into the onejudge \
-     base config the node-scope graph's worker points at — and set `schema_version: 2`";
+/// A number that is not here is one this crate has never written, and there is
+/// no document to read it as.
+pub const PLAN_SCHEMA_VERSIONS_READ: [u32; 3] = [PLAN_SCHEMA_VERSION, 2, 1];
 
 /// What a lifecycle node at [`PLAN_SCHEMA_VERSION`] stating no `title` is told.
 ///
@@ -642,32 +632,35 @@ mod tests {
         );
     }
 
-    /// A legacy plan carrying the retired field is answered about the *field*.
+    /// A plan carrying the retired field is answered about the *field*, at every
+    /// version a document can declare it at.
     ///
-    /// Both things are wrong with it — the version it declares and the field it
-    /// carries — and only one of the two refusals says what to do with the review
-    /// bar its author wrote. The document never deserialises, so the version is
-    /// never reached, and that ordering is the point rather than an accident.
+    /// The bar its author wrote has to go somewhere, and only the field's own
+    /// refusal says where. It is a **parse** refusal, so it comes ahead of
+    /// anything the version decides — which is what stops a planner being told to
+    /// move a number when what they have to move is a review bar.
     #[test]
-    fn a_legacy_plan_carrying_done_when_is_answered_about_the_field_not_the_version() {
-        let root = scratch("legacy");
-        let path = root.join("legacy.plan.json");
-        std::fs::write(
-            &path,
-            format!(
-                r#"{{"schema_version":{PLAN_SCHEMA_VERSION_RETIRED},"tasks":[
-                    {{"id":"contract","persona":"e","task":"t",
-                     "done_when":"the gate is green"}}]}}"#
-            ),
-        )
-        .expect("written");
-        let message = Plan::load(&path).unwrap_err().to_string();
-        assert!(message.contains("'contract':"), "{message}");
-        assert!(message.contains(DONE_WHEN_RETIRED), "{message}");
-        assert!(
-            !message.contains("schema_version"),
-            "the version refusal displaced the field's: {message}"
-        );
+    fn a_plan_carrying_done_when_is_answered_about_the_field_at_every_version() {
+        let root = scratch("donewhen");
+        for version in PLAN_SCHEMA_VERSIONS_READ {
+            let path = root.join(format!("v{version}.plan.json"));
+            std::fs::write(
+                &path,
+                format!(
+                    r#"{{"schema_version":{version},"tasks":[
+                        {{"id":"contract","persona":"e","task":"t",
+                         "done_when":"the gate is green"}}]}}"#
+                ),
+            )
+            .expect("written");
+            let message = Plan::load(&path).unwrap_err().to_string();
+            assert!(message.contains("'contract':"), "{message}");
+            assert!(message.contains(DONE_WHEN_RETIRED), "{message}");
+            assert!(
+                !message.contains("schema_version"),
+                "a version refusal displaced the field's: {message}"
+            );
+        }
         std::fs::remove_dir_all(&root).ok();
     }
 }

@@ -713,17 +713,18 @@ crosses. A graph that reached a dispatch without crossing it — one folded from
 journal a stale build wrote — settles the node `invalid-node` with the same
 sentence rather than launching.
 
-The plan schema is **version 2** for it. The two versions do not describe the
-same document — one field is gone and one now reaches the dispatch — so a plan
-declaring version 1 is refused deliberately, naming what moved and what to set
-rather than reporting that two numbers differ. A version-1 plan that still
-carries `done_when` is answered with the field's refusal instead, because the
-field is the thing its author has to move and the version is downstream of that.
+The plan schema was **version 2** for it, and the amended contract listed
+`max_turns` among the node shapes and no `done_when` at all, stated what a
+control is and what becomes of one that cannot be applied, and named
+`pub controls: NodeControls` in its seam sketch.
 
-The amended contract declares the schema as v2, lists `max_turns` among the node
-shapes and no `done_when` at all, states what a control is and what becomes of
-one that cannot be applied, and names `pub controls: NodeControls` in its seam
-sketch.
+**Superseded on the version, not on the controls.** That change refused a
+version-1 plan deliberately; the schema is at 3 now and this build reads 1, 2,
+and 3, because what each version added is keyed to the version the *document*
+declares and a plan already written on a host is a document this engine can
+execute. What survives unchanged is the field: a plan carrying `done_when` is
+answered with that field's own refusal at every version, because the review bar
+its author wrote is the thing they have to move.
 
 ## 25. The retained driver of a detached launch is now a *second* hidden verb — RESOLVED
 

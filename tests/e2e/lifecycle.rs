@@ -24,6 +24,18 @@ use crate::harness::{agent, gate_script, lifecycle, plan_of, Repository, World, 
 use onevcs::provenance::SUBJECT_LIMIT;
 use serde_json::json;
 
+/// The subject `onevcs` derives for a publication that states none.
+///
+/// The sibling's own, composed from the branch it is publishing rather than from
+/// anything this crate said — which is the point: a node that states no title
+/// lands under a subject only the repository side could have written. Spelled
+/// here so a journey can hold the whole subject rather than a prefix, and so a
+/// sibling that changes what it derives fails a test that says why instead of
+/// one that reads differently.
+fn derived_subject(branch: &str) -> String {
+    format!("chore: preserve work on {branch}")
+}
+
 fn settle(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
     let path = world.plan(name, &plan_of(name, nodes));
     world
@@ -807,44 +819,64 @@ fn a_drafted_body_is_read_only_from_the_copy_this_run_retained() {
     }
 }
 
-/// A plan written at the version before this one still runs, and its untitled
+/// A plan written at an **earlier** version still runs, and its untitled
 /// lifecycle node publishes under the subject `onevcs` derives.
 ///
-/// The publication is what proves it: this crate passes no title at all, so the
-/// subject on the base branch is the sibling's own reading of the branch's
-/// conventional commits rather than anything composed here.
+/// Every version this build reads below the one it writes, because "an earlier
+/// plan still runs" is a promise to every plan already written on a host and a
+/// journey that drove only the newest of them would not hold it. A node written
+/// there states no title — the field is required from schema 3 on — so this
+/// crate passes none, and the subject the change lands under is the sibling's
+/// own reading of the branch's conventional commits rather than anything
+/// composed here.
 #[test]
-fn a_legacy_plan_still_publishes_under_the_subject_the_sibling_derives() {
-    let world = World::new("lifecycle-legacy");
-    let repo = published_locally(&world);
-    world.script("service.work", "the worker wrote this\n");
-    let mut plan = plan_of("legacy", vec![lifecycle("service", &[])]);
-    plan["schema_version"] = json!(2);
-    let path = world.plan("legacy", &plan);
-    world
-        .run(&["start", &path.to_string_lossy(), "--attach"])
-        .settled();
+fn an_earlier_plan_still_publishes_under_the_subject_the_sibling_derives() {
+    for version in [1, 2] {
+        let world = World::new(&format!("lifecycle-v{version}"));
+        let repo = published_locally(&world);
+        world.script("service.work", "the worker wrote this\n");
+        let run = format!("v{version}");
+        // Untitled on purpose: that is the whole shape an earlier version has,
+        // and it is what a plan on a host was written as.
+        let mut node = lifecycle("service", &[]);
+        node.as_object_mut().expect("a node").remove("title");
+        let mut plan = plan_of(&run, vec![node]);
+        plan["schema_version"] = json!(version);
+        let path = world.plan(&run, &plan);
+        world
+            .run(&["start", &path.to_string_lossy(), "--attach"])
+            .settled();
 
-    let result = world.run_json("legacy", "result.json");
-    assert_eq!(
-        result["state"],
-        "complete",
-        "a version 2 plan no longer runs: {result}\n{}",
-        why(&world, "legacy")
-    );
-    let landed = repo.base_commits(&world);
-    // Nothing this crate composed: the `chore: <node id>` fallback it used to
-    // publish under is gone, and what the base carries is the subject the
-    // sibling derived from the branch.
-    assert!(
-        !landed.iter().any(|subject| subject == "chore: service"),
-        "this crate composed a subject for a node that stated none: {landed:?}"
-    );
-    assert!(
-        landed.len() > 1,
-        "the workstream published nothing: {landed:?}\n{}",
-        why(&world, "legacy")
-    );
+        let result = world.run_json(&run, "result.json");
+        assert_eq!(
+            result["state"],
+            "complete",
+            "a version {version} plan no longer runs: {result}\n{}",
+            why(&world, &run)
+        );
+        let landed = repo.base_commits(&world);
+        assert!(
+            landed.len() > 1,
+            "the workstream published nothing: {landed:?}\n{}",
+            why(&world, &run)
+        );
+        // Nothing this crate composed: the `chore: <node id>` fallback it used
+        // to publish under is gone, and the subject the base landed under is the
+        // one the sibling derived from the branch this node published — read off
+        // the node's own settlement rather than written down here.
+        let branch = result["nodes"][0]["branch"]
+            .as_str()
+            .unwrap_or_else(|| panic!("the node recorded no branch: {result}"));
+        assert!(
+            !landed.iter().any(|subject| subject.contains("service")),
+            "this crate composed a subject for a node that stated none: {landed:?}"
+        );
+        assert_eq!(
+            landed.first().map(String::as_str),
+            Some(derived_subject(branch).as_str()),
+            "the base did not land under the subject the sibling derives: {landed:?}"
+        );
+    }
 }
 
 /// Publication, watched while it happens.

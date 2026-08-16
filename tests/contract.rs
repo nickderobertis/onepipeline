@@ -30,7 +30,9 @@ use onepipeline::executor::{
 use onepipeline::filter::{
     EventFilter, Filters, LaunchConfig, Matcher, LAUNCH_CONFIG_SCHEMA_VERSION,
 };
-use onepipeline::plan::{Node, NodeKind, Plan, Resume, Step, PLAN_SCHEMA_VERSION};
+use onepipeline::plan::{
+    Node, NodeKind, Plan, Resume, Step, PLAN_SCHEMA_VERSION, PLAN_SCHEMA_VERSIONS_READ,
+};
 use onepipeline::rules::{ExecutorKind, ExecutorRules, Predicate};
 use onevcs::registry::{RepoType, Workflow};
 use onevcs::{MergePolicy, SessionRequest};
@@ -774,14 +776,14 @@ fn the_plan_schema_carries_every_node_shape_the_contract_names() {
     );
 }
 
-/// The contract's schema version and this crate's are the same number, and the
-/// version it replaced is refused deliberately.
+/// The contract's schema version and this crate's are the same number, and every
+/// version the document says this build reads, it reads.
 ///
 /// The plan schema is a serialized contract: a document says which version it
 /// was written at, and a reader decides by that. So the number the document
-/// states and the number the code writes are gated against each other here, and
-/// the previous version — which every plan on this host was written at — is
-/// refused with what to change rather than accepted as near enough.
+/// states and the number the code writes are gated against each other here — and
+/// so is the set below it, because "an earlier plan still runs" is a promise to
+/// every plan already written on a host and there is nothing else holding it.
 #[test]
 fn the_contracts_plan_schema_version_is_the_one_this_crate_writes() {
     assert!(
@@ -790,34 +792,44 @@ fn the_contracts_plan_schema_version_is_the_one_this_crate_writes() {
          ({PLAN_SCHEMA_VERSION})"
     );
     assert!(
-        CONTRACT.contains("a v1 plan is **refused deliberately**"),
-        "the contract no longer says the previous version is refused on purpose"
+        CONTRACT.contains("this build reads **3, 2, and 1**"),
+        "the contract no longer names the versions this build reads"
+    );
+    assert_eq!(
+        PLAN_SCHEMA_VERSIONS_READ,
+        [3, 2, 1],
+        "this crate reads a different set of versions than the contract states"
     );
 
     let root = std::env::temp_dir().join(format!("onepipeline-version-{}", std::process::id()));
     std::fs::create_dir_all(&root).expect("a scratch root");
-    let path = root.join("legacy.plan.json");
-    // A legacy plan with nothing else wrong with it: the version alone is what
-    // stops it, and the refusal is what its author needs to act on.
-    std::fs::write(
-        &path,
-        r#"{"schema_version":1,"tasks":[{"id":"a","persona":"engineer","task":"Do it."}]}"#,
-    )
-    .expect("written");
-    // It parses — the schema's shape is not what is wrong with it — and what
-    // stops it is validation, which `tests/e2e/plan.rs` drives through the
-    // binary because that is where a planner meets the refusal.
-    let legacy = Plan::load(&path).expect("a legacy plan is still a readable document");
-    assert_ne!(
-        legacy.schema_version, PLAN_SCHEMA_VERSION,
-        "this fixture is meant to declare the version that was replaced"
-    );
+    // Every version the contract names, as a document an operator wrote: each
+    // one loads, and each keeps the version it declares — a reader decides by
+    // that number, so a loader that normalized it would answer for a document
+    // nobody wrote. That they *execute* is driven through the binary, in
+    // `tests/e2e/plan.rs`, and all the way to a publication in
+    // `tests/e2e/lifecycle.rs`, because that is where a planner meets either
+    // answer.
+    for version in PLAN_SCHEMA_VERSIONS_READ {
+        let path = root.join(format!("v{version}.plan.json"));
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{"schema_version":{version},
+                    "tasks":[{{"id":"a","persona":"engineer","task":"Do it."}}]}}"#
+            ),
+        )
+        .expect("written");
+        let plan = Plan::load(&path)
+            .unwrap_or_else(|why| panic!("a version {version} plan is a readable document: {why}"));
+        assert_eq!(plan.schema_version, version);
+    }
 
-    // What this crate *writes* carries the current number, so a document it
-    // produces is one this contract describes and one an older reader refuses.
+    // What this crate *writes* carries the current number, whatever it read.
+    let earlier = Plan::load(&root.join("v1.plan.json")).expect("it still loads");
     let current = Plan {
         schema_version: PLAN_SCHEMA_VERSION,
-        ..legacy
+        ..earlier
     };
     let written = serde_json::to_value(&current).expect("it serialises");
     assert_eq!(written["schema_version"], PLAN_SCHEMA_VERSION);
