@@ -21,25 +21,47 @@ use crate::event::{Envelope, Labels};
 use crate::executor::{DispatchRequest, Executor, WorkspaceSpec};
 use crate::filter::EventFilter;
 use crate::graph::NodeStatus;
+use crate::ledger::RunPaths;
 use crate::plan::{Node, NodeKind, Step};
 
-/// The persona that drafts a change request's title and body.
+/// The persona that drafts a change request's body.
 pub const PR_AUTHOR_PERSONA: &str = "pr-author";
 
+// llmlint: ignore-block[invalid_states_unrepresentable] the graph references below are the
+// same validated, launch-recorded strings the engine carries — the launch record's own
+// fields, read off it strictly and passed straight back into oneagentgraph's transparent
+// ConfigRef. Another newtype would duplicate that sibling type and widen this
+// path-resolution change across unrelated composition.
+/// What this run's launch decides about a lifecycle node's dispatches.
+///
+/// One value rather than three parameters, and it is the launch record's own
+/// three: every one of them is read off the record the loop read **strictly** at
+/// the start of the pass, so a dispatch cannot pick up a config this build could
+/// not honour by re-reading `launch.json` leniently where nothing can refuse it.
+#[derive(Debug, Clone, Default)]
+pub struct Launch {
+    /// The default node-scope agent-graph config every dispatch launches, unless
+    /// the node or the step names one of its own.
+    pub node_graph: String,
+    /// The agent graph a change request's body is drafted by, when the launch
+    /// named one. `None` is the shipped default: this crate ships the flag, not
+    /// the document, and a launch that names no graph drafts nothing.
+    pub pr_author_graph: Option<String>,
+    /// What every followed `onevcs` session's stream is read through.
+    pub vcs_filter: Option<EventFilter>,
+}
+
 /// Run one lifecycle node to settlement.
-// llmlint: ignore-block[invalid_states_unrepresentable] `default_graph` is the same
-// validated, launch-recorded string carried by the engine. Lifecycle only passes it into
-// oneagentgraph's transparent ConfigRef; another newtype would duplicate that sibling
-// type and widen this path-resolution change across unrelated composition.
 pub fn execute(
     executor: &dyn Executor,
-    run: &str,
-    default_graph: &str,
+    paths: &RunPaths,
+    launch: &Launch,
     node: &Node,
     cancel: &crate::executor::CancellationToken,
     tx: &Sender<Message>,
-    vcs_filter: Option<&EventFilter>,
 ) -> Settlement {
+    let run = paths.run.as_str();
+    let vcs_filter = launch.vcs_filter.as_ref();
     let Some(request) = crate::vcs::request_for(node) else {
         return Settlement {
             detail: Some("a lifecycle node needs a repo".into()),
@@ -136,7 +158,7 @@ pub fn execute(
         };
         let graph = engine::node_graph(
             step.agent_graph.as_ref().or(node.agent_graph.as_ref()),
-            default_graph,
+            &launch.node_graph,
         );
         let build = || DispatchRequest {
             graph: graph.clone(),
@@ -187,8 +209,8 @@ pub fn execute(
 
     let settlement = publish(
         executor,
-        run,
-        default_graph,
+        paths,
+        launch,
         node,
         worktree.as_deref(),
         cancel,
@@ -200,18 +222,19 @@ pub fn execute(
     settlement
 }
 
-/// Draft the change request, then publish through `onevcs`.
+/// Draft the change request's body, then publish through `onevcs`.
 #[allow(
     clippy::too_many_arguments,
-    reason = "publication needs the dispatch context (executor, run, node, cancel, \
-              stream) as well as what the steps left behind (the session token, its branch, \
-              and the worktree they worked in); the first six are the node's own dispatch \
-              identity and bundling them would only move the same list one indirection away"
+    reason = "publication needs the dispatch context (executor, the run's paths, what its \
+              launch decided, the node, cancellation, and the event stream) as well as what \
+              the steps left behind (the session token, its branch, and the worktree they \
+              worked in); the first six are the node's own dispatch identity and bundling \
+              them would only move the same list one indirection away"
 )]
 fn publish(
     executor: &dyn Executor,
-    run: &str,
-    default_graph: &str,
+    paths: &RunPaths,
+    launch: &Launch,
     node: &Node,
     worktree: Option<&std::path::Path>,
     cancel: &crate::executor::CancellationToken,
@@ -219,12 +242,19 @@ fn publish(
     token: &str,
     branch: Option<String>,
 ) -> Settlement {
-    let title = node
-        .title
+    // The plan's own body wins outright and spends no dispatch: a planner who
+    // wrote the change request has already done the drafting.
+    let body = node
+        .body
         .clone()
-        .unwrap_or_else(|| draft_title(executor, run, default_graph, node, worktree, cancel, tx));
+        .or_else(|| drafted(executor, paths, launch, node, worktree, cancel, tx));
 
-    match crate::vcs::publish(token, node.merge_policy, Some(&title)) {
+    match crate::vcs::publish(
+        token,
+        node.merge_policy,
+        node.title.as_deref(),
+        body.as_deref(),
+    ) {
         Ok(published) => {
             // A publication that did not land is an ending of the publication,
             // not a refused request: `onevcs` draws that line itself, in
@@ -238,7 +268,8 @@ fn publish(
                     ..Settlement::plain(&node.id, NodeStatus::Failed, Some("publication-failed"))
                 };
             }
-            let labels = engine::dispatch_labels(run, &node.id, None, node.persona.as_deref());
+            let labels =
+                engine::dispatch_labels(&paths.run, &node.id, None, node.persona.as_deref());
             let _ = tx.send(Message::Event(Box::new(crate::vcs::published_event(
                 &published, &labels,
             ))));
@@ -271,84 +302,124 @@ fn publish(
     }
 }
 
-/// One post-verification dispatch drafting the change request's title.
+/// The task a drafting dispatch is given, ahead of the node's own.
+const DRAFTING_TASK: &str = "Read this branch's diff and write the change request's body, \
+     following the repository's own template. The task this branch delivered:";
+
+/// One post-verification dispatch drafting the change request's body, when the
+/// launch named a graph to draft it with and the node carries none of its own.
 ///
 /// It runs **after** the branch has been verified and is not on the publication
-/// path: a drafting failure falls back to the deterministic title and the change
-/// still publishes. That is the whole point of running it here rather than
-/// making it a step.
+/// path: every way it can end badly leaves the change request to open with no
+/// body, and the node settles on its publication as before. That is the whole
+/// point of running it here rather than making it a step. There are three such
+/// endings and they take two arms — a dispatch that never started, and one that
+/// settled without succeeding, which is where a failed turn and a cancelled one
+/// both land because the difference between them is not a difference to a
+/// publication that carries no body either way. An answer the schema did not
+/// accept is the third, and it is a dispatch that succeeded and drafted nothing.
 ///
 /// It runs in the node's **own** worktree, which is the only place the diff it is
 /// asked to read exists: a session of its own would be a fresh clone cut from the
 /// base, carrying nothing this node wrote — and opening one reclaims the session
-/// still holding the work.
+/// still holding the work. So a node with no worktree to run it in drafts
+/// nothing, out loud, rather than dispatching an agent to read an empty diff.
 #[allow(
     clippy::too_many_arguments,
-    reason = "the draft is a dispatch inside one lifecycle execution and needs that execution's \
-              executor, labels, resolved graph, workspace, cancellation, and event stream"
+    reason = "the draft is a dispatch inside one lifecycle execution and needs that \
+              execution's executor, the run's own paths, what its launch decided, the node, \
+              the workspace, cancellation, and the event stream"
 )]
-fn draft_title(
+fn drafted(
     executor: &dyn Executor,
-    run: &str,
-    default_graph: &str,
+    paths: &RunPaths,
+    launch: &Launch,
     node: &Node,
     worktree: Option<&std::path::Path>,
     cancel: &crate::executor::CancellationToken,
     tx: &Sender<Message>,
-) -> String {
-    let fallback = deterministic_title(node);
-    let Some(request) = crate::vcs::request_for(node) else {
-        return fallback;
-    };
-    let workspace = match worktree {
-        Some(dir) => WorkspaceSpec::Path(dir.to_path_buf()),
-        None => WorkspaceSpec::VcsSession(SessionRequest {
-            branch: node.branch.clone().or(request.branch.clone()),
-            ..request
-        }),
+) -> Option<String> {
+    let graph = launch.pr_author_graph.as_deref()?;
+    let Some(worktree) = worktree else {
+        eprintln!(
+            "onepipeline: node '{}': no worktree to draft its change request in, \
+             so it publishes with no body",
+            node.id
+        );
+        return None;
     };
     let dispatch = executor.dispatch(DispatchRequest {
-        graph: engine::node_graph(None, default_graph),
-        task: format!(
-            "Read this branch's diff and write the change request's title and body, \
-             following the repository's own template. The task this branch delivered:\n\n{}",
-            node.rendered_task()
-        ),
-        labels: engine::dispatch_labels(run, &node.id, None, Some(PR_AUTHOR_PERSONA)),
+        graph: oneagentgraph::config::ConfigRef(graph.to_owned()),
+        task: format!("{DRAFTING_TASK}\n\n{}", node.rendered_task()),
+        labels: engine::dispatch_labels(&paths.run, &node.id, None, Some(PR_AUTHOR_PERSONA)),
         // None of the node's own: the drafting dispatch is not the node's work,
         // and a turn budget written for that work would be spent twice — once on
         // it and once here — if this dispatch inherited it.
-        controls: crate::controls::NodeControls::default(),
-        workspace,
+        controls: NodeControls::default(),
+        workspace: WorkspaceSpec::Path(worktree.to_path_buf()),
         cancel: cancel.clone(),
     });
-    let Ok(mut handle) = dispatch else {
-        return fallback;
+    let mut handle = match dispatch {
+        Ok(handle) => handle,
+        Err(error) => {
+            // Said out loud, because a launch that named a drafting graph and
+            // silently drafted nothing is indistinguishable from one that named
+            // none — and the change request it opens carries no sign of it.
+            eprintln!(
+                "onepipeline: node '{}': the drafting dispatch could not start, \
+                 so it publishes with no body: {error}",
+                node.id
+            );
+            return None;
+        }
     };
-    let mut drafted = None;
+    let mut retained = Vec::new();
     for envelope in handle.events() {
+        // A line off this stream that will not parse costs that line and nothing
+        // more: what the loop is looking for is a `member-settled` naming a
+        // retained report, and a drafting run that never produces one already
+        // publishes with no body two lines below. Skipping is therefore the same
+        // ending an unreadable stream would reach by any other route, reported
+        // the same way.
+        // llmlint: ignore[changed_behavior_has_e2e] no double can produce this: the
+        // envelopes come off the real `oneagentgraph`'s own stdout, which is well-formed
+        // by construction, and there is no fault-injection seam here to drive one through.
+        // The ending it falls back to — a dispatch that yields no body, and a publication
+        // that proceeds without one — is driven end to end by
+        // `a_drafting_graph_the_runner_refuses_still_publishes_the_change_request`.
         let Ok(envelope) = envelope else { continue };
-        if let Some(title) = envelope.payload.get("title").and_then(|v| v.as_str()) {
-            drafted = Some(title.to_string());
+        // **Ingest**, and the same ingest the engine performs on the envelopes
+        // this relays to it: the line is arriving on the stdout of a process
+        // this crate started, which is the one moment the path it names carries
+        // the producer's authority rather than the journal's. What is read
+        // below is that copy, at a path derived from the settlement — this
+        // crate never opens the path a producer named.
+        crate::report::retain(paths, &envelope);
+        if envelope.source == crate::event::Source::Agentgraph
+            && envelope.kind.0 == crate::report::MEMBER_SETTLED
+        {
+            retained.push(paths.report_for(&envelope.stream, envelope.seq));
         }
         let _ = tx.send(Message::Event(Box::new(envelope)));
     }
+    // llmlint: ignore-block[changed_behavior_has_e2e] the arm below is reached by a
+    // dispatch that failed, one that answered nothing the schema accepted, and one that was
+    // cancelled; the first two have journeys of their own in `tests/e2e/lifecycle.rs`, and
+    // the third has none because it is not separately reachable. Nothing cancels a
+    // drafting dispatch except the node's own token being flipped, which happens when the
+    // run is being stopped — and a run whose driver is being torn down has no publication
+    // left to protect, so a journey claiming "it published anyway" would be asserting the
+    // opposite of what a stop means. Deleting the arm is not the alternative either: it is
+    // the same `_` a failed settlement takes.
     match handle.wait() {
-        Ok(outcome) if outcome.succeeded => drafted.unwrap_or(fallback),
-        _ => fallback,
-    }
+        Ok(outcome) if outcome.succeeded => retained
+            .iter()
+            .filter_map(|kept| crate::report::read(kept))
+            .find_map(|report| crate::report::drafted_body(&report)),
+        _ => None,
+    } // llmlint: ignore-end[changed_behavior_has_e2e]
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
-
-/// The title a change gets when nothing drafted one.
-///
-/// Derived from what the plan already states, so it is the same title every
-/// time rather than a guess that varies per run.
-pub fn deterministic_title(node: &Node) -> String {
-    node.title
-        .clone()
-        .unwrap_or_else(|| format!("chore: {}", node.id))
-}
 
 /// Put every envelope a followed session writes into the merged stream.
 fn relay_into(tx: &Sender<Message>, node: Labels) -> Box<dyn Fn(Envelope) + Send> {
@@ -555,12 +626,14 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let settlement = execute(
             &crate::executor::LocalExecutor,
-            "demo",
-            "graphs/node-scope.yaml",
+            &RunPaths::under(std::path::Path::new("/nowhere"), "demo"),
+            &Launch {
+                node_graph: "graphs/node-scope.yaml".into(),
+                ..Launch::default()
+            },
             &node,
             &crate::executor::CancellationToken::new(),
             &tx,
-            None,
         );
         assert_eq!(settlement.status, NodeStatus::Failed);
         assert_eq!(settlement.outcome.as_deref(), Some("invalid-node"));
@@ -639,17 +712,6 @@ mod tests {
         assert_eq!(steps.len(), 1);
         assert_eq!(steps[0].id, "service");
         assert_eq!(steps[0].persona.as_deref(), Some("engineer"));
-    }
-
-    #[test]
-    fn a_deterministic_title_is_the_same_every_time() {
-        let node = lifecycle(None);
-        assert_eq!(deterministic_title(&node), "chore: service");
-        let titled = Node {
-            title: Some("feat: ship the thing".into()),
-            ..node
-        };
-        assert_eq!(deterministic_title(&titled), "feat: ship the thing");
     }
 
     /// The record a follow ended one read short of, relayed exactly once.

@@ -322,7 +322,54 @@ pub fn validate(plan: &Plan) -> Result<()> {
     if plan.tasks.is_empty() {
         return Err(Error::Invalid("a plan needs at least one node".into()));
     }
-    validate_edited(plan)
+    validate_edited(plan)?;
+    validate_declared_version(plan)
+}
+
+/// The two rules a plan's **own declared version** decides.
+///
+/// A plan file is a document written at a version and read by a build, so what
+/// it may say is the version it declares rather than the one this build writes.
+/// Version 3 states the change request a lifecycle node publishes: a `title` is
+/// required on one, and a `body` may be carried beside it. A plan declaring an
+/// earlier version in
+/// [`PLAN_SCHEMA_VERSIONS_READ`](crate::plan::PLAN_SCHEMA_VERSIONS_READ) is read
+/// as that version — its untitled lifecycle nodes publish under the subject
+/// `onevcs` derives from the branch's own conventional commits — and naming a
+/// field that version never had is refused **by the field's name**, exactly as
+/// an unknown field is.
+///
+/// Here rather than in [`validate_node`], which is the shape check every
+/// *edited* graph is also held to: an edit is compiled against the version this
+/// build writes, and a graph folded from a version-2 run carries the untitled
+/// lifecycle nodes that run was launched with. Requiring a title there would
+/// refuse every later edit to those runs — a `retry` of a node clones it — which
+/// is the whole graph held hostage to a field the plan was never written with.
+fn validate_declared_version(plan: &Plan) -> Result<()> {
+    for node in &plan.tasks {
+        let named = |what: String| Error::Invalid(format!("node '{}': {what}", node.id));
+        // The version is the whole of what `body` is checked for, and deliberately.
+        // It is one of seven publication-only optional fields the common node shape
+        // carries — `title`, `branch`, `merge_policy`, `base_branch`, `repo_type` and
+        // `workflow` are the others — and what makes a node a lifecycle node is
+        // `repo`. None of the other six is refused on a node kind that never
+        // publishes, so refusing this one alone would answer a planner differently
+        // for the same mistake depending on which field they made it in.
+        // llmlint: ignore[boundary_inputs_validated] the paragraph above is the decision:
+        // the schema struct's `deny_unknown_fields` is this document's boundary, and what a
+        // node kind does with a field it does not use is the plan shape's own convention
+        // rather than a validation this field is missing.
+        if node.body.is_some() && plan.schema_version < crate::plan::PLAN_SCHEMA_VERSION {
+            return Err(named(crate::plan::body_is_newer(plan.schema_version)));
+        }
+        if plan.schema_version >= crate::plan::PLAN_SCHEMA_VERSION
+            && node.repo.is_some()
+            && node.title.is_none()
+        {
+            return Err(named(crate::plan::TITLE_IS_REQUIRED.to_owned()));
+        }
+    }
+    Ok(())
 }
 
 /// Check a graph an edit produced.
@@ -332,21 +379,22 @@ pub fn validate(plan: &Plan) -> Result<()> {
 /// do, which is a settled run rather than a malformed plan — refusing it would
 /// make the planner unable to abandon a graph it started.
 pub fn validate_edited(plan: &Plan) -> Result<()> {
-    if plan.schema_version != crate::plan::PLAN_SCHEMA_VERSION {
-        // The version this one replaced is refused *deliberately*, with what to
-        // change: it is the version every plan on this host was written at, and a
-        // planner reading only that two numbers differ has to go and find out
-        // which fields moved. Any other version is a number this build has never
-        // written, so there is no migration to name.
-        let migration = if plan.schema_version == crate::plan::PLAN_SCHEMA_VERSION_RETIRED {
-            format!("; {}", crate::plan::RETIRED_VERSION_MIGRATION)
-        } else {
-            String::new()
-        };
+    // Every version this build reads, because what each newer one added is keyed
+    // to the version a document declares: a plan written at an earlier one
+    // describes a graph this engine executes exactly as it always did, and its
+    // author has nothing to migrate. A number outside the set is one this crate
+    // has never written and there is no document to read it as, so it is refused
+    // by its number and the ones that are read are named.
+    let read = crate::plan::PLAN_SCHEMA_VERSIONS_READ;
+    if !read.contains(&plan.schema_version) {
+        let known = read
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
         return Err(Error::Invalid(format!(
-            "plan schema_version {} is not {}{migration}",
-            plan.schema_version,
-            crate::plan::PLAN_SCHEMA_VERSION
+            "plan schema_version {} is not one this build reads ({known})",
+            plan.schema_version
         )));
     }
     if plan.concurrency == 0 {
@@ -406,9 +454,24 @@ pub fn validate_edited(plan: &Plan) -> Result<()> {
     Ok(())
 }
 
+/// What a plan naming the reserved drafting persona is told.
+///
+/// The persona a dispatch runs under is what tells the change request's drafting
+/// apart from a node's own work — it is the one fact the executor has when it
+/// composes a launch, and the two are composed differently: a node's dispatch
+/// carries the run's node-scope overrides and its own persona, and the drafting
+/// dispatch carries the graph the operator named and nothing else. A node
+/// claiming this name would be composed as the drafting dispatch and lose the
+/// overrides it declared, silently, which is the one direction this crate
+/// refuses to fail in. So the name is refused where a plan is read.
+pub(crate) const RESERVED_PERSONA: &str = "`pr-author` is the persona this crate dispatches a      change request's drafting under, so a node's own worker cannot run as it";
+
 /// Check one node's shape.
 pub fn validate_node(node: &Node) -> Result<()> {
     let named = |what: &str| Error::Invalid(format!("node '{}': {what}", node.id));
+    if node.persona.as_deref() == Some(crate::lifecycle::PR_AUTHOR_PERSONA) {
+        return Err(named(RESERVED_PERSONA));
+    }
 
     // A title is only ever the subject of a publication, and only a node that
     // names a repo publishes — so this holds exactly the nodes whose title
@@ -562,6 +625,9 @@ fn validate_steps(node: &Node, steps: &[Step]) -> Result<()> {
         } else {
             if step.persona.is_none() {
                 return Err(named(format!("agent step '{}' needs a persona", step.id)));
+            }
+            if step.persona.as_deref() == Some(crate::lifecycle::PR_AUTHOR_PERSONA) {
+                return Err(named(format!("step '{}': {RESERVED_PERSONA}", step.id)));
             }
             // The same rule the node above is held to: a control this build
             // cannot apply stops the plan here rather than at the step's launch.
@@ -906,6 +972,7 @@ mod tests {
                 repo: Some("owner/repo".into()),
                 persona: Some("engineer".into()),
                 task: Some("## What\nship".into()),
+                title: Some("feat: ship it".into()),
                 deps: vec!["approve".into()],
                 ..Node::default()
             },
@@ -1192,42 +1259,33 @@ mod tests {
         .expect("an ordinary title was refused");
     }
 
-    /// The version this schema replaced is refused *deliberately*.
+    /// Every version this build reads validates, and a number outside that set
+    /// is refused by it.
     ///
-    /// Every plan written on this host before the judge controls were made
-    /// honest declares it, so its author is told which fields moved and what to
-    /// set — not that two numbers differ, which is all a version this build has
-    /// never written can be told.
+    /// A plan written at an earlier version has nothing to migrate: what each
+    /// later version added is keyed to the version the document declares, so the
+    /// graph it describes is one this engine executes. A number this crate has
+    /// never written is the only version refusal there is, and it names the ones
+    /// that are read rather than leaving its author to guess.
     #[test]
-    fn the_retired_schema_version_is_refused_with_the_migration_it_needs() {
-        let mut legacy = plan_of(vec![agent("a", &[])]);
-        legacy.schema_version = crate::plan::PLAN_SCHEMA_VERSION_RETIRED;
-        let message = validate(&legacy).unwrap_err().to_string();
-        assert!(
-            message.contains(&format!(
-                "schema_version {} is not {}",
-                crate::plan::PLAN_SCHEMA_VERSION_RETIRED,
-                crate::plan::PLAN_SCHEMA_VERSION
-            )),
-            "{message}"
-        );
-        assert!(message.contains("`done_when`"), "{message}");
-        assert!(message.contains("`max_turns`"), "{message}");
-        assert!(
-            message.contains("set `schema_version: 2`"),
-            "the refusal does not say what to set: {message}"
-        );
+    fn every_version_this_build_reads_validates_and_no_other_does() {
+        for version in crate::plan::PLAN_SCHEMA_VERSIONS_READ {
+            let mut plan = plan_of(vec![agent("a", &[])]);
+            plan.schema_version = version;
+            validate(&plan)
+                .unwrap_or_else(|why| panic!("a version {version} plan is a document: {why}"));
+        }
 
-        // A version this build has never written has no migration to name, so it
-        // is told the two numbers and nothing invented.
         let mut unknown = plan_of(vec![agent("a", &[])]);
         unknown.schema_version = 99;
         let message = validate(&unknown).unwrap_err().to_string();
         assert!(message.contains("schema_version 99"), "{message}");
-        assert!(
-            !message.contains("`done_when`"),
-            "a migration was offered for a version it does not describe: {message}"
-        );
+        for version in crate::plan::PLAN_SCHEMA_VERSIONS_READ {
+            assert!(
+                message.contains(&version.to_string()),
+                "the refusal does not name version {version}, which this build reads: {message}"
+            );
+        }
     }
 
     #[test]

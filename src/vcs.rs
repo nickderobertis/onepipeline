@@ -78,18 +78,22 @@ pub fn session_open(request: &SessionRequest) -> Result<Session> {
 /// The title is checked here, where the request is built, because
 /// [`Subject`]'s conversion is where the sibling checks it — a title too long to
 /// be a commit subject is refused before a session's work is committed rather
-/// than after.
+/// than after. A title of `None` is the plan stating none: the sibling then
+/// derives the subject from the branch's own conventional commits, which is a
+/// better subject than anything this crate could compose about work it did not
+/// do.
 ///
-/// `body` is `None`, and that is this crate's answer rather than a field it has
-/// not got around to: [`PublishRequest::body`] is the change request's body
-/// *verbatim*, and nothing in the plan schema is one. A node's `task` is the
-/// brief its agent was given, not a description of what the branch turned out to
-/// hold, so sending it would put a prediction where a reviewer reads a report.
-/// Opening the change request with no body leaves that to whoever writes one.
+/// The body crosses as the prose it is. Nothing checks it, here or there — a
+/// host places no shape on a change request's body, so there is no rule to hold
+/// it to and inventing one would refuse a body the host would have taken. What
+/// it is *not* is a node's `task`: that is the brief its agent was given, not a
+/// description of what the branch turned out to hold, so a body is one that was
+/// drafted from the diff or there is none.
 pub fn publish(
     token: &str,
     policy: Option<MergePolicy>,
     title: Option<&str>,
+    body: Option<&str>,
 ) -> Result<Publication> {
     let title = title
         .map(|title| title.parse::<Subject>().map_err(sibling))
@@ -100,7 +104,7 @@ pub fn publish(
         &PublishRequest {
             policy,
             title,
-            body: None,
+            body: body.map(str::to_owned),
         },
     )
     .map_err(refusal)

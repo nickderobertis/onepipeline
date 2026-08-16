@@ -725,6 +725,47 @@ impl World {
         self.write_graphs_with(Some(&pacemaker), CONSUMER_GRAPH_SCHEMA);
     }
 
+    /// The graph a launch drafts change request bodies with, as
+    /// `--pr-author-graph` takes it.
+    ///
+    /// Written on demand rather than by [`write_graphs`](World::write_graphs),
+    /// because naming one is what a journey about drafting *states*: every other
+    /// journey proves a launch that drafts nothing, which is the shipped
+    /// default.
+    ///
+    /// Its member is single-sided and its own oneharness config declares a
+    /// `schema_file`, which is what asks that library for an answer validated
+    /// against a schema — the channel a drafted body arrives on. The schema is
+    /// this world's own file, so the shape the drafting dispatch must answer in
+    /// is stated once, here, and the graph is a real document either sibling
+    /// will read.
+    pub fn pr_author_graph(&self) -> String {
+        let dir = self.graphs();
+        std::fs::create_dir_all(&dir).expect("a directory for the graph configs");
+        std::fs::write(
+            dir.join("body.schema.json"),
+            r#"{"type":"object","properties":{"body":{"type":"string"}},
+               "required":["body"],"additionalProperties":false}"#,
+        )
+        .expect("the drafted body's schema is written");
+        std::fs::write(
+            dir.join("oneharness.pr-author.toml"),
+            "run_mode = \"fallback\"\nharnesses = [\"claude-code\"]\n\
+             schema_file = \"./body.schema.json\"\n",
+        )
+        .expect("the drafting harness config is written");
+        let graph = dir.join("pr-author.yaml");
+        std::fs::write(
+            &graph,
+            format!(
+                "version: {CONSUMER_GRAPH_SCHEMA}\nname: pr-author\nmembers:\n  author:\n    \
+                 kind: oneharness\n    oneharness_config: ./oneharness.pr-author.toml\n"
+            ),
+        )
+        .expect("the pr-author graph is written");
+        graph.display().to_string()
+    }
+
     fn write_graphs_with(&self, dag_extra: Option<&str>, version: u32) {
         let dir = self.graphs();
         std::fs::create_dir_all(&dir).expect("a directory for the graph configs");
@@ -751,11 +792,23 @@ impl World {
             } else {
                 ("", String::new())
             };
+            // Which run this graph is watching, in the member's own environment.
+            // A launch hands the two variables to the graph *run*, where they
+            // expand `${...}` references — reaching a member's own process is
+            // what the graph's `env:` block is for, and the shipped dag-scope
+            // graph says the same thing in the one place it needs the run id: the
+            // channel-serve command its judge side runs.
+            let env = if file == "dag-scope.yaml" {
+                "env:\n  ONEPIPELINE_RUN_ID: ${ONEPIPELINE_RUN_ID}\n  \
+                 ONEPIPELINE_RUNS_DIR: ${ONEPIPELINE_RUNS_DIR}\n"
+            } else {
+                ""
+            };
             std::fs::write(
                 dir.join(file),
                 format!(
                     "version: {version}\nname: {}\nmembers:\n  {member}:\n    \
-                     kind: oneharness\n    oneharness_config: {}\n{task}{extra}",
+                     kind: oneharness\n    oneharness_config: {}\n{task}{extra}{env}",
                     file.trim_end_matches(".yaml"),
                     self.harness_config(member),
                 ),
@@ -1031,6 +1084,19 @@ pub struct Repository {
     pub origin: PathBuf,
     /// The registered execution and publication checkout.
     pub checkout: PathBuf,
+}
+
+impl World {
+    /// Every change request this world's host was asked to open, in order.
+    ///
+    /// The host is `gh`, standing in at `onevcs`'s own `ONEVCS_GH` override, and
+    /// it records what it was asked for — the title and the body a reviewer
+    /// reads among them. That is the far side of a publication, which is the
+    /// only place a drafted body is a fact rather than an argument this crate
+    /// passed.
+    pub fn changes_opened(&self) -> Vec<Value> {
+        read_jsonl(&self.fakes.join("gh").join("opened.jsonl"))
+    }
 }
 
 impl Repository {
@@ -1660,6 +1726,10 @@ pub fn lifecycle(id: &str, deps: &[&str]) -> Value {
         "id": id,
         "repo": "service",
         "persona": "engineer",
+        // The title its change request opens under, which a lifecycle node
+        // states from plan schema 3 on. A journey about the title or the body
+        // states its own.
+        "title": format!("feat: ship {id}"),
         "task": format!("## What\nShip {id}.\n\n## Why\nUsers need it.\n\n## Acceptance criteria\n- {id} is published."),
         "deps": deps,
     })
@@ -1668,7 +1738,7 @@ pub fn lifecycle(id: &str, deps: &[&str]) -> Value {
 /// A plan holding these nodes.
 pub fn plan_of(name: &str, nodes: Vec<Value>) -> Value {
     serde_json::json!({
-        "schema_version": 2,
+        "schema_version": onepipeline::plan::PLAN_SCHEMA_VERSION,
         "name": name,
         "concurrency": 4,
         "goal": {"text": format!("Deliver {name}")},

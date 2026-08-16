@@ -272,8 +272,8 @@ pub fn now() -> String {
 ///
 /// Shared by both doubles, because the monitor is a *member* rather than a
 /// graph: the `oneagentgraph` double acts it out when it is standing in for the
-/// whole sibling, and the `oneharness` double acts it out when the real sibling
-/// is running the graph and only the paid turn is being replaced.
+/// whole sibling, and the harness double acts it out when the real sibling is
+/// running the graph and only the paid turn is being replaced.
 pub fn observe(dir: &Path) -> std::process::ExitCode {
     // Required, not defaulted: an empty run id would leave every assertion
     // about what this observer saw pointing at a run named by nothing.

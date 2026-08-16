@@ -50,8 +50,22 @@ pub const MONITOR_PROFILE: &str = "monitor";
 /// The matcher fields the grammar has, for the refusal that names them.
 const MATCHER_FIELDS: &str = "`source`, `kind`, `run_id`, `node`, `step`, `member`, `persona`";
 
-/// The launch-config schema version this build writes and reads.
-pub const LAUNCH_CONFIG_SCHEMA_VERSION: u32 = 1;
+/// The launch-config schema version this build **writes**.
+///
+/// **2** since a launch declares the graph its change request bodies are drafted
+/// by: `pr_author_graph` is a key version 1 never had, so a document carrying it
+/// is a different document and says so.
+pub const LAUNCH_CONFIG_SCHEMA_VERSION: u32 = 2;
+
+/// Every launch-config version this build **reads**, newest first.
+///
+/// The same rule the plan schema is read by, and for the same reason: a config
+/// is a file an operator wrote at a version, and what version 2 added is keyed
+/// to the version the document declares. A version-1 config is a complete
+/// document — it says nothing about drafting, which is what a launch naming no
+/// graph means — and naming `pr_author_graph` there is refused **by that field's
+/// name**, exactly as a key no version ever had is.
+pub const LAUNCH_CONFIG_SCHEMA_VERSIONS_READ: [u32; 2] = [LAUNCH_CONFIG_SCHEMA_VERSION, 1];
 
 /// A launch config: what a launch declares about its run, as one document.
 ///
@@ -66,9 +80,10 @@ pub const LAUNCH_CONFIG_SCHEMA_VERSION: u32 = 1;
 /// decision goes, rather than beside the filters that happen to be the first one.
 ///
 /// Versioned and closed. It is **external input** — a file an operator wrote —
-/// so an unknown key is refused by name rather than silently dropped, and a
-/// document declaring a version this build does not read is refused by its
-/// number rather than read as though it said something else.
+/// so an unknown key is refused by name rather than silently dropped, a key a
+/// declared version never had is refused by *its* name, and a document declaring
+/// a version this build does not read is refused by its number rather than read
+/// as though it said something else.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LaunchConfig {
@@ -81,6 +96,20 @@ pub struct LaunchConfig {
     /// round-trips as the file wrote it.
     #[serde(default, skip_serializing_if = "Filters::is_empty")]
     pub filters: Filters,
+    /// The agent graph this launch drafts change request bodies with, if any.
+    ///
+    /// The second launch-level decision, and it is one a team writes down beside
+    /// a plan for the same reason the filters are: which graph authors a change
+    /// request is a property of how a team works rather than of one launch.
+    /// `--pr-author-graph` spells the same thing for a launch that would rather
+    /// say it inline, and overrides this when both are given.
+    ///
+    /// A key [`LAUNCH_CONFIG_SCHEMA_VERSION`] added, so a document below it may
+    /// not carry one. Omitted when absent, so a config that names no graph
+    /// round-trips as the file wrote it — and so what this crate writes for a
+    /// launch that named none is a document a version-1 reader still accepts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_author_graph: Option<String>,
 }
 
 impl Default for LaunchConfig {
@@ -88,6 +117,7 @@ impl Default for LaunchConfig {
         Self {
             schema_version: LAUNCH_CONFIG_SCHEMA_VERSION,
             filters: Filters::default(),
+            pr_author_graph: None,
         }
     }
 }
@@ -103,8 +133,9 @@ impl LaunchConfig {
     /// # Errors
     ///
     /// [`Error::Ledger`] for a file that cannot be read, and [`Error::Invalid`]
-    /// — naming the path — for a document this schema does not accept, a version
-    /// this build does not read, or a filter that could not be honoured.
+    /// — naming the path — for a document this schema does not accept, a key its
+    /// declared version never had, a version this build does not read, or a
+    /// filter that could not be honoured.
     pub fn load(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path).map_err(|source| Error::Ledger {
             path: path.to_path_buf(),
@@ -113,10 +144,26 @@ impl LaunchConfig {
         let named = |why: String| Error::Invalid(format!("{}: {why}", path.display()));
         let config: Self =
             serde_norway::from_str(&text).map_err(|failure| named(failure.to_string()))?;
-        if config.schema_version != LAUNCH_CONFIG_SCHEMA_VERSION {
+        if !LAUNCH_CONFIG_SCHEMA_VERSIONS_READ.contains(&config.schema_version) {
+            let known = LAUNCH_CONFIG_SCHEMA_VERSIONS_READ
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
             return Err(named(format!(
-                "launch config schema_version {}, and this build reads \
-                 {LAUNCH_CONFIG_SCHEMA_VERSION} — set `schema_version: \
+                "launch config schema_version {}, and this build reads {known} — set \
+                 `schema_version: {LAUNCH_CONFIG_SCHEMA_VERSION}`",
+                config.schema_version
+            )));
+        }
+        // The field's own name, not the version's number: an operator who wrote a
+        // drafting graph and had it dropped would find that out from a change
+        // request nobody drafted a body for.
+        if config.pr_author_graph.is_some() && config.schema_version < LAUNCH_CONFIG_SCHEMA_VERSION
+        {
+            return Err(named(format!(
+                "`pr_author_graph` is a schema {LAUNCH_CONFIG_SCHEMA_VERSION} key and this \
+                 config declares schema_version {} — set `schema_version: \
                  {LAUNCH_CONFIG_SCHEMA_VERSION}`",
                 config.schema_version
             )));
@@ -630,62 +677,76 @@ fn glob(pattern: &str, text: &str) -> bool {
 mod tests {
     use super::*;
 
-    /// The checked-in shape of a schema-1 launch config.
+    /// The checked-in shape of a launch config, one file per version this build
+    /// reads.
     ///
     /// Read rather than restated: this is the document an operator writes and a
     /// later build parses, and the only thing that stops a key being renamed, an
     /// omitted block becoming an explicit empty one, or the version moving
-    /// without anyone deciding to move it.
-    const GOLDEN: &str = include_str!("../tests/golden/launch-config-v1.json");
+    /// without anyone deciding to move it. The earlier one stays checked in for
+    /// the half a single golden cannot pin — that a config written before the
+    /// current version is still a document this build reads.
+    const GOLDEN: &str = include_str!("../tests/golden/launch-config-v2.json");
 
-    /// The document the golden pins, built through the types.
+    /// The same, as version 1 wrote it: the block, and no key that version never
+    /// had.
+    const GOLDEN_EARLIER: &str = include_str!("../tests/golden/launch-config-v1.json");
+
+    /// The filters both goldens carry.
     ///
     /// Both source filters and both shipped profile names, because each is a
     /// distinct shape on the wire — an `exclude`-only filter, an `include` of
     /// several matchers, an overridden profile, and the empty filter that means
     /// "unfiltered" — and a golden carrying one of them would pin a quarter of
     /// the document.
-    fn golden() -> LaunchConfig {
+    fn pinned_filters() -> Filters {
         let kind = |glob: &str| Matcher {
             kind: Some(glob.to_string()),
             ..Matcher::default()
         };
+        Filters {
+            agentgraph: Some(EventFilter {
+                include: Vec::new(),
+                exclude: vec![kind("turn-activity")],
+            }),
+            vcs: Some(EventFilter {
+                include: vec![kind("gate-*"), kind("session-closed")],
+                exclude: Vec::new(),
+            }),
+            profiles: [
+                (
+                    DEFAULT_PROFILE.to_string(),
+                    shipped_profile(DEFAULT_PROFILE).expect("planner ships"),
+                ),
+                (
+                    MONITOR_PROFILE.to_string(),
+                    shipped_profile(MONITOR_PROFILE).expect("monitor ships"),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        }
+    }
+
+    /// The document [`GOLDEN`] pins, built through the types: the block, and the
+    /// launch's other decision.
+    fn golden() -> LaunchConfig {
         LaunchConfig {
             schema_version: LAUNCH_CONFIG_SCHEMA_VERSION,
-            filters: Filters {
-                agentgraph: Some(EventFilter {
-                    include: Vec::new(),
-                    exclude: vec![kind("turn-activity")],
-                }),
-                vcs: Some(EventFilter {
-                    include: vec![kind("gate-*"), kind("session-closed")],
-                    exclude: Vec::new(),
-                }),
-                profiles: [
-                    (
-                        DEFAULT_PROFILE.to_string(),
-                        shipped_profile(DEFAULT_PROFILE).expect("planner ships"),
-                    ),
-                    (
-                        MONITOR_PROFILE.to_string(),
-                        shipped_profile(MONITOR_PROFILE).expect("monitor ships"),
-                    ),
-                ]
-                .into_iter()
-                .collect(),
-            },
+            filters: pinned_filters(),
+            pr_author_graph: Some("./graphs/pr-author.yaml".to_string()),
         }
     }
 
     #[test]
-    fn a_schema_1_launch_config_is_the_shape_the_golden_pins() {
+    fn a_launch_config_is_the_shape_its_version_golden_pins() {
         let rendered = serde_json::to_string_pretty(&golden()).expect("it serialises");
         assert_eq!(
             rendered.trim(),
             GOLDEN.trim(),
             "the launch config changed shape. If that was deliberate, bump \
-             LAUNCH_CONFIG_SCHEMA_VERSION and update tests/golden/launch-config-v1.json \
-             together"
+             LAUNCH_CONFIG_SCHEMA_VERSION and add tests/golden/launch-config-v<n>.json \
+             in the same change"
         );
     }
 
@@ -694,6 +755,70 @@ mod tests {
         let parsed: LaunchConfig = serde_json::from_str(GOLDEN).expect("the golden parses");
         assert_eq!(parsed.schema_version, LAUNCH_CONFIG_SCHEMA_VERSION);
         assert_eq!(parsed, golden(), "the golden is not the document it pins");
+    }
+
+    /// The version before this one is still a document this build reads.
+    ///
+    /// A promise to every config already written beside a plan: it carries the
+    /// same block, it declares its own number, and it says nothing about
+    /// drafting — which is what a launch naming no graph means. Held against the
+    /// checked-in file rather than a string built here, because that file is what
+    /// an operator has on disk.
+    #[test]
+    fn the_earlier_version_still_reads_and_says_nothing_about_drafting() {
+        let earlier: LaunchConfig =
+            serde_json::from_str(GOLDEN_EARLIER).expect("the earlier golden parses");
+        assert_eq!(
+            earlier,
+            LaunchConfig {
+                schema_version: 1,
+                filters: pinned_filters(),
+                pr_author_graph: None,
+            }
+        );
+        assert!(
+            LAUNCH_CONFIG_SCHEMA_VERSIONS_READ.contains(&earlier.schema_version),
+            "the version the earlier golden declares is not one this build reads"
+        );
+        // And it is the *earlier* document, not this one wearing an older
+        // number: what this build writes carries the current version.
+        assert_ne!(earlier.schema_version, LAUNCH_CONFIG_SCHEMA_VERSION);
+    }
+
+    /// The launch's other decision round-trips when it is there and is written
+    /// as no key at all when it is not.
+    ///
+    /// The second half is what keeps the bump additive: a launch that named no
+    /// graph is written as a document carrying nothing about drafting, which is
+    /// what a version-1 reader accepts and what a version-1 file already says.
+    #[test]
+    fn the_drafting_graph_round_trips_when_named_and_is_omitted_when_it_is_not() {
+        let named = LaunchConfig {
+            pr_author_graph: Some("./graphs/pr-author.yaml".to_string()),
+            ..LaunchConfig::default()
+        };
+        let rendered = serde_json::to_string(&named).expect("it serialises");
+        assert_eq!(
+            rendered,
+            format!(
+                r#"{{"schema_version":{LAUNCH_CONFIG_SCHEMA_VERSION},"pr_author_graph":"./graphs/pr-author.yaml"}}"#
+            )
+        );
+        assert_eq!(
+            serde_json::from_str::<LaunchConfig>(&rendered).expect("it re-parses"),
+            named
+        );
+
+        let unnamed = LaunchConfig::default();
+        let rendered = serde_json::to_string(&unnamed).expect("it serialises");
+        assert!(
+            !rendered.contains("pr_author_graph"),
+            "a launch that named no drafting graph was written one: {rendered}"
+        );
+        assert_eq!(
+            serde_json::from_str::<LaunchConfig>(&rendered).expect("it re-parses"),
+            unnamed
+        );
     }
 
     /// A config that declares no events round-trips as the file wrote it.
@@ -708,18 +833,26 @@ mod tests {
     fn a_launch_config_declaring_no_events_omits_the_block_and_round_trips() {
         let bare = LaunchConfig::default();
         let rendered = serde_json::to_string(&bare).expect("it serialises");
-        assert_eq!(rendered, r#"{"schema_version":1}"#);
+        assert_eq!(
+            rendered,
+            format!(r#"{{"schema_version":{LAUNCH_CONFIG_SCHEMA_VERSION}}}"#)
+        );
         assert_eq!(
             serde_json::from_str::<LaunchConfig>(&rendered).expect("it re-parses"),
             bare
         );
 
-        // And the version alone is a whole document: a config that says nothing
-        // else is what a launch naming no filters already means.
-        let minimal: LaunchConfig =
-            serde_norway::from_str("schema_version: 1\n").expect("a bare config parses");
-        assert_eq!(minimal, bare);
-        assert!(minimal.filters.is_empty());
+        // And the version alone is a whole document, at every version this build
+        // reads: a config that says nothing else is what a launch naming no
+        // filters already means.
+        for version in LAUNCH_CONFIG_SCHEMA_VERSIONS_READ {
+            let minimal: LaunchConfig =
+                serde_norway::from_str(&format!("schema_version: {version}\n"))
+                    .expect("a bare config parses");
+            assert_eq!(minimal.schema_version, version);
+            assert!(minimal.filters.is_empty());
+            assert_eq!(minimal.pr_author_graph, None);
+        }
     }
 
     /// Every filter shape survives the wire, and an empty list is never written.
@@ -746,7 +879,8 @@ mod tests {
         );
     }
 
-    /// The version is refused by its number, and an unknown key by its name.
+    /// The version is refused by its number, an unknown key by its name, and a
+    /// key an earlier version never had by *that* key's name.
     #[test]
     fn a_launch_config_this_build_cannot_read_is_refused_by_name() {
         let root = std::env::temp_dir().join(format!("onepipeline-config-{}", std::process::id()));
@@ -757,11 +891,46 @@ mod tests {
             path
         };
 
-        let later = LaunchConfig::load(&written("later.yaml", "schema_version: 2\n"))
+        // A number this build has never written, told the versions it reads.
+        let later = LaunchConfig::load(&written("later.yaml", "schema_version: 7\n"))
             .expect_err("a version this build does not read is refused");
         let said = later.to_string();
-        assert!(said.contains("schema_version 2"), "{said}");
-        assert!(said.contains("schema_version: 1"), "{said}");
+        assert!(said.contains("schema_version 7"), "{said}");
+        for version in LAUNCH_CONFIG_SCHEMA_VERSIONS_READ {
+            assert!(
+                said.contains(&version.to_string()),
+                "the refusal does not name version {version}, which this build reads: {said}"
+            );
+        }
+
+        // A key the version this document declares never had: refused by that
+        // key's name, because the key is what its author has to act on and the
+        // alternative is a drafting graph nobody drafts with.
+        let early = LaunchConfig::load(&written(
+            "early.yaml",
+            "schema_version: 1\npr_author_graph: ./graphs/pr-author.yaml\n",
+        ))
+        .expect_err("a key a declared version never had is refused");
+        let said = early.to_string();
+        assert!(said.contains("`pr_author_graph`"), "{said}");
+        assert!(
+            said.contains(&format!("schema {LAUNCH_CONFIG_SCHEMA_VERSION} key")),
+            "{said}"
+        );
+
+        // And the same document at the version that has it is read.
+        let read = LaunchConfig::load(&written(
+            "current.yaml",
+            &format!(
+                "schema_version: {LAUNCH_CONFIG_SCHEMA_VERSION}\n\
+                 pr_author_graph: ./graphs/pr-author.yaml\n"
+            ),
+        ))
+        .expect("the version that declares the key reads it");
+        assert_eq!(
+            read.pr_author_graph.as_deref(),
+            Some("./graphs/pr-author.yaml")
+        );
 
         let stray = LaunchConfig::load(&written(
             "stray.yaml",

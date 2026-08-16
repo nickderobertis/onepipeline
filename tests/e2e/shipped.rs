@@ -194,7 +194,10 @@ fn the_check_in_persona_reports_and_never_asks_for_a_decision() {
 fn the_pr_author_persona_is_off_the_publication_path() {
     let text = unwrapped("personas/pr-author.yaml");
     assert!(text.contains("you are not on the publication path"));
-    assert!(text.contains("The deterministic body is used instead"));
+    assert!(text.contains("The change request opens with no body and the change still publishes"));
+    // What it answers with, because a body that is not in the schema's own
+    // `body` field reaches nobody: the answer is validated and read from there.
+    assert!(text.contains("the JSON object the schema your graph names requires"));
 }
 
 #[test]

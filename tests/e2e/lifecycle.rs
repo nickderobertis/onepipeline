@@ -20,9 +20,23 @@
 // opened and merged offline. `harness.rs` carries the same suppression and the full
 // rationale.
 
+use std::path::PathBuf;
+
 use crate::harness::{agent, gate_script, lifecycle, plan_of, Repository, World, REFUSED};
 use onevcs::provenance::SUBJECT_LIMIT;
 use serde_json::json;
+
+/// The subject `onevcs` derives for a publication that states none.
+///
+/// The sibling's own, composed from the branch it is publishing rather than from
+/// anything this crate said — which is the point: a node that states no title
+/// lands under a subject only the repository side could have written. Spelled
+/// here so a journey can hold the whole subject rather than a prefix, and so a
+/// sibling that changes what it derives fails a test that says why instead of
+/// one that reads differently.
+fn derived_subject(branch: &str) -> String {
+    format!("chore: preserve work on {branch}")
+}
 
 fn settle(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
     let path = world.plan(name, &plan_of(name, nodes));
@@ -108,6 +122,40 @@ fn opened_tokens(world: &World, run: &str) -> Vec<String> {
         .fold(Vec::new(), |mut seen, token| {
             if !seen.contains(&token) {
                 seen.push(token);
+            }
+            seen
+        })
+}
+
+/// One node, with the title its change request opens under.
+///
+/// A lifecycle node needs one from schema version 3 on, and the journeys here
+/// are about the *body*, so the title is stated once here rather than in each.
+fn titled(node: serde_json::Value, title: &str) -> serde_json::Value {
+    let mut node = node;
+    node["title"] = json!(title);
+    node
+}
+
+/// The directory each dispatch of one run ran in, by the persona it ran under.
+///
+/// Read off the dispatch's own relayed envelopes, which carry the directory the
+/// member was given — so "the drafting dispatch ran where the work was done" is
+/// two recorded directories compared, rather than a name this suite recognised.
+fn dispatch_directories(world: &World, run: &str) -> Vec<(String, String)> {
+    world
+        .journal(run)
+        .iter()
+        .filter(|event| event["source"] == "agentgraph")
+        .filter_map(|event| {
+            Some((
+                event["labels"]["persona"].as_str()?.to_string(),
+                event["payload"]["dir"].as_str()?.to_string(),
+            ))
+        })
+        .fold(Vec::new(), |mut seen, (persona, dir)| {
+            if !seen.iter().any(|(known, _)| known == &persona) {
+                seen.push((persona, dir));
             }
             seen
         })
@@ -231,6 +279,7 @@ fn several_steps_share_one_branch_and_run_serially_in_topological_order() {
     let node = json!({
         "id": "service",
         "repo": "service",
+        "title": "feat: land the workstream",
         "steps": [
             {"id": "review", "persona": "reviewer", "task": "## What\nreview", "deps": ["implement"]},
             {"id": "implement", "persona": "engineer", "task": "## What\nimplement"},
@@ -305,20 +354,26 @@ fn several_steps_share_one_branch_and_run_serially_in_topological_order() {
 ///
 /// The record is removed while the first step is held at a rendezvous, so the
 /// window is the test's rather than the host's.
+///
+/// It is also the one world where the **drafting** dispatch has no worktree to
+/// run in — the node's own is what it reads the diff from, and there is no
+/// record left to name one — so the launch names a graph to draft with and this
+/// journey holds that ending too: the change request keeps its title and gets no
+/// body, said out loud rather than dispatching an agent to read an empty diff.
 #[test]
 fn a_session_record_that_cannot_be_read_falls_back_to_opening_a_session() {
     use std::process::Stdio;
 
     let world = World::new("lifecycle-norecord");
     published_locally(&world);
+    let drafting = world.pr_author_graph();
     world.script("service.implement.wait", "hold");
     world.script("driver.wait", "hold");
     let node = json!({
         "id": "service",
         "repo": "service",
-        // Its own title, so the run spends no `pr-author` dispatch: that one
-        // reads the node's worktree too and would fall back alongside the step,
-        // and this journey is about the step.
+        // The title its change request opens under, which a lifecycle node
+        // states from plan schema 3 on.
         "title": "feat: land what the steps made",
         "steps": [
             {"id": "implement", "persona": "engineer", "task": "## What\nimplement"},
@@ -329,7 +384,13 @@ fn a_session_record_that_cannot_be_read_falls_back_to_opening_a_session() {
     // Attached, so the fallback's own words land on a descriptor this test
     // holds: the loop runs in the process this command started.
     let driving = world
-        .cmd(&["start", &path.to_string_lossy(), "--attach"])
+        .cmd(&[
+            "start",
+            &path.to_string_lossy(),
+            "--attach",
+            "--pr-author-graph",
+            &drafting,
+        ])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -374,6 +435,19 @@ fn a_session_record_that_cannot_be_read_falls_back_to_opening_a_session() {
         said.contains("cannot read session") && said.contains("record"),
         "the fallback was silent about the record it could not read:\n{said}"
     );
+    // And the drafting dispatch, which had nowhere to read the diff from, said
+    // so rather than running somewhere it could not read one.
+    assert!(
+        said.contains("no worktree to draft its change request in"),
+        "a launch that named a drafting graph drafted nothing and said nothing:\n{said}"
+    );
+    assert!(
+        !world.was_invoked(
+            "oneagentgraph",
+            &["--label", "onepipeline.persona=pr-author"]
+        ),
+        "a drafting dispatch ran with no worktree to read a diff in"
+    );
     // It fell back rather than running nowhere: the second step asked for a
     // session of its own, which is what it would have done had the first never
     // opened one. Two distinct tokens, where a workstream whose record *is*
@@ -404,6 +478,7 @@ fn a_human_step_holds_the_workstream_rather_than_being_inferred() {
     let node = json!({
         "id": "service",
         "repo": "service",
+        "title": "feat: land the workstream",
         "steps": [
             {"id": "implement", "persona": "engineer", "task": "## What\nimplement"},
             {"id": "staging-approval", "kind": "human", "task": "Exercise the staged service.", "deps": ["implement"]},
@@ -446,86 +521,378 @@ fn a_human_step_holds_the_workstream_rather_than_being_inferred() {
     );
 }
 
+/// A change request the drafting dispatch wrote the body of.
+///
+/// `change-open` rather than `local-direct`, because a body is prose on a change
+/// request and a direct merge opens none: the far side of this publication is
+/// the host, and what it was asked to open the change request with is where a
+/// drafted body is a fact rather than an argument this crate passed.
 #[test]
-fn the_pr_author_dispatch_drafts_the_title_and_never_blocks_publication() {
+fn the_pr_author_dispatch_drafts_the_body_the_change_request_opens_with() {
     let world = World::new("lifecycle-pr-author");
-    let repo = published_locally(&world);
+    world.repository("change-open", &["true"]);
     world.script("service.work", "the worker wrote this\n");
-    let run = settle(&world, "authored", vec![lifecycle("service", &[])]);
+    world.script("pr-author.body", "## What\nRead off the branch's diff.\n");
+    let drafting = world.pr_author_graph();
+    let node = titled(lifecycle("service", &[]), "feat: land what the worker made");
+    let path = world.plan("authored", &plan_of("authored", vec![node]));
+    world
+        .run(&[
+            "start",
+            &path.to_string_lossy(),
+            "--attach",
+            "--pr-author-graph",
+            &drafting,
+        ])
+        .settled();
 
-    assert!(
-        world.was_invoked(
-            "oneagentgraph",
-            &["--label", "onepipeline.persona=pr-author"]
-        ),
-        "no pr-author dispatch: {:?}",
+    // It ran the graph the launch named, rather than the node-scope one every
+    // other dispatch runs.
+    let drafts: Vec<serde_json::Value> = world
+        .invocations()
+        .into_iter()
+        .filter(|call| {
+            call["tool"] == "oneagentgraph"
+                && call["args"].as_array().is_some_and(|args| {
+                    args.iter()
+                        .any(|arg| arg == "onepipeline.persona=pr-author")
+                })
+        })
+        .collect();
+    assert_eq!(
+        drafts.len(),
+        1,
+        "the drafting dispatch did not run exactly once: {:?}",
         world.invocations()
     );
-
-    // The drafted title is the subject the change landed under — read off the
-    // base branch, which is the only place a title is a fact rather than an
-    // argument somebody passed.
-    assert!(
-        repo.base_commits(&world)
-            .iter()
-            .any(|subject| subject == "feat: drafted from the diff"),
-        "the drafted title did not reach publication: {:?}\n{}",
-        repo.base_commits(&world),
-        why(&world, &run)
+    assert_eq!(
+        drafts[0]["args"][1], drafting,
+        "the drafting dispatch ran a graph the launch did not name: {}",
+        drafts[0]
     );
-    assert_eq!(world.run_json(&run, "result.json")["state"], "complete");
+
+    // And it ran in the node's **own** worktree, which is the only place the
+    // diff it was asked to read exists: the same directory the worker wrote in,
+    // proven by comparing the two rather than by reading the name.
+    let dirs = dispatch_directories(&world, "authored");
+    let whose = |persona: &str| {
+        dirs.iter()
+            .find(|(who, _)| who == persona)
+            .map(|(_, dir)| dir.clone())
+            .unwrap_or_else(|| panic!("no {persona} dispatch recorded a directory: {dirs:?}"))
+    };
+    assert_eq!(
+        whose("pr-author"),
+        whose("engineer"),
+        "the drafting dispatch did not run where the work was done: {dirs:?}"
+    );
+    assert!(
+        whose("pr-author").contains("worktree"),
+        "the drafting dispatch did not run in the session's worktree: {dirs:?}"
+    );
+
+    // And the body it drafted is what the change request opened with.
+    let opened = world.changes_opened();
+    assert_eq!(opened.len(), 1, "{opened:?}");
+    assert_eq!(
+        opened[0]["body"],
+        "## What\nRead off the branch's diff.",
+        "the drafted body did not reach the change request: {opened:?}\n{}",
+        why(&world, "authored")
+    );
+    assert_eq!(opened[0]["title"], "feat: land what the worker made");
+    assert_eq!(
+        world.run_json("authored", "result.json")["state"],
+        "complete"
+    );
 }
 
+/// A launch that names no drafting graph is the shipped default, and it drafts
+/// nothing: the change request opens with the plan's own body, or with none.
 #[test]
-fn a_planner_supplied_title_wins_over_the_drafting_dispatch() {
-    let world = World::new("lifecycle-title");
-    let repo = published_locally(&world);
+fn a_node_that_states_its_own_body_publishes_it_and_spends_no_dispatch() {
+    let world = World::new("lifecycle-body");
+    world.repository("change-open", &["true"]);
     world.script("service.work", "the worker wrote this\n");
-    let mut node = lifecycle("service", &[]);
-    node["title"] = json!("fix: the planner named this");
-    let run = settle(&world, "titled", vec![node]);
+    let mut node = titled(
+        lifecycle("service", &[]),
+        "feat: land what the planner asked for",
+    );
+    node["body"] = json!("## What\nThe planner wrote this.");
+    let path = world.plan("bodied", &plan_of("bodied", vec![node]));
+    // The graph *is* named, so the only reason no dispatch runs is the body the
+    // node already carries.
+    let drafting = world.pr_author_graph();
+    world
+        .run(&[
+            "start",
+            &path.to_string_lossy(),
+            "--attach",
+            "--pr-author-graph",
+            &drafting,
+        ])
+        .settled();
 
-    assert!(
-        repo.base_commits(&world)
-            .iter()
-            .any(|subject| subject == "fix: the planner named this"),
-        "the planner's title was overwritten: {:?}\n{}",
-        repo.base_commits(&world),
-        why(&world, &run)
+    let opened = world.changes_opened();
+    assert_eq!(opened.len(), 1, "{opened:?}");
+    assert_eq!(
+        opened[0]["body"], "## What\nThe planner wrote this.",
+        "the node's own body was not what the change request opened with: {opened:?}"
     );
     assert!(
         !world.was_invoked(
             "oneagentgraph",
             &["--label", "onepipeline.persona=pr-author"]
         ),
-        "a title the planner set still spent a drafting dispatch"
+        "a body the planner wrote still spent a drafting dispatch"
     );
 }
 
+/// Every way the drafting dispatch can end badly, and none of them reaches the
+/// publication.
+///
+/// It runs after the branch is verified and is not on the publication path, so
+/// each of these is a change request that opens with no body and a node that
+/// settles on its publication as before.
 #[test]
-fn a_drafting_failure_falls_back_deterministic_and_still_publishes() {
-    let world = World::new("lifecycle-fallback");
-    let repo = published_locally(&world);
-    world.script("service.work", "the worker wrote this\n");
-    // Only the drafting dispatch fails. It runs after the branch is already
-    // verified and is not on the publication path, so the change still lands.
-    world.script("service.pr-author.fail", "1");
-    let run = settle(&world, "fallback", vec![lifecycle("service", &[])]);
+fn a_drafting_dispatch_that_ends_badly_leaves_the_publication_untouched() {
+    for (name, scenario) in [
+        ("failed", "service.pr-author.fail"),
+        ("unschematic", "pr-author.unschematic"),
+    ] {
+        let world = World::new(&format!("lifecycle-draft-{name}"));
+        world.repository("change-open", &["true"]);
+        world.script("service.work", "the worker wrote this\n");
+        world.script(scenario, "1");
+        let drafting = world.pr_author_graph();
+        let node = titled(lifecycle("service", &[]), "feat: land it anyway");
+        let path = world.plan(name, &plan_of(name, vec![node]));
+        let launched = world.run(&[
+            "start",
+            &path.to_string_lossy(),
+            "--attach",
+            "--pr-author-graph",
+            &drafting,
+        ]);
+        launched.settled();
 
-    let result = world.run_json(&run, "result.json");
+        let result = world.run_json(name, "result.json");
+        assert_eq!(
+            result["state"],
+            "complete",
+            "a drafting dispatch that {name} blocked publication: {result}\n{}",
+            why(&world, name)
+        );
+        let opened = world.changes_opened();
+        assert_eq!(opened.len(), 1, "{opened:?}");
+        assert_eq!(
+            opened[0]["body"], "",
+            "a drafting dispatch that {name} still put a body on the change request: {opened:?}"
+        );
+        assert_eq!(opened[0]["title"], "feat: land it anyway");
+    }
+}
+
+/// The launch config declares the drafting graph, the flag overrides it, and
+/// both are resolved against the directory the launch was made from.
+///
+/// The same pair every other launch-level decision has: a team writes the graph
+/// down beside its plan, and one launch says otherwise on the command line
+/// without restating the rest of the document. Both references are **relative**,
+/// which is how a document beside a plan names a document beside a plan — and
+/// what the launch records is the resolved path, because every later driver
+/// replays that record from wherever it happens to be started.
+#[test]
+fn a_launch_config_names_the_drafting_graph_and_the_flag_overrides_it() {
+    let world = World::new("lifecycle-draft-config");
+    world.repository("change-open", &["true"]);
+    world.script("service.work", "the worker wrote this\n");
+    let declared = world.pr_author_graph();
+    // A second document, so "which graph ran" is a question with two answers.
+    let overriding = world.graphs().join("pr-author-override.yaml");
+    std::fs::copy(&declared, &overriding).expect("the overriding graph is written");
+    let config = world.root.join("launch.yaml");
+    // At the version that declares the key: `pr_author_graph` is what schema 2
+    // added, and a document below it naming one is refused by that key's name.
+    std::fs::write(
+        &config,
+        "schema_version: 2\npr_author_graph: graphs/pr-author.yaml\n",
+    )
+    .expect("the launch config is written");
+
+    let drafted = |run: &str, extra: &[&str]| -> String {
+        let node = titled(lifecycle("service", &[]), "feat: land it");
+        let path = world.plan(run, &plan_of(run, vec![node]));
+        let mut args = vec![
+            "start".to_string(),
+            path.to_string_lossy().into_owned(),
+            "--attach".to_string(),
+            "--launch-config".to_string(),
+            config.to_string_lossy().into_owned(),
+        ];
+        args.extend(extra.iter().map(|arg| (*arg).to_string()));
+        let mut command = world.cmd(&args.iter().map(String::as_str).collect::<Vec<_>>());
+        // Launched from the directory both references are written against, which
+        // is what makes them relative to anything at all.
+        command.current_dir(&world.root);
+        world
+            .run_on(command, "start with a declared drafting graph")
+            .settled();
+        world.run_json(run, "launch.json")["pr_author_graph"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{run} recorded no drafting graph"))
+            .to_string()
+    };
+
+    // Each run records the *resolved* reference: relative in the document,
+    // absolute in the record, against the directory the launch was made from.
     assert_eq!(
-        result["state"],
-        "complete",
-        "a drafting failure blocked publication: {result}\n{}",
-        why(&world, &run)
+        std::fs::canonicalize(drafted("declared", &[])).expect("the recorded graph resolves"),
+        std::fs::canonicalize(&declared).expect("the declared graph is there"),
+        "the launch config's own graph did not reach the run"
     );
-    assert!(
-        repo.base_commits(&world)
-            .iter()
-            .any(|subject| subject == "chore: service"),
-        "the deterministic title was not used: {:?}",
-        repo.base_commits(&world)
+    assert_eq!(
+        std::fs::canonicalize(drafted(
+            "overridden",
+            &["--pr-author-graph", "graphs/pr-author-override.yaml"]
+        ))
+        .expect("the recorded graph resolves"),
+        std::fs::canonicalize(&overriding).expect("the overriding graph is there"),
+        "the flag did not override the config it names"
     );
+    // And it is the graph each run *dispatched*, rather than only what each
+    // recorded: the second run drafted through the document the flag named.
+    let graphs: Vec<PathBuf> = world
+        .invocations()
+        .iter()
+        .filter(|call| {
+            call["tool"] == "oneagentgraph"
+                && call["args"].as_array().is_some_and(|args| {
+                    args.iter()
+                        .any(|arg| arg == "onepipeline.persona=pr-author")
+                })
+        })
+        .filter_map(|call| call["args"][1].as_str())
+        .map(|graph| std::fs::canonicalize(graph).expect("the dispatched graph resolves"))
+        .collect();
+    assert_eq!(
+        graphs,
+        vec![
+            std::fs::canonicalize(&declared).expect("the declared graph is there"),
+            std::fs::canonicalize(&overriding).expect("the overriding graph is there"),
+        ],
+        "the drafting dispatches did not run the graphs their launches decided"
+    );
+}
+
+/// The drafted body is read out of the copy **this run kept**, never out of the
+/// path the producer named.
+///
+/// `report_path` is a stranger's path on a journal line: a reader that opened
+/// whatever it named would be an arbitrary-file reader driven by whatever wrote
+/// there, and what it read would be published on a change request. So the
+/// producer here names a **symlink** wearing the report's own file name, and the
+/// file behind it is a valid report carrying a body of its own. Retention
+/// refuses it — a report is a plain file the producer wrote — and the change
+/// request opens with no body at all: the planted words reach nothing this run
+/// wrote, published or recorded.
+#[test]
+fn a_drafted_body_is_read_only_from_the_copy_this_run_retained() {
+    let world = World::new("lifecycle-planted-body");
+    world.repository("change-open", &["true"]);
+    world.script("service.work", "the worker wrote this\n");
+    // Every settlement in this run names one, which costs the transcript its
+    // words and must cost the publication its body.
+    world.script("report.symlink", "");
+    let drafting = world.pr_author_graph();
+    let node = titled(lifecycle("service", &[]), "feat: land it with no body");
+    let path = world.plan("planted", &plan_of("planted", vec![node]));
+    world
+        .run(&[
+            "start",
+            &path.to_string_lossy(),
+            "--attach",
+            "--pr-author-graph",
+            &drafting,
+        ])
+        .settled();
+
+    let opened = world.changes_opened();
+    assert_eq!(opened.len(), 1, "{opened:?}");
+    assert_eq!(
+        opened[0]["body"], "",
+        "the change request carries a body this run never retained: {opened:?}"
+    );
+    // And nowhere else either: not in the merged store, and not in the run's own
+    // record of what it published.
+    for artifact in ["events.jsonl", "result.json"] {
+        let written = std::fs::read_to_string(world.run_file("planted", artifact))
+            .unwrap_or_else(|error| panic!("cannot read {artifact}: {error}"));
+        assert!(
+            !written.contains("planted-and-never-read"),
+            "{artifact} carries what only the producer-named path held"
+        );
+    }
+}
+
+/// A plan written at an **earlier** version still runs, and its untitled
+/// lifecycle node publishes under the subject `onevcs` derives.
+///
+/// Every version this build reads below the one it writes, because "an earlier
+/// plan still runs" is a promise to every plan already written on a host and a
+/// journey that drove only the newest of them would not hold it. A node written
+/// there states no title — the field is required from schema 3 on — so this
+/// crate passes none, and the subject the change lands under is the sibling's
+/// own reading of the branch's conventional commits rather than anything
+/// composed here.
+#[test]
+fn an_earlier_plan_still_publishes_under_the_subject_the_sibling_derives() {
+    for version in [1, 2] {
+        let world = World::new(&format!("lifecycle-v{version}"));
+        let repo = published_locally(&world);
+        world.script("service.work", "the worker wrote this\n");
+        let run = format!("v{version}");
+        // Untitled on purpose: that is the whole shape an earlier version has,
+        // and it is what a plan on a host was written as.
+        let mut node = lifecycle("service", &[]);
+        node.as_object_mut().expect("a node").remove("title");
+        let mut plan = plan_of(&run, vec![node]);
+        plan["schema_version"] = json!(version);
+        let path = world.plan(&run, &plan);
+        world
+            .run(&["start", &path.to_string_lossy(), "--attach"])
+            .settled();
+
+        let result = world.run_json(&run, "result.json");
+        assert_eq!(
+            result["state"],
+            "complete",
+            "a version {version} plan no longer runs: {result}\n{}",
+            why(&world, &run)
+        );
+        let landed = repo.base_commits(&world);
+        assert!(
+            landed.len() > 1,
+            "the workstream published nothing: {landed:?}\n{}",
+            why(&world, &run)
+        );
+        // Nothing this crate composed: the `chore: <node id>` fallback it used
+        // to publish under is gone, and the subject the base landed under is the
+        // one the sibling derived from the branch this node published — read off
+        // the node's own settlement rather than written down here.
+        let branch = result["nodes"][0]["branch"]
+            .as_str()
+            .unwrap_or_else(|| panic!("the node recorded no branch: {result}"));
+        assert!(
+            !landed.iter().any(|subject| subject.contains("service")),
+            "this crate composed a subject for a node that stated none: {landed:?}"
+        );
+        assert_eq!(
+            landed.first().map(String::as_str),
+            Some(derived_subject(branch).as_str()),
+            "the base did not land under the subject the sibling derives: {landed:?}"
+        );
+    }
 }
 
 /// Publication, watched while it happens.
@@ -677,6 +1044,42 @@ fn a_record_written_after_the_follow_ended_still_reaches_the_merged_store_once()
     let closed = &world.events_of(&run, "session-closed")[0];
     assert_eq!(closed["labels"]["node"], "service", "{closed}");
     assert_eq!(closed["source"], "vcs", "{closed}");
+}
+
+/// A drafting graph the launch directory cannot produce is refused before a run
+/// exists.
+///
+/// The reference is external input and it is *relative*, so this crate owns the
+/// base it resolves against and is the only thing that can say it does not
+/// resolve. Refused at launch rather than at the first publication: a run minted
+/// against a graph nothing can read would dispatch every node, do the work, and
+/// discover at the change request that the drafting it was launched for was
+/// never going to happen — so the refusal is worth nothing unless no run was
+/// minted, which is the second half of what this asserts.
+#[test]
+fn a_drafting_graph_the_launch_directory_cannot_produce_is_refused_before_a_run_starts() {
+    let world = World::new("lifecycle-nodrafting");
+    world.repository("local-direct", &["true"]);
+    let path = world.plan(
+        "nodrafting",
+        &plan_of("nodrafting", vec![lifecycle("service", &[])]),
+    );
+    world
+        .run(&[
+            "start",
+            &path.to_string_lossy(),
+            "--attach",
+            "--pr-author-graph",
+            "graphs/no-such-pr-author.yaml",
+        ])
+        .exited(2)
+        // Naming the reference as it was given and the directory it was resolved
+        // against: a launch refused for a relative path says which path and
+        // relative to what, or the operator cannot tell a typo from a launch run
+        // from the wrong directory.
+        .err_has("cannot read graph 'graphs/no-such-pr-author.yaml'")
+        .err_has("resolved against launch directory");
+    assert!(!world.run_file("nodrafting", "launch.json").exists());
 }
 
 #[test]
@@ -1397,6 +1800,7 @@ fn a_step_dispatches_under_its_own_agent_graph_before_its_nodes() {
     let node = json!({
         "id": "service",
         "repo": "service",
+        "title": "feat: land the workstream",
         "agent_graph": node_graph.to_string_lossy(),
         "steps": [
             {"id": "implement", "persona": "engineer", "task": "## What\nimplement"},
@@ -1623,6 +2027,7 @@ fn a_continuation_skips_the_steps_the_preserved_branch_already_carries() {
     let node = json!({
         "id": "service",
         "repo": "service",
+        "title": "feat: land the workstream",
         "steps": [
             {"id": "implement", "persona": "engineer", "task": "## What\nimplement"},
             {"id": "review", "persona": "reviewer", "task": "## What\nreview", "deps": ["implement"]},

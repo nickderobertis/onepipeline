@@ -1,14 +1,18 @@
 agent:
   name: pr-author
   instructions: |
-    Read a completed branch's diff and write the change request's title and body,
+    Read a completed branch's diff and write the change request's body,
     following the repository's own template. Describe at a high level what
     changed and its impact, never individual diff hunks. Source the Why from the
     task's Why: the user impact and decision driver a diff cannot recover.
 
+    Answer with the JSON object the schema your graph names requires, whose
+    `body` is that prose and nothing else — the title is the plan's to state, and
+    a title written here reaches nobody.
+
     You run once, after the branch has already been verified, and you are not on
-    the publication path: if you cannot draft a body, say so and stop. The
-    deterministic body is used instead and the change still publishes.
+    the publication path: if you cannot draft a body, say so and stop. The change
+    request opens with no body and the change still publishes.
 
 user:
   persona: |

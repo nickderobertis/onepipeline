@@ -1,9 +1,17 @@
-//! The onejudge report a settled member left behind.
+//! The report a settled member left behind.
 //!
 //! `oneagentgraph` stores each member's full report and puts its `report_path`
 //! on the `member-settled` it relays here, so the evidence behind a dispatch —
 //! every turn, its tools, its text, and what the two sides of the conversation
 //! spent — is retained rather than summarised away.
+//!
+//! **Whose report depends on the member.** A two-party (`kind: onejudge`) member
+//! settles on onejudge's own report, whose `transcript` is the conversation its
+//! two sides had. A single-sided (`kind: oneharness`) member settles on
+//! oneharness's run report: one entry per harness the run tried, each carrying
+//! that harness's final text, the tool events it took, and — for a run whose
+//! config declared a schema — the answer that was validated against it. Both are
+//! read here, because both are what a dispatch of this stack can leave behind.
 //!
 //! # Ingest copies; readers never follow
 //!
@@ -340,7 +348,7 @@ pub fn read(kept: &Path) -> Option<Value> {
     serde_json::from_str(&text).ok()
 }
 
-/// The turns a report's transcript carries, in order.
+/// The turns a report carries, in order.
 ///
 /// **Two report shapes, because a node is dispatched to either member kind.** A
 /// two-party `kind: onejudge` member settles with onejudge's report, whose
@@ -375,11 +383,37 @@ pub fn turns(document: &Value) -> Vec<Turn> {
     {
         return messages.iter().map(Turn::of).collect();
     }
+    results(document).filter_map(Turn::of_result).collect()
+}
+
+/// The per-harness results a run report carries, or nothing for a document that
+/// is not one.
+fn results(document: &Value) -> impl Iterator<Item = &Value> {
     document
         .get("results")
         .and_then(Value::as_array)
-        .map(|results| results.iter().filter_map(Turn::of_result).collect())
-        .unwrap_or_default()
+        .into_iter()
+        .flatten()
+}
+
+/// The `body` a structured-output run's validated answer carries, when one ran.
+///
+/// The answer lives at `results[].structured` of the harness that **ran** — the
+/// list holds one entry per candidate an identity chain tried, and one it
+/// stepped past carries no answer — and it is taken only where the producing
+/// library says it conformed to the schema it was validated against. A
+/// last-attempted value that failed validation is retained there on purpose, so
+/// a consumer reading `structured` alone would take prose the schema rejected.
+///
+/// `None` for every other ending: no schema was asked for, no candidate ran, the
+/// answer did not conform, or it conformed and carries no body worth publishing.
+pub fn drafted_body(document: &Value) -> Option<String> {
+    results(document)
+        .filter(|result| result.get("schema_valid").and_then(Value::as_bool) == Some(true))
+        .find_map(|result| {
+            let body = result.get("structured")?.get("body")?.as_str()?.trim();
+            (!body.is_empty()).then(|| body.to_owned())
+        })
 }
 // llmlint: ignore-end[boundary_inputs_validated]
 
@@ -703,6 +737,29 @@ mod tests {
         // And an entry that answered but named no producer is not shown under a
         // blank identity.
         assert!(turns(&json!({"results": [{"text": "done"}]})).is_empty());
+    }
+
+    /// The drafted body is the validated answer of the result that ran, and
+    /// nothing else is read as one.
+    #[test]
+    fn a_drafted_body_is_taken_only_from_an_answer_the_schema_accepted() {
+        let result = |valid: Value, structured: Value| json!({"results": [{"schema_valid": valid, "structured": structured}]});
+        assert_eq!(
+            drafted_body(&result(json!(true), json!({"body": "## What\nit landed"}))).as_deref(),
+            Some("## What\nit landed")
+        );
+
+        // The last-attempted value of a run that never conformed is retained on
+        // the report on purpose: taking it would publish prose the schema
+        // rejected.
+        assert!(drafted_body(&result(json!(false), json!({"body": "half a "}))).is_none());
+        // A schema nobody asked for leaves both fields null.
+        assert!(drafted_body(&result(Value::Null, Value::Null)).is_none());
+        // A conforming answer whose body is blank is no body at all.
+        assert!(drafted_body(&result(json!(true), json!({"body": "  "}))).is_none());
+        assert!(drafted_body(&result(json!(true), json!({"title": "feat: x"}))).is_none());
+        // And a document that is not a run report at all.
+        assert!(drafted_body(&json!({"transcript": {"messages": []}})).is_none());
     }
 
     #[test]
