@@ -1315,3 +1315,65 @@ fn a_workspace_this_host_cannot_ask_about_is_reported_rather_than_read_as_free()
 
     world.release("service.go");
 }
+
+/// A workspace whose only holder has *finished with it* reads as free.
+///
+/// A session record outlives the session: closing one releases the worktree and
+/// the lease and leaves the record behind, because the branch it names is still
+/// the only record of the work. So a repository worked in earlier in the run has
+/// holders, and none of them holds anything — and a ready node on it is waiting
+/// for a slot, not for a lease. Reported as waiting, it would send a supervisor
+/// looking for a dispatch that settled hours ago.
+#[test]
+fn a_ready_node_whose_repositorys_only_session_has_closed_reads_as_queued() {
+    let world = World::new("views-ready-closed");
+    world.repository("local-direct", &["true"]);
+    world.script("service.work", "the worker wrote this\n");
+    // One whole lifecycle first, so the repository has a session record and that
+    // session is closed.
+    let done = world.plan(
+        "worked",
+        &plan_of("worked", vec![lifecycle("service", &[])]),
+    );
+    world
+        .run(&["start", &done.to_string_lossy(), "--attach"])
+        .settled();
+    world.until("the first run to settle", |world| {
+        world.run_file("worked", "result.json").is_file()
+    });
+    assert!(
+        !world.events_of("worked", "session-closed").is_empty(),
+        "the first run's session never closed, so nothing left a spent holder behind:\n{}",
+        world.dump()
+    );
+
+    // Now a run whose lifecycle node is ready behind a node that is not: the
+    // repository's only holder is the closed one above.
+    world.script("blocker.wait", "hold");
+    let mut plan = plan_of(
+        "readyclosed",
+        vec![agent("blocker", &[]), lifecycle("service", &[])],
+    );
+    plan["concurrency"] = serde_json::json!(1);
+    let path = world.plan("readyclosed", &plan);
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+    world.until("the blocking node to be dispatched", |world| {
+        !world.events_of("readyclosed", "node-dispatched").is_empty()
+    });
+
+    let status = world.run(&["status", "readyclosed"]);
+    status.exited(0);
+    assert!(
+        status
+            .stdout
+            .lines()
+            .any(|line| line.contains("service: ready — queued for dispatch")),
+        "a workspace whose only session has closed reads as one something is \
+         holding:\n{}",
+        status.stdout
+    );
+
+    world.release("blocker.go");
+}

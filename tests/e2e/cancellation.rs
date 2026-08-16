@@ -399,51 +399,52 @@ fn a_requeue_of_a_parked_node_whose_dispatch_has_settled_is_applied() {
 #[test]
 fn a_cancel_of_a_silent_dispatch_asks_nothing_and_still_carries_a_deadline() {
     let world = World::new("cancel-silent");
-    // Held before it announces anything: no member, no turn, no address.
-    world.script("slow.wait", "hold");
-    let path = world.plan(
-        "cancelsilent",
-        &plan_of("cancelsilent", vec![agent("slow", &[])]),
-    );
-    let mut launch = world.cmd(&["start", &path.to_string_lossy(), "--detach"]);
-    // A deadline of zero, which is the value that must not be honoured: taken
-    // literally it would make every cooperative cancel an immediate kill, and
-    // the ask this whole change exists for would never be waited on. It falls
-    // back to the default, which the surface below names.
-    launch.env(CANCEL_GRACE_ENV, "0");
-    world.run_on(launch, "start --detach").exited(0);
-    world.until("the node to be dispatched", |world| {
-        !world
-            .events_of("cancelsilent", "node-dispatched")
-            .is_empty()
-    });
-    let run = "cancelsilent".to_string();
+    // Both spellings of an unusable deadline, because they fail differently and
+    // the fallback has to cover both: a literal zero, which taken at its word
+    // would make every cooperative cancel an immediate kill and never wait for
+    // the ask this change exists for, and a value that is not a number of
+    // seconds at all. Each drives its own run; the node is named for its
+    // scenario so the two holds are independent.
+    for (node, grace) in [("zeroed", "0"), ("nonsense", "when-it-feels-like-it")] {
+        // Held before it announces anything: no member, no turn, no address.
+        world.script(&format!("{node}.wait"), "hold");
+        let path = world.plan(node, &plan_of(node, vec![agent(node, &[])]));
+        let mut launch = world.cmd(&["start", &path.to_string_lossy(), "--detach"]);
+        launch.env(CANCEL_GRACE_ENV, grace);
+        world.run_on(launch, "start --detach").exited(0);
+        world.until("the node to be dispatched", |world| {
+            !world.events_of(node, "node-dispatched").is_empty()
+        });
+        let run = node.to_string();
 
-    cancel(&world, &run, "slow");
+        cancel(&world, &run, node);
 
-    let asked_for = world.surfaced(&run, "dispatch-interrupted");
-    let message = asked_for["payload"]["message"]
-        .as_str()
-        .expect("the surface says what it did");
-    assert!(
-        message.contains("has named a turn to interrupt"),
-        "a dispatch that had named no turn was reported as one that was asked: {message}"
-    );
-    assert!(
-        message.contains("killed in 300s"),
-        "an unusable grace period did not fall back to the default: {message}"
-    );
-    assert!(
-        !world.was_invoked("oneagentgraph", &["interrupt"]),
-        "an interrupt was addressed at a turn nothing had named: {:?}",
-        world.invocations()
-    );
+        let asked_for = world.surfaced(&run, "dispatch-interrupted");
+        let message = asked_for["payload"]["message"]
+            .as_str()
+            .expect("the surface says what it did");
+        assert!(
+            message.contains("has named a turn to interrupt"),
+            "a dispatch that had named no turn was reported as one that was asked: {message}"
+        );
+        assert!(
+            message.contains("killed in 300s"),
+            "the grace period {grace:?} was honoured instead of falling back to the \
+             default: {message}"
+        );
+        assert!(
+            !world.was_invoked("oneagentgraph", &["interrupt"]),
+            "an interrupt was addressed at a turn nothing had named: {:?}",
+            world.invocations()
+        );
 
-    // Released rather than left to the deadline: what this journey is about is
-    // the ask and the clock, and waiting out the default would be waiting on it.
-    world.release("slow.go");
-    let settled = settlement(&world, &run, "slow");
-    assert_eq!(settled["payload"]["status"], "cancelled", "{settled}");
+        // Released rather than left to the deadline: what this journey is about
+        // is the ask and the clock, and waiting out the default would be waiting
+        // on it.
+        world.release(&format!("{node}.go"));
+        let settled = settlement(&world, &run, node);
+        assert_eq!(settled["payload"]["status"], "cancelled", "{settled}");
+    }
 }
 
 /// A lever that was pulled and *broke* is an answer too, and the deadline still
