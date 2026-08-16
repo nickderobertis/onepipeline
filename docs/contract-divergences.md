@@ -729,17 +729,18 @@ crosses. A graph that reached a dispatch without crossing it — one folded from
 journal a stale build wrote — settles the node `invalid-node` with the same
 sentence rather than launching.
 
-The plan schema is **version 2** for it. The two versions do not describe the
-same document — one field is gone and one now reaches the dispatch — so a plan
-declaring version 1 is refused deliberately, naming what moved and what to set
-rather than reporting that two numbers differ. A version-1 plan that still
-carries `done_when` is answered with the field's refusal instead, because the
-field is the thing its author has to move and the version is downstream of that.
+The plan schema was **version 2** for it, and the amended contract listed
+`max_turns` among the node shapes and no `done_when` at all, stated what a
+control is and what becomes of one that cannot be applied, and named
+`pub controls: NodeControls` in its seam sketch.
 
-The amended contract declares the schema as v2, lists `max_turns` among the node
-shapes and no `done_when` at all, states what a control is and what becomes of
-one that cannot be applied, and names `pub controls: NodeControls` in its seam
-sketch.
+**Superseded on the version, not on the controls.** That change refused a
+version-1 plan deliberately; the schema is at 3 now and this build reads 1, 2,
+and 3, because what each version added is keyed to the version the *document*
+declares and a plan already written on a host is a document this engine can
+execute. What survives unchanged is the field: a plan carrying `done_when` is
+answered with that field's own refusal at every version, because the review bar
+its author wrote is the thing they have to move.
 
 ## 25. The retained driver of a detached launch is now a *second* hidden verb — RESOLVED
 
@@ -876,9 +877,9 @@ launcher **writes** and `adopt` replays — nothing an operator hands to `start`
 The block reached a run as three flags only.
 
 Both halves now exist and they are one block.
-[`filter::LaunchConfig`](../src/filter.rs) is the document — `schema_version: 1`,
-an optional `filters:`, and nothing else, read as YAML or JSON by
-`LaunchConfig::load` — and `cli::StartArgs::launch_config` is the
+[`filter::LaunchConfig`](../src/filter.rs) is the document — a `schema_version`,
+an optional `filters:`, and what a later version added beside it, read as YAML or
+JSON by `LaunchConfig::load` — and `cli::StartArgs::launch_config` is the
 `--launch-config FILE` that names it. `driver::declared_filters` reads that
 config as the **base** and applies each flag over it: `--filter-agentgraph` and
 `--filter-vcs` replace their source filter wholesale, and each
@@ -890,9 +891,17 @@ two that have to agree.
 The config is external input and is refused at its own boundary — unknown key by
 name, `schema_version` by its number, and a filter by the grammar's own rules —
 before a run is minted. It is versioned and pinned: `LAUNCH_CONFIG_SCHEMA_VERSION`
-beside `tests/golden/launch-config-v1.json`, gated the way the run result and the
+beside a checked-in golden **per version**, gated the way the run result and the
 telemetry document already are, so the shape cannot move without someone deciding
 to move it.
+
+**Version 2 is `pr_author_graph`**, the launch's second decision, and the bump was
+made deliberately with the golden that pins it —
+`tests/golden/launch-config-v2.json`, beside the version-1 one that stays checked
+in for what a single golden cannot pin: that a config written before the key is
+still a document this build reads. `LAUNCH_CONFIG_SCHEMA_VERSIONS_READ` is that
+set, and naming the key at version 1 is refused by the key's own name rather than
+by the number — the same rule the plan schema reads `body` by.
 
 ## 31. `next` had no event view for a profile to shape, so it grew one — RESOLVED
 

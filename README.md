@@ -65,6 +65,12 @@ reported one for a while. It never drives the engine. Attached, `start` returns
 when the run settles; exit `3` means nothing is driving the run, and
 `onepipeline adopt RUN` attaches a fresh driver to the intact ledger.
 
+A lifecycle node states the `title` its change request opens under, and may state
+its `body` too. `--pr-author-graph REF` names an agent graph that drafts that body
+instead, from the branch's own diff, once the branch is verified and before the
+change request is opened; naming none is the default, and a drafting dispatch that
+does not get there costs the change request its body and nothing else.
+
 The planner supervises over the channel:
 
 ```bash

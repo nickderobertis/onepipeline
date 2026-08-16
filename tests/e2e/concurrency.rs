@@ -21,7 +21,8 @@ fn live_holders_refuse_unless_acknowledged_and_stale_holders_do_not_refuse() {
             "id": "build",
             "task": "## What\nBuild.\n\n## Why\nNeeded.\n\n## Acceptance criteria\n- Built.",
             "persona": "engineer",
-            "repo": "service"
+            "repo": "service",
+            "title": "feat: build it"
         })
     };
     let first_plan = world.plan("first", &plan_of("first", vec![lifecycle()]));

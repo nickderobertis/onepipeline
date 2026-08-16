@@ -41,7 +41,8 @@ path = "src/bin/fake-gh.rs"
 # turn only, for the journeys that drive the real `oneagentgraph` binary. It is
 # the *harness* rather than `oneharness`, because a single-sided member's turn is
 # an `oneharness_core` library call from `oneagentgraph 0.2.18` on and the only
-# process left below it is the one oneharness spawns for the identity chain.
+# process left below it is the one oneharness spawns for the identity chain, at
+# that library's own `ONEHARNESS_BIN_<ID>`.
 [[bin]]
 name = "fake-claude"
 path = "src/bin/fake-claude.rs"

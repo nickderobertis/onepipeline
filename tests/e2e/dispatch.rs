@@ -163,6 +163,7 @@ fn relative_node_and_step_graph_overrides_dispatch_from_the_launch_directory() {
     let node = json!({
         "id": "service",
         "repo": "service",
+        "title": "feat: land the workstream",
         "agent_graph": "node-override.yaml",
         "steps": [
             {"id": "implement", "persona": "engineer", "task": "## What\nimplement"},
@@ -214,8 +215,16 @@ fn relative_node_and_step_graph_overrides_dispatch_from_the_launch_directory() {
     }
 }
 
+/// Both graphs a lifecycle node dispatches under are the ones its **launch**
+/// resolved, and a fresh driver replays them.
+///
+/// The node-scope graph its work runs under, and the pr-author graph its change
+/// request's body is drafted by: each is resolved once, at `start`, against the
+/// directory the operator launched from, and recorded. `adopt` runs from
+/// somewhere else, under an environment naming a *different* node graph — what
+/// the dispatches run under is the launch record either way.
 #[test]
-fn lifecycle_and_title_drafting_keep_the_node_graph_resolved_at_launch() {
+fn a_lifecycle_nodes_two_graphs_are_the_ones_its_launch_resolved() {
     let world = World::new("lifecycle-recorded-default-graph");
     world.repository("local-direct", &["true"]);
     world.script("driver.wait", "hold");
@@ -223,6 +232,7 @@ fn lifecycle_and_title_drafting_keep_the_node_graph_resolved_at_launch() {
     let launch_graph = crate::harness::repo_file("graphs/node-scope.yaml");
     let later_graph = world.root.join("later-node-scope.yaml");
     std::fs::copy(&launch_graph, &later_graph).expect("the later graph is written");
+    let drafting = world.pr_author_graph();
     let mut service = crate::harness::lifecycle("service", &["approve"]);
     service["deps"] = json!(["approve"]);
     let path = world.plan(
@@ -232,17 +242,31 @@ fn lifecycle_and_title_drafting_keep_the_node_graph_resolved_at_launch() {
             vec![human("approve", &[]), service],
         ),
     );
-    let mut start = world.cmd(&["start", &path.to_string_lossy(), "--attach"]);
+    let mut start = world.cmd(&[
+        "start",
+        &path.to_string_lossy(),
+        "--attach",
+        "--pr-author-graph",
+        &drafting,
+    ]);
     start.env("ONEPIPELINE_NODE_GRAPH", &launch_graph);
     world
         .run_on(start, "start recorded lifecycle graph")
         .exited(0);
+    // Recorded, which is what makes it replayable at all: a launcher that
+    // resolved the reference and kept it to itself would leave every later
+    // driver to guess.
+    assert_eq!(
+        world.run_json("recorded-lifecycle-graph", "launch.json")["pr_author_graph"],
+        json!(drafting),
+        "the launch record does not name the graph the launch was given"
+    );
     world
         .run(&["attest", "recorded-lifecycle-graph", "approve"])
         .exited(0);
     // A fresh driver, under an environment naming a *different* node graph: what
-    // the dispatch runs under is the reference resolved at launch and recorded,
-    // never whatever this process happens to be pointed at.
+    // the dispatches run under is the state the launch recorded, never whatever
+    // this process happens to be pointed at.
     let mut adopted = world.cmd(&["adopt", "recorded-lifecycle-graph"]);
     adopted.env("ONEPIPELINE_NODE_GRAPH", &later_graph);
     world
@@ -259,20 +283,37 @@ fn lifecycle_and_title_drafting_keep_the_node_graph_resolved_at_launch() {
                     .is_some_and(|args| args.iter().any(|arg| arg == "onepipeline.node=service"))
         })
         .collect();
-    assert!(
+    let under = |persona: &str| -> Vec<&Value> {
         relevant
             .iter()
-            .any(|call| call["args"].as_array().is_some_and(|args| {
-                args.iter()
-                    .any(|arg| arg == "onepipeline.persona=pr-author")
-            })),
-        "the title drafting dispatch did not run: {relevant:?}"
+            .filter(|call| {
+                call["args"]
+                    .as_array()
+                    .is_some_and(|args| args.iter().any(|arg| arg == persona))
+            })
+            .copied()
+            .collect()
+    };
+    let drafts = under("onepipeline.persona=pr-author");
+    assert_eq!(
+        drafts.len(),
+        1,
+        "the body drafting dispatch did not run after adoption: {relevant:?}"
+    );
+    assert_eq!(
+        drafts[0]["args"][1], drafting,
+        "the drafting dispatch ran a graph the launch did not record: {drafts:?}"
+    );
+    let worked = under("onepipeline.persona=engineer");
+    assert!(
+        !worked.is_empty(),
+        "the node never dispatched: {relevant:?}"
     );
     assert!(
-        relevant
+        worked
             .iter()
             .all(|call| call["args"][1] == launch_graph.to_string_lossy().as_ref()),
-        "a lifecycle dispatch re-read the live graph instead of launch state: {relevant:?}"
+        "a lifecycle dispatch re-read the live graph instead of launch state: {worked:?}"
     );
 }
 
@@ -338,6 +379,7 @@ fn unreadable_relative_plan_graphs_name_their_path_and_launch_base() {
             json!({
                 "id": "service",
                 "repo": "service",
+                "title": "feat: land the workstream",
                 "steps": [{
                     "id": "implement",
                     "persona": "engineer",
@@ -779,6 +821,226 @@ fn status_says_what_a_live_dispatch_is_doing_and_the_readout_advances() {
     world.until("the run to settle", |world| {
         world.run_file("watched", "result.json").is_file()
     });
+}
+
+/// A change request body drafted through the **real** siblings, end to end.
+///
+/// Every layer between the plan and the published body is the real thing: real
+/// `oneagentgraph` resolves the pr-author graph and prepares its member, real
+/// `oneharness` reads that member's own config, sees the `schema_file` it
+/// declares, runs the turn buffered rather than streamed, validates what comes
+/// back against that schema, and stores it at `results[].structured` of the
+/// result that ran. This crate retains that report as it ingests the settlement,
+/// reads the body out of its own copy, and hands it to `onevcs`, which opens the
+/// change request with it. Only the paid model turn stands in.
+///
+/// That chain is a cross-repository contract with no shared type, so it is
+/// proven rather than assumed: a sibling that stopped putting a validated answer
+/// where this crate reads it would publish an empty change request and nothing
+/// else would say so.
+#[test]
+fn a_drafted_body_reaches_the_change_request_through_the_real_siblings() {
+    let world = World::new("real-pr-author");
+    world.write_graphs();
+    // A change request left open for review: a body is prose on one, and a
+    // direct merge opens none.
+    world.repository("change-open", &["true"]);
+    world.script("harness.work", "the worker wrote this");
+    let drafted = "## What\nRead off the branch's own diff.\n\n## Why\nSo a reviewer knows.";
+    world.script("harness.body", drafted);
+    let drafting = world.pr_author_graph();
+    let node = json!({
+        "id": "service",
+        "repo": "service",
+        "persona": "engineer",
+        "title": "feat: land what the member made",
+        "task": "## What\nship the thing",
+    });
+    let path = world.plan("authored", &plan_of("authored", vec![node]));
+    let launched = world.run_on_agentgraph(&[
+        "start",
+        &path.to_string_lossy(),
+        "--attach",
+        "--pr-author-graph",
+        &drafting,
+    ]);
+    launched.settled();
+    // What the host was asked to open the change request with.
+    let opened = world.changes_opened();
+    assert_eq!(opened.len(), 1, "{opened:?}\n{}", world.dump());
+    assert_eq!(
+        opened[0]["body"],
+        drafted,
+        "the drafted body did not reach the change request: {opened:?}\n{}",
+        world.dump()
+    );
+
+    // And it came off this run's **own** copy of the report, which is the file
+    // the reader opens: the run kept one, and the validated answer is where the
+    // producing library puts it rather than where this crate hoped.
+    let kept: Vec<serde_json::Value> = std::fs::read_dir(world.run_file("authored", "reports"))
+        .expect("the run kept the reports its dispatches settled with")
+        .filter_map(Result::ok)
+        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+        .filter_map(|text| serde_json::from_str(&text).ok())
+        .collect();
+    assert!(
+        kept.iter().any(|report| {
+            report["results"]
+                .as_array()
+                .is_some_and(|results| results.iter().any(|result| {
+                    result["schema_valid"] == json!(true) && result["structured"]["body"] == drafted
+                }))
+        }),
+        "no report this run retained carries the validated answer the body was read from: {kept:#?}"
+    );
+}
+
+/// An answer the schema accepted that carries no body publishes without one.
+///
+/// The other ending of a drafting dispatch that *worked*: the member ran, the
+/// harness answered, and the producing library validated what came back — so
+/// every failure path is untaken and `schema_valid` is true — and the body in it
+/// is blank. Distinct from the refused-graph journey below, where no answer
+/// exists at all: here one does, this crate reads it, and what it decides is
+/// that blank prose is not a body worth publishing.
+///
+/// Worth driving rather than leaving to the reader's unit tests, because the
+/// blankness has to survive four hand-offs to be observable — the harness's
+/// structured answer, the library's validation, the report this run retains, and
+/// the publish request — and a crate that passed `Some("")` on would open a
+/// change request whose body is a blank line nobody wrote.
+#[test]
+fn a_validated_answer_carrying_no_body_publishes_the_change_request_without_one() {
+    let world = World::new("blank-pr-author");
+    world.write_graphs();
+    world.repository("change-open", &["true"]);
+    world.script("harness.work", "the worker wrote this");
+    // Spacing only, which is what a turn that answered the schema and said
+    // nothing looks like: the schema requires the key, not prose under it.
+    world.script("harness.body", "   \n");
+    let drafting = world.pr_author_graph();
+    let node = json!({
+        "id": "service",
+        "repo": "service",
+        "persona": "engineer",
+        "title": "feat: land it with a blank draft",
+        "task": "## What\nship the thing",
+    });
+    let path = world.plan("blankdraft", &plan_of("blankdraft", vec![node]));
+    let launched = world.run_on_agentgraph(&[
+        "start",
+        &path.to_string_lossy(),
+        "--attach",
+        "--pr-author-graph",
+        &drafting,
+    ]);
+    launched.settled();
+
+    // Published, with the plan's own title and no body — not a body of spaces.
+    let opened = world.changes_opened();
+    assert_eq!(opened.len(), 1, "{opened:?}\n{}", world.dump());
+    assert_eq!(opened[0]["title"], "feat: land it with a blank draft");
+    assert_eq!(
+        opened[0]["body"], "",
+        "a validated answer with no body in it still put one on the change request: {opened:?}"
+    );
+    assert_eq!(
+        world.run_json("blankdraft", "result.json")["state"],
+        "complete",
+        "a drafting dispatch that answered blank took the publication with it:\n{}",
+        world.dump()
+    );
+
+    // And the answer really was accepted: the emptiness is this crate's reading
+    // of a validated answer, not a validation the dispatch failed. Without this
+    // the journey would pass just as well against a member that never ran.
+    let kept: Vec<serde_json::Value> = std::fs::read_dir(world.run_file("blankdraft", "reports"))
+        .expect("the run kept the reports its dispatches settled with")
+        .filter_map(Result::ok)
+        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+        .filter_map(|text| serde_json::from_str(&text).ok())
+        .collect();
+    assert!(
+        kept.iter().any(|report| {
+            report["results"].as_array().is_some_and(|results| {
+                results.iter().any(|result| {
+                    result["schema_valid"] == json!(true) && result["structured"]["body"] == ""
+                })
+            })
+        }),
+        "no report this run retained carries a validated answer with a blank body: {kept:#?}"
+    );
+}
+
+/// A drafting graph the runner refuses costs the change request its body and
+/// nothing else.
+///
+/// The document exists — a launch resolves the reference against its own
+/// directory and refuses one it cannot read, so a reference that got this far
+/// names a file — and the **runner** is what will not have it. That refusal
+/// arrives where the drafting dispatch is built, after the branch is verified
+/// and while the session still holds the work, which is exactly the moment
+/// nothing may take the publication down with it.
+///
+/// The real sibling, because the refusal is its: a launcher holding a second
+/// opinion about what a graph document may contain is the defect this file
+/// exists for.
+#[test]
+fn a_drafting_graph_the_runner_refuses_still_publishes_the_change_request() {
+    let world = World::new("real-pr-author-refused");
+    world.write_graphs();
+    world.repository("change-open", &["true"]);
+    world.script("harness.work", "the worker wrote this");
+    // A readable file that is not a graph the runner will run: it names a member
+    // kind that does not exist, which `oneagentgraph` refuses in its own words.
+    let refused = world.graphs().join("unrunnable.yaml");
+    std::fs::write(
+        &refused,
+        format!(
+            "version: {}\nname: pr-author\nmembers:\n  author:\n    kind: nonesuch\n",
+            oneagentgraph::config::SCHEMA_VERSION
+        ),
+    )
+    .expect("the unrunnable graph is written");
+    let node = json!({
+        "id": "service",
+        "repo": "service",
+        "persona": "engineer",
+        "title": "feat: land it with no body",
+        "task": "## What\nship the thing",
+    });
+    let path = world.plan("refuseddraft", &plan_of("refuseddraft", vec![node]));
+    let launched = world.run_on_agentgraph(&[
+        "start",
+        &path.to_string_lossy(),
+        "--attach",
+        "--pr-author-graph",
+        &refused.to_string_lossy(),
+    ]);
+    launched.settled();
+
+    // The node published, and the change request carries the plan's own title
+    // and no body at all.
+    let opened = world.changes_opened();
+    assert_eq!(opened.len(), 1, "{opened:?}\n{}", world.dump());
+    assert_eq!(opened[0]["title"], "feat: land it with no body");
+    assert_eq!(opened[0]["body"], "", "{opened:?}");
+    assert_eq!(
+        world.run_json("refuseddraft", "result.json")["state"],
+        "complete",
+        "a drafting graph the runner refused took the publication with it:\n{}",
+        world.dump()
+    );
+    // And it is not silent: a launch that named a drafting graph and drafted
+    // nothing reads exactly like one that named none.
+    assert!(
+        launched
+            .stderr
+            .contains("the drafting dispatch could not start"),
+        "the refusal never reached the operator:\n{}",
+        launched.stderr
+    );
 }
 
 /// The tools a real dispatched turn used, read back off the CLI.
@@ -1849,9 +2111,9 @@ fn two_party_worktree(world: &World, run: &str) -> String {
 ///
 /// What this journey deliberately does not assert is a *settled* two-party
 /// member. onejudge spawns the agent side as `oneharness run … --prompt-file -`,
-/// which `fake-oneharness` does not speak — it stands in for the single-sided
-/// invocation `oneagentgraph` builds itself — so the conversation cannot complete
-/// offline. The launch is the fact under test and it is published before the turn
+/// which the harness double does not speak — it stands in for the provider CLI
+/// `oneharness` itself spawns, one layer further down — so the conversation
+/// cannot complete offline. The launch is the fact under test and it is published before the turn
 /// runs, which is why every two-party journey in this file reads one.
 #[test]
 fn a_two_party_member_is_started_in_the_directory_the_graph_was_given() {
@@ -1866,8 +2128,8 @@ fn a_two_party_member_is_started_in_the_directory_the_graph_was_given() {
         "repo": "service",
         "persona": "./engineer.yaml",
         "task": "## What\nship the thing",
-        // Its own title, so the run spends no `pr-author` dispatch: that one has
-        // nothing to say about where a member works.
+        // The title its change request opens under, which a lifecycle node
+        // states from plan schema 3 on.
         "title": "feat: land what the member made",
     });
     let path = world.plan("twoparty", &plan_of("twoparty", vec![node]));
@@ -1915,9 +2177,8 @@ fn a_steps_turn_budget_reaches_that_steps_own_dispatch() {
     let node = json!({
         "id": "service",
         "repo": "service",
-        // Its own title, so the run spends no `pr-author` dispatch: that one runs
-        // under a persona this world has not written, and this journey is about
-        // the step.
+        // The title its change request opens under, which a lifecycle node
+        // states from plan schema 3 on.
         "title": "feat: land what the step made",
         "steps": [
             {"id": "implement", "persona": "./implementer.yaml", "task": "## What\nimplement",

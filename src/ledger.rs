@@ -380,6 +380,18 @@ pub struct LaunchRecord {
     /// The default node-scope agent-graph config every dispatch launches.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub node_graph: String,
+    /// The agent-graph config a lifecycle node's change request body is drafted
+    /// by, when the launch named one.
+    ///
+    /// Absent when it named none, which is the shipped default: this crate ships
+    /// the flag and not the document, so a launch that says nothing drafts
+    /// nothing. Read it through [`pr_author_graph`](Self::pr_author_graph)
+    /// rather than testing this field, for the reason [`graph`](Self::graph) is
+    /// read through its own accessor. Omitted when empty, like every other field
+    /// added to this record after it shipped, so a build that predates it still
+    /// reads what it wrote.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub pr_author_graph: String,
     /// The launcher, as the environment reported it.
     pub launcher: String,
     /// The launching session. A view labels a foreign one by
@@ -425,6 +437,16 @@ impl LaunchRecord {
     /// what an empty graph reference means.
     pub fn observer_graph(&self) -> Option<&str> {
         (!self.graph.is_empty()).then_some(self.graph.as_str())
+    }
+
+    /// The graph this run drafts change request bodies with, when it was
+    /// launched with one.
+    ///
+    /// The same reading [`observer_graph`](Self::observer_graph) has, for the
+    /// same reason: an absent string field is written as no field at all, and
+    /// this is the one place that absence becomes "there is none" again.
+    pub fn pr_author_graph(&self) -> Option<&str> {
+        (!self.pr_author_graph.is_empty()).then_some(self.pr_author_graph.as_str())
     }
 
     /// Whether `session` is the session that launched this run.
@@ -758,6 +780,7 @@ mod tests {
             graph: String::new(),
             graph_run: String::new(),
             node_graph: "graphs/node-scope.yaml".into(),
+            pr_author_graph: String::new(),
             launcher: "claude-code".into(),
             session: "a-session".into(),
             pid: 1,
@@ -903,6 +926,7 @@ mod tests {
             graph: "graphs/dag-scope.yaml".into(),
             graph_run: String::new(),
             node_graph: String::new(),
+            pr_author_graph: String::new(),
             launcher: sys::UNKNOWN_LAUNCHER.into(),
             session: sys::UNKNOWN_LAUNCHER.into(),
             pid: 1,
@@ -927,6 +951,7 @@ mod tests {
             graph: "graphs/dag-scope.yaml".into(),
             graph_run: String::new(),
             node_graph: String::new(),
+            pr_author_graph: String::new(),
             launcher: "claude-code".into(),
             session: "secret-session-id".into(),
             pid: 1,

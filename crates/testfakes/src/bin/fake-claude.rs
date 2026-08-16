@@ -10,9 +10,12 @@
 //!
 //! It speaks Claude Code's headless surface — `claude -p [PROMPT]
 //! [--input-format text] --permission-mode M --output-format json|stream-json
-//! [--verbose]` — and answers in the shape oneharness normalizes: for a
-//! streaming run, Anthropic content-block lines and a terminal
-//! `{"type":"result",…}`; for a buffered one, that result document alone.
+//! [--json-schema S] [--verbose]` — and answers in the shape oneharness
+//! normalizes: for a streaming run, Anthropic content-block lines and a terminal
+//! `{"type":"result",…}`; for a buffered one, that result document alone. A run
+//! that named a schema gets its validated answer in that document's
+//! `structured_output`, which is where the change request body a `pr-author`
+//! dispatch drafts comes from.
 //!
 //! What it *does* with the turn is what a real agent would do with the same
 //! prompt: an orchestrator member is told to drive a run with the engine verbs,
@@ -66,11 +69,15 @@ enum Takes {
 /// The flags the headless surface above is made of, and what follows each.
 // llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the same gate as
 // `MODES` below, and for the same reason.
-const FLAGS: [(&str, Takes); 5] = [
+const FLAGS: [(&str, Takes); 6] = [
     ("-p", Takes::ThePromptIfItIsHere),
     ("--input-format", Takes::AValue),
     ("--permission-mode", Takes::AValue),
     ("--output-format", Takes::AValue),
+    // What a structured-output run is: oneharness names the schema file the
+    // member's own config declared, and prefers the answer validated against it
+    // over anything it could extract from the turn's text.
+    ("--json-schema", Takes::AValue),
     ("--verbose", Takes::Nothing),
 ];
 
@@ -254,7 +261,7 @@ fn turn(args: &[String], dir: &std::path::Path) -> ExitCode {
     if streaming {
         assistant_text();
     }
-    result(outcome);
+    result(outcome, &prompt, args, dir);
     outcome.exit_code()
 }
 
@@ -360,23 +367,45 @@ const ANSWER: &str = "Ran what the task asked for.";
 /// The terminal document a headless run ends on.
 ///
 /// `session_id` is what a continuation resumes, and `usage` is what an accounting
-/// reader adds up.
+/// reader adds up. `structured_output` is the field a native structured-output
+/// run answers in — `--json-schema` is on the argv, and oneharness prefers that
+/// field over anything it could extract from the text. Only a turn that
+/// *answered* carries one: a turn that did not get there has nothing the schema
+/// could have accepted, and a failure carrying an answer is a shape no harness
+/// produces.
 // llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the same provider
 // wire shape as `tool_call` above, gated the same way: `oneharness_core` reads
 // `is_error`, `result`, `session_id` and `usage` out of this document, so a field
 // it stops reading settles a member differently in `tests/e2e/dispatch.rs`.
-fn result(outcome: Outcome) {
-    println!(
-        "{}",
-        serde_json::json!({
-            "type": "result",
-            "subtype": outcome.subtype(),
-            "is_error": outcome == Outcome::TurnFailed,
-            "result": outcome.text(),
-            "session_id": "fake-claude-session",
-            "num_turns": 1,
-            "total_cost_usd": 0,
-            "usage": {"input_tokens": 1, "output_tokens": 1},
-        })
-    );
+fn result(outcome: Outcome, prompt: &str, args: &[String], dir: &std::path::Path) {
+    let mut document = serde_json::json!({
+        "type": "result",
+        "subtype": outcome.subtype(),
+        "is_error": outcome == Outcome::TurnFailed,
+        "result": outcome.text(),
+        "session_id": "fake-claude-session",
+        "num_turns": 1,
+        "total_cost_usd": 0,
+        "usage": {"input_tokens": 1, "output_tokens": 1},
+    });
+    if outcome == Outcome::Answered && fake::flag(args, "--json-schema").is_some() {
+        document["structured_output"] = structured(prompt, dir);
+    }
+    println!("{document}");
+}
+
+/// The validated answer a structured-output run is asked for.
+///
+/// One shape, because one dispatch in this stack asks for one: the change
+/// request body, which the schema its graph names requires. Scripted with
+/// `harness.body` where a journey wants to read its own words back out of the
+/// change request.
+fn structured(prompt: &str, dir: &std::path::Path) -> serde_json::Value {
+    let body = fake::node_script(dir, "harness", "body").unwrap_or_else(|| {
+        format!(
+            "## What\nWhat the diff did.\n\n## Why\n{}",
+            prompt.lines().next().unwrap_or_default()
+        )
+    });
+    serde_json::json!({"body": body})
 }

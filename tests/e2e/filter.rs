@@ -773,9 +773,12 @@ fn a_flag_overrides_the_part_of_the_launch_config_it_names() {
 /// A launch config that declares nothing changes nothing, and a config this build
 /// cannot read is refused before a run exists.
 ///
-/// The backward-compatible half: `filters:` is optional, so a document that only
-/// names its version is a launch that ingests exactly what it always did — the
-/// same thing a launch naming no config at all means.
+/// The backward-compatible half, twice over. `filters:` is optional, so a
+/// document that only names its version is a launch that ingests exactly what it
+/// always did — the same thing a launch naming no config at all means. And the
+/// version it names here is **1**: a config written before the schema declared a
+/// drafting graph is still a document this build reads, and it drives a whole run
+/// from the binary rather than only parsing in a unit test.
 #[test]
 fn a_launch_config_may_declare_nothing_and_is_refused_when_it_cannot_be_read() {
     let world = World::new("filter-config-bare");
@@ -821,8 +824,18 @@ fn a_launch_config_may_declare_nothing_and_is_refused_when_it_cannot_be_read() {
     };
     for (config, named) in [
         (
-            written("later.yaml", "schema_version: 2\n"),
-            "schema_version",
+            written("later.yaml", "schema_version: 7\n"),
+            "schema_version 7",
+        ),
+        // A key the version this document declares never had, refused by that
+        // key's name: an operator who wrote a drafting graph at the earlier
+        // version has the key to act on, not the number.
+        (
+            written(
+                "earlykey.yaml",
+                "schema_version: 1\npr_author_graph: ./graphs/pr-author.yaml\n",
+            ),
+            "`pr_author_graph` is a schema 2 key",
         ),
         (
             written("stray.yaml", "schema_version: 1\nfilterz: {}\n"),

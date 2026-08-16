@@ -30,7 +30,9 @@ use onepipeline::executor::{
 use onepipeline::filter::{
     EventFilter, Filters, LaunchConfig, Matcher, LAUNCH_CONFIG_SCHEMA_VERSION,
 };
-use onepipeline::plan::{Node, NodeKind, Plan, Resume, Step, PLAN_SCHEMA_VERSION};
+use onepipeline::plan::{
+    Node, NodeKind, Plan, Resume, Step, PLAN_SCHEMA_VERSION, PLAN_SCHEMA_VERSIONS_READ,
+};
 use onepipeline::rules::{ExecutorKind, ExecutorRules, Predicate};
 use onevcs::registry::{RepoType, Workflow};
 use onevcs::{MergePolicy, SessionRequest};
@@ -371,11 +373,17 @@ fn dispatching_goes_through_the_oneagentgraph_seam_and_says_so_when_it_cannot() 
 /// source and a copy that stopped matching it fails this gate.
 #[test]
 fn the_contracts_launch_config_example_parses_and_round_trips() {
-    let yaml = fenced_block_naming("yaml", "schema_version: 1");
+    let yaml = fenced_block_naming("yaml", "schema_version: 2");
     let config: LaunchConfig = serde_norway::from_str(&yaml).expect("the launch config parses");
     assert_eq!(
         config.schema_version, LAUNCH_CONFIG_SCHEMA_VERSION,
         "the contract's example declares a version this build does not read"
+    );
+    assert_eq!(
+        config.pr_author_graph.as_deref(),
+        Some("./graphs/pr-author.yaml"),
+        "the contract's example declares the launch's other decision and this build \
+         does not read it"
     );
     let filters = config.filters;
 
@@ -414,14 +422,37 @@ fn the_contracts_launch_config_example_parses_and_round_trips() {
     // both claim to pin the launch config's shape and could disagree would be two
     // sources; this is the one place they are held to being one.
     let golden: LaunchConfig = serde_json::from_str(
-        &std::fs::read_to_string(repo_root().join("tests/golden/launch-config-v1.json"))
+        &std::fs::read_to_string(repo_root().join("tests/golden/launch-config-v2.json"))
             .expect("the golden ships"),
     )
     .expect("the golden parses");
     assert_eq!(
-        golden.filters, filters,
-        "tests/golden/launch-config-v1.json and the contract's own example are \
+        (
+            golden.schema_version,
+            golden.filters,
+            golden.pr_author_graph
+        ),
+        (config.schema_version, filters, config.pr_author_graph),
+        "tests/golden/launch-config-v2.json and the contract's own example are \
          different documents"
+    );
+
+    // The version before it is still a document this build reads, and it ships
+    // as its own golden: the bump is additive, and that promise is to every
+    // config already written beside a plan.
+    let earlier: LaunchConfig = serde_json::from_str(
+        &std::fs::read_to_string(repo_root().join("tests/golden/launch-config-v1.json"))
+            .expect("the earlier golden ships"),
+    )
+    .expect("the earlier golden parses");
+    assert_eq!(earlier.schema_version, 1);
+    assert_eq!(
+        earlier.pr_author_graph, None,
+        "the earlier golden carries a key that version never had"
+    );
+    assert!(
+        CONTRACT.contains("a version-1 config is a complete document this build still reads"),
+        "the contract no longer says an earlier launch config still reads"
     );
 }
 
@@ -432,17 +463,23 @@ fn the_contracts_launch_config_example_parses_and_round_trips() {
 /// what this crate writes, and neither is an error.
 #[test]
 fn the_contracts_launch_config_omits_an_empty_block_and_still_reads() {
-    let bare: LaunchConfig =
-        serde_norway::from_str("schema_version: 1\n").expect("a config may declare only a version");
-    assert!(bare.filters.is_empty());
+    for version in [LAUNCH_CONFIG_SCHEMA_VERSION, 1] {
+        let bare: LaunchConfig = serde_norway::from_str(&format!("schema_version: {version}\n"))
+            .expect("a config may declare only a version");
+        assert!(bare.filters.is_empty());
+        assert_eq!(bare.pr_author_graph, None);
+    }
+    // And what this crate *writes* for one is the version alone: both optional
+    // keys are omitted, so a launch that declared neither is a document an
+    // earlier reader accepts.
     assert_eq!(
-        serde_json::to_string(&bare).expect("serializes"),
+        serde_json::to_string(&LaunchConfig::default()).expect("serializes"),
         format!(r#"{{"schema_version":{LAUNCH_CONFIG_SCHEMA_VERSION}}}"#),
-        "an empty filters block was written out"
+        "an empty filters block or an absent drafting graph was written out"
     );
     assert_contract_names(
         "launch config surface",
-        &["--launch-config FILE", "schema_version: 1"],
+        &["--launch-config FILE", "schema_version: 2"],
     );
 }
 
@@ -767,14 +804,14 @@ fn the_plan_schema_carries_every_node_shape_the_contract_names() {
     );
 }
 
-/// The contract's schema version and this crate's are the same number, and the
-/// version it replaced is refused deliberately.
+/// The contract's schema version and this crate's are the same number, and every
+/// version the document says this build reads, it reads.
 ///
 /// The plan schema is a serialized contract: a document says which version it
 /// was written at, and a reader decides by that. So the number the document
-/// states and the number the code writes are gated against each other here, and
-/// the previous version — which every plan on this host was written at — is
-/// refused with what to change rather than accepted as near enough.
+/// states and the number the code writes are gated against each other here — and
+/// so is the set below it, because "an earlier plan still runs" is a promise to
+/// every plan already written on a host and there is nothing else holding it.
 #[test]
 fn the_contracts_plan_schema_version_is_the_one_this_crate_writes() {
     assert!(
@@ -783,34 +820,44 @@ fn the_contracts_plan_schema_version_is_the_one_this_crate_writes() {
          ({PLAN_SCHEMA_VERSION})"
     );
     assert!(
-        CONTRACT.contains("a v1 plan is **refused deliberately**"),
-        "the contract no longer says the previous version is refused on purpose"
+        CONTRACT.contains("this build reads **3, 2, and 1**"),
+        "the contract no longer names the versions this build reads"
+    );
+    assert_eq!(
+        PLAN_SCHEMA_VERSIONS_READ,
+        [3, 2, 1],
+        "this crate reads a different set of versions than the contract states"
     );
 
     let root = std::env::temp_dir().join(format!("onepipeline-version-{}", std::process::id()));
     std::fs::create_dir_all(&root).expect("a scratch root");
-    let path = root.join("legacy.plan.json");
-    // A legacy plan with nothing else wrong with it: the version alone is what
-    // stops it, and the refusal is what its author needs to act on.
-    std::fs::write(
-        &path,
-        r#"{"schema_version":1,"tasks":[{"id":"a","persona":"engineer","task":"Do it."}]}"#,
-    )
-    .expect("written");
-    // It parses — the schema's shape is not what is wrong with it — and what
-    // stops it is validation, which `tests/e2e/plan.rs` drives through the
-    // binary because that is where a planner meets the refusal.
-    let legacy = Plan::load(&path).expect("a legacy plan is still a readable document");
-    assert_ne!(
-        legacy.schema_version, PLAN_SCHEMA_VERSION,
-        "this fixture is meant to declare the version that was replaced"
-    );
+    // Every version the contract names, as a document an operator wrote: each
+    // one loads, and each keeps the version it declares — a reader decides by
+    // that number, so a loader that normalized it would answer for a document
+    // nobody wrote. That they *execute* is driven through the binary, in
+    // `tests/e2e/plan.rs`, and all the way to a publication in
+    // `tests/e2e/lifecycle.rs`, because that is where a planner meets either
+    // answer.
+    for version in PLAN_SCHEMA_VERSIONS_READ {
+        let path = root.join(format!("v{version}.plan.json"));
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{"schema_version":{version},
+                    "tasks":[{{"id":"a","persona":"engineer","task":"Do it."}}]}}"#
+            ),
+        )
+        .expect("written");
+        let plan = Plan::load(&path)
+            .unwrap_or_else(|why| panic!("a version {version} plan is a readable document: {why}"));
+        assert_eq!(plan.schema_version, version);
+    }
 
-    // What this crate *writes* carries the current number, so a document it
-    // produces is one this contract describes and one an older reader refuses.
+    // What this crate *writes* carries the current number, whatever it read.
+    let earlier = Plan::load(&root.join("v1.plan.json")).expect("it still loads");
     let current = Plan {
         schema_version: PLAN_SCHEMA_VERSION,
-        ..legacy
+        ..earlier
     };
     let written = serde_json::to_value(&current).expect("it serialises");
     assert_eq!(written["schema_version"], PLAN_SCHEMA_VERSION);
@@ -1589,7 +1636,8 @@ fn a_relayed_envelope_keeps_its_producers_own_kind() {
 #[test]
 fn the_driver_contracts_invocation_parses_exactly_as_written() {
     let documented = "onepipeline start plan.json [--attach|--detach] \
-                      [--dag-graph off|REF] [--heartbeat-interval 1800] \
+                      [--dag-graph off|REF] [--pr-author-graph REF] \
+                      [--heartbeat-interval 1800] \
                       [--set PATH=VALUE]... [--node-set PATH=VALUE]... \
                       [--acknowledge-concurrent]";
     assert!(CONTRACT.contains(documented), "the driver invocation moved");
@@ -1601,6 +1649,8 @@ fn the_driver_contracts_invocation_parses_exactly_as_written() {
         "--detach",
         "--dag-graph",
         "graphs/dag-scope.yaml",
+        "--pr-author-graph",
+        "graphs/pr-author.yaml",
         "--heartbeat-interval",
         "1800",
         "--set",
@@ -1619,6 +1669,10 @@ fn the_driver_contracts_invocation_parses_exactly_as_written() {
     assert!(args.detach);
     assert!(!args.attach);
     assert_eq!(args.dag_graph, "graphs/dag-scope.yaml");
+    assert_eq!(
+        args.pr_author_graph.as_deref(),
+        Some("graphs/pr-author.yaml")
+    );
     assert_eq!(args.heartbeat_interval, 1_800);
     assert!(args.acknowledge_concurrent);
     assert_eq!(
@@ -1649,6 +1703,10 @@ fn the_driver_contracts_invocation_parses_exactly_as_written() {
     assert_eq!(
         args.dag_graph, DAG_GRAPH_OFF,
         "a plan runs with no agent graph unless one is asked for"
+    );
+    assert_eq!(
+        args.pr_author_graph, None,
+        "a change request is drafted by no graph unless one is asked for"
     );
     assert_eq!(args.heartbeat_interval, DEFAULT_HEARTBEAT_INTERVAL_SECONDS);
 }
@@ -1926,7 +1984,15 @@ fn every_persona_the_contract_ships_is_present_and_has_both_sides() {
 #[test]
 fn the_pr_author_never_blocks_publication() {
     assert!(
-        CONTRACT.contains("drafting failure falls back deterministic and never blocks publication")
+        CONTRACT.contains("Drafting is never on the publication path."),
+        "the contract no longer keeps the drafting dispatch off the publication path"
+    );
+    assert!(
+        CONTRACT.contains(
+            "the change request opens with no body and the node settles on its \
+                           publication as before"
+        ),
+        "the contract no longer says what a drafting dispatch that ended badly costs"
     );
     let text = std::fs::read_to_string(repo_root().join("personas/pr-author.yaml"))
         .expect("the pr-author persona ships");

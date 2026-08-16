@@ -269,6 +269,11 @@ fn create(args: &[String], dir: &Path) -> ExitCode {
             "head": flag("--head"),
             "base": flag("--base"),
             "title": flag("--title"),
+            // What a reviewer actually reads. Recorded rather than only
+            // shape-checked: the body is the whole product of a drafting
+            // dispatch, and a journey that could not read it back would be
+            // asserting that *something* was passed.
+            "body": flag("--body"),
             "number": number,
         })
         .to_string(),

@@ -1105,28 +1105,31 @@ fn spawn(
 
     let run = paths.run.clone();
     let node = node.clone();
-    let node_graph = launch.node_graph.clone();
+    let paths = paths.clone();
     // Cloned off the record the loop read **strictly**, rather than re-read from
     // disk where a dispatch needs it: `launch.json` is external input, and a
-    // second, leniently-read copy of it would be a filter this build could not
-    // honour arriving where nothing can refuse it.
-    let vcs_filter = launch.filters.vcs.clone();
+    // second, leniently-read copy of it would be a graph reference or a filter
+    // this build could not honour arriving where nothing can refuse it.
+    let launched = crate::lifecycle::Launch {
+        node_graph: launch.node_graph.clone(),
+        pr_author_graph: launch.pr_author_graph().map(str::to_owned),
+        vcs_filter: launch.filters.vcs.clone(),
+    };
     std::thread::Builder::new()
         .name(format!("dispatch-{}", node.id))
         .spawn(move || {
             let executor = crate::rules::executor_for(&entry);
             let settlement = if node.repo.is_some() {
-                crate::lifecycle::execute(
+                crate::lifecycle::execute(executor.as_ref(), &paths, &launched, &node, &cancel, &tx)
+            } else {
+                execute_direct(
                     executor.as_ref(),
                     &run,
-                    &node_graph,
+                    &launched.node_graph,
                     &node,
                     &cancel,
                     &tx,
-                    vcs_filter.as_ref(),
                 )
-            } else {
-                execute_direct(executor.as_ref(), &run, &node_graph, &node, &cancel, &tx)
             };
             let _ = tx.send(Message::Settled(Box::new(settlement)));
         })

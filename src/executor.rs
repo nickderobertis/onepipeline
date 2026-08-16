@@ -265,7 +265,26 @@ impl Executor for LocalExecutor {
 /// dispatch — and the node's own settings are applied *after* them: an operator's
 /// `--node-set` is run-wide, and a control the plan wrote against one node is the
 /// more specific of the two.
+///
+/// **None of them for the drafting dispatch.** `--node-set` is forwarded to every
+/// *node-scope* launch, and the persona override names `members.worker`, which is
+/// the member of the node-scope graph this crate composes: a run's pr-author
+/// graph is the operator's whole statement about how a change request is
+/// drafted, and it declares its own members under its own names. Composing
+/// either onto it refuses the launch — `this graph has no worker` — which is a
+/// drafting dispatch that could never start.
+///
+/// The **persona** is what tells the two apart, and it can be: `pr-author` is
+/// this crate's own, and a plan naming it for a node or a step is refused where
+/// the plan is read — see [`RESERVED_PERSONA`](crate::graph::RESERVED_PERSONA) —
+/// so a dispatch arriving here under it is the drafting one and nothing else. A
+/// second condition on the graph would not narrow that: an operator may point
+/// `--pr-author-graph` at the same document a node dispatches under, and then
+/// the graph says nothing about which dispatch this is.
 fn node_sets(labels: &Labels, controls: &NodeControls) -> Result<Vec<String>> {
+    if labels.persona.as_deref() == Some(crate::lifecycle::PR_AUTHOR_PERSONA) {
+        return Ok(Vec::new());
+    }
     let mut sets = launched_with(labels)?.map_or_else(Vec::new, |record| record.node_sets);
     if let Some(persona) = &labels.persona {
         sets.push(format!("members.{WORKER_MEMBER}.persona={persona}"));
@@ -414,6 +433,53 @@ mod tests {
         };
         assert!(matches!(request.workspace, WorkspaceSpec::VcsSession(_)));
         assert_eq!(request.graph.0, "./graphs/node-scope.yaml");
+    }
+
+    /// The drafting dispatch takes the graph the launch named as it was written.
+    ///
+    /// Neither half of the node-scope composition is a statement about it: the
+    /// persona override names a member only the node-scope graph has, and
+    /// `--node-set` is forwarded to node-scope launches. Both are dropped on the
+    /// persona alone, which is a name a plan may not claim — so this is the one
+    /// dispatch that reaches it.
+    #[test]
+    fn the_drafting_dispatch_composes_nothing_onto_the_graph_the_launch_named() {
+        let root = std::env::temp_dir().join(format!("onepipeline-drafting-{}", crate::sys::pid()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = crate::ledger::RunPaths::under(&root, "demo");
+        paths.create().expect("the run directory");
+        let record = r#"{"run_id":"demo","plan":"p.json","node_graph":"./node.yaml",
+            "pr_author_graph":"./author.yaml","launcher":"l","session":"s","pid":1,
+            "host":"h","started_at":"now","heartbeat_interval":1,
+            "node_sets":["members.worker.model=m"]}"#;
+        std::fs::write(paths.launch(), record).expect("the launch record is written");
+        std::env::set_var(crate::ledger::RUNS_DIR_ENV, &root);
+
+        let sets = |persona: &str| {
+            node_sets(
+                &Labels {
+                    run_id: Some("demo".into()),
+                    persona: Some(persona.into()),
+                    ..Labels::default()
+                },
+                &NodeControls::default(),
+            )
+            .expect("the launch record is readable")
+        };
+        assert!(
+            sets(crate::lifecycle::PR_AUTHOR_PERSONA).is_empty(),
+            "the drafting dispatch was given a member this graph never declared"
+        );
+        // The node's own work, under the same run and the same record.
+        assert_eq!(
+            sets("engineer"),
+            vec![
+                "members.worker.model=m".to_string(),
+                "members.worker.persona=engineer".to_string(),
+            ]
+        );
+        std::env::remove_var(crate::ledger::RUNS_DIR_ENV);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

@@ -31,18 +31,37 @@ resolver = "2"
 # `tests/e2e/dispatch.rs` holds the first end to end: it fails against 0.2.11
 # rather than merely reading differently.
 #
-# Two more floors, and both are registry releases: **neither sibling may carry a
-# `git`/`rev` pin**, because a revision is content this host cannot reproduce
-# from crates.io and a crate that itself ships there cannot publish against one.
+# **Both siblings are registry releases**, and **neither may carry a `git`/`rev`
+# pin**, because a revision is content this host cannot reproduce from crates.io
+# and a crate that itself ships there cannot publish against one.
 #
-# - 0.2.18 runs a single-sided member's turn through the oneharness *library*.
-#   Below it that turn is a process, and every seam this build reads it through —
-#   the classification a death is reported under, the teardown of the harness
-#   tree, `member-started`'s fields — is the other one.
+# The filter grammar this crate passes through to them — a *cross-repository*
+# contract with no shared crate — is carried by both pins: `oneagentgraph` merged
+# it at v0.2.13 and `onevcs` at v0.2.7, and each pin below is above its own.
+# `tests/e2e/dispatch.rs` and `tests/e2e/real_vcs.rs` drive those surfaces against
+# the real siblings, so a pin moved below one fails rather than reads differently.
+#
+# Four further floors, each a **requirement** of what this crate composes today:
+#
+# - `oneagentgraph` 0.2.16 lets a `kind: oneharness` member's own oneharness
+#   config decide its run — `schema_file` there asks for a validated JSON answer,
+#   which is what the pr-author graph a launch names declares and what puts the
+#   drafted body at `results[].structured` of the report that member's
+#   `member-settled` names. Below it that member is always run with `--stream`,
+#   which oneharness refuses beside a schema, so the drafting dispatch is a usage
+#   error rather than a structured answer.
+# - `oneagentgraph` 0.2.18 runs a single-sided member's turn through the
+#   oneharness *library*. Below it that turn is a process, and every seam this
+#   build reads it through — the classification a death is reported under, the
+#   teardown of the harness tree, `member-started`'s fields — is the other one.
 # - `onevcs` 0.2.8 raises `provenance::SUBJECT_LIMIT` from 72 to 120, which
-#   `src/graph.rs` reads to refuse an unpublishable node title at plan load.
-#   Below it a load refuses every title between the two that the publication
-#   commits without complaint. `tests/e2e/real_vcs.rs` drives the surface.
+#   `src/graph.rs` reads to refuse an unpublishable node title at plan load — so
+#   the `onevcs` pin also decides which titles a plan may state. Below it a load
+#   refuses every title between the two that the publication commits without
+#   complaint. `tests/e2e/real_vcs.rs` drives the surface.
+# - `onevcs` 0.4.0 carries `PublishRequest.body`, which is the whole of what a
+#   drafted body is *for*: below it a change request opens with the boilerplate
+#   this crate has no way to replace. 0.4.1 adds a stacked-branch publish above it.
 [workspace.dependencies]
 oneagentgraph = "0.2.18"
 onevcs = "0.4.1"
@@ -81,8 +100,9 @@ include = [
   # its own test binary.
   "tests/e2e/gate.sh",
   "tests/e2e/gate.bat",
-  # The checked-in telemetry golden, which `src/telemetry.rs` reads at compile
-  # time: without it the packaged crate does not build, let alone test.
+  # The checked-in goldens `src/telemetry.rs` and `src/filter.rs` read at compile
+  # time — the telemetry document, and one launch config per schema version this
+  # build reads. Without them the packaged crate does not build, let alone test.
   "tests/golden/*.json",
   "Cargo.toml",
   "README.md",
@@ -115,8 +135,8 @@ serde_norway = "0.9"
 thiserror = "2"
 
 # The siblings this crate composes, at the workspace's own pins. See
-# `[workspace.dependencies]` for what each floor buys and why both are registry
-# releases.
+# `[workspace.dependencies]` for what each pin's floor is a requirement of, and
+# why both are registry releases.
 oneagentgraph = { workspace = true }
 onevcs = { workspace = true }
 
