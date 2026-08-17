@@ -1188,12 +1188,11 @@ fn stop(args: &StopArgs) -> Result<i32> {
 // stale record names beside the pid the lock stamps — is what the first of those walks over
 // one listing.
 fn terminate(paths: &RunPaths, record: &LaunchRecord) -> Result<Option<sys::Teardown>> {
-    let aim = roots_to_stop(paths, record)?;
-    if !aim.on_this_host {
+    let Aim::Here { roots, unproven } = roots_to_stop(paths, record)? else {
         return Ok(None);
-    }
-    let established = sys::stop_and_confirm(&aim.roots, sys::Stop::Politely, TEARDOWN_PATIENCE);
-    if aim.unproven.is_empty() {
+    };
+    let established = sys::stop_and_confirm(&roots, sys::Stop::Politely, TEARDOWN_PATIENCE);
+    if unproven.is_empty() {
         return Ok(Some(established));
     }
     Ok(Some(match established {
@@ -1207,25 +1206,32 @@ fn terminate(paths: &RunPaths, record: &LaunchRecord) -> Result<Option<sys::Tear
 }
 
 /// What a stop of this run may aim at on this host.
-#[derive(Debug, Default)]
-struct Aim {
-    /// Whether any record of this run names a process on **this** host at all.
-    ///
-    /// Separate from the roots, because a run whose every record is another
-    /// host's and a run whose processes are all over are opposite answers: the
-    /// first is `elsewhere`, where this host promises nothing, and the second is
-    /// a run this host can say has nothing left to stop.
-    on_this_host: bool,
-    /// The roots, in the order they are signalled: every claim whose own stamp
-    /// proves its pid is still the process the record named.
-    roots: Vec<u32>,
-    /// Live pids on this host that no record could place either way. What stood
-    /// in the way of proving each is said on stderr where it is met.
-    ///
-    /// Never signalled — that is the whole point — and never ignored either. A
-    /// teardown that dropped these would report a clean stop over a process that
-    /// may well be the run's own driver.
-    unproven: Vec<u32>,
+///
+/// Two answers rather than a flag beside a list, because the flag's other
+/// combination is not a state a run can be in: a pid this host may aim at is one
+/// a record of this host's named, so "nothing here is this run's" and "here is
+/// what this run is running" cannot both be true, and only one of them can carry
+/// pids.
+#[derive(Debug, PartialEq, Eq)]
+enum Aim {
+    /// Nothing this run names is a process on this host. Nothing is attempted
+    /// and this host promises nothing either way — deliberately not the same
+    /// answer as a run of this host's whose processes are all over, which is a
+    /// teardown that looked and found nothing left to stop.
+    Elsewhere,
+    /// The run is this host's, as far as its records say.
+    Here {
+        /// The roots, in the order they are signalled: every claim whose own
+        /// stamp proves its pid is still the process the record named.
+        roots: Vec<u32>,
+        /// Live pids on this host that no record could place either way. What
+        /// stood in the way of proving each is said on stderr where it is met.
+        ///
+        /// Never signalled — that is the whole point — and never ignored either.
+        /// A teardown that dropped these would report a clean stop over a
+        /// process that may well be the run's own driver.
+        unproven: Vec<u32>,
+    },
 }
 
 /// Every process on this host a stop of this run aims at, or why this build
@@ -1250,7 +1256,9 @@ struct Aim {
 /// dies, and nothing rewrites it until an adoption does.
 fn roots_to_stop(paths: &RunPaths, record: &LaunchRecord) -> Result<Aim> {
     let here = sys::hostname();
-    let mut aim = Aim::default();
+    let mut on_this_host = false;
+    let mut roots: Vec<u32> = Vec::new();
+    let mut unproven: Vec<u32> = Vec::new();
     // Each claim in turn, and the launch record first, so a teardown asks the
     // driver to go before the work it started: the record's driver, then the
     // lock's holder, then every dispatch the run has recorded.
@@ -1273,30 +1281,55 @@ fn roots_to_stop(paths: &RunPaths, record: &LaunchRecord) -> Result<Aim> {
         if host != here {
             continue;
         }
-        aim.on_this_host = true;
-        if aim.roots.contains(&pid) || aim.unproven.contains(&pid) {
+        on_this_host = true;
+        if roots.contains(&pid) || unproven.contains(&pid) {
             continue;
         }
         match claim_on(pid, &started) {
-            Claim::Proved => aim.roots.push(pid),
+            Claim::Proved => roots.push(pid),
             Claim::Gone => {}
             Claim::Reissued => eprintln!(
                 "onepipeline: run '{}': the {named_by} names pid {pid}, which this host has \
                  since given to another process, so it was not signalled",
                 paths.run
             ),
-            Claim::Unproven(why) => {
-                eprintln!(
-                    "onepipeline: run '{}': the {named_by} names pid {pid}, which is running on \
-                     this host — {why}, so nothing says it is still this run's process and it \
-                     was not signalled",
-                    paths.run
+            Claim::Unstamped => {
+                left_alone(
+                    &paths.run,
+                    named_by,
+                    pid,
+                    "its record carries no start token",
                 );
-                aim.unproven.push(pid);
+                unproven.push(pid);
+            }
+            Claim::HostSilent => {
+                left_alone(
+                    &paths.run,
+                    named_by,
+                    pid,
+                    "this host will not say when it started",
+                );
+                unproven.push(pid);
             }
         }
     }
-    Ok(aim)
+    if !on_this_host {
+        return Ok(Aim::Elsewhere);
+    }
+    Ok(Aim::Here { roots, unproven })
+}
+
+/// Say out loud that a live pid was left alone, and what stood in the way of
+/// placing it.
+///
+/// A teardown that is narrower than the one an operator asked for has to say so
+/// where it happens: the refusal that follows knows only that something could
+/// not be established, and this is the line that names which pid and why.
+fn left_alone(run: &str, named_by: &str, pid: u32, why: &str) {
+    eprintln!(
+        "onepipeline: run '{run}': the {named_by} names pid {pid}, which is running on this \
+         host — {why}, so nothing says it is still this run's process and it was not signalled"
+    );
 }
 // llmlint: ignore-end[changed_behavior_has_e2e]
 
@@ -1319,8 +1352,12 @@ enum Claim {
     /// recorded process is over and its pid has been handed on, so there is
     /// nothing here to stop and nothing unresolved either.
     Reissued,
-    /// A live process this build cannot place either way, and why.
-    Unproven(&'static str),
+    /// A live process whose record carries no stamp to compare — every record a
+    /// build before the field existed wrote.
+    Unstamped,
+    /// A live process this host would not describe, so there was nothing to
+    /// compare its record against.
+    HostSilent,
 }
 
 /// Whether `pid` is still the process a record stamped `started` was written
@@ -1338,8 +1375,8 @@ fn claim_on(pid: u32, started: &str) -> Claim {
         Some(ref token) if token.matches(started) => Claim::Proved,
         _ if !sys::process_may_be_live(pid) => Claim::Gone,
         Some(_) if !started.is_empty() => Claim::Reissued,
-        Some(_) => Claim::Unproven("its record carries no start token"),
-        None => Claim::Unproven("this host will not say when it started"),
+        Some(_) => Claim::Unstamped,
+        None => Claim::HostSilent,
     }
 }
 
@@ -2082,13 +2119,20 @@ mod tests {
             .to_string();
         let aimed_at =
             |record: &LaunchRecord| roots_to_stop(&paths, record).expect("this run's records read");
-        let roots = |record: &LaunchRecord| aimed_at(record).roots;
+        let roots = |record: &LaunchRecord| match aimed_at(record) {
+            Aim::Here { roots, .. } => roots,
+            Aim::Elsewhere => panic!("a run this host's own records name read as another host's"),
+        };
 
         // Nothing holds the lock, and the record names a driver that has died:
         // the run is this host's and there is nothing here to aim at.
-        let stale = aimed_at(&launched_by(dead, &here, &proven));
-        assert!(stale.on_this_host);
-        assert!(stale.roots.is_empty() && stale.unproven.is_empty());
+        assert_eq!(
+            aimed_at(&launched_by(dead, &here, &proven)),
+            Aim::Here {
+                roots: Vec::new(),
+                unproven: Vec::new()
+            }
+        );
         // The same record naming this live process, which its stamp proves.
         assert_eq!(
             roots(&launched_by(sys::pid(), &here, &proven)),
@@ -2099,22 +2143,28 @@ mod tests {
         // was written for is over, this one is a stranger's, and a teardown
         // aimed there would end work this run never started. Nothing unresolved
         // either — the stamp *answered*, and its answer was no.
-        let reissued = aimed_at(&launched_by(
-            sys::pid(),
-            &here,
-            "the driver it named, which is not this process",
-        ));
-        assert!(
-            reissued.roots.is_empty(),
+        assert_eq!(
+            aimed_at(&launched_by(
+                sys::pid(),
+                &here,
+                "the driver it named, which is not this process",
+            )),
+            Aim::Here {
+                roots: Vec::new(),
+                unproven: Vec::new()
+            },
             "a stop aimed at a pid the host has since given to another process"
         );
-        assert!(reissued.unproven.is_empty());
         // A record from a build that predates the stamp proves nothing about its
         // pid either way, so it is not aimed at — and, unlike the two above, the
         // stop may not call that pid gone.
-        let unstamped = aimed_at(&launched_by(sys::pid(), &here, ""));
-        assert!(unstamped.roots.is_empty());
-        assert_eq!(unstamped.unproven, vec![sys::pid()]);
+        assert_eq!(
+            aimed_at(&launched_by(sys::pid(), &here, "")),
+            Aim::Here {
+                roots: Vec::new(),
+                unproven: vec![sys::pid()]
+            }
+        );
 
         // A lock this build's own stamp proves.
         held(&stamp(&proven));
@@ -2134,9 +2184,13 @@ mod tests {
         // A lock an older build wrote carries no stamp, and an unproven pid is
         // not one a teardown may aim at either.
         held(&stamp(""));
-        let unstamped = aimed_at(&launched_by(dead, &here, &proven));
-        assert!(unstamped.roots.is_empty());
-        assert_eq!(unstamped.unproven, vec![sys::pid()]);
+        assert_eq!(
+            aimed_at(&launched_by(dead, &here, &proven)),
+            Aim::Here {
+                roots: Vec::new(),
+                unproven: vec![sys::pid()]
+            }
+        );
         // A lock taken on another machine, where a pid means nothing.
         held(&ledger::LockRecord {
             host: "a-host-this-is-not".into(),
@@ -2153,9 +2207,10 @@ mod tests {
         // And a run whose every record is another host's leaves this one nothing
         // to aim at and nothing to promise, which is what `stop` reports as
         // `elsewhere` rather than as a run whose work is over.
-        let afar = aimed_at(&launched_by(dead, "a-host-this-is-not", &proven));
-        assert!(!afar.on_this_host);
-        assert!(afar.roots.is_empty() && afar.unproven.is_empty());
+        assert_eq!(
+            aimed_at(&launched_by(dead, "a-host-this-is-not", &proven)),
+            Aim::Elsewhere
+        );
 
         // The registry, which names the work rather than a driver. Its entries
         // are proved one at a time and on their own stamps, so a dispatch is
