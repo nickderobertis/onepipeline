@@ -1245,7 +1245,6 @@ fn lock_held_on(paths: &RunPaths) -> Option<ledger::LockRecord> {
     let path = paths.lock();
     match ledger::read_json::<ledger::LockRecord>(&path) {
         Ok(held) => Some(held),
-        // Nothing holds the run: the ordinary case, and no news.
         Err(Error::Ledger { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => {
             eprintln!(
