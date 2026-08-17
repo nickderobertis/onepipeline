@@ -1492,6 +1492,59 @@ fn still_listed(pid: u32) -> bool {
     process_table().iter().any(|(listed, _)| *listed == pid)
 }
 
+/// When this host says a process started, asked the way the crate asks it.
+///
+/// The test's own oracle again, and the environment matters: `lstart` is a
+/// rendering, so a reading taken in another zone or locale is a different string
+/// for the same process, and a journey comparing one against a stamp the crate
+/// recorded would be comparing two renderings rather than two processes.
+#[cfg(unix)]
+fn started_at_of(pid: u32) -> String {
+    let listed = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "lstart="])
+        .env("TZ", "UTC")
+        .env("LC_ALL", "C")
+        .output()
+        .expect("this host says when a process started");
+    assert!(
+        listed.status.success(),
+        "`ps` refused to describe pid {pid}"
+    );
+    String::from_utf8(listed.stdout)
+        .expect("`ps` wrote a start this host can decode")
+        .trim()
+        .to_string()
+}
+
+/// A live process this run never started, standing in for whatever the host gave
+/// a reissued pid to — and one this host describes differently from `stamp`.
+///
+/// `lstart` is reported to the **second**, so a process started inside the same
+/// second as the driver carries the driver's own stamp and would be a pid the
+/// record still proves rather than a stranger. Retried until the host's clock has
+/// left that second behind, so the stand-in is a stranger by construction rather
+/// than by luck.
+#[cfg(unix)]
+fn stranger_started_after(stamp: &str) -> std::process::Child {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let mut child = std::process::Command::new("sleep")
+            .arg("300")
+            .spawn()
+            .expect("this host starts a process of its own");
+        if started_at_of(child.id()) != stamp {
+            return child;
+        }
+        child.kill().expect("this test ends its own process");
+        child.wait().expect("it is reaped");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "this host kept starting processes inside the second {stamp:?} names"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
 /// Ending a run ends everything it started, and nothing beside it.
 ///
 /// Both halves, because a teardown can be wrong in either direction: the
@@ -1795,6 +1848,94 @@ fn stopping_a_run_ends_the_tree_its_lock_names_when_the_record_names_a_dead_driv
     world.until("every process the run started to end", |_| {
         tree.iter().all(|pid| !still_listed(*pid))
     });
+    world.release("build.go");
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+/// A stop never signals a pid the host has since given to another process.
+///
+/// The other thing a stale launch record can be, and the dangerous one. The
+/// record above named a pid nothing answers to, which costs a signal and nothing
+/// else; here the host has reissued that pid, so the record names a **live**
+/// process that this run never started — somebody else's editor, somebody else's
+/// build — and a teardown taking the record at its word ends it. That is not a
+/// hypothetical for a record that outlives every driver it names: it is the
+/// oldest claim a run holds, a driver that dies leaves its pid sitting in it, and
+/// nothing rewrites it until an adoption does.
+///
+/// So the stranger stands in for whatever the host handed that pid to. It is
+/// this test's own process, deliberately started outside the run's tree, and the
+/// journey holds both halves at once: it is still running afterwards, and the
+/// run's real tree — found through the claims that *can* prove themselves — is
+/// gone.
+///
+/// The record is edited for the reason the journey above edits one: no verb
+/// produces this state on demand, and what is edited is the one fact under test.
+/// The stamp beside the pid is left exactly as the driver wrote it, which is what
+/// makes this a reissued pid rather than a rewritten record.
+// llmlint: ignore-block[tests_mirror_real_usage] the one value set by hand is the pid the
+// launch record names, and no product surface sets it: the verbs that write that field —
+// `start`, `drive-run`, `adopt` — write their own pid and their own stamp together, so a
+// record whose pid the host has reissued is a state a user reaches by having a driver die and
+// the host reuse its pid, not by typing anything. The rest of the journey is the real binary
+// end to end, and the assertions are about processes on this host.
+#[cfg(unix)]
+#[test]
+fn a_stop_never_signals_a_pid_the_host_has_given_to_another_process() {
+    let world = World::new("driver-stop-reissued-pid");
+    world.script("build.wait", "hold");
+    let (run, driver) = start_detached_announcing(&world, "reissued", vec![agent("build", &[])]);
+    world.until("a node to be in flight", |world| {
+        !world.events_of(&run, "node-dispatched").is_empty()
+    });
+    world.until("the dispatch to be a process below the driver", |_| {
+        !descendants(driver).is_empty()
+    });
+    let tree: Vec<u32> = std::iter::once(driver).chain(descendants(driver)).collect();
+
+    // The stranger the host handed the pid to: a real process, started by this
+    // test rather than by the run, so it is nobody's descendant in the tree a
+    // teardown walks — and one this host describes differently from the stamp
+    // the driver recorded, which is what makes it a stranger and not the driver.
+    let record = world.run_file(&run, "launch.json");
+    let mut named = world.run_json(&run, "launch.json");
+    let recorded = named["started"]
+        .as_str()
+        .expect("a driver records the stamp that proves its pid")
+        .to_string();
+    let mut stranger = stranger_started_after(&recorded);
+    let taken = stranger.id();
+    assert!(
+        !tree.contains(&taken),
+        "the stranger {taken} is part of the run's own tree, so this journey proves nothing"
+    );
+
+    named["pid"] = json!(taken);
+    std::fs::write(&record, named.to_string()).expect("the launch record is rewritten");
+
+    let stopped = world.run(&["stop", &run]);
+    // The half this journey exists for, asked of the process itself rather than
+    // of a listing: a signalled process is still *listed* while nobody has
+    // reaped it, and this test is what would reap this one.
+    assert!(
+        stranger
+            .try_wait()
+            .expect("this host answers about this test's own process")
+            .is_none(),
+        "a stop ended pid {taken}, which the host had given to a process this run never started"
+    );
+    // And the run itself was stopped, through the claims that can prove
+    // themselves — the stale record cost it nothing but a sentence on stderr.
+    stopped
+        .exited(0)
+        .out_has("\"stopped\":true")
+        .out_has("\"teardown\":\"signalled\"")
+        .err_has("since given to another process");
+    world.until("every process the run started to end", |_| {
+        tree.iter().all(|pid| !still_listed(*pid))
+    });
+    stranger.kill().expect("this test ends its own process");
+    stranger.wait().expect("it is reaped");
     world.release("build.go");
 }
 // llmlint: ignore-end[tests_mirror_real_usage]

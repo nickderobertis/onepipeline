@@ -637,11 +637,7 @@ impl World {
     /// name `ps` on the `PATH` the process under test was given.
     #[cfg(unix)]
     pub fn path_whose_ps_garbles_a_row(&self) -> PathBuf {
-        let real = real_ps();
-        self.path_with_ps(
-            "garbled-ps",
-            &format!("echo 'not-a-pid also-not'\nexec {} \"$@\"", real.display()),
-        )
+        self.path_with_ps("garbled-ps", &listing_plus("not-a-pid also-not"))
     }
 
     /// A `PATH` whose `ps` answers with the real listing plus a child of `parent`
@@ -656,14 +652,9 @@ impl World {
     /// any it was checking for.
     #[cfg(unix)]
     pub fn path_whose_ps_invents_an_unreachable_child(&self, parent: u32) -> PathBuf {
-        let real = real_ps();
         self.path_with_ps(
             "unreachable-child-ps",
-            &format!(
-                "echo '{} {parent}'\nexec {} \"$@\"",
-                u32::MAX,
-                real.display()
-            ),
+            &listing_plus(&format!("{} {parent}", u32::MAX)),
         )
     }
 
@@ -672,6 +663,9 @@ impl World {
     /// Unix-only: the fixture is a shell script, and the Windows arm reaches the
     /// tree through `taskkill /T` rather than through any table this could stand
     /// in for.
+    ///
+    /// See [`listing_plus`] for why a stand-in that alters the **listing** has
+    /// to leave every other question alone.
     #[cfg(unix)]
     fn path_with_ps(&self, name: &str, script: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
@@ -1408,6 +1402,23 @@ fn real_ps() -> PathBuf {
         .map(|dir| dir.join("ps"))
         .find(|candidate| candidate.is_file())
         .expect("this host has a ps")
+}
+
+/// A `ps` stand-in that answers the real thing, with `row` added to the process
+/// **listing** and to nothing else.
+///
+/// The guard is the whole point. `ps` is asked two different questions here — for
+/// the table a teardown walks (`-A`), and for when one process started, which is
+/// what a recorded pid is proved against — and a stand-in that wrote its row into
+/// both would be two faults wearing one name: the journey would still refuse, but
+/// over a host that could not describe a *process*, which is a different journey
+/// with a different verdict. So the fault is scoped to the question it is about.
+#[cfg(unix)]
+fn listing_plus(row: &str) -> String {
+    format!(
+        "case \" $* \" in\n  *\" -A \"*) echo '{row}' ;;\nesac\nexec {} \"$@\"",
+        real_ps().display()
+    )
 }
 
 /// A `PATH` with `dirs` ahead of the one this process inherited.

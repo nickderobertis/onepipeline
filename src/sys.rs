@@ -711,7 +711,13 @@ pub fn process_start_token(pid: u32) -> Option<StartToken> {
 /// Read strictly. A `ps` that cannot run, exits non-zero, or writes bytes this
 /// cannot decode is not an answer, and neither is an empty line — a token
 /// nothing produced would compare equal to another one nothing produced, which
-/// would make two different processes prove each other.
+/// would make two different processes prove each other. Neither is an answer of
+/// **more than one line**: one process was asked about, and a host that wrote
+/// anything beside its answer is one whose reading cannot be compared against a
+/// reading taken when it was well. Folding that into one string would make a
+/// live process disagree with its own recorded stamp, which a caller reads as a
+/// pid handed to somebody else — the one verdict that must never come from the
+/// host misbehaving rather than from the process ending.
 #[cfg(unix)]
 fn platform_process_start_token(pid: u32) -> Option<String> {
     let listed = std::process::Command::new("ps")
@@ -726,8 +732,13 @@ fn platform_process_start_token(pid: u32) -> Option<String> {
     if !listed.status.success() {
         return None;
     }
-    let token = String::from_utf8(listed.stdout).ok()?.trim().to_string();
-    (!token.is_empty()).then_some(token)
+    let answer = String::from_utf8(listed.stdout).ok()?;
+    let mut lines = answer
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty());
+    let token = lines.next()?.to_string();
+    lines.next().is_none().then_some(token)
 }
 
 /// The creation time this platform keeps on the process itself, which is the

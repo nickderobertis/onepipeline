@@ -441,6 +441,26 @@ pub struct LaunchRecord {
     pub pid: u32,
     /// The host that pid is meaningful on.
     pub host: String,
+    /// That driver's own process start token, as [`sys::process_start_token`]
+    /// read it when it claimed the run.
+    ///
+    /// The same proof, and for the same reason, as the ownership lock's and the
+    /// registry's: the pid says *which* process and this says it is still that
+    /// one. This record outlives every driver it names — a driver that died
+    /// leaves its pid sitting here until something adopts the run — so by the
+    /// time a `stop` reads it the host may have handed that pid to a stranger,
+    /// and a teardown aimed at it would end work this run never started.
+    ///
+    /// Written only by [`driven_by_this_process`](Self::driven_by_this_process),
+    /// which writes all three fields together: a pid recorded without the stamp
+    /// beside it is a pid no later reader may act on.
+    ///
+    /// Empty when this host would not say, and on a record written before the
+    /// field existed. Omitted when empty, like every other field added to this
+    /// record after it shipped, so a build that predates it still reads what it
+    /// wrote. Empty is **not** a match — see [`sys::StartToken::matches`].
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub started: String,
     /// When the run was launched.
     pub started_at: String,
     /// The pacemaker interval, in seconds.
@@ -468,6 +488,22 @@ pub struct LaunchRecord {
 }
 
 impl LaunchRecord {
+    /// Record that **this** process is now the run's driver.
+    ///
+    /// The one writer of the three fields that name a driver, because they are
+    /// one fact and a record carrying two of them is a pid nothing can act on:
+    /// a `stop` reading a pid with no stamp beside it cannot tell the driver it
+    /// was written for from whatever the host has since given that pid to. Every
+    /// path that claims a run — the launch, the driver a detached launch
+    /// retains, and each adoption — goes through here.
+    pub fn driven_by_this_process(&mut self) {
+        self.pid = sys::pid();
+        self.host = sys::hostname();
+        self.started = sys::process_start_token(self.pid)
+            .map(|token| token.recorded().to_string())
+            .unwrap_or_default();
+    }
+
     /// The observer graph this run was launched with, when it was launched with
     /// one.
     ///
@@ -1042,6 +1078,7 @@ mod tests {
             session: "a-session".into(),
             pid: 1,
             host: "h".into(),
+            started: "Fri Aug 15 00:00:00 2026".into(),
             started_at: sys::now_rfc3339(),
             heartbeat_interval: 1_800,
             dag_sets: Vec::new(),
@@ -1049,6 +1086,69 @@ mod tests {
             adoptions: 0,
             filters: Filters::default(),
         }
+    }
+
+    /// A driver is claimed as three facts at once, and a record that predates
+    /// the stamp is read as proving nothing rather than as proving its pid.
+    ///
+    /// The pid and the stamp are one claim: a `stop` reading a pid with nothing
+    /// beside it cannot tell the driver the record was written for from whatever
+    /// the host has since handed that pid to, so the writer that records one
+    /// records both. The compatibility half is the same promise every field
+    /// added to this record makes — an older document still reads — and the
+    /// answer it must give is the *empty* stamp, which never matches.
+    #[test]
+    fn claiming_a_run_records_the_stamp_that_proves_its_pid_and_an_older_record_carries_none() {
+        let mut record = a_record();
+        record.driven_by_this_process();
+        assert_eq!(record.pid, sys::pid());
+        assert_eq!(record.host, sys::hostname());
+        assert!(
+            sys::process_start_token(sys::pid())
+                .expect("this host says when a process started")
+                .matches(&record.started),
+            "a run claimed by this process recorded a stamp that does not prove it"
+        );
+        let text = serde_json::to_string(&record).expect("it serialises");
+        assert_eq!(
+            serde_json::from_str::<LaunchRecord>(&text).expect("it re-parses"),
+            record
+        );
+
+        // A record written before the field existed, which is the file on disk
+        // this build has to keep opening.
+        let older = serde_json::json!({
+            "run_id": "demo",
+            "plan": "plan.json",
+            "node_graph": "graphs/node-scope.yaml",
+            "launcher": "claude-code",
+            "session": "a-session",
+            "pid": sys::pid(),
+            "host": sys::hostname(),
+            "started_at": "2026-08-15T00:00:00.000Z",
+            "heartbeat_interval": 1800,
+        });
+        let read: LaunchRecord =
+            serde_json::from_value(older).expect("a record predating the stamp still reads");
+        assert!(read.started.is_empty());
+        assert!(
+            !sys::process_start_token(sys::pid())
+                .expect("this host says when a process started")
+                .matches(&read.started),
+            "a record carrying no stamp proved a live pid"
+        );
+
+        // And a record that carries none writes none, so a build that predates
+        // the field still reads what this one wrote.
+        let text = serde_json::to_string(&LaunchRecord {
+            started: String::new(),
+            ..a_record()
+        })
+        .expect("it serialises");
+        assert!(
+            !text.contains("started\""),
+            "an empty stamp reached the record: {text}"
+        );
     }
 
     /// A run's journal has several appenders at once — the launcher relaying its
@@ -1188,6 +1288,7 @@ mod tests {
             session: sys::UNKNOWN_LAUNCHER.into(),
             pid: 1,
             host: "h".into(),
+            started: String::new(),
             started_at: sys::now_rfc3339(),
             heartbeat_interval: 1,
             dag_sets: Vec::new(),
@@ -1213,6 +1314,7 @@ mod tests {
             session: "secret-session-id".into(),
             pid: 1,
             host: "h".into(),
+            started: String::new(),
             started_at: sys::now_rfc3339(),
             heartbeat_interval: 1,
             dag_sets: Vec::new(),
