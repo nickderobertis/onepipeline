@@ -184,12 +184,23 @@ pub fn node_script(dir: &Path, node: &str, suffix: &str) -> Option<String> {
 /// A no-op off Unix, where the teardown draws no such distinction: `taskkill`
 /// is asked forcefully in both modes, for the reason `sys::platform_stop`
 /// records there.
+/// The one failure here is **fatal to the double**, and deliberately loud: a
+/// dispatch that was asked to survive `SIGTERM` and did not install the
+/// disposition dies at the first ask, and the journey around it then proves the
+/// opposite of what it says — that a stop ended a tree that would have gone
+/// anyway. There is nothing to recover to, so the double says so and stops.
 pub fn ignore_the_polite_ask() {
     #[cfg(unix)]
-    // SAFETY: `signal` sets this process's disposition for one signal and
-    // borrows nothing; `SIG_IGN` is a valid disposition for `SIGTERM`.
-    unsafe {
-        libc::signal(libc::SIGTERM, libc::SIG_IGN);
+    {
+        // SAFETY: `signal` sets this process's disposition for one signal and
+        // borrows nothing; `SIG_IGN` is a valid disposition for `SIGTERM`.
+        let installed = unsafe { libc::signal(libc::SIGTERM, libc::SIG_IGN) };
+        assert!(
+            installed != libc::SIG_ERR,
+            "this double was asked to work through a polite stop and this host would not let it \
+             ignore SIGTERM: {}",
+            std::io::Error::last_os_error()
+        );
     }
 }
 
