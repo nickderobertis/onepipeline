@@ -21,11 +21,10 @@
 //! is the origin and the identity publishes `local-direct`, so no host is asked
 //! for anything.
 //!
-// llmlint: ignore-file[e2e_not_mocked] the sibling this file is about — `onevcs` — is
-// not substituted anywhere: it is the linked library under the compiled binary, and the
-// state each journey starts from is built by that sibling's own released executable
-// against a real git origin. `oneagentgraph` is the double, because what is under test
-// is which session a dispatch runs in rather than what the dispatch writes.
+// llmlint: ignore-file[e2e_not_mocked] `onevcs` is not substituted: it is the linked
+// library under the compiled binary, and its own released executable builds the state
+// each journey starts from. `oneagentgraph` is the double, because what is under test is
+// which session a dispatch runs in rather than what the dispatch writes.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -37,7 +36,6 @@ use crate::harness::{
 };
 use onevcs::Session;
 
-/// The branch a stopped run left its work on, and the branch its retry pins.
 const STRANDED: &str = "feature/stranded";
 
 /// The refusal a pin whose branch already carries work is met with.
@@ -92,15 +90,6 @@ fn opened(world: &World, run: &str) -> Value {
         .unwrap_or(Value::Null)
 }
 
-/// The token of the session a run worked in.
-fn session_of(world: &World, run: &str) -> String {
-    let opened = opened(world, run);
-    opened["payload"]["token"]
-        .as_str()
-        .unwrap_or_else(|| panic!("{run} opened no session\n{}", why(world, run)))
-        .to_owned()
-}
-
 /// The released `onevcs` executable, run against this world's state root.
 ///
 /// The same build the binary under test links — `harness::onevcs_binary` builds
@@ -153,7 +142,10 @@ fn abandoned_session(world: &World, branch: &str) -> Session {
         .unwrap_or_else(|e| panic!("`onevcs session open` did not print a session: {e}: {printed}"))
 }
 
-/// The run root a session was cut under: the directory its worktree sits in.
+/// The run root a session was cut under.
+///
+/// Derived rather than reported: a [`Session`] names the worktree, and the run
+/// root is what `onevcs` cuts that worktree inside.
 fn run_root(session: &Session) -> &Path {
     session
         .worktree
@@ -179,6 +171,9 @@ fn run_root(session: &Session) -> &Path {
 /// holds is what decides occupancy. Should `onevcs` move that decision to another
 /// lock, the adoption succeeds and this says so, rather than leaving the journeys
 /// below holding a file nothing consults and asserting nothing.
+// llmlint: ignore-block[tests_mirror_real_usage] this function alone, for the reason
+// above: no command leaves a run root occupied, so there is no interface to reach it
+// through. Every journey below drives the compiled binary.
 fn hold_lease(world: &World, session: &Session) -> std::fs::File {
     use sha2::{Digest, Sha256};
     let lease = format!("run:{}", run_root(session).display());
@@ -215,6 +210,7 @@ fn hold_lease(world: &World, session: &Session) -> std::fs::File {
     );
     file
 }
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 /// Run one lifecycle node to settlement, pinned to `branch` or naming none.
 ///
@@ -251,8 +247,8 @@ fn a_retry_takes_up_the_session_a_stopped_run_left_its_work_in() {
     );
     world.script("service.work", "the worker wrote this\n");
 
-    // 1. A run that stops in the middle of its publication, with its work
-    //    committed on the branch the plan pinned.
+    // A run that stops in the middle of its publication, with its work committed
+    // on the branch the plan pinned.
     let mut stopped = lifecycle("service", &[]);
     stopped["branch"] = json!(STRANDED);
     let path = world.plan("stopped", &plan_of("stopped", vec![stopped]));
@@ -268,7 +264,16 @@ fn a_retry_takes_up_the_session_a_stopped_run_left_its_work_in() {
             .iter()
             .any(|event| event["source"] == "vcs" && event["kind"] == "gate-started")
     });
-    let stranded = session_of(&world, "stopped");
+    let stranded = opened(&world, "stopped");
+    let stranded = stranded["payload"]["token"]
+        .as_str()
+        .unwrap_or_else(|| {
+            panic!(
+                "the stopped run opened no session\n{}",
+                why(&world, "stopped")
+            )
+        })
+        .to_owned();
     let clone = PathBuf::from(
         opened(&world, "stopped")["payload"]["clone"]
             .as_str()
@@ -290,7 +295,6 @@ fn a_retry_takes_up_the_session_a_stopped_run_left_its_work_in() {
         "the stopped run left nothing on {STRANDED} for its retry to inherit"
     );
 
-    // 2. The retry: the same pin, a fresh run, and a gate that now passes.
     world.release("gate.go");
     world.script("continuation.work", "and then the worker wrote this\n");
     let mut retry = lifecycle("continuation", &[]);
