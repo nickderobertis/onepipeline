@@ -1174,7 +1174,7 @@ fn stop(args: &StopArgs) -> Result<i32> {
 // `stopping_a_run_ends_the_tree_its_lock_names_when_the_record_names_a_dead_driver` walks over
 // one listing.
 fn terminate(paths: &RunPaths, record: &LaunchRecord) -> Result<Option<sys::Teardown>> {
-    let roots = driving_here(paths, record)?;
+    let roots = roots_to_stop(paths, record)?;
     if roots.is_empty() {
         return Ok(None);
     }
@@ -1185,43 +1185,25 @@ fn terminate(paths: &RunPaths, record: &LaunchRecord) -> Result<Option<sys::Tear
     )))
 }
 
-/// Every process on this host a stop of this run has to aim at, or why this
-/// build cannot say.
+/// Every process on this host a stop of this run aims at, or why this build
+/// cannot say.
 ///
-/// Three records name one, and they answer three different questions.
+/// Three records, three questions. The **launch record** names the driver the run
+/// was launched or last adopted with, taken on the record's word: it is where a
+/// teardown has always aimed, and a pid nothing answers to costs a signal and
+/// nothing else. The **ownership lock** names whatever is driving the run now.
+/// The **registry** names the work itself — the one record that survives the
+/// driver that started it, and the only way a stop reaches a dispatch that has
+/// outlived one.
 ///
-/// The **launch record** names the driver the run was launched or last adopted
-/// with, which is a fact about the past: a driver that died leaves that pid
-/// behind it, and a stop that aimed there alone would signal nothing, find
-/// nothing, and report a clean stop over a dispatch tree still running.
+/// Reading the registry is therefore the one failure that is **fatal to the
+/// stop**. The other two can only add a root, so one that cannot be read costs
+/// reach; a registry that cannot be read is a run nobody can say is idle, and the
+/// caller refuses rather than reporting a teardown it did not make.
 ///
-/// The **ownership lock** is the claim made *now* — created by the process
-/// driving the run and removed when it lets go — and it carries the start token
-/// that says its pid is still the process that took it.
-///
-/// The **dispatch registry** is the only one that names the *work*. Both of the
-/// others name a driver, and a driver is not what a run is spending: it starts
-/// dispatches, and a dispatch outlives the driver that started it — reparented
-/// the moment that driver dies, so nothing descending from either recorded pid
-/// reaches it ever again. That is the live tree a stop used to walk past, and it
-/// is found here or not at all.
-///
-/// So the registry is the one record whose failure to read is **fatal to the
-/// stop**. The others narrow what a teardown can reach; this one decides whether
-/// anything is known about the work at all, and a registry this build cannot read
-/// is not a run with nothing running — it is a run nobody can say that about. The
-/// caller refuses on it rather than reporting a teardown it did not make.
-///
-/// Each stamped root is aimed at only where its **own** token proves it,
-/// independently of the others: a dispatch is verified as the process it was
-/// recorded as whether or not anything is still driving the run, which is the
-/// whole case — the driver is dead. The stamp is what makes an extra root safe
-/// rather than reckless, because a pid the host has since handed to something
-/// else is a tree belonging to somebody who never heard of this run, and a
-/// teardown is the one operation that must never be aimed at a guess. An
-/// unstamped lock — one an older build wrote — proves nothing and is left alone,
-/// so the launch record's pid stands on its own exactly as it did before.
-fn driving_here(paths: &RunPaths, record: &LaunchRecord) -> Result<Vec<u32>> {
+/// A stamped claim is aimed at only where its own token proves it, because a pid
+/// the host has since reissued is somebody else's tree.
+fn roots_to_stop(paths: &RunPaths, record: &LaunchRecord) -> Result<Vec<u32>> {
     let here = sys::hostname();
     let mut roots = Vec::new();
     if record.host == here {
@@ -1986,7 +1968,7 @@ mod tests {
             .recorded()
             .to_string();
         let aimed_at =
-            |record: &LaunchRecord| driving_here(&paths, record).expect("this run's records read");
+            |record: &LaunchRecord| roots_to_stop(&paths, record).expect("this run's records read");
 
         // Nothing holds the lock: the launch record is the whole answer, as it
         // always was.
@@ -2107,7 +2089,7 @@ mod tests {
         };
         // A registry that is there and empty is an answer: this run has nothing
         // running, and the stop proceeds on the records that remain.
-        assert!(driving_here(&paths, &launch).is_ok());
+        assert!(roots_to_stop(&paths, &launch).is_ok());
 
         for (what, entry) in [
             (
@@ -2136,7 +2118,7 @@ mod tests {
             ),
         ] {
             std::fs::write(paths.dispatch(usable.pid, 0), entry).expect("an entry");
-            let refused = driving_here(&paths, &launch)
+            let refused = roots_to_stop(&paths, &launch)
                 .expect_err(&format!("{what} was read as a registry to act on"));
             assert!(
                 refused.to_string().contains(&usable.pid.to_string()),
@@ -2148,7 +2130,7 @@ mod tests {
         // creates has: its absence is something having taken it away, and what
         // the run is running cannot be established without it.
         std::fs::remove_dir_all(paths.dispatches()).expect("the registry is taken away");
-        let refused = driving_here(&paths, &launch)
+        let refused = roots_to_stop(&paths, &launch)
             .expect_err("a run with no registry at all was read as a run with nothing running");
         assert!(
             refused

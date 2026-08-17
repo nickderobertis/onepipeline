@@ -775,11 +775,9 @@ impl DispatchRecord {
 /// A dispatch's entry in the registry, removed when this value is dropped.
 ///
 /// RAII for the same reason [`OwnershipLock`] is: a dispatch ends in more ways
-/// than it settles — it fails, it is cancelled, it is retried, its thread
-/// unwinds — and an entry that outlived any of those would send a later stop at
-/// a pid this run no longer has anything running in. The one ending that leaves
-/// the entry behind is the process itself dying, which is exactly when a stop
-/// needs it.
+/// than it settles, and every one of them drops this. The single ending that
+/// leaves the entry behind is the process itself dying, which is exactly when a
+/// stop needs it.
 #[derive(Debug)]
 pub struct DispatchClaim {
     path: PathBuf,
@@ -840,6 +838,16 @@ pub fn claim_dispatch(paths: &RunPaths, node: &str, pid: u32) -> Result<Dispatch
     // Read back through the same reader a stop uses, because what this promises
     // its caller is not that a write returned but that the registry now holds an
     // entry that reader will act on.
+    //
+    // llmlint: ignore-block[changed_behavior_has_e2e] a write that lands as something other
+    // than what was written is a filesystem lying to a process, not anything a user can type
+    // or a suite can arrange: every fault a journey *can* set — no directory, a file where
+    // one has to be, an entry rewritten afterwards — fails earlier, in branches
+    // `a_dispatch_this_run_cannot_record_is_refused_and_does_not_run` and
+    // `stopping_a_run_whose_registry_cannot_be_read_refuses_and_leaves_the_run_retryable`
+    // drive end to end. What this arm adds is that the promise is checked rather than
+    // assumed, and `a_dispatch_the_registry_cannot_record_is_refused` holds the refusal it
+    // produces against the real filesystem.
     match read_json::<DispatchRecord>(&path) {
         Ok(held) if held == record => Ok(DispatchClaim {
             path,
@@ -851,7 +859,7 @@ pub fn claim_dispatch(paths: &RunPaths, node: &str, pid: u32) -> Result<Dispatch
             paths.run,
             path.display()
         ))),
-    }
+    } // llmlint: ignore-end[changed_behavior_has_e2e]
 }
 
 /// Write one registry entry so no reader can catch it half-written.
@@ -908,6 +916,12 @@ pub fn dispatches_of(paths: &RunPaths) -> Result<Vec<DispatchRecord>> {
     })?;
     let mut found = Vec::new();
     for entry in listed {
+        // llmlint: ignore[changed_behavior_has_e2e] an enumeration that fails *part way* is
+        // the host withdrawing a directory it has already begun to list — a condition no
+        // portable journey can set, and one this reader answers exactly as it answers the
+        // directory it could not open at all, which
+        // `stopping_a_run_whose_registry_cannot_be_read_refuses_and_leaves_the_run_retryable`
+        // drives end to end for both the missing registry and the entry it cannot read.
         let entry = entry.map_err(|source| Error::Ledger {
             path: registry.clone(),
             source,

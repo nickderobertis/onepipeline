@@ -1801,18 +1801,11 @@ fn stopping_a_run_ends_the_tree_its_lock_names_when_the_record_names_a_dead_driv
 
 /// A stop reaches a dispatch whose driver is gone.
 ///
-/// The case both of the run's other records are blind to. The launch record and
-/// the ownership lock name a **driver**, and a driver is not what a run is
-/// spending: it starts dispatches, and a dispatch outlives the driver that
-/// started it — reparented the moment that driver dies, so nothing descending
-/// from either recorded pid reaches it ever again. Before the registry, this
-/// exact state answered `{"stopped":true,"teardown":"nothing-to-stop"}` with an
-/// exit 0, while the dispatch went on holding its workspace and burning a CPU.
-///
-/// Nothing here is arranged: the driver is a real one, ended the way a host ends
-/// a process it has run out of memory for, and the dispatch it leaves behind is
-/// the run's own — a real process, still running, that this journey then watches
-/// the stop reach.
+/// The launch record and the ownership lock name a driver, and a dispatch
+/// outlives the driver that started it — so before the registry this state
+/// answered `{"stopped":true,"teardown":"nothing-to-stop"}` with an exit 0 while
+/// the dispatch went on running. The driver here is ended the way a host ends one
+/// it has run out of memory for, and what it started is left behind.
 #[cfg(unix)]
 #[test]
 fn stopping_a_run_reaches_a_dispatch_whose_driver_and_lock_holder_are_dead() {
@@ -2122,20 +2115,39 @@ fn stopping_a_run_whose_registry_cannot_be_read_refuses_and_leaves_the_run_retry
     for (shape, entry) in [
         (
             "a record that is not one",
-            "not an entry this build knows".to_string(),
+            Some("not an entry this build knows".to_string()),
         ),
         (
             "a record from a writer this build does not know",
-            json!({
-                "node": "build",
-                "pid": 4_242,
-                "host": "this-host",
-                "dispatched_at": "2026-08-17T00:00:00.000Z",
-                "started": "a start this host once reported",
-                "reaped_by": "a build that came later",
-            })
-            .to_string(),
+            Some(
+                json!({
+                    "node": "build",
+                    "pid": 4_242,
+                    "host": "this-host",
+                    "dispatched_at": "2026-08-17T00:00:00.000Z",
+                    "started": "a start this host once reported",
+                    "reaped_by": "a build that came later",
+                })
+                .to_string(),
+            ),
         ),
+        (
+            "a record whose stamp proves nothing",
+            Some(
+                json!({
+                    "node": "build",
+                    "pid": 4_242,
+                    "host": "this-host",
+                    "dispatched_at": "2026-08-17T00:00:00.000Z",
+                    "started": "",
+                })
+                .to_string(),
+            ),
+        ),
+        // And the registry gone altogether. Every run this build creates has
+        // one, so this is not "a run with nothing running" — it is a run whose
+        // record of what it is running has been taken away.
+        ("no registry at all", None),
     ] {
         let world = World::new(&format!(
             "driver-stop-unreadable-registry-{}",
@@ -2153,7 +2165,11 @@ fn stopping_a_run_whose_registry_cannot_be_read_refuses_and_leaves_the_run_retry
         let tree: Vec<u32> = std::iter::once(driver).chain(descendants(driver)).collect();
 
         let planted = world.run_file(&run, "dispatches/planted.json");
-        std::fs::write(&planted, entry).expect("an entry nobody can read");
+        match &entry {
+            Some(entry) => std::fs::write(&planted, entry).expect("an entry nobody can read"),
+            None => std::fs::remove_dir_all(world.run_file(&run, "dispatches"))
+                .expect("the registry is taken away"),
+        }
 
         let refused = world.run(&["stop", &run]);
         refused
@@ -2185,9 +2201,13 @@ fn stopping_a_run_whose_registry_cannot_be_read_refuses_and_leaves_the_run_retry
             world.dump()
         );
 
-        // The recovery: with the entry gone, the same ask ends the run and says
-        // what it reached.
-        std::fs::remove_file(&planted).expect("the entry is removed");
+        // The recovery: with what it could not read put right, the same ask ends
+        // the run and says what it reached.
+        match &entry {
+            Some(_) => std::fs::remove_file(&planted).expect("the entry is removed"),
+            None => std::fs::create_dir_all(world.run_file(&run, "dispatches"))
+                .expect("the registry is put back"),
+        }
         world
             .run(&["stop", &run])
             .exited(0)

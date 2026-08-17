@@ -180,24 +180,14 @@ pub fn stop(pid: u32, how: Stop) -> Teardown {
 
 /// Ask several trees to stop **together**, and then watch until they are gone.
 ///
-/// Two things [`stop`] leaves to its caller, done here because both callers that
-/// report to a person need them and neither can do them from what `stop`
-/// returns.
-///
-/// *Together*, because one listing decides every tree: a teardown that ended one
-/// root and only then went looking for the next would read the table with the
-/// first tree already dying, and a descendant whose parent has gone is
-/// reparented at once — beyond descent, which is the only handle a later stop
-/// has on it. So the roots are walked over one snapshot, the union is signalled
-/// roots first, and no tree is read after another has been signalled.
-///
-/// *Watched*, because [`Teardown::Signalled`] is a delivered signal rather than
-/// a process that has exited, and the difference is the whole of what an
-/// operator is asking. The set watched is the one that was **aimed at**, read
-/// before anything was signalled: probing the roots alone would call a tree gone
-/// the moment its root was, and probing by descent afterwards would find nothing
-/// to probe. A tree still standing when `patience` runs out is
-/// [`Teardown::PartlySignalled`] — signalled, and still running.
+/// Two things [`stop`] leaves to its caller. *Together*, because one listing
+/// decides every tree: a root signalled before the next is walked has already
+/// reparented its children beyond descent. *Watched*, because
+/// [`Teardown::Signalled`] is a delivered signal rather than a process that has
+/// exited — and what is watched is the set that was aimed at, read before
+/// anything was signalled, since afterwards there is no tree left to descend. A
+/// tree still standing when `patience` runs out is
+/// [`Teardown::PartlySignalled`].
 pub fn stop_and_confirm(pids: &[u32], how: Stop, patience: Duration) -> Teardown {
     let (established, aimed) = platform_stop(pids, how);
     if established != Teardown::Signalled {
