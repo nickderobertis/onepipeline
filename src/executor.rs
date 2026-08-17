@@ -264,7 +264,7 @@ impl Executor for LocalExecutor {
         // is taken back down and the failure is the caller's: a dispatch that
         // could not start is an outcome this seam already has, and the engine
         // retries it and settles the node saying so.
-        let claim = match claimed(&req.labels, run.process()) {
+        let claim = match register_dispatch(&req.labels, run.process()) {
             Ok(claim) => claim,
             Err(refusal) => {
                 // Ended and collected, not merely signalled: what this returns
@@ -299,7 +299,10 @@ impl Executor for LocalExecutor {
 /// registry for a run that does not exist. So is one whose node the labels do not
 /// name — an entry that could not say which node it belonged to would be a pid an
 /// operator could not act on. Every dispatch a *run* makes carries both.
-fn claimed(labels: &Labels, process: Option<u32>) -> Result<Option<crate::ledger::DispatchClaim>> {
+fn register_dispatch(
+    labels: &Labels,
+    process: Option<u32>,
+) -> Result<Option<crate::ledger::DispatchClaim>> {
     let (Some(run), Some(node)) = (labels.run_id.as_deref(), labels.node.as_deref()) else {
         return Ok(None);
     };
