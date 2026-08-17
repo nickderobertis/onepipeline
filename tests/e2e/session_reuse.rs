@@ -108,6 +108,22 @@ fn session_of(world: &World, run: &str) -> String {
 /// state the sibling itself writes, rather than a shape this suite believes it
 /// writes.
 fn onevcs(world: &World, args: &[&str]) -> String {
+    let (code, out, err) = ran(world, args);
+    assert_eq!(code, Some(0), "onevcs {args:?} failed: {err}{out}");
+    out
+}
+
+/// The same command, for a verb this journey needs to be *refused*.
+///
+/// Answers what it said, which is where the refusal is: a command that succeeded
+/// is the failure, and it fails here rather than several assertions later.
+fn onevcs_refusal(world: &World, args: &[&str]) -> String {
+    let (code, out, err) = ran(world, args);
+    assert_ne!(code, Some(0), "onevcs {args:?} was not refused: {out}{err}");
+    err
+}
+
+fn ran(world: &World, args: &[&str]) -> (Option<i32>, String, String) {
     let output = Command::new(onevcs_binary())
         .args(args)
         .env("ONEVCS_HOME", world.onevcs_home())
@@ -119,12 +135,11 @@ fn onevcs(world: &World, args: &[&str]) -> String {
         .stdin(Stdio::null())
         .output()
         .expect("the onevcs binary runs");
-    assert!(
-        output.status.success(),
-        "onevcs {args:?} failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8_lossy(&output.stdout).into_owned()
+    (
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
 }
 
 /// A session opened by a process that has since exited.
@@ -149,14 +164,21 @@ fn run_root(session: &Session) -> &Path {
 /// Hold a run root's occupancy lease exclusively, as a reclamation probing that
 /// directory holds it.
 ///
-/// This is the one thing a journey cannot ask the sibling's own command line for:
-/// no verb holds a lease past its own exit, which is the point of a lease the OS
-/// releases with the process. So the file is locked directly, and the *name* of it
-/// is computed the way `onevcs` computes it — `run:<run root>`, SHA-256'd, under
-/// the state root's `locks/` — because that module is private to the sibling.
-/// The file has to exist already, which is what says the name is still the one the
-/// sibling writes: renamed there, this fails saying so rather than locking a file
-/// nothing consults and quietly asserting nothing.
+/// This is the one state a journey cannot ask the sibling's own command line for:
+/// a lease is deliberately one the OS releases with the process, so no verb holds
+/// one past its own exit and no sequence of them leaves a run root occupied. The
+/// file is therefore locked here, and its *name* is computed the way `onevcs`
+/// computes it — `run:<run root>`, SHA-256'd, under the state root's `locks/` —
+/// because the module that names it is private to the sibling.
+///
+/// A restated name is only worth having while something proves it is still the
+/// right one, so this does not trust it twice over. The file has to already exist,
+/// which catches a rename; and the sibling is then asked, through its own
+/// `session adopt`, to take the session up — the same lease `resumable` consults,
+/// asked by the public verb built on it. A refusal is the proof that what this
+/// holds is what decides occupancy. Should `onevcs` move that decision to another
+/// lock, the adoption succeeds and this says so, rather than leaving the journeys
+/// below holding a file nothing consults and asserting nothing.
 fn hold_lease(world: &World, session: &Session) -> std::fs::File {
     use sha2::{Digest, Sha256};
     let lease = format!("run:{}", run_root(session).display());
@@ -182,6 +204,13 @@ fn hold_lease(world: &World, session: &Session) -> std::fs::File {
     assert!(
         matches!(fs4::fs_std::FileExt::try_lock_exclusive(&file), Ok(true)),
         "the lease at {} is already held, so this journey never made the run root occupied",
+        path.display()
+    );
+    let refused = onevcs_refusal(world, &["session", "adopt", &session.token.0]);
+    assert!(
+        refused.contains("is occupied by another process"),
+        "the sibling took up a session whose lease this journey holds, so {} is not \
+         the lock occupancy is decided by: {refused}",
         path.display()
     );
     file
