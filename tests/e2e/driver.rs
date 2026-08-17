@@ -11,7 +11,9 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::harness::{agent, human, plan_of, World, NOTHING_DRIVING, REFUSED};
+use crate::harness::{
+    agent, deaf_process, end_process, human, plan_of, reaped_pid, World, NOTHING_DRIVING, REFUSED,
+};
 use serde_json::json;
 
 fn start_detached(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
@@ -1735,6 +1737,151 @@ fn a_stop_aimed_at_another_hosts_driver_reports_that_it_reached_nothing() {
         .exited(0)
         .out_has("\"teardown\":\"signalled\"");
     world.until("the driver to end", |_| !still_listed(driver));
+    world.release("build.go");
+}
+
+/// A stop finds the run's tree through the ownership lock, not through a
+/// recorded pid that has died.
+///
+/// The launch record names the driver a run was launched or last adopted with,
+/// which is a claim about the past: a driver that died leaves that pid behind
+/// it, and a stop aimed there alone signals nothing, finds nothing, and reports
+/// a clean teardown over a dispatch tree that is still running and still
+/// spending. The **lock** is the claim made now, and its start token is what
+/// makes acting on it safe — so the stop reaches the tree the run is actually
+/// made of.
+///
+/// The record is edited rather than arranged, because no verb produces this
+/// state on demand: a driver that has died and been taken over rewrites the
+/// record as it takes the lock, and the window where the two disagree is one a
+/// journey cannot stand in. What is edited is the one fact under test — the pid
+/// the record names — and everything else about the run is real: a live driver
+/// holding the lock it took, with a dispatch genuinely in flight below it.
+#[cfg(unix)]
+#[test]
+fn stopping_a_run_ends_the_tree_its_lock_names_when_the_record_names_a_dead_driver() {
+    let world = World::new("driver-stop-stale-record");
+    world.script("build.wait", "hold");
+    let (run, driver) = start_detached_announcing(&world, "stale", vec![agent("build", &[])]);
+    world.until("a node to be in flight", |world| {
+        !world.events_of(&run, "node-dispatched").is_empty()
+    });
+    world.until("the dispatch to be a process below the driver", |_| {
+        !descendants(driver).is_empty()
+    });
+    let tree: Vec<u32> = std::iter::once(driver).chain(descendants(driver)).collect();
+
+    let record = world.run_file(&run, "launch.json");
+    let mut named = world.run_json(&run, "launch.json");
+    let dead = reaped_pid();
+    named["pid"] = json!(dead);
+    std::fs::write(&record, named.to_string()).expect("the launch record is rewritten");
+    assert!(
+        !still_listed(dead),
+        "the record now names pid {dead}, which is live, so this journey proves nothing"
+    );
+
+    world
+        .run(&["stop", &run])
+        .exited(0)
+        .out_has("\"stopped\":true")
+        .out_has("\"teardown\":\"signalled\"");
+    world.until("every process the run started to end", |_| {
+        tree.iter().all(|pid| !still_listed(*pid))
+    });
+    world.release("build.go");
+}
+
+/// A stop that found nothing running says that, rather than claiming it reached
+/// a tree.
+///
+/// The two are opposite answers to what an operator is asking, and they were one
+/// value: `ESRCH` — no such process — counted as a process reached, so `stop`
+/// answered `signalled` for a run whose work had ended hours earlier and for one
+/// it had genuinely just ended. The run is stopped either way, which is why this
+/// is a success and not a refusal: the ledger record is what stops a run.
+#[test]
+fn stopping_a_run_whose_work_is_over_says_there_was_nothing_to_stop() {
+    let world = World::new("driver-stop-nothing");
+    let run = start_detached(&world, "finished", vec![agent("build", &[])]);
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+
+    let stopped = world.run(&["stop", &run]);
+    stopped.exited(0).out_has("\"stopped\":true");
+    assert_eq!(
+        stopped.json()["teardown"],
+        json!("nothing-to-stop"),
+        "a stop that signalled nothing reported what a stop that ended a run reports:\n{}",
+        stopped.stdout
+    );
+    // And the run's own record says the same, so a later reader is not left to
+    // take this for a run whose workers were ended by it.
+    let recorded = world.events_of(&run, "run-stopped");
+    assert_eq!(recorded.len(), 1, "the stop went unrecorded");
+    assert_eq!(recorded[0]["payload"]["teardown"], json!("nothing-to-stop"));
+}
+
+/// A stop watches the tree it signalled and refuses when it is still there.
+///
+/// `Signalled` was never a process that had exited — `kill` reports a delivered
+/// signal and nothing more — and the type said so, deferring the liveness probe
+/// to a caller that never performed it. So a worker that took the ask and stayed
+/// was reported as a clean stop, which is how an operator walks away from a run
+/// still burning a CPU.
+///
+/// The process that stays is a real one this suite owns and starts for the
+/// purpose, put inside the run's tree through the listing the teardown reads:
+/// the run's own doubles act out a worker that finishes and one that holds, and
+/// neither acts out one that ignores the ask.
+#[cfg(unix)]
+#[test]
+fn a_stop_whose_tree_takes_the_ask_and_stays_refuses_rather_than_reporting_a_clean_stop() {
+    let world = World::new("driver-stop-deaf");
+    world.script("build.wait", "hold");
+    let (run, driver) = start_detached_announcing(&world, "deaf", vec![agent("build", &[])]);
+    world.until("a node to be in flight", |world| {
+        !world.events_of(&run, "node-dispatched").is_empty()
+    });
+    let deaf = deaf_process();
+
+    let mut command = world.cmd(&["stop", &run]);
+    command.env("PATH", world.path_whose_ps_adds_a_child(driver, deaf));
+    let refused = world.run_on(
+        command,
+        "stop with a process in the tree that ignores the ask",
+    );
+    refused.exited(REFUSED).err_has("only partly stopped");
+    assert!(
+        !refused.stdout.contains("\"stopped\":true"),
+        "a run with a process still running was announced as a clean stop:\n{}",
+        refused.stdout
+    );
+    assert!(
+        still_listed(deaf),
+        "pid {deaf} ended on the polite ask, so the refusal above proves nothing"
+    );
+
+    // The record says which of the answers it was, so no reader takes this for a
+    // run whose work was ended.
+    let stopped = world.events_of(&run, "run-stopped");
+    assert_eq!(stopped.len(), 1);
+    assert_eq!(
+        stopped[0]["payload"]["teardown"],
+        json!("partly-signalled"),
+        "a stop that left a process running was recorded as something else: {}",
+        stopped[0]
+    );
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("worker may still be running");
+
+    end_process(deaf);
+    world.until("the process that ignored the ask to end", |_| {
+        !still_listed(deaf)
+    });
     world.release("build.go");
 }
 

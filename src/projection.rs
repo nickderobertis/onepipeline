@@ -525,7 +525,13 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
         Some(journal::PipelineKind::RunStopped) => {
             state.stop = match journal::StopTeardown::of(payload) {
                 journal::StopTeardown::Signalled => StopState::WorkersSignalled,
-                journal::StopTeardown::NotAttempted
+                // A stop that found nothing to aim at established nothing about
+                // this run's workers either. It very likely means they had
+                // already ended — but "ended when the run was stopped" is a
+                // claim about a signal nobody sent, and a worker orphaned by a
+                // dead driver is exactly the case that would make it false.
+                journal::StopTeardown::NothingToStop
+                | journal::StopTeardown::NotAttempted
                 | journal::StopTeardown::PartlySignalled
                 | journal::StopTeardown::Elsewhere => StopState::WorkersUndetermined,
             };

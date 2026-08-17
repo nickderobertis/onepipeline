@@ -6,7 +6,7 @@
 //! resolves them through this module, so an unanswerable question resolves
 //! toward "still working" here rather than in each caller.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// The environment variable naming the launching session, when the harness
 /// exports one.
@@ -92,19 +92,31 @@ pub fn hostname() -> String {
 
 /// What a teardown established about the processes it was aimed at.
 ///
-/// Three outcomes because they call for three different things from the caller,
+/// Four outcomes because they call for four different things from the caller,
 /// and collapsing any two of them is how a stop reports a completion nobody
 /// achieved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Teardown {
-    /// Every process in the tree was reached — or there was no process to aim
-    /// at.
+    /// A tree was there and every process in it was reached.
     ///
     /// Signalled, not *proved gone*: `kill` reports that the signal was
     /// delivered, and a process may take a moment over it. What this rules out
-    /// is the failure that matters — a process nobody aimed at. The caller's
-    /// next liveness probe confirms the rest.
+    /// is the failure that matters — a process nobody aimed at.
+    /// [`stop_and_confirm`] is the liveness probe that settles the rest, and a
+    /// caller that reports a stop to a person has to run it: a teardown that
+    /// signalled a tree still standing is a run the operator has been told is
+    /// over.
     Signalled,
+    /// There was **nothing to aim at**: every process the walk named was
+    /// already gone, so no signal reached anything.
+    ///
+    /// Deliberately not [`Signalled`](Self::Signalled), which is what it was
+    /// once folded into. The two are opposite answers to the question a caller
+    /// is actually asking — *did this end the run's work?* — and reading "there
+    /// was nothing running" as "the tree was reached" is how a `stop` reports
+    /// having ended a dispatch it never found. Neither is a failure: a run whose
+    /// work is already over has nothing left to end.
+    NothingToStop,
     /// The teardown never began — this host gave no listing the tree could be
     /// read from, or the program that ends it could not be run — so **nothing**
     /// was signalled and the run is exactly as it was.
@@ -114,13 +126,14 @@ pub enum Teardown {
     /// it permanently beyond descent — the only handle a later stop has on them.
     /// Untouched, the same ask works once the host answers.
     NotAttempted,
-    /// The teardown began and reached part of the tree; at least one process in
-    /// it was not reached.
+    /// The teardown began and at least one process in the tree is still
+    /// running: one it could not signal, or — where the caller asked for the
+    /// probe — one it signalled that has not gone.
     ///
     /// The run is *not* untouched and retrying will not necessarily help: what
-    /// could not be signalled is a process this user may not touch, and it is
-    /// still running. The caller has to say so rather than report either of the
-    /// other two.
+    /// is left is a process this user may not touch, or one that took the ask
+    /// and stayed, and either way it is still running. The caller has to say so
+    /// rather than report any of the other three.
     PartlySignalled,
 }
 
@@ -162,44 +175,149 @@ pub enum Stop {
 /// inside that moment is missed; signalling the root first is what closes that
 /// in practice.
 pub fn stop(pid: u32, how: Stop) -> Teardown {
-    // `0` is no process, and this process is one a teardown must never turn on
-    // itself: `stop` is called from the command doing the stopping. Neither
-    // leaves a tree unreached, which is what the answer is about.
-    if pid == 0 || pid == self::pid() {
-        return Teardown::Signalled;
-    }
-    platform_stop(pid, how)
+    platform_stop(&[pid], how).0
 }
 
-#[cfg(unix)]
-fn platform_stop(pid: u32, how: Stop) -> Teardown {
-    let signal = match how {
-        Stop::Politely => libc::SIGTERM,
-        Stop::Now => libc::SIGKILL,
-    };
-    // The tree is read **before** anything is signalled: a process whose parent
-    // has died is reparented at once, so a table read after the root is gone no
-    // longer descends to any of them.
-    let Some(tree) = descendants(pid) else {
-        return Teardown::NotAttempted;
-    };
-    // The root first, so what is left has stopped growing while its members are
-    // taken down. Every answer is kept: one process this user may not signal is
-    // one still running, and a teardown that reported the tree as reached
-    // anyway would be the same false completion in a smaller place.
-    let mut reached = signal_one(pid, signal);
-    for descendant in tree {
-        reached = signal_one(descendant, signal) && reached;
+/// Ask several trees to stop **together**, and then watch until they are gone.
+///
+/// Two things [`stop`] leaves to its caller, done here because both callers that
+/// report to a person need them and neither can do them from what `stop`
+/// returns.
+///
+/// *Together*, because one listing decides every tree: a teardown that ended one
+/// root and only then went looking for the next would read the table with the
+/// first tree already dying, and a descendant whose parent has gone is
+/// reparented at once — beyond descent, which is the only handle a later stop
+/// has on it. So the roots are walked over one snapshot, the union is signalled
+/// roots first, and no tree is read after another has been signalled.
+///
+/// *Watched*, because [`Teardown::Signalled`] is a delivered signal rather than
+/// a process that has exited, and the difference is the whole of what an
+/// operator is asking. The set watched is the one that was **aimed at**, read
+/// before anything was signalled: probing the roots alone would call a tree gone
+/// the moment its root was, and probing by descent afterwards would find nothing
+/// to probe. A tree still standing when `patience` runs out is
+/// [`Teardown::PartlySignalled`] — signalled, and still running.
+pub fn stop_and_confirm(pids: &[u32], how: Stop, patience: Duration) -> Teardown {
+    let (established, aimed) = platform_stop(pids, how);
+    if established != Teardown::Signalled {
+        return established;
     }
-    if reached {
+    if gone_within(&aimed, patience) {
         Teardown::Signalled
     } else {
         Teardown::PartlySignalled
     }
 }
 
-/// Signal one process, and refuse every id that is not one. `true` when this
-/// user's signal reached it, or when there was no longer anything to reach.
+/// Whether every process in `aimed` is gone before `patience` runs out.
+///
+/// Polled rather than waited on: these are not this process's children, so there
+/// is nothing to wait for — the only question a host answers about somebody
+/// else's process is whether it is still there.
+fn gone_within(aimed: &[u32], patience: Duration) -> bool {
+    let deadline = Instant::now() + patience;
+    loop {
+        if !aimed.iter().any(|pid| process_may_be_live(*pid)) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(PROBE_POLL);
+    }
+}
+
+/// How often the liveness probe asks again.
+const PROBE_POLL: Duration = Duration::from_millis(20);
+
+/// The roots a teardown may aim at, in the order they are signalled.
+///
+/// `0` is no process, and this process is one a teardown must never turn on
+/// itself: a stop is called from the command doing the stopping. Neither is a
+/// tree left unreached, which is what the answer is about — a set that empties
+/// to nothing here is [`Teardown::NothingToStop`].
+fn aimable(roots: &[u32]) -> Vec<u32> {
+    let mut aimed: Vec<u32> = Vec::new();
+    for root in roots
+        .iter()
+        .copied()
+        .filter(|pid| *pid != 0 && *pid != self::pid())
+    {
+        if !aimed.contains(&root) {
+            aimed.push(root);
+        }
+    }
+    aimed
+}
+
+#[cfg(unix)]
+fn platform_stop(roots: &[u32], how: Stop) -> (Teardown, Vec<u32>) {
+    let signal = match how {
+        Stop::Politely => libc::SIGTERM,
+        Stop::Now => libc::SIGKILL,
+    };
+    let mut aimed = aimable(roots);
+    if aimed.is_empty() {
+        return (Teardown::NothingToStop, aimed);
+    }
+    // The table is read **before** anything is signalled: a process whose parent
+    // has died is reparented at once, so a table read after any root is gone no
+    // longer descends to what was under it.
+    let Some(table) = process_table() else {
+        return (Teardown::NotAttempted, Vec::new());
+    };
+    // The roots first, so what is left has stopped growing while its members are
+    // taken down.
+    for root in aimed.clone() {
+        for descendant in descended_from(&table, root) {
+            if !aimed.contains(&descendant) {
+                aimed.push(descendant);
+            }
+        }
+    }
+    // Every answer is kept: one process this user may not signal is one still
+    // running, and a teardown that reported the tree as reached anyway would be
+    // the same false completion in a smaller place. And a walk that found
+    // nothing but processes already gone reached no tree at all, which is the
+    // answer a caller reports as such rather than as a stop it made.
+    let mut refused = false;
+    let mut delivered = false;
+    for pid in &aimed {
+        match signal_one(*pid, signal) {
+            Reached::Delivered => delivered = true,
+            Reached::Absent => {}
+            Reached::Refused => refused = true,
+        }
+    }
+    let established = match (refused, delivered) {
+        (true, _) => Teardown::PartlySignalled,
+        (false, true) => Teardown::Signalled,
+        (false, false) => Teardown::NothingToStop,
+    };
+    (established, aimed)
+}
+
+/// What one process did with the signal it was sent.
+///
+/// Three answers rather than a `bool`, because the teardown's own answer is
+/// built from them and two of them used to be one: a process that took the
+/// signal and one that was no longer there both count as *reached*, and only the
+/// first is a tree this stop ended. Folding them together is what let a teardown
+/// that found nothing report the same outcome as one that ended a run.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reached {
+    /// This user's signal was delivered to a process that was there.
+    Delivered,
+    /// There was no such process: it exited between the listing and the signal,
+    /// or the walk named an id nothing holds.
+    Absent,
+    /// A process still running that this teardown may not signal.
+    Refused,
+}
+
+/// Signal one process, and refuse every id that is not one.
 ///
 /// `kill` reads a non-positive pid as a **broadcast**: `0` is the caller's whole
 /// process group, `-1` is every process it may signal, and a negative id is
@@ -210,39 +328,48 @@ fn platform_stop(pid: u32, how: Stop) -> Teardown {
 /// rather than only where the ids are read.
 ///
 /// The answer is what makes the teardown's own answer honest. `ESRCH` — no such
-/// process — is the outcome that was wanted: it exited between the listing and
-/// the signal. Anything else, `EPERM` above all, is a process still running that
-/// this user may not touch, and a teardown reporting that as reached would be
-/// claiming a completion it was refused.
+/// process — is not a failure: it exited between the listing and the signal, and
+/// there is nothing left in it to end. It is not a stop this teardown made
+/// either, which is why it is [`Reached::Absent`] and not
+/// [`Reached::Delivered`]. Anything else, `EPERM` above all, is a process still
+/// running that this user may not touch, and a teardown reporting that as
+/// reached would be claiming a completion it was refused.
 #[cfg(unix)]
-fn signal_one(pid: u32, signal: i32) -> bool {
+fn signal_one(pid: u32, signal: i32) -> Reached {
     let Ok(raw) = i32::try_from(pid) else {
-        return false;
+        return Reached::Refused;
     };
     if raw <= 0 {
-        return false;
+        return Reached::Refused;
     }
     // SAFETY: `kill` takes a pid and a signal number and touches no memory this
     // call owns. `raw` is positive, so this addresses one process.
     if unsafe { libc::kill(raw, signal) } == 0 {
-        return true;
+        return Reached::Delivered;
     }
-    std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    if std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+        return Reached::Absent;
+    }
+    Reached::Refused
 }
 
-/// Every process descended from `pid`, however deep, or `None` when this host
-/// would not say.
+/// Every process descended from `pid` in one listing, however deep.
 ///
-/// The two are not the same answer and the caller must not read them as one: an
-/// empty set means the process started nothing, while `None` means the tree is
-/// unknown and anything under it is about to be orphaned.
+/// Takes the table rather than reading one, because a teardown aimed at more
+/// than one root must walk them all over the **same** snapshot: a table read
+/// again after another root has been signalled describes a host where that
+/// root's children have already been reparented away.
 ///
-/// Walked over a single snapshot, in whatever order the frontier gives — the
-/// caller needs the *set*. A pid already found is never queued again, which is
-/// what makes a table reporting a cycle terminate rather than hang a teardown.
+/// An empty set means the process started nothing. That a host would not say at
+/// all is the caller's question — [`process_table`] answers `None` for it — and
+/// the two must never be read as one, because anything under an unknown tree is
+/// about to be orphaned.
+///
+/// Walked in whatever order the frontier gives — the caller needs the *set*. A
+/// pid already found is never queued again, which is what makes a table
+/// reporting a cycle terminate rather than hang a teardown.
 #[cfg(unix)]
-fn descendants(pid: u32) -> Option<Vec<u32>> {
-    let table = process_table()?;
+fn descended_from(table: &[(u32, u32)], pid: u32) -> Vec<u32> {
     let mut found: Vec<u32> = Vec::new();
     let mut frontier = vec![pid];
     while let Some(parent) = frontier.pop() {
@@ -253,7 +380,7 @@ fn descendants(pid: u32) -> Option<Vec<u32>> {
             }
         }
     }
-    Some(found)
+    found
 }
 
 /// This host's `(pid, parent pid)` pairs, or `None` when it gave no listing this
@@ -310,8 +437,51 @@ fn parse_table(listed: &str) -> Option<Vec<(u32, u32)>> {
 }
 
 /// `how` is deliberately unread here; see the note on `/F` below.
+///
+/// The roots are filtered to the ones this host says are still there **before**
+/// any of them is asked to end, which is this platform's answer to the question
+/// the Unix arm reads off `ESRCH`: a `taskkill` aimed at a tree that is already
+/// gone reached nothing, and reporting that as a stop is the false completion
+/// this seam exists to remove.
 #[cfg(windows)]
-fn platform_stop(pid: u32, _how: Stop) -> Teardown {
+fn platform_stop(roots: &[u32], _how: Stop) -> (Teardown, Vec<u32>) {
+    let aimed: Vec<u32> = aimable(roots)
+        .into_iter()
+        .filter(|pid| platform_process_may_be_live(*pid))
+        .collect();
+    if aimed.is_empty() {
+        return (Teardown::NothingToStop, aimed);
+    }
+    // Every tree is asked separately, because `taskkill` takes one root, and the
+    // answers are folded the way a teardown of several trees has to be: one tree
+    // untouched beside one that was signalled is a run that is neither intact nor
+    // ended, which is what [`Teardown::PartlySignalled`] says.
+    let mut walked = true;
+    let mut attempted = false;
+    for pid in &aimed {
+        match taskkill_established(taskkill(*pid), || platform_process_may_be_live(*pid)) {
+            Teardown::Signalled => attempted = true,
+            Teardown::PartlySignalled => {
+                attempted = true;
+                walked = false;
+            }
+            Teardown::NotAttempted => walked = false,
+            // `taskkill_established` never answers it: a root this teardown
+            // aimed at was live when it was filtered above.
+            Teardown::NothingToStop => {}
+        }
+    }
+    let established = match (walked, attempted) {
+        (true, _) => Teardown::Signalled,
+        (false, true) => Teardown::PartlySignalled,
+        (false, false) => Teardown::NotAttempted,
+    };
+    (established, aimed)
+}
+
+/// Ask this platform to end one tree.
+#[cfg(windows)]
+fn taskkill(pid: u32) -> std::io::Result<std::process::ExitStatus> {
     // `/T` for the tree — the same boundary the Unix arm walks the process table
     // for, which this platform offers outright.
     //
@@ -333,17 +503,16 @@ fn platform_stop(pid: u32, _how: Stop) -> Teardown {
     // that carries it — a signal whose default action is to terminate, which
     // nothing in this crate installs a handler for. So the grace this drops is
     // grace no process here was taking.
-    let ran = std::process::Command::new("taskkill")
+    std::process::Command::new("taskkill")
         .args(["/PID", &pid.to_string(), "/T", "/F"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status();
-    taskkill_established(ran, || platform_process_may_be_live(pid))
+        .status()
 }
 
 /// What a run of `taskkill /T /F` established about the tree it was aimed at.
 ///
-/// Separate from running it so all four answers can be proved without a process:
+/// Separate from running it so all three answers can be proved without a process:
 /// what a `taskkill` that ran and *failed* means is a question about this
 /// mapping alone, and one of its cases is not one a suite can produce on demand
 /// — it needs a process this user may not end, which is not a thing to go and
@@ -493,9 +662,16 @@ impl StartToken {
 /// record naming one is evidence about the process that took it only while that
 /// process is still the one holding it — and a record that has been sitting on
 /// disk for two days is exactly where that stops being true. Recorded beside the
-/// pid and compared for equality afterwards: the same host, asking the same way,
-/// gets the same answer for the same process and a different one for its
-/// successor.
+/// pid and compared for equality afterwards: the same host gets the same answer
+/// for the same process and a different one for its successor.
+///
+/// The reading is a function of the **process**, never of who is reading it. One
+/// process is written down by the driver that took the run's lock and read back
+/// by whatever session goes looking, and those two share a host and nothing else
+/// — not a working directory, not a login, not a `TZ`. A token that moved with
+/// the reader's environment would make one live process disagree with itself,
+/// which reads as a pid that has been handed to something else; see
+/// [`platform_process_start_token`] for what that cost and how it is pinned.
 ///
 /// Opaque on purpose — never parsed, never ordered, never rendered as a time.
 /// What makes it a proof is that two readings agree, not what either one says.
@@ -515,6 +691,22 @@ pub fn process_start_token(pid: u32) -> Option<StartToken> {
 /// of them. `lstart` is the process's own start time, which the kernel fixes
 /// when the process is created and nothing afterwards changes.
 ///
+/// **Asked in a fixed environment**, and that is what makes two readings
+/// comparable at all. `lstart` is not a fact `ps` copies out; it is that fact
+/// *rendered*, and every Unix renders it through the reader's own environment —
+/// `localtime` for the zone, and on the BSDs `strftime("%c")` for the words. So
+/// the same live process answers `Mon Aug 17 11:22:34 2026` to one reader and
+/// `Mon Aug 17 07:22:34 2026` to another standing in a different `TZ`, and two
+/// readings that disagree are what a caller comparing them reads as *a different
+/// process*. That is not a hypothetical: a run adopted from one session and
+/// looked at from another is two processes with two environments, and the view
+/// that exists to say whether its dispatches are alive reported them dead.
+/// Pinning the zone and the locale on the child leaves the reading a function of
+/// the process alone, which is the property the token is for; the alternative —
+/// a source rendered by nobody, `/proc/<pid>/stat` — exists on one of the two
+/// platforms this crate supports, and a platform fixed in only one of them is
+/// what having a single implementation here is worth avoiding.
+///
 /// Read strictly. A `ps` that cannot run, exits non-zero, or writes bytes this
 /// cannot decode is not an answer, and neither is an empty line — a token
 /// nothing produced would compare equal to another one nothing produced, which
@@ -523,6 +715,10 @@ pub fn process_start_token(pid: u32) -> Option<StartToken> {
 fn platform_process_start_token(pid: u32) -> Option<String> {
     let listed = std::process::Command::new("ps")
         .args(["-p", &pid.to_string(), "-o", "lstart="])
+        // `LC_ALL` rather than `LC_TIME`, because it is the one that overrides
+        // whatever else the reader's environment sets.
+        .env("TZ", "UTC")
+        .env("LC_ALL", "C")
         .stderr(std::process::Stdio::null())
         .output()
         .ok()?;
@@ -1022,26 +1218,193 @@ mod tests {
         false
     }
 
-    /// A process that is already gone counts as reached; an id that is not a
-    /// process never does.
+    /// A live process, a process already gone, and an id that is not a process
+    /// each answer differently.
     ///
-    /// The distinction the teardown's own answer rests on. `ESRCH` means the
-    /// process exited between the listing and the signal, which is the outcome
-    /// that was wanted — treating it as a failure would make every ordinary race
-    /// report an incomplete stop. A non-positive id is not a process at all: to
-    /// `kill` it is a broadcast, so it is refused rather than sent, and refusing
-    /// to send is not reaching anything.
+    /// The three answers the teardown's own answer is built from, and the reason
+    /// they are three. `ESRCH` means the process exited between the listing and
+    /// the signal, which is not a failure — treating it as one would make every
+    /// ordinary race report an incomplete stop — and it is not a process this
+    /// teardown ended either, which is the distinction that used to be missing. A
+    /// non-positive id is not a process at all: to `kill` it is a broadcast, so
+    /// it is refused rather than sent, and refusing to send is not reaching
+    /// anything.
     #[cfg(unix)]
     #[test]
-    fn a_signal_reports_a_process_already_gone_as_reached_and_a_broadcast_as_not() {
-        assert!(
+    fn a_signal_separates_a_process_it_reached_from_one_already_gone_and_from_a_broadcast() {
+        // Signal `0` is the existence check, so this reaches a live process
+        // without ending the suite that is running in it.
+        assert_eq!(
+            signal_one(pid(), 0),
+            Reached::Delivered,
+            "a live process was not reported as reached"
+        );
+        assert_eq!(
             signal_one(reaped_pid(), libc::SIGTERM),
-            "a process that had already exited was reported as unreached"
+            Reached::Absent,
+            "a process that had already exited was reported as one this teardown ended"
+        );
+        assert_eq!(
+            signal_one(0, libc::SIGTERM),
+            Reached::Refused,
+            "pid 0 was signalled, and to `kill` it is a whole process group"
+        );
+    }
+
+    /// A teardown aimed at a tree that has already gone says there was nothing
+    /// to stop, not that it stopped something.
+    ///
+    /// The whole of the second defect in one assertion: `stop` used to answer
+    /// the same value here as it does for a run it actually ended, so `onepipeline
+    /// stop` reported a clean teardown of a driver that had died hours earlier —
+    /// and the dispatch tree that driver had orphaned kept running.
+    ///
+    /// Not `#[cfg(unix)]`: the contract is the same on both platforms.
+    #[test]
+    fn a_teardown_aimed_at_a_tree_that_has_already_gone_says_there_was_nothing_to_stop() {
+        let dead = reaped_pid();
+        assert!(
+            !process_may_be_live(dead),
+            "the reaped pid {dead} was still live, so this is not the case under test"
+        );
+        assert_eq!(
+            stop(dead, Stop::Politely),
+            Teardown::NothingToStop,
+            "a stop that found nothing to aim at reported having reached a tree"
+        );
+        // The two ids a teardown never aims at, for the same reason.
+        assert_eq!(stop(0, Stop::Politely), Teardown::NothingToStop);
+        assert_eq!(stop(pid(), Stop::Politely), Teardown::NothingToStop);
+    }
+
+    /// A fixture tree this process does **not** own, and the pids it reports.
+    ///
+    /// Orphaned deliberately, and every probing test below needs it to be: a
+    /// fixture left as this process's own child is reaped by nobody while a
+    /// probe is watching it, and a signalled child nobody has collected is a
+    /// zombie — which answers a liveness probe as alive. A teardown that ended
+    /// such a tree would read as one that left it running, so the fixture would
+    /// fail the test for a reason that is entirely the fixture's. `init` reaps
+    /// what `init` adopts, so an orphan that is gone reads as gone. The
+    /// intermediate shell exits at once and is collected here, which is what
+    /// hands the tree over.
+    ///
+    /// `script` is the tree, each of whose levels echoes its own pid; `levels`
+    /// is how many of those to wait for.
+    #[cfg(unix)]
+    fn orphaned(script: &str, levels: usize) -> Vec<u32> {
+        use std::io::BufRead;
+
+        let mut spawner = std::process::Command::new("sh")
+            .args(["-c", &format!("{script} &")])
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("a fixture tree");
+        let reported = spawner.stdout.take().expect("the tree reports itself");
+        let pids: Vec<u32> = std::io::BufReader::new(reported)
+            .lines()
+            .take(levels)
+            .map(|line| {
+                let line = line.expect("a reported pid");
+                line.trim()
+                    .parse()
+                    .unwrap_or_else(|_| panic!("the tree said {line:?} where a pid was due"))
+            })
+            .collect();
+        spawner.wait().expect("the shell that detached it exits");
+        assert_eq!(
+            pids.len(),
+            levels,
+            "the fixture reported {pids:?} where {levels} level(s) were due"
+        );
+        pids
+    }
+
+    /// A stop that signalled a tree waits to see it go, and says so when it
+    /// does not.
+    ///
+    /// The probe [`Teardown::Signalled`] used to defer to a caller that never
+    /// performed it. The process here takes the polite ask and stays — a real
+    /// one with `SIGTERM` ignored, which is what a wedged worker looks like from
+    /// outside — so a teardown reporting on the signal alone calls this a clean
+    /// stop while the process is still burning a CPU. Asked again forcefully,
+    /// the same process goes, and the answer changes with it.
+    #[cfg(unix)]
+    #[test]
+    fn a_stop_that_watches_reports_a_tree_that_took_the_ask_and_stayed() {
+        let deaf = orphaned("sh -c 'trap \"\" TERM; echo $$; sleep 120'", 1)[0];
+
+        assert_eq!(
+            stop_and_confirm(
+                &[deaf],
+                Stop::Politely,
+                std::time::Duration::from_millis(300)
+            ),
+            Teardown::PartlySignalled,
+            "a stop watched pid {deaf} never go and still called it a clean stop"
         );
         assert!(
-            !signal_one(0, libc::SIGTERM),
-            "pid 0 was reported as reached, and to `kill` it is a whole process group"
+            process_may_be_live(deaf),
+            "pid {deaf} ended on the polite ask, so the answer above proves nothing"
         );
+
+        assert_eq!(
+            stop_and_confirm(&[deaf], Stop::Now, std::time::Duration::from_secs(10)),
+            Teardown::Signalled,
+            "a tree that went was not reported as reached"
+        );
+        assert!(
+            !process_may_be_live(deaf),
+            "the forceful ask left pid {deaf} running"
+        );
+    }
+
+    /// Several trees are read over one listing and ended together.
+    ///
+    /// What a `stop` aims at is every process this run's records name, and they
+    /// are not one: a driver the launch record names and a driver the ownership
+    /// lock names are two roots whenever the first has died and been taken over.
+    /// Read one at a time, the second walk would happen with the first tree
+    /// already dying — and a child whose parent has gone is reparented at once,
+    /// beyond descent for ever.
+    #[cfg(unix)]
+    #[test]
+    fn a_stop_aimed_at_several_roots_ends_every_tree_and_leaves_the_one_beside_them() {
+        let trees: Vec<Vec<u32>> = (0..2)
+            .map(|_| {
+                orphaned(
+                    "sh -c 'echo $$; sh -c \"echo \\$\\$; sleep 120\" & sleep 120'",
+                    2,
+                )
+            })
+            .collect();
+        let beside = orphaned("sh -c 'echo $$; sleep 120'", 1)[0];
+        let roots: Vec<u32> = trees.iter().map(|tree| tree[0]).collect();
+        let every: Vec<u32> = trees.concat();
+        assert!(
+            every.iter().all(|pid| process_may_be_live(*pid)),
+            "the trees {every:?} were not running before they were stopped"
+        );
+
+        assert_eq!(
+            stop_and_confirm(&roots, Stop::Now, std::time::Duration::from_secs(10)),
+            Teardown::Signalled,
+            "a stop that ended {every:?} did not report reaching them"
+        );
+        let surviving: Vec<u32> = every
+            .iter()
+            .copied()
+            .filter(|pid| process_may_be_live(*pid))
+            .collect();
+        assert!(
+            surviving.is_empty(),
+            "a stop of several trees left {surviving:?} of {every:?} running"
+        );
+        assert!(
+            process_may_be_live(beside),
+            "a stop of several trees took pid {beside}, which was under none of them"
+        );
+        stop(beside, Stop::Now);
     }
 
     /// A console process tree, and the pids of both its levels.
@@ -1264,29 +1627,7 @@ mod tests {
         a_stop_reaches_the_whole_console_tree(Stop::Now);
     }
 
-    /// A teardown aimed at a tree that has already gone reports a complete one.
-    ///
-    /// The ordinary race, driven through the real program rather than the
-    /// mapping: `taskkill` fails because there is nothing left to end, and the
-    /// stop that raced its own tree to exit reached everything there was to
-    /// reach. Reporting it as partial would send an operator to hunt a process
-    /// that does not exist.
-    #[cfg(windows)]
-    #[test]
-    fn a_stop_aimed_at_a_tree_that_has_already_gone_is_a_complete_teardown() {
-        let dead = reaped_pid();
-        assert!(
-            !platform_process_may_be_live(dead),
-            "the reaped pid {dead} was still live, so this is not the race under test"
-        );
-        assert_eq!(
-            stop(dead, Stop::Politely),
-            Teardown::Signalled,
-            "a stop that raced its own tree to exit was reported as having left one running"
-        );
-    }
-
-    /// The four answers a `taskkill` can establish, including both directions of
+    /// The three answers a `taskkill` can establish, including both directions of
     /// the one its exit status cannot tell apart.
     ///
     /// The seam is a mapping so the case that matters is provable at all: a

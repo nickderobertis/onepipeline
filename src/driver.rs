@@ -52,6 +52,17 @@ const DRAIN_GRACE: Duration = Duration::from_secs(2);
 /// that waited longer would make a genuinely failed launch look like a slow one.
 const DRIVER_HANDOVER: Duration = Duration::from_secs(30);
 
+/// How long a `stop` watches the tree it signalled before saying it is still
+/// there.
+///
+/// The polite signal is `SIGTERM` and nothing a run is made of installs a
+/// handler for it, so a process that has taken one is gone in milliseconds; what
+/// this waits out is a loaded host and the moment between a parent dying and
+/// `init` reaping what it left. Long enough that an ordinary teardown never
+/// reports a survivor it merely outran, short enough that an operator whose run
+/// really is wedged hears about it rather than watching a command hang.
+const TEARDOWN_PATIENCE: Duration = Duration::from_secs(5);
+
 /// How many of a failed driver's last lines a refusal repeats.
 ///
 /// Enough for the sibling's own refusal and the sentence around it, and few
@@ -1079,10 +1090,11 @@ fn stop(args: &StopArgs) -> Result<i32> {
 
     // Attempted before the record is written, so the record says what happened
     // rather than what was about to be tried.
-    let teardown = terminate(record.pid, &record.host);
+    let teardown = terminate(&paths, &record);
     let established = match teardown {
         None => journal::StopTeardown::Elsewhere,
         Some(sys::Teardown::Signalled) => journal::StopTeardown::Signalled,
+        Some(sys::Teardown::NothingToStop) => journal::StopTeardown::NothingToStop,
         Some(sys::Teardown::NotAttempted) => journal::StopTeardown::NotAttempted,
         Some(sys::Teardown::PartlySignalled) => journal::StopTeardown::PartlySignalled,
     };
@@ -1113,12 +1125,12 @@ fn stop(args: &StopArgs) -> Result<i32> {
         Some(sys::Teardown::PartlySignalled) => {
             return Err(Error::Refused(format!(
                 "run '{run}' was only partly stopped: part of its process tree was \
-                 signalled and at least one process in it could not be, so that one is \
-                 still running and is not this session's to end. Find it in this host's \
-                 process list and end it as the user that owns it"
+                 signalled and at least one process in it is still running — one this \
+                 session could not signal, or one that took the ask and stayed. Find it \
+                 in this host's process list and end it as the user that owns it"
             )));
         }
-        None | Some(sys::Teardown::Signalled) => {}
+        None | Some(sys::Teardown::Signalled) | Some(sys::Teardown::NothingToStop) => {}
     }
     // `teardown` qualifies `stopped`: the ledger record is what stops a run, and
     // it is written either way.
@@ -1134,19 +1146,58 @@ fn stop(args: &StopArgs) -> Result<i32> {
     Ok(EXIT_SUCCESS)
 }
 
-/// Ask the recorded driver to stop, on the host its pid means something on.
+/// Ask everything driving this run on this host to stop, and watch it go.
 ///
-/// Politely: the driver takes the ask first so it records its own abandonment
+/// Politely: a driver takes the ask first so it records its own abandonment
 /// rather than vanishing. The host check is this caller's alone — a pid means
-/// nothing across machines, and the ledger's record names which one it was
+/// nothing across machines, and the ledger's records name which one each was
 /// taken on.
-/// `None` when the pid is another host's, where nothing was attempted and this
-/// host has nothing to promise either way.
-fn terminate(pid: u32, host: &str) -> Option<sys::Teardown> {
-    if host != sys::hostname() {
+///
+/// `None` when nothing this run names is a process on this host, where nothing
+/// was attempted and this host has nothing to promise either way.
+fn terminate(paths: &RunPaths, record: &LaunchRecord) -> Option<sys::Teardown> {
+    let roots = driving_here(paths, record);
+    if roots.is_empty() {
         return None;
     }
-    Some(sys::stop(pid, sys::Stop::Politely))
+    Some(sys::stop_and_confirm(
+        &roots,
+        sys::Stop::Politely,
+        TEARDOWN_PATIENCE,
+    ))
+}
+
+/// Every process on this host a stop of this run has to aim at.
+///
+/// Two records name one and they are not the same claim. The **launch record**
+/// names the driver the run was launched or last adopted with, which is a fact
+/// about the past: a driver that died leaves that pid behind it, and a stop that
+/// aimed there alone would signal nothing, find nothing, and report a clean stop
+/// over a dispatch tree still running. The **ownership lock** is the claim made
+/// *now* — created by the process driving the run and removed when it lets go —
+/// and it carries the start token that says its pid is still the process that
+/// took it.
+///
+/// The lock's pid is aimed at only where that stamp proves it, and the stamp is
+/// what makes the extra root safe rather than reckless: a pid the host has since
+/// handed to something else is a tree belonging to somebody who never heard of
+/// this run, and a teardown is the one operation that must never be aimed at a
+/// guess. A lock with no stamp — one an older build wrote — proves nothing, so
+/// it is left alone and the launch record's pid stands on its own, exactly as
+/// before.
+fn driving_here(paths: &RunPaths, record: &LaunchRecord) -> Vec<u32> {
+    let here = sys::hostname();
+    let mut roots = Vec::new();
+    if record.host == here {
+        roots.push(record.pid);
+    }
+    let held: Option<ledger::LockRecord> = ledger::read_json_opt(&paths.lock());
+    if let Some(held) = held.filter(|held| held.host == here && !roots.contains(&held.pid)) {
+        if sys::process_start_token(held.pid).is_some_and(|token| token.matches(&held.started)) {
+            roots.push(held.pid);
+        }
+    }
+    roots
 }
 
 /// `onepipeline next` — the channel's only consumer.
@@ -1800,5 +1851,106 @@ mod tests {
     #[test]
     fn the_reply_timeout_falls_back_when_the_environment_is_unusable() {
         assert!(reply_timeout_seconds() > 0);
+    }
+
+    /// A launch record naming a driver, as `stop` reads one.
+    fn launched_by(pid: u32, host: &str) -> LaunchRecord {
+        LaunchRecord {
+            run_id: "stopped".into(),
+            plan: PathBuf::from("plan.json"),
+            dir: PathBuf::from("/tmp/launch"),
+            graph: String::new(),
+            graph_run: String::new(),
+            node_graph: "graphs/node-scope.yaml".into(),
+            pr_author_graph: String::new(),
+            launcher: "e2e".into(),
+            session: "session-a".into(),
+            pid,
+            host: host.to_string(),
+            started_at: sys::now_rfc3339(),
+            heartbeat_interval: 1_800,
+            dag_sets: Vec::new(),
+            node_sets: Vec::new(),
+            adoptions: 0,
+            filters: crate::filter::Filters::default(),
+        }
+    }
+
+    /// What a stop aims at is the launch record's driver **and** the process the
+    /// ownership lock stamps as driving the run now — and never a pid nothing
+    /// proves.
+    ///
+    /// The two records answer different questions, and the launch record's
+    /// answer is about the past: a driver that died leaves its pid there, and a
+    /// stop that aimed at it alone signalled nothing while the run's dispatches
+    /// kept running. The lock is the claim made now, so it is aimed at too — but
+    /// only where its own start token says its pid is still the process that took
+    /// it, because a teardown aimed at a pid the host has since reissued is a
+    /// teardown of somebody else's work.
+    #[test]
+    fn a_stop_aims_at_the_locks_stamped_holder_as_well_as_the_recorded_driver() {
+        let root = scratch("roots");
+        let paths = RunPaths::under(&root, "stopped");
+        paths.create().expect("the run directory");
+        let here = sys::hostname();
+        let dead = sys::reaped_pid();
+        let stamp = |started: &str| ledger::LockRecord {
+            pid: sys::pid(),
+            host: here.clone(),
+            acquired_at: sys::now_rfc3339(),
+            verb: "drive".into(),
+            started: started.to_string(),
+        };
+        let held = |record: &ledger::LockRecord| {
+            ledger::write_json(&paths.lock(), record).expect("a held lock");
+        };
+        let proven = sys::process_start_token(sys::pid())
+            .expect("this host says when a process started")
+            .recorded()
+            .to_string();
+
+        // Nothing holds the lock: the launch record is the whole answer, as it
+        // always was.
+        assert_eq!(driving_here(&paths, &launched_by(dead, &here)), vec![dead]);
+
+        // A lock this build's own stamp proves: both, and the recorded driver
+        // first.
+        held(&stamp(&proven));
+        assert_eq!(
+            driving_here(&paths, &launched_by(dead, &here)),
+            vec![dead, sys::pid()],
+            "a stop did not aim at the process the lock stamps as driving the run"
+        );
+        // The same live pid, stamped as a process it is not. This is the case
+        // that makes the stamp worth reading: the pid answers a liveness probe,
+        // and it is not the driver.
+        held(&stamp("the process that took it, which is not this one"));
+        assert_eq!(
+            driving_here(&paths, &launched_by(dead, &here)),
+            vec![dead],
+            "a stop aimed at a pid the lock's own stamp disowns"
+        );
+        // A lock an older build wrote carries no stamp, and an unproven pid is
+        // not one a teardown may aim at either.
+        held(&stamp(""));
+        assert_eq!(driving_here(&paths, &launched_by(dead, &here)), vec![dead]);
+        // A lock taken on another machine, where a pid means nothing.
+        held(&ledger::LockRecord {
+            host: "a-host-this-is-not".into(),
+            ..stamp(&proven)
+        });
+        assert_eq!(driving_here(&paths, &launched_by(dead, &here)), vec![dead]);
+
+        // And a run whose every record is another host's leaves this one nothing
+        // to aim at, which is what `stop` reports as `elsewhere`.
+        assert!(driving_here(&paths, &launched_by(dead, "a-host-this-is-not")).is_empty());
+        // One process named twice is one root: the driver that took the lock is
+        // usually the one the record names.
+        held(&stamp(&proven));
+        assert_eq!(
+            driving_here(&paths, &launched_by(sys::pid(), &here)),
+            vec![sys::pid()]
+        );
+        std::fs::remove_dir_all(&root).ok();
     }
 }
