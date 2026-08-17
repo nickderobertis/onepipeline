@@ -658,6 +658,20 @@ impl World {
         )
     }
 
+    /// A `PATH` whose `ps` answers a question about **one** process with more
+    /// than it was asked for.
+    ///
+    /// The fault that is not about the listing at all. A start token is `ps -p
+    /// PID -o lstart=` — one process, one line — and a host that writes anything
+    /// beside that has not answered the question. Folding what it wrote into a
+    /// token would make a live process disagree with the stamp its own record
+    /// carries, which a reader takes for a pid the host has handed to somebody
+    /// else: the one verdict that must never come from the host misbehaving.
+    #[cfg(unix)]
+    pub fn path_whose_ps_says_more_than_it_was_asked(&self) -> PathBuf {
+        self.path_with_ps("talkative-ps", &answer_plus("a line nobody asked for"))
+    }
+
     /// A `PATH` holding one `ps` stand-in that behaves like `script`.
     ///
     /// Unix-only: the fixture is a shell script, and the Windows arm reaches the
@@ -1415,8 +1429,22 @@ fn real_ps() -> PathBuf {
 /// with a different verdict. So the fault is scoped to the question it is about.
 #[cfg(unix)]
 fn listing_plus(row: &str) -> String {
+    ps_plus("*\" -A \"*", row)
+}
+
+/// The other half of that pair: `row` added to what this host says about **one**
+/// process, and to nothing else, so the listing a teardown walks stays good.
+#[cfg(unix)]
+fn answer_plus(row: &str) -> String {
+    ps_plus("*lstart=*", row)
+}
+
+/// A `ps` stand-in that answers the real thing, with `row` written ahead of the
+/// answers whose arguments match `question` and no others.
+#[cfg(unix)]
+fn ps_plus(question: &str, row: &str) -> String {
     format!(
-        "case \" $* \" in\n  *\" -A \"*) echo '{row}' ;;\nesac\nexec {} \"$@\"",
+        "case \" $* \" in\n  {question}) echo '{row}' ;;\nesac\nexec {} \"$@\"",
         real_ps().display()
     )
 }

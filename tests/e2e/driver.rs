@@ -1731,6 +1731,76 @@ fn a_stop_that_cannot_read_the_process_table_refuses_and_leaves_the_run_retryabl
     }
 }
 
+/// A host that says more than it was asked is a host that has not answered, and
+/// a stop says so rather than reading it as somebody else's pid.
+///
+/// The fourth way this host can fail a teardown, and the one that hides. A start
+/// token is one process and one line, so an answer carrying anything beside it is
+/// a different string from the one the driver recorded for that very process — and
+/// read as a token, a *different* string is not "this host is unwell", it is "the
+/// pid was handed on". That reading is silent by design: a pid the host reissued
+/// is nobody's to signal and nothing to report, so the stop would walk past the
+/// run's own driver, find nothing else it could prove, and answer
+/// `{"stopped":true,"teardown":"nothing-to-stop"}` over a tree that is still
+/// running.
+///
+/// So the answer is refused instead: nothing is signalled, the run is left exactly
+/// as it was, and the same ask works once the host answers what it was asked. The
+/// listing this stand-in gives is the real one throughout, which is what keeps the
+/// fault to the one question under test.
+#[cfg(unix)]
+#[test]
+fn a_stop_whose_host_says_more_than_it_was_asked_about_a_pid_refuses_and_signals_nothing() {
+    let world = World::new("driver-stop-talkative-ps");
+    world.script("build.wait", "hold");
+    let (run, driver) = start_detached_announcing(&world, "talkative", vec![agent("build", &[])]);
+    world.until("a node to be in flight", |world| {
+        !world.events_of(&run, "node-dispatched").is_empty()
+    });
+    world.until("the dispatch to be a process below the driver", |_| {
+        !descendants(driver).is_empty()
+    });
+    let tree: Vec<u32> = std::iter::once(driver).chain(descendants(driver)).collect();
+
+    let mut command = world.cmd(&["stop", &run]);
+    command.env("PATH", world.path_whose_ps_says_more_than_it_was_asked());
+    let refused = world.run_on(command, "stop with a ps that says more than it was asked");
+    refused
+        .exited(REFUSED)
+        .err_has("was not stopped")
+        .err_has("will not say when it started");
+    assert!(
+        !refused.stdout.contains("\"stopped\":true"),
+        "a stop that could not place a single pid still announced a clean stop:\n{}",
+        refused.stdout
+    );
+    for pid in &tree {
+        assert!(
+            still_listed(*pid),
+            "a refused stop signalled pid {pid} anyway, orphaning what it could not find"
+        );
+    }
+    let stopped = world.events_of(&run, "run-stopped");
+    assert_eq!(stopped.len(), 1, "the attempt went unrecorded");
+    assert_eq!(
+        stopped[0]["payload"]["teardown"],
+        json!("not-attempted"),
+        "a stop that established nothing was recorded as a clean one: {}",
+        stopped[0]
+    );
+
+    // And the same ask, on a host that answers what it was asked, ends the tree.
+    world
+        .run(&["stop", &run])
+        .exited(0)
+        .out_has("\"stopped\":true")
+        .out_has("\"teardown\":\"signalled\"");
+    world.until("every process the run started to end", |_| {
+        tree.iter().all(|pid| !still_listed(*pid))
+    });
+    world.release("build.go");
+}
+
 /// A stop aimed at another host's driver says it reached nothing.
 ///
 /// A pid means nothing across machines, so this host will not signal one it did
