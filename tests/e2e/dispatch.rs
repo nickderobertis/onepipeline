@@ -1783,7 +1783,15 @@ fn a_launchs_own_environment_reaches_the_member_the_library_backend_runs() {
 /// sibling by name.
 ///
 /// What the document *means* is the runner's business; this crate's claim is
-/// only that it holds one parser, so the journey ends there.
+/// only that it holds one parser, so the journey ends where the graph runs.
+///
+/// It ends there rather than at settlement, and the reason is the other thing an
+/// emptied `PATH` takes away. A host with nothing on it cannot be asked when a
+/// process started, and a dispatch whose process cannot be stamped is one the
+/// run could never find again — so it is refused rather than run blind, and the
+/// node settles as an infrastructure failure naming exactly that. That is a fact
+/// about this host, decided after the launch this journey is about, and it is
+/// asserted here so the two are not confused for one another.
 #[test]
 fn a_document_the_runner_accepts_launches_whichever_way_it_is_asked_for() {
     for form in ["--attach", "--detach"] {
@@ -1800,18 +1808,43 @@ fn a_document_the_runner_accepts_launches_whichever_way_it_is_asked_for() {
         ]);
         command.env("PATH", world.empty_path());
         let started = world.run_on(command, &format!("start {form}"));
-        // The whole of the defect, in one exit code: the launch that refused
-        // this document refused it here, naming a field list that predates the
-        // one it carries.
-        started.exited(0);
-
-        // And it is a launch rather than a parse: the run reaches settlement,
-        // which takes the graph running, the loop driving, and the node it
-        // dispatched reporting back. Read through `status`, where an operator
-        // reads it.
-        world.until("the run to settle", |world| {
-            world.run(&["status", "schema"]).stdout.contains("SETTLED")
+        // The whole of the defect, in one line of the run's own record: the
+        // launcher that refused this document refused it here, naming a field
+        // list that predates the one it carries — so no graph ever started. It
+        // is a launch rather than a parse, and this is the graph the runner
+        // accepted, ran, and settled.
+        assert!(
+            !started.stderr.contains("schema_version"),
+            "the launch refused the document the runner accepts:\n{}",
+            started.stderr
+        );
+        // Read off what the graph's own member did, because that is the same
+        // evidence either way a run is launched: an attached launch relays the
+        // observer's envelopes into the run's store and a detached one hands
+        // them to its driver log, but the member runs in both.
+        world.until("the graph the launch named to run", |world| {
+            !world.observer_saw().is_empty()
         });
+
+        // And the loop drove: it dispatched the node, on a host that cannot say
+        // when a process started — so the dispatch could not be registered, and
+        // the node settles saying so rather than running work the run could
+        // never find again.
+        world.until("the run to settle", |world| {
+            world.run_file("schema", "result.json").is_file()
+        });
+        assert!(
+            !world.events_of("schema", "node-dispatched").is_empty(),
+            "the loop never dispatched the node:\n{}",
+            world.dump()
+        );
+        let settled = world.events_of("schema", "node-settled");
+        assert_eq!(
+            settled[0]["payload"]["outcome"],
+            json!("infrastructure-failure"),
+            "a dispatch nothing could stamp settled as something else: {}",
+            settled[0]
+        );
         let results = world.run(&["results", "schema"]);
         results.exited(0).out_has("build");
     }

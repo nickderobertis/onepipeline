@@ -239,7 +239,7 @@ impl Executor for LocalExecutor {
         let filters = launched_with(&req.labels)?
             .map(|record| record.filters)
             .unwrap_or_default();
-        let run = GraphRun::start(&Launch {
+        let mut run = GraphRun::start(&Launch {
             graph: &req.graph.0,
             task: &req.task,
             dir: &dir,
@@ -255,7 +255,28 @@ impl Executor for LocalExecutor {
         // and nobody else's — an executor that ran the dispatch on another
         // machine would have no local process to name, and would say so by
         // recording nothing.
-        let claim = claimed(&req.labels, run.process());
+        //
+        // A dispatch this run cannot register does not run. The registry is the
+        // only record of where the work is, so an unregistered dispatch is a
+        // process no view will show and no `stop` will reach — work that can only
+        // be found by a person reading a process table, on a run whose own
+        // records say it has nothing running. So the graph that has just started
+        // is taken back down and the failure is the caller's: a dispatch that
+        // could not start is an outcome this seam already has, and the engine
+        // retries it and settles the node saying so.
+        let claim = match claimed(&req.labels, run.process()) {
+            Ok(claim) => claim,
+            Err(refusal) => {
+                // Ended and collected, not merely signalled: what this returns
+                // to the caller is that the dispatch is not running, and a
+                // process nobody has waited on is a zombie — which answers a
+                // liveness probe as alive and would leave the very row an
+                // operator would go looking for.
+                run.cancel();
+                let _ = run.wait();
+                return Err(refusal);
+            }
+        };
         Ok(Box::new(LocalDispatch {
             run,
             cancel: req.cancel,
@@ -273,15 +294,17 @@ impl Executor for LocalExecutor {
 /// which is the true answer to where that dispatch's work is and the one a
 /// teardown would have to aim at.
 ///
-/// A dispatch outside a run records nothing: the contract's own example and the
-/// seam's tests carry no `run_id`, and there is no registry for a run that does
-/// not exist. So is one whose node the labels do not name — an entry that could
-/// not say which node it belonged to would be a pid an operator could not act on.
-fn claimed(labels: &Labels, process: Option<u32>) -> Option<crate::ledger::DispatchClaim> {
-    let run = labels.run_id.as_deref()?;
-    let node = labels.node.as_deref()?;
+/// A dispatch outside a run records nothing and is not refused for it: the
+/// contract's own example and the seam's tests carry no `run_id`, and there is no
+/// registry for a run that does not exist. So is one whose node the labels do not
+/// name — an entry that could not say which node it belonged to would be a pid an
+/// operator could not act on. Every dispatch a *run* makes carries both.
+fn claimed(labels: &Labels, process: Option<u32>) -> Result<Option<crate::ledger::DispatchClaim>> {
+    let (Some(run), Some(node)) = (labels.run_id.as_deref(), labels.node.as_deref()) else {
+        return Ok(None);
+    };
     let paths = crate::ledger::RunPaths::under(&crate::ledger::runs_root(), run);
-    crate::ledger::claim_dispatch(&paths, node, process.unwrap_or_else(crate::sys::pid))
+    crate::ledger::claim_dispatch(&paths, node, process.unwrap_or_else(crate::sys::pid)).map(Some)
 }
 
 /// The overrides one dispatch's graph launch carries, in the order they apply.

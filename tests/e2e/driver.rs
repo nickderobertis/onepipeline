@@ -1948,26 +1948,122 @@ fn a_stop_that_found_nothing_running_never_reports_its_workers_as_ended() {
     world.release("build.go");
 }
 
-/// A stop whose run holds claims this build cannot read says so, and still ends
-/// the tree it can find.
+/// A dispatch this run cannot record does not run.
 ///
-/// An unreadable claim names nobody, so it adds no root — but a lock that cannot
-/// be read is not the same as a run nothing holds, and a stop that swallowed the
-/// difference would leave an operator reading a narrower teardown than they
-/// asked for with nothing saying why. An unreadable **registry entry** costs
-/// only itself, and that is the difference between the two: one is a claim on
-/// the whole run, the other is one dispatch among however many. Neither is
-/// refused, because refusing a stop over a record nobody can parse would leave a
-/// live run running.
+/// The registry is a trust boundary rather than bookkeeping around one: an entry
+/// that was not written is a process no view will show and no `stop` will reach,
+/// on a run whose own records say it has nothing running. So a dispatch that
+/// cannot be registered is taken back down and the node settles as an
+/// infrastructure failure naming what could not be written — the same ending a
+/// dispatch that could not start at all takes, and the same one the loop retries.
+///
+/// Nothing races. One node is held open, which keeps the driver in its loop with
+/// nothing to do, and the node under test waits on a person — so the registry is
+/// broken while the run is idle and the attestation is what releases the dispatch
+/// into it. The held dispatch beside it is the control: it was registered before
+/// the fault and it is still running afterwards, so what disappears is the
+/// dispatch that was refused and nothing else.
 #[cfg(unix)]
-// llmlint: ignore-block[tests_mirror_real_usage] neither state is one any command produces:
-// the only writer of the lock is a live driver taking the run, and the only writer of a
-// registry entry is a live dispatch recording the process it is in, and both write records of
-// their own schema. What they stand for — records written by a build this one does not
-// understand — is reachable only across versions, so the fixture writes the two facts under
-// test and everything else in the journey is the real binary end to end.
+// llmlint: ignore-block[tests_mirror_real_usage] a run whose registry cannot be written is a
+// filesystem condition, not something a user types: the directory is created with the run and
+// the only writers under it are its own dispatches. What it stands for — a full disk, a
+// revoked permission, a volume that went read-only under a live run — is reachable only by
+// arranging the filesystem, so the fixture removes exactly that one thing and everything else
+// in the journey is the real binary end to end.
 #[test]
-fn stopping_a_run_whose_claims_cannot_be_read_says_so_and_still_ends_what_it_finds() {
+fn a_dispatch_this_run_cannot_record_is_refused_and_does_not_run() {
+    let world = World::new("driver-dispatch-unrecordable");
+    world.script("held.wait", "hold");
+    let (run, driver) = start_detached_announcing(
+        &world,
+        "unrecordable",
+        vec![
+            agent("held", &[]),
+            human("approve", &[]),
+            agent("build", &["approve"]),
+        ],
+    );
+    world.until(
+        "the run to ask the person and hold a dispatch open",
+        |world| {
+            world
+                .events_of(&run, "node-settled")
+                .iter()
+                .any(|event| event["labels"]["node"] == json!("approve"))
+                && !world.events_of(&run, "node-dispatched").is_empty()
+        },
+    );
+    world.until("the held dispatch to be a process below the driver", |_| {
+        !descendants(driver).is_empty()
+    });
+    let held = descendants(driver);
+
+    // The registry cannot be written: a file where its directory has to be, which
+    // no host will create a directory under.
+    let registry = world.run_file(&run, "dispatches");
+    std::fs::remove_dir_all(&registry).expect("the registry is taken away");
+    std::fs::write(&registry, "not a directory").expect("something in the way");
+
+    world.run(&["attest", &run, "approve"]).exited(0);
+
+    // The dispatch is made, refused, and taken back down — and the node says so
+    // where an operator reads it.
+    world.until("the node to settle", |world| {
+        world
+            .events_of(&run, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == json!("build"))
+    });
+    let settled = world.events_of(&run, "node-settled");
+    let build = settled
+        .iter()
+        .find(|event| event["labels"]["node"] == json!("build"))
+        .expect("the node settles");
+    assert_eq!(
+        build["payload"]["outcome"],
+        json!("infrastructure-failure"),
+        "a dispatch nothing could record settled as something else: {build}"
+    );
+    let said = build["payload"]["detail"].as_str().unwrap_or_default();
+    assert!(
+        said.contains("dispatches"),
+        "the settlement does not say what could not be recorded: {build}"
+    );
+    world
+        .run(&["results", &run])
+        .exited(0)
+        .out_has("build")
+        .out_has("failed");
+
+    // And the work it started really is gone. The refused dispatch was held open
+    // by its double like the control beside it, so a process still under the
+    // driver would be one this run cannot find and nobody asked for.
+    world.until(
+        "the refused dispatch to be gone from under the driver",
+        |_| descendants(driver) == held,
+    );
+    world.release("held.go");
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+/// A stop whose run holds a **lock** this build cannot read says so, and still
+/// ends the tree it can find.
+///
+/// An unreadable lock names nobody, so it adds no root — but it is not the same
+/// as a run nothing holds, and a stop that swallowed the difference would leave
+/// an operator reading a narrower teardown than they asked for with nothing
+/// saying why. It is not refused either: the lock can only *widen* what a
+/// teardown reaches, so losing it costs reach, and refusing over it would leave a
+/// live run running. The registry below is the opposite case, and the journey
+/// after this one is where the difference is stated.
+#[cfg(unix)]
+// llmlint: ignore-block[tests_mirror_real_usage] a held lock this build cannot read is not a
+// state any command produces: the only writer of that file is a live driver taking the run,
+// and it writes a record of its own schema. What it stands for — a lock written by a build
+// this one does not understand — is reachable only across versions, so the fixture writes the
+// one fact under test and everything else in the journey is the real binary end to end.
+#[test]
+fn stopping_a_run_whose_lock_cannot_be_read_says_so_and_still_ends_what_it_finds() {
     let world = World::new("driver-stop-unreadable-lock");
     world.script("build.wait", "hold");
     let (run, driver) = start_detached_announcing(&world, "unreadable", vec![agent("build", &[])]);
@@ -1984,14 +2080,6 @@ fn stopping_a_run_whose_claims_cannot_be_read_says_so_and_still_ends_what_it_fin
         "not a lock this build knows",
     )
     .expect("the lock is rewritten");
-    // And one entry in the registry that no reader can make a pid out of. It
-    // costs itself and nothing else: the stop goes on to end what the records it
-    // *can* read name, which is the tree below.
-    std::fs::write(
-        world.run_file(&run, "dispatches/nonsense.json"),
-        "not an entry this build knows",
-    )
-    .expect("an entry nobody can read");
 
     let stopped = world.run(&["stop", &run]);
     stopped
@@ -2003,6 +2091,111 @@ fn stopping_a_run_whose_claims_cannot_be_read_says_so_and_still_ends_what_it_fin
         tree.iter().all(|pid| !still_listed(*pid))
     });
     world.release("build.go");
+}
+
+/// A stop whose run holds a **registry** this build cannot read refuses, signals
+/// nothing, and works on the retry.
+///
+/// The other half of the pair, and the opposite answer. Every other record a stop
+/// consults can only add a root, so one it cannot read costs reach. The registry
+/// is what says whether the run has work running at all — so a reader that met an
+/// entry it could not parse and carried on would report `nothing-to-stop` about a
+/// run it never managed to ask, which is the false completion this verb exists to
+/// refuse, one layer further in.
+///
+/// Both shapes an unreadable entry takes: one that is not a record at all, and
+/// one that is a record carrying a field this build does not know — a newer
+/// writer's, which a reader that shrugged would silently act on half of. Nothing
+/// is signalled for either, so the run is intact and the same ask works once the
+/// entry is gone.
+#[cfg(unix)]
+// llmlint: ignore-block[tests_mirror_real_usage] the only writer of a registry entry is a
+// live dispatch recording the process it is in, and it writes a record of its own schema, so
+// neither shape below is a state a command produces. What they stand for — an entry from a
+// build this one does not understand, and one a crash left half-written — is reachable only
+// across versions or across a power cut, so the fixture writes the one fact under test and
+// everything else in the journey is the real binary end to end.
+#[test]
+fn stopping_a_run_whose_registry_cannot_be_read_refuses_and_leaves_the_run_retryable() {
+    for (shape, entry) in [
+        (
+            "a record that is not one",
+            "not an entry this build knows".to_string(),
+        ),
+        (
+            "a record from a writer this build does not know",
+            json!({
+                "node": "build",
+                "pid": 4_242,
+                "host": "this-host",
+                "dispatched_at": "2026-08-17T00:00:00.000Z",
+                "started": "a start this host once reported",
+                "reaped_by": "a build that came later",
+            })
+            .to_string(),
+        ),
+    ] {
+        let world = World::new(&format!(
+            "driver-stop-unreadable-registry-{}",
+            shape.replace(' ', "-")
+        ));
+        world.script("build.wait", "hold");
+        let (run, driver) =
+            start_detached_announcing(&world, "unreadable", vec![agent("build", &[])]);
+        world.until("a node to be in flight", |world| {
+            !world.events_of(&run, "node-dispatched").is_empty()
+        });
+        world.until("the dispatch to be a process below the driver", |_| {
+            !descendants(driver).is_empty()
+        });
+        let tree: Vec<u32> = std::iter::once(driver).chain(descendants(driver)).collect();
+
+        let planted = world.run_file(&run, "dispatches/planted.json");
+        std::fs::write(&planted, entry).expect("an entry nobody can read");
+
+        let refused = world.run(&["stop", &run]);
+        refused
+            .exited(REFUSED)
+            .err_has("was not stopped")
+            .err_has("cannot establish what it is running");
+        assert!(
+            !refused.stdout.contains("\"stopped\":true"),
+            "a stop that established nothing announced a clean stop with {shape}:\n{}",
+            refused.stdout
+        );
+        assert!(
+            !refused.stdout.contains("nothing-to-stop"),
+            "a stop that could not read the registry reported the run as idle:\n{}",
+            refused.stdout
+        );
+
+        // And it really did leave the run alone, which is what makes the refusal
+        // honest rather than merely pessimistic — and the retry below possible.
+        for pid in &tree {
+            assert!(
+                still_listed(*pid),
+                "a refused stop signalled pid {pid} anyway, with {shape} in the registry"
+            );
+        }
+        assert!(
+            world.events_of(&run, "run-stopped").is_empty(),
+            "a stop that refused recorded one anyway:\n{}",
+            world.dump()
+        );
+
+        // The recovery: with the entry gone, the same ask ends the run and says
+        // what it reached.
+        std::fs::remove_file(&planted).expect("the entry is removed");
+        world
+            .run(&["stop", &run])
+            .exited(0)
+            .out_has("\"stopped\":true")
+            .out_has("\"teardown\":\"signalled\"");
+        world.until("every process the run started to end", |_| {
+            tree.iter().all(|pid| !still_listed(*pid))
+        });
+        world.release("build.go");
+    }
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 

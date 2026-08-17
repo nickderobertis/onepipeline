@@ -1089,8 +1089,19 @@ fn stop(args: &StopArgs) -> Result<i32> {
     }
 
     // Attempted before the record is written, so the record says what happened
-    // rather than what was about to be tried.
-    let teardown = terminate(&paths, &record);
+    // rather than what was about to be tried — and refused before either, where
+    // this build cannot establish what the run is running. Nothing is signalled
+    // and no stop is recorded on that path: a run whose registry cannot be read
+    // is one nobody can say is idle, and writing "stopped" over it would be the
+    // same false completion this verb refuses everywhere else.
+    let teardown = terminate(&paths, &record).map_err(|why| {
+        Error::Refused(format!(
+            "run '{}' was not stopped: this build cannot establish what it is running — {why}. \
+             The run is untouched; nothing was signalled. Fix or remove the entry the path \
+             above names and run `onepipeline stop {}` again",
+            paths.run, paths.run
+        ))
+    })?;
     let established = match teardown {
         None => journal::StopTeardown::Elsewhere,
         Some(sys::Teardown::Signalled) => journal::StopTeardown::Signalled,
@@ -1162,19 +1173,20 @@ fn stop(args: &StopArgs) -> Result<i32> {
 // stale record names beside the pid the lock stamps — is what
 // `stopping_a_run_ends_the_tree_its_lock_names_when_the_record_names_a_dead_driver` walks over
 // one listing.
-fn terminate(paths: &RunPaths, record: &LaunchRecord) -> Option<sys::Teardown> {
-    let roots = driving_here(paths, record);
+fn terminate(paths: &RunPaths, record: &LaunchRecord) -> Result<Option<sys::Teardown>> {
+    let roots = driving_here(paths, record)?;
     if roots.is_empty() {
-        return None;
+        return Ok(None);
     }
-    Some(sys::stop_and_confirm(
+    Ok(Some(sys::stop_and_confirm(
         &roots,
         sys::Stop::Politely,
         TEARDOWN_PATIENCE,
-    ))
+    )))
 }
 
-/// Every process on this host a stop of this run has to aim at.
+/// Every process on this host a stop of this run has to aim at, or why this
+/// build cannot say.
 ///
 /// Three records name one, and they answer three different questions.
 ///
@@ -1194,17 +1206,22 @@ fn terminate(paths: &RunPaths, record: &LaunchRecord) -> Option<sys::Teardown> {
 /// reaches it ever again. That is the live tree a stop used to walk past, and it
 /// is found here or not at all.
 ///
-/// Each of the two stamped roots is aimed at only where its **own** token proves
-/// it, independently of the others: a dispatch is verified as the process it was
+/// So the registry is the one record whose failure to read is **fatal to the
+/// stop**. The others narrow what a teardown can reach; this one decides whether
+/// anything is known about the work at all, and a registry this build cannot read
+/// is not a run with nothing running — it is a run nobody can say that about. The
+/// caller refuses on it rather than reporting a teardown it did not make.
+///
+/// Each stamped root is aimed at only where its **own** token proves it,
+/// independently of the others: a dispatch is verified as the process it was
 /// recorded as whether or not anything is still driving the run, which is the
 /// whole case — the driver is dead. The stamp is what makes an extra root safe
 /// rather than reckless, because a pid the host has since handed to something
 /// else is a tree belonging to somebody who never heard of this run, and a
 /// teardown is the one operation that must never be aimed at a guess. An
-/// unstamped record — one an older build wrote, or one this host would not
-/// answer about — proves nothing and is left alone, so the launch record's pid
-/// stands on its own exactly as it did before.
-fn driving_here(paths: &RunPaths, record: &LaunchRecord) -> Vec<u32> {
+/// unstamped lock — one an older build wrote — proves nothing and is left alone,
+/// so the launch record's pid stands on its own exactly as it did before.
+fn driving_here(paths: &RunPaths, record: &LaunchRecord) -> Result<Vec<u32>> {
     let here = sys::hostname();
     let mut roots = Vec::new();
     if record.host == here {
@@ -1216,7 +1233,7 @@ fn driving_here(paths: &RunPaths, record: &LaunchRecord) -> Vec<u32> {
         .map(|held| (held.pid, held.host, held.started))
         .into_iter()
         .chain(
-            ledger::dispatches_of(paths)
+            ledger::dispatches_of(paths)?
                 .into_iter()
                 .map(|running| (running.pid, running.host, running.started)),
         );
@@ -1228,7 +1245,7 @@ fn driving_here(paths: &RunPaths, record: &LaunchRecord) -> Vec<u32> {
             roots.push(pid);
         }
     }
-    roots
+    Ok(roots)
 }
 // llmlint: ignore-end[changed_behavior_has_e2e]
 
@@ -1968,16 +1985,18 @@ mod tests {
             .expect("this host says when a process started")
             .recorded()
             .to_string();
+        let aimed_at =
+            |record: &LaunchRecord| driving_here(&paths, record).expect("this run's records read");
 
         // Nothing holds the lock: the launch record is the whole answer, as it
         // always was.
-        assert_eq!(driving_here(&paths, &launched_by(dead, &here)), vec![dead]);
+        assert_eq!(aimed_at(&launched_by(dead, &here)), vec![dead]);
 
         // A lock this build's own stamp proves: both, and the recorded driver
         // first.
         held(&stamp(&proven));
         assert_eq!(
-            driving_here(&paths, &launched_by(dead, &here)),
+            aimed_at(&launched_by(dead, &here)),
             vec![dead, sys::pid()],
             "a stop did not aim at the process the lock stamps as driving the run"
         );
@@ -1986,29 +2005,30 @@ mod tests {
         // and it is not the driver.
         held(&stamp("the process that took it, which is not this one"));
         assert_eq!(
-            driving_here(&paths, &launched_by(dead, &here)),
+            aimed_at(&launched_by(dead, &here)),
             vec![dead],
             "a stop aimed at a pid the lock's own stamp disowns"
         );
         // A lock an older build wrote carries no stamp, and an unproven pid is
         // not one a teardown may aim at either.
         held(&stamp(""));
-        assert_eq!(driving_here(&paths, &launched_by(dead, &here)), vec![dead]);
+        assert_eq!(aimed_at(&launched_by(dead, &here)), vec![dead]);
         // A lock taken on another machine, where a pid means nothing.
         held(&ledger::LockRecord {
             host: "a-host-this-is-not".into(),
             ..stamp(&proven)
         });
-        assert_eq!(driving_here(&paths, &launched_by(dead, &here)), vec![dead]);
-        // A claim this build cannot read names nobody, so it adds no root — and
-        // it is reported rather than read as an absent lock, because the two are
-        // different states of the run.
+        assert_eq!(aimed_at(&launched_by(dead, &here)), vec![dead]);
+        // A lock this build cannot read names nobody, so it adds no root. Unlike
+        // the registry below it is not fatal: the lock narrows what a teardown
+        // reaches, while the registry decides whether anything is known about the
+        // work at all.
         std::fs::write(paths.lock(), "not json at all").expect("a lock nobody can read");
-        assert_eq!(driving_here(&paths, &launched_by(dead, &here)), vec![dead]);
+        assert_eq!(aimed_at(&launched_by(dead, &here)), vec![dead]);
 
         // And a run whose every record is another host's leaves this one nothing
         // to aim at, which is what `stop` reports as `elsewhere`.
-        assert!(driving_here(&paths, &launched_by(dead, "a-host-this-is-not")).is_empty());
+        assert!(aimed_at(&launched_by(dead, "a-host-this-is-not")).is_empty());
 
         // The registry, which names the work rather than a driver. Its entries
         // are proved one at a time and on their own stamps, so a dispatch is
@@ -2027,35 +2047,113 @@ mod tests {
         };
         recorded(&running(sys::pid(), &here, &proven));
         assert_eq!(
-            driving_here(&paths, &launched_by(dead, &here)),
+            aimed_at(&launched_by(dead, &here)),
             vec![dead, sys::pid()],
             "a stop did not aim at the process the registry says the run's work is in"
         );
-        // The same live pid, recorded as a process it is not; a dispatch an older
-        // build recorded without a stamp; and one recorded on another machine.
-        // None of the three proves a pid, and a teardown aims at none of them.
+        // The same live pid, recorded as a process it is not, and one recorded on
+        // another machine. Neither proves a pid on this host, and a teardown aims
+        // at neither — and neither is a registry this build cannot read, so the
+        // stop still goes ahead with what it can prove.
         for disowned in [
             running(
                 sys::pid(),
                 &here,
                 "the process that took it, which is not this one",
             ),
-            running(sys::pid(), &here, ""),
             running(sys::pid(), "a-host-this-is-not", &proven),
         ] {
             recorded(&disowned);
             assert_eq!(
-                driving_here(&paths, &launched_by(dead, &here)),
+                aimed_at(&launched_by(dead, &here)),
                 vec![dead],
                 "a stop aimed at a pid the registry cannot prove: {disowned:?}"
             );
         }
         // One process named twice is one root: the driver that took the lock is
         // usually the one the record names.
+        recorded(&running(sys::pid(), &here, &proven));
         held(&stamp(&proven));
-        assert_eq!(
-            driving_here(&paths, &launched_by(sys::pid(), &here)),
-            vec![sys::pid()]
+        assert_eq!(aimed_at(&launched_by(sys::pid(), &here)), vec![sys::pid()]);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A registry this build cannot read stops the stop, rather than narrowing
+    /// it.
+    ///
+    /// The distinction the whole boundary rests on. Every other record a stop
+    /// consults can only *add* a root, so one it cannot read costs reach and
+    /// nothing else. The registry is what says whether a run has work running at
+    /// all, so a reader that met an entry it could not parse and carried on would
+    /// be reporting "there was nothing to stop" about a run it never managed to
+    /// ask — which is the false completion, one layer further in.
+    #[test]
+    fn a_registry_this_build_cannot_read_refuses_the_stop_rather_than_narrowing_it() {
+        let root = scratch("roots-unreadable");
+        let paths = RunPaths::under(&root, "stopped");
+        paths.create().expect("the run directory");
+        let here = sys::hostname();
+        let launch = launched_by(sys::reaped_pid(), &here);
+        let usable = ledger::DispatchRecord {
+            node: "build".into(),
+            pid: sys::pid(),
+            host: here.clone(),
+            dispatched_at: sys::now_rfc3339(),
+            started: sys::process_start_token(sys::pid())
+                .expect("this host says when a process started")
+                .recorded()
+                .to_string(),
+        };
+        // A registry that is there and empty is an answer: this run has nothing
+        // running, and the stop proceeds on the records that remain.
+        assert!(driving_here(&paths, &launch).is_ok());
+
+        for (what, entry) in [
+            (
+                "a record that is not JSON at all",
+                "not an entry".to_string(),
+            ),
+            (
+                "a record carrying a field this build does not know",
+                serde_json::to_string(&serde_json::json!({
+                    "node": "build",
+                    "pid": sys::pid(),
+                    "host": here,
+                    "dispatched_at": sys::now_rfc3339(),
+                    "started": usable.started,
+                    "reaped_by": "a build that came later",
+                }))
+                .expect("an entry from a newer writer"),
+            ),
+            (
+                "a record whose stamp proves nothing",
+                serde_json::to_string(&ledger::DispatchRecord {
+                    started: String::new(),
+                    ..usable.clone()
+                })
+                .expect("an unstamped entry"),
+            ),
+        ] {
+            std::fs::write(paths.dispatch(usable.pid), entry).expect("an entry");
+            let refused = driving_here(&paths, &launch)
+                .expect_err(&format!("{what} was read as a registry to act on"));
+            assert!(
+                refused.to_string().contains(&usable.pid.to_string()),
+                "the refusal does not name the entry that caused it: {refused}"
+            );
+        }
+
+        // And a registry that is not there at all, which every run this build
+        // creates has: its absence is something having taken it away, and what
+        // the run is running cannot be established without it.
+        std::fs::remove_dir_all(paths.dispatches()).expect("the registry is taken away");
+        let refused = driving_here(&paths, &launch)
+            .expect_err("a run with no registry at all was read as a run with nothing running");
+        assert!(
+            refused
+                .to_string()
+                .contains(&paths.dispatches().display().to_string()),
+            "the refusal does not name the registry it could not read: {refused}"
         );
         std::fs::remove_dir_all(&root).ok();
     }
