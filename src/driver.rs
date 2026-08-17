@@ -2043,7 +2043,8 @@ mod tests {
             started: started.to_string(),
         };
         let recorded = |record: &ledger::DispatchRecord| {
-            ledger::write_json(&paths.dispatch(record.pid), record).expect("a recorded dispatch");
+            ledger::write_json(&paths.dispatch(record.pid, 0), record)
+                .expect("a recorded dispatch");
         };
         recorded(&running(sys::pid(), &here, &proven));
         assert_eq!(
@@ -2134,7 +2135,7 @@ mod tests {
                 .expect("an unstamped entry"),
             ),
         ] {
-            std::fs::write(paths.dispatch(usable.pid), entry).expect("an entry");
+            std::fs::write(paths.dispatch(usable.pid, 0), entry).expect("an entry");
             let refused = driving_here(&paths, &launch)
                 .expect_err(&format!("{what} was read as a registry to act on"));
             assert!(

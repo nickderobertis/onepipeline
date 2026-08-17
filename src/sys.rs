@@ -1635,6 +1635,41 @@ mod tests {
         a_stop_reaches_the_whole_console_tree(Stop::Now);
     }
 
+    /// Several trees are ended together on this platform too.
+    ///
+    /// What a `stop` aims at is every process the run's records name, and they
+    /// are not one: a driver a record names, a driver the lock stamps, and each
+    /// dispatch the registry says the work is running in. This platform hands
+    /// each tree to `taskkill /T` separately, so what has to hold here is the
+    /// **fold** — every ask made, every tree gone, and one answer over the lot of
+    /// them. The Unix arm walks one process table for all of them instead, and
+    /// `a_stop_aimed_at_several_roots_ends_every_tree_and_leaves_the_one_beside_them`
+    /// is where that half is held.
+    #[cfg(windows)]
+    #[test]
+    fn a_stop_aimed_at_several_console_trees_ends_every_one_of_them() {
+        let (mut first, first_leaf) = console_tree();
+        let (mut second, second_leaf) = console_tree();
+        let roots = [first.id(), second.id()];
+        let every = [first.id(), first_leaf, second.id(), second_leaf];
+        assert!(
+            every.iter().all(|pid| platform_process_may_be_live(*pid)),
+            "the trees {every:?} were not running before they were stopped"
+        );
+
+        assert_eq!(
+            stop_and_confirm(&roots, Stop::Now, std::time::Duration::from_secs(10)),
+            Teardown::Signalled,
+            "a stop that ended the trees {every:?} did not report reaching them"
+        );
+        assert!(
+            all_ended_within(&every, std::time::Duration::from_secs(10)),
+            "a stop of several trees left part of {every:?} running"
+        );
+        let _ = first.wait();
+        let _ = second.wait();
+    }
+
     /// The three answers a `taskkill` can establish, including both directions of
     /// the one its exit status cannot tell apart.
     ///

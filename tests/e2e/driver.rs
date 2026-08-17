@@ -2093,6 +2093,8 @@ fn stopping_a_run_whose_lock_cannot_be_read_says_so_and_still_ends_what_it_finds
     world.release("build.go");
 }
 
+// llmlint: ignore-end[tests_mirror_real_usage]
+
 /// A stop whose run holds a **registry** this build cannot read refuses, signals
 /// nothing, and works on the retry.
 ///

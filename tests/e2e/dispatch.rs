@@ -771,6 +771,83 @@ fn events_reported(status: &str, node: &str) -> u64 {
         .unwrap_or_else(|e| panic!("`{line}` carries no readable count: {e}"))
 }
 
+/// Two dispatches running **inside one driver** are two registrations, and a
+/// stop over them is a clean stop.
+///
+/// The shape a real run has: node-scope dispatches go through the sibling as a
+/// library call, so a run at any concurrency above one has several live
+/// dispatches sharing the driver's process. A registry keyed by that pid alone
+/// held one entry for both of them — the second overwrote the first, and the
+/// first to end took the survivor's registration away — and the two of them
+/// racing one temporary would leave an entry no reader could parse, which is now
+/// a `stop` that refuses a perfectly healthy run.
+///
+/// The second dispatch is released by an attestation rather than started beside
+/// the first, and that is not only about this suite: the sibling names a library
+/// run's state directory from the clock and the process, so two started inside
+/// one millisecond ask for the same directory and the second is refused. A run
+/// reaches this state the way a real one does — a node becoming ready while
+/// another is already in flight.
+#[cfg(unix)]
+#[test]
+fn two_dispatches_running_in_one_driver_are_stopped_as_one_run() {
+    let world = World::new("real-shared-process");
+    world.write_graphs();
+    world.script("turn.hold", "hold");
+    let path = world.plan(
+        "shared",
+        &plan_of(
+            "shared",
+            vec![
+                agent("first", &[]),
+                human("approve", &[]),
+                agent("second", &["approve"]),
+            ],
+        ),
+    );
+    world
+        .run_on_agentgraph(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+
+    let dispatched = |world: &World| -> Vec<String> {
+        world
+            .events_of("shared", "node-dispatched")
+            .iter()
+            .filter_map(|event| event["labels"]["node"].as_str().map(str::to_string))
+            .collect()
+    };
+    world.until(
+        "the first node to be in flight beside the person",
+        |world| {
+            dispatched(world).contains(&"first".to_string())
+                && !world.events_of("shared", "node-settled").is_empty()
+        },
+    );
+
+    // The second becomes ready while the first is still in flight, so the driver
+    // is running two dispatches inside itself.
+    world.run(&["attest", "shared", "approve"]).exited(0);
+    world.until("both nodes to be in flight", |world| {
+        dispatched(world).contains(&"second".to_string())
+    });
+    world
+        .run(&["status", "shared"])
+        .exited(0)
+        .out_has("first: running")
+        .out_has("second: running");
+
+    let stopped = world.run(&["stop", "shared"]);
+    stopped.exited(0).out_has("\"stopped\":true");
+    assert_eq!(
+        stopped.json()["teardown"],
+        json!("signalled"),
+        "a stop over two dispatches in one driver did not report reaching them:\n{}",
+        stopped.stdout
+    );
+    world.release("turn.go");
+    world.release("turn.settle");
+}
+
 /// What a live node is doing, read while it is doing it.
 ///
 /// Mid-run, `status` used to say a node had been in flight for thirty-four

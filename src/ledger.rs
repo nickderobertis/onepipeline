@@ -214,14 +214,23 @@ impl RunPaths {
         self.dir.join("dispatches")
     }
 
-    /// One dispatch's record, named by the process it runs in.
+    /// One dispatch's record, named by the process it runs in and the claim that
+    /// wrote it.
     ///
-    /// Keyed by pid because a pid is always a safe file name and a node id is
+    /// Named from a pid because a pid is always a safe file name and a node id is
     /// not: an id is plan text, required to be non-empty and unique and nothing
     /// else, so joining one raw is how a name becomes a path — and sanitising it
     /// would map two distinct nodes onto one record.
-    pub fn dispatch(&self, pid: u32) -> PathBuf {
-        self.dispatches().join(format!("{pid}.json"))
+    ///
+    /// A pid alone is **not** an identity, which is the other half. A run's
+    /// dispatches can share one process: that is what the library backend is —
+    /// several nodes running concurrently inside the driver — so two live
+    /// dispatches would write one entry, the second would overwrite the first,
+    /// and the first to end would take the survivor's registration with it,
+    /// leaving a live dispatch nothing could find. `claim` is what tells them
+    /// apart, and it is unique for the life of the process that mints it.
+    pub fn dispatch(&self, pid: u32, claim: u64) -> PathBuf {
+        self.dispatches().join(format!("{pid}-{claim}.json"))
     }
 }
 
@@ -806,6 +815,11 @@ impl Drop for DispatchClaim {
 /// something other than what was written — is the same absence with a file in the
 /// way, so what was written is read back before the claim is handed over.
 pub fn claim_dispatch(paths: &RunPaths, node: &str, pid: u32) -> Result<DispatchClaim> {
+    // Unique for the life of this process, which is what separates two dispatches
+    // running inside it. Across processes the pid separates them, and across a
+    // pid this host has reissued the stamp does.
+    static CLAIMED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let claim = CLAIMED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let Some(started) = sys::process_start_token(pid) else {
         return Err(Error::Refused(format!(
             "run '{}': node '{node}': this host will not say when pid {pid} started, so its \
@@ -821,8 +835,8 @@ pub fn claim_dispatch(paths: &RunPaths, node: &str, pid: u32) -> Result<Dispatch
         dispatched_at: sys::now_rfc3339(),
         started: started.recorded().to_string(),
     };
-    let path = paths.dispatch(pid);
-    write_dispatch(paths, &path, &record)?;
+    let path = paths.dispatch(pid, claim);
+    write_dispatch(paths, &path, claim, &record)?;
     // Read back through the same reader a stop uses, because what this promises
     // its caller is not that a write returned but that the registry now holds an
     // entry that reader will act on.
@@ -847,7 +861,12 @@ pub fn claim_dispatch(paths: &RunPaths, node: &str, pid: u32) -> Result<Dispatch
 /// reader acts on, and a reader is now entitled to fail on one it cannot read. A
 /// temporary written beside its target would be a half-written entry in the set,
 /// and a `stop` racing a dispatch would refuse over this crate's own scratch.
-fn write_dispatch(paths: &RunPaths, path: &Path, record: &DispatchRecord) -> Result<()> {
+fn write_dispatch(
+    paths: &RunPaths,
+    path: &Path,
+    claim: u64,
+    record: &DispatchRecord,
+) -> Result<()> {
     let body = serde_json::to_string_pretty(record)
         .map_err(|e| Error::Invalid(format!("{}: {e}", path.display())))?;
     let ledger = |at: &Path| {
@@ -855,9 +874,13 @@ fn write_dispatch(paths: &RunPaths, path: &Path, record: &DispatchRecord) -> Res
         move |source: io::Error| Error::Ledger { path: at, source }
     };
     fs::create_dir_all(paths.dispatches()).map_err(ledger(&paths.dispatches()))?;
+    // Named from the claim as well as the process, for the reason
+    // [`RunPaths::dispatch`] gives: two dispatches inside one process would
+    // otherwise write one another's temporary, and a reader is entitled to fail
+    // on an entry it cannot parse.
     let temp = paths
         .dir
-        .join(format!("dispatch-{}.tmp.{}", record.pid, sys::pid()));
+        .join(format!("dispatch-{}-{claim}.tmp", record.pid));
     fs::write(&temp, body.as_bytes()).map_err(ledger(&temp))?;
     fs::rename(&temp, path).map_err(ledger(path))
 }
@@ -1332,6 +1355,50 @@ mod tests {
         fs::remove_dir_all(&root).ok();
     }
 
+    /// Two dispatches inside one process are two entries, and each ends alone.
+    ///
+    /// The library backend runs a node's dispatch **in the driver**, so a run at
+    /// any concurrency above one has several live dispatches sharing a pid. Keyed
+    /// by pid alone they were one entry: the second overwrote the first, and
+    /// whichever ended first took the survivor's registration with it — leaving a
+    /// live dispatch nothing could find, which is the failure this registry
+    /// exists to make impossible.
+    #[test]
+    fn two_dispatches_in_one_process_are_two_entries_and_each_ends_alone() {
+        let root = scratch("dispatches-shared-process");
+        let paths = RunPaths::under(&root, "demo");
+        paths.create().expect("the run directory");
+
+        let first = claim_dispatch(&paths, "first", sys::pid()).expect("the first is recorded");
+        let second = claim_dispatch(&paths, "second", sys::pid()).expect("the second is recorded");
+        let nodes = |paths: &RunPaths| {
+            let mut named: Vec<String> = dispatches_of(paths)
+                .expect("the registry reads")
+                .into_iter()
+                .map(|held| held.node)
+                .collect();
+            named.sort();
+            named
+        };
+        assert_eq!(
+            nodes(&paths),
+            vec!["first".to_string(), "second".to_string()],
+            "two dispatches in one process did not record two entries"
+        );
+
+        drop(first);
+        assert_eq!(
+            nodes(&paths),
+            vec!["second".to_string()],
+            "a dispatch that ended took a live one's registration with it"
+        );
+        drop(second);
+        assert!(dispatches_of(&paths)
+            .expect("the registry reads")
+            .is_empty());
+        fs::remove_dir_all(&root).ok();
+    }
+
     /// A claim removes its **own** entry and never the one that replaced it.
     ///
     /// The host reissues pids, so the entry under one is this dispatch's only
@@ -1349,7 +1416,7 @@ mod tests {
         // The same pid, claimed again by what stands in here for a later process
         // wearing it: the entry is rewritten with a start this one does not have.
         write_json(
-            &paths.dispatch(sys::pid()),
+            &paths.dispatch(sys::pid(), 0),
             &DispatchRecord {
                 started: "the process that took it, which is not the first one".into(),
                 ..dispatches_of(&paths).expect("the registry reads")[0].clone()
@@ -1379,7 +1446,7 @@ mod tests {
         paths.create().expect("the run directory");
         for (node, pid) in [("later", 900_u32), ("earlier", 90), ("middle", 300)] {
             write_json(
-                &paths.dispatch(pid),
+                &paths.dispatch(pid, 0),
                 &DispatchRecord {
                     node: node.to_string(),
                     pid,
@@ -1456,7 +1523,7 @@ mod tests {
                 .expect("an unstamped entry"),
             ),
         ] {
-            fs::write(paths.dispatch(usable.pid), entry).expect("an entry");
+            fs::write(paths.dispatch(usable.pid, 0), entry).expect("an entry");
             let refused =
                 dispatches_of(&paths).expect_err(&format!("{what} was read as a registry"));
             assert!(
