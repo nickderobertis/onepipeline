@@ -1218,13 +1218,23 @@ fn host_renders_the_live_dispatches_of_a_run_that_was_adopted() {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("the adopting driver starts");
-    let adopter = adopting.id();
-    world.until("the adopting driver to take the run's lock", |world| {
-        std::fs::read_to_string(world.run_file("adopted", "owner.lock"))
-            .ok()
-            .and_then(|held| serde_json::from_str::<serde_json::Value>(&held).ok())
-            .is_some_and(|held| held["pid"] == serde_json::json!(adopter))
+    // Waited for through the run's own record of the takeover, which is what
+    // the adoption announces to every reader of the run: the driver that adopted
+    // it says so, and says which process it is.
+    world.until("the run to record its adoption", |world| {
+        !world.events_of("adopted", "driver-adopted").is_empty()
     });
+    let adopter = u32::try_from(
+        world.events_of("adopted", "driver-adopted")[0]["payload"]["pid"]
+            .as_u64()
+            .expect("an adoption names the driver that took the run"),
+    )
+    .expect("a pid");
+    assert_eq!(
+        adopter,
+        adopting.id(),
+        "the run recorded an adoption by a process this journey did not start"
+    );
     assert_ne!(
         start_of_as_rendered_in(EAST, adopter),
         start_of_as_rendered_in(WEST, adopter),

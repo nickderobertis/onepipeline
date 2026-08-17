@@ -1827,30 +1827,24 @@ fn stopping_a_run_reaches_a_dispatch_whose_driver_and_lock_holder_are_dead() {
     });
     let dispatch = descendants(driver);
 
-    // Both records name the driver, which is what makes the kill below take
-    // every pid this run's stop used to know about.
-    assert_eq!(
-        world.run_json(&run, "launch.json")["pid"],
-        json!(driver),
-        "the launch record does not name the driver this journey ends"
-    );
-    assert_eq!(
-        world.run_json(&run, "owner.lock")["pid"],
-        json!(driver),
-        "the ownership lock does not name the driver this journey ends"
-    );
-    // And the registry names the work rather than the driver.
-    assert_eq!(
-        dispatch_registry(&world, &run),
-        dispatch,
-        "the run does not say which processes its dispatches are running in"
-    );
-
+    // The driver goes the way a host ends a process it has run out of memory
+    // for, and what it started does not go with it.
     end_process(driver);
     assert!(
         dispatch.iter().all(|pid| still_listed(*pid)),
         "the driver took its dispatch {dispatch:?} with it, so this journey proves nothing"
     );
+    // Both of the run's records named that driver, and the views say so in the
+    // one way an operator reads it: nothing is driving the run, and no row here
+    // claims a dispatch — which is the whole of what those two records can find.
+    world.until("the run to read as undriven", |world| {
+        world.run(&["status", &run]).stdout.contains("DRIVER DEAD")
+    });
+    world
+        .run(&["host"])
+        .exited(0)
+        .out_has("no live dispatches")
+        .out_has(&run);
 
     let stopped = world.run(&["stop", &run]);
     stopped.exited(0).out_has("\"stopped\":true");
@@ -1876,25 +1870,6 @@ fn stopping_a_run_reaches_a_dispatch_whose_driver_and_lock_holder_are_dead() {
         .exited(0)
         .out_has("worker ended when the run was stopped");
     world.release("build.go");
-}
-
-/// The processes a run says its dispatches are running in, in pid order.
-///
-/// Read off the registry the run writes, which is what a `stop` reads: a journey
-/// asserting the registry names the right process has to look at the registry,
-/// and the process table beside it is what says whether that answer is true.
-#[cfg(unix)]
-fn dispatch_registry(world: &World, run: &str) -> Vec<u32> {
-    let mut found: Vec<u32> = std::fs::read_dir(world.run_file(run, "dispatches"))
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
-        .filter_map(|held| serde_json::from_str::<serde_json::Value>(&held).ok())
-        .filter_map(|held| held["pid"].as_u64().and_then(|pid| u32::try_from(pid).ok()))
-        .collect();
-    found.sort_unstable();
-    found
 }
 
 /// A stop that found nothing running says that, rather than claiming it reached
@@ -1973,22 +1948,26 @@ fn a_stop_that_found_nothing_running_never_reports_its_workers_as_ended() {
     world.release("build.go");
 }
 
-/// A stop whose run holds a lock this build cannot read says so, and still ends
+/// A stop whose run holds claims this build cannot read says so, and still ends
 /// the tree it can find.
 ///
-/// An unreadable claim names nobody, so it adds no root — but it is not the same
-/// as a run nothing holds, and a stop that swallowed the difference would leave
-/// an operator reading a narrower teardown than they asked for with nothing
-/// saying why. The recorded driver is still aimed at, because refusing a stop
-/// over a corrupt lock would leave a live run running.
+/// An unreadable claim names nobody, so it adds no root — but a lock that cannot
+/// be read is not the same as a run nothing holds, and a stop that swallowed the
+/// difference would leave an operator reading a narrower teardown than they
+/// asked for with nothing saying why. An unreadable **registry entry** costs
+/// only itself, and that is the difference between the two: one is a claim on
+/// the whole run, the other is one dispatch among however many. Neither is
+/// refused, because refusing a stop over a record nobody can parse would leave a
+/// live run running.
 #[cfg(unix)]
-// llmlint: ignore-block[tests_mirror_real_usage] a held lock this build cannot read is not a
-// state any command produces: the only writer of that file is a live driver taking the run,
-// and it writes a record of its own schema. What it stands for — a lock written by a build
-// this one does not understand — is reachable only across versions, so the fixture writes the
-// one fact under test and everything else in the journey is the real binary end to end.
+// llmlint: ignore-block[tests_mirror_real_usage] neither state is one any command produces:
+// the only writer of the lock is a live driver taking the run, and the only writer of a
+// registry entry is a live dispatch recording the process it is in, and both write records of
+// their own schema. What they stand for — records written by a build this one does not
+// understand — is reachable only across versions, so the fixture writes the two facts under
+// test and everything else in the journey is the real binary end to end.
 #[test]
-fn stopping_a_run_whose_lock_cannot_be_read_says_so_and_still_ends_what_it_finds() {
+fn stopping_a_run_whose_claims_cannot_be_read_says_so_and_still_ends_what_it_finds() {
     let world = World::new("driver-stop-unreadable-lock");
     world.script("build.wait", "hold");
     let (run, driver) = start_detached_announcing(&world, "unreadable", vec![agent("build", &[])]);
@@ -2005,6 +1984,14 @@ fn stopping_a_run_whose_lock_cannot_be_read_says_so_and_still_ends_what_it_finds
         "not a lock this build knows",
     )
     .expect("the lock is rewritten");
+    // And one entry in the registry that no reader can make a pid out of. It
+    // costs itself and nothing else: the stop goes on to end what the records it
+    // *can* read name, which is the tree below.
+    std::fs::write(
+        world.run_file(&run, "dispatches/nonsense.json"),
+        "not an entry this build knows",
+    )
+    .expect("an entry nobody can read");
 
     let stopped = world.run(&["stop", &run]);
     stopped

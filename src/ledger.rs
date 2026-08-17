@@ -788,6 +788,14 @@ pub fn claim_dispatch(paths: &RunPaths, node: &str, pid: u32) -> Option<Dispatch
             .unwrap_or_default(),
     };
     let path = paths.dispatch(pid);
+    // llmlint: ignore-block[changed_behavior_has_e2e] the arm below needs a host that
+    // refuses to create a directory under a run it has just written a journal into, which is
+    // a filesystem condition rather than anything a user types — and the only window a
+    // journey could arrange it in is between a dispatch starting and this line, which is a
+    // race a suite cannot hold open. Driven instead by
+    // `a_dispatch_the_registry_cannot_record_still_runs`, against the real filesystem, and
+    // what it costs is proved end to end by the journeys where the registry is *absent*: a
+    // stop that cannot read a run's claims still ends the tree the driver's own records name.
     match write_json(&path, &record) {
         Ok(()) => Some(DispatchClaim {
             path,
@@ -801,7 +809,7 @@ pub fn claim_dispatch(paths: &RunPaths, node: &str, pid: u32) -> Option<Dispatch
             );
             None
         }
-    }
+    } // llmlint: ignore-end[changed_behavior_has_e2e]
 }
 
 /// Every dispatch this run has recorded, in pid order.
