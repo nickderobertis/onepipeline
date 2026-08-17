@@ -440,6 +440,15 @@ fn parse_table(listed: &str) -> Option<Vec<(u32, u32)>> {
 /// the Unix arm reads off `ESRCH`: a `taskkill` aimed at a tree that is already
 /// gone reached nothing, and reporting that as a stop is the false completion
 /// this seam exists to remove.
+// llmlint: ignore-block[changed_behavior_has_e2e] this arm is `#[cfg(windows)]`, so the only
+// build that compiles it is the one that runs the suite's journeys on Windows — and there they
+// are its e2e: `the_owner_stops_its_own_run_without_force` and
+// `stopping_a_run_whose_work_is_over_says_there_was_nothing_to_stop` are deliberately not
+// `#[cfg(unix)]`, and each drives a real `stop` of a run holding a driver and its registered
+// dispatches, which is this fold over several roots. What is `#[cfg(unix)]` in
+// `tests/e2e/driver.rs` is every journey that asserts against a **process table**, because that
+// oracle is the platform's, not the teardown's. A journey here would be a Windows journey run on
+// a host that is not one.
 #[cfg(windows)]
 fn platform_stop(roots: &[u32], _how: Stop) -> (Teardown, Vec<u32>) {
     let aimed: Vec<u32> = aimable(roots)
@@ -475,6 +484,7 @@ fn platform_stop(roots: &[u32], _how: Stop) -> (Teardown, Vec<u32>) {
     };
     (established, aimed)
 }
+// llmlint: ignore-end[changed_behavior_has_e2e]
 
 /// Ask this platform to end one tree.
 ///
