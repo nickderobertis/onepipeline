@@ -229,6 +229,10 @@ fn gone_within(aimed: &[u32], patience: Duration) -> bool {
 }
 
 /// How often the liveness probe asks again.
+///
+/// Short enough that an ordinary teardown returns as soon as its tree is gone
+/// rather than at some interval's convenience, and long enough that a stop
+/// waiting out a wedged process is not a busy loop against `kill`.
 const PROBE_POLL: Duration = Duration::from_millis(20);
 
 /// The roots a teardown may aim at, in the order they are signalled.
@@ -480,6 +484,10 @@ fn platform_stop(roots: &[u32], _how: Stop) -> (Teardown, Vec<u32>) {
 }
 
 /// Ask this platform to end one tree.
+///
+/// Split out of [`platform_stop`] so that the fold over several roots above
+/// reads as the fold it is: this is the one ask, and everything about *how* it
+/// asks — `/T`, and `/F` in both modes — is the note inside it.
 #[cfg(windows)]
 fn taskkill(pid: u32) -> std::io::Result<std::process::ExitStatus> {
     // `/T` for the tree — the same boundary the Unix arm walks the process table

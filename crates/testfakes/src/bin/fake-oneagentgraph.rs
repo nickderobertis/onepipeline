@@ -293,6 +293,15 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     // has to reap it. Without it every held dispatch ignores an interrupt,
     // which is the other scenario — and a suite that could only script that
     // one cannot tell a turn that stopped politely from one that was killed.
+    //
+    // `<key>.ignores-the-ask` is the worker at the other extreme: it keeps the
+    // hold through a `SIGTERM`, which is what a wedged dispatch looks like to
+    // the teardown aimed at it — signalled, and still there. A suite without one
+    // cannot tell a stop that ended a tree from one that only signalled it,
+    // because every other dispatch here goes on the first ask.
+    if dir.join(format!("{key}.ignores-the-ask")).exists() {
+        fake::ignore_the_polite_ask();
+    }
     if dir.join(format!("{key}.wait")).exists() {
         let go = dir.join(format!("{key}.go"));
         if dir.join(format!("{key}.stops-when-interrupted")).exists() {

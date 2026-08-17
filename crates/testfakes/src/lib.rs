@@ -172,6 +172,27 @@ pub fn node_script(dir: &Path, node: &str, suffix: &str) -> Option<String> {
         .map(|text| text.trim().to_string())
 }
 
+/// Keep working through the ask to stop, as a wedged worker does.
+///
+/// The one dispatch behaviour a rendezvous cannot act out. A teardown's polite
+/// ask is `SIGTERM`, whose default action ends the process, so every other
+/// double here goes the instant it is signalled — and a suite where nothing
+/// survives the ask cannot tell a stop that *ended* a run's tree from one that
+/// only signalled it and walked away. This is the second half of that pair; the
+/// forceful ask still ends it, because `SIGKILL` cannot be handled.
+///
+/// A no-op off Unix, where the teardown draws no such distinction: `taskkill`
+/// is asked forcefully in both modes, for the reason `sys::platform_stop`
+/// records there.
+pub fn ignore_the_polite_ask() {
+    #[cfg(unix)]
+    // SAFETY: `signal` sets this process's disposition for one signal and
+    // borrows nothing; `SIG_IGN` is a valid disposition for `SIGTERM`.
+    unsafe {
+        libc::signal(libc::SIGTERM, libc::SIG_IGN);
+    }
+}
+
 /// Wait until a rendezvous file appears, so a test can hold a dispatch open
 /// while it does something else — issue a live edit, kill a driver, read a
 /// surface.

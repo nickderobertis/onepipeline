@@ -26,6 +26,13 @@ serde_json = "1"
 # reserves — a copy is a list that goes stale the round after the sibling adds one.
 oneagentgraph = { workspace = true }
 
+# So a double can act out the one dispatch behaviour a rendezvous cannot: a
+# worker that keeps working through the polite ask to stop. The crate under test
+# names the same dependency for the same platform, and for the same reason —
+# what a process does with a signal is not a `std` question on this MSRV floor.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [[bin]]
 name = "fake-oneagentgraph"
 path = "src/bin/fake-oneagentgraph.rs"

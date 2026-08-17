@@ -1155,6 +1155,13 @@ fn stop(args: &StopArgs) -> Result<i32> {
 ///
 /// `None` when nothing this run names is a process on this host, where nothing
 /// was attempted and this host has nothing to promise either way.
+// llmlint: ignore-block[changed_behavior_has_e2e] both halves are driven end to end in
+// `tests/e2e/driver.rs`, against real drivers and real dispatches. What has no journey is a
+// stop of two *live* roots, and that is a state a run cannot be in: the ownership lock is a
+// single-writer lock, so one run has one driver, and the pair a stop can meet — the pid a
+// stale record names beside the pid the lock stamps — is what
+// `stopping_a_run_ends_the_tree_its_lock_names_when_the_record_names_a_dead_driver` walks over
+// one listing.
 fn terminate(paths: &RunPaths, record: &LaunchRecord) -> Option<sys::Teardown> {
     let roots = driving_here(paths, record);
     if roots.is_empty() {
@@ -1191,13 +1198,44 @@ fn driving_here(paths: &RunPaths, record: &LaunchRecord) -> Vec<u32> {
     if record.host == here {
         roots.push(record.pid);
     }
-    let held: Option<ledger::LockRecord> = ledger::read_json_opt(&paths.lock());
-    if let Some(held) = held.filter(|held| held.host == here && !roots.contains(&held.pid)) {
-        if sys::process_start_token(held.pid).is_some_and(|token| token.matches(&held.started)) {
-            roots.push(held.pid);
-        }
+    let Some(held) = lock_held_on(paths) else {
+        return roots;
+    };
+    if held.host == here
+        && !roots.contains(&held.pid)
+        && sys::process_start_token(held.pid).is_some_and(|token| token.matches(&held.started))
+    {
+        roots.push(held.pid);
     }
     roots
+}
+// llmlint: ignore-end[changed_behavior_has_e2e]
+
+/// The run's ownership lock, as a record, when there is one this build can read.
+///
+/// A lock that is **not there** and one this build cannot read are different
+/// answers and only the first is silent. Neither gives a teardown a pid it may
+/// aim at — an unreadable claim names nobody — but the second means the run is
+/// held by something whose record this build does not understand, and a stop
+/// that swallowed that would leave an operator reading a teardown narrower than
+/// they asked for with nothing saying why. Said out loud and not refused: the
+/// recorded driver is still aimed at, and refusing the stop over a corrupt lock
+/// would leave a live run running.
+fn lock_held_on(paths: &RunPaths) -> Option<ledger::LockRecord> {
+    let path = paths.lock();
+    match ledger::read_json::<ledger::LockRecord>(&path) {
+        Ok(held) => Some(held),
+        // Nothing holds the run: the ordinary case, and no news.
+        Err(Error::Ledger { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            eprintln!(
+                "onepipeline: the ownership lock of run '{}' cannot be read, so this stop aims \
+                 only at the driver the launch record names: {error}",
+                paths.run
+            );
+            None
+        }
+    }
 }
 
 /// `onepipeline next` — the channel's only consumer.
@@ -1939,6 +1977,11 @@ mod tests {
             host: "a-host-this-is-not".into(),
             ..stamp(&proven)
         });
+        assert_eq!(driving_here(&paths, &launched_by(dead, &here)), vec![dead]);
+        // A claim this build cannot read names nobody, so it adds no root — and
+        // it is reported rather than read as an absent lock, because the two are
+        // different states of the run.
+        std::fs::write(paths.lock(), "not json at all").expect("a lock nobody can read");
         assert_eq!(driving_here(&paths, &launched_by(dead, &here)), vec![dead]);
 
         // And a run whose every record is another host's leaves this one nothing

@@ -943,6 +943,7 @@ dependencies = [
 name = "onepipeline-testfakes"
 version = "0.0.0"
 dependencies = [
+ "libc",
  "oneagentgraph",
  "serde_json",
 ]

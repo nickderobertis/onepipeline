@@ -12,7 +12,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::harness::{
-    agent, deaf_process, end_process, human, plan_of, reaped_pid, World, NOTHING_DRIVING, REFUSED,
+    agent, end_process, human, plan_of, reaped_pid, World, NOTHING_DRIVING, REFUSED,
 };
 use serde_json::json;
 
@@ -1757,6 +1757,12 @@ fn a_stop_aimed_at_another_hosts_driver_reports_that_it_reached_nothing() {
 /// journey cannot stand in. What is edited is the one fact under test — the pid
 /// the record names — and everything else about the run is real: a live driver
 /// holding the lock it took, with a dispatch genuinely in flight below it.
+// llmlint: ignore-block[tests_mirror_real_usage] the one value set by hand is the pid the
+// launch record names, and no product surface sets it: the verbs that write that field —
+// `start`, `drive-run`, `adopt` — all write their *own* pid as they take the lock, so a run
+// whose record has fallen behind its lock is a state a user reaches by having a driver die,
+// not by typing anything. The rest of the journey is the real binary end to end, and the
+// assertion is about processes on this host rather than about the file that was edited.
 #[cfg(unix)]
 #[test]
 fn stopping_a_run_ends_the_tree_its_lock_names_when_the_record_names_a_dead_driver() {
@@ -1791,6 +1797,7 @@ fn stopping_a_run_ends_the_tree_its_lock_names_when_the_record_names_a_dead_driv
     });
     world.release("build.go");
 }
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 /// A stop that found nothing running says that, rather than claiming it reached
 /// a tree.
@@ -1823,6 +1830,97 @@ fn stopping_a_run_whose_work_is_over_says_there_was_nothing_to_stop() {
     assert_eq!(recorded[0]["payload"]["teardown"], json!("nothing-to-stop"));
 }
 
+/// And a stop that found nothing running never reports the run's workers as
+/// ended by it.
+///
+/// The node here is recorded in flight and its worker is genuinely gone — the
+/// driver died and took its dispatch with it, which is the state a run is left
+/// in when a host reboots under it. Nothing was signalled, so "worker ended when
+/// the run was stopped" would be a claim about a signal nobody sent; the view
+/// says what this stop actually established about that worker, which is nothing.
+#[cfg(unix)]
+#[test]
+fn a_stop_that_found_nothing_running_never_reports_its_workers_as_ended() {
+    let world = World::new("driver-stop-nothing-inflight");
+    world.script("build.wait", "hold");
+    let (run, driver) = start_detached_announcing(&world, "vanished", vec![agent("build", &[])]);
+    world.until("a node to be in flight", |world| {
+        !world.events_of(&run, "node-dispatched").is_empty()
+    });
+    world.until("the dispatch to be a process below the driver", |_| {
+        !descendants(driver).is_empty()
+    });
+    for pid in std::iter::once(driver).chain(descendants(driver)) {
+        end_process(pid);
+    }
+
+    let stopped = world.run(&["stop", &run]);
+    stopped.exited(0).out_has("\"stopped\":true");
+    assert_eq!(
+        stopped.json()["teardown"],
+        json!("nothing-to-stop"),
+        "a stop with nothing left to aim at reported reaching a tree:\n{}",
+        stopped.stdout
+    );
+
+    let status = world.run(&["status", &run]);
+    status.exited(0).out_has("worker may still be running");
+    assert!(
+        !status
+            .stdout
+            .contains("worker ended when the run was stopped"),
+        "a view reported a worker as ended by a stop that signalled nothing:\n{}",
+        status.stdout
+    );
+    world.release("build.go");
+}
+
+/// A stop whose run holds a lock this build cannot read says so, and still ends
+/// the tree it can find.
+///
+/// An unreadable claim names nobody, so it adds no root — but it is not the same
+/// as a run nothing holds, and a stop that swallowed the difference would leave
+/// an operator reading a narrower teardown than they asked for with nothing
+/// saying why. The recorded driver is still aimed at, because refusing a stop
+/// over a corrupt lock would leave a live run running.
+#[cfg(unix)]
+// llmlint: ignore-block[tests_mirror_real_usage] a held lock this build cannot read is not a
+// state any command produces: the only writer of that file is a live driver taking the run,
+// and it writes a record of its own schema. What it stands for — a lock written by a build
+// this one does not understand — is reachable only across versions, so the fixture writes the
+// one fact under test and everything else in the journey is the real binary end to end.
+#[test]
+fn stopping_a_run_whose_lock_cannot_be_read_says_so_and_still_ends_what_it_finds() {
+    let world = World::new("driver-stop-unreadable-lock");
+    world.script("build.wait", "hold");
+    let (run, driver) = start_detached_announcing(&world, "unreadable", vec![agent("build", &[])]);
+    world.until("a node to be in flight", |world| {
+        !world.events_of(&run, "node-dispatched").is_empty()
+    });
+    world.until("the dispatch to be a process below the driver", |_| {
+        !descendants(driver).is_empty()
+    });
+    let tree: Vec<u32> = std::iter::once(driver).chain(descendants(driver)).collect();
+
+    std::fs::write(
+        world.run_file(&run, "owner.lock"),
+        "not a lock this build knows",
+    )
+    .expect("the lock is rewritten");
+
+    let stopped = world.run(&["stop", &run]);
+    stopped
+        .exited(0)
+        .out_has("\"teardown\":\"signalled\"")
+        .err_has("ownership lock")
+        .err_has("cannot be read");
+    world.until("every process the run started to end", |_| {
+        tree.iter().all(|pid| !still_listed(*pid))
+    });
+    world.release("build.go");
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
 /// A stop watches the tree it signalled and refuses when it is still there.
 ///
 /// `Signalled` was never a process that had exited — `kill` reports a delivered
@@ -1831,36 +1929,41 @@ fn stopping_a_run_whose_work_is_over_says_there_was_nothing_to_stop() {
 /// was reported as a clean stop, which is how an operator walks away from a run
 /// still burning a CPU.
 ///
-/// The process that stays is a real one this suite owns and starts for the
-/// purpose, put inside the run's tree through the listing the teardown reads:
-/// the run's own doubles act out a worker that finishes and one that holds, and
-/// neither acts out one that ignores the ask.
+/// The worker that stays is the run's own dispatch, scripted to keep working
+/// through the polite ask: a real process, started by the driver, inside the
+/// tree the teardown walks for itself. The `SIGTERM` it ignores is the one the
+/// stop actually sent it, and the forceful ask this journey ends with is the one
+/// no process can ignore.
 #[cfg(unix)]
 #[test]
 fn a_stop_whose_tree_takes_the_ask_and_stays_refuses_rather_than_reporting_a_clean_stop() {
     let world = World::new("driver-stop-deaf");
     world.script("build.wait", "hold");
+    world.script("build.ignores-the-ask", "yes");
     let (run, driver) = start_detached_announcing(&world, "deaf", vec![agent("build", &[])]);
     world.until("a node to be in flight", |world| {
         !world.events_of(&run, "node-dispatched").is_empty()
     });
-    let deaf = deaf_process();
+    world.until("the dispatch to be a process below the driver", |_| {
+        !descendants(driver).is_empty()
+    });
+    let worker = descendants(driver);
 
-    let mut command = world.cmd(&["stop", &run]);
-    command.env("PATH", world.path_whose_ps_adds_a_child(driver, deaf));
-    let refused = world.run_on(
-        command,
-        "stop with a process in the tree that ignores the ask",
-    );
+    let refused = world.run(&["stop", &run]);
     refused.exited(REFUSED).err_has("only partly stopped");
     assert!(
         !refused.stdout.contains("\"stopped\":true"),
         "a run with a process still running was announced as a clean stop:\n{}",
         refused.stdout
     );
-    assert!(
-        still_listed(deaf),
-        "pid {deaf} ended on the polite ask, so the refusal above proves nothing"
+    let surviving: Vec<u32> = worker
+        .iter()
+        .copied()
+        .filter(|pid| still_listed(*pid))
+        .collect();
+    assert_eq!(
+        surviving, worker,
+        "the dispatch {worker:?} ended on the polite ask, so the refusal above proves nothing"
     );
 
     // The record says which of the answers it was, so no reader takes this for a
@@ -1878,10 +1981,12 @@ fn a_stop_whose_tree_takes_the_ask_and_stays_refuses_rather_than_reporting_a_cle
         .exited(0)
         .out_has("worker may still be running");
 
-    end_process(deaf);
-    world.until("the process that ignored the ask to end", |_| {
-        !still_listed(deaf)
-    });
+    // The ask no worker can ignore, which is also this journey's cleanup: the
+    // dispatch it left running is the one thing a `World` going out of scope
+    // cannot take with it.
+    for pid in &surviving {
+        end_process(*pid);
+    }
     world.release("build.go");
 }
 

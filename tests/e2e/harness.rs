@@ -644,24 +644,6 @@ impl World {
         )
     }
 
-    /// A `PATH` whose `ps` answers with the real listing plus `child` as a child
-    /// of `parent`.
-    ///
-    /// For the journey about a process that is genuinely reached and does not
-    /// go: the row is real, so the teardown delivers a signal to a live process
-    /// this suite owns and then has to say what became of it. The listing is
-    /// what puts that process inside the run's tree, because the honest
-    /// alternative — a run whose real worker ignores the ask — is a fake this
-    /// suite's doubles do not act out.
-    #[cfg(unix)]
-    pub fn path_whose_ps_adds_a_child(&self, parent: u32, child: u32) -> PathBuf {
-        let real = real_ps();
-        self.path_with_ps(
-            "added-child-ps",
-            &format!("echo '{child} {parent}'\nexec {} \"$@\"", real.display()),
-        )
-    }
-
     /// A `PATH` whose `ps` answers with the real listing plus a child of `parent`
     /// that no signal can reach.
     ///
@@ -1380,49 +1362,39 @@ pub fn reaped_pid() -> u32 {
     pid
 }
 
-/// A live process this suite owns that **ignores the polite ask**, and its pid.
-///
-/// What a wedged worker looks like from outside: `SIGTERM` is delivered and the
-/// process stays. Orphaned deliberately — the shell that starts it exits at once
-/// and is collected here — because a process left as this suite's own child is
-/// reaped by nobody while a stop is watching it, and a signalled child nobody
-/// has collected is a zombie, which answers a liveness probe as alive. Ended
-/// with [`end_process`], which is the one ask it cannot ignore.
-#[cfg(unix)]
-pub fn deaf_process() -> u32 {
-    use std::io::BufRead;
-
-    let mut spawner = std::process::Command::new("sh")
-        .args(["-c", "sh -c 'trap \"\" TERM; echo $$; sleep 300' &"])
-        .stdout(Stdio::piped())
-        // Nothing of this test's own: a fixture holding the suite's stderr open
-        // is a leaked handle for as long as it lives, which is deliberately
-        // longer than the polite ask it is here to ignore.
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("a process that ignores the polite ask");
-    let mut said = String::new();
-    std::io::BufReader::new(spawner.stdout.take().expect("it reports itself"))
-        .read_line(&mut said)
-        .expect("a reported pid");
-    spawner.wait().expect("the shell that detached it exits");
-    said.trim()
-        .parse()
-        .unwrap_or_else(|_| panic!("the fixture said {said:?} where a pid was due"))
-}
-
-/// End one process this suite is entitled to end, and leave nothing of it.
+/// End one process this suite is entitled to end, and wait until it is gone.
 ///
 /// Forcefully, because both things it is used on are processes a polite ask does
-/// not settle: the fixture that ignores `SIGTERM` by design, and a run's driver
-/// which a journey needs *gone* — without the tree it started going with it,
-/// which is the state an adoption recovers from.
+/// not settle: a dispatch scripted to keep working through `SIGTERM`, and a
+/// run's driver which a journey needs *gone* without the tree it started going
+/// with it, which is the state an adoption recovers from.
+///
+/// The wait is what makes this usable as a precondition. `kill` returns when the
+/// signal is queued, not when the process has exited, so a journey that went
+/// straight on from here would be asserting against a host that had not caught
+/// up with it yet.
 #[cfg(unix)]
 pub fn end_process(pid: u32) {
     std::process::Command::new("kill")
         .args(["-KILL", &pid.to_string()])
         .status()
         .expect("this host ends a process it owns");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
+        // `kill -0` is the existence check: it delivers nothing and fails once
+        // there is no such process.
+        let still_there = std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stderr(Stdio::null())
+            .status()
+            .expect("this host answers about a process it owns")
+            .success();
+        if !still_there {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    panic!("pid {pid} outlived the one ask no process can ignore");
 }
 
 /// This host's own `ps`, found the way a shell finds it.
