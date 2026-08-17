@@ -206,12 +206,15 @@ pub fn stop_and_confirm(pids: &[u32], how: Stop, patience: Duration) -> Teardown
 /// is nothing to wait for — the only question a host answers about somebody
 /// else's process is whether it is still there.
 fn gone_within(aimed: &[u32], patience: Duration) -> bool {
-    let deadline = Instant::now() + patience;
+    // Saturating rather than added: `patience` is a caller's value, and an
+    // instant that cannot be represented is a wait this platform cannot end
+    // early rather than a reason to take the process down.
+    let deadline = Instant::now().checked_add(patience);
     loop {
         if !aimed.iter().any(|pid| process_may_be_live(*pid)) {
             return true;
         }
-        if Instant::now() >= deadline {
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             return false;
         }
         std::thread::sleep(PROBE_POLL);
