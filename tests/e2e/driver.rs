@@ -1799,6 +1799,104 @@ fn stopping_a_run_ends_the_tree_its_lock_names_when_the_record_names_a_dead_driv
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 
+/// A stop reaches a dispatch whose driver is gone.
+///
+/// The case both of the run's other records are blind to. The launch record and
+/// the ownership lock name a **driver**, and a driver is not what a run is
+/// spending: it starts dispatches, and a dispatch outlives the driver that
+/// started it — reparented the moment that driver dies, so nothing descending
+/// from either recorded pid reaches it ever again. Before the registry, this
+/// exact state answered `{"stopped":true,"teardown":"nothing-to-stop"}` with an
+/// exit 0, while the dispatch went on holding its workspace and burning a CPU.
+///
+/// Nothing here is arranged: the driver is a real one, ended the way a host ends
+/// a process it has run out of memory for, and the dispatch it leaves behind is
+/// the run's own — a real process, still running, that this journey then watches
+/// the stop reach.
+#[cfg(unix)]
+#[test]
+fn stopping_a_run_reaches_a_dispatch_whose_driver_and_lock_holder_are_dead() {
+    let world = World::new("driver-stop-orphaned-dispatch");
+    world.script("build.wait", "hold");
+    let (run, driver) = start_detached_announcing(&world, "orphaned", vec![agent("build", &[])]);
+    world.until("a node to be in flight", |world| {
+        !world.events_of(&run, "node-dispatched").is_empty()
+    });
+    world.until("the dispatch to be a process below the driver", |_| {
+        !descendants(driver).is_empty()
+    });
+    let dispatch = descendants(driver);
+
+    // Both records name the driver, which is what makes the kill below take
+    // every pid this run's stop used to know about.
+    assert_eq!(
+        world.run_json(&run, "launch.json")["pid"],
+        json!(driver),
+        "the launch record does not name the driver this journey ends"
+    );
+    assert_eq!(
+        world.run_json(&run, "owner.lock")["pid"],
+        json!(driver),
+        "the ownership lock does not name the driver this journey ends"
+    );
+    // And the registry names the work rather than the driver.
+    assert_eq!(
+        dispatch_registry(&world, &run),
+        dispatch,
+        "the run does not say which processes its dispatches are running in"
+    );
+
+    end_process(driver);
+    assert!(
+        dispatch.iter().all(|pid| still_listed(*pid)),
+        "the driver took its dispatch {dispatch:?} with it, so this journey proves nothing"
+    );
+
+    let stopped = world.run(&["stop", &run]);
+    stopped.exited(0).out_has("\"stopped\":true");
+    assert_eq!(
+        stopped.json()["teardown"],
+        json!("signalled"),
+        "a stop that reached a live dispatch did not report reaching one:\n{}",
+        stopped.stdout
+    );
+    let surviving: Vec<u32> = dispatch
+        .iter()
+        .copied()
+        .filter(|pid| still_listed(*pid))
+        .collect();
+    assert!(
+        surviving.is_empty(),
+        "the stop left {surviving:?} of the dispatch {dispatch:?} running"
+    );
+    // Reported as reached because it *was* reached: the teardown watched it go
+    // rather than reporting on the signal it sent.
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("worker ended when the run was stopped");
+    world.release("build.go");
+}
+
+/// The processes a run says its dispatches are running in, in pid order.
+///
+/// Read off the registry the run writes, which is what a `stop` reads: a journey
+/// asserting the registry names the right process has to look at the registry,
+/// and the process table beside it is what says whether that answer is true.
+#[cfg(unix)]
+fn dispatch_registry(world: &World, run: &str) -> Vec<u32> {
+    let mut found: Vec<u32> = std::fs::read_dir(world.run_file(run, "dispatches"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+        .filter_map(|held| serde_json::from_str::<serde_json::Value>(&held).ok())
+        .filter_map(|held| held["pid"].as_u64().and_then(|pid| u32::try_from(pid).ok()))
+        .collect();
+    found.sort_unstable();
+    found
+}
+
 /// A stop that found nothing running says that, rather than claiming it reached
 /// a tree.
 ///

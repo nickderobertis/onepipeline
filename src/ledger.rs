@@ -192,6 +192,28 @@ impl RunPaths {
     pub fn result(&self) -> PathBuf {
         self.dir.join("result.json")
     }
+
+    /// The dispatch ownership registry: one record per process this run has
+    /// work running in.
+    ///
+    /// A directory of small records rather than one document, because its
+    /// writers are the run's dispatch threads and they start and finish
+    /// independently: a single file would be read, edited, and rewritten by
+    /// several of them at once, and a lost update there is a live dispatch no
+    /// later stop can find.
+    pub fn dispatches(&self) -> PathBuf {
+        self.dir.join("dispatches")
+    }
+
+    /// One dispatch's record, named by the process it runs in.
+    ///
+    /// Keyed by pid because a pid is always a safe file name and a node id is
+    /// not: an id is plan text, required to be non-empty and unique and nothing
+    /// else, so joining one raw is how a name becomes a path — and sanitising it
+    /// would map two distinct nodes onto one record.
+    pub fn dispatch(&self, pid: u32) -> PathBuf {
+        self.dispatches().join(format!("{pid}.json"))
+    }
 }
 
 /// A run root this build refused, and the reason it gave.
@@ -684,6 +706,123 @@ impl Drop for OwnershipLock {
     }
 }
 
+/// One live dispatch's claim on the process it is running in.
+///
+/// The registry answers a question neither the launch record nor the ownership
+/// lock can: *what is this run actually running, and where*. Both of those name
+/// a **driver**, and a driver is not the work — it starts the work, and when it
+/// dies the work it started is reparented away and outlives it, findable by
+/// nothing that descends from a pid either record holds. That is a live dispatch
+/// a stop cannot reach and an operator is told is over.
+///
+/// Written by the machine running the dispatch, which is the one that knows
+/// which process the work is in, and removed when that dispatch ends.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DispatchRecord {
+    /// The node this dispatch is running.
+    pub node: String,
+    /// The process the work is running in.
+    pub pid: u32,
+    /// The host that pid is meaningful on.
+    pub host: String,
+    /// When the dispatch was recorded.
+    pub dispatched_at: String,
+    /// That process's own start token, as [`sys::process_start_token`] read it
+    /// when the dispatch started.
+    ///
+    /// The same proof, and for the same reason, as the ownership lock's: the pid
+    /// says *which* process and this says it is still that one. A record outlives
+    /// the driver that wrote it — that is the case it exists for — so by the time
+    /// anything reads it the host may have handed the pid to a stranger, and a
+    /// teardown aimed at that would end work this run never started.
+    ///
+    /// Empty when this host would not say, which is not a match: an unproven pid
+    /// is not one a teardown may aim at.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub started: String,
+}
+
+/// A dispatch's entry in the registry, removed when this value is dropped.
+///
+/// RAII for the same reason [`OwnershipLock`] is: a dispatch ends in more ways
+/// than it settles — it fails, it is cancelled, it is retried, its thread
+/// unwinds — and an entry that outlived any of those would send a later stop at
+/// a pid this run no longer has anything running in. The one ending that leaves
+/// the entry behind is the process itself dying, which is exactly when a stop
+/// needs it.
+#[derive(Debug)]
+pub struct DispatchClaim {
+    path: PathBuf,
+    /// What this claim recorded, so it removes its **own** entry and never a
+    /// later dispatch's: the host reissues pids, and a record keyed by one is
+    /// only this dispatch's while the process behind it is.
+    started: String,
+}
+
+impl Drop for DispatchClaim {
+    fn drop(&mut self) {
+        let ours = read_json_opt::<DispatchRecord>(&self.path)
+            .is_some_and(|held| held.started == self.started);
+        if ours {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// Record that this run is running `node` in `pid`, on this host.
+///
+/// Best-effort about the *registry* and never about the dispatch: a run that
+/// cannot write this record still runs the work, because refusing to dispatch
+/// over a bookkeeping failure would be a worse answer than a stop that has to
+/// fall back on the driver's own tree. It is said out loud rather than swallowed
+/// — what it costs is precisely the ability to find this process later.
+pub fn claim_dispatch(paths: &RunPaths, node: &str, pid: u32) -> Option<DispatchClaim> {
+    let record = DispatchRecord {
+        node: node.to_string(),
+        pid,
+        host: sys::hostname(),
+        dispatched_at: sys::now_rfc3339(),
+        started: sys::process_start_token(pid)
+            .map(|token| token.recorded().to_string())
+            .unwrap_or_default(),
+    };
+    let path = paths.dispatch(pid);
+    match write_json(&path, &record) {
+        Ok(()) => Some(DispatchClaim {
+            path,
+            started: record.started,
+        }),
+        Err(error) => {
+            eprintln!(
+                "onepipeline: node '{node}': its dispatch in pid {pid} could not be recorded in \
+                 run '{}', so a later stop will not find that process through the run: {error}",
+                paths.run
+            );
+            None
+        }
+    }
+}
+
+/// Every dispatch this run has recorded, in pid order.
+///
+/// Ordered because a caller acts on them — a teardown signals what they name —
+/// and a directory listing is in whatever order the host gives, which would make
+/// one run's stop reach its processes in a different order each time it was
+/// asked. A record this build cannot read is skipped: it names no pid this may
+/// act on, and the driver's own tree is still aimed at either way.
+pub fn dispatches_of(paths: &RunPaths) -> Vec<DispatchRecord> {
+    let Ok(entries) = fs::read_dir(paths.dispatches()) else {
+        return Vec::new();
+    };
+    let mut found: Vec<DispatchRecord> = entries
+        .flatten()
+        .filter_map(|entry| read_json_opt::<DispatchRecord>(&entry.path()))
+        .collect();
+    found.sort_by_key(|held| held.pid);
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1066,6 +1205,154 @@ mod tests {
         assert!(!record.started.is_empty());
         held.release();
         fs::remove_dir_all(&root).ok();
+    }
+
+    /// A dispatch claims the process its work is in, and gives the claim up when
+    /// the dispatch ends.
+    ///
+    /// The registry's whole contract in one place: while a dispatch is running
+    /// the run says which process it is running in and proves that pid is still
+    /// that process, and the moment the dispatch ends — however it ends, because
+    /// the claim is given up by being dropped — the run stops saying so. A
+    /// registry that kept the entry would send a later stop at whatever the host
+    /// had handed the pid to next.
+    #[test]
+    fn a_dispatch_claims_the_process_it_runs_in_and_gives_it_up_when_it_ends() {
+        let root = scratch("dispatches");
+        let paths = RunPaths::under(&root, "demo");
+        paths.create().expect("the run directory");
+        assert!(
+            dispatches_of(&paths).is_empty(),
+            "a run that has dispatched nothing claimed a process"
+        );
+
+        let claim = claim_dispatch(&paths, "build", sys::pid()).expect("the dispatch is recorded");
+        let recorded = dispatches_of(&paths);
+        assert_eq!(recorded.len(), 1, "{recorded:?}");
+        assert_eq!(recorded[0].node, "build");
+        assert_eq!(recorded[0].pid, sys::pid());
+        assert_eq!(recorded[0].host, sys::hostname());
+        assert!(
+            sys::process_start_token(sys::pid())
+                .expect("this host says when a process started")
+                .matches(&recorded[0].started),
+            "the entry's stamp is not this process's own start: {recorded:?}"
+        );
+
+        drop(claim);
+        assert!(
+            dispatches_of(&paths).is_empty(),
+            "a dispatch that ended left the run claiming its process"
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A claim removes its **own** entry and never the one that replaced it.
+    ///
+    /// The host reissues pids, so the entry under one is this dispatch's only
+    /// while the process behind it is. A claim that removed the file by name
+    /// would, on the ordering that matters — a dispatch ending just as a later
+    /// one starts in a pid the host has recycled — delete a live dispatch's
+    /// entry and leave that process findable by nothing.
+    #[test]
+    fn a_claim_that_ends_leaves_a_later_dispatchs_entry_alone() {
+        let root = scratch("dispatches-reused");
+        let paths = RunPaths::under(&root, "demo");
+        paths.create().expect("the run directory");
+
+        let first = claim_dispatch(&paths, "build", sys::pid()).expect("the dispatch is recorded");
+        // The same pid, claimed again by what stands in here for a later process
+        // wearing it: the entry is rewritten with a start this one does not have.
+        write_json(
+            &paths.dispatch(sys::pid()),
+            &DispatchRecord {
+                started: "the process that took it, which is not the first one".into(),
+                ..dispatches_of(&paths)[0].clone()
+            },
+        )
+        .expect("the entry is rewritten");
+
+        drop(first);
+        let recorded = dispatches_of(&paths);
+        assert_eq!(
+            recorded.len(),
+            1,
+            "a dispatch that ended removed an entry it did not write: {recorded:?}"
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// Every entry, in pid order, and nothing this build cannot read.
+    ///
+    /// Ordered because a teardown acts on them, and a directory listing is in
+    /// whatever order the host gives. Unreadable entries are skipped rather than
+    /// ending the read: one file nobody can parse names no pid, and a stop that
+    /// abandoned the whole registry over it would go back to reaching only the
+    /// driver.
+    #[test]
+    fn the_registry_reads_in_pid_order_and_skips_what_it_cannot_read() {
+        let root = scratch("dispatches-order");
+        let paths = RunPaths::under(&root, "demo");
+        paths.create().expect("the run directory");
+        for (node, pid) in [("later", 900_u32), ("earlier", 90), ("middle", 300)] {
+            write_json(
+                &paths.dispatch(pid),
+                &DispatchRecord {
+                    node: node.to_string(),
+                    pid,
+                    host: sys::hostname(),
+                    dispatched_at: sys::now_rfc3339(),
+                    started: "a start this host once reported".into(),
+                },
+            )
+            .expect("an entry");
+        }
+        fs::write(paths.dispatch(7), "not a record this build knows").expect("an entry it cannot");
+
+        let read: Vec<u32> = dispatches_of(&paths).iter().map(|held| held.pid).collect();
+        assert_eq!(read, vec![90, 300, 900]);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A registry that cannot be written costs the entry and never the dispatch.
+    ///
+    /// The bookkeeping is what makes a later stop able to find this process; the
+    /// dispatch is the work itself. Refusing to run the work because the note
+    /// about it could not be filed would be the worse answer by a wide margin —
+    /// so the claim is `None`, the caller runs the dispatch, and the only thing
+    /// lost is that a stop falls back on the driver's own tree.
+    #[test]
+    fn a_dispatch_the_registry_cannot_record_still_runs() {
+        let root = scratch("dispatches-unwritable");
+        let paths = RunPaths::under(&root, "demo");
+        paths.create().expect("the run directory");
+        // A file where the registry's directory has to go, so creating it fails
+        // on a host that is otherwise perfectly healthy.
+        fs::write(paths.dispatches(), "not a directory").expect("something in the way");
+
+        assert!(
+            claim_dispatch(&paths, "build", sys::pid()).is_none(),
+            "a registry write that failed reported a claim it does not hold"
+        );
+        assert!(dispatches_of(&paths).is_empty());
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// An entry written where this host would not say when a process started
+    /// carries no stamp, and says so by leaving the field out.
+    ///
+    /// The same absence the lock's stamp has, spelled the same way: omitted when
+    /// empty, so a record this build writes stays readable to one that predates
+    /// the field, and empty is never a match.
+    #[test]
+    fn a_dispatch_entry_without_a_start_token_reads_and_is_written_back_without_one() {
+        let record: DispatchRecord = serde_json::from_str(
+            r#"{"node":"build","pid":1,"host":"h","dispatched_at":"2026-01-01T00:00:00.000Z"}"#,
+        )
+        .expect("an entry carrying no stamp");
+        assert!(record.started.is_empty());
+        let written = serde_json::to_string(&record).expect("it serializes");
+        assert!(!written.contains("started"), "{written}");
     }
 
     /// A lock written before the stamp existed still reads, and still round-trips

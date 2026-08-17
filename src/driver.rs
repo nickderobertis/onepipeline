@@ -1176,36 +1176,57 @@ fn terminate(paths: &RunPaths, record: &LaunchRecord) -> Option<sys::Teardown> {
 
 /// Every process on this host a stop of this run has to aim at.
 ///
-/// Two records name one and they are not the same claim. The **launch record**
-/// names the driver the run was launched or last adopted with, which is a fact
-/// about the past: a driver that died leaves that pid behind it, and a stop that
-/// aimed there alone would signal nothing, find nothing, and report a clean stop
-/// over a dispatch tree still running. The **ownership lock** is the claim made
-/// *now* — created by the process driving the run and removed when it lets go —
-/// and it carries the start token that says its pid is still the process that
-/// took it.
+/// Three records name one, and they answer three different questions.
 ///
-/// The lock's pid is aimed at only where that stamp proves it, and the stamp is
-/// what makes the extra root safe rather than reckless: a pid the host has since
-/// handed to something else is a tree belonging to somebody who never heard of
-/// this run, and a teardown is the one operation that must never be aimed at a
-/// guess. A lock with no stamp — one an older build wrote — proves nothing, so
-/// it is left alone and the launch record's pid stands on its own, exactly as
-/// before.
+/// The **launch record** names the driver the run was launched or last adopted
+/// with, which is a fact about the past: a driver that died leaves that pid
+/// behind it, and a stop that aimed there alone would signal nothing, find
+/// nothing, and report a clean stop over a dispatch tree still running.
+///
+/// The **ownership lock** is the claim made *now* — created by the process
+/// driving the run and removed when it lets go — and it carries the start token
+/// that says its pid is still the process that took it.
+///
+/// The **dispatch registry** is the only one that names the *work*. Both of the
+/// others name a driver, and a driver is not what a run is spending: it starts
+/// dispatches, and a dispatch outlives the driver that started it — reparented
+/// the moment that driver dies, so nothing descending from either recorded pid
+/// reaches it ever again. That is the live tree a stop used to walk past, and it
+/// is found here or not at all.
+///
+/// Each of the two stamped roots is aimed at only where its **own** token proves
+/// it, independently of the others: a dispatch is verified as the process it was
+/// recorded as whether or not anything is still driving the run, which is the
+/// whole case — the driver is dead. The stamp is what makes an extra root safe
+/// rather than reckless, because a pid the host has since handed to something
+/// else is a tree belonging to somebody who never heard of this run, and a
+/// teardown is the one operation that must never be aimed at a guess. An
+/// unstamped record — one an older build wrote, or one this host would not
+/// answer about — proves nothing and is left alone, so the launch record's pid
+/// stands on its own exactly as it did before.
 fn driving_here(paths: &RunPaths, record: &LaunchRecord) -> Vec<u32> {
     let here = sys::hostname();
     let mut roots = Vec::new();
     if record.host == here {
         roots.push(record.pid);
     }
-    let Some(held) = lock_held_on(paths) else {
-        return roots;
-    };
-    if held.host == here
-        && !roots.contains(&held.pid)
-        && sys::process_start_token(held.pid).is_some_and(|token| token.matches(&held.started))
-    {
-        roots.push(held.pid);
+    // Each stamped claim in turn: the lock's holder, then every dispatch the
+    // run has recorded, and each proved on its own token.
+    let claimed = lock_held_on(paths)
+        .map(|held| (held.pid, held.host, held.started))
+        .into_iter()
+        .chain(
+            ledger::dispatches_of(paths)
+                .into_iter()
+                .map(|running| (running.pid, running.host, running.started)),
+        );
+    for (pid, host, started) in claimed {
+        if host == here
+            && !roots.contains(&pid)
+            && sys::process_start_token(pid).is_some_and(|token| token.matches(&started))
+        {
+            roots.push(pid);
+        }
     }
     roots
 }
@@ -1914,19 +1935,20 @@ mod tests {
         }
     }
 
-    /// What a stop aims at is the launch record's driver **and** the process the
-    /// ownership lock stamps as driving the run now — and never a pid nothing
-    /// proves.
+    /// What a stop aims at is every claim the run holds and can prove — and
+    /// never a pid nothing proves.
     ///
-    /// The two records answer different questions, and the launch record's
-    /// answer is about the past: a driver that died leaves its pid there, and a
-    /// stop that aimed at it alone signalled nothing while the run's dispatches
-    /// kept running. The lock is the claim made now, so it is aimed at too — but
-    /// only where its own start token says its pid is still the process that took
-    /// it, because a teardown aimed at a pid the host has since reissued is a
-    /// teardown of somebody else's work.
+    /// Three records, three questions. The launch record's answer is about the
+    /// past: a driver that died leaves its pid there, and a stop that aimed at it
+    /// alone signalled nothing while the run's dispatches kept running. The lock
+    /// is the claim made now. The registry is the only one that names the work
+    /// rather than a driver, which is what a stop is actually for.
+    ///
+    /// Each of the latter two is aimed at only where its own start token says its
+    /// pid is still the process that took it, because a teardown aimed at a pid
+    /// the host has since reissued is a teardown of somebody else's work.
     #[test]
-    fn a_stop_aims_at_the_locks_stamped_holder_as_well_as_the_recorded_driver() {
+    fn a_stop_aims_at_every_stamped_claim_the_run_holds_and_never_at_a_pid_nothing_proves() {
         let root = scratch("roots");
         let paths = RunPaths::under(&root, "stopped");
         paths.create().expect("the run directory");
@@ -1987,6 +2009,47 @@ mod tests {
         // And a run whose every record is another host's leaves this one nothing
         // to aim at, which is what `stop` reports as `elsewhere`.
         assert!(driving_here(&paths, &launched_by(dead, "a-host-this-is-not")).is_empty());
+
+        // The registry, which names the work rather than a driver. Its entries
+        // are proved one at a time and on their own stamps, so a dispatch is
+        // aimed at whether or not anything is still driving the run — which is
+        // the case it exists for, because the driver is dead.
+        std::fs::remove_file(paths.lock()).expect("the lock is given up");
+        let running = |pid: u32, host: &str, started: &str| ledger::DispatchRecord {
+            node: "build".into(),
+            pid,
+            host: host.to_string(),
+            dispatched_at: sys::now_rfc3339(),
+            started: started.to_string(),
+        };
+        let recorded = |record: &ledger::DispatchRecord| {
+            ledger::write_json(&paths.dispatch(record.pid), record).expect("a recorded dispatch");
+        };
+        recorded(&running(sys::pid(), &here, &proven));
+        assert_eq!(
+            driving_here(&paths, &launched_by(dead, &here)),
+            vec![dead, sys::pid()],
+            "a stop did not aim at the process the registry says the run's work is in"
+        );
+        // The same live pid, recorded as a process it is not; a dispatch an older
+        // build recorded without a stamp; and one recorded on another machine.
+        // None of the three proves a pid, and a teardown aims at none of them.
+        for disowned in [
+            running(
+                sys::pid(),
+                &here,
+                "the process that took it, which is not this one",
+            ),
+            running(sys::pid(), &here, ""),
+            running(sys::pid(), "a-host-this-is-not", &proven),
+        ] {
+            recorded(&disowned);
+            assert_eq!(
+                driving_here(&paths, &launched_by(dead, &here)),
+                vec![dead],
+                "a stop aimed at a pid the registry cannot prove: {disowned:?}"
+            );
+        }
         // One process named twice is one root: the driver that took the lock is
         // usually the one the record names.
         held(&stamp(&proven));
