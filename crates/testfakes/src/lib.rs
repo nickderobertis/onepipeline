@@ -195,6 +195,16 @@ pub fn ignore_the_polite_ask() {
         // SAFETY: `signal` sets this process's disposition for one signal and
         // borrows nothing; `SIG_IGN` is a valid disposition for `SIGTERM`.
         let installed = unsafe { libc::signal(libc::SIGTERM, libc::SIG_IGN) };
+        // llmlint: ignore[no_panics_on_recoverable_errors] there is nothing to
+        // recover to here, which is the paragraph above rather than an oversight.
+        // This double's whole contract is to still be running after `SIGTERM`, so a
+        // host that refuses the disposition has taken away the only behaviour the
+        // call has; returning would leave it dying at the first ask while the
+        // journey around it recorded that a stop had ended a wedged tree. Nor is
+        // there a caller to propagate to: the one call site is `fake-oneagentgraph`
+        // acting out `<key>.ignores-the-ask`, which has no other way to be that
+        // worker. Failing loudly at the disposition is what keeps the journey from
+        // proving the opposite of what it claims.
         assert!(
             installed != libc::SIG_ERR,
             "this double was asked to work through a polite stop and this host would not let it \
