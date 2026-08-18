@@ -582,6 +582,10 @@ fn write_work(args: &[String], name: &str, body: &str) {
 /// read, so the dispatch's very first envelopes arrive evidencing progress that
 /// nothing can place in time. That is a producer whose stamps a reader refuses,
 /// not one that said nothing, and the two are opposite things to report.
+/// `<key>.unplaceable-member-start` is the same clock coming back: only the
+/// member's own arrival is unplaceable, and the turn announced behind it can be
+/// placed, so the dispatch's record starts at the second envelope rather than
+/// the first.
 ///
 /// `<key>.also-member` names a **second** member of the same graph run, which
 /// announces a turn of its own. A graph is a graph — several members work under
@@ -592,8 +596,9 @@ fn write_work(args: &[String], name: &str, body: &str) {
 fn open_turn(args: &[String], dir: &std::path::Path, key: &str, node: &str, step: Option<&str>) {
     let labels = member_labels(args, node, step);
     let unplaceable = dir.join(format!("{key}.unplaceable-turn")).exists();
-    let stamp = || {
-        if unplaceable {
+    let starts_unplaceable = dir.join(format!("{key}.unplaceable-member-start")).exists();
+    let stamp = |seq: u64| {
+        if unplaceable || (starts_unplaceable && seq == 0) {
             unplaceable_now()
         } else {
             fake::now()
@@ -602,7 +607,7 @@ fn open_turn(args: &[String], dir: &std::path::Path, key: &str, node: &str, step
     for (seq, kind) in [(0, "member-started"), (1, "turn-started")] {
         publish(&serde_json::json!({
             "v": 1,
-            "ts": stamp(),
+            "ts": stamp(seq),
             "stream": stream(),
             "seq": seq,
             "source": "agentgraph",
@@ -616,7 +621,7 @@ fn open_turn(args: &[String], dir: &std::path::Path, key: &str, node: &str, step
         labels.insert("member".to_string(), member.into());
         publish(&serde_json::json!({
             "v": 1,
-            "ts": stamp(),
+            "ts": stamp(5),
             "stream": stream(),
             "seq": 5,
             "source": "agentgraph",

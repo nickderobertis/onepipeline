@@ -597,13 +597,19 @@ fn a_park_whose_moment_cannot_be_placed_reads_as_a_park_rather_than_a_pending_st
         String::from_utf8_lossy(&quiet.stdout).contains("PARKED")
     });
 
+    // llmlint: ignore-block[tests_mirror_real_usage] the case under test is a store this
+    // build did not write: a park committed by a build whose stamps this one refuses. No
+    // invocation a user can type produces one — every record this build writes is stamped
+    // by its own clock, in the one spelling it reads — so rewriting that single field is
+    // the only way to reach the replay, and the replay is what keeps a park nothing can
+    // place in time from being rendered as a stop pending since an invented moment. The
+    // journeys around it drive the same run through the compiled CLI throughout, and this
+    // one reads its claim off `status` and `results` the same way.
+    //
     // A run store this build did not write: the commit that parked the node
     // carries a real RFC 3339 instant with a numeric UTC offset instead of `Z`,
-    // which this build refuses because the envelope fixes one spelling. No
-    // command on this build's surface can produce one — every record it writes
-    // is stamped by its own clock — so writing it is the only way to replay a
-    // journal a sibling build left behind, and that replay is what this is
-    // about. Nothing else about the record is touched.
+    // which this build refuses because the envelope fixes one spelling. Nothing
+    // else about the record is touched.
     let journal = world.run_file(&run, "events.jsonl");
     let store = std::fs::read_to_string(&journal).expect("the journal reads");
     let mut unplaceable = 0;
@@ -630,6 +636,7 @@ fn a_park_whose_moment_cannot_be_placed_reads_as_a_park_rather_than_a_pending_st
         "the commit that parked the node was not the one record restamped:\n{store}"
     );
     std::fs::write(&journal, format!("{}\n", replayed.join("\n"))).expect("the journal is written");
+    // llmlint: ignore-end[tests_mirror_real_usage]
 
     // The node is still parked — the park itself was never in doubt — and
     // nothing claims a stop has been pending for any length of time.
