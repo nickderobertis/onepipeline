@@ -122,11 +122,18 @@ pub fn payload(fields: &[(&str, Value)]) -> Map<String, Value> {
 ///
 /// A line this build cannot parse is skipped rather than ending the read: a
 /// reader skips records from a version it does not know rather than failing the
-/// run it is observing.
+/// run it is observing. A line holding a **fragment and then a whole record** —
+/// the shape a writer that died mid-record used to leave behind — hands back the
+/// whole one: it is a record the store really holds, and losing it was how the
+/// event reporting that writer's death disappeared.
 pub fn read(path: &Path) -> Vec<Envelope> {
-    ledger::read_lines(path)
+    ledger::read_records(path)
         .iter()
-        .filter_map(|line| serde_json::from_str::<Envelope>(line).ok())
+        .filter_map(|record| match reading(record) {
+            Reading::Whole(envelope) => Some(envelope),
+            Reading::Glued { envelope, .. } => Some(envelope),
+            Reading::Blank | Reading::Truncated | Reading::Unparseable => None,
+        })
         .collect()
 }
 
@@ -134,11 +141,194 @@ pub fn read(path: &Path) -> Vec<Envelope> {
 ///
 /// Strict replay needs to know: an unreadable line might have been an
 /// authoritative graph mutation, so a reader that folds one reports rather than
-/// guesses.
+/// guesses. Every class of loss counts, a fragment as much as a record from a
+/// schema this build does not know — what strict replay is about is that
+/// *something* the graph may have turned on is not there.
 pub fn has_unreadable_lines(path: &Path) -> bool {
-    ledger::read_lines(path)
-        .iter()
-        .any(|line| serde_json::from_str::<Envelope>(line).is_err())
+    ledger::read_records(path).iter().any(|record| {
+        matches!(
+            reading(record),
+            Reading::Glued { .. } | Reading::Truncated | Reading::Unparseable
+        )
+    })
+}
+
+/// What one line of the journal turned out to be.
+enum Reading {
+    /// A whole record this build reads.
+    Whole(Envelope),
+    /// Nothing at all: a blank line, which every reader here has always skipped.
+    Blank,
+    /// A fragment, and then a whole record appended after it by another process
+    /// — one line holding two, glued where the first writer stopped.
+    Glued {
+        /// How many bytes of the line are the fragment.
+        lost: u64,
+        /// The whole record after it.
+        envelope: Envelope,
+    },
+    /// A record whose writer did not finish it.
+    Truncated,
+    /// A whole line this build cannot read: a record from a schema it does not
+    /// know, or something that is not a record at all.
+    Unparseable,
+}
+
+/// Which of the five a line is.
+///
+/// The distinction a reader could not previously draw. `serde_json`'s own
+/// `is_eof` separates a record that stops early from one that is whole and
+/// unreadable, and an unterminated final line is a fragment whatever its parse
+/// says — the writer had not finished it.
+fn reading(record: &ledger::Record) -> Reading {
+    if record.text.trim().is_empty() {
+        return Reading::Blank;
+    }
+    match serde_json::from_str::<Envelope>(&record.text) {
+        Ok(envelope) => Reading::Whole(envelope),
+        Err(e) => match glued_tail(&record.text) {
+            Some((lost, envelope)) => Reading::Glued { lost, envelope },
+            None if e.is_eof() || !record.terminated => Reading::Truncated,
+            None => Reading::Unparseable,
+        },
+    }
+}
+
+/// The whole record hiding after a fragment on one line, and how much of the
+/// line was the fragment.
+///
+/// Only ever asked of a line that did not parse, and only at the positions a
+/// record of this store can start at. Every envelope written here is serialized
+/// from the same struct, whose first field is `v`, so the needle is the whole of
+/// that opening — searching every `{` instead would try a parse per brace, and a
+/// payload has a brace per field.
+fn glued_tail(text: &str) -> Option<(u64, Envelope)> {
+    text.match_indices("{\"v\":")
+        .skip_while(|(at, _)| *at == 0)
+        .find_map(|(at, _)| {
+            serde_json::from_str::<Envelope>(&text[at..])
+                .ok()
+                .map(|envelope| (at as u64, envelope))
+        })
+}
+
+/// One record a run's store does not hold whole, and where it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Loss {
+    /// The 1-based line it is on.
+    pub line: usize,
+    /// Where in the file that line begins.
+    pub offset: u64,
+    /// How many bytes of it are not a record this build can read.
+    pub bytes: u64,
+}
+
+/// What a read of one run's journal found that is not a whole record.
+///
+/// The three are deliberately distinct, because they call for different things:
+/// a **truncated** record is a writer that died mid-line and is a loss this run
+/// really suffered; an **unparseable** one is very often a record from a build
+/// newer than this one, and nothing is missing but this reader's ability to read
+/// it; a **healed** one is a fragment an append has already cut away, which no
+/// reader will ever see in the file again and which is the whole reason it is
+/// recorded beside it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Integrity {
+    /// Records whose writer did not finish them.
+    pub truncated: Vec<Loss>,
+    /// Whole lines this build cannot read.
+    pub unparseable: Vec<Loss>,
+    /// Fragments an append healed out of the file, as the ledger recorded them.
+    pub healed: Vec<ledger::TornTail>,
+}
+
+impl Integrity {
+    /// Whether the store holds every record it was ever written, whole.
+    pub fn is_whole(&self) -> bool {
+        self.truncated.is_empty() && self.unparseable.is_empty() && self.healed.is_empty()
+    }
+
+    /// How a view says what the store lost, or nothing when it lost nothing.
+    ///
+    /// Counted **and** placed. A count alone tells a reader something is wrong
+    /// and not where to look, and the journal is what every other view is folded
+    /// from — a loss inside it is what makes the rest of them unprovable.
+    pub fn phrase(&self) -> String {
+        if self.is_whole() {
+            return String::new();
+        }
+        let mut said: Vec<String> = Vec::new();
+        for (losses, what) in [
+            (&self.truncated, "truncated record"),
+            (&self.unparseable, "line this build cannot read"),
+        ] {
+            if losses.is_empty() {
+                continue;
+            }
+            let placed: Vec<String> = losses
+                .iter()
+                .map(|loss| {
+                    format!(
+                        "line {} at byte {} ({} bytes)",
+                        loss.line, loss.offset, loss.bytes
+                    )
+                })
+                .collect();
+            said.push(format!(
+                "{} {what}{}: {}",
+                losses.len(),
+                if losses.len() == 1 { "" } else { "s" },
+                placed.join(", ")
+            ));
+        }
+        if !self.healed.is_empty() {
+            let placed: Vec<String> = self
+                .healed
+                .iter()
+                .map(|torn| format!("byte {} ({} bytes)", torn.offset, torn.bytes))
+                .collect();
+            said.push(format!(
+                "{} fragment{} discarded at append: {}",
+                self.healed.len(),
+                if self.healed.len() == 1 { "" } else { "s" },
+                placed.join(", ")
+            ));
+        }
+        said.join("; ")
+    }
+}
+
+/// What one run's journal holds that is not a whole record.
+///
+/// Read from the file rather than from the folded events, because what this is
+/// about is exactly the records the fold never saw.
+pub fn integrity(path: &Path) -> Integrity {
+    let mut integrity = Integrity {
+        healed: ledger::torn_tails(path),
+        ..Integrity::default()
+    };
+    for record in ledger::read_records(path) {
+        let bytes = record.text.len() as u64;
+        match reading(&record) {
+            Reading::Whole(_) | Reading::Blank => {}
+            Reading::Glued { lost, .. } => integrity.truncated.push(Loss {
+                line: record.line,
+                offset: record.offset,
+                bytes: lost,
+            }),
+            Reading::Truncated => integrity.truncated.push(Loss {
+                line: record.line,
+                offset: record.offset,
+                bytes,
+            }),
+            Reading::Unparseable => integrity.unparseable.push(Loss {
+                line: record.line,
+                offset: record.offset,
+                bytes,
+            }),
+        }
+    }
+    integrity
 }
 
 /// Merge order: each stream in its own `seq`, interleaved between streams by
@@ -356,6 +546,138 @@ mod tests {
         assert_eq!(read(&paths.journal()).len(), 1, "the future line was read");
         assert!(has_unreadable_lines(&paths.journal()));
         fs::remove_dir_all(&root).ok();
+    }
+
+    /// A truncated record, an unreadable line, and a line holding both a
+    /// fragment and a whole record are three different findings.
+    ///
+    /// The distinction nothing here could draw. `read` filtered all three away
+    /// and the only hook was a bool — so a run that lost the record reporting
+    /// its own driver's death rendered as a run that had simply been quiet.
+    #[test]
+    fn a_reader_tells_the_three_ways_a_line_is_not_a_record_apart() {
+        let root = scratch("integrity");
+        let paths = RunPaths::under(&root, "demo");
+        paths.create().expect("the run directory");
+        let mut journal = Journal::open(&paths);
+        journal
+            .emit(PipelineKind::RunStarted, labels("demo", None), payload(&[]))
+            .expect("appended");
+        journal
+            .emit(
+                PipelineKind::NodeReady,
+                labels("demo", Some("build")),
+                payload(&[]),
+            )
+            .expect("appended");
+
+        // The store as a build carrying no healing left it: the second record
+        // is a fragment with a whole record glued onto it, which is what a
+        // second process appending after a dying writer produced.
+        let text = ledger::read_lines(&paths.journal());
+        let fragment = r#"{"v":1,"ts":"2026-08-16T00:00:00.000Z","strea"#;
+        std::fs::write(
+            paths.journal(),
+            format!(
+                "{}\n{fragment}{}\n{{\"v\":99,\"from\":\"a newer build\"}}\n{}",
+                text[0], text[1], r#"{"v":1,"ts":"2026-08-16T"#
+            ),
+        )
+        .expect("the store is written");
+
+        let integrity = integrity(&paths.journal());
+        assert!(!integrity.is_whole());
+        assert_eq!(
+            integrity.truncated.len(),
+            2,
+            "a fragment was not counted as one: {integrity:?}"
+        );
+        // The glued line: the loss is the fragment in front of the record, not
+        // the whole line, and it is placed where the line begins.
+        assert_eq!(integrity.truncated[0].line, 2);
+        assert_eq!(integrity.truncated[0].offset, text[0].len() as u64 + 1);
+        assert_eq!(integrity.truncated[0].bytes, fragment.len() as u64);
+        // The unterminated last line: a record whose writer did not finish it.
+        assert_eq!(integrity.truncated[1].line, 4);
+        assert_eq!(integrity.unparseable.len(), 1, "{integrity:?}");
+        assert_eq!(integrity.unparseable[0].line, 3);
+
+        // The record the tear used to destroy is handed back whole, because it
+        // is whole: only what is in front of it is not.
+        let events = read(&paths.journal());
+        assert_eq!(events.len(), 2, "the glued record was thrown away");
+        assert_eq!(events[1].kind.0, "node-ready");
+        assert_eq!(events[1].labels.node.as_deref(), Some("build"));
+
+        // Strict replay still reports every one of them, as it always did.
+        assert!(has_unreadable_lines(&paths.journal()));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A store nothing has torn says nothing, and one that has been healed says
+    /// what it cost even though a reader can no longer see it.
+    #[test]
+    fn a_healed_loss_is_reported_although_the_store_no_longer_holds_it() {
+        let root = scratch("integrity-healed");
+        let paths = RunPaths::under(&root, "demo");
+        paths.create().expect("the run directory");
+        let mut journal = Journal::open(&paths);
+        journal
+            .emit(PipelineKind::RunStarted, labels("demo", None), payload(&[]))
+            .expect("appended");
+        assert!(integrity(&paths.journal()).is_whole());
+        assert!(integrity(&paths.journal()).phrase().is_empty());
+
+        let whole = std::fs::read_to_string(paths.journal()).expect("the store reads");
+        std::fs::write(paths.journal(), format!("{whole}{{\"half\":")).expect("written");
+        journal
+            .emit(PipelineKind::NodeReady, labels("demo", None), payload(&[]))
+            .expect("appended");
+
+        let integrity = integrity(&paths.journal());
+        assert!(
+            integrity.truncated.is_empty() && integrity.unparseable.is_empty(),
+            "the store still holds the fragment: {integrity:?}"
+        );
+        assert!(!integrity.is_whole(), "the healed loss went unreported");
+        assert_eq!(
+            integrity.phrase(),
+            format!(
+                "1 fragment discarded at append: byte {} (8 bytes)",
+                whole.len()
+            )
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// How the count and the position read when there is more than one of each.
+    #[test]
+    fn the_phrase_counts_and_places_every_loss_it_reports() {
+        let losses = Integrity {
+            truncated: vec![
+                Loss {
+                    line: 2,
+                    offset: 40,
+                    bytes: 12,
+                },
+                Loss {
+                    line: 9,
+                    offset: 900,
+                    bytes: 3,
+                },
+            ],
+            unparseable: vec![Loss {
+                line: 4,
+                offset: 120,
+                bytes: 30,
+            }],
+            healed: Vec::new(),
+        };
+        assert_eq!(
+            losses.phrase(),
+            "2 truncated records: line 2 at byte 40 (12 bytes), line 9 at byte 900 (3 bytes); \
+             1 line this build cannot read: line 4 at byte 120 (30 bytes)"
+        );
     }
 
     #[test]

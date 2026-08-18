@@ -817,6 +817,44 @@ impl World {
         }
     }
 
+    /// Run the binary with a hard ceiling on how large any file it writes may
+    /// grow — the real short write a full disk answers with.
+    ///
+    /// Nothing is substituted and no write is intercepted: `RLIMIT_FSIZE` is the
+    /// kernel's own ceiling, and past it `write(2)` behaves exactly as it does on
+    /// a filesystem that has run out — the first call takes the bytes that fit
+    /// and returns that partial count, and the next one fails. `SIGXFSZ` is set
+    /// to ignored in the child so the failure arrives as `EFBIG` at the write
+    /// rather than as a signal that ends the process, which is what a full disk
+    /// gives a writer.
+    ///
+    /// Unix only: the ceiling is a Unix resource limit, and the journey that
+    /// needs it says so with its own `cfg`.
+    #[cfg(unix)]
+    pub fn run_with_file_ceiling(&self, args: &[&str], ceiling: u64) -> Run {
+        use std::os::unix::process::CommandExt;
+
+        let mut command = self.cmd(args);
+        // SAFETY: the closure runs between `fork` and `exec` in the child, and
+        // calls only async-signal-safe syscalls — no allocation, no locks.
+        unsafe {
+            command.pre_exec(move || {
+                let ceiling = libc::rlimit {
+                    rlim_cur: ceiling,
+                    rlim_max: ceiling,
+                };
+                if libc::setrlimit(libc::RLIMIT_FSIZE, &ceiling) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::signal(libc::SIGXFSZ, libc::SIG_IGN) == libc::SIG_ERR {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        Run::of(command.output().expect("the binary runs"), args, self)
+    }
+
     /// Run an already-configured command to completion.
     ///
     /// For a journey that needs one environment override — a timeout it is
@@ -913,8 +951,17 @@ impl World {
                 for entry in entries.flatten() {
                     let run = entry.file_name().to_string_lossy().to_string();
                     out.push_str(&format!("  {run}:\n"));
-                    for event in self.journal(&run) {
-                        out.push_str(&format!("    {event}\n"));
+                    // Read leniently, unlike every assertion below: a dump is
+                    // the diagnostic a failing journey prints, and one journey
+                    // is *about* a store holding a line no reader can parse.
+                    // Panicking here would replace that journey's own failure
+                    // with this one's, on every command it runs.
+                    for line in std::fs::read_to_string(self.runs.join(&run).join("events.jsonl"))
+                        .unwrap_or_default()
+                        .lines()
+                        .filter(|line| !line.trim().is_empty())
+                    {
+                        out.push_str(&format!("    {line}\n"));
                     }
                 }
             }
