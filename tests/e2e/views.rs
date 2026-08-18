@@ -976,6 +976,57 @@ fn status_reports_a_dispatch_it_cannot_place_in_time_as_having_recorded_nothing(
     world.release("timed.go");
 }
 
+/// Once one envelope can be placed, the readout ages the dispatch by that one —
+/// and claims nothing for the arrivals it never could place.
+///
+/// The transition, and the half the wholly-unplaceable journey above cannot
+/// show: a producer whose opening envelope carries a spelling this build does not
+/// read, and whose next one it does. What must not happen is the age sliding back
+/// onto the arrival nothing could place, which would date the dispatch to a
+/// moment no clock here ever read. So the count is of what could be placed, and
+/// the age is of the last of those.
+#[test]
+fn status_ages_a_dispatch_from_the_first_envelope_it_can_place() {
+    let world = World::new("views-dawning");
+    world.script("dawning.turn-open", "");
+    world.script("dawning.wait", "hold");
+    world.script("dawning.heartbeat", "100");
+    // The announcing envelope is unplaceable and the turn's own is not, so the
+    // dispatch crosses from having nothing to age by to having one thing.
+    world.script("dawning.clock-unreadable-first", "");
+    let path = world.plan("dawning", &plan_of("dawning", vec![agent("dawning", &[])]));
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+
+    // Beating for a while, so an age taken from the placeable envelope and one
+    // taken from the latest arrival cannot be confused.
+    world.until("the dispatch to heartbeat for a while", |world| {
+        world.events_of("dawning", "member-heartbeat").len() >= 20
+    });
+
+    let status = world.run(&["status", "dawning"]);
+    status.exited(0);
+    let line = status
+        .stdout
+        .lines()
+        .find(|line| line.trim_start().starts_with("dawning: running"))
+        .unwrap_or_else(|| panic!("`status` has no line for dawning:\n{}", status.stdout))
+        .to_string();
+    assert!(
+        line.contains("1 event(s)"),
+        "the arrival this build could not place was counted beside the one it \
+         could: {line}"
+    );
+    assert!(
+        seconds_since_activity(&status.stdout, "dawning") >= 2,
+        "the dispatch was aged by its heartbeats rather than by the one envelope \
+         it could be placed by: {line}"
+    );
+
+    world.release("dawning.go");
+}
+
 /// A run that has dispatched nothing has no transcript, and says so rather than
 /// rendering an empty one.
 #[test]
