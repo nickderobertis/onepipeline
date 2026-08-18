@@ -554,6 +554,14 @@ pub fn torn_tail_log(path: &Path) -> PathBuf {
 }
 
 /// Every fragment an append has healed out of one file, oldest first.
+///
+// llmlint: ignore[boundary_inputs_validated] the loss log is not external input: it is
+// written by `report_torn_tail` in this build and by nothing else, and `TornTail` is
+// `deny_unknown_fields`, so a line that is not one is refused rather than partly read.
+// What a lenient read costs is one loss going unmentioned; what refusing would cost is
+// the whole run's record, taken away over the file that exists to report a loss — which
+// is the rule `read_json_opt` above already states for every ledger record this crate
+// wrote.
 pub fn torn_tails(path: &Path) -> Vec<TornTail> {
     read_lines(&torn_tail_log(path))
         .iter()
@@ -739,26 +747,34 @@ fn report_torn_tail(path: &Path, torn: &TornTail) {
 
 /// Every line of an append-only file, with where it is and whether its writer
 /// finished it, or nothing when the file does not exist yet.
+///
+/// Read as **bytes** and decoded a line at a time, which is not a detail: a
+/// record torn mid-character leaves a byte sequence that is not UTF-8, and
+/// decoding the file whole would fail on it and hand back an empty store — every
+/// view of that run rendering as a run that recorded nothing, over one bad byte
+/// at the end. Decoded per line, the tear is one unreadable line and every whole
+/// record before it survives; the replacement characters it decodes to are what
+/// makes it unreadable, which is what it is. The offsets stay the file's own,
+/// because they are counted off the bytes rather than off the decoding.
 pub fn read_records(path: &Path) -> Vec<Record> {
-    let Ok(text) = fs::read_to_string(path) else {
+    let Ok(bytes) = fs::read(path) else {
         return Vec::new();
     };
     let mut records = Vec::new();
     let mut offset = 0u64;
-    for (index, line) in text.split_inclusive('\n').enumerate() {
-        let terminated = line.ends_with('\n');
-        let text = line
+    for (index, line) in bytes.split_inclusive(|byte| *byte == b'\n').enumerate() {
+        let terminated = line.ends_with(b"\n");
+        let text = String::from_utf8_lossy(line)
             .trim_end_matches('\n')
             .trim_end_matches('\r')
             .to_string();
-        let bytes = line.len() as u64;
         records.push(Record {
             line: index + 1,
             offset,
             text,
             terminated,
         });
-        offset += bytes;
+        offset += line.len() as u64;
     }
     records
 }

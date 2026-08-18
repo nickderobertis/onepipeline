@@ -677,15 +677,21 @@ fn platform_open_locked_append(path: &std::path::Path) -> std::io::Result<std::f
 /// A sharing violation is the *contended* answer rather than a failure, and the
 /// wait is bounded so an appender can never hang a view or a driver: past the
 /// deadline the error is handed back as what it is.
+// llmlint: ignore-block[changed_behavior_has_e2e] the *uncontended* half of this arm is
+// driven by every journey that appends, on the Windows leg of CI, which runs the same
+// suite. What has no journey is the contended half, and the reason is that the holder a
+// journey needs is a second writer this suite can only be on the platform it is written
+// on: `tests/e2e/journal.rs` holds the store with `flock` and says so. A Windows journey
+// authored here would be one nobody has ever seen pass or fail — this host cannot link
+// that target, let alone run it — which is a worse thing to ship than a stated gap.
 #[cfg(windows)]
 fn platform_open_locked_append(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Foundation::ERROR_SHARING_VIOLATION;
     use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
 
     /// How long an appender waits for the writer ahead of it.
     const DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
-    /// ERROR_SHARING_VIOLATION: another appender holds the file.
-    const SHARING_VIOLATION: i32 = 32;
 
     let waiting_since = std::time::Instant::now();
     loop {
@@ -697,7 +703,7 @@ fn platform_open_locked_append(path: &std::path::Path) -> std::io::Result<std::f
             .open(path);
         match opened {
             Err(e)
-                if e.raw_os_error() == Some(SHARING_VIOLATION)
+                if e.raw_os_error() == Some(ERROR_SHARING_VIOLATION as i32)
                     && waiting_since.elapsed() < DEADLINE =>
             {
                 std::thread::sleep(std::time::Duration::from_millis(2));

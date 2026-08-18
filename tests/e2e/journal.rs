@@ -352,16 +352,19 @@ fn settled_run(name: &'static str) -> (World, String) {
 const FRAGMENT: &str =
     "{\"v\":1,\"ts\":\"2026-08-16T00:00:00.000Z\",\"stream\":\"dead-writer\",\"seq\":";
 
-/// How long that is, so a journey can say what the store should hold.
-const FRAGMENT_HEAD: usize = FRAGMENT.len();
-
 /// Leave the fragment a writer that died mid-record leaves behind.
 ///
 /// The state on disk, written as the dead writer left it: bytes with no
-/// terminator after them. It is written directly because no build carrying the
-/// fix can produce one any more — the append that would have torn the file now
-/// rolls itself back — and because the case the healing is for is a store this
-/// process did not write: one an older build, or a `SIGKILL`ed writer, left.
+/// terminator after them.
+///
+// llmlint: ignore-block[tests_mirror_real_usage] there is no user-facing path to this
+// precondition and there must not be: the whole of the fix is that no append this build
+// makes can leave a fragment, because one that fails takes its own bytes back off the
+// file. The state the healing exists for is one *another* writer left — an older build,
+// or a process the host killed between the two halves of a record — so a journey that
+// waited for this binary to produce it would be waiting for the defect to come back.
+// What is written here is bytes on disk, not a stand-in for anything in the crate, which
+// every journey below drives as the compiled binary it is.
 fn leave_a_fragment(journal: &std::path::Path, bytes: usize) -> String {
     use std::io::Write;
     let fragment = format!("{FRAGMENT}{}", "0".repeat(bytes));
@@ -373,6 +376,7 @@ fn leave_a_fragment(journal: &std::path::Path, bytes: usize) -> String {
         .expect("the fragment is written");
     fragment
 }
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 /// A writer that runs out of room mid-record leaves the store on a boundary.
 ///
@@ -486,6 +490,90 @@ fn a_fragment_a_dead_writer_left_is_healed_and_the_loss_is_reported() {
         .run(&["results", &run])
         .exited(0)
         .out_has("this run's record of itself is incomplete");
+
+    // The account of a loss is a file like any other, and a writer can die in
+    // the middle of it too. It heals the same way — and says so on stderr rather
+    // than into a log of its own, which is a recursion with no end.
+    let losses = world.run_file(&run, "events.jsonl.torn");
+    leave_a_fragment(&losses, 20);
+    let healed_again = std::fs::read_to_string(&journal).expect("the journal reads");
+    let second = leave_a_fragment(&journal, 60);
+    world
+        .run(&[
+            "surface",
+            &run,
+            "--kind",
+            "check-in",
+            "--message",
+            "and going",
+        ])
+        .exited(0)
+        .err_has("of the loss log itself");
+
+    let recorded = read_torn_log(&losses);
+    assert_eq!(
+        recorded.len(),
+        2,
+        "the loss log lost a record of its own: {recorded:?}"
+    );
+    world.run(&["status", &run]).exited(0).out_has(&format!(
+        "2 fragments discarded at append: byte {} ({} bytes), byte {} ({} bytes)",
+        whole.len(),
+        fragment.len(),
+        healed_again.len(),
+        second.len()
+    ));
+}
+
+/// An append that heals a fragment and then fails still reports what it
+/// discarded.
+///
+/// The two happen on one call and a host that has run out of room stays out of
+/// room: the fragment is gone whether or not the record meant to replace it ever
+/// reached the file. An appender that reported the loss only when its own write
+/// succeeded would discard the evidence of a death on a full disk — the exact
+/// conditions the death happened under.
+#[cfg(unix)]
+#[test]
+fn an_append_that_heals_and_then_runs_out_of_room_still_reports_the_loss() {
+    let (world, run) = settled_run("journal-heal-shortwrite");
+    let journal = world.run_file(&run, "events.jsonl");
+    let whole = std::fs::read_to_string(&journal).expect("the journal reads");
+    let fragment = leave_a_fragment(&journal, 200);
+
+    let ceiling = whole.len() as u64 + fragment.len() as u64 + 64;
+    let refused = world.run_with_file_ceiling(
+        &[
+            "surface",
+            &run,
+            "--kind",
+            "check-in",
+            "--message",
+            &"x".repeat(300),
+        ],
+        ceiling,
+    );
+    refused
+        .exited(REFUSED)
+        .err_has("discarded a")
+        .err_has("events.jsonl");
+
+    assert_eq!(
+        std::fs::read_to_string(&journal).expect("the journal reads"),
+        whole,
+        "the store did not come back to the boundary the heal left it on"
+    );
+    let recorded = read_torn_log(&world.run_file(&run, "events.jsonl.torn"));
+    assert_eq!(
+        recorded.len(),
+        1,
+        "an append that failed after healing discarded the fragment and said nothing"
+    );
+    assert_eq!(recorded[0]["bytes"], json!(fragment.len()));
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("1 fragment discarded at append");
 }
 
 /// Two real appenders, one of which heals: neither loses the other's record.
@@ -513,8 +601,12 @@ fn an_appender_waits_for_the_writer_ahead_of_it_rather_than_healing_under_it() {
     let whole = std::fs::read_to_string(&journal).expect("the journal reads");
     leave_a_fragment(&journal, 400);
 
-    // A writer that is not this binary, holding the store the way this binary's
-    // own appends hold it.
+    // llmlint: ignore-block[tests_mirror_real_usage] the second writer here is a real
+    // one, taking the store's own lock the way every appender does — that is the point:
+    // an exclusion nobody outside the binary can take is one no journey can prove was
+    // taken. There is no verb that holds a run's journal open for a while, and adding one
+    // to test with would be a surface nobody asked for; what stands in is not a component
+    // of the crate but a second participant in a protocol the host owns.
     let held = std::fs::OpenOptions::new()
         .append(true)
         .open(&journal)
@@ -527,6 +619,7 @@ fn an_appender_waits_for_the_writer_ahead_of_it_rather_than_healing_under_it() {
         "the journal could not be held: {}",
         std::io::Error::last_os_error()
     );
+    // llmlint: ignore-end[tests_mirror_real_usage]
 
     const APPENDERS: usize = 8;
     let mut racing: Vec<_> = (0..APPENDERS)
@@ -556,7 +649,7 @@ fn an_appender_waits_for_the_writer_ahead_of_it_rather_than_healing_under_it() {
         std::fs::read_to_string(&journal)
             .expect("the journal reads")
             .len(),
-        whole.len() + 400 + FRAGMENT_HEAD,
+        whole.len() + 400 + FRAGMENT.len(),
         "the held store was written to anyway"
     );
     drop(held);
@@ -608,7 +701,10 @@ fn an_appender_waits_for_the_writer_ahead_of_it_rather_than_healing_under_it() {
 /// record is a loss this run really suffered, and a line from a newer build is
 /// one this reader cannot interpret with nothing missing. Neither used to reach
 /// a reader at all — `read` filtered both away, and the only hook was a bool on
-/// the driver's own stderr.
+/// the driver's stderr.
+///
+/// Two of each, because a view that could only say "1" of anything would be
+/// counting nothing.
 #[test]
 fn a_read_verb_tells_a_truncated_record_from_one_it_cannot_read() {
     let (world, run) = settled_run("journal-classes");
@@ -635,25 +731,39 @@ fn a_read_verb_tells_a_truncated_record_from_one_it_cannot_read() {
     let last = lines.pop().expect("the store holds a record");
     let fragment = "{\"v\":1,\"ts\":\"2026-08-16T00:00:00.000Z\",\"stream\":\"dead-wri";
     lines.push(format!("{fragment}{last}"));
-    lines.push(r#"{"v":99,"from":"a newer build"}"#.to_string());
-    std::fs::write(&journal, format!("{}\n", lines.join("\n"))).expect("the store is written");
+    let future = r#"{"v":99,"from":"a newer build"}"#;
+    lines.push(future.to_string());
+    lines.push(future.to_string());
+    // The last line of all, with nothing after it: a record whose writer was
+    // stopped between the record and its terminator and has not come back.
+    let tail = &fragment[..30];
+    std::fs::write(&journal, format!("{}\n{tail}", lines.join("\n")))
+        .expect("the store is written");
     // llmlint: ignore-end[tests_mirror_real_usage]
 
-    let glued_at: u64 = lines[..lines.len() - 2]
-        .iter()
-        .map(|line| line.len() as u64 + 1)
-        .sum();
+    let offset = |upto: usize| -> u64 { lines[..upto].iter().map(|l| l.len() as u64 + 1).sum() };
+    let glued = lines.len() - 3;
     let status = world.run(&["status", &run]);
     status
         .exited(0)
         .out_has(&format!(
-            "1 truncated record: line {} at byte {glued_at} ({} bytes)",
-            lines.len() - 1,
-            fragment.len()
+            "2 truncated records: line {} at byte {} ({} bytes), line {} at byte {} ({} bytes)",
+            glued + 1,
+            offset(glued),
+            fragment.len(),
+            lines.len() + 1,
+            offset(lines.len()),
+            tail.len()
         ))
         .out_has(&format!(
-            "1 line this build cannot read: line {} at byte",
-            lines.len()
+            "2 lines this build cannot read: line {} at byte {} ({} bytes), \
+             line {} at byte {} ({} bytes)",
+            lines.len() - 1,
+            offset(lines.len() - 2),
+            future.len(),
+            lines.len(),
+            offset(lines.len() - 1),
+            future.len()
         ));
 
     // And the record the tear used to destroy is handed back: it is whole, it is

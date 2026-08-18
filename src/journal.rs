@@ -258,9 +258,15 @@ impl Integrity {
             return String::new();
         }
         let mut said: Vec<String> = Vec::new();
-        for (losses, what) in [
-            (&self.truncated, "truncated record"),
-            (&self.unparseable, "line this build cannot read"),
+        // Both spellings, rather than an `s` on the end of one: the plural of
+        // "line this build cannot read" is not that word with an `s` after it.
+        for (losses, one, many) in [
+            (&self.truncated, "truncated record", "truncated records"),
+            (
+                &self.unparseable,
+                "line this build cannot read",
+                "lines this build cannot read",
+            ),
         ] {
             if losses.is_empty() {
                 continue;
@@ -275,9 +281,9 @@ impl Integrity {
                 })
                 .collect();
             said.push(format!(
-                "{} {what}{}: {}",
+                "{} {}: {}",
                 losses.len(),
-                if losses.len() == 1 { "" } else { "s" },
+                if losses.len() == 1 { one } else { many },
                 placed.join(", ")
             ));
         }
