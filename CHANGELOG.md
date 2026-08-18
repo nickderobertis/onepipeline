@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.4](https://github.com/nickderobertis/onepipeline/compare/v0.7.3...v0.7.4) - 2026-08-18
+
+### Fixed
+
+- *(ledger)* never leave a torn record, and say when one was found ([#68](https://github.com/nickderobertis/onepipeline/pull/68))
+
 ## [0.7.3](https://github.com/nickderobertis/onepipeline/compare/v0.7.2...v0.7.3) - 2026-08-18
 
 ### Added
