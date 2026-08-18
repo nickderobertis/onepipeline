@@ -1585,7 +1585,7 @@ fn a_double_is_placed_whole_or_not_at_all() {
     );
 
     let _ = std::fs::remove_dir_all(&dir);
-}
+} // llmlint: ignore-end[tests_mirror_real_usage]
 
 /// A repository gate command, written into this world as a script.
 ///
