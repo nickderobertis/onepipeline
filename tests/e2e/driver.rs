@@ -11,9 +11,17 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::harness::{
-    agent, end_process, human, plan_of, reaped_pid, World, NOTHING_DRIVING, REFUSED,
-};
+use crate::harness::{agent, human, plan_of, World, NOTHING_DRIVING, REFUSED};
+// The journeys that end a process, and those that assert against a process table,
+// are `#[cfg(unix)]`, so what only they reach for is imported on the same terms.
+// Both names have to be: `end_process` is `#[cfg(unix)]` in `harness.rs`, so an
+// unconditional import of it does not resolve for a Windows target at all, and
+// `reaped_pid` — which is not gated there — is used in this file only from one of
+// those journeys, so importing it unconditionally is an unused import under
+// `-D warnings`. Each was a Windows-only build failure this host's own gate,
+// which compiles the unix half, cannot see.
+#[cfg(unix)]
+use crate::harness::{end_process, reaped_pid};
 use serde_json::json;
 
 fn start_detached(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
