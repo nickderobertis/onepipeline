@@ -112,12 +112,21 @@ impl RunPaths {
         self.dir.is_dir()
     }
 
-    /// Create the run's directory and its channel subdirectory.
+    /// Create the run's directory and the two subdirectories a run always has.
+    ///
+    /// The dispatch registry among them, and empty is the answer it is created to
+    /// be able to give: a reader that meets no registry at all cannot tell a run
+    /// with nothing running from one whose record of what it is running has gone,
+    /// and refuses. So a run has one from the moment it exists, and its absence
+    /// afterwards means something took it away.
     pub fn create(&self) -> Result<()> {
-        fs::create_dir_all(self.channel_dir()).map_err(|e| Error::Ledger {
-            path: self.channel_dir(),
-            source: e,
-        })
+        for dir in [self.channel_dir(), self.dispatches()] {
+            fs::create_dir_all(&dir).map_err(|e| Error::Ledger {
+                path: dir,
+                source: e,
+            })?;
+        }
+        Ok(())
     }
 
     /// The merged three-stream event store.
@@ -191,6 +200,37 @@ impl RunPaths {
     /// the ledger records is where the whole graph has got to.
     pub fn result(&self) -> PathBuf {
         self.dir.join("result.json")
+    }
+
+    /// The dispatch ownership registry: one record per process this run has
+    /// work running in.
+    ///
+    /// A directory of small records rather than one document, because its
+    /// writers are the run's dispatch threads and they start and finish
+    /// independently: a single file would be read, edited, and rewritten by
+    /// several of them at once, and a lost update there is a live dispatch no
+    /// later stop can find.
+    pub fn dispatches(&self) -> PathBuf {
+        self.dir.join("dispatches")
+    }
+
+    /// One dispatch's record, named by the process it runs in and the claim that
+    /// wrote it.
+    ///
+    /// Named from a pid because a pid is always a safe file name and a node id is
+    /// not: an id is plan text, required to be non-empty and unique and nothing
+    /// else, so joining one raw is how a name becomes a path — and sanitising it
+    /// would map two distinct nodes onto one record.
+    ///
+    /// A pid alone is **not** an identity, which is the other half. A run's
+    /// dispatches can share one process: that is what the library backend is —
+    /// several nodes running concurrently inside the driver — so two live
+    /// dispatches would write one entry, the second would overwrite the first,
+    /// and the first to end would take the survivor's registration with it,
+    /// leaving a live dispatch nothing could find. `claim` is what tells them
+    /// apart, and it is unique for the life of the process that mints it.
+    pub fn dispatch(&self, pid: u32, claim: u64) -> PathBuf {
+        self.dispatches().join(format!("{pid}-{claim}.json"))
     }
 }
 
@@ -401,6 +441,26 @@ pub struct LaunchRecord {
     pub pid: u32,
     /// The host that pid is meaningful on.
     pub host: String,
+    /// That driver's own process start token, as [`sys::process_start_token`]
+    /// read it when it claimed the run.
+    ///
+    /// The same proof, and for the same reason, as the ownership lock's and the
+    /// registry's: the pid says *which* process and this says it is still that
+    /// one. This record outlives every driver it names — a driver that died
+    /// leaves its pid sitting here until something adopts the run — so by the
+    /// time a `stop` reads it the host may have handed that pid to a stranger,
+    /// and a teardown aimed at it would end work this run never started.
+    ///
+    /// Written only by [`driven_by_this_process`](Self::driven_by_this_process),
+    /// which writes all three fields together: a pid recorded without the stamp
+    /// beside it is a pid no later reader may act on.
+    ///
+    /// Empty when this host would not say, and on a record written before the
+    /// field existed. Omitted when empty, like every other field added to this
+    /// record after it shipped, so a build that predates it still reads what it
+    /// wrote. Empty is **not** a match — see [`sys::StartToken::matches`].
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub started: String,
     /// When the run was launched.
     pub started_at: String,
     /// The pacemaker interval, in seconds.
@@ -428,6 +488,22 @@ pub struct LaunchRecord {
 }
 
 impl LaunchRecord {
+    /// Record that **this** process is now the run's driver.
+    ///
+    /// The one writer of the three fields that name a driver, because they are
+    /// one fact and a record carrying two of them is a pid nothing can act on:
+    /// a `stop` reading a pid with no stamp beside it cannot tell the driver it
+    /// was written for from whatever the host has since given that pid to. Every
+    /// path that claims a run — the launch, the driver a detached launch
+    /// retains, and each adoption — goes through here.
+    pub fn driven_by_this_process(&mut self) {
+        self.pid = sys::pid();
+        self.host = sys::hostname();
+        self.started = sys::process_start_token(self.pid)
+            .map(|token| token.recorded().to_string())
+            .unwrap_or_default();
+    }
+
     /// The observer graph this run was launched with, when it was launched with
     /// one.
     ///
@@ -684,6 +760,223 @@ impl Drop for OwnershipLock {
     }
 }
 
+/// One live dispatch's claim on the process it is running in.
+///
+/// The registry answers a question neither the launch record nor the ownership
+/// lock can: *what is this run actually running, and where*. Both of those name
+/// a **driver**, and a driver is not the work — it starts the work, and when it
+/// dies the work it started is reparented away and outlives it, findable by
+/// nothing that descends from a pid either record holds. That is a live dispatch
+/// a stop cannot reach and an operator is told is over.
+///
+/// Written by the machine running the dispatch, which is the one that knows
+/// which process the work is in, and removed when that dispatch ends. Every
+/// field is required, the stamp included: a record that cannot prove its own pid
+/// is not a weaker entry but an unusable one, and the type is what stops one
+/// being written or read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DispatchRecord {
+    /// The node this dispatch is running.
+    pub node: String,
+    /// The process the work is running in.
+    pub pid: u32,
+    /// The host that pid is meaningful on.
+    pub host: String,
+    /// When the dispatch was recorded.
+    pub dispatched_at: String,
+    /// That process's own start token, as [`sys::process_start_token`] read it
+    /// when the dispatch started.
+    ///
+    /// The same proof, and for the same reason, as the ownership lock's: the pid
+    /// says *which* process and this says it is still that one. A record outlives
+    /// the driver that wrote it — that is the case it exists for — so by the time
+    /// anything reads it the host may have handed the pid to a stranger, and a
+    /// teardown aimed at that would end work this run never started.
+    pub started: String,
+}
+
+impl DispatchRecord {
+    /// Whether this entry is one a reader may act on.
+    ///
+    /// An empty stamp parses and proves nothing, which is the one state the
+    /// field's type cannot rule out. A registry holding one cannot say whether
+    /// the pid beside it is still this run's work, and *cannot say* is the answer
+    /// this registry exists to stop being read as *nothing is running*.
+    fn is_usable(&self) -> bool {
+        !self.started.trim().is_empty()
+    }
+}
+
+/// A dispatch's entry in the registry, removed when this value is dropped.
+///
+/// RAII for the same reason [`OwnershipLock`] is: a dispatch ends in more ways
+/// than it settles, and every one of them drops this. The single ending that
+/// leaves the entry behind is the process itself dying, which is exactly when a
+/// stop needs it.
+#[derive(Debug)]
+pub struct DispatchClaim {
+    path: PathBuf,
+    /// What this claim recorded, so it removes its **own** entry and never a
+    /// later dispatch's: the host reissues pids, and a record keyed by one is
+    /// only this dispatch's while the process behind it is.
+    started: String,
+}
+
+impl Drop for DispatchClaim {
+    fn drop(&mut self) {
+        let ours = read_json_opt::<DispatchRecord>(&self.path)
+            .is_some_and(|held| held.started == self.started);
+        if ours {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// Record that this run is running `node` in `pid`, on this host, or refuse.
+///
+/// A **trust boundary**, not bookkeeping. The registry is the only record of
+/// where a run's work actually is, so a dispatch this run cannot register is a
+/// process nothing will ever find: not the operator reading a view, and not the
+/// `stop` they run when they need the work to end. Continuing anyway would buy
+/// one dispatch at the price of the guarantee every later stop rests on — so the
+/// caller is given the failure and ends the dispatch with it.
+///
+/// Two ways to fail, and both are refusals rather than empty entries. A host that
+/// will not say when `pid` started leaves nothing that could prove the pid is
+/// still this process, and an entry a reader cannot act on is one that would make
+/// a later stop refuse instead. A write that did not land — or landed as
+/// something other than what was written — is the same absence with a file in the
+/// way, so what was written is read back before the claim is handed over.
+pub fn claim_dispatch(paths: &RunPaths, node: &str, pid: u32) -> Result<DispatchClaim> {
+    // Unique for the life of this process, which is what separates two dispatches
+    // running inside it. Across processes the pid separates them, and across a
+    // pid this host has reissued the stamp does.
+    static CLAIMED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let claim = CLAIMED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let Some(started) = sys::process_start_token(pid) else {
+        return Err(Error::Refused(format!(
+            "run '{}': node '{node}': this host will not say when pid {pid} started, so its \
+             dispatch cannot be recorded as running there and nothing could prove that pid is \
+             still this run's work",
+            paths.run
+        )));
+    };
+    let record = DispatchRecord {
+        node: node.to_string(),
+        pid,
+        host: sys::hostname(),
+        dispatched_at: sys::now_rfc3339(),
+        started: started.recorded().to_string(),
+    };
+    let path = paths.dispatch(pid, claim);
+    write_dispatch(paths, &path, claim, &record)?;
+    // Read back through the same reader a stop uses, because what this promises
+    // its caller is not that a write returned but that the registry now holds an
+    // entry that reader will act on.
+    //
+    // llmlint: ignore-block[changed_behavior_has_e2e] a write that lands as something other
+    // than what was written is a filesystem lying to a process, not anything a user can type
+    // or a suite can arrange: every fault a journey *can* set — no directory, a file where
+    // one has to be, an entry rewritten afterwards — fails earlier, in branches
+    // `a_dispatch_this_run_cannot_record_is_refused_and_does_not_run` and
+    // `stopping_a_run_whose_registry_cannot_be_read_refuses_and_leaves_the_run_retryable`
+    // drive end to end. What this arm adds is that the promise is checked rather than
+    // assumed, and `a_dispatch_the_registry_cannot_record_is_refused` holds the refusal it
+    // produces against the real filesystem.
+    match read_json::<DispatchRecord>(&path) {
+        Ok(held) if held == record => Ok(DispatchClaim {
+            path,
+            started: record.started,
+        }),
+        Ok(_) | Err(_) => Err(Error::Refused(format!(
+            "run '{}': node '{node}': its dispatch in pid {pid} was written to {} and did not \
+             read back as itself, so the run cannot say where that work is",
+            paths.run,
+            path.display()
+        ))),
+    } // llmlint: ignore-end[changed_behavior_has_e2e]
+}
+
+/// Write one registry entry so no reader can catch it half-written.
+///
+/// Renamed into the registry from a temporary **outside** it, which is the whole
+/// difference from [`write_atomic`]: every file in that directory is an entry a
+/// reader acts on, and a reader is now entitled to fail on one it cannot read. A
+/// temporary written beside its target would be a half-written entry in the set,
+/// and a `stop` racing a dispatch would refuse over this crate's own scratch.
+fn write_dispatch(
+    paths: &RunPaths,
+    path: &Path,
+    claim: u64,
+    record: &DispatchRecord,
+) -> Result<()> {
+    let body = serde_json::to_string_pretty(record)
+        .map_err(|e| Error::Invalid(format!("{}: {e}", path.display())))?;
+    let ledger = |at: &Path| {
+        let at = at.to_path_buf();
+        move |source: io::Error| Error::Ledger { path: at, source }
+    };
+    fs::create_dir_all(paths.dispatches()).map_err(ledger(&paths.dispatches()))?;
+    // Named from the claim as well as the process, for the reason
+    // [`RunPaths::dispatch`] gives: two dispatches inside one process would
+    // otherwise write one another's temporary, and a reader is entitled to fail
+    // on an entry it cannot parse.
+    let temp = paths
+        .dir
+        .join(format!("dispatch-{}-{claim}.tmp", record.pid));
+    fs::write(&temp, body.as_bytes()).map_err(ledger(&temp))?;
+    fs::rename(&temp, path).map_err(ledger(path))
+}
+
+/// Every dispatch this run has recorded, in pid order — or why this build cannot
+/// say.
+///
+/// Errors are **preserved**, never flattened into an empty registry, and that is
+/// this reader's whole job. "Nothing is registered" and "what is registered
+/// cannot be read" are opposite answers for the caller that acts on them: the
+/// first says a run has no work running, and the second says nobody knows — and a
+/// stop that read the second as the first would report a run ended over work it
+/// never looked for. So a registry that is not there, a directory this host will
+/// not enumerate, an entry that cannot be read, one carrying a field this build
+/// does not know, and one whose stamp proves nothing are all failures with the
+/// path that caused them.
+///
+/// Ordered because a caller acts on them — a teardown signals what they name —
+/// and a directory listing comes in whatever order the host gives.
+pub fn dispatches_of(paths: &RunPaths) -> Result<Vec<DispatchRecord>> {
+    let registry = paths.dispatches();
+    let listed = fs::read_dir(&registry).map_err(|source| Error::Ledger {
+        path: registry.clone(),
+        source,
+    })?;
+    let mut found = Vec::new();
+    for entry in listed {
+        // llmlint: ignore-block[changed_behavior_has_e2e] an enumeration that fails *part way* is
+        // the host withdrawing a directory it has already begun to list — a condition no
+        // portable journey can set, and one this reader answers exactly as it answers the
+        // directory it could not open at all, which
+        // `stopping_a_run_whose_registry_cannot_be_read_refuses_and_leaves_the_run_retryable`
+        // drives end to end for both the missing registry and the entry it cannot read.
+        let entry = entry.map_err(|source| Error::Ledger {
+            path: registry.clone(),
+            source,
+        })?; // llmlint: ignore-end[changed_behavior_has_e2e]
+        let held: DispatchRecord = read_json(&entry.path())?;
+        if !held.is_usable() {
+            return Err(Error::Invalid(format!(
+                "{}: the dispatch it records carries no start token, so nothing says pid {} is \
+                 still this run's work",
+                entry.path().display(),
+                held.pid
+            )));
+        }
+        found.push(held);
+    }
+    found.sort_by_key(|held| held.pid);
+    Ok(found)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -785,6 +1078,7 @@ mod tests {
             session: "a-session".into(),
             pid: 1,
             host: "h".into(),
+            started: "Fri Aug 15 00:00:00 2026".into(),
             started_at: sys::now_rfc3339(),
             heartbeat_interval: 1_800,
             dag_sets: Vec::new(),
@@ -792,6 +1086,69 @@ mod tests {
             adoptions: 0,
             filters: Filters::default(),
         }
+    }
+
+    /// A driver is claimed as three facts at once, and a record that predates
+    /// the stamp is read as proving nothing rather than as proving its pid.
+    ///
+    /// The pid and the stamp are one claim: a `stop` reading a pid with nothing
+    /// beside it cannot tell the driver the record was written for from whatever
+    /// the host has since handed that pid to, so the writer that records one
+    /// records both. The compatibility half is the same promise every field
+    /// added to this record makes — an older document still reads — and the
+    /// answer it must give is the *empty* stamp, which never matches.
+    #[test]
+    fn claiming_a_run_records_the_stamp_that_proves_its_pid_and_an_older_record_carries_none() {
+        let mut record = a_record();
+        record.driven_by_this_process();
+        assert_eq!(record.pid, sys::pid());
+        assert_eq!(record.host, sys::hostname());
+        assert!(
+            sys::process_start_token(sys::pid())
+                .expect("this host says when a process started")
+                .matches(&record.started),
+            "a run claimed by this process recorded a stamp that does not prove it"
+        );
+        let text = serde_json::to_string(&record).expect("it serialises");
+        assert_eq!(
+            serde_json::from_str::<LaunchRecord>(&text).expect("it re-parses"),
+            record
+        );
+
+        // A record written before the field existed, which is the file on disk
+        // this build has to keep opening.
+        let older = serde_json::json!({
+            "run_id": "demo",
+            "plan": "plan.json",
+            "node_graph": "graphs/node-scope.yaml",
+            "launcher": "claude-code",
+            "session": "a-session",
+            "pid": sys::pid(),
+            "host": sys::hostname(),
+            "started_at": "2026-08-15T00:00:00.000Z",
+            "heartbeat_interval": 1800,
+        });
+        let read: LaunchRecord =
+            serde_json::from_value(older).expect("a record predating the stamp still reads");
+        assert!(read.started.is_empty());
+        assert!(
+            !sys::process_start_token(sys::pid())
+                .expect("this host says when a process started")
+                .matches(&read.started),
+            "a record carrying no stamp proved a live pid"
+        );
+
+        // And a record that carries none writes none, so a build that predates
+        // the field still reads what this one wrote.
+        let text = serde_json::to_string(&LaunchRecord {
+            started: String::new(),
+            ..a_record()
+        })
+        .expect("it serialises");
+        assert!(
+            !text.contains("started\""),
+            "an empty stamp reached the record: {text}"
+        );
     }
 
     /// A run's journal has several appenders at once — the launcher relaying its
@@ -931,6 +1288,7 @@ mod tests {
             session: sys::UNKNOWN_LAUNCHER.into(),
             pid: 1,
             host: "h".into(),
+            started: String::new(),
             started_at: sys::now_rfc3339(),
             heartbeat_interval: 1,
             dag_sets: Vec::new(),
@@ -956,6 +1314,7 @@ mod tests {
             session: "secret-session-id".into(),
             pid: 1,
             host: "h".into(),
+            started: String::new(),
             started_at: sys::now_rfc3339(),
             heartbeat_interval: 1,
             dag_sets: Vec::new(),
@@ -1065,6 +1424,281 @@ mod tests {
         );
         assert!(!record.started.is_empty());
         held.release();
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A dispatch claims the process its work is in, and gives the claim up when
+    /// the dispatch ends.
+    ///
+    /// The registry's whole contract in one place: while a dispatch is running
+    /// the run says which process it is running in and proves that pid is still
+    /// that process, and the moment the dispatch ends — however it ends, because
+    /// the claim is given up by being dropped — the run stops saying so. A
+    /// registry that kept the entry would send a later stop at whatever the host
+    /// had handed the pid to next.
+    #[test]
+    fn a_dispatch_claims_the_process_it_runs_in_and_gives_it_up_when_it_ends() {
+        let root = scratch("dispatches");
+        let paths = RunPaths::under(&root, "demo");
+        paths.create().expect("the run directory");
+        assert!(
+            dispatches_of(&paths)
+                .expect("a run that has dispatched nothing has an empty registry")
+                .is_empty(),
+            "a run that has dispatched nothing claimed a process"
+        );
+
+        let claim = claim_dispatch(&paths, "build", sys::pid()).expect("the dispatch is recorded");
+        let recorded = dispatches_of(&paths).expect("the registry reads");
+        assert_eq!(recorded.len(), 1, "{recorded:?}");
+        assert_eq!(recorded[0].node, "build");
+        assert_eq!(recorded[0].pid, sys::pid());
+        assert_eq!(recorded[0].host, sys::hostname());
+        assert!(
+            sys::process_start_token(sys::pid())
+                .expect("this host says when a process started")
+                .matches(&recorded[0].started),
+            "the entry's stamp is not this process's own start: {recorded:?}"
+        );
+
+        drop(claim);
+        assert!(
+            dispatches_of(&paths)
+                .expect("the registry reads")
+                .is_empty(),
+            "a dispatch that ended left the run claiming its process"
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// Two dispatches inside one process are two entries, and each ends alone.
+    ///
+    /// The library backend runs a node's dispatch **in the driver**, so a run at
+    /// any concurrency above one has several live dispatches sharing a pid. Keyed
+    /// by pid alone they were one entry: the second overwrote the first, and
+    /// whichever ended first took the survivor's registration with it — leaving a
+    /// live dispatch nothing could find, which is the failure this registry
+    /// exists to make impossible.
+    #[test]
+    fn two_dispatches_in_one_process_are_two_entries_and_each_ends_alone() {
+        let root = scratch("dispatches-shared-process");
+        let paths = RunPaths::under(&root, "demo");
+        paths.create().expect("the run directory");
+
+        let first = claim_dispatch(&paths, "first", sys::pid()).expect("the first is recorded");
+        let second = claim_dispatch(&paths, "second", sys::pid()).expect("the second is recorded");
+        let nodes = |paths: &RunPaths| {
+            let mut named: Vec<String> = dispatches_of(paths)
+                .expect("the registry reads")
+                .into_iter()
+                .map(|held| held.node)
+                .collect();
+            named.sort();
+            named
+        };
+        assert_eq!(
+            nodes(&paths),
+            vec!["first".to_string(), "second".to_string()],
+            "two dispatches in one process did not record two entries"
+        );
+
+        drop(first);
+        assert_eq!(
+            nodes(&paths),
+            vec!["second".to_string()],
+            "a dispatch that ended took a live one's registration with it"
+        );
+        drop(second);
+        assert!(dispatches_of(&paths)
+            .expect("the registry reads")
+            .is_empty());
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A claim removes its **own** entry and never the one that replaced it.
+    ///
+    /// The host reissues pids, so the entry under one is this dispatch's only
+    /// while the process behind it is. A claim that removed the file by name
+    /// would, on the ordering that matters — a dispatch ending just as a later
+    /// one starts in a pid the host has recycled — delete a live dispatch's
+    /// entry and leave that process findable by nothing.
+    #[test]
+    fn a_claim_that_ends_leaves_a_later_dispatchs_entry_alone() {
+        let root = scratch("dispatches-reused");
+        let paths = RunPaths::under(&root, "demo");
+        paths.create().expect("the run directory");
+
+        let first = claim_dispatch(&paths, "build", sys::pid()).expect("the dispatch is recorded");
+        // The same pid, claimed again by what stands in here for a later process
+        // wearing it: the entry is rewritten with a start this one does not have.
+        write_json(
+            &paths.dispatch(sys::pid(), 0),
+            &DispatchRecord {
+                started: "the process that took it, which is not the first one".into(),
+                ..dispatches_of(&paths).expect("the registry reads")[0].clone()
+            },
+        )
+        .expect("the entry is rewritten");
+
+        drop(first);
+        let recorded = dispatches_of(&paths).expect("the registry reads");
+        assert_eq!(
+            recorded.len(),
+            1,
+            "a dispatch that ended removed an entry it did not write: {recorded:?}"
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// Every entry, in pid order.
+    ///
+    /// Ordered because a teardown acts on them, and a directory listing comes in
+    /// whatever order the host gives — so a run's stop would reach its processes
+    /// in a different order each time it was asked.
+    #[test]
+    fn the_registry_reads_in_pid_order() {
+        let root = scratch("dispatches-order");
+        let paths = RunPaths::under(&root, "demo");
+        paths.create().expect("the run directory");
+        for (node, pid) in [("later", 900_u32), ("earlier", 90), ("middle", 300)] {
+            write_json(
+                &paths.dispatch(pid, 0),
+                &DispatchRecord {
+                    node: node.to_string(),
+                    pid,
+                    host: sys::hostname(),
+                    dispatched_at: sys::now_rfc3339(),
+                    started: "a start this host once reported".into(),
+                },
+            )
+            .expect("an entry");
+        }
+
+        let read: Vec<u32> = dispatches_of(&paths)
+            .expect("the registry reads")
+            .iter()
+            .map(|held| held.pid)
+            .collect();
+        assert_eq!(read, vec![90, 300, 900]);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// Every way a registry can fail to be read is a failure, and none of them
+    /// is an empty registry.
+    ///
+    /// "Nothing is registered" and "what is registered cannot be read" are
+    /// opposite answers for the caller that acts on them, and this reader's whole
+    /// job is to keep them apart: the first says a run has no work running, the
+    /// second says nobody knows. Each of these was once the same empty vector.
+    #[test]
+    fn a_registry_this_build_cannot_read_is_reported_and_never_read_as_an_empty_one() {
+        let root = scratch("dispatches-unreadable");
+        let paths = RunPaths::under(&root, "demo");
+        paths.create().expect("the run directory");
+        let usable = DispatchRecord {
+            node: "build".into(),
+            pid: 4_242,
+            host: sys::hostname(),
+            dispatched_at: sys::now_rfc3339(),
+            started: "a start this host once reported".into(),
+        };
+
+        for (what, entry) in [
+            (
+                "a record that is not JSON at all",
+                "not an entry".to_string(),
+            ),
+            (
+                "a record carrying a field this build does not know",
+                serde_json::to_string(&serde_json::json!({
+                    "node": usable.node,
+                    "pid": usable.pid,
+                    "host": usable.host,
+                    "dispatched_at": usable.dispatched_at,
+                    "started": usable.started,
+                    "reaped_by": "a build that came later",
+                }))
+                .expect("an entry from a newer writer"),
+            ),
+            (
+                "a record missing the stamp entirely",
+                serde_json::to_string(&serde_json::json!({
+                    "node": usable.node,
+                    "pid": usable.pid,
+                    "host": usable.host,
+                    "dispatched_at": usable.dispatched_at,
+                }))
+                .expect("an entry from a writer that recorded no stamp"),
+            ),
+            (
+                "a record whose stamp proves nothing",
+                serde_json::to_string(&DispatchRecord {
+                    started: String::new(),
+                    ..usable.clone()
+                })
+                .expect("an unstamped entry"),
+            ),
+        ] {
+            fs::write(paths.dispatch(usable.pid, 0), entry).expect("an entry");
+            let refused =
+                dispatches_of(&paths).expect_err(&format!("{what} was read as a registry"));
+            assert!(
+                refused.to_string().contains(&usable.pid.to_string()),
+                "the refusal over {what} does not name what caused it: {refused}"
+            );
+        }
+
+        // And the registry that is not there at all. Every run this build creates
+        // has one, so its absence is something having taken it away — which is
+        // not the same fact as a run that has dispatched nothing, and answering
+        // it the same way is what this reader refuses to do.
+        fs::remove_dir_all(paths.dispatches()).expect("the registry is taken away");
+        let refused = dispatches_of(&paths)
+            .expect_err("a registry that is not there was read as a run with nothing running");
+        assert!(
+            refused
+                .to_string()
+                .contains(&paths.dispatches().display().to_string()),
+            "the refusal does not name the registry it could not read: {refused}"
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A dispatch this run cannot record is a dispatch this run does not run.
+    ///
+    /// The claim is the trust boundary, not bookkeeping around one: an entry
+    /// that was not written is a process no view will show and no stop will
+    /// reach, on a run whose own records say it has nothing running. So the
+    /// caller is handed the failure — both ways it can happen — and ends the
+    /// dispatch with it rather than running work nothing can find.
+    #[test]
+    fn a_dispatch_the_registry_cannot_record_is_refused() {
+        let root = scratch("dispatches-unwritable");
+        let paths = RunPaths::under(&root, "demo");
+        paths.create().expect("the run directory");
+
+        // A host that will not say when the process started: nothing could prove
+        // that pid is still this run's work, so there is no entry to write.
+        let reaped = sys::reaped_pid();
+        let refused = claim_dispatch(&paths, "build", reaped)
+            .expect_err("a dispatch nothing can stamp was recorded anyway");
+        assert!(
+            refused.to_string().contains(&reaped.to_string()),
+            "the refusal does not name the process it could not stamp: {refused}"
+        );
+
+        // And a registry that cannot be written at all, with a file where its
+        // directory has to go — a host that is otherwise perfectly healthy.
+        fs::remove_dir_all(paths.dispatches()).expect("the registry is taken away");
+        fs::write(paths.dispatches(), "not a directory").expect("something in the way");
+        let refused = claim_dispatch(&paths, "build", sys::pid())
+            .expect_err("a claim that could not be written was reported as held");
+        assert!(
+            refused
+                .to_string()
+                .contains(&paths.dispatches().display().to_string()),
+            "the refusal does not name what it could not write: {refused}"
+        );
         fs::remove_dir_all(&root).ok();
     }
 

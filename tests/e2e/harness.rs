@@ -637,11 +637,7 @@ impl World {
     /// name `ps` on the `PATH` the process under test was given.
     #[cfg(unix)]
     pub fn path_whose_ps_garbles_a_row(&self) -> PathBuf {
-        let real = real_ps();
-        self.path_with_ps(
-            "garbled-ps",
-            &format!("echo 'not-a-pid also-not'\nexec {} \"$@\"", real.display()),
-        )
+        self.path_with_ps("garbled-ps", &listing_plus("not-a-pid also-not"))
     }
 
     /// A `PATH` whose `ps` answers with the real listing plus a child of `parent`
@@ -656,15 +652,24 @@ impl World {
     /// any it was checking for.
     #[cfg(unix)]
     pub fn path_whose_ps_invents_an_unreachable_child(&self, parent: u32) -> PathBuf {
-        let real = real_ps();
         self.path_with_ps(
             "unreachable-child-ps",
-            &format!(
-                "echo '{} {parent}'\nexec {} \"$@\"",
-                u32::MAX,
-                real.display()
-            ),
+            &listing_plus(&format!("{} {parent}", u32::MAX)),
         )
+    }
+
+    /// A `PATH` whose `ps` answers a question about **one** process with more
+    /// than it was asked for.
+    ///
+    /// The fault that is not about the listing at all. A start token is `ps -p
+    /// PID -o lstart=` — one process, one line — and a host that writes anything
+    /// beside that has not answered the question. Folding what it wrote into a
+    /// token would make a live process disagree with the stamp its own record
+    /// carries, which a reader takes for a pid the host has handed to somebody
+    /// else: the one verdict that must never come from the host misbehaving.
+    #[cfg(unix)]
+    pub fn path_whose_ps_says_more_than_it_was_asked(&self) -> PathBuf {
+        self.path_with_ps("talkative-ps", &answer_plus("a line nobody asked for"))
     }
 
     /// A `PATH` holding one `ps` stand-in that behaves like `script`.
@@ -672,6 +677,9 @@ impl World {
     /// Unix-only: the fixture is a shell script, and the Windows arm reaches the
     /// tree through `taskkill /T` rather than through any table this could stand
     /// in for.
+    ///
+    /// See [`listing_plus`] for why a stand-in that alters the **listing** has
+    /// to leave every other question alone.
     #[cfg(unix)]
     fn path_with_ps(&self, name: &str, script: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
@@ -1345,6 +1353,58 @@ pub fn onevcs_binary() -> PathBuf {
         .clone()
 }
 
+/// A pid this host can prove is gone: a real process, started and reaped.
+///
+/// Picked out of the air it would not be one — the kernel may have handed it to
+/// something else — and every journey about a record that names a driver which
+/// is no longer there turns on the difference.
+pub fn reaped_pid() -> u32 {
+    let mut child = std::process::Command::new(binary())
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("the binary starts");
+    let pid = child.id();
+    child.wait().expect("it exits");
+    pid
+}
+
+/// End one process this suite is entitled to end, and wait until it is gone.
+///
+/// Forcefully, because both things it is used on are processes a polite ask does
+/// not settle: a dispatch scripted to keep working through `SIGTERM`, and a
+/// run's driver which a journey needs *gone* without the tree it started going
+/// with it, which is the state an adoption recovers from.
+///
+/// The wait is what makes this usable as a precondition. `kill` returns when the
+/// signal is queued, not when the process has exited, so a journey that went
+/// straight on from here would be asserting against a host that had not caught
+/// up with it yet.
+#[cfg(unix)]
+pub fn end_process(pid: u32) {
+    std::process::Command::new("kill")
+        .args(["-KILL", &pid.to_string()])
+        .status()
+        .expect("this host ends a process it owns");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
+        // `kill -0` is the existence check: it delivers nothing and fails once
+        // there is no such process.
+        let still_there = std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stderr(Stdio::null())
+            .status()
+            .expect("this host answers about a process it owns")
+            .success();
+        if !still_there {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    panic!("pid {pid} outlived the one ask no process can ignore");
+}
+
 /// This host's own `ps`, found the way a shell finds it.
 ///
 /// Resolved here rather than written down, because it is `/bin/ps` on some hosts
@@ -1356,6 +1416,37 @@ fn real_ps() -> PathBuf {
         .map(|dir| dir.join("ps"))
         .find(|candidate| candidate.is_file())
         .expect("this host has a ps")
+}
+
+/// A `ps` stand-in that answers the real thing, with `row` added to the process
+/// **listing** and to nothing else.
+///
+/// The guard is the whole point. `ps` is asked two different questions here — for
+/// the table a teardown walks (`-A`), and for when one process started, which is
+/// what a recorded pid is proved against — and a stand-in that wrote its row into
+/// both would be two faults wearing one name: the journey would still refuse, but
+/// over a host that could not describe a *process*, which is a different journey
+/// with a different verdict. So the fault is scoped to the question it is about.
+#[cfg(unix)]
+fn listing_plus(row: &str) -> String {
+    ps_plus("*\" -A \"*", row)
+}
+
+/// The other half of that pair: `row` added to what this host says about **one**
+/// process, and to nothing else, so the listing a teardown walks stays good.
+#[cfg(unix)]
+fn answer_plus(row: &str) -> String {
+    ps_plus("*lstart=*", row)
+}
+
+/// A `ps` stand-in that answers the real thing, with `row` written ahead of the
+/// answers whose arguments match `question` and no others.
+#[cfg(unix)]
+fn ps_plus(question: &str, row: &str) -> String {
+    format!(
+        "case \" $* \" in\n  {question}) echo '{row}' ;;\nesac\nexec {} \"$@\"",
+        real_ps().display()
+    )
 }
 
 /// A `PATH` with `dirs` ahead of the one this process inherited.

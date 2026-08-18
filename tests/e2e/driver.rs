@@ -12,6 +12,16 @@
 use std::path::{Path, PathBuf};
 
 use crate::harness::{agent, human, plan_of, World, NOTHING_DRIVING, REFUSED};
+// The journeys that end a process, and those that assert against a process table,
+// are `#[cfg(unix)]`, so what only they reach for is imported on the same terms.
+// Both names have to be: `end_process` is `#[cfg(unix)]` in `harness.rs`, so an
+// unconditional import of it does not resolve for a Windows target at all, and
+// `reaped_pid` — which is not gated there — is used in this file only from one of
+// those journeys, so importing it unconditionally is an unused import under
+// `-D warnings`. Each was a Windows-only build failure this host's own gate,
+// which compiles the unix half, cannot see.
+#[cfg(unix)]
+use crate::harness::{end_process, reaped_pid};
 use serde_json::json;
 
 fn start_detached(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
@@ -1490,6 +1500,59 @@ fn still_listed(pid: u32) -> bool {
     process_table().iter().any(|(listed, _)| *listed == pid)
 }
 
+/// When this host says a process started, asked the way the crate asks it.
+///
+/// The test's own oracle again, and the environment matters: `lstart` is a
+/// rendering, so a reading taken in another zone or locale is a different string
+/// for the same process, and a journey comparing one against a stamp the crate
+/// recorded would be comparing two renderings rather than two processes.
+#[cfg(unix)]
+fn started_at_of(pid: u32) -> String {
+    let listed = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "lstart="])
+        .env("TZ", "UTC")
+        .env("LC_ALL", "C")
+        .output()
+        .expect("this host says when a process started");
+    assert!(
+        listed.status.success(),
+        "`ps` refused to describe pid {pid}"
+    );
+    String::from_utf8(listed.stdout)
+        .expect("`ps` wrote a start this host can decode")
+        .trim()
+        .to_string()
+}
+
+/// A live process this run never started, standing in for whatever the host gave
+/// a reissued pid to — and one this host describes differently from `stamp`.
+///
+/// `lstart` is reported to the **second**, so a process started inside the same
+/// second as the driver carries the driver's own stamp and would be a pid the
+/// record still proves rather than a stranger. Retried until the host's clock has
+/// left that second behind, so the stand-in is a stranger by construction rather
+/// than by luck.
+#[cfg(unix)]
+fn stranger_started_after(stamp: &str) -> std::process::Child {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let mut child = std::process::Command::new("sleep")
+            .arg("300")
+            .spawn()
+            .expect("this host starts a process of its own");
+        if started_at_of(child.id()) != stamp {
+            return child;
+        }
+        child.kill().expect("this test ends its own process");
+        child.wait().expect("it is reaped");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "this host kept starting processes inside the second {stamp:?} names"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
 /// Ending a run ends everything it started, and nothing beside it.
 ///
 /// Both halves, because a teardown can be wrong in either direction: the
@@ -1676,6 +1739,76 @@ fn a_stop_that_cannot_read_the_process_table_refuses_and_leaves_the_run_retryabl
     }
 }
 
+/// A host that says more than it was asked is a host that has not answered, and
+/// a stop says so rather than reading it as somebody else's pid.
+///
+/// The fourth way this host can fail a teardown, and the one that hides. A start
+/// token is one process and one line, so an answer carrying anything beside it is
+/// a different string from the one the driver recorded for that very process — and
+/// read as a token, a *different* string is not "this host is unwell", it is "the
+/// pid was handed on". That reading is silent by design: a pid the host reissued
+/// is nobody's to signal and nothing to report, so the stop would walk past the
+/// run's own driver, find nothing else it could prove, and answer
+/// `{"stopped":true,"teardown":"nothing-to-stop"}` over a tree that is still
+/// running.
+///
+/// So the answer is refused instead: nothing is signalled, the run is left exactly
+/// as it was, and the same ask works once the host answers what it was asked. The
+/// listing this stand-in gives is the real one throughout, which is what keeps the
+/// fault to the one question under test.
+#[cfg(unix)]
+#[test]
+fn a_stop_whose_host_says_more_than_it_was_asked_about_a_pid_refuses_and_signals_nothing() {
+    let world = World::new("driver-stop-talkative-ps");
+    world.script("build.wait", "hold");
+    let (run, driver) = start_detached_announcing(&world, "talkative", vec![agent("build", &[])]);
+    world.until("a node to be in flight", |world| {
+        !world.events_of(&run, "node-dispatched").is_empty()
+    });
+    world.until("the dispatch to be a process below the driver", |_| {
+        !descendants(driver).is_empty()
+    });
+    let tree: Vec<u32> = std::iter::once(driver).chain(descendants(driver)).collect();
+
+    let mut command = world.cmd(&["stop", &run]);
+    command.env("PATH", world.path_whose_ps_says_more_than_it_was_asked());
+    let refused = world.run_on(command, "stop with a ps that says more than it was asked");
+    refused
+        .exited(REFUSED)
+        .err_has("was not stopped")
+        .err_has("will not say when it started");
+    assert!(
+        !refused.stdout.contains("\"stopped\":true"),
+        "a stop that could not place a single pid still announced a clean stop:\n{}",
+        refused.stdout
+    );
+    for pid in &tree {
+        assert!(
+            still_listed(*pid),
+            "a refused stop signalled pid {pid} anyway, orphaning what it could not find"
+        );
+    }
+    let stopped = world.events_of(&run, "run-stopped");
+    assert_eq!(stopped.len(), 1, "the attempt went unrecorded");
+    assert_eq!(
+        stopped[0]["payload"]["teardown"],
+        json!("not-attempted"),
+        "a stop that established nothing was recorded as a clean one: {}",
+        stopped[0]
+    );
+
+    // And the same ask, on a host that answers what it was asked, ends the tree.
+    world
+        .run(&["stop", &run])
+        .exited(0)
+        .out_has("\"stopped\":true")
+        .out_has("\"teardown\":\"signalled\"");
+    world.until("every process the run started to end", |_| {
+        tree.iter().all(|pid| !still_listed(*pid))
+    });
+    world.release("build.go");
+}
+
 /// A stop aimed at another host's driver says it reached nothing.
 ///
 /// A pid means nothing across machines, so this host will not signal one it did
@@ -1735,6 +1868,644 @@ fn a_stop_aimed_at_another_hosts_driver_reports_that_it_reached_nothing() {
         .exited(0)
         .out_has("\"teardown\":\"signalled\"");
     world.until("the driver to end", |_| !still_listed(driver));
+    world.release("build.go");
+}
+
+/// A stop finds the run's tree through the ownership lock, not through a
+/// recorded pid that has died.
+///
+/// The launch record names the driver a run was launched or last adopted with,
+/// which is a claim about the past: a driver that died leaves that pid behind
+/// it, and a stop aimed there alone signals nothing, finds nothing, and reports
+/// a clean teardown over a dispatch tree that is still running and still
+/// spending. The **lock** is the claim made now, and its start token is what
+/// makes acting on it safe — so the stop reaches the tree the run is actually
+/// made of.
+///
+/// The record is edited rather than arranged, because no verb produces this
+/// state on demand: a driver that has died and been taken over rewrites the
+/// record as it takes the lock, and the window where the two disagree is one a
+/// journey cannot stand in. What is edited is the one fact under test — the pid
+/// the record names — and everything else about the run is real: a live driver
+/// holding the lock it took, with a dispatch genuinely in flight below it.
+// llmlint: ignore-block[tests_mirror_real_usage] the one value set by hand is the pid the
+// launch record names, and no product surface sets it: the verbs that write that field —
+// `start`, `drive-run`, `adopt` — all write their *own* pid as they take the lock, so a run
+// whose record has fallen behind its lock is a state a user reaches by having a driver die,
+// not by typing anything. The rest of the journey is the real binary end to end, and the
+// assertion is about processes on this host rather than about the file that was edited.
+#[cfg(unix)]
+#[test]
+fn stopping_a_run_ends_the_tree_its_lock_names_when_the_record_names_a_dead_driver() {
+    let world = World::new("driver-stop-stale-record");
+    world.script("build.wait", "hold");
+    let (run, driver) = start_detached_announcing(&world, "stale", vec![agent("build", &[])]);
+    world.until("a node to be in flight", |world| {
+        !world.events_of(&run, "node-dispatched").is_empty()
+    });
+    world.until("the dispatch to be a process below the driver", |_| {
+        !descendants(driver).is_empty()
+    });
+    let tree: Vec<u32> = std::iter::once(driver).chain(descendants(driver)).collect();
+
+    let record = world.run_file(&run, "launch.json");
+    let mut named = world.run_json(&run, "launch.json");
+    let dead = reaped_pid();
+    named["pid"] = json!(dead);
+    std::fs::write(&record, named.to_string()).expect("the launch record is rewritten");
+    assert!(
+        !still_listed(dead),
+        "the record now names pid {dead}, which is live, so this journey proves nothing"
+    );
+
+    world
+        .run(&["stop", &run])
+        .exited(0)
+        .out_has("\"stopped\":true")
+        .out_has("\"teardown\":\"signalled\"");
+    world.until("every process the run started to end", |_| {
+        tree.iter().all(|pid| !still_listed(*pid))
+    });
+    world.release("build.go");
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+/// A stop never signals a pid the host has since given to another process.
+///
+/// The other thing a stale launch record can be, and the dangerous one. The
+/// record above named a pid nothing answers to, which costs a signal and nothing
+/// else; here the host has reissued that pid, so the record names a **live**
+/// process that this run never started — somebody else's editor, somebody else's
+/// build — and a teardown taking the record at its word ends it. That is not a
+/// hypothetical for a record that outlives every driver it names: it is the
+/// oldest claim a run holds, a driver that dies leaves its pid sitting in it, and
+/// nothing rewrites it until an adoption does.
+///
+/// So the stranger stands in for whatever the host handed that pid to. It is
+/// this test's own process, deliberately started outside the run's tree, and the
+/// journey holds both halves at once: it is still running afterwards, and the
+/// run's real tree — found through the claims that *can* prove themselves — is
+/// gone.
+///
+/// The record is edited for the reason the journey above edits one: no verb
+/// produces this state on demand, and what is edited is the one fact under test.
+/// The stamp beside the pid is left exactly as the driver wrote it, which is what
+/// makes this a reissued pid rather than a rewritten record.
+// llmlint: ignore-block[tests_mirror_real_usage] the one value set by hand is the pid the
+// launch record names, and no product surface sets it: the verbs that write that field —
+// `start`, `drive-run`, `adopt` — write their own pid and their own stamp together, so a
+// record whose pid the host has reissued is a state a user reaches by having a driver die and
+// the host reuse its pid, not by typing anything. The rest of the journey is the real binary
+// end to end, and the assertions are about processes on this host.
+#[cfg(unix)]
+#[test]
+fn a_stop_never_signals_a_pid_the_host_has_given_to_another_process() {
+    let world = World::new("driver-stop-reissued-pid");
+    world.script("build.wait", "hold");
+    let (run, driver) = start_detached_announcing(&world, "reissued", vec![agent("build", &[])]);
+    world.until("a node to be in flight", |world| {
+        !world.events_of(&run, "node-dispatched").is_empty()
+    });
+    world.until("the dispatch to be a process below the driver", |_| {
+        !descendants(driver).is_empty()
+    });
+    let tree: Vec<u32> = std::iter::once(driver).chain(descendants(driver)).collect();
+
+    // The stranger the host handed the pid to: a real process, started by this
+    // test rather than by the run, so it is nobody's descendant in the tree a
+    // teardown walks — and one this host describes differently from the stamp
+    // the driver recorded, which is what makes it a stranger and not the driver.
+    let record = world.run_file(&run, "launch.json");
+    let mut named = world.run_json(&run, "launch.json");
+    let recorded = named["started"]
+        .as_str()
+        .expect("a driver records the stamp that proves its pid")
+        .to_string();
+    let mut stranger = stranger_started_after(&recorded);
+    let taken = stranger.id();
+    assert!(
+        !tree.contains(&taken),
+        "the stranger {taken} is part of the run's own tree, so this journey proves nothing"
+    );
+
+    named["pid"] = json!(taken);
+    std::fs::write(&record, named.to_string()).expect("the launch record is rewritten");
+
+    let stopped = world.run(&["stop", &run]);
+    // The half this journey exists for, asked of the process itself rather than
+    // of a listing: a signalled process is still *listed* while nobody has
+    // reaped it, and this test is what would reap this one.
+    assert!(
+        stranger
+            .try_wait()
+            .expect("this host answers about this test's own process")
+            .is_none(),
+        "a stop ended pid {taken}, which the host had given to a process this run never started"
+    );
+    // And the run itself was stopped, through the claims that can prove
+    // themselves — the stale record cost it nothing but a sentence on stderr.
+    stopped
+        .exited(0)
+        .out_has("\"stopped\":true")
+        .out_has("\"teardown\":\"signalled\"")
+        .err_has("since given to another process");
+    world.until("every process the run started to end", |_| {
+        tree.iter().all(|pid| !still_listed(*pid))
+    });
+    stranger.kill().expect("this test ends its own process");
+    stranger.wait().expect("it is reaped");
+    world.release("build.go");
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+/// A stop reaches a dispatch whose driver is gone.
+///
+/// The launch record and the ownership lock name a driver, and a dispatch
+/// outlives the driver that started it — so before the registry this state
+/// answered `{"stopped":true,"teardown":"nothing-to-stop"}` with an exit 0 while
+/// the dispatch went on running. The driver here is ended the way a host ends one
+/// it has run out of memory for, and what it started is left behind.
+#[cfg(unix)]
+#[test]
+fn stopping_a_run_reaches_a_dispatch_whose_driver_and_lock_holder_are_dead() {
+    let world = World::new("driver-stop-orphaned-dispatch");
+    world.script("build.wait", "hold");
+    let (run, driver) = start_detached_announcing(&world, "orphaned", vec![agent("build", &[])]);
+    world.until("a node to be in flight", |world| {
+        !world.events_of(&run, "node-dispatched").is_empty()
+    });
+    world.until("the dispatch to be a process below the driver", |_| {
+        !descendants(driver).is_empty()
+    });
+    let dispatch = descendants(driver);
+
+    // The driver goes the way a host ends a process it has run out of memory
+    // for, and what it started does not go with it.
+    end_process(driver);
+    assert!(
+        dispatch.iter().all(|pid| still_listed(*pid)),
+        "the driver took its dispatch {dispatch:?} with it, so this journey proves nothing"
+    );
+    // Both of the run's records named that driver, and the views say so in the
+    // one way an operator reads it: nothing is driving the run, and no row here
+    // claims a dispatch — which is the whole of what those two records can find.
+    world.until("the run to read as undriven", |world| {
+        world.run(&["status", &run]).stdout.contains("DRIVER DEAD")
+    });
+    world
+        .run(&["host"])
+        .exited(0)
+        .out_has("no live dispatches")
+        .out_has(&run);
+
+    let stopped = world.run(&["stop", &run]);
+    stopped.exited(0).out_has("\"stopped\":true");
+    assert_eq!(
+        stopped.json()["teardown"],
+        json!("signalled"),
+        "a stop that reached a live dispatch did not report reaching one:\n{}",
+        stopped.stdout
+    );
+    let surviving: Vec<u32> = dispatch
+        .iter()
+        .copied()
+        .filter(|pid| still_listed(*pid))
+        .collect();
+    assert!(
+        surviving.is_empty(),
+        "the stop left {surviving:?} of the dispatch {dispatch:?} running"
+    );
+    // Reported as reached because it *was* reached: the teardown watched it go
+    // rather than reporting on the signal it sent.
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("worker ended when the run was stopped");
+    world.release("build.go");
+}
+
+/// A stop that found nothing running says that, rather than claiming it reached
+/// a tree.
+///
+/// The two are opposite answers to what an operator is asking, and they were one
+/// value: `ESRCH` — no such process — counted as a process reached, so `stop`
+/// answered `signalled` for a run whose work had ended hours earlier and for one
+/// it had genuinely just ended. The run is stopped either way, which is why this
+/// is a success and not a refusal: the ledger record is what stops a run.
+#[test]
+fn stopping_a_run_whose_work_is_over_says_there_was_nothing_to_stop() {
+    let world = World::new("driver-stop-nothing");
+    let run = start_detached(&world, "finished", vec![agent("build", &[])]);
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+
+    let stopped = world.run(&["stop", &run]);
+    stopped.exited(0).out_has("\"stopped\":true");
+    assert_eq!(
+        stopped.json()["teardown"],
+        json!("nothing-to-stop"),
+        "a stop that signalled nothing reported what a stop that ended a run reports:\n{}",
+        stopped.stdout
+    );
+    // And the run's own record says the same, so a later reader is not left to
+    // take this for a run whose workers were ended by it.
+    let recorded = world.events_of(&run, "run-stopped");
+    assert_eq!(recorded.len(), 1, "the stop went unrecorded");
+    assert_eq!(recorded[0]["payload"]["teardown"], json!("nothing-to-stop"));
+}
+
+/// And a stop that found nothing running never reports the run's workers as
+/// ended by it.
+///
+/// The node here is recorded in flight and its worker is genuinely gone — the
+/// driver died and took its dispatch with it, which is the state a run is left
+/// in when a host reboots under it. Nothing was signalled, so "worker ended when
+/// the run was stopped" would be a claim about a signal nobody sent; the view
+/// says what this stop actually established about that worker, which is nothing.
+#[cfg(unix)]
+#[test]
+fn a_stop_that_found_nothing_running_never_reports_its_workers_as_ended() {
+    let world = World::new("driver-stop-nothing-inflight");
+    world.script("build.wait", "hold");
+    let (run, driver) = start_detached_announcing(&world, "vanished", vec![agent("build", &[])]);
+    world.until("a node to be in flight", |world| {
+        !world.events_of(&run, "node-dispatched").is_empty()
+    });
+    world.until("the dispatch to be a process below the driver", |_| {
+        !descendants(driver).is_empty()
+    });
+    for pid in std::iter::once(driver).chain(descendants(driver)) {
+        end_process(pid);
+    }
+
+    let stopped = world.run(&["stop", &run]);
+    stopped.exited(0).out_has("\"stopped\":true");
+    assert_eq!(
+        stopped.json()["teardown"],
+        json!("nothing-to-stop"),
+        "a stop with nothing left to aim at reported reaching a tree:\n{}",
+        stopped.stdout
+    );
+
+    let status = world.run(&["status", &run]);
+    status.exited(0).out_has("worker may still be running");
+    assert!(
+        !status
+            .stdout
+            .contains("worker ended when the run was stopped"),
+        "a view reported a worker as ended by a stop that signalled nothing:\n{}",
+        status.stdout
+    );
+    world.release("build.go");
+}
+
+/// A dispatch this run cannot record does not run.
+///
+/// The registry is a trust boundary rather than bookkeeping around one: an entry
+/// that was not written is a process no view will show and no `stop` will reach,
+/// on a run whose own records say it has nothing running. So a dispatch that
+/// cannot be registered is taken back down and the node settles as an
+/// infrastructure failure naming what could not be written — the same ending a
+/// dispatch that could not start at all takes, and the same one the loop retries.
+///
+/// Nothing races. One node is held open, which keeps the driver in its loop with
+/// nothing to do, and the node under test waits on a person — so the registry is
+/// broken while the run is idle and the attestation is what releases the dispatch
+/// into it. The held dispatch beside it is the control: it was registered before
+/// the fault and it is still running afterwards, so what disappears is the
+/// dispatch that was refused and nothing else.
+#[cfg(unix)]
+// llmlint: ignore-block[tests_mirror_real_usage] a run whose registry cannot be written is a
+// filesystem condition, not something a user types: the directory is created with the run and
+// the only writers under it are its own dispatches. What it stands for — a full disk, a
+// revoked permission, a volume that went read-only under a live run — is reachable only by
+// arranging the filesystem, so the fixture removes exactly that one thing and everything else
+// in the journey is the real binary end to end.
+#[test]
+fn a_dispatch_this_run_cannot_record_is_refused_and_does_not_run() {
+    let world = World::new("driver-dispatch-unrecordable");
+    world.script("held.wait", "hold");
+    let (run, driver) = start_detached_announcing(
+        &world,
+        "unrecordable",
+        vec![
+            agent("held", &[]),
+            human("approve", &[]),
+            agent("build", &["approve"]),
+        ],
+    );
+    world.until(
+        "the run to ask the person and hold a dispatch open",
+        |world| {
+            world
+                .events_of(&run, "node-settled")
+                .iter()
+                .any(|event| event["labels"]["node"] == json!("approve"))
+                && !world.events_of(&run, "node-dispatched").is_empty()
+        },
+    );
+    world.until("the held dispatch to be a process below the driver", |_| {
+        !descendants(driver).is_empty()
+    });
+    let held = descendants(driver);
+
+    // The registry cannot be written: a file where its directory has to be, which
+    // no host will create a directory under.
+    let registry = world.run_file(&run, "dispatches");
+    std::fs::remove_dir_all(&registry).expect("the registry is taken away");
+    std::fs::write(&registry, "not a directory").expect("something in the way");
+
+    world.run(&["attest", &run, "approve"]).exited(0);
+
+    // The dispatch is made, refused, and taken back down — and the node says so
+    // where an operator reads it.
+    world.until("the node to settle", |world| {
+        world
+            .events_of(&run, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == json!("build"))
+    });
+    let settled = world.events_of(&run, "node-settled");
+    let build = settled
+        .iter()
+        .find(|event| event["labels"]["node"] == json!("build"))
+        .expect("the node settles");
+    assert_eq!(
+        build["payload"]["outcome"],
+        json!("infrastructure-failure"),
+        "a dispatch nothing could record settled as something else: {build}"
+    );
+    let said = build["payload"]["detail"].as_str().unwrap_or_default();
+    assert!(
+        said.contains("dispatches"),
+        "the settlement does not say what could not be recorded: {build}"
+    );
+    world
+        .run(&["results", &run])
+        .exited(0)
+        .out_has("build")
+        .out_has("failed");
+
+    // And the work it started really is gone. The refused dispatch was held open
+    // by its double like the control beside it, so a process still under the
+    // driver would be one this run cannot find and nobody asked for.
+    world.until(
+        "the refused dispatch to be gone from under the driver",
+        |_| descendants(driver) == held,
+    );
+    world.release("held.go");
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+/// A stop whose run holds a **lock** this build cannot read says so, and still
+/// ends the tree it can find.
+///
+/// An unreadable lock names nobody, so it adds no root — but it is not the same
+/// as a run nothing holds, and a stop that swallowed the difference would leave
+/// an operator reading a narrower teardown than they asked for with nothing
+/// saying why. It is not refused either: the lock can only *widen* what a
+/// teardown reaches, so losing it costs reach, and refusing over it would leave a
+/// live run running. The registry below is the opposite case, and the journey
+/// after this one is where the difference is stated.
+#[cfg(unix)]
+// llmlint: ignore-block[tests_mirror_real_usage] a held lock this build cannot read is not a
+// state any command produces: the only writer of that file is a live driver taking the run,
+// and it writes a record of its own schema. What it stands for — a lock written by a build
+// this one does not understand — is reachable only across versions, so the fixture writes the
+// one fact under test and everything else in the journey is the real binary end to end.
+#[test]
+fn stopping_a_run_whose_lock_cannot_be_read_says_so_and_still_ends_what_it_finds() {
+    let world = World::new("driver-stop-unreadable-lock");
+    world.script("build.wait", "hold");
+    let (run, driver) = start_detached_announcing(&world, "unreadable", vec![agent("build", &[])]);
+    world.until("a node to be in flight", |world| {
+        !world.events_of(&run, "node-dispatched").is_empty()
+    });
+    world.until("the dispatch to be a process below the driver", |_| {
+        !descendants(driver).is_empty()
+    });
+    let tree: Vec<u32> = std::iter::once(driver).chain(descendants(driver)).collect();
+
+    std::fs::write(
+        world.run_file(&run, "owner.lock"),
+        "not a lock this build knows",
+    )
+    .expect("the lock is rewritten");
+
+    let stopped = world.run(&["stop", &run]);
+    stopped
+        .exited(0)
+        .out_has("\"teardown\":\"signalled\"")
+        .err_has("ownership lock")
+        .err_has("cannot be read");
+    world.until("every process the run started to end", |_| {
+        tree.iter().all(|pid| !still_listed(*pid))
+    });
+    world.release("build.go");
+}
+
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+/// A stop whose run holds a **registry** this build cannot read refuses, signals
+/// nothing, and works on the retry.
+///
+/// The other half of the pair, and the opposite answer. Every other record a stop
+/// consults can only add a root, so one it cannot read costs reach. The registry
+/// is what says whether the run has work running at all — so a reader that met an
+/// entry it could not parse and carried on would report `nothing-to-stop` about a
+/// run it never managed to ask, which is the false completion this verb exists to
+/// refuse, one layer further in.
+///
+/// Both shapes an unreadable entry takes: one that is not a record at all, and
+/// one that is a record carrying a field this build does not know — a newer
+/// writer's, which a reader that shrugged would silently act on half of. Nothing
+/// is signalled for either, so the run is intact and the same ask works once the
+/// entry is gone.
+#[cfg(unix)]
+// llmlint: ignore-block[tests_mirror_real_usage] the only writer of a registry entry is a
+// live dispatch recording the process it is in, and it writes a record of its own schema, so
+// neither shape below is a state a command produces. What they stand for — an entry from a
+// build this one does not understand, and one a crash left half-written — is reachable only
+// across versions or across a power cut, so the fixture writes the one fact under test and
+// everything else in the journey is the real binary end to end.
+#[test]
+fn stopping_a_run_whose_registry_cannot_be_read_refuses_and_leaves_the_run_retryable() {
+    for (shape, entry) in [
+        (
+            "a record that is not one",
+            Some("not an entry this build knows".to_string()),
+        ),
+        (
+            "a record from a writer this build does not know",
+            Some(
+                json!({
+                    "node": "build",
+                    "pid": 4_242,
+                    "host": "this-host",
+                    "dispatched_at": "2026-08-17T00:00:00.000Z",
+                    "started": "a start this host once reported",
+                    "reaped_by": "a build that came later",
+                })
+                .to_string(),
+            ),
+        ),
+        (
+            "a record whose stamp proves nothing",
+            Some(
+                json!({
+                    "node": "build",
+                    "pid": 4_242,
+                    "host": "this-host",
+                    "dispatched_at": "2026-08-17T00:00:00.000Z",
+                    "started": "",
+                })
+                .to_string(),
+            ),
+        ),
+        // And the registry gone altogether. Every run this build creates has
+        // one, so this is not "a run with nothing running" — it is a run whose
+        // record of what it is running has been taken away.
+        ("no registry at all", None),
+    ] {
+        let world = World::new(&format!(
+            "driver-stop-unreadable-registry-{}",
+            shape.replace(' ', "-")
+        ));
+        world.script("build.wait", "hold");
+        let (run, driver) =
+            start_detached_announcing(&world, "unreadable", vec![agent("build", &[])]);
+        world.until("a node to be in flight", |world| {
+            !world.events_of(&run, "node-dispatched").is_empty()
+        });
+        world.until("the dispatch to be a process below the driver", |_| {
+            !descendants(driver).is_empty()
+        });
+        let tree: Vec<u32> = std::iter::once(driver).chain(descendants(driver)).collect();
+
+        let planted = world.run_file(&run, "dispatches/planted.json");
+        match &entry {
+            Some(entry) => std::fs::write(&planted, entry).expect("an entry nobody can read"),
+            None => std::fs::remove_dir_all(world.run_file(&run, "dispatches"))
+                .expect("the registry is taken away"),
+        }
+
+        let refused = world.run(&["stop", &run]);
+        refused
+            .exited(REFUSED)
+            .err_has("was not stopped")
+            .err_has("cannot establish what it is running");
+        assert!(
+            !refused.stdout.contains("\"stopped\":true"),
+            "a stop that established nothing announced a clean stop with {shape}:\n{}",
+            refused.stdout
+        );
+        assert!(
+            !refused.stdout.contains("nothing-to-stop"),
+            "a stop that could not read the registry reported the run as idle:\n{}",
+            refused.stdout
+        );
+
+        // And it really did leave the run alone, which is what makes the refusal
+        // honest rather than merely pessimistic — and the retry below possible.
+        for pid in &tree {
+            assert!(
+                still_listed(*pid),
+                "a refused stop signalled pid {pid} anyway, with {shape} in the registry"
+            );
+        }
+        assert!(
+            world.events_of(&run, "run-stopped").is_empty(),
+            "a stop that refused recorded one anyway:\n{}",
+            world.dump()
+        );
+
+        // The recovery: with what it could not read put right, the same ask ends
+        // the run and says what it reached.
+        match &entry {
+            Some(_) => std::fs::remove_file(&planted).expect("the entry is removed"),
+            None => std::fs::create_dir_all(world.run_file(&run, "dispatches"))
+                .expect("the registry is put back"),
+        }
+        world
+            .run(&["stop", &run])
+            .exited(0)
+            .out_has("\"stopped\":true")
+            .out_has("\"teardown\":\"signalled\"");
+        world.until("every process the run started to end", |_| {
+            tree.iter().all(|pid| !still_listed(*pid))
+        });
+        world.release("build.go");
+    }
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+/// A stop watches the tree it signalled and refuses when it is still there.
+///
+/// `Signalled` was never a process that had exited — `kill` reports a delivered
+/// signal and nothing more — and the type said so, deferring the liveness probe
+/// to a caller that never performed it. So a worker that took the ask and stayed
+/// was reported as a clean stop, which is how an operator walks away from a run
+/// still burning a CPU.
+///
+/// The worker that stays is the run's own dispatch, scripted to keep working
+/// through the polite ask: a real process, started by the driver, inside the
+/// tree the teardown walks for itself. The `SIGTERM` it ignores is the one the
+/// stop actually sent it, and the forceful ask this journey ends with is the one
+/// no process can ignore.
+#[cfg(unix)]
+#[test]
+fn a_stop_whose_tree_takes_the_ask_and_stays_refuses_rather_than_reporting_a_clean_stop() {
+    let world = World::new("driver-stop-deaf");
+    world.script("build.wait", "hold");
+    world.script("build.ignores-the-ask", "yes");
+    let (run, driver) = start_detached_announcing(&world, "deaf", vec![agent("build", &[])]);
+    world.until("a node to be in flight", |world| {
+        !world.events_of(&run, "node-dispatched").is_empty()
+    });
+    world.until("the dispatch to be a process below the driver", |_| {
+        !descendants(driver).is_empty()
+    });
+    let worker = descendants(driver);
+
+    let refused = world.run(&["stop", &run]);
+    refused.exited(REFUSED).err_has("only partly stopped");
+    assert!(
+        !refused.stdout.contains("\"stopped\":true"),
+        "a run with a process still running was announced as a clean stop:\n{}",
+        refused.stdout
+    );
+    let surviving: Vec<u32> = worker
+        .iter()
+        .copied()
+        .filter(|pid| still_listed(*pid))
+        .collect();
+    assert_eq!(
+        surviving, worker,
+        "the dispatch {worker:?} ended on the polite ask, so the refusal above proves nothing"
+    );
+
+    // The record says which of the answers it was, so no reader takes this for a
+    // run whose work was ended.
+    let stopped = world.events_of(&run, "run-stopped");
+    assert_eq!(stopped.len(), 1);
+    assert_eq!(
+        stopped[0]["payload"]["teardown"],
+        json!("partly-signalled"),
+        "a stop that left a process running was recorded as something else: {}",
+        stopped[0]
+    );
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("worker may still be running");
+
+    // The ask no worker can ignore, which is also this journey's cleanup: the
+    // dispatch it left running is the one thing a `World` going out of scope
+    // cannot take with it.
+    for pid in &surviving {
+        end_process(*pid);
+    }
     world.release("build.go");
 }
 
