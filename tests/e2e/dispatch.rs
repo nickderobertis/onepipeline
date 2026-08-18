@@ -788,6 +788,14 @@ fn events_reported(status: &str, node: &str) -> u64 {
 /// one millisecond ask for the same directory and the second is refused. A run
 /// reaches this state the way a real one does — a node becoming ready while
 /// another is already in flight.
+///
+/// `#[cfg(unix)]` because of what it reads the registry *through*: a `stop`
+/// reporting `signalled` over the roots this run holds, which is
+/// `sys::platform_stop`'s fold — and that fold's Windows arm is `taskkill`'s,
+/// held there by the ungated journeys `src/sys.rs` names beside it. The gate is
+/// therefore about where the teardown half is proven per platform and not about
+/// anything here being unix-shaped; nothing this journey reaches for is. It has
+/// never been run on Windows, so it is not claimed for that platform either.
 #[cfg(unix)]
 #[test]
 fn two_dispatches_running_in_one_driver_are_stopped_as_one_run() {
@@ -1862,13 +1870,14 @@ fn a_launchs_own_environment_reaches_the_member_the_library_backend_runs() {
 /// What the document *means* is the runner's business; this crate's claim is
 /// only that it holds one parser, so the journey ends where the graph runs.
 ///
-/// It ends there rather than at settlement, and the reason is the other thing an
-/// emptied `PATH` takes away. A host with nothing on it cannot be asked when a
-/// process started, and a dispatch whose process cannot be stamped is one the
-/// run could never find again — so it is refused rather than run blind, and the
-/// node settles as an infrastructure failure naming exactly that. That is a fact
-/// about this host, decided after the launch this journey is about, and it is
-/// asserted here so the two are not confused for one another.
+/// It ends there rather than at settlement, and what happens after it is a fact
+/// about the **host** rather than about the launch — decided after the launch
+/// this journey is about, and asserted below so the two are never confused for
+/// one another. That fact is the one thing here the two platforms do not share,
+/// because the question a dispatch is registered against — when its process
+/// started — is asked of a program on Unix and of the process itself on Windows.
+/// So it is stated per platform at the assertion, and neither platform is left
+/// asserting nothing.
 #[test]
 fn a_document_the_runner_accepts_launches_whichever_way_it_is_asked_for() {
     for form in ["--attach", "--detach"] {
@@ -1903,10 +1912,8 @@ fn a_document_the_runner_accepts_launches_whichever_way_it_is_asked_for() {
             !world.observer_saw().is_empty()
         });
 
-        // And the loop drove: it dispatched the node, on a host that cannot say
-        // when a process started — so the dispatch could not be registered, and
-        // the node settles saying so rather than running work the run could
-        // never find again.
+        // And the loop drove: it dispatched the node, and the node settled. What
+        // it settled *as* is the per-platform half below.
         world.until("the run to settle", |world| {
             world.run_file("schema", "result.json").is_file()
         });
@@ -1916,10 +1923,30 @@ fn a_document_the_runner_accepts_launches_whichever_way_it_is_asked_for() {
             world.dump()
         );
         let settled = world.events_of("schema", "node-settled");
+        // On Unix `sys::process_start_token` asks `ps`, which is resolved **by
+        // name** off the `PATH` emptied above — so this host cannot say when the
+        // dispatch's process started, and a dispatch the run could never find
+        // again is refused rather than run blind.
+        #[cfg(unix)]
         assert_eq!(
             settled[0]["payload"]["outcome"],
             json!("infrastructure-failure"),
             "a dispatch nothing could stamp settled as something else: {}",
+            settled[0]
+        );
+        // Windows asks the **process**, not a program: `OpenProcess` and
+        // `GetProcessTimes` in the `#[cfg(windows)]` half of that same function,
+        // which resolves nothing by name. So an emptied `PATH` takes nothing
+        // away here — the dispatch is stamped and registered, and it runs,
+        // because everything below it in this world is named by absolute path.
+        // Asserted rather than gated away, so the platform that *can* stamp is
+        // held to running the node through to a settlement rather than to
+        // whatever it happened to do.
+        #[cfg(windows)]
+        assert_eq!(
+            settled[0]["payload"]["status"],
+            json!("done"),
+            "a dispatch this host could stamp did not run: {}",
             settled[0]
         );
         let results = world.run(&["results", "schema"]);
