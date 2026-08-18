@@ -10,7 +10,13 @@
 // model turns to produce, and `dispatch.rs` is where the real `oneagentgraph` binary is
 // driven instead. `harness.rs` carries the same suppression and the full rationale.
 
-use crate::harness::{agent, plan_of, World, REFUSED};
+use crate::harness::{agent, plan_of, World};
+// The two journeys that assert a refusal are the ones a writer runs out of room in,
+// which is `setrlimit(2)`, so both are `#[cfg(unix)]` and so is what only they reach
+// for. Unconditionally imported, `REFUSED` is an unused import under `-D warnings` on
+// Windows — a build failure this host's gate, which compiles the unix half, cannot see.
+#[cfg(unix)]
+use crate::harness::REFUSED;
 use serde_json::{json, Value};
 
 #[test]
