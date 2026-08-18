@@ -41,7 +41,7 @@ resolver = "2"
 # `tests/e2e/dispatch.rs` and `tests/e2e/real_vcs.rs` drive those surfaces against
 # the real siblings, so a pin moved below one fails rather than reads differently.
 #
-# Four further floors, each a **requirement** of what this crate composes today:
+# Five further floors, each a **requirement** of what this crate composes today:
 #
 # - `oneagentgraph` 0.2.16 lets a `kind: oneharness` member's own oneharness
 #   config decide its run — `schema_file` there asks for a validated JSON answer,
@@ -54,6 +54,17 @@ resolver = "2"
 #   oneharness *library*. Below it that turn is a process, and every seam this
 #   build reads it through — the classification a death is reported under, the
 #   teardown of the harness tree, `member-started`'s fields — is the other one.
+# - `oneagentgraph` 0.3.0 is the release a persona is a **onejudge config
+#   fragment** in: the role is the top-level `system_prompt` and the label the
+#   top-level `name`, and the `agent:` block that spelled both before is refused
+#   outright — no alias, no flag, no deprecation period. The three personas under
+#   `personas/` are shipped content written in that format, so below 0.3.0 the
+#   files this crate ships do not load at all — which is why the requirement is
+#   the one below rather than the `0.2.18` it replaces: a caret over that pin
+#   excludes 0.3.0, so the declaration, not the lock, was the constraint.
+#   `tests/e2e/shipped.rs` reads each shipped persona through the sibling's own
+#   `Persona::parse` and layers it onto a base, so a file in the wrong spelling
+#   fails rather than reads differently.
 # - `onevcs` 0.2.8 raises `provenance::SUBJECT_LIMIT` from 72 to 120, which
 #   `src/graph.rs` reads to refuse an unpublishable node title at plan load — so
 #   the `onevcs` pin also decides which titles a plan may state. Below it a load
@@ -72,7 +83,7 @@ resolver = "2"
 # 0.4.2 the retry is refused before it dispatches and that journey fails saying so,
 # rather than reading differently.
 [workspace.dependencies]
-oneagentgraph = "0.2.18"
+oneagentgraph = "0.3.0"
 onevcs = "0.4.1"
 # The sibling's own test-support crate, from the **same** revision as the library
 # it implements — here by resolving both from the registry at the releases cut

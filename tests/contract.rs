@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 
 use clap::{CommandFactory, Parser};
 use oneagentgraph::config::{ConfigRef, GraphConfig, JudgeSide, Member};
+use oneagentgraph::persona::{merge, Persona};
 use onepipeline::channel::{allows, Author, Command as Edit, Dependents, Reply, SurfaceKind};
 use onepipeline::cli::{Cli, Command, DAG_GRAPH_OFF, DEFAULT_HEARTBEAT_INTERVAL_SECONDS};
 use onepipeline::controls::NodeControls;
@@ -2244,19 +2245,26 @@ fn every_persona_the_contract_ships_is_present_and_has_both_sides() {
         let path = repo_root().join("personas").join(format!("{file}.yaml"));
         let text =
             std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{file} persona ships: {e}"));
-        let persona: Value =
-            serde_norway::from_str(&text).unwrap_or_else(|e| panic!("{file} parses: {e}"));
+        // Through the sibling's own reader, which is the trust boundary a member
+        // resolving this file crosses: a persona in a shape it refuses ships
+        // broken, and asserting on the YAML alone would not notice.
+        let persona = Persona::parse(&text, &format!("personas/{file}.yaml"))
+            .unwrap_or_else(|e| panic!("{file} is not a persona oneagentgraph loads: {e}"));
         assert_eq!(
-            persona.pointer("/agent/name").and_then(Value::as_str),
+            persona.label(),
             Some(role),
             "personas/{file}.yaml carries the {role} role"
         );
+        // What it layers onto a base, read off the merge rather than off the
+        // file: that is the config the member is actually launched with.
+        let effective = merge("{}\n", "an empty base config", &persona)
+            .unwrap_or_else(|e| panic!("{file} does not layer onto a base config: {e}"));
         assert!(
-            persona.pointer("/agent/instructions").is_some(),
+            effective.pointer("/system_prompt").is_some(),
             "{file} states the agent's role"
         );
         assert!(
-            persona.pointer("/user/persona").is_some(),
+            effective.pointer("/user/persona").is_some(),
             "{file} states the supervisor's review bar"
         );
     }

@@ -525,7 +525,7 @@ fn a_plan_persona_reaches_the_member_that_actually_runs() {
     world.write_graphs();
     std::fs::write(
         world.graphs().join("requested-reviewer.yaml"),
-        "agent:\n  name: requested-reviewer\n  instructions: Review the change.\nuser:\n  persona: Demand evidence.\n",
+        "name: requested-reviewer\nsystem_prompt: Review the change.\nuser:\n  persona: Demand evidence.\n",
     )
     .expect("the requested persona is written");
     let mut node = agent("review", &[]);
@@ -2239,7 +2239,7 @@ fn turns_dispatched(world: &World, run: &str, node: &str, step: Option<&str>) ->
 fn write_supervised_node_graph(world: &World) {
     std::fs::write(
         world.graphs().join("onejudge.base.yaml"),
-        "agent:\n  instructions: Do the work.\nuser:\n  persona: Review it.\n  \
+        "system_prompt: Do the work.\nuser:\n  persona: Review it.\n  \
          done_when: the original task is complete\n  max_turns: 12\n",
     )
     .expect("the onejudge base config is written");
@@ -2257,7 +2257,7 @@ fn write_supervised_node_graph(world: &World) {
 fn write_persona(world: &World, name: &str) {
     std::fs::write(
         world.graphs().join(format!("{name}.yaml")),
-        format!("agent:\n  name: {name}\n  instructions: Ship it.\nuser:\n  persona: Review it.\n"),
+        format!("name: {name}\nsystem_prompt: Ship it.\nuser:\n  persona: Review it.\n"),
     )
     .expect("the persona is written");
 }
