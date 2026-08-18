@@ -682,25 +682,40 @@ fn hold(
     // taken for one of them.
     let mut seq = 100;
     fake::wait_for_any_ticking(until, every, &mut || {
-        println!(
-            "{}",
-            serde_json::json!({
-                "v": 1,
-                "ts": fake::now(),
-                "stream": stream(),
-                "seq": seq,
-                "source": "agentgraph",
-                // The producing library's own spelling of the kind, read off its
-                // enum: a double that hand-wrote the word would keep emitting it
-                // after the sibling renamed it, which is an oracle for a stream
-                // nothing produces.
-                "kind": oneagentgraph::event::EventKind::MemberHeartbeat.as_str(),
-                "labels": labels,
-                "payload": {},
-            })
-        );
+        publish(&serde_json::json!({
+            "v": 1,
+            "ts": fake::now(),
+            "stream": stream(),
+            "seq": seq,
+            "source": "agentgraph",
+            // The producing library's own spelling of the kind, read off its
+            // enum: a double that hand-wrote the word would keep emitting it
+            // after the sibling renamed it, which is an oracle for a stream
+            // nothing produces.
+            "kind": oneagentgraph::event::EventKind::MemberHeartbeat.as_str(),
+            "labels": labels,
+            "payload": {},
+        }));
         seq += 1;
     });
+}
+
+/// Write one envelope to the stream this double publishes on.
+///
+/// A fallible write rather than `println!`, which panics: the reader on the
+/// other end can go away — a driver that stopped waiting closes the pipe — and
+/// that is an ordinary I/O error rather than a scenario. Unwinding out of it
+/// would reach a test as a double that crashed, which is the one thing this
+/// program must never look like, so the error is reported and the process ends
+/// the way every other failure a double cannot act out ends.
+fn publish(envelope: &serde_json::Value) {
+    use std::io::Write;
+    if let Err(error) = writeln!(std::io::stdout().lock(), "{envelope}") {
+        fake::fail(&format!(
+            "cannot publish a {} envelope: {error}",
+            envelope["kind"]
+        ));
+    }
 }
 
 /// The turn is over, so nothing can be delivered into it any more.
