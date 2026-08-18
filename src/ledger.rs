@@ -952,7 +952,7 @@ pub fn dispatches_of(paths: &RunPaths) -> Result<Vec<DispatchRecord>> {
     })?;
     let mut found = Vec::new();
     for entry in listed {
-        // llmlint: ignore[changed_behavior_has_e2e] an enumeration that fails *part way* is
+        // llmlint: ignore-block[changed_behavior_has_e2e] an enumeration that fails *part way* is
         // the host withdrawing a directory it has already begun to list — a condition no
         // portable journey can set, and one this reader answers exactly as it answers the
         // directory it could not open at all, which
@@ -961,7 +961,7 @@ pub fn dispatches_of(paths: &RunPaths) -> Result<Vec<DispatchRecord>> {
         let entry = entry.map_err(|source| Error::Ledger {
             path: registry.clone(),
             source,
-        })?;
+        })?; // llmlint: ignore-end[changed_behavior_has_e2e]
         let held: DispatchRecord = read_json(&entry.path())?;
         if !held.is_usable() {
             return Err(Error::Invalid(format!(

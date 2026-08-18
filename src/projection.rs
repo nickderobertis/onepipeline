@@ -533,7 +533,7 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
                 journal::StopTeardown::NothingToStop
                 | journal::StopTeardown::NotAttempted
                 | journal::StopTeardown::PartlySignalled
-                // llmlint: ignore[changed_behavior_has_e2e] this pattern is forced by
+                // llmlint: ignore-block[changed_behavior_has_e2e] this pattern is forced by
                 // exhaustiveness over a value the journal newly carries, and it renders
                 // nothing new: `refused` lands on `WorkersUndetermined`, the same state the
                 // four variants beside it map to, and three of those — `nothing-to-stop`,
@@ -547,6 +547,7 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
                 // `a_teardown_refused_by_everything_it_aimed_at_reports_no_signal_at_all` and
                 // `a_stop_that_could_signal_nothing_it_aimed_at_says_so`.
                 | journal::StopTeardown::Refused
+                // llmlint: ignore-end[changed_behavior_has_e2e]
                 | journal::StopTeardown::Elsewhere => StopState::WorkersUndetermined,
             };
         }
