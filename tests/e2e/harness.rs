@@ -1448,9 +1448,7 @@ fn held_alias(held: &Path, name: &str) -> PathBuf {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         loop {
             let _ = std::fs::remove_file(&mine);
-            let held = std::fs::hard_link(&published, &mine)
-                .or_else(|_| std::fs::copy(&published, &mine).map(|_| ()));
-            match held {
+            match place(&published, &mine) {
                 Ok(()) => break,
                 Err(error) => assert!(
                     std::time::Instant::now() < deadline,
@@ -1462,6 +1460,131 @@ fn held_alias(held: &Path, name: &str) -> PathBuf {
         }
     }
     mine
+}
+
+/// How many staging names this process has spent placing doubles.
+///
+/// Per attempt rather than per name: the retry above may place the same double
+/// twice, and a staging file left behind by an attempt that failed must not be
+/// the one the next attempt writes.
+static STAGED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Put one built binary at the name this process holds it under, whole or not at
+/// all.
+///
+/// The hard link is atomic by construction — the name either resolves or it does
+/// not — and it stays the fast path for the reason [`held_alias`] gives. The copy
+/// behind it is *not* atomic, and writing it straight to `mine` leaves that name
+/// resolving to a **partial** binary for as long as the copy takes: a world that
+/// execs the double in that window reads a truncated image and gets
+/// `Exec format error (os error 8)`, which was reported from a real dispatch in
+/// three tests on a cold build. It reads as a broken double rather than as a
+/// race, and the retry loop above cannot catch it — the file exists while it is
+/// partial, so the copy returns `Ok` and the loop breaks.
+///
+/// So the copy lands on a name of this process's own **in the destination's own
+/// directory** and is renamed into place. Rename is atomic within a filesystem,
+/// and staging beside the destination is what keeps it one: a reader watching
+/// `mine` sees nothing, the old file, or a complete new one.
+fn place(published: &Path, mine: &Path) -> std::io::Result<()> {
+    if std::fs::hard_link(published, mine).is_ok() {
+        return Ok(());
+    }
+    let staging = mine.with_file_name(format!(
+        "{}.staging-{}-{}",
+        mine.file_name().unwrap_or_default().to_string_lossy(),
+        std::process::id(),
+        STAGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+    ));
+    std::fs::copy(published, &staging)?;
+    std::fs::rename(&staging, mine).inspect_err(|_| {
+        // A rename that did not happen leaves the staging file next to the
+        // destination, where the next `build` would sweep nothing: the directory
+        // is this process's own and lives as long as it does.
+        let _ = std::fs::remove_file(&staging);
+    })
+}
+
+/// A double is never visible half-written at the name a world execs it under.
+///
+/// The window is [`place`]'s copy fallback, and it is only observable while the
+/// copy runs — so this watches the destination while a file too big to be copied
+/// in one write is placed over one that is already there, and asserts that every
+/// observation is one of three things: no file, the whole of the old one, or the
+/// whole of the new one. A length that is neither is the truncated image a
+/// concurrent exec reads as `Exec format error (os error 8)`.
+///
+/// The destination exists before the placement, which is what sends this down
+/// the fallback: `hard_link` refuses a name that already resolves. The fast path
+/// is what every other journey in this suite takes.
+// llmlint: ignore-block[tests_mirror_real_usage] the subject is this suite's own
+// scaffolding rather than a journey: `place` is how a test process gets a double onto a
+// name it can spawn, and it is reachable from no interface a user of this crate has. What
+// it has to be true of is a property of the placement itself — that no concurrent reader
+// of the destination ever sees a partial — and the only way to observe that is to watch
+// the destination while the placement runs. The journeys that then *spawn* the doubles
+// are every other test in this directory, all of which drive the compiled binary.
+#[test]
+fn a_double_is_placed_whole_or_not_at_all() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let dir = std::env::temp_dir().join(format!("onepipeline-place-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory for the placement");
+
+    // Big enough that copying it is many writes rather than one. A small file
+    // would be placed inside a single write and would prove nothing about a
+    // binary, which is the size that made this a real failure.
+    let replacement = vec![b'N'; 64 << 20];
+    let replaced = b"the double this one replaces".to_vec();
+    let published = dir.join("double.published");
+    let mine = dir.join("double");
+    std::fs::write(&published, &replacement).expect("the built double is written");
+    std::fs::write(&mine, &replaced).expect("the double this one replaces is written");
+
+    let watching = Arc::new(AtomicBool::new(true));
+    let stop = Arc::clone(&watching);
+    let destination = mine.clone();
+    let whole = [replaced.len() as u64, replacement.len() as u64];
+    let reader = std::thread::spawn(move || {
+        let mut looked: u64 = 0;
+        let mut partial: Option<u64> = None;
+        while stop.load(Ordering::Relaxed) {
+            looked += 1;
+            // A name that does not resolve is one of the three: a reader that
+            // finds nothing there looks again, and never execs a fragment.
+            if let Ok(seen) = std::fs::metadata(&destination) {
+                if !whole.contains(&seen.len()) {
+                    partial = partial.or(Some(seen.len()));
+                }
+            }
+        }
+        (looked, partial)
+    });
+
+    place(&published, &mine).expect("the double is placed");
+    watching.store(false, Ordering::Relaxed);
+    let (looked, partial) = reader.join().expect("the reader ends");
+
+    assert!(looked > 0, "the reader never looked at the destination");
+    assert_eq!(
+        partial,
+        None,
+        "a reader saw {} byte(s) at {} while it was being placed — neither the old \
+         double ({}) nor the new one ({})",
+        partial.unwrap_or_default(),
+        mine.display(),
+        whole[0],
+        whole[1]
+    );
+    assert_eq!(
+        std::fs::metadata(&mine).expect("the placed double").len(),
+        replacement.len() as u64,
+        "the placement did not leave the new double behind"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A repository gate command, written into this world as a script.
