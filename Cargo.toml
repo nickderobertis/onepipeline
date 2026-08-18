@@ -62,6 +62,15 @@ resolver = "2"
 # - `onevcs` 0.4.0 carries `PublishRequest.body`, which is the whole of what a
 #   drafted body is *for*: below it a change request opens with the boilerplate
 #   this crate has no way to replace. 0.4.1 adds a stacked-branch publish above it.
+#
+# One floor is carried by `Cargo.lock` rather than by the requirement below, and
+# deliberately: `onevcs` 0.4.2 takes up the session a stopped run left on a pinned
+# branch instead of cutting a second one on the same name, which is what lets a
+# retry reach work its predecessor stranded. `^0.4.1` already permits it, so the
+# resolution is the whole of the fix and widening the requirement would buy
+# nothing. `tests/e2e/session_reuse.rs` is what holds the resolution there: below
+# 0.4.2 the retry is refused before it dispatches and that journey fails saying so,
+# rather than reading differently.
 [workspace.dependencies]
 oneagentgraph = "0.2.18"
 onevcs = "0.4.1"
@@ -76,7 +85,7 @@ onevcs-testing = "0.2.1"
 
 [package]
 name = "onepipeline"
-version = "0.7.1"
+version = "0.7.2"
 edition = "2021"
 rust-version = "1.88"
 description = "Execute a task DAG over oneagentgraph and onevcs, merging their event streams into one."
@@ -154,7 +163,7 @@ windows-sys = { version = "0.61", features = [
   "Win32_System_Threading",
 ] }
 
-# Two dev-dependencies, and neither is a test framework. The e2e suite drives the
+# Four dev-dependencies, and none is a test framework. The e2e suite drives the
 # compiled binary as a subprocess with `std::process` and reads what it wrote, so
 # it needs no command-assertion crate — `tests/e2e/harness.rs` is the whole of it.
 #
@@ -171,9 +180,21 @@ windows-sys = { version = "0.61", features = [
 # than in prose, with no git, no host, and no process. Both are dev-dependencies
 # and must stay so: what they implement must never be reachable from a release
 # binary.
+#
+# `fs4` and `sha2` are one journey's tools, not a second implementation of
+# anything: `tests/e2e/session_reuse.rs` has to make a run root *occupied* —
+# taken exclusively, which is the one answer that stops `onevcs` reusing a
+# session — and no verb of that sibling's holds an occupancy lease past its own
+# exit, because the lease is deliberately one the OS releases with the process.
+# So that journey takes the advisory lock itself, on the file the sibling names
+# the lease after: `fs4` is the lock (the same crate, and the same lock, `onevcs`
+# uses) and `sha2` spells the name. Both are already in the graph through the
+# siblings, so neither adds anything to what this build resolves.
 [dev-dependencies]
+fs4 = "0.13"
 onepipeline-testfakes = { path = "crates/testfakes" }
 onevcs-testing = { workspace = true }
+sha2 = "0.10"
 
 [[test]]
 name = "e2e"

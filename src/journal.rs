@@ -211,21 +211,40 @@ pub const STOP_TEARDOWN: &str = "teardown";
 /// What a `run-stopped` record says its teardown established about the run's
 /// processes.
 ///
-/// A closed set on the wire as well as in the code: an unknown value is not a
-/// fourth meaning to guess at, and [`StopTeardown::of`] reads one as the
-/// conservative answer rather than the convenient one.
+/// A closed set on the wire as well as in the code: an unknown value is not one
+/// more meaning to guess at, and [`StopTeardown::of`] reads one as the
+/// conservative answer rather than the convenient one — which is also what a
+/// build that predates a value added here does with it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum StopTeardown {
-    /// The run's process tree was listed in full and every process in it was
-    /// signalled.
+    /// The run's process tree was listed in full, every process in it was
+    /// signalled, and this host then watched them go.
     Signalled,
+    /// The tree was listed and there was nothing in it left to signal: every
+    /// process the run named was already gone.
+    ///
+    /// The run is stopped — the ledger record is what stops it — and this stop
+    /// ended nothing, because there was nothing to end. Recorded apart from
+    /// [`Signalled`](Self::Signalled) because a reader that cannot tell them
+    /// apart cannot tell a run whose workers were ended from one whose workers
+    /// nobody found.
+    NothingToStop,
     /// This host gave no listing the tree could be read from, so nothing was
     /// signalled and the run was left as it was.
     NotAttempted,
     /// The tree was listed and part of it was signalled; at least one process in
-    /// it could not be, and is still running.
+    /// it is still running — one that could not be signalled, or one that was
+    /// and did not go.
     PartlySignalled,
+    /// The tree was listed and **every** ask over it was refused, so nothing in
+    /// it was signalled and all of it that is still there is still running.
+    ///
+    /// Recorded apart from [`PartlySignalled`](Self::PartlySignalled), which a
+    /// reader takes as some of the run having come down. None of it did, and a
+    /// reader that cannot tell the two apart tells an operator that a teardown
+    /// they must finish by hand made a start on itself.
+    Refused,
     /// The run's driver is on another host, so this one attempted nothing and
     /// has nothing to say about its processes.
     Elsewhere,

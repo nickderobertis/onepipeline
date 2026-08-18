@@ -771,6 +771,91 @@ fn events_reported(status: &str, node: &str) -> u64 {
         .unwrap_or_else(|e| panic!("`{line}` carries no readable count: {e}"))
 }
 
+/// Two dispatches running **inside one driver** are two registrations, and a
+/// stop over them is a clean stop.
+///
+/// The shape a real run has: node-scope dispatches go through the sibling as a
+/// library call, so a run at any concurrency above one has several live
+/// dispatches sharing the driver's process. A registry keyed by that pid alone
+/// held one entry for both of them — the second overwrote the first, and the
+/// first to end took the survivor's registration away — and the two of them
+/// racing one temporary would leave an entry no reader could parse, which is now
+/// a `stop` that refuses a perfectly healthy run.
+///
+/// The second dispatch is released by an attestation rather than started beside
+/// the first, and that is not only about this suite: the sibling names a library
+/// run's state directory from the clock and the process, so two started inside
+/// one millisecond ask for the same directory and the second is refused. A run
+/// reaches this state the way a real one does — a node becoming ready while
+/// another is already in flight.
+///
+/// `#[cfg(unix)]` because of what it reads the registry *through*: a `stop`
+/// reporting `signalled` over the roots this run holds, which is
+/// `sys::platform_stop`'s fold — and that fold's Windows arm is `taskkill`'s,
+/// held there by the ungated journeys `src/sys.rs` names beside it. The gate is
+/// therefore about where the teardown half is proven per platform and not about
+/// anything here being unix-shaped; nothing this journey reaches for is. It has
+/// never been run on Windows, so it is not claimed for that platform either.
+#[cfg(unix)]
+#[test]
+fn two_dispatches_running_in_one_driver_are_stopped_as_one_run() {
+    let world = World::new("real-shared-process");
+    world.write_graphs();
+    world.script("turn.hold", "hold");
+    let path = world.plan(
+        "shared",
+        &plan_of(
+            "shared",
+            vec![
+                agent("first", &[]),
+                human("approve", &[]),
+                agent("second", &["approve"]),
+            ],
+        ),
+    );
+    world
+        .run_on_agentgraph(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+
+    let dispatched = |world: &World| -> Vec<String> {
+        world
+            .events_of("shared", "node-dispatched")
+            .iter()
+            .filter_map(|event| event["labels"]["node"].as_str().map(str::to_string))
+            .collect()
+    };
+    world.until(
+        "the first node to be in flight beside the person",
+        |world| {
+            dispatched(world).contains(&"first".to_string())
+                && !world.events_of("shared", "node-settled").is_empty()
+        },
+    );
+
+    // The second becomes ready while the first is still in flight, so the driver
+    // is running two dispatches inside itself.
+    world.run(&["attest", "shared", "approve"]).exited(0);
+    world.until("both nodes to be in flight", |world| {
+        dispatched(world).contains(&"second".to_string())
+    });
+    world
+        .run(&["status", "shared"])
+        .exited(0)
+        .out_has("first: running")
+        .out_has("second: running");
+
+    let stopped = world.run(&["stop", "shared"]);
+    stopped.exited(0).out_has("\"stopped\":true");
+    assert_eq!(
+        stopped.json()["teardown"],
+        json!("signalled"),
+        "a stop over two dispatches in one driver did not report reaching them:\n{}",
+        stopped.stdout
+    );
+    world.release("turn.go");
+    world.release("turn.settle");
+}
+
 /// What a live node is doing, read while it is doing it.
 ///
 /// Mid-run, `status` used to say a node had been in flight for thirty-four
@@ -1783,7 +1868,16 @@ fn a_launchs_own_environment_reaches_the_member_the_library_backend_runs() {
 /// sibling by name.
 ///
 /// What the document *means* is the runner's business; this crate's claim is
-/// only that it holds one parser, so the journey ends there.
+/// only that it holds one parser, so the journey ends where the graph runs.
+///
+/// It ends there rather than at settlement, and what happens after it is a fact
+/// about the **host** rather than about the launch — decided after the launch
+/// this journey is about, and asserted below so the two are never confused for
+/// one another. That fact is the one thing here the two platforms do not share,
+/// because the question a dispatch is registered against — when its process
+/// started — is asked of a program on Unix and of the process itself on Windows.
+/// So it is stated per platform at the assertion, and neither platform is left
+/// asserting nothing.
 #[test]
 fn a_document_the_runner_accepts_launches_whichever_way_it_is_asked_for() {
     for form in ["--attach", "--detach"] {
@@ -1800,18 +1894,61 @@ fn a_document_the_runner_accepts_launches_whichever_way_it_is_asked_for() {
         ]);
         command.env("PATH", world.empty_path());
         let started = world.run_on(command, &format!("start {form}"));
-        // The whole of the defect, in one exit code: the launch that refused
-        // this document refused it here, naming a field list that predates the
-        // one it carries.
-        started.exited(0);
-
-        // And it is a launch rather than a parse: the run reaches settlement,
-        // which takes the graph running, the loop driving, and the node it
-        // dispatched reporting back. Read through `status`, where an operator
-        // reads it.
-        world.until("the run to settle", |world| {
-            world.run(&["status", "schema"]).stdout.contains("SETTLED")
+        // The whole of the defect, in one line of the run's own record: the
+        // launcher that refused this document refused it here, naming a field
+        // list that predates the one it carries — so no graph ever started. It
+        // is a launch rather than a parse, and this is the graph the runner
+        // accepted, ran, and settled.
+        assert!(
+            !started.stderr.contains("schema_version"),
+            "the launch refused the document the runner accepts:\n{}",
+            started.stderr
+        );
+        // Read off what the graph's own member did, because that is the same
+        // evidence either way a run is launched: an attached launch relays the
+        // observer's envelopes into the run's store and a detached one hands
+        // them to its driver log, but the member runs in both.
+        world.until("the graph the launch named to run", |world| {
+            !world.observer_saw().is_empty()
         });
+
+        // And the loop drove: it dispatched the node, and the node settled. What
+        // it settled *as* is the per-platform half below.
+        world.until("the run to settle", |world| {
+            world.run_file("schema", "result.json").is_file()
+        });
+        assert!(
+            !world.events_of("schema", "node-dispatched").is_empty(),
+            "the loop never dispatched the node:\n{}",
+            world.dump()
+        );
+        let settled = world.events_of("schema", "node-settled");
+        // On Unix `sys::process_start_token` asks `ps`, which is resolved **by
+        // name** off the `PATH` emptied above — so this host cannot say when the
+        // dispatch's process started, and a dispatch the run could never find
+        // again is refused rather than run blind.
+        #[cfg(unix)]
+        assert_eq!(
+            settled[0]["payload"]["outcome"],
+            json!("infrastructure-failure"),
+            "a dispatch nothing could stamp settled as something else: {}",
+            settled[0]
+        );
+        // Windows asks the **process**, not a program: `OpenProcess` and
+        // `GetProcessTimes` in the `#[cfg(windows)]` half of that same function,
+        // which resolves nothing by name. So an emptied `PATH` takes nothing
+        // away here — the dispatch is stamped and registered, and it runs,
+        // because everything below it in this world is named by absolute path.
+        // Asserted rather than gated away, so the platform that *can* stamp is
+        // held to running the node through to a settlement rather than to
+        // whatever it happened to do.
+        #[cfg(windows)]
+        assert_eq!(
+            settled[0]["payload"]["status"],
+            json!("done"),
+            "a dispatch this host could stamp did not run: {}",
+            settled[0]
+        );
         let results = world.run(&["results", "schema"]);
         results.exited(0).out_has("build");
     }
