@@ -1188,12 +1188,33 @@ fn an_unresolvable_repository_is_refused_before_a_run_starts() {
     assert!(!world.run_file("nosession", "launch.json").exists());
 }
 
+/// A publication its gate rejected, with a drafting dispatch that also failed.
+///
+/// Both endings in one journey because the settlement carries both, in one
+/// order: the publication's own reason is what settled the node, and the
+/// drafting ending follows it because it is true either way. A reader looking
+/// for the drafter must not have to know which of the two failed first.
 #[test]
 fn a_publication_that_its_gate_rejects_settles_the_node_failed_by_name() {
     let world = World::new("lifecycle-gate");
     world.repository("local-direct", &["false"]);
     world.script("service.work", "the worker wrote this\n");
-    let run = settle(&world, "rejected", vec![lifecycle("service", &[])]);
+    world.script("service.pr-author.fail", "1");
+    let drafting = world.pr_author_graph();
+    let path = world.plan(
+        "rejected",
+        &plan_of("rejected", vec![lifecycle("service", &[])]),
+    );
+    world
+        .run(&[
+            "start",
+            &path.to_string_lossy(),
+            "--attach",
+            "--pr-author-graph",
+            &drafting,
+        ])
+        .settled();
+    let run = "rejected".to_string();
 
     let result = world.run_json(&run, "result.json");
     assert_eq!(
@@ -1203,10 +1224,36 @@ fn a_publication_that_its_gate_rejects_settles_the_node_failed_by_name() {
         why(&world, &run)
     );
     assert_eq!(result["nodes"][0]["outcome"], "publication-failed");
-    world
-        .run(&["results", &run])
-        .exited(0)
-        .out_has("publication-failed");
+    let reported = world.run(&["results", &run]);
+    reported.exited(0).out_has("publication-failed");
+
+    // The sibling's own reason leads, and the drafting ending follows it.
+    let settled = world.events_of(&run, "node-settled");
+    let detail = settled[0]["payload"]["detail"]
+        .as_str()
+        .expect("the settlement says why");
+    let publication = detail
+        .find("onevcs:")
+        .expect("the sibling's own reason is what settled the node");
+    let drafted = detail
+        .find("the change request's body was not drafted")
+        .unwrap_or_else(|| panic!("the drafting ending is missing from: {detail}"));
+    assert!(
+        publication < drafted,
+        "the drafting ending displaced the reason the node failed: {detail}"
+    );
+    assert!(
+        reported.stdout.contains("was not drafted"),
+        "`results` did not show the drafting ending:\n{}",
+        reported.stdout
+    );
+
+    // And it is reported on its own kind as well, under the node it happened
+    // to: a publication that failed does not swallow the drafting failure.
+    let undrafted = world.events_of(&run, "body-not-drafted");
+    assert_eq!(undrafted.len(), 1, "{undrafted:?}");
+    assert_eq!(undrafted[0]["payload"]["ending"], "dispatch-failed");
+    assert_eq!(undrafted[0]["labels"]["node"], "service");
 }
 
 /// A title the sibling will not commit under never reaches a dispatch.

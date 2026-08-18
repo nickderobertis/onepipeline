@@ -275,9 +275,16 @@ fn publish(
     // failure came first. The publication's own reason leads, because that is
     // what settled the node.
     let undrafted = undrafted.map(|ending| ending.why());
-    let with_drafting = |detail: String| match &undrafted {
-        Some(why) => format!("{detail}. {why}"),
-        None => detail,
+    // One composition for both endings of a publication that did not happen, so
+    // there is one place the two reasons are put together rather than two that
+    // can come to disagree.
+    let publication_failed = |detail: String| Settlement {
+        branch: branch.clone(),
+        detail: Some(match &undrafted {
+            Some(why) => format!("{detail}. {why}"),
+            None => detail,
+        }),
+        ..Settlement::plain(&node.id, NodeStatus::Failed, Some("publication-failed"))
     };
 
     match crate::vcs::publish(
@@ -293,11 +300,7 @@ fn publish(
             // than a second one. The reason is the sibling's own — the gate it
             // ran and what that said — and it is what the node settles with.
             if let onevcs::PublishOutcome::Failed { reason, .. } = &published.outcome {
-                return Settlement {
-                    branch,
-                    detail: Some(with_drafting(format!("onevcs: {reason}"))),
-                    ..Settlement::plain(&node.id, NodeStatus::Failed, Some("publication-failed"))
-                };
+                return publication_failed(format!("onevcs: {reason}"));
             }
             let labels =
                 engine::dispatch_labels(&paths.run, &node.id, None, node.persona.as_deref());
@@ -328,11 +331,7 @@ fn publish(
                 ..Settlement::plain(&node.id, NodeStatus::Done, None)
             }
         }
-        Err(error) => Settlement {
-            branch,
-            detail: Some(with_drafting(error.to_string())),
-            ..Settlement::plain(&node.id, NodeStatus::Failed, Some("publication-failed"))
-        },
+        Err(error) => publication_failed(error.to_string()),
     }
 }
 
@@ -733,6 +732,61 @@ pub fn ordered_steps(node: &Node) -> std::result::Result<Vec<Step>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The endings this module emits and the endings the contract names are one
+    /// set.
+    ///
+    /// The wire spellings are stated twice — in `docs/contract.md`'s pr-author
+    /// paragraph and in [`Undrafted::ending`] — and only one of them is
+    /// compiled, so the document needs a gate the way the closed set of kinds
+    /// has one in `tests/contract.rs`. It cannot live there: the type is private
+    /// to this module, and a public one would widen the surface past what the
+    /// contract names.
+    #[test]
+    fn every_ending_this_module_emits_is_one_the_contract_names() {
+        let contract = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/contract.md"),
+        )
+        .expect("the contract ships");
+        let endings = [
+            Undrafted::Dispatch(String::new()),
+            Undrafted::SchemaRefused,
+            Undrafted::Bodyless,
+        ];
+        for ending in &endings {
+            assert!(
+                contract.contains(&format!("`{}`", ending.ending())),
+                "docs/contract.md does not name the `{}` ending this module emits",
+                ending.ending()
+            );
+        }
+
+        // And the other direction: a spelling the document carries and nothing
+        // emits is a promise nobody keeps. The contract lists them in one
+        // clause, so the clause is read and its backticked tokens compared with
+        // the set above rather than the whole document searched.
+        let clause = contract
+            .split_once("carrying `ending` —")
+            .expect("the contract lists the endings `body-not-drafted` carries")
+            .1
+            .split_once("— and `detail`")
+            .expect("the clause ends where the detail begins")
+            .0;
+        let listed: Vec<&str> = clause.split('`').skip(1).step_by(2).collect();
+        assert_eq!(
+            listed,
+            endings
+                .iter()
+                .map(Undrafted::ending)
+                .collect::<Vec<&'static str>>(),
+            "the contract's endings are not the ones this module emits"
+        );
+
+        // The sentences a reader is given are each the ending's own, so two
+        // endings cannot arrive under one set of words.
+        let why: std::collections::BTreeSet<String> = endings.iter().map(Undrafted::why).collect();
+        assert_eq!(why.len(), endings.len(), "two endings say the same thing");
+    }
 
     /// A workstream refuses before it cuts a branch.
     ///

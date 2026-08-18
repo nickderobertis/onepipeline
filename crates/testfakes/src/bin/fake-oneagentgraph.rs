@@ -899,7 +899,15 @@ fn emit(
 /// reads a drafted change request body out of, so it is what this double
 /// answers a `pr-author` dispatch with.
 fn report_of(task: &str) -> serde_json::Value {
-    if let Some((body, schema_valid)) = drafted_answer(task, &fake::script_dir()) {
+    if let Some(answer) = drafted_answer(task, &fake::script_dir()) {
+        // The wire shape is a value and a flag, and only three of their four
+        // combinations mean anything — which is what [`Drafted`] is: the flag is
+        // derived from the answer here rather than scripted beside it.
+        let (body, schema_valid) = match &answer {
+            Drafted::Body(body) => (body.as_str(), true),
+            Drafted::SchemaRefused(attempted) => (attempted.as_str(), false),
+            Drafted::Bodyless => ("", true),
+        };
         return serde_json::json!({
             "schema_version": "0.6",
             "results": [
@@ -945,38 +953,50 @@ fn report_of(task: &str) -> serde_json::Value {
     })
 }
 
-/// The answer a `pr-author` dispatch gives, and whether the schema accepted it.
+/// What a `pr-author` dispatch's turn answered with.
+///
+/// Three answers rather than a body and a flag beside it, because only three of
+/// that pair's four combinations mean anything: prose the schema accepted, prose
+/// it refused, and an answer inside the schema with nothing in it. The fourth —
+/// a refused answer that is nonetheless the body to publish — is a state the
+/// consumer must never see, so this double cannot script one.
+enum Drafted {
+    /// A validated answer carrying the prose the change request opens with.
+    Body(String),
+    /// An answer the schema **refused**, holding the value the turn last
+    /// attempted — which the real library retains beside the flag, so a consumer
+    /// reading `structured` without reading the flag would publish prose that
+    /// never validated.
+    SchemaRefused(String),
+    /// An answer that conformed to the schema and put no body in it, which is a
+    /// drafter to correct rather than a schema.
+    Bodyless,
+}
+
+/// The answer a `pr-author` dispatch gives.
 ///
 /// Recognised by the task this crate composes for a drafting dispatch and by
 /// nothing else, so an ordinary node's dispatch never answers as one — and
 /// `None` is exactly that: a dispatch which is not a drafting one, whose report
 /// is the two-party transcript every other member settles with.
 ///
-/// The three answers a drafting turn can give are each scripted, because they
-/// are three different endings for the run that asked and they take three
-/// different fixes:
-///
-/// * `pr-author.body` — the prose a journey reads back out of the change
-///   request. The default where nothing is scripted.
-/// * `pr-author.unschematic` — a turn whose answer the schema **refused**. The
-///   value it last attempted is retained beside the flag, as the real library
-///   retains one, so a consumer reading `structured` without the flag would
-///   publish prose that never validated.
-/// * `pr-author.bodyless` — a turn that answered **inside** the schema and put
-///   no body in it, which is a drafter to correct rather than a schema.
-fn drafted_answer(task: &str, dir: &std::path::Path) -> Option<(String, bool)> {
+/// Each of the three is scripted, because each is a different ending for the run
+/// that asked and they take three different fixes: `pr-author.body` is the prose
+/// a journey reads back out of the change request and is the default where
+/// nothing is scripted, `pr-author.unschematic` is the refused answer, and
+/// `pr-author.bodyless` is the conforming one with nothing in it.
+fn drafted_answer(task: &str, dir: &std::path::Path) -> Option<Drafted> {
     if !task.starts_with("Read this branch's diff") {
         return None;
     }
     if dir.join("pr-author.unschematic").exists() {
-        return Some(("half a bo".to_string(), false));
+        return Some(Drafted::SchemaRefused("half a bo".to_string()));
     }
     if dir.join("pr-author.bodyless").exists() {
-        return Some((String::new(), true));
+        return Some(Drafted::Bodyless);
     }
-    Some((
+    Some(Drafted::Body(
         fake::node_script(dir, "pr-author", "body")
             .unwrap_or_else(|| "## What\nDrafted from the diff.".to_string()),
-        true,
     ))
 }
