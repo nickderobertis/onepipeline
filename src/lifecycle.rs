@@ -367,7 +367,15 @@ pub(crate) enum Undrafted {
     /// It succeeded, and the schema it was validated against refused every
     /// answer it made.
     SchemaRefused,
-    /// It succeeded and answered inside the schema, carrying no body.
+    /// It succeeded and there was no body in what it answered with.
+    ///
+    /// The widest of the three on purpose. It is where a dispatch lands that
+    /// succeeded and had nothing refused: one that answered inside its schema
+    /// and put nothing in it, one no schema was asked of, and one whose reports
+    /// this run holds no readable copy of. They differ in nothing a reader acts
+    /// on differently — a drafter that succeeded and produced no prose is the
+    /// same fix in each — and none of them is a schema to correct, which is
+    /// what keeps them out of [`SchemaRefused`](Self::SchemaRefused).
     Bodyless,
 }
 
@@ -392,7 +400,7 @@ impl Undrafted {
                  dispatch answered nothing the schema it was validated against accepted"
                 .to_owned(),
             Self::Bodyless => "the change request's body was not drafted: the drafting \
-                 dispatch answered inside its schema and carried no body"
+                 dispatch succeeded and there was no body in what it answered with"
                 .to_owned(),
         }
     }

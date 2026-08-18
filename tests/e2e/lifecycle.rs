@@ -721,7 +721,7 @@ fn a_drafting_dispatch_that_ends_badly_leaves_the_publication_untouched() {
             "bodyless",
             "pr-author.bodyless",
             "no-body",
-            "answered inside its schema and carried no body",
+            "succeeded and there was no body in what it answered with",
         ),
     ] {
         let world = World::new(&format!("lifecycle-draft-{name}"));
