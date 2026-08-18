@@ -1361,6 +1361,9 @@ mod tests {
             session: "session-a".into(),
             pid,
             host: sys::hostname(),
+            started: sys::process_start_token(pid)
+                .map(|token| token.recorded().to_string())
+                .unwrap_or_default(),
             started_at: sys::now_rfc3339(),
             heartbeat_interval: 1_800,
             dag_sets: Vec::new(),

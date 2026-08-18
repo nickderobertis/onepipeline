@@ -172,6 +172,48 @@ pub fn node_script(dir: &Path, node: &str, suffix: &str) -> Option<String> {
         .map(|text| text.trim().to_string())
 }
 
+/// Keep working through the ask to stop, as a wedged worker does.
+///
+/// The one dispatch behaviour a rendezvous cannot act out. A teardown's polite
+/// ask is `SIGTERM`, whose default action ends the process, so every other
+/// double here goes the instant it is signalled — and a suite where nothing
+/// survives the ask cannot tell a stop that *ended* a run's tree from one that
+/// only signalled it and walked away. This is the second half of that pair; the
+/// forceful ask still ends it, because `SIGKILL` cannot be handled.
+///
+/// A no-op off Unix, where the teardown draws no such distinction: `taskkill`
+/// is asked forcefully in both modes, for the reason `sys::platform_stop`
+/// records there.
+/// The one failure here is **fatal to the double**, and deliberately loud: a
+/// dispatch that was asked to survive `SIGTERM` and did not install the
+/// disposition dies at the first ask, and the journey around it then proves the
+/// opposite of what it says — that a stop ended a tree that would have gone
+/// anyway. There is nothing to recover to, so the double says so and stops.
+pub fn ignore_the_polite_ask() {
+    #[cfg(unix)]
+    {
+        // SAFETY: `signal` sets this process's disposition for one signal and
+        // borrows nothing; `SIG_IGN` is a valid disposition for `SIGTERM`.
+        let installed = unsafe { libc::signal(libc::SIGTERM, libc::SIG_IGN) };
+        // llmlint: ignore[no_panics_on_recoverable_errors] there is nothing to
+        // recover to here, which is the paragraph above rather than an oversight.
+        // This double's whole contract is to still be running after `SIGTERM`, so a
+        // host that refuses the disposition has taken away the only behaviour the
+        // call has; returning would leave it dying at the first ask while the
+        // journey around it recorded that a stop had ended a wedged tree. Nor is
+        // there a caller to propagate to: the one call site is `fake-oneagentgraph`
+        // acting out `<key>.ignores-the-ask`, which has no other way to be that
+        // worker. Failing loudly at the disposition is what keeps the journey from
+        // proving the opposite of what it claims.
+        assert!(
+            installed != libc::SIG_ERR,
+            "this double was asked to work through a polite stop and this host would not let it \
+             ignore SIGTERM: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+}
+
 /// Wait until a rendezvous file appears, so a test can hold a dispatch open
 /// while it does something else — issue a live edit, kill a driver, read a
 /// surface.

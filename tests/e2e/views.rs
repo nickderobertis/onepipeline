@@ -12,7 +12,7 @@
 // `dispatch.rs` is where the real binary is driven instead. `harness.rs` carries the same
 // suppression and the full rationale.
 
-use crate::harness::{agent, gate_script, human, plan_of, Run, World};
+use crate::harness::{agent, gate_script, human, plan_of, reaped_pid, Run, World};
 
 use crate::harness::lifecycle;
 use onepipeline::event::{Envelope, Source};
@@ -1415,20 +1415,184 @@ fn host_never_renders_a_dispatch_whose_driver_this_host_can_prove_is_gone() {
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 
-/// A pid this host can prove is gone: a real process, started and reaped.
+/// One zone east of UTC and one west of it, as the environment names them.
 ///
-/// Picked out of the air it would not be one — the kernel may have handed it to
-/// something else — and the whole journey above turns on the difference.
-fn reaped_pid() -> u32 {
-    let mut child = std::process::Command::new(crate::harness::binary())
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+/// POSIX-form offsets rather than zone names, deliberately: a host with no
+/// `tzdata` resolves `America/New_York` to UTC and answers a reader in either
+/// "zone" identically, which would leave the journeys below passing while
+/// proving nothing. These need nothing installed.
+#[cfg(unix)]
+const EAST: &str = "XXX-5";
+#[cfg(unix)]
+const WEST: &str = "YYY9";
+
+/// How this host renders one process's start to a reader standing in `zone`.
+///
+/// The journeys' own oracle, deliberately not the crate's: what they are about
+/// is that a *recorded* start token and a later reading of the same live process
+/// agree, and asking the code under test how it reads one would be asking the
+/// answer of the thing under test. This asks `ps` the way a person would.
+#[cfg(unix)]
+fn start_of_as_rendered_in(zone: &str, pid: u32) -> String {
+    let listed = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "lstart="])
+        .env("TZ", zone)
+        .output()
+        .expect("this host says when a process started");
+    assert!(
+        listed.status.success(),
+        "`ps` would not say when pid {pid} started"
+    );
+    String::from_utf8(listed.stdout)
+        .expect("`ps` wrote an answer this host can decode")
+        .trim()
+        .to_string()
+}
+
+/// A live dispatch is still a live dispatch to a reader whose environment is not
+/// the driver's.
+///
+/// The defect this states: a start token is `ps -o lstart=`, which every Unix
+/// renders through the **reader's** own time zone — so the driver that recorded
+/// the run's lock and the session that later looked at it read one live process
+/// as two different ones, and the view whose whole job is to say whether a
+/// dispatch is alive answered `no live dispatches` for a run that was working.
+/// Nothing about the run changes between the two commands below; only who is
+/// asking does.
+#[cfg(unix)]
+#[test]
+fn host_renders_a_live_dispatch_read_from_a_different_zone_than_its_driver_recorded_it_in() {
+    let world = World::new("views-zoned");
+    world.script("build.wait", "hold");
+    let path = world.plan("zoned", &plan_of("zoned", vec![agent("build", &[])]));
+    let mut launch = world.cmd(&["start", &path.to_string_lossy(), "--detach"]);
+    launch.env("TZ", EAST);
+    let started = world.run_on(launch, "a detached launch made in one zone");
+    started.exited(0);
+    let driver = u32::try_from(
+        serde_json::from_str::<serde_json::Value>(started.stdout.trim())
+            .expect("a detached launch announces itself")["pid"]
+            .as_u64()
+            .expect("a driver pid"),
+    )
+    .expect("a pid");
+    world.until("the dispatch to be in flight", |world| {
+        !world.events_of("zoned", "node-dispatched").is_empty()
+    });
+
+    // The fixture is only a fixture if the two readers really are given
+    // different answers about the same live process.
+    assert_ne!(
+        start_of_as_rendered_in(EAST, driver),
+        start_of_as_rendered_in(WEST, driver),
+        "this host renders pid {driver}'s start the same way in both zones, so this journey \
+         proves nothing"
+    );
+
+    let mut read = world.cmd(&["host"]);
+    read.env("TZ", WEST);
+    let rendered = world.run_on(read, "host, read from the other zone");
+    rendered.exited(0).out_has("zoned").out_has("build");
+    assert!(
+        !rendered.stdout.contains("no live dispatches")
+            && !rendered.stdout.contains("stale registry"),
+        "a live dispatch was reported dead to a reader standing in another zone:\n{}",
+        rendered.stdout
+    );
+    world.release("build.go");
+}
+
+/// And an **adopted** run's live dispatches are live dispatches too.
+///
+/// The moment the defect was found in, and the worst one to be wrong in: an
+/// adoption is exactly when an operator asks whether the takeover worked, and
+/// `host` answered `no live dispatches` for a run that was heartbeating. It is
+/// also where the two environments come apart by themselves — the driver that
+/// takes the lock is a fresh process started by whatever session happened to
+/// adopt the run, and it shares a host with the reader and nothing else.
+///
+/// The dispatch is held across the whole thing and outlives the driver that
+/// started it, which is what makes this an adoption of a run *holding* a live
+/// dispatch rather than a fresh launch wearing the word.
+#[cfg(unix)]
+#[test]
+fn host_renders_the_live_dispatches_of_a_run_that_was_adopted() {
+    let world = World::new("views-adopted");
+    world.script("build.wait", "hold");
+    let path = world.plan("adopted", &plan_of("adopted", vec![agent("build", &[])]));
+    let mut launch = world.cmd(&["start", &path.to_string_lossy(), "--detach"]);
+    launch.env("TZ", EAST);
+    let started = world.run_on(launch, "a detached launch made in one zone");
+    started.exited(0);
+    let first = u32::try_from(
+        serde_json::from_str::<serde_json::Value>(started.stdout.trim())
+            .expect("a detached launch announces itself")["pid"]
+            .as_u64()
+            .expect("a driver pid"),
+    )
+    .expect("a pid");
+    world.until("the dispatch to be in flight", |world| {
+        !world.events_of("adopted", "node-dispatched").is_empty()
+    });
+
+    // The driver dies and what it started does not: the state an adoption exists
+    // to recover from, and the reason the run is still holding a dispatch when
+    // the next driver takes it over.
+    crate::harness::end_process(first);
+    world.until("the run to read as undriven", |world| {
+        world
+            .run(&["status", "adopted"])
+            .stdout
+            .contains("DRIVER DEAD")
+    });
+
+    // An adoption attaches, so the adopting driver is left running rather than
+    // waited on: it is the process holding the run while the view below is read.
+    let mut adopting = world.cmd(&["adopt", "adopted"]);
+    adopting.env("TZ", EAST);
+    let mut adopting = adopting
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .spawn()
-        .expect("the binary starts");
-    let pid = child.id();
-    child.wait().expect("it exits");
-    pid
+        .expect("the adopting driver starts");
+    // Waited for through the run's own record of the takeover, which is what
+    // the adoption announces to every reader of the run: the driver that adopted
+    // it says so, and says which process it is.
+    world.until("the run to record its adoption", |world| {
+        !world.events_of("adopted", "driver-adopted").is_empty()
+    });
+    let adopter = u32::try_from(
+        world.events_of("adopted", "driver-adopted")[0]["payload"]["pid"]
+            .as_u64()
+            .expect("an adoption names the driver that took the run"),
+    )
+    .expect("a pid");
+    assert_eq!(
+        adopter,
+        adopting.id(),
+        "the run recorded an adoption by a process this journey did not start"
+    );
+    assert_ne!(
+        start_of_as_rendered_in(EAST, adopter),
+        start_of_as_rendered_in(WEST, adopter),
+        "this host renders pid {adopter}'s start the same way in both zones, so this journey \
+         proves nothing"
+    );
+
+    let mut read = world.cmd(&["host"]);
+    read.env("TZ", WEST);
+    let rendered = world.run_on(read, "host, read from the other zone after an adoption");
+    rendered.exited(0).out_has("adopted").out_has("build");
+    assert!(
+        !rendered.stdout.contains("no live dispatches")
+            && !rendered.stdout.contains("stale registry"),
+        "an adopted run's live dispatch was reported dead:\n{}",
+        rendered.stdout
+    );
+
+    let _ = adopting.kill();
+    let _ = adopting.wait();
+    world.release("build.go");
 }
 
 /// A node that failed because its identity chains ran out says which side asked

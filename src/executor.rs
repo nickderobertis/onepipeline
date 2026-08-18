@@ -239,7 +239,7 @@ impl Executor for LocalExecutor {
         let filters = launched_with(&req.labels)?
             .map(|record| record.filters)
             .unwrap_or_default();
-        let run = GraphRun::start(&Launch {
+        let mut run = GraphRun::start(&Launch {
             graph: &req.graph.0,
             task: &req.task,
             dir: &dir,
@@ -249,13 +249,65 @@ impl Executor for LocalExecutor {
             filter: filters.agentgraph.as_ref(),
             output: GraphOutput::Relayed,
         })?;
+        // The run's registry of what it is running, and where. Recorded here
+        // because this is the layer that knows: the executor is *where a
+        // dispatch runs*, so the process the work is in is its answer to give
+        // and nobody else's — an executor that ran the dispatch on another
+        // machine would have no local process to name, and would say so by
+        // recording nothing.
+        //
+        // A dispatch this run cannot register does not run. The registry is the
+        // only record of where the work is, so an unregistered dispatch is a
+        // process no view will show and no `stop` will reach — work that can only
+        // be found by a person reading a process table, on a run whose own
+        // records say it has nothing running. So the graph that has just started
+        // is taken back down and the failure is the caller's: a dispatch that
+        // could not start is an outcome this seam already has, and the engine
+        // retries it and settles the node saying so.
+        let claim = match register_dispatch(&req.labels, run.process()) {
+            Ok(claim) => claim,
+            Err(refusal) => {
+                // Ended and collected, not merely signalled: what this returns
+                // to the caller is that the dispatch is not running, and a
+                // process nobody has waited on is a zombie — which answers a
+                // liveness probe as alive and would leave the very row an
+                // operator would go looking for.
+                run.cancel();
+                let _ = run.wait();
+                return Err(refusal);
+            }
+        };
         Ok(Box::new(LocalDispatch {
             run,
             cancel: req.cancel,
             labels: req.labels,
             session,
+            _claim: claim,
         }))
     }
+}
+
+/// Record this dispatch in its run's registry, and hold the entry open.
+///
+/// `process` is the graph run's own, where the graph is a process this crate
+/// started; a graph running **in this process** is recorded as this process,
+/// which is the true answer to where that dispatch's work is and the one a
+/// teardown would have to aim at.
+///
+/// A dispatch outside a run records nothing and is not refused for it: the
+/// contract's own example and the seam's tests carry no `run_id`, and there is no
+/// registry for a run that does not exist. So is one whose node the labels do not
+/// name — an entry that could not say which node it belonged to would be a pid an
+/// operator could not act on. Every dispatch a *run* makes carries both.
+fn register_dispatch(
+    labels: &Labels,
+    process: Option<u32>,
+) -> Result<Option<crate::ledger::DispatchClaim>> {
+    let (Some(run), Some(node)) = (labels.run_id.as_deref(), labels.node.as_deref()) else {
+        return Ok(None);
+    };
+    let paths = crate::ledger::RunPaths::under(&crate::ledger::runs_root(), run);
+    crate::ledger::claim_dispatch(&paths, node, process.unwrap_or_else(crate::sys::pid)).map(Some)
 }
 
 /// The overrides one dispatch's graph launch carries, in the order they apply.
@@ -315,6 +367,14 @@ struct LocalDispatch {
     cancel: CancellationToken,
     labels: Labels,
     session: Option<onevcs::Session>,
+    /// This dispatch's entry in the run's registry, held for exactly as long as
+    /// the dispatch is: dropping the handle — settled, failed, cancelled,
+    /// retried — takes the entry with it, so the registry holds live dispatches
+    /// and nothing else.
+    ///
+    /// Underscored because nothing reads it and nothing should: what it does, it
+    /// does by existing and then not.
+    _claim: Option<crate::ledger::DispatchClaim>,
 }
 
 impl DispatchHandle for LocalDispatch {
