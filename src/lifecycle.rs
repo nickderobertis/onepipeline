@@ -540,7 +540,7 @@ fn drafted(
 fn answered(reports: impl Iterator<Item = serde_json::Value>) -> crate::report::Drafted {
     let mut refused = false;
     for report in reports {
-        match crate::report::drafted_body(&report) {
+        match crate::report::drafted(&report) {
             crate::report::Drafted::Body(body) => return crate::report::Drafted::Body(body),
             crate::report::Drafted::SchemaRefused => refused = true,
             crate::report::Drafted::Bodyless => {}

@@ -71,8 +71,9 @@ instead, from the branch's own diff, once the branch is verified and before the
 change request is opened; naming none is the default, and a drafting dispatch that
 does not get there costs the change request its body and nothing else. It costs no
 visibility either: a drafting dispatch that was configured, attempted, and produced
-no body records `body-not-drafted` against the node — `dispatch-failed`,
-`schema-refused`, or `no-body`, because those take three different fixes — and the
+no body is recorded against the node, naming which ending it was — the dispatch
+could not run or did not finish, the schema refused its answer, or it answered
+within the schema and put nothing in it, which are three different fixes — and the
 node's own settlement says the same thing, so `results` shows it. Naming no graph
 and writing the `body` yourself are the two endings that spend no dispatch, and
 neither is reported.

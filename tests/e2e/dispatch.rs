@@ -971,6 +971,14 @@ fn a_validated_answer_carrying_no_body_publishes_the_change_request_without_one(
         }),
         "no report this run retained carries a validated answer with a blank body: {kept:#?}"
     );
+
+    // And the run says so: a drafter that answers inside its schema with
+    // nothing in it is a drafter to correct, and it is named apart from one
+    // whose answer the schema refused and one that never ran.
+    let undrafted = world.events_of("blankdraft", "body-not-drafted");
+    assert_eq!(undrafted.len(), 1, "{undrafted:?}\n{}", world.dump());
+    assert_eq!(undrafted[0]["payload"]["ending"], "no-body");
+    assert_eq!(undrafted[0]["labels"]["node"], "service");
 }
 
 /// A drafting graph the runner refuses costs the change request its body and
@@ -1040,6 +1048,26 @@ fn a_drafting_graph_the_runner_refuses_still_publishes_the_change_request() {
             .contains("the drafting dispatch could not start"),
         "the refusal never reached the operator:\n{}",
         launched.stderr
+    );
+    // And it reaches the run's own record too, where a reader who was not
+    // watching stderr finds it: the sibling's refusal, under the ending that
+    // says the dispatch is what failed rather than its answer.
+    let undrafted = world.events_of("refuseddraft", "body-not-drafted");
+    assert_eq!(undrafted.len(), 1, "{undrafted:?}\n{}", world.dump());
+    assert_eq!(undrafted[0]["payload"]["ending"], "dispatch-failed");
+    assert_eq!(undrafted[0]["labels"]["node"], "service");
+    let detail = undrafted[0]["payload"]["detail"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        detail.contains("the drafting dispatch could not start"),
+        "the recorded ending does not carry the sibling's refusal: {detail}"
+    );
+    // The node settled on its publication, and its detail says the same thing.
+    let settled = world.events_of("refuseddraft", "node-settled");
+    assert_eq!(
+        settled[0]["payload"]["detail"], undrafted[0]["payload"]["detail"],
+        "the settlement of a node whose drafter would not start did not name it"
     );
 }
 

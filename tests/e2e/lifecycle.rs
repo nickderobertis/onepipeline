@@ -458,6 +458,24 @@ fn a_session_record_that_cannot_be_read_falls_back_to_opening_a_session() {
         ),
         "a drafting dispatch ran with no worktree to read a diff in"
     );
+    // And it is in the run's own record as well as on stderr, under the ending
+    // that says the dispatch is what could not happen.
+    let undrafted = world.events_of("norecord", "body-not-drafted");
+    assert_eq!(undrafted.len(), 1, "{undrafted:?}");
+    assert_eq!(undrafted[0]["payload"]["ending"], "dispatch-failed");
+    assert_eq!(undrafted[0]["labels"]["node"], "service");
+    let detail = undrafted[0]["payload"]["detail"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        detail.contains("no worktree to read this branch's diff in"),
+        "the recorded ending does not say what could not happen: {detail}"
+    );
+    let settled = world.events_of("norecord", "node-settled");
+    assert_eq!(
+        settled[0]["payload"]["detail"], undrafted[0]["payload"]["detail"],
+        "the settlement of a node with nowhere to draft in did not name it"
+    );
     // It fell back rather than running nowhere: the second step asked for a
     // session of its own, which is what it would have done had the first never
     // opened one. Two distinct tokens, where a workstream whose record *is*
