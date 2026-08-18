@@ -241,8 +241,9 @@ pub struct NodeActivity {
     pub last_heartbeat_at: Option<u64>,
 }
 
-/// What one node's dispatch has done: how many envelopes evidencing progress
-/// have arrived, and when the last of them did.
+/// What one node's dispatch has done that this build can date: how many
+/// envelopes evidencing progress have arrived since the first one it could place
+/// in time, and when the last of those did.
 ///
 /// One value, because they are one fact. Apart, they admit a dispatch that has
 /// recorded events at no time and one that has recorded none at a time, and a
@@ -260,7 +261,10 @@ impl Progress {
     ///
     /// A dispatch whose every envelope so far carries a stamp this build cannot
     /// read has recorded nothing it can age, and is reported as having recorded
-    /// nothing rather than as having recorded something a moment ago.
+    /// nothing rather than as having recorded something a moment ago. Those
+    /// arrivals are left out of the count as well, because there is nowhere to
+    /// hold them that does not also assert a moment — a count standing alone is
+    /// the half of this pair a view renders as an age.
     pub(crate) fn first(at: Option<u64>) -> Option<Self> {
         Some(Self {
             events: NonZeroU64::MIN,
@@ -280,12 +284,12 @@ impl Progress {
         }
     }
 
-    /// How many have arrived.
+    /// How many have arrived since the first one this build could place in time.
     pub fn events(self) -> u64 {
         self.events.get()
     }
 
-    /// When the last of them did, in epoch milliseconds.
+    /// When the last of those did, in epoch milliseconds.
     pub fn last_at(self) -> u64 {
         self.last_at
     }

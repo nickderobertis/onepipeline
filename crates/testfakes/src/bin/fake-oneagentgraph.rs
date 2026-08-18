@@ -578,10 +578,13 @@ fn write_work(args: &[String], name: &str, body: &str) {
 /// to reach. That is the case a harness without out-of-band control produces,
 /// and it is the one `auto` must fall through on.
 ///
-/// `<key>.unplaceable-turn` announces the turn on a clock this build cannot
-/// read, so the dispatch's very first envelopes arrive evidencing progress that
-/// nothing can place in time. That is a producer whose stamps a reader refuses,
-/// not one that said nothing, and the two are opposite things to report.
+/// `<key>.unplaceable-member-start` and `<key>.unplaceable-turn-start` announce
+/// the member's arrival and the turn behind it on a clock this build cannot
+/// read, each on its own. Scripted together they are a producer whose every
+/// envelope so far a reader refuses — one whose stamps are rejected, not one
+/// that said nothing. Scripted singly they are a clock that comes back one
+/// envelope in, or one that fails one envelope in, and a reader has something
+/// different to say about all three.
 ///
 /// `<key>.also-member` names a **second** member of the same graph run, which
 /// announces a turn of its own. A graph is a graph — several members work under
@@ -591,9 +594,13 @@ fn write_work(args: &[String], name: &str, body: &str) {
 /// two answers, which is what a caller has to carry on from.
 fn open_turn(args: &[String], dir: &std::path::Path, key: &str, node: &str, step: Option<&str>) {
     let labels = member_labels(args, node, step);
-    let unplaceable = dir.join(format!("{key}.unplaceable-turn")).exists();
-    let stamp = || {
-        if unplaceable {
+    // One per envelope the announcement is, in the order it emits them.
+    let unplaceable = [
+        dir.join(format!("{key}.unplaceable-member-start")).exists(),
+        dir.join(format!("{key}.unplaceable-turn-start")).exists(),
+    ];
+    let stamp = |seq: usize| {
+        if unplaceable[seq] {
             unplaceable_now()
         } else {
             fake::now()
@@ -604,7 +611,7 @@ fn open_turn(args: &[String], dir: &std::path::Path, key: &str, node: &str, step
             "{}",
             serde_json::json!({
                 "v": 1,
-                "ts": stamp(),
+                "ts": stamp(seq),
                 "stream": stream(),
                 "seq": seq,
                 "source": "agentgraph",
