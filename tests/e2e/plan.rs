@@ -10,7 +10,9 @@
 // model turns to produce, and `dispatch.rs` is where the real `oneagentgraph` binary is
 // driven instead. `harness.rs` carries the same suppression and the full rationale.
 
-use crate::harness::{agent, human, plan_of, World, NOTHING_DRIVING, REFUSED, STALL_AFTER_ENV};
+use crate::harness::{
+    agent, human, plan_of, World, NOTHING_DRIVING, REFUSED, RENDEZVOUS_SECONDS_ENV, STALL_AFTER_ENV,
+};
 use serde_json::json;
 
 /// Run a plan to settlement, attached, and return the run id.
@@ -708,6 +710,82 @@ fn a_worker_that_only_heartbeats_is_reported_quiet_rather_than_active() {
     world.until("the run to settle", |world| {
         world.run_file("wedged", "result.json").is_file()
     });
+}
+
+/// A hold no clock can wait out fails the dispatch rather than dying inside it.
+///
+/// The bound arrives in the environment, and every command this suite runs sets
+/// it — so a mistyped one is a live way for a journey to be misconfigured. Read
+/// without a ceiling it becomes a duration added to a clock, and an addition past
+/// what an `Instant` can represent panics: the double unwinds mid-dispatch and
+/// what reaches the run is a sibling that died saying nothing about the value it
+/// was handed. That is the one failure a double cannot report, because reporting
+/// a misconfiguration is all it does — so the bound is checked where it is read,
+/// and the node settles naming the variable.
+#[test]
+fn a_hold_longer_than_a_clock_can_wait_fails_the_dispatch() {
+    let world = World::new("plan-unwaitable");
+    // Scripted to hold: the bound is read only by a dispatch that waits, so one
+    // that runs straight through would settle whatever the value was.
+    world.script("stuck.wait", "hold");
+    let path = world.plan(
+        "unwaitable",
+        &plan_of("unwaitable", vec![agent("stuck", &[])]),
+    );
+    let mut command = world.cmd(&["start", &path.to_string_lossy(), "--detach"]);
+    command.env(RENDEZVOUS_SECONDS_ENV, u64::MAX.to_string());
+    world.run_on(command, "start --detach").exited(0);
+    world.until("the run to settle", |world| {
+        world.run_file("unwaitable", "result.json").is_file()
+    });
+
+    let result = world.run_json("unwaitable", "result.json");
+    assert_eq!(result["state"], "failed", "{result}");
+    let results = world.run(&["results", "unwaitable"]);
+    results.exited(0);
+    assert!(
+        results.stdout.contains(RENDEZVOUS_SECONDS_ENV),
+        "the failure does not name the variable that was out of range, so a \
+         journey that mistyped it is left reading a dead sibling:\n{}",
+        results.stdout
+    );
+    assert!(
+        !results.stdout.contains("panicked"),
+        "the dispatch died inside the hold instead of refusing it:\n{}",
+        results.stdout
+    );
+}
+
+/// A scripted heartbeat interval that is not one fails the dispatch rather than
+/// holding silently.
+///
+/// The interval a journey scripts is how a wedged worker is acted out, and the
+/// two cases it tells apart — a dispatch that says nothing and one that says only
+/// that it is alive — differ by nothing but that number. Read leniently, `0` or a
+/// typo becomes the silent case: the journey above would go on passing while the
+/// scenario it names had quietly stopped being produced. So the double refuses it
+/// and the node settles failed saying which script it was, which is the half no
+/// beating dispatch can show.
+#[test]
+fn a_scripted_heartbeat_that_is_not_an_interval_fails_the_dispatch() {
+    let world = World::new("plan-beatless");
+    world.script("stuck.turn-open", "");
+    world.script("stuck.wait", "hold");
+    // No hold to release: the refusal happens before the dispatch ever waits,
+    // which is what lets this settle on its own.
+    world.script("stuck.heartbeat", "0");
+    let run = settle(&world, "beatless", vec![agent("stuck", &[])]);
+
+    let result = world.run_json(&run, "result.json");
+    assert_eq!(result["state"], "failed", "{result}");
+    let results = world.run(&["results", &run]);
+    results.exited(0);
+    assert!(
+        results.stdout.contains("stuck.heartbeat"),
+        "the failure does not name the script that was not an interval, so a \
+         journey scripting a typo is told nothing:\n{}",
+        results.stdout
+    );
 }
 
 /// A node the planner cancels is parked, not failed.
