@@ -172,6 +172,48 @@ pub fn node_script(dir: &Path, node: &str, suffix: &str) -> Option<String> {
         .map(|text| text.trim().to_string())
 }
 
+/// Keep working through the ask to stop, as a wedged worker does.
+///
+/// The one dispatch behaviour a rendezvous cannot act out. A teardown's polite
+/// ask is `SIGTERM`, whose default action ends the process, so every other
+/// double here goes the instant it is signalled — and a suite where nothing
+/// survives the ask cannot tell a stop that *ended* a run's tree from one that
+/// only signalled it and walked away. This is the second half of that pair; the
+/// forceful ask still ends it, because `SIGKILL` cannot be handled.
+///
+/// A no-op off Unix, where the teardown draws no such distinction: `taskkill`
+/// is asked forcefully in both modes, for the reason `sys::platform_stop`
+/// records there.
+/// The one failure here is **fatal to the double**, and deliberately loud: a
+/// dispatch that was asked to survive `SIGTERM` and did not install the
+/// disposition dies at the first ask, and the journey around it then proves the
+/// opposite of what it says — that a stop ended a tree that would have gone
+/// anyway. There is nothing to recover to, so the double says so and stops.
+pub fn ignore_the_polite_ask() {
+    #[cfg(unix)]
+    {
+        // SAFETY: `signal` sets this process's disposition for one signal and
+        // borrows nothing; `SIG_IGN` is a valid disposition for `SIGTERM`.
+        let installed = unsafe { libc::signal(libc::SIGTERM, libc::SIG_IGN) };
+        // llmlint: ignore[no_panics_on_recoverable_errors] there is nothing to
+        // recover to here, which is the paragraph above rather than an oversight.
+        // This double's whole contract is to still be running after `SIGTERM`, so a
+        // host that refuses the disposition has taken away the only behaviour the
+        // call has; returning would leave it dying at the first ask while the
+        // journey around it recorded that a stop had ended a wedged tree. Nor is
+        // there a caller to propagate to: the one call site is `fake-oneagentgraph`
+        // acting out `<key>.ignores-the-ask`, which has no other way to be that
+        // worker. Failing loudly at the disposition is what keeps the journey from
+        // proving the opposite of what it claims.
+        assert!(
+            installed != libc::SIG_ERR,
+            "this double was asked to work through a polite stop and this host would not let it \
+             ignore SIGTERM: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+}
+
 /// Wait until a rendezvous file appears, so a test can hold a dispatch open
 /// while it does something else — issue a live edit, kill a driver, read a
 /// surface.
@@ -199,11 +241,40 @@ pub fn wait_for(path: &Path) {
 /// rendezvous ends the process rather than continuing as though it had been
 /// released.
 pub fn wait_for_any(paths: &[PathBuf]) {
-    let deadline =
-        std::time::Instant::now() + std::time::Duration::from_secs(rendezvous_timeout_seconds());
+    // A hold with no clock of its own: `Duration::MAX` never elapses, so the
+    // tick below never fires and this waits exactly as it always has.
+    wait_for_any_ticking(paths, std::time::Duration::MAX, &mut || {});
+}
+
+/// [`wait_for_any`], running `tick` about every `every` for as long as it waits.
+///
+/// What a dispatch that goes on *saying* something while it holds needs: a real
+/// harness publishes its liveness whether or not the turn is doing anything, and
+/// a double that could only hold silently cannot act out a wedged worker at all.
+/// The bound is unchanged — an unreleased hold still ends the process.
+pub fn wait_for_any_ticking(paths: &[PathBuf], every: std::time::Duration, tick: &mut dyn FnMut()) {
+    let timeout = rendezvous_timeout();
+    // Checked, because adding to an `Instant` panics on overflow and a panic
+    // here is the one failure this file cannot report: it unwinds out of a
+    // double whose whole contract is to say what was misconfigured and exit.
+    // The bound below makes an overflow impossible on any clock this suite
+    // runs on, so this reports a clock that cannot hold the hold at all rather
+    // than standing in for that bound.
+    let deadline = match std::time::Instant::now().checked_add(timeout) {
+        Some(deadline) => deadline,
+        None => fail(&format!(
+            "a hold of {} seconds is further ahead than this clock can represent",
+            timeout.as_secs()
+        )),
+    };
+    let mut ticked = std::time::Instant::now();
     while std::time::Instant::now() < deadline {
         if paths.iter().any(|path| path.exists()) {
             return;
+        }
+        if ticked.elapsed() >= every {
+            tick();
+            ticked = std::time::Instant::now();
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
@@ -217,22 +288,35 @@ pub fn wait_for_any(paths: &[PathBuf]) {
     ));
 }
 
+/// The longest hold this double will wait out.
+///
+/// A rendezvous is a test holding a dispatch open while it does something else,
+/// so an hour is already far longer than any suite waits — a scripted value past
+/// it is a mistyped number rather than a longer test. Bounding it is also what
+/// keeps the deadline representable: seconds arrive off the environment, and an
+/// arbitrarily large number of them is a duration no clock can be advanced by.
+const MAX_RENDEZVOUS_SECONDS: u64 = 60 * 60;
+
 /// How long a hold waits before it gives up.
 ///
-/// A scripted value that is not a positive number of seconds is refused rather
-/// than defaulted: `0` would make every hold expire before it began, which is
-/// the silent opposite of what a test asking for one means.
-fn rendezvous_timeout_seconds() -> u64 {
-    match std::env::var("ONEPIPELINE_FAKE_RENDEZVOUS_SECONDS") {
+/// A scripted value that is not a number of seconds inside that bound is refused
+/// rather than defaulted or clamped: `0` would make every hold expire before it
+/// began, which is the silent opposite of what a test asking for one means, and
+/// a value past the ceiling is a scenario nobody wrote — either way the double
+/// says which value it was handed and exits, the way it reports every other
+/// misconfiguration.
+fn rendezvous_timeout() -> std::time::Duration {
+    let seconds = match std::env::var("ONEPIPELINE_FAKE_RENDEZVOUS_SECONDS") {
         Err(_) => 30,
-        Ok(value) => match value.trim().parse() {
-            Ok(seconds) if seconds > 0 => seconds,
+        Ok(value) => match value.trim().parse::<u64>() {
+            Ok(seconds) if seconds > 0 && seconds <= MAX_RENDEZVOUS_SECONDS => seconds,
             _ => fail(&format!(
-                "ONEPIPELINE_FAKE_RENDEZVOUS_SECONDS holds {value:?}, \
-                 which is not a positive number of seconds"
+                "ONEPIPELINE_FAKE_RENDEZVOUS_SECONDS holds {value:?}, which is not a \
+                 number of seconds between 1 and {MAX_RENDEZVOUS_SECONDS}"
             )),
         },
-    }
+    };
+    std::time::Duration::from_secs(seconds)
 }
 
 /// An RFC 3339 millisecond UTC timestamp, in the envelope's one format.

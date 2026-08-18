@@ -53,7 +53,7 @@ use crate::event::{Envelope, Source};
 use crate::filter::EventFilter;
 use crate::graph::{self, Landing, NodeStatus};
 use crate::journal::PipelineKind;
-use crate::ledger::{self, LaunchRecord, LockRecord, RunPaths};
+use crate::ledger::{self, LaunchRecord, LockRecord};
 use crate::projection::{self, MemberLabel, Refusal, RunState};
 use crate::sys;
 
@@ -62,6 +62,19 @@ use crate::sys;
 /// Re-exported where the views are, because a rejection is part of what a view
 /// reports: a root that was skipped is named on the same output a run is.
 pub use crate::ledger::Skipped;
+
+/// Where one run's durable state lives.
+///
+/// Re-exported where the views are, because it is the type a consumer already
+/// receives on [`RunView::paths`] and could not name — and because
+/// [`report_for`](RunPaths::report_for) is how a reader of this run's store
+/// resolves the copy [`report::retain`](crate::report::retain) wrote. What the
+/// contract promises of it is `run`, `dir`, [`new`](RunPaths::new),
+/// [`under`](RunPaths::under), [`reports_dir`](RunPaths::reports_dir), and
+/// `report_for`; the segment sanitiser behind the last of those stays private,
+/// so a report path is obtained by calling and never by restating.
+// llmlint: ignore[invalid_states_unrepresentable] naming the type changes nothing about a run id: `run` is a `String` for the reason `src/ledger.rs`'s file-level suppression states, and `ledger::is_valid_run_id` remains the boundary every externally-supplied id crosses.
+pub use crate::ledger::RunPaths;
 
 /// How long a launch may hold its pid without doing anything before it is
 /// reported [`Parked`](DriverLiveness::Parked).
@@ -521,6 +534,22 @@ pub fn status(survey: &Survey) -> String {
             }
             out.push('\n');
         }
+        // A node whose cancellation is still out there. Under its own word,
+        // because neither of the two a reader has fits: `parked` is a planner's
+        // own idle with nothing running, and `ready` is a node about to start.
+        for (id, node_status) in &statuses {
+            if *node_status != NodeStatus::Parked {
+                continue;
+            }
+            let Some(pending) = cancelling_for(&view.state, id) else {
+                continue;
+            };
+            out.push_str(&format!(
+                "  {id}: cancelling — asked to stop {pending} ago and its dispatch has not \
+                 settled; it still holds the node's workspace, so wait for it rather than \
+                 requeueing the node\n"
+            ));
+        }
         // A node that is ready and has not started. On its own that reads as
         // "about to go", which is what a node waiting on an occupied workspace
         // looks like for as long as it waits — one sat `ready` for forty minutes
@@ -562,6 +591,7 @@ pub fn status(survey: &Survey) -> String {
                 view.paths.run
             ));
         }
+        out.push_str(&journal_loss_line(view));
         if let Some(health) = crate::agentgraph::health() {
             out.push_str(&format!("  providers: {health}\n"));
         }
@@ -571,6 +601,17 @@ pub fn status(survey: &Survey) -> String {
     }
     out.push_str(&skipped_lines(&survey.skipped));
     out
+}
+
+/// How long a node's cancellation has been waiting on the dispatch it asked to
+/// stop, when one is still out there — see [`Recorded::cancelling_since`].
+///
+/// [`Recorded::cancelling_since`]: crate::projection::Recorded::cancelling_since
+fn cancelling_for(state: &RunState, id: &str) -> Option<String> {
+    let since = state.recorded.get(id)?.cancelling_since()?;
+    Some(crate::telemetry::duration(
+        sys::now_millis().saturating_sub(since),
+    ))
 }
 
 /// Every provider refusal one node's dispatches recorded, in arrival order.
@@ -716,20 +757,34 @@ fn waiting_on(state: &RunState, id: &str) -> String {
 
 /// What one in-flight dispatch is doing now, on the line that reports it.
 ///
-/// Three facts, because one alone misleads: what it last did, how much it has
-/// done, and how long ago. A dispatch that has recorded plenty and nothing
-/// recently is the wedged one; a first turn that has run for twenty minutes and
-/// is still recording is healthy, and has twice been reported dead for want of
-/// this line.
+/// Four facts, because one alone misleads: what it last did, how much it has
+/// done, how long ago, and — separately — whether it is still alive. A dispatch
+/// that has recorded plenty and nothing recently is the wedged one; a first turn
+/// that has run for twenty minutes and is still recording is healthy, and has
+/// twice been reported dead for want of this line.
+///
+/// The age is of the last thing the dispatch **did**, and the heartbeat is
+/// reported beside it rather than inside it: an age over every envelope can
+/// never be older than one beat for anything that has not died, so a wedged
+/// dispatch and a working one read the same.
 fn working(activity: &crate::projection::NodeActivity) -> String {
+    let ago = |at: u64| crate::telemetry::duration(sys::now_millis().saturating_sub(at));
+    let alive = activity
+        .last_heartbeat_at
+        .filter(|beat| activity.progress.is_none_or(|done| *beat > done.last_at()))
+        .map(|beat| format!("; alive {} ago", ago(beat)))
+        .unwrap_or_default();
+    // A dispatch whose every envelope has been a heartbeat has *started* and
+    // produced nothing, which is neither a dispatch nothing is driving nor one
+    // that is doing something. Said in those words rather than as an age of
+    // nothing.
+    let Some(progress) = activity.progress else {
+        return format!("nothing recorded yet{alive}");
+    };
     let counted = format!(
-        "{} event(s), {} ago",
-        activity.events,
-        crate::telemetry::duration(
-            activity
-                .last_at
-                .map_or(0, |at| sys::now_millis().saturating_sub(at))
-        )
+        "{} event(s), {} ago{alive}",
+        progress.events(),
+        ago(progress.last_at())
     );
     match &activity.doing {
         Some(doing) => format!("now {doing} ({counted})"),
@@ -1013,6 +1068,26 @@ fn landed_phrase(landing: Landing, settled_at: Option<u64>) -> String {
     }
 }
 
+/// What a view says about the records the run's own store does not hold whole,
+/// or nothing when it holds them all.
+///
+/// Every line either view prints is folded from that store, so a loss inside it
+/// is the one fact that makes the rest of them unprovable — a `node-settled`
+/// nobody can read renders as a node that never settled, and an `edit-committed`
+/// nobody can read renders as a node the run never had. It is said here because
+/// the only place it used to be said was the driver's stderr, which a detached
+/// run writes to a log file nobody opens.
+fn journal_loss_line(view: &RunView) -> String {
+    let integrity = crate::journal::integrity(&view.paths.journal());
+    if integrity.is_whole() {
+        return String::new();
+    }
+    format!(
+        "  journal: {} — this run's record of itself is incomplete\n",
+        integrity.phrase()
+    )
+}
+
 /// `onepipeline results` — per-node outcomes, with each node's own evidence.
 pub fn results(view: &RunView) -> String {
     // The run and how its graph stands — deliberately not the node tally the
@@ -1032,6 +1107,12 @@ pub fn results(view: &RunView) -> String {
         out.push_str(&format!("  {:<24} {}", node.id, status.as_str()));
         if let Some(outcome) = view.state.outcomes.get(&node.id) {
             out.push_str(&format!(" ({outcome})"));
+        }
+        // Beside the status word for the same reason `status` gives it a line:
+        // `parked` on its own says the planner idled the node, and says nothing
+        // about the dispatch still running for it.
+        if let Some(pending) = cancelling_for(&view.state, &node.id) {
+            out.push_str(&format!(" — cancelling, asked to stop {pending} ago"));
         }
         // Beside the status word, because it is the fact the status word does
         // not carry: `done` is the same for a change that merged and one still
@@ -1097,6 +1178,7 @@ pub fn results(view: &RunView) -> String {
             }
         }
     }
+    out.push_str(&journal_loss_line(view));
     out
 }
 
@@ -1314,6 +1396,9 @@ mod tests {
             session: "session-a".into(),
             pid,
             host: sys::hostname(),
+            started: sys::process_start_token(pid)
+                .map(|token| token.recorded().to_string())
+                .unwrap_or_default(),
             started_at: sys::now_rfc3339(),
             heartbeat_interval: 1_800,
             dag_sets: Vec::new(),
@@ -2078,17 +2163,64 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// One node's progress record, built through the transitions the fold builds
+    /// it through rather than assembled: `events` arrivals, the last of them at
+    /// `last_at`.
+    ///
+    /// Started from nothing and advanced one arrival at a time, exactly as
+    /// `fold_activity` advances it — so no arrivals is no record, which is the
+    /// answer the fold gives too.
+    fn recorded(events: u64, last_at: u64) -> Option<crate::projection::Progress> {
+        (0..events).fold(None, |progress, _| match progress {
+            None => crate::projection::Progress::first(Some(last_at)),
+            Some(progress) => Some(progress.and(Some(last_at))),
+        })
+    }
+
     /// A dispatch that has recorded something without naming a tool claims the
     /// count and the age and nothing more.
     #[test]
     fn a_dispatch_that_has_named_no_tool_reports_its_count_rather_than_a_guess() {
         let rendered = working(&crate::projection::NodeActivity {
             doing: None,
-            events: 3,
-            last_at: Some(sys::now_millis()),
+            progress: recorded(3, sys::now_millis()),
+            last_heartbeat_at: None,
         });
         assert_eq!(rendered, "3 event(s), 0s ago");
         assert!(!rendered.contains("now"), "{rendered}");
+    }
+
+    /// A dispatch heartbeating over work it did long ago reports both, and the
+    /// age it reports is the work's.
+    #[test]
+    fn a_heartbeat_is_reported_beside_the_age_of_the_work_rather_than_as_work() {
+        let now = sys::now_millis();
+        let rendered = working(&crate::projection::NodeActivity {
+            doing: Some("Bash red-green.sh".into()),
+            progress: recorded(4, now - 600_000),
+            last_heartbeat_at: Some(now),
+        });
+        assert!(
+            rendered.contains("4 event(s), 10m00s ago"),
+            "the age of the work was taken from the heartbeat: {rendered}"
+        );
+        assert!(
+            rendered.contains("alive 0s ago"),
+            "a dispatch that is alive and doing nothing is not reported as alive: {rendered}"
+        );
+    }
+
+    /// A dispatch that has only ever heartbeated has produced nothing, and says
+    /// so — rather than claiming an age for work it has not done, and rather
+    /// than reading as a node nothing is driving.
+    #[test]
+    fn a_dispatch_that_has_only_heartbeated_reports_no_work_and_still_reads_as_alive() {
+        let rendered = working(&crate::projection::NodeActivity {
+            doing: None,
+            progress: None,
+            last_heartbeat_at: Some(sys::now_millis()),
+        });
+        assert_eq!(rendered, "nothing recorded yet; alive 0s ago");
     }
 
     /// Both halves of a transcript: the tools the store carries as the turn

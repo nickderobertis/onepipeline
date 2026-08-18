@@ -33,7 +33,11 @@ use onepipeline::filter::{
 use onepipeline::plan::{
     Node, NodeKind, Plan, Resume, Step, PLAN_SCHEMA_VERSION, PLAN_SCHEMA_VERSIONS_READ,
 };
+use onepipeline::report::{
+    retain, ACCEPTED_REPORT_FILE, MAX_REPORT_BYTES, MEMBER_SETTLED, REPORT_PATH,
+};
 use onepipeline::rules::{ExecutorKind, ExecutorRules, Predicate};
+use onepipeline::views::RunPaths;
 use onevcs::registry::{RepoType, Workflow};
 use onevcs::{MergePolicy, SessionRequest};
 use serde_json::{json, Value};
@@ -1631,6 +1635,283 @@ fn a_relayed_envelope_keeps_its_producers_own_kind() {
     assert_eq!(envelope.source, Source::Vcs);
     assert_eq!(envelope.kind, EventKind("gate-finished".into()));
     assert_eq!(serde_json::to_value(&envelope).expect("serializes"), wire);
+}
+
+/// A scratch root for one test, removed when it ends.
+///
+/// The retention path writes to a real filesystem, so these journeys need
+/// somewhere to hold a consumer's own runs root beside a producing process's own
+/// scratch — which is the whole distinction the path is about.
+fn scratch(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "onepipeline-contract-{name}-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch root");
+    dir
+}
+
+/// The `member-settled` a producing process wrote to its own stdout, as the wire
+/// line it arrives as.
+///
+/// Built out of the published constants rather than a second spelling of them:
+/// what a consumer has to be able to compose is exactly this envelope, and the
+/// crate's own words are what it composes it from.
+fn member_settled(stream: &str, seq: u64, named: &Path) -> Envelope {
+    let mut wire = json!({
+        "v": ENVELOPE_VERSION,
+        "ts": "2026-08-18T09:00:00.000Z",
+        "stream": stream,
+        "seq": seq,
+        "source": "agentgraph",
+        "kind": MEMBER_SETTLED,
+        "labels": {"node": "build", "member": "worker"},
+        "payload": {},
+        // The artifact names the stream and not the seq, which is why the copy
+        // is derivable from this envelope and never from the id alone.
+        "artifacts": [{"id": format!("report-{stream}"), "kind": "report", "bytes": 0}]
+    });
+    wire["payload"][REPORT_PATH] = json!(named.display().to_string());
+    serde_json::from_value(wire).expect("the settlement parses")
+}
+
+/// The whole published path, driven the way a consumer downstream of this crate
+/// drives it: mint the run's paths, ingest the settlement a producing process
+/// wrote, and read the report back from the path `report_for` derives.
+///
+/// The stream carries characters the sanitiser rewrites, so what is proved is
+/// the *derived* name rather than a passthrough one — and the consumer obtains
+/// it by calling, never by restating the rule behind it.
+#[test]
+fn a_consumer_retains_a_report_and_reads_it_back_from_the_path_it_derives() {
+    let root = scratch("retention-journey");
+    // The producing library's own scratch: a directory this crate neither
+    // chooses nor can attest.
+    let produced = root.join("producer");
+    std::fs::create_dir_all(&produced).expect("a producer scratch");
+    let named = produced.join(ACCEPTED_REPORT_FILE);
+    let body = r#"{"results":[{"harness":"claude-code","text":"Ran the gate."}]}"#;
+    std::fs::write(&named, body).expect("the report the producer wrote");
+
+    let runs = root.join("runs");
+    let paths = RunPaths::under(&runs, "demo");
+    assert_eq!(paths.run, "demo");
+    assert_eq!(paths.dir, runs.join("demo"));
+    assert!(paths.reports_dir().starts_with(&paths.dir));
+
+    let stream = "node-scope/1786925518098 3163646";
+    retain(&paths, &member_settled(stream, 7, &named));
+
+    let kept = paths.report_for(stream, 7);
+    assert_eq!(
+        std::fs::read_to_string(&kept).expect("this run's own copy of the report"),
+        body,
+        "the copy at the derived path is not the report the producer wrote"
+    );
+
+    // One segment under the run's own storage, whatever the producer's stream id
+    // said — the sanitiser is reached only through this call.
+    let leaf = kept
+        .strip_prefix(paths.reports_dir())
+        .expect("the copy is under the run's own reports directory");
+    assert_eq!(
+        leaf.components().count(),
+        1,
+        "the derived name is not a single segment: {leaf:?}"
+    );
+
+    // Copied, not referenced: the producer's own file going away costs the run
+    // nothing, which is what makes the derived path the one a reader opens.
+    std::fs::remove_file(&named).expect("the producer's own copy goes away");
+    assert!(std::fs::read_to_string(&kept).is_ok());
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// A producer's stream id is a string; the path it derives is a name.
+///
+/// The seq is part of that name because the settlement is what identifies the
+/// report — the artifact id names the stream alone — so two settlements of one
+/// stream never resolve to one file.
+#[test]
+fn a_derived_report_path_is_one_segment_under_the_runs_own_storage() {
+    let paths = RunPaths::under(Path::new("/nowhere"), "demo");
+    for stream in [
+        "oneagentgraph-1",
+        "../../elsewhere",
+        "..",
+        "",
+        "node scope:1786925518098/3163646",
+    ] {
+        let kept = paths.report_for(stream, 3);
+        let leaf = kept
+            .strip_prefix(paths.reports_dir())
+            .unwrap_or_else(|_| panic!("'{stream}' derived a path outside the run: {kept:?}"));
+        assert_eq!(
+            leaf.components().count(),
+            1,
+            "'{stream}' derived more than one segment: {leaf:?}"
+        );
+        assert_ne!(
+            kept,
+            paths.report_for(stream, 4),
+            "'{stream}' resolves two settlements to one file"
+        );
+    }
+}
+
+/// Every refusal the writer makes, met the way a consumer meets it: nothing is
+/// at the path `report_for` derives, so no reader of this run's store finds one.
+#[test]
+fn the_published_writer_refuses_anything_that_is_not_the_producers_own_plain_file() {
+    let root = scratch("retention-refusals");
+    let paths = RunPaths::under(&root.join("runs"), "demo");
+    let secret = root.join("secret.json");
+    std::fs::write(&secret, r#"{"transcript":{"messages":[]}}"#)
+        .expect("a file the producing library never wrote");
+
+    let planted = root.join("planted");
+    std::fs::create_dir_all(&planted).expect("somewhere to plant a link");
+    let link = planted.join(ACCEPTED_REPORT_FILE);
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&secret, &link).expect("a symlink");
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_file(&secret, &link).expect("a symlink");
+
+    let directory = root.join("as-a-directory").join(ACCEPTED_REPORT_FILE);
+    std::fs::create_dir_all(&directory).expect("a directory wearing the accepted name");
+
+    for (seq, (case, named)) in [
+        ("a base name the producing library never writes", secret),
+        ("a symlink wearing the accepted name", link),
+        ("a directory wearing the accepted name", directory),
+        (
+            "nothing at all",
+            root.join("gone").join(ACCEPTED_REPORT_FILE),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let seq = seq as u64;
+        retain(&paths, &member_settled("oneagentgraph-1", seq, &named));
+        let kept = paths.report_for("oneagentgraph-1", seq);
+        assert!(
+            std::fs::symlink_metadata(&kept).is_err(),
+            "{case}: '{}' reached the run's own storage at {kept:?}",
+            named.display()
+        );
+    }
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// The bound is the writer's, and it is published so a caller knows what will be
+/// refused rather than discovering it.
+#[test]
+fn the_published_writer_refuses_a_report_past_the_bound_it_publishes() {
+    let root = scratch("retention-oversize");
+    let paths = RunPaths::under(&root.join("runs"), "demo");
+    let produced = root.join("producer");
+    std::fs::create_dir_all(&produced).expect("a producer scratch");
+    let named = produced.join(ACCEPTED_REPORT_FILE);
+    // Claimed rather than written: the bound is on the size the filesystem
+    // reports, and a real 32MiB fixture would be a slow way to say so.
+    let file = std::fs::File::create(&named).expect("the stored report");
+    file.set_len(MAX_REPORT_BYTES + 1)
+        .expect("a report past the bound");
+    drop(file);
+
+    retain(&paths, &member_settled("oneagentgraph-1", 4, &named));
+    let kept = paths.report_for("oneagentgraph-1", 4);
+    assert!(
+        std::fs::symlink_metadata(&kept).is_err(),
+        "a report past {MAX_REPORT_BYTES} bytes reached the run's own storage"
+    );
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// The writer ingests a settlement of the producing library's, and nothing else
+/// of the same shape.
+#[test]
+fn the_published_writer_ingests_only_an_oneagentgraph_settlement() {
+    let root = scratch("retention-kinds");
+    let paths = RunPaths::under(&root.join("runs"), "demo");
+    let produced = root.join("producer");
+    std::fs::create_dir_all(&produced).expect("a producer scratch");
+    let named = produced.join(ACCEPTED_REPORT_FILE);
+    std::fs::write(&named, "{}").expect("the report the producer wrote");
+
+    // This library's own event, of the very same shape.
+    let mut ours = member_settled("onepipeline-1", 1, &named);
+    ours.source = Source::Pipeline;
+    retain(&paths, &ours);
+
+    // And a kind of the producing library's that settles nothing.
+    let mut other = member_settled("oneagentgraph-1", 2, &named);
+    other.kind = EventKind("turn-completed".into());
+    retain(&paths, &other);
+
+    assert!(
+        !paths.reports_dir().exists(),
+        "an envelope that is not an agentgraph {MEMBER_SETTLED} was ingested as a report"
+    );
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// The document names every item the retention path is promised through, and the
+/// release a consumer links it as.
+#[test]
+fn the_contract_names_the_retention_path_and_the_release_it_ships_in() {
+    // The package's own version, read from the manifest rather than from a
+    // second spelling of it: the whole point of publishing it is that a host
+    // pinning this engine and a reader of its run store can prove they are one
+    // release.
+    let manifest =
+        std::fs::read_to_string(repo_root().join("Cargo.toml")).expect("the manifest ships");
+    let declared = manifest
+        .split_once("\n[package]")
+        .expect("the manifest declares this package")
+        .1
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("version = \"")?.strip_suffix('"'))
+        .expect("the package declares a version");
+    assert_eq!(
+        onepipeline::VERSION,
+        declared,
+        "`VERSION` is not this crate's own package version"
+    );
+
+    assert_contract_names(
+        "published retention path",
+        &[
+            "views::RunPaths",
+            "the run id `run` and the run's own directory `dir`",
+            "RunPaths::new",
+            "RunPaths::under",
+            "reports_dir()",
+            "report_for(STREAM, SEQ)",
+            "reports/<sanitised stream>-<seq>.json",
+            "report::retain(&RunPaths, &Envelope)",
+            "report::MEMBER_SETTLED",
+            "report::REPORT_PATH",
+            "report::ACCEPTED_REPORT_FILE",
+            "report::MAX_REPORT_BYTES",
+            "onepipeline::VERSION",
+        ],
+    );
+    // The precondition rides with the function: publishing it did not widen when
+    // it is safe to call, and a document that dropped this leaves a caller free
+    // to hand it a path it has no authority for.
+    assert!(
+        CONTRACT.contains("the caller holds the producing process's authority for the path"),
+        "docs/contract.md no longer states `retain`'s precondition"
+    );
+    assert!(
+        CONTRACT.contains("the sanitiser is not public"),
+        "docs/contract.md no longer says the sanitiser is unreachable"
+    );
 }
 
 #[test]

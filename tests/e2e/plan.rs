@@ -10,7 +10,9 @@
 // model turns to produce, and `dispatch.rs` is where the real `oneagentgraph` binary is
 // driven instead. `harness.rs` carries the same suppression and the full rationale.
 
-use crate::harness::{agent, human, plan_of, World, NOTHING_DRIVING, REFUSED};
+use crate::harness::{
+    agent, human, plan_of, World, NOTHING_DRIVING, REFUSED, RENDEZVOUS_SECONDS_ENV, STALL_AFTER_ENV,
+};
 use serde_json::json;
 
 /// Run a plan to settlement, attached, and return the run id.
@@ -595,7 +597,7 @@ fn a_worker_that_goes_quiet_is_surfaced_without_holding_anything_back() {
         &plan_of("quiet", vec![agent("slow", &[]), agent("busy", &[])]),
     );
     let mut command = world.cmd(&["start", &path.to_string_lossy(), "--detach"]);
-    command.env("ONEPIPELINE_STALL_AFTER_SECONDS", "1");
+    command.env(STALL_AFTER_ENV, "1");
     command.output().expect("the binary runs");
 
     // A stall is evidence rather than a verdict, so the surface is
@@ -650,6 +652,108 @@ fn a_worker_that_goes_quiet_is_surfaced_without_holding_anything_back() {
     world.until("the run to settle", |world| {
         world.run_file("quiet", "result.json").is_file()
     });
+}
+
+/// A worker that is alive and doing nothing is still reported quiet.
+///
+/// The watch was reset by the one event whose literal meaning is "nothing is
+/// happening", so it could fire for a worker that had *died* and never for one
+/// that was wedged. The heartbeat itself is not stopped — a member is declared
+/// dead on it one layer down — and the claim here is only that it is not
+/// mistaken for work.
+#[test]
+fn a_worker_that_only_heartbeats_is_reported_quiet_rather_than_active() {
+    let world = World::new("plan-heartbeat");
+    // Alive, addressable, and producing nothing: the turn is announced and then
+    // the dispatch does nothing but say it is still there.
+    world.script("stuck.turn-open", "");
+    world.script("stuck.wait", "hold");
+    world.script("stuck.heartbeat", "50");
+    let path = world.plan("wedged", &plan_of("wedged", vec![agent("stuck", &[])]));
+    let mut command = world.cmd(&["start", &path.to_string_lossy(), "--detach"]);
+    command.env(STALL_AFTER_ENV, "2");
+    world.run_on(command, "start --detach").exited(0);
+
+    // Heartbeating well past the threshold, which is the whole scenario: at
+    // twenty beats over two seconds nothing that counted them could ever call
+    // this dispatch quiet.
+    world.until(
+        "the wedged worker to heartbeat past the threshold",
+        |world| world.events_of("wedged", "member-heartbeat").len() >= 20,
+    );
+    world.until("the wedged worker to be reported quiet", |world| {
+        !world.events_of("wedged", "quiet-worker").is_empty()
+    });
+
+    let reported = world
+        .events_of("wedged", "quiet-worker")
+        .into_iter()
+        .find(|event| event["labels"]["node"] == "stuck")
+        .expect("the wedged worker was reported quiet");
+    assert_eq!(reported["payload"]["threshold_seconds"], 2);
+    assert!(
+        reported["payload"]["quiet_for_seconds"]
+            .as_u64()
+            .unwrap_or(0)
+            >= 2,
+        "the quiet stretch is shorter than the threshold that fired: {reported}"
+    );
+
+    // Still beating afterwards: what was reported is a worker that is alive and
+    // doing nothing, not one that stopped saying anything.
+    let beats = world.events_of("wedged", "member-heartbeat").len();
+    world.until("the wedged worker to go on heartbeating", |world| {
+        world.events_of("wedged", "member-heartbeat").len() > beats
+    });
+
+    world.release("stuck.go");
+    world.until("the run to settle", |world| {
+        world.run_file("wedged", "result.json").is_file()
+    });
+}
+
+/// A hold no clock can wait out fails the dispatch rather than dying inside it.
+///
+/// The bound arrives in the environment, and every command this suite runs sets
+/// it — so a mistyped one is a live way for a journey to be misconfigured. Read
+/// without a ceiling it becomes a duration added to a clock, and an addition past
+/// what an `Instant` can represent panics: the double unwinds mid-dispatch and
+/// what reaches the run is a sibling that died saying nothing about the value it
+/// was handed. That is the one failure a double cannot report, because reporting
+/// a misconfiguration is all it does — so the bound is checked where it is read,
+/// and the node settles naming the variable.
+#[test]
+fn a_hold_longer_than_a_clock_can_wait_fails_the_dispatch() {
+    let world = World::new("plan-unwaitable");
+    // Scripted to hold: the bound is read only by a dispatch that waits, so one
+    // that runs straight through would settle whatever the value was.
+    world.script("stuck.wait", "hold");
+    let path = world.plan(
+        "unwaitable",
+        &plan_of("unwaitable", vec![agent("stuck", &[])]),
+    );
+    let mut command = world.cmd(&["start", &path.to_string_lossy(), "--detach"]);
+    command.env(RENDEZVOUS_SECONDS_ENV, u64::MAX.to_string());
+    world.run_on(command, "start --detach").exited(0);
+    world.until("the run to settle", |world| {
+        world.run_file("unwaitable", "result.json").is_file()
+    });
+
+    let result = world.run_json("unwaitable", "result.json");
+    assert_eq!(result["state"], "failed", "{result}");
+    let results = world.run(&["results", "unwaitable"]);
+    results.exited(0);
+    assert!(
+        results.stdout.contains(RENDEZVOUS_SECONDS_ENV),
+        "the failure does not name the variable that was out of range, so a \
+         journey that mistyped it is left reading a dead sibling:\n{}",
+        results.stdout
+    );
+    assert!(
+        !results.stdout.contains("panicked"),
+        "the dispatch died inside the hold instead of refusing it:\n{}",
+        results.stdout
+    );
 }
 
 /// A node the planner cancels is parked, not failed.

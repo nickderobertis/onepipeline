@@ -1176,6 +1176,21 @@ impl GraphRun {
         }
     }
 
+    /// The process this graph run's work is happening in, where it is one this
+    /// crate started.
+    ///
+    /// `None` for the library backend, and that is not "no process": the graph
+    /// is running *in this one*, and a caller recording where a run's work is
+    /// records its own pid for it. The distinction is which process a teardown
+    /// would have to aim at, and only the caller knows whether it is willing to
+    /// name itself.
+    pub fn process(&self) -> Option<u32> {
+        match &self.backend {
+            GraphBackend::Library(_) => None,
+            GraphBackend::Process(run) => Some(run.pid()),
+        }
+    }
+
     /// Whether the graph has ended, reaping a retained process if it has.
     ///
     /// Reaping is the point for the process backend. A child nobody waits on

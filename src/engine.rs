@@ -415,8 +415,11 @@ struct Dispatch {
     node: Node,
     cancel: CancellationToken,
     started: Instant,
-    /// When this dispatch last recorded anything, for the quiet-worker watch.
-    last_activity: Instant,
+    /// When this dispatch last recorded anything evidencing progress, for the
+    /// quiet-worker watch. Named for progress rather than for activity because
+    /// a heartbeat is activity and does not move it: see
+    /// [`projection::evidences_progress`].
+    last_progress: Instant,
     /// Whether it has already been reported quiet in this quiet stretch. A
     /// worker that wakes up, works, and goes quiet again is reported again; one
     /// that simply stays quiet is not repeated.
@@ -568,8 +571,17 @@ fn converge(
             Ok(Message::Event(envelope)) => {
                 if let Some(node) = envelope.labels.node.clone() {
                     if let Some(dispatch) = in_flight.get_mut(&node) {
-                        dispatch.last_activity = Instant::now();
-                        dispatch.reported_quiet = false;
+                        // Only an envelope evidencing progress moves the stall
+                        // clock. A heartbeat says the process is alive, which is
+                        // a different question with its own deadline one layer
+                        // down — and a stall watch it reset could never fire for
+                        // the wedged-but-alive turn it exists to catch.
+                        if projection::evidences_progress(&envelope) {
+                            dispatch.last_progress = Instant::now();
+                            dispatch.reported_quiet = false;
+                        }
+                        // Addressing is not progress: a turn a heartbeat names
+                        // is still the turn a `context` note is delivered into.
                         if let Some(address) = addressed_by(&envelope) {
                             dispatch.control = Some(address);
                         }
@@ -1187,7 +1199,7 @@ fn start_ready(
                 node,
                 cancel,
                 started: now,
-                last_activity: now,
+                last_progress: now,
                 reported_quiet: false,
                 control: None,
             },
@@ -1843,12 +1855,12 @@ fn watch_for_quiet(
     let quiet: Vec<(String, u64, bool, String)> = in_flight
         .iter()
         .filter(|(_, dispatch)| !dispatch.reported_quiet)
-        .filter(|(_, dispatch)| dispatch.last_activity.elapsed() > stall_after)
+        .filter(|(_, dispatch)| dispatch.last_progress.elapsed() > stall_after)
         .map(|(id, dispatch)| {
             (
                 id.clone(),
-                dispatch.last_activity.elapsed().as_secs(),
-                dispatch.last_activity == dispatch.started,
+                dispatch.last_progress.elapsed().as_secs(),
+                dispatch.last_progress == dispatch.started,
                 dispatch.node.persona.clone().unwrap_or_else(|| "-".into()),
             )
         })
@@ -1982,6 +1994,7 @@ fn gating_humans(
 mod tests {
     use super::*;
     use crate::plan::{Plan, PLAN_SCHEMA_VERSION};
+    use crate::projection::Recorded;
 
     /// The checked-in shape of a schema-3 run result.
     const RUN_RESULT_GOLDEN: &str = include_str!("../tests/golden/run-result-v3.json");
@@ -2202,7 +2215,7 @@ mod tests {
             plan: Some(plan),
             recorded: recorded
                 .iter()
-                .map(|(id, status)| ((*id).to_string(), *status))
+                .map(|(id, status)| ((*id).to_string(), Recorded::At(*status)))
                 .collect(),
             ..RunState::default()
         }

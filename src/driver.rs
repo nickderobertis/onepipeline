@@ -52,6 +52,17 @@ const DRAIN_GRACE: Duration = Duration::from_secs(2);
 /// that waited longer would make a genuinely failed launch look like a slow one.
 const DRIVER_HANDOVER: Duration = Duration::from_secs(30);
 
+/// How long a `stop` watches the tree it signalled before saying it is still
+/// there.
+///
+/// The polite signal is `SIGTERM` and nothing a run is made of installs a
+/// handler for it, so a process that has taken one is gone in milliseconds; what
+/// this waits out is a loaded host and the moment between a parent dying and
+/// `init` reaping what it left. Long enough that an ordinary teardown never
+/// reports a survivor it merely outran, short enough that an operator whose run
+/// really is wedged hears about it rather than watching a command hang.
+const TEARDOWN_PATIENCE: Duration = Duration::from_secs(5);
+
 /// How many of a failed driver's last lines a refusal repeats.
 ///
 /// Enough for the sibling's own refusal and the sentence around it, and few
@@ -425,13 +436,17 @@ fn start(args: &StartArgs) -> Result<i32> {
         pr_author_graph: pr_author_graph_ref.unwrap_or_default(),
         launcher: sys::launcher(),
         session: sys::launching_session(),
-        // Replaced below by the graph process's own pid. What drives the run
-        // is that process, not this one: `--detach` returns immediately, so a
-        // record naming this pid would read as a dead driver the moment it did.
-        // Until that process exists, this one is what is driving the run, and
-        // the record has to say so — see `launch_graph`'s ordering.
-        pid: sys::pid(),
-        host: sys::hostname(),
+        // Claimed by this process immediately below, through the one writer of
+        // all three: which process, on which host, and the stamp that says the
+        // pid is still that process. Replaced again by the graph process's own
+        // claim — what drives the run is that process, not this one: `--detach`
+        // returns immediately, so a record naming this pid would read as a dead
+        // driver the moment it did. Until that process exists, this one is what
+        // is driving the run, and the record has to say so — see
+        // `launch_graph`'s ordering.
+        pid: 0,
+        host: String::new(),
+        started: String::new(),
         started_at: sys::now_rfc3339(),
         heartbeat_interval: args.heartbeat_interval,
         dag_sets: args.dag_sets.clone(),
@@ -439,6 +454,7 @@ fn start(args: &StartArgs) -> Result<i32> {
         adoptions: 0,
         filters,
     };
+    record.driven_by_this_process();
 
     let mut open = Journal::open(&paths);
     if !live.is_empty() {
@@ -682,8 +698,7 @@ fn drive_run(args: &RunArgs) -> Result<i32> {
             .map(|goal| goal.text.as_str()),
         agentgraph::GraphOutput::Logged(&log),
     )?;
-    record.pid = sys::pid();
-    record.host = sys::hostname();
+    record.driven_by_this_process();
     ledger::write_json(&paths.launch(), &record)?;
 
     let settled = engine::drive_holding(&paths, lock)?;
@@ -975,8 +990,7 @@ fn adopt(args: &RunArgs) -> Result<i32> {
     let lock = engine::claim(&paths)?;
 
     record.adoptions += 1;
-    record.pid = sys::pid();
-    record.host = sys::hostname();
+    record.driven_by_this_process();
     // The dead driver's evidence moves aside rather than being truncated: it is
     // the first thing to read after adopting.
     let previous = paths
@@ -1078,13 +1092,28 @@ fn stop(args: &StopArgs) -> Result<i32> {
     }
 
     // Attempted before the record is written, so the record says what happened
-    // rather than what was about to be tried.
-    let teardown = terminate(record.pid, &record.host);
+    // rather than what was about to be tried — and refused before either, where
+    // this build cannot establish what the run is running. Nothing is signalled
+    // and no stop is recorded on that path: a run whose registry cannot be read
+    // is one nobody can say is idle, and writing "stopped" over it would be the
+    // same false completion this verb refuses everywhere else.
+    let teardown = terminate(&paths, &record).map_err(|why| {
+        Error::Refused(format!(
+            "run '{}' was not stopped: this build cannot establish what it is running — {why}. \
+             The run is untouched; nothing was signalled. Fix or remove the entry the path \
+             above names and run `onepipeline stop {}` again",
+            paths.run, paths.run
+        ))
+    })?;
     let established = match teardown {
         None => journal::StopTeardown::Elsewhere,
         Some(sys::Teardown::Signalled) => journal::StopTeardown::Signalled,
+        Some(sys::Teardown::NothingToStop) => journal::StopTeardown::NothingToStop,
         Some(sys::Teardown::NotAttempted) => journal::StopTeardown::NotAttempted,
         Some(sys::Teardown::PartlySignalled) => journal::StopTeardown::PartlySignalled,
+        // Unix-only, as the variant is: no Windows teardown establishes it.
+        #[cfg(unix)]
+        Some(sys::Teardown::Refused) => journal::StopTeardown::Refused,
     };
     let mut journal = Journal::open(&paths);
     journal.emit(
@@ -1104,21 +1133,43 @@ fn stop(args: &StopArgs) -> Result<i32> {
     match teardown {
         Some(sys::Teardown::NotAttempted) => {
             return Err(Error::Refused(format!(
-                "run '{run}' was not stopped: this host gave no process listing its tree \
-                 could be read from, so the processes the run started could not be found, \
-                 and ending its driver alone would have orphaned them. The run is \
-                 untouched — run `onepipeline stop {run}` again once `ps` answers"
+                "run '{run}' was not stopped: this host gave no answer its tree could be \
+                 read from — no process listing, or nothing that says whether a pid it \
+                 recorded is still the process it named, each said above — so the \
+                 processes the run started could not be found, and ending its driver \
+                 alone would have orphaned them. The run is untouched — run \
+                 `onepipeline stop {run}` again once this host answers"
             )));
         }
         Some(sys::Teardown::PartlySignalled) => {
             return Err(Error::Refused(format!(
                 "run '{run}' was only partly stopped: part of its process tree was \
-                 signalled and at least one process in it could not be, so that one is \
-                 still running and is not this session's to end. Find it in this host's \
-                 process list and end it as the user that owns it"
+                 signalled and at least one process in it is still running — one this \
+                 session could not signal, or one that took the ask and stayed. Find it \
+                 in this host's process list and end it as the user that owns it"
             )));
         }
-        None | Some(sys::Teardown::Signalled) => {}
+        // llmlint: ignore-block[changed_behavior_has_e2e] this arm has no journey and
+        // cannot have one: reaching it takes a run every process of which refuses this
+        // user's signal, and a process this user may not signal is not a thing for a
+        // suite to go and make — the same reason `sys::established` is a fold driven
+        // from the answers a round of signalling gives rather than from signals, and the
+        // reason the Windows teardown arm carries this directive too. What the arm is
+        // built from is proved there, at
+        // `a_teardown_refused_by_everything_it_aimed_at_reports_no_signal_at_all` and
+        // `a_stop_that_could_signal_nothing_it_aimed_at_says_so`; every other outcome
+        // this match renders is driven end to end in `tests/e2e/driver.rs`.
+        #[cfg(unix)]
+        Some(sys::Teardown::Refused) => {
+            return Err(Error::Refused(format!(
+                "run '{run}' was not stopped: its process tree was found and every \
+                 process in it refused this session's signal, so nothing was signalled \
+                 and all of it is still running. Running `onepipeline stop {run}` again \
+                 as this user will be refused the same way — find the tree in this \
+                 host's process list and end it as the user that owns it"
+            )));
+        } // llmlint: ignore-end[changed_behavior_has_e2e]
+        None | Some(sys::Teardown::Signalled) | Some(sys::Teardown::NothingToStop) => {}
     }
     // `teardown` qualifies `stopped`: the ledger record is what stops a run, and
     // it is written either way.
@@ -1134,19 +1185,257 @@ fn stop(args: &StopArgs) -> Result<i32> {
     Ok(EXIT_SUCCESS)
 }
 
-/// Ask the recorded driver to stop, on the host its pid means something on.
+/// Ask everything driving this run on this host to stop, and watch it go.
 ///
-/// Politely: the driver takes the ask first so it records its own abandonment
+/// Politely: a driver takes the ask first so it records its own abandonment
 /// rather than vanishing. The host check is this caller's alone — a pid means
-/// nothing across machines, and the ledger's record names which one it was
+/// nothing across machines, and the ledger's records name which one each was
 /// taken on.
-/// `None` when the pid is another host's, where nothing was attempted and this
-/// host has nothing to promise either way.
-fn terminate(pid: u32, host: &str) -> Option<sys::Teardown> {
-    if host != sys::hostname() {
-        return None;
+///
+/// `None` when nothing this run names is a process on this host, where nothing
+/// was attempted and this host has nothing to promise either way.
+///
+/// A live pid no record can prove is **not** signalled and is not silently
+/// dropped either: it downgrades what this promises, to `NotAttempted` where
+/// nothing was signalled at all and to `PartlySignalled` where the rest of the
+/// run was, so `stop` refuses rather than reporting a teardown over a process it
+/// could not place. A teardown every process refused needs no downgrade — it
+/// already says nothing was signalled and the run is still running — and keeps
+/// its own answer. All three are what [`Aim::unproven`] exists to carry.
+// llmlint: ignore-block[changed_behavior_has_e2e] every branch is driven end to end in
+// `tests/e2e/driver.rs`, against real drivers and real dispatches: the proved claims and the
+// stale record in `stopping_a_run_ends_the_tree_its_lock_names_when_the_record_names_a_dead_driver`,
+// the reissued pid in `a_stop_never_signals_a_pid_the_host_has_given_to_another_process`, and
+// the unprovable pid in `a_stop_that_cannot_read_the_process_table_refuses_and_leaves_the_run_retryable`,
+// whose faulty `ps` is a host that will not say when anything started. What has no journey is a
+// stop of two *live* roots, and that is a state a run cannot be in: the ownership lock is a
+// single-writer lock, so one run has one driver, and the pair a stop can meet — the pid a
+// stale record names beside the pid the lock stamps — is what the first of those walks over
+// one listing.
+fn terminate(paths: &RunPaths, record: &LaunchRecord) -> Result<Option<sys::Teardown>> {
+    let Aim::Here { roots, unproven } = roots_to_stop(paths, record)? else {
+        return Ok(None);
+    };
+    let established = sys::stop_and_confirm(&roots, sys::Stop::Politely, TEARDOWN_PATIENCE);
+    if unproven.is_empty() {
+        return Ok(Some(established));
     }
-    Some(sys::stop(pid, sys::Stop::Politely))
+    Ok(Some(match established {
+        // Nothing was signalled and the run is exactly as it was, which is what
+        // a retry rests on.
+        sys::Teardown::NothingToStop | sys::Teardown::NotAttempted => sys::Teardown::NotAttempted,
+        // Part of the run was signalled and something on this host is still
+        // running that this teardown was not entitled to touch.
+        sys::Teardown::Signalled | sys::Teardown::PartlySignalled => sys::Teardown::PartlySignalled,
+        // Nothing was signalled either, but a retry does not rest on it: what
+        // stood in the way was this user's own entitlement, which is what stands
+        // in the way of the unproven pid beside it too. Left as it is rather
+        // than downgraded to `NotAttempted`, whose promise — the same ask works
+        // once the host answers — is the one thing that is not true here.
+        #[cfg(unix)]
+        sys::Teardown::Refused => sys::Teardown::Refused,
+    }))
+}
+
+/// What a stop of this run may aim at on this host.
+///
+/// Two answers rather than a flag beside a list, because the flag's other
+/// combination is not a state a run can be in: a pid this host may aim at is one
+/// a record of this host's named, so "nothing here is this run's" and "here is
+/// what this run is running" cannot both be true, and only one of them can carry
+/// pids.
+#[derive(Debug, PartialEq, Eq)]
+enum Aim {
+    /// Nothing this run names is a process on this host. Nothing is attempted
+    /// and this host promises nothing either way — deliberately not the same
+    /// answer as a run of this host's whose processes are all over, which is a
+    /// teardown that looked and found nothing left to stop.
+    Elsewhere,
+    /// The run is this host's, as far as its records say.
+    Here {
+        /// The roots, in the order they are signalled: every claim whose own
+        /// stamp proves its pid is still the process the record named.
+        roots: Vec<u32>,
+        /// Live pids on this host that no record could place either way. What
+        /// stood in the way of proving each is said on stderr where it is met.
+        ///
+        /// Never signalled — that is the whole point — and never ignored either.
+        /// A teardown that dropped these would report a clean stop over a
+        /// process that may well be the run's own driver.
+        unproven: Vec<u32>,
+    },
+}
+
+/// Every process on this host a stop of this run aims at, or why this build
+/// cannot say.
+///
+/// Three records, three questions. The **launch record** names the driver the run
+/// was launched or last adopted with, which is a claim about the past: a driver
+/// that died leaves its pid sitting there until something adopts the run. The
+/// **ownership lock** names whatever is driving the run now. The **registry**
+/// names the work itself — the one record that survives the driver that started
+/// it, and the only way a stop reaches a dispatch that has outlived one.
+///
+/// Reading the registry is therefore the one failure that is **fatal to the
+/// stop**. The other two can only add a root, so one that cannot be read costs
+/// reach; a registry that cannot be read is a run nobody can say is idle, and the
+/// caller refuses rather than reporting a teardown it did not make.
+///
+/// **Every** claim is aimed at only where its own stamp proves it, the launch
+/// record included, because a pid the host has since reissued is somebody else's
+/// tree — and the pid a stop is likeliest to have reissued is exactly that one:
+/// it is the oldest claim a run holds, it is left behind by every driver that
+/// dies, and nothing rewrites it until an adoption does.
+fn roots_to_stop(paths: &RunPaths, record: &LaunchRecord) -> Result<Aim> {
+    let here = sys::hostname();
+    let mut on_this_host = false;
+    let mut roots: Vec<u32> = Vec::new();
+    let mut unproven: Vec<u32> = Vec::new();
+    // Each claim in turn, and the launch record first, so a teardown asks the
+    // driver to go before the work it started: the record's driver, then the
+    // lock's holder, then every dispatch the run has recorded.
+    let claimed = std::iter::once((
+        RECORDED_DRIVER,
+        record.pid,
+        record.host.clone(),
+        record.started.clone(),
+    ))
+    .chain(lock_held_on(paths).map(|held| (LOCK_HOLDER, held.pid, held.host, held.started)))
+    .chain(ledger::dispatches_of(paths)?.into_iter().map(|running| {
+        (
+            REGISTERED_DISPATCH,
+            running.pid,
+            running.host,
+            running.started,
+        )
+    }));
+    for (named_by, pid, host, started) in claimed {
+        if host != here {
+            continue;
+        }
+        on_this_host = true;
+        if roots.contains(&pid) || unproven.contains(&pid) {
+            continue;
+        }
+        match claim_on(pid, &started) {
+            Claim::Proved => roots.push(pid),
+            Claim::Gone => {}
+            Claim::Reissued => eprintln!(
+                "onepipeline: run '{}': the {named_by} names pid {pid}, which this host has \
+                 since given to another process, so it was not signalled",
+                paths.run
+            ),
+            Claim::Unstamped => {
+                left_alone(
+                    &paths.run,
+                    named_by,
+                    pid,
+                    "its record carries no start token",
+                );
+                unproven.push(pid);
+            }
+            Claim::HostSilent => {
+                left_alone(
+                    &paths.run,
+                    named_by,
+                    pid,
+                    "this host will not say when it started",
+                );
+                unproven.push(pid);
+            }
+        }
+    }
+    if !on_this_host {
+        return Ok(Aim::Elsewhere);
+    }
+    Ok(Aim::Here { roots, unproven })
+}
+
+/// Say out loud that a live pid was left alone, and what stood in the way of
+/// placing it.
+///
+/// A teardown that is narrower than the one an operator asked for has to say so
+/// where it happens: the refusal that follows knows only that something could
+/// not be established, and this is the line that names which pid and why.
+fn left_alone(run: &str, named_by: &str, pid: u32, why: &str) {
+    eprintln!(
+        "onepipeline: run '{run}': the {named_by} names pid {pid}, which is running on this \
+         host — {why}, so nothing says it is still this run's process and it was not signalled"
+    );
+}
+// llmlint: ignore-end[changed_behavior_has_e2e]
+
+/// How a teardown names the record a pid came off, when it says out loud that it
+/// did not aim there.
+const RECORDED_DRIVER: &str = "launch record";
+/// The claim being driven now.
+const LOCK_HOLDER: &str = "ownership lock";
+/// The claim that outlives the driver that wrote it.
+const REGISTERED_DISPATCH: &str = "dispatch registry";
+
+/// What one record says about one pid on this host.
+#[derive(Debug, PartialEq, Eq)]
+enum Claim {
+    /// Still the process the record was written for: its stamp says so.
+    Proved,
+    /// Not a process this teardown has anything to end — the pid is gone.
+    Gone,
+    /// A live process this host says is **not** the one the record named. The
+    /// recorded process is over and its pid has been handed on, so there is
+    /// nothing here to stop and nothing unresolved either.
+    Reissued,
+    /// A live process whose record carries no stamp to compare — every record a
+    /// build before the field existed wrote.
+    Unstamped,
+    /// A live process this host would not describe, so there was nothing to
+    /// compare its record against.
+    HostSilent,
+}
+
+/// Whether `pid` is still the process a record stamped `started` was written
+/// for.
+///
+/// The order of the answers is the point. A stamp that matches is the only
+/// proof, and everything else is read against whether the pid is a process at
+/// all: one that is gone ends the question, and one that is live is either
+/// somebody else's — the host answered with a different stamp — or a pid this
+/// build has nothing to compare, which is *cannot say* rather than *nothing is
+/// running there*.
+fn claim_on(pid: u32, started: &str) -> Claim {
+    let reading = sys::process_start_token(pid);
+    match reading {
+        Some(ref token) if token.matches(started) => Claim::Proved,
+        _ if !sys::process_may_be_live(pid) => Claim::Gone,
+        Some(_) if !started.is_empty() => Claim::Reissued,
+        Some(_) => Claim::Unstamped,
+        None => Claim::HostSilent,
+    }
+}
+
+/// The run's ownership lock, as a record, when there is one this build can read.
+///
+/// A lock that is **not there** and one this build cannot read are different
+/// answers and only the first is silent. Neither gives a teardown a pid it may
+/// aim at — an unreadable claim names nobody — but the second means the run is
+/// held by something whose record this build does not understand, and a stop
+/// that swallowed that would leave an operator reading a teardown narrower than
+/// they asked for with nothing saying why. Said out loud and not refused: the
+/// recorded driver is still aimed at, and refusing the stop over a corrupt lock
+/// would leave a live run running.
+fn lock_held_on(paths: &RunPaths) -> Option<ledger::LockRecord> {
+    let path = paths.lock();
+    match ledger::read_json::<ledger::LockRecord>(&path) {
+        Ok(held) => Some(held),
+        Err(Error::Ledger { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            eprintln!(
+                "onepipeline: the ownership lock of run '{}' cannot be read, so this stop aims \
+                 only at the driver the launch record names: {error}",
+                paths.run
+            );
+            None
+        }
+    }
 }
 
 /// `onepipeline next` — the channel's only consumer.
@@ -1800,5 +2089,289 @@ mod tests {
     #[test]
     fn the_reply_timeout_falls_back_when_the_environment_is_unusable() {
         assert!(reply_timeout_seconds() > 0);
+    }
+
+    /// A launch record naming a driver, as `stop` reads one: the pid, the host
+    /// it means something on, and the stamp that says it is still that process.
+    fn launched_by(pid: u32, host: &str, started: &str) -> LaunchRecord {
+        LaunchRecord {
+            run_id: "stopped".into(),
+            plan: PathBuf::from("plan.json"),
+            dir: PathBuf::from("/tmp/launch"),
+            graph: String::new(),
+            graph_run: String::new(),
+            node_graph: "graphs/node-scope.yaml".into(),
+            pr_author_graph: String::new(),
+            launcher: "e2e".into(),
+            session: "session-a".into(),
+            pid,
+            host: host.to_string(),
+            started: started.to_string(),
+            started_at: sys::now_rfc3339(),
+            heartbeat_interval: 1_800,
+            dag_sets: Vec::new(),
+            node_sets: Vec::new(),
+            adoptions: 0,
+            filters: crate::filter::Filters::default(),
+        }
+    }
+
+    /// What a stop aims at is every claim the run holds and can prove — and
+    /// never a pid nothing proves, the launch record's included.
+    ///
+    /// Three records, three questions. The launch record's answer is about the
+    /// past: a driver that died leaves its pid there, and a stop that aimed at it
+    /// alone signalled nothing while the run's dispatches kept running. The lock
+    /// is the claim made now. The registry is the only one that names the work
+    /// rather than a driver, which is what a stop is actually for.
+    ///
+    /// Each of the three is aimed at only where its own start token says its pid
+    /// is still the process the record named, because a teardown aimed at a pid
+    /// the host has since reissued is a teardown of somebody else's work.
+    #[test]
+    fn a_stop_aims_at_every_stamped_claim_the_run_holds_and_never_at_a_pid_nothing_proves() {
+        let root = scratch("roots");
+        let paths = RunPaths::under(&root, "stopped");
+        paths.create().expect("the run directory");
+        let here = sys::hostname();
+        let dead = sys::reaped_pid();
+        let stamp = |started: &str| ledger::LockRecord {
+            pid: sys::pid(),
+            host: here.clone(),
+            acquired_at: sys::now_rfc3339(),
+            verb: "drive".into(),
+            started: started.to_string(),
+        };
+        let held = |record: &ledger::LockRecord| {
+            ledger::write_json(&paths.lock(), record).expect("a held lock");
+        };
+        let proven = sys::process_start_token(sys::pid())
+            .expect("this host says when a process started")
+            .recorded()
+            .to_string();
+        let aimed_at =
+            |record: &LaunchRecord| roots_to_stop(&paths, record).expect("this run's records read");
+        let roots = |record: &LaunchRecord| match aimed_at(record) {
+            Aim::Here { roots, .. } => roots,
+            Aim::Elsewhere => panic!("a run this host's own records name read as another host's"),
+        };
+
+        // Nothing holds the lock, and the record names a driver that has died:
+        // the run is this host's and there is nothing here to aim at.
+        assert_eq!(
+            aimed_at(&launched_by(dead, &here, &proven)),
+            Aim::Here {
+                roots: Vec::new(),
+                unproven: Vec::new()
+            }
+        );
+        // The same record naming this live process, which its stamp proves.
+        assert_eq!(
+            roots(&launched_by(sys::pid(), &here, &proven)),
+            vec![sys::pid()]
+        );
+        // And naming a live pid stamped as a process it is not, which is what a
+        // host that has reissued that pid leaves behind: the process the record
+        // was written for is over, this one is a stranger's, and a teardown
+        // aimed there would end work this run never started. Nothing unresolved
+        // either — the stamp *answered*, and its answer was no.
+        assert_eq!(
+            aimed_at(&launched_by(
+                sys::pid(),
+                &here,
+                "the driver it named, which is not this process",
+            )),
+            Aim::Here {
+                roots: Vec::new(),
+                unproven: Vec::new()
+            },
+            "a stop aimed at a pid the host has since given to another process"
+        );
+        // A record from a build that predates the stamp proves nothing about its
+        // pid either way, so it is not aimed at — and, unlike the two above, the
+        // stop may not call that pid gone.
+        assert_eq!(
+            aimed_at(&launched_by(sys::pid(), &here, "")),
+            Aim::Here {
+                roots: Vec::new(),
+                unproven: vec![sys::pid()]
+            }
+        );
+
+        // A lock this build's own stamp proves.
+        held(&stamp(&proven));
+        assert_eq!(
+            roots(&launched_by(dead, &here, &proven)),
+            vec![sys::pid()],
+            "a stop did not aim at the process the lock stamps as driving the run"
+        );
+        // The same live pid, stamped as a process it is not. This is the case
+        // that makes the stamp worth reading: the pid answers a liveness probe,
+        // and it is not the driver.
+        held(&stamp("the process that took it, which is not this one"));
+        assert!(
+            roots(&launched_by(dead, &here, &proven)).is_empty(),
+            "a stop aimed at a pid the lock's own stamp disowns"
+        );
+        // A lock an older build wrote carries no stamp, and an unproven pid is
+        // not one a teardown may aim at either.
+        held(&stamp(""));
+        assert_eq!(
+            aimed_at(&launched_by(dead, &here, &proven)),
+            Aim::Here {
+                roots: Vec::new(),
+                unproven: vec![sys::pid()]
+            }
+        );
+        // A lock taken on another machine, where a pid means nothing.
+        held(&ledger::LockRecord {
+            host: "a-host-this-is-not".into(),
+            ..stamp(&proven)
+        });
+        assert!(roots(&launched_by(dead, &here, &proven)).is_empty());
+        // A lock this build cannot read names nobody, so it adds no root. Unlike
+        // the registry below it is not fatal: the lock narrows what a teardown
+        // reaches, while the registry decides whether anything is known about the
+        // work at all.
+        std::fs::write(paths.lock(), "not json at all").expect("a lock nobody can read");
+        assert!(roots(&launched_by(dead, &here, &proven)).is_empty());
+
+        // And a run whose every record is another host's leaves this one nothing
+        // to aim at and nothing to promise, which is what `stop` reports as
+        // `elsewhere` rather than as a run whose work is over.
+        assert_eq!(
+            aimed_at(&launched_by(dead, "a-host-this-is-not", &proven)),
+            Aim::Elsewhere
+        );
+
+        // The registry, which names the work rather than a driver. Its entries
+        // are proved one at a time and on their own stamps, so a dispatch is
+        // aimed at whether or not anything is still driving the run — which is
+        // the case it exists for, because the driver is dead.
+        std::fs::remove_file(paths.lock()).expect("the lock is given up");
+        let running = |pid: u32, host: &str, started: &str| ledger::DispatchRecord {
+            node: "build".into(),
+            pid,
+            host: host.to_string(),
+            dispatched_at: sys::now_rfc3339(),
+            started: started.to_string(),
+        };
+        let recorded = |record: &ledger::DispatchRecord| {
+            ledger::write_json(&paths.dispatch(record.pid, 0), record)
+                .expect("a recorded dispatch");
+        };
+        recorded(&running(sys::pid(), &here, &proven));
+        assert_eq!(
+            roots(&launched_by(dead, &here, &proven)),
+            vec![sys::pid()],
+            "a stop did not aim at the process the registry says the run's work is in"
+        );
+        // The same live pid, recorded as a process it is not, and one recorded on
+        // another machine. Neither proves a pid on this host, and a teardown aims
+        // at neither — and neither is a registry this build cannot read, so the
+        // stop still goes ahead with what it can prove.
+        for disowned in [
+            running(
+                sys::pid(),
+                &here,
+                "the process that took it, which is not this one",
+            ),
+            running(sys::pid(), "a-host-this-is-not", &proven),
+        ] {
+            recorded(&disowned);
+            assert!(
+                roots(&launched_by(dead, &here, &proven)).is_empty(),
+                "a stop aimed at a pid the registry cannot prove: {disowned:?}"
+            );
+        }
+        // One process named twice is one root: the driver that took the lock is
+        // usually the one the record names.
+        recorded(&running(sys::pid(), &here, &proven));
+        held(&stamp(&proven));
+        assert_eq!(
+            roots(&launched_by(sys::pid(), &here, &proven)),
+            vec![sys::pid()]
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A registry this build cannot read stops the stop, rather than narrowing
+    /// it.
+    ///
+    /// The distinction the whole boundary rests on. Every other record a stop
+    /// consults can only *add* a root, so one it cannot read costs reach and
+    /// nothing else. The registry is what says whether a run has work running at
+    /// all, so a reader that met an entry it could not parse and carried on would
+    /// be reporting "there was nothing to stop" about a run it never managed to
+    /// ask — which is the false completion, one layer further in.
+    #[test]
+    fn a_registry_this_build_cannot_read_refuses_the_stop_rather_than_narrowing_it() {
+        let root = scratch("roots-unreadable");
+        let paths = RunPaths::under(&root, "stopped");
+        paths.create().expect("the run directory");
+        let here = sys::hostname();
+        let launch = launched_by(sys::reaped_pid(), &here, "a driver that has since died");
+        let usable = ledger::DispatchRecord {
+            node: "build".into(),
+            pid: sys::pid(),
+            host: here.clone(),
+            dispatched_at: sys::now_rfc3339(),
+            started: sys::process_start_token(sys::pid())
+                .expect("this host says when a process started")
+                .recorded()
+                .to_string(),
+        };
+        // A registry that is there and empty is an answer: this run has nothing
+        // running, and the stop proceeds on the records that remain.
+        assert!(roots_to_stop(&paths, &launch).is_ok());
+
+        for (what, entry) in [
+            (
+                "a record that is not JSON at all",
+                "not an entry".to_string(),
+            ),
+            (
+                "a record carrying a field this build does not know",
+                serde_json::to_string(&serde_json::json!({
+                    "node": "build",
+                    "pid": sys::pid(),
+                    "host": here,
+                    "dispatched_at": sys::now_rfc3339(),
+                    "started": usable.started,
+                    "reaped_by": "a build that came later",
+                }))
+                .expect("an entry from a newer writer"),
+            ),
+            (
+                "a record whose stamp proves nothing",
+                serde_json::to_string(&ledger::DispatchRecord {
+                    started: String::new(),
+                    ..usable.clone()
+                })
+                .expect("an unstamped entry"),
+            ),
+        ] {
+            std::fs::write(paths.dispatch(usable.pid, 0), entry).expect("an entry");
+            let refused = roots_to_stop(&paths, &launch)
+                .expect_err(&format!("{what} was read as a registry to act on"));
+            assert!(
+                refused.to_string().contains(&usable.pid.to_string()),
+                "the refusal does not name the entry that caused it: {refused}"
+            );
+        }
+
+        // And a registry that is not there at all, which every run this build
+        // creates has: its absence is something having taken it away, and what
+        // the run is running cannot be established without it.
+        std::fs::remove_dir_all(paths.dispatches()).expect("the registry is taken away");
+        let refused = roots_to_stop(&paths, &launch)
+            .expect_err("a run with no registry at all was read as a run with nothing running");
+        assert!(
+            refused
+                .to_string()
+                .contains(&paths.dispatches().display().to_string()),
+            "the refusal does not name the registry it could not read: {refused}"
+        );
+        std::fs::remove_dir_all(&root).ok();
     }
 }

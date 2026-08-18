@@ -19,8 +19,9 @@
 //! types, so the two cannot drift.
 //!
 //! A run's durable state is one directory: the plan it was launched with, the
-//! merged event store every view reads, the run's own result, and the channel's
-//! transport. The process driving the run is that ledger's **single writer**,
+//! merged event store every view reads, the run's own result, the channel's
+//! transport, and — beside the store — the account of any record a writer left
+//! half-written. The process driving the run is that ledger's **single writer**,
 //! guarded by the run's ownership lock; everything else reads.
 //!
 //! Composition is by subprocess. The agents come from `oneagentgraph` and the
@@ -44,14 +45,15 @@ pub mod event;
 pub mod executor;
 pub mod filter;
 pub mod plan;
+pub mod report;
 pub mod rules;
 pub mod views;
 
 // The engine behind the contract's surface. These modules are private on
 // purpose: `docs/contract.md` names the plan schema, the channel, the executor
-// seam, the rules grammar, and the views, and a public item it does not name is
-// a promise this crate did not make. The binary reaches them through
-// [`run`](crate::run).
+// seam, the rules grammar, the views, and the report retention path, and a
+// public item it does not name is a promise this crate did not make. The binary
+// reaches them through [`run`](crate::run).
 mod agentgraph;
 mod concurrency;
 mod crossdag;
@@ -63,12 +65,19 @@ mod journal;
 mod ledger;
 mod lifecycle;
 mod projection;
-mod report;
 mod sys;
 mod telemetry;
 mod vcs;
 
 pub use error::{Error, Result};
+
+/// The release of this crate a consumer is linking.
+///
+/// A host that pins this engine and separately pins a reader of the run store it
+/// writes has nothing else to hold the two to one another: the retention path
+/// and the resolution path are the same promise only where both sides are the
+/// same release, and this is how each side says which one it is.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Execute one parsed command line.
 ///
