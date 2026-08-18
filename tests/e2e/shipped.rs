@@ -12,6 +12,7 @@
 
 use crate::harness::{repo_file, World};
 use oneagentgraph::config::{GraphConfig, JudgeSide, Member};
+use oneagentgraph::persona::{merge, Persona};
 
 fn read(relative: &str) -> String {
     std::fs::read_to_string(repo_file(relative))
@@ -112,25 +113,40 @@ const SHIPPED_PERSONAS: [(&str, &str); 3] = [
     ("pr-author", "pr-author"),
 ];
 
+/// A shipped persona, read the way a member resolving it reads one: through the
+/// sibling's own parser, then layered onto a base config.
+///
+/// The merge is what a member is launched with, so it is what the assertions
+/// below are made against — a persona that parsed and then contributed nothing
+/// to the effective config would be a file that ships and does nothing.
+fn effective_persona(file: &str) -> (Persona, serde_json::Value) {
+    let origin = format!("personas/{file}.yaml");
+    let persona = Persona::parse(&read(&origin), &origin)
+        .unwrap_or_else(|e| panic!("{origin} is not a persona oneagentgraph loads: {e}"));
+    // An empty base, so what the merged config carries is this file's own.
+    let effective = merge("{}\n", "an empty base config", &persona)
+        .unwrap_or_else(|e| panic!("{origin} does not layer onto a base config: {e}"));
+    (persona, effective)
+}
+
 #[test]
 fn every_shipped_persona_is_a_persona_with_both_sides() {
     for (file, role) in SHIPPED_PERSONAS {
-        let text = read(&format!("personas/{file}.yaml"));
-        let document: serde_json::Value = serde_norway::from_str(&text)
-            .unwrap_or_else(|e| panic!("personas/{file}.yaml is not valid YAML: {e}"));
+        let (persona, effective) = effective_persona(file);
 
         assert_eq!(
-            document["agent"]["name"], role,
+            persona.label(),
+            Some(role),
             "personas/{file}.yaml names a different agent"
         );
-        let instructions = document["agent"]["instructions"]
+        let system_prompt = effective["system_prompt"]
             .as_str()
-            .unwrap_or_else(|| panic!("personas/{file}.yaml has no agent instructions"));
-        let supervisor = document["user"]["persona"]
+            .unwrap_or_else(|| panic!("personas/{file}.yaml has no system prompt"));
+        let supervisor = effective["user"]["persona"]
             .as_str()
             .unwrap_or_else(|| panic!("personas/{file}.yaml has no supervisor persona"));
         assert!(
-            instructions.len() > 200,
+            system_prompt.len() > 200,
             "personas/{file}.yaml says too little"
         );
         assert!(
@@ -138,6 +154,24 @@ fn every_shipped_persona_is_a_persona_with_both_sides() {
             "personas/{file}.yaml supervises too little"
         );
     }
+}
+
+/// The spelling the shipped personas were migrated off, refused where a member
+/// would read one.
+///
+/// Named here because the migration has no alias behind it: a file that grew an
+/// `agent:` block back would produce no member at all, and the refusal is what
+/// tells an author which field to write instead.
+#[test]
+fn the_previous_persona_spelling_no_longer_loads() {
+    let refused = Persona::parse(
+        "agent:\n  name: monitor\n  instructions: Observe one run.\n",
+        "personas/stale.yaml",
+    )
+    .expect_err("the previous spelling still loads");
+    let said = refused.to_string();
+    assert!(said.contains("system_prompt"), "{said}");
+    assert!(said.contains("personas/stale.yaml"), "{said}");
 }
 
 #[test]
