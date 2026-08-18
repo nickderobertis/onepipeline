@@ -44,14 +44,15 @@ pub mod event;
 pub mod executor;
 pub mod filter;
 pub mod plan;
+pub mod report;
 pub mod rules;
 pub mod views;
 
 // The engine behind the contract's surface. These modules are private on
 // purpose: `docs/contract.md` names the plan schema, the channel, the executor
-// seam, the rules grammar, and the views, and a public item it does not name is
-// a promise this crate did not make. The binary reaches them through
-// [`run`](crate::run).
+// seam, the rules grammar, the views, and the report retention path, and a
+// public item it does not name is a promise this crate did not make. The binary
+// reaches them through [`run`](crate::run).
 mod agentgraph;
 mod concurrency;
 mod crossdag;
@@ -63,12 +64,19 @@ mod journal;
 mod ledger;
 mod lifecycle;
 mod projection;
-mod report;
 mod sys;
 mod telemetry;
 mod vcs;
 
 pub use error::{Error, Result};
+
+/// The release of this crate a consumer is linking.
+///
+/// A host that pins this engine and separately pins a reader of the run store it
+/// writes has nothing else to hold the two to one another: the retention path
+/// and the resolution path are the same promise only where both sides are the
+/// same release, and this is how each side says which one it is.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Execute one parsed command line.
 ///
