@@ -237,6 +237,14 @@ pub enum StopTeardown {
     /// it is still running — one that could not be signalled, or one that was
     /// and did not go.
     PartlySignalled,
+    /// The tree was listed and **every** ask over it was refused, so nothing in
+    /// it was signalled and all of it that is still there is still running.
+    ///
+    /// Recorded apart from [`PartlySignalled`](Self::PartlySignalled), which a
+    /// reader takes as some of the run having come down. None of it did, and a
+    /// reader that cannot tell the two apart tells an operator that a teardown
+    /// they must finish by hand made a start on itself.
+    Refused,
     /// The run's driver is on another host, so this one attempted nothing and
     /// has nothing to say about its processes.
     Elsewhere,

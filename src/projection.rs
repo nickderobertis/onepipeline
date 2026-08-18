@@ -533,6 +533,7 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
                 journal::StopTeardown::NothingToStop
                 | journal::StopTeardown::NotAttempted
                 | journal::StopTeardown::PartlySignalled
+                | journal::StopTeardown::Refused
                 | journal::StopTeardown::Elsewhere => StopState::WorkersUndetermined,
             };
         }

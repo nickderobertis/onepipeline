@@ -92,9 +92,11 @@ pub fn hostname() -> String {
 
 /// What a teardown established about the processes it was aimed at.
 ///
-/// Four outcomes because they call for four different things from the caller,
+/// Five outcomes because they call for five different things from the caller,
 /// and collapsing any two of them is how a stop reports a completion nobody
-/// achieved.
+/// achieved. The fifth is [`Refused`](Self::Refused), which only a platform
+/// that signals processes one at a time can establish, and so exists only where
+/// one does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Teardown {
     /// A tree was there and every process in it was reached.
@@ -126,15 +128,38 @@ pub enum Teardown {
     /// it permanently beyond descent — the only handle a later stop has on them.
     /// Untouched, the same ask works once the host answers.
     NotAttempted,
-    /// The teardown began and at least one process in the tree is still
-    /// running: one it could not signal, or — where the caller asked for the
-    /// probe — one it signalled that has not gone.
+    /// The teardown began, part of the tree took the signal, and at least one
+    /// process in it is still running: one it could not signal, or — where the
+    /// caller asked for the probe — one it signalled that has not gone.
     ///
     /// The run is *not* untouched and retrying will not necessarily help: what
     /// is left is a process this user may not touch, or one that took the ask
     /// and stayed, and either way it is still running. The caller has to say so
-    /// rather than report any of the other three.
+    /// rather than report any of the other four.
     PartlySignalled,
+    /// The teardown began and **every** ask was refused: nothing was signalled,
+    /// and every process it aimed at that was still there is one this user may
+    /// not signal.
+    ///
+    /// Deliberately not [`PartlySignalled`](Self::PartlySignalled), which says
+    /// part of the tree took the signal — and so tells an operator that some of
+    /// the run came down, which is exactly what did not happen here. Nothing
+    /// came down. Deliberately not [`NotAttempted`](Self::NotAttempted) either,
+    /// though nothing was signalled on that path too: that one promises the
+    /// same ask works once the host answers, and here the host did answer and
+    /// the ask itself is what was refused, so making it again as this user
+    /// changes nothing. The whole tree is still running and ending it takes the
+    /// user that owns it.
+    ///
+    /// Unix-only, because establishing it takes an answer per process and the
+    /// Windows arm's one ask does not give one: a `taskkill /T` that was
+    /// refused has in general already ended the part of the tree it walked
+    /// before it met the refusal, which is
+    /// [`PartlySignalled`](Self::PartlySignalled). A variant that platform
+    /// could never construct would be an outcome an operator there was told to
+    /// read for and would never see.
+    #[cfg(unix)]
+    Refused,
 }
 
 /// How firmly a process is asked to stop.
@@ -278,21 +303,39 @@ fn platform_stop(roots: &[u32], how: Stop) -> (Teardown, Vec<u32>) {
     // the same false completion in a smaller place. And a walk that found
     // nothing but processes already gone reached no tree at all, which is the
     // answer a caller reports as such rather than as a stop it made.
-    let mut refused = false;
-    let mut delivered = false;
-    for pid in &aimed {
-        match signal_one(*pid, signal) {
-            Reached::Delivered => delivered = true,
-            Reached::Absent => {}
-            Reached::Refused => refused = true,
-        }
-    }
-    let established = match (refused, delivered) {
-        (true, _) => Teardown::PartlySignalled,
+    let answers: Vec<Reached> = aimed.iter().map(|pid| signal_one(*pid, signal)).collect();
+    (established(&answers), aimed)
+}
+
+/// What the answers from one round of signalling establish about the tree.
+///
+/// Split out of [`platform_stop`] for the reason the Windows arm's
+/// `taskkill_established` is: the case this fold exists to get right cannot be
+/// manufactured. A teardown that was refused everything needs a process this
+/// user may not signal, and going and making one would be a worse thing than
+/// the bug being checked for, so the fold is driven from the answers instead —
+/// the same answers a real round of signalling hands it.
+///
+/// Refusal and delivery are read separately because a tree can hold both, and
+/// what the pair of them reaches is four different things to tell an operator.
+/// Some refused beside some delivered is [`Teardown::PartlySignalled`] — part of
+/// the run came down and part of it is still running. **Every** ask refused is
+/// [`Teardown::Refused`]: none of it came down, and calling that partly
+/// signalled would tell the operator some of it had and stop them looking, which
+/// is the false completion this whole seam exists to remove. Nothing refused and
+/// something delivered is the whole tree reached, [`Teardown::Signalled`], and
+/// neither of the two is a walk that met only processes already gone:
+/// [`Teardown::NothingToStop`].
+#[cfg(unix)]
+fn established(answers: &[Reached]) -> Teardown {
+    let refused = answers.contains(&Reached::Refused);
+    let delivered = answers.contains(&Reached::Delivered);
+    match (refused, delivered) {
+        (true, true) => Teardown::PartlySignalled,
+        (true, false) => Teardown::Refused,
         (false, true) => Teardown::Signalled,
         (false, false) => Teardown::NothingToStop,
-    };
-    (established, aimed)
+    }
 }
 
 /// What one process did with the signal it was sent.
@@ -473,7 +516,9 @@ fn platform_stop(roots: &[u32], _how: Stop) -> (Teardown, Vec<u32>) {
             }
             Teardown::NotAttempted => walked = false,
             // `taskkill_established` never answers it: a root this teardown
-            // aimed at was live when it was filtered above.
+            // aimed at was live when it was filtered above. `Teardown::Refused`
+            // is not an arm here at all, because this platform cannot establish
+            // it — the note on the variant says why.
             Teardown::NothingToStop => {}
         }
     }
@@ -1297,6 +1342,70 @@ mod tests {
         // The two ids a teardown never aims at, for the same reason.
         assert_eq!(stop(0, Stop::Politely), Teardown::NothingToStop);
         assert_eq!(stop(pid(), Stop::Politely), Teardown::NothingToStop);
+    }
+
+    /// What a teardown that was refused **everything** says, and the three
+    /// answers it must not be confused with.
+    ///
+    /// Refusal and delivery used to be folded on `(true, _)`: refused, whatever
+    /// else happened, answered `PartlySignalled`. So a teardown that delivered
+    /// nothing at all — every process in the tree one this user may not signal —
+    /// reported that part of the run had been signalled. An operator reads that
+    /// as "some of it is coming down" and stops looking, which is the false
+    /// completion this whole seam exists to remove, reproduced inside it.
+    ///
+    /// Driven through the fold rather than through real signals, for the reason
+    /// the Windows arm's mapping is: a process this user may not signal is not a
+    /// thing to go and make, and the mixed answer needs one of those standing
+    /// beside a process that takes the ask.
+    #[cfg(unix)]
+    #[test]
+    fn a_teardown_refused_by_everything_it_aimed_at_reports_no_signal_at_all() {
+        assert_eq!(
+            established(&[Reached::Refused, Reached::Refused]),
+            Teardown::Refused,
+            "a teardown that delivered nothing reported part of the tree signalled"
+        );
+        assert_eq!(
+            established(&[Reached::Refused, Reached::Absent]),
+            Teardown::Refused,
+            "a process already gone was counted as a signal this teardown delivered"
+        );
+        // The three answers this one has to stay distinct from.
+        assert_eq!(
+            established(&[Reached::Refused, Reached::Delivered]),
+            Teardown::PartlySignalled,
+            "a tree part of which took the signal was not reported as partly signalled"
+        );
+        assert_eq!(
+            established(&[Reached::Delivered, Reached::Absent]),
+            Teardown::Signalled,
+            "a tree every process of which was reached was not reported as reached"
+        );
+        assert_eq!(
+            established(&[Reached::Absent, Reached::Absent]),
+            Teardown::NothingToStop,
+            "a walk that met nothing but processes already gone reported a stop it made"
+        );
+    }
+
+    /// The same answer through the whole teardown, from the one refusal a suite
+    /// can produce without a process it may not touch.
+    ///
+    /// [`signal_one`] refuses an id that is no process this host could hold —
+    /// the walk's ids are parsed out of a `ps` listing, and a non-positive one
+    /// would be a broadcast — and a refusal is a refusal however it was
+    /// reached: nothing was signalled, and what the teardown says has to be
+    /// that. Held here as well as at the fold because a fold that is right is
+    /// worth nothing if [`stop`] does not return what it establishes.
+    #[cfg(unix)]
+    #[test]
+    fn a_stop_that_could_signal_nothing_it_aimed_at_says_so() {
+        assert_eq!(
+            stop(u32::MAX, Stop::Politely),
+            Teardown::Refused,
+            "a stop that signalled nothing reported having reached part of a tree"
+        );
     }
 
     /// A fixture tree this process does **not** own, and the pids it reports.

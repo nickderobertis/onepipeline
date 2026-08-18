@@ -1111,6 +1111,9 @@ fn stop(args: &StopArgs) -> Result<i32> {
         Some(sys::Teardown::NothingToStop) => journal::StopTeardown::NothingToStop,
         Some(sys::Teardown::NotAttempted) => journal::StopTeardown::NotAttempted,
         Some(sys::Teardown::PartlySignalled) => journal::StopTeardown::PartlySignalled,
+        // Unix-only, as the variant is: no Windows teardown establishes it.
+        #[cfg(unix)]
+        Some(sys::Teardown::Refused) => journal::StopTeardown::Refused,
     };
     let mut journal = Journal::open(&paths);
     journal.emit(
@@ -1146,6 +1149,26 @@ fn stop(args: &StopArgs) -> Result<i32> {
                  in this host's process list and end it as the user that owns it"
             )));
         }
+        // llmlint: ignore-block[changed_behavior_has_e2e] this arm has no journey and
+        // cannot have one: reaching it takes a run every process of which refuses this
+        // user's signal, and a process this user may not signal is not a thing for a
+        // suite to go and make — the same reason `sys::established` is a fold driven
+        // from the answers a round of signalling gives rather than from signals, and the
+        // reason the Windows teardown arm carries this directive too. What the arm is
+        // built from is proved there, at
+        // `a_teardown_refused_by_everything_it_aimed_at_reports_no_signal_at_all` and
+        // `a_stop_that_could_signal_nothing_it_aimed_at_says_so`; every other outcome
+        // this match renders is driven end to end in `tests/e2e/driver.rs`.
+        #[cfg(unix)]
+        Some(sys::Teardown::Refused) => {
+            return Err(Error::Refused(format!(
+                "run '{run}' was not stopped: its process tree was found and every \
+                 process in it refused this session's signal, so nothing was signalled \
+                 and all of it is still running. Running `onepipeline stop {run}` again \
+                 as this user will be refused the same way — find the tree in this \
+                 host's process list and end it as the user that owns it"
+            )));
+        } // llmlint: ignore-end[changed_behavior_has_e2e]
         None | Some(sys::Teardown::Signalled) | Some(sys::Teardown::NothingToStop) => {}
     }
     // `teardown` qualifies `stopped`: the ledger record is what stops a run, and
@@ -1176,7 +1199,9 @@ fn stop(args: &StopArgs) -> Result<i32> {
 /// dropped either: it downgrades what this promises, to `NotAttempted` where
 /// nothing was signalled at all and to `PartlySignalled` where the rest of the
 /// run was, so `stop` refuses rather than reporting a teardown over a process it
-/// could not place. Both are what [`Aim::unproven`] exists to carry.
+/// could not place. A teardown every process refused needs no downgrade — it
+/// already says nothing was signalled and the run is still running — and keeps
+/// its own answer. All three are what [`Aim::unproven`] exists to carry.
 // llmlint: ignore-block[changed_behavior_has_e2e] every branch is driven end to end in
 // `tests/e2e/driver.rs`, against real drivers and real dispatches: the proved claims and the
 // stale record in `stopping_a_run_ends_the_tree_its_lock_names_when_the_record_names_a_dead_driver`,
@@ -1202,6 +1227,13 @@ fn terminate(paths: &RunPaths, record: &LaunchRecord) -> Result<Option<sys::Tear
         // Part of the run was signalled and something on this host is still
         // running that this teardown was not entitled to touch.
         sys::Teardown::Signalled | sys::Teardown::PartlySignalled => sys::Teardown::PartlySignalled,
+        // Nothing was signalled either, but a retry does not rest on it: what
+        // stood in the way was this user's own entitlement, which is what stands
+        // in the way of the unproven pid beside it too. Left as it is rather
+        // than downgraded to `NotAttempted`, whose promise — the same ask works
+        // once the host answers — is the one thing that is not true here.
+        #[cfg(unix)]
+        sys::Teardown::Refused => sys::Teardown::Refused,
     }))
 }
 
