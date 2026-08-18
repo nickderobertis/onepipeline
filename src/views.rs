@@ -2128,11 +2128,15 @@ mod tests {
     /// One node's progress record, built through the transitions the fold builds
     /// it through rather than assembled: `events` arrivals, the last of them at
     /// `last_at`.
+    ///
+    /// Started from nothing and advanced one arrival at a time, exactly as
+    /// `fold_activity` advances it — so no arrivals is no record, which is the
+    /// answer the fold gives too.
     fn recorded(events: u64, last_at: u64) -> Option<crate::projection::Progress> {
-        (1..events).fold(
-            crate::projection::Progress::first(Some(last_at)),
-            |progress, _| progress.map(|progress| progress.and(Some(last_at))),
-        )
+        (0..events).fold(None, |progress, _| match progress {
+            None => crate::projection::Progress::first(Some(last_at)),
+            Some(progress) => Some(progress.and(Some(last_at))),
+        })
     }
 
     /// A dispatch that has recorded something without naming a tool claims the
