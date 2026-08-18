@@ -506,7 +506,7 @@ pub fn of_run(paths: &RunPaths, events: &[Envelope]) -> RunTelemetry {
         settled_done: state
             .recorded
             .values()
-            .filter(|status| **status == NodeStatus::Done)
+            .filter(|recorded| recorded.status() == NodeStatus::Done)
             .count() as u64,
         no_diff: state
             .outcomes

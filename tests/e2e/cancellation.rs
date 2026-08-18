@@ -21,6 +21,10 @@
 // sibling. `harness.rs` carries the same suppression and the full rationale.
 
 use crate::harness::{agent, plan_of, World, CANCEL_GRACE_ENV, REFUSED};
+// The crate's own constant, because `views` is part of the published surface:
+// the threshold a run is reported parked past is what makes an adoption
+// reachable inside a test's patience, and a copy here could go stale silently.
+use onepipeline::views::PARKED_AFTER_ENV;
 use serde_json::{json, Value};
 
 /// A deadline short enough for a journey to wait through.
@@ -400,6 +404,176 @@ fn a_requeue_of_a_parked_node_whose_dispatch_has_settled_is_applied() {
 
     world.release("slow.go");
     world.release("keep.go");
+}
+
+/// A cancellation still waiting on its dispatch renders as its own state, and
+/// says how long it has been waiting.
+///
+/// Both situations `parked` covers are in this graph on purpose: `later` never
+/// started, so cancelling it stops nothing and it really is parked, and `slow`
+/// is held open, so its cancellation is still converging. A planner given the
+/// second dressed as the first destroyed a dispatch that succeeded twenty
+/// seconds later.
+#[test]
+fn a_node_whose_cancellation_is_still_in_flight_renders_as_cancelling() {
+    let world = World::new("cancel-rendered");
+    world.script("slow.turn-open", "");
+    world.script("slow.wait", "hold");
+    let path = world.plan(
+        "cancelrendered",
+        &plan_of(
+            "cancelrendered",
+            vec![agent("slow", &[]), agent("later", &["slow"])],
+        ),
+    );
+    // A deadline nothing in this journey waits out: what is being read is the
+    // window *before* a dispatch lets go, so nothing may reap it out from under
+    // the reading.
+    let mut launch = world.cmd(&["start", &path.to_string_lossy(), "--detach"]);
+    launch.env(CANCEL_GRACE_ENV, "600");
+    world.run_on(launch, "start --detach").exited(0);
+    let run = "cancelrendered".to_string();
+    world.until("the held node's turn to open", |world| {
+        !world.events_of(&run, "turn-started").is_empty()
+    });
+
+    cancel(&world, &run, "slow");
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([{"op": "cancel", "id": "later"}])),
+        )
+        .exited(0);
+    world.until("both cancels to be committed", |world| {
+        world
+            .events_of(&run, "edit-committed")
+            .iter()
+            .filter(|event| event["payload"]["command"]["op"] == "cancel")
+            .count()
+            == 2
+    });
+
+    let status = world.run(&["status", &run]);
+    status
+        .exited(0)
+        .out_has("slow: cancelling")
+        .out_has("asked to stop")
+        .out_has("its dispatch has not settled");
+    // Not the word for a node about to start, and not the word for a node the
+    // planner simply idled.
+    for wrong in ["slow: ready", "later: cancelling"] {
+        assert!(
+            !status.stdout.contains(wrong),
+            "a node whose cancellation is still in flight reads as {wrong:?}:\n{}",
+            status.stdout
+        );
+    }
+
+    // The same distinction in the view a planner reads a run's outcome from,
+    // where both nodes carry the same status word.
+    let results = world.run(&["results", &run]);
+    results.exited(0).out_has("parked");
+    let line = |node: &str| {
+        results
+            .stdout
+            .lines()
+            .find(|line| line.trim_start().starts_with(node))
+            .unwrap_or_else(|| panic!("`results` has no line for {node}:\n{}", results.stdout))
+            .to_string()
+    };
+    assert!(
+        line("slow").contains("cancelling, asked to stop"),
+        "the node whose dispatch is still running reads as a plain park: {}",
+        line("slow")
+    );
+    assert!(
+        !line("later").contains("cancelling"),
+        "a node that never started reads as one whose cancellation is in flight: {}",
+        line("later")
+    );
+
+    // And once the dispatch lets go the two agree again: there is nothing left
+    // to wait for, so nothing says there is.
+    world.release("slow.go");
+    settlement(&world, &run, "slow");
+    let settled = world.run(&["status", &run]);
+    settled.exited(0);
+    assert!(
+        !settled.stdout.contains("cancelling"),
+        "a cancellation that has landed is still reported as pending:\n{}",
+        settled.stdout
+    );
+}
+
+/// An adoption ends a cancellation the driver it replaced was waiting on.
+///
+/// The wait is on a *process*, and the dispatch it asked to stop was a thread of
+/// the driver that started it — so taking the run over ends it as surely as a
+/// settlement would. Left standing, the node reports a stop nothing is
+/// converging on for as long as the run exists, which is the same lie the
+/// rendering was added to stop telling.
+///
+/// The park itself is the planner's own idle and outlives any driver: what the
+/// node comes back through is still a `requeue`, and it is accepted here for the
+/// ordinary reason — nothing is in flight for the node any more.
+#[test]
+fn an_adoption_ends_a_cancellation_the_driver_it_replaced_was_waiting_on() {
+    let world = World::new("cancel-adopted");
+    // A deadline nothing waits out: what ends this dispatch is its driver going,
+    // not the teardown.
+    let run = held(&world, "canceladopted", "600");
+    cancel(&world, &run, "slow");
+    world.until("the cancellation to be reported pending", |world| {
+        world
+            .run(&["status", &run])
+            .stdout
+            .contains("slow: cancelling")
+    });
+
+    // The dispatch it is waiting on is held open and silent, so the driver has
+    // nothing left to write and the run becomes adoptable.
+    world.until("the run to be reported parked", |world| {
+        let mut status = world.cmd(&["status", &run]);
+        status.env(PARKED_AFTER_ENV, "1");
+        let out = status.output().expect("the binary runs");
+        String::from_utf8_lossy(&out.stdout).contains("PARKED")
+    });
+    let mut adopt = world.cmd(&["adopt", &run]);
+    adopt.env(PARKED_AFTER_ENV, "1");
+    let adopted = adopt.output().expect("the binary runs");
+    assert!(
+        String::from_utf8_lossy(&adopted.stderr).contains("ending it to adopt the run"),
+        "the driver holding the cancellation was left running: {}",
+        String::from_utf8_lossy(&adopted.stderr)
+    );
+    assert_eq!(world.events_of(&run, "driver-adopted").len(), 1);
+
+    // Nothing is converging on that stop any more, and nothing says it is. The
+    // park stands, because only a requeue clears one.
+    let status = world.run(&["status", &run]);
+    status.exited(0);
+    assert!(
+        !status.stdout.contains("cancelling"),
+        "a cancellation whose dispatch went with its driver is still reported pending:\n{}",
+        status.stdout
+    );
+    world.run(&["results", &run]).exited(0).out_has("parked");
+
+    // And the node is usable again: the refusal that held a requeue back was
+    // about a dispatch in flight, and there is none.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([{"op": "requeue", "id": "slow"}])),
+        )
+        .exited(0)
+        .out_has("\"applied\"");
+    world
+        .run(&["results", &run])
+        .exited(0)
+        .out_has("slow                     ready");
+
+    world.release("slow.go");
 }
 
 /// A dispatch that has said **nothing** is cancelled on the loop's own clock.

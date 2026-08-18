@@ -782,6 +782,343 @@ fn a_dispatch_that_has_named_no_tool_reports_its_count_rather_than_a_guess() {
     );
     world.release("service.go");
 }
+/// How many seconds ago one node's `status` line says it last did anything.
+///
+/// Read off the rendered line rather than out of the journal: the claim under
+/// test is what an operator sees, and an age taken from anywhere else would pass
+/// while the line said something different.
+fn seconds_since_activity(status: &str, node: &str) -> u64 {
+    let line = status
+        .lines()
+        .find(|line| line.trim_start().starts_with(&format!("{node}: running")))
+        .unwrap_or_else(|| panic!("`status` has no in-flight line for {node}:\n{status}"));
+    let at = line
+        .find(" ago")
+        .unwrap_or_else(|| panic!("`{line}` carries no age"));
+    let age: String = line[..at]
+        .chars()
+        .rev()
+        .take_while(|c| *c != ' ')
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    // The rendered spelling is `12s` under a minute and `1m30s` above it, and
+    // the second is already past anything this journey waits for.
+    age.strip_suffix('s')
+        .and_then(|seconds| seconds.parse().ok())
+        .unwrap_or_else(|| panic!("`{line}` carries no readable age in seconds"))
+}
+
+/// A dispatch that is only heartbeating is aged by the work it has done, not by
+/// the heartbeat.
+///
+/// An age over every envelope can never be older than one beat for anything
+/// that has not died: measured on a real run, a node reported as possibly
+/// wedged said "14s ago", and would have said the same after ten silent
+/// minutes. The liveness is reported beside the work rather than as it.
+#[test]
+fn status_ages_a_dispatch_by_its_work_rather_than_by_its_heartbeat() {
+    let world = World::new("views-heartbeat");
+    world.script("stuck.turn-open", "");
+    world.script("stuck.wait", "hold");
+    world.script("stuck.heartbeat", "100");
+    // A second dispatch that heartbeats without ever announcing a turn: alive
+    // from the first beat and having produced nothing at all, which is what a
+    // harness that has started and not begun looks like.
+    world.script("mute.wait", "hold");
+    world.script("mute.heartbeat", "100");
+    let path = world.plan(
+        "beating",
+        &plan_of("beating", vec![agent("stuck", &[]), agent("mute", &[])]),
+    );
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+
+    // Long enough that an age reading the heartbeat and one reading the work
+    // cannot be confused: the turn was announced once, and the beats have gone
+    // on for seconds since.
+    world.until("both dispatches to heartbeat for a while", |world| {
+        world
+            .events_of("beating", "member-heartbeat")
+            .iter()
+            .filter(|event| event["labels"]["onepipeline.node"] == "stuck")
+            .count()
+            >= 30
+            && world
+                .events_of("beating", "member-heartbeat")
+                .iter()
+                .filter(|event| event["labels"]["onepipeline.node"] == "mute")
+                .count()
+                >= 30
+    });
+
+    let status = world.run(&["status", "beating"]);
+    status.exited(0).out_has("stuck: running");
+    // The two envelopes the turn's announcement is: a member starting and a turn
+    // starting. Everything since has been a heartbeat, and none of it is work.
+    status.out_has("2 event(s)");
+    assert!(
+        seconds_since_activity(&status.stdout, "stuck") >= 2,
+        "the age of the work was taken from the heartbeat:\n{}",
+        status.stdout
+    );
+    // And the liveness is still reported, because a dispatch that has gone quiet
+    // and one that has died call for opposite actions.
+    status.out_has("alive ");
+
+    // The dispatch that has produced nothing says so, rather than claiming an
+    // age for work it has not done — and it does not read as a node nothing is
+    // driving, which is the opposite mistake.
+    let mute = status
+        .stdout
+        .lines()
+        .find(|line| line.trim_start().starts_with("mute: running"))
+        .unwrap_or_else(|| panic!("`status` has no line for mute:\n{}", status.stdout));
+    assert!(
+        mute.contains("nothing recorded yet") && mute.contains("alive "),
+        "a dispatch that has only ever heartbeated reads as one that has worked: {mute}"
+    );
+    assert!(
+        !mute.contains("UNDRIVEN"),
+        "a dispatch that is heartbeating reads as one nothing is driving: {mute}"
+    );
+
+    world.release("stuck.go");
+    world.release("mute.go");
+}
+
+/// How long ago one node's `status` line says it was last heard from alive.
+///
+/// Read off the rendered line for the same reason the age of the work is: the
+/// claim under test is the one an operator reads, and the line carries two ages
+/// — the work's and the liveness — so this one is picked out by the word that
+/// introduces it rather than by position.
+fn seconds_since_alive(status: &str, node: &str) -> u64 {
+    let line = status
+        .lines()
+        .find(|line| line.trim_start().starts_with(&format!("{node}: running")))
+        .unwrap_or_else(|| panic!("`status` has no in-flight line for {node}:\n{status}"));
+    let age = line
+        .split("alive ")
+        .nth(1)
+        .and_then(|rest| rest.split(" ago").next())
+        .unwrap_or_else(|| panic!("`{line}` reports no liveness"));
+    // The rendered spelling is `12s` under a minute and `1m30s` above it, and
+    // the second is already past anything this journey waits for.
+    age.strip_suffix('s')
+        .and_then(|seconds| seconds.parse().ok())
+        .unwrap_or_else(|| panic!("`{line}` carries no readable liveness age in seconds"))
+}
+
+/// A dispatch whose every envelope so far carries a stamp this build cannot
+/// read has recorded nothing it can age, and says so.
+///
+/// The envelopes arrived — the node is not one nothing is driving — but not one
+/// of them can be placed in time, so there is no moment to date the work to. An
+/// age invented for it would be the same lie the whole readout exists to stop
+/// telling, and "0s ago" is the worst of them: it reads as a dispatch that was
+/// working a moment ago.
+#[test]
+fn status_reports_no_work_for_a_dispatch_whose_envelopes_cannot_be_placed_in_time() {
+    let world = World::new("views-unplaceable");
+    world.script("blind.turn-open", "");
+    world.script("blind.wait", "hold");
+    // The sibling announces itself and its turn on a clock this build cannot
+    // read, so not one of its envelopes so far can be placed.
+    world.script("blind.unplaceable-member-start", "");
+    world.script("blind.unplaceable-turn-start", "");
+    let path = world.plan(
+        "unplaceable",
+        &plan_of("unplaceable", vec![agent("blind", &[])]),
+    );
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+    world.until("the dispatch to announce its turn", |world| {
+        !world.events_of("unplaceable", "turn-started").is_empty()
+    });
+
+    let status = world.run(&["status", "unplaceable"]);
+    status.exited(0);
+    let line = status
+        .stdout
+        .lines()
+        .find(|line| line.trim_start().starts_with("blind: running"))
+        .unwrap_or_else(|| panic!("`status` has no line for blind:\n{}", status.stdout))
+        .to_string();
+    assert!(
+        line.contains("nothing recorded yet"),
+        "a dispatch whose envelopes cannot be placed in time is reported as having \
+         worked: {line}"
+    );
+    assert!(
+        !line.contains("event(s)") && !line.contains(" ago"),
+        "an age was claimed for work nothing can date: {line}"
+    );
+    // And it is not the other mistake either: the envelopes did arrive, so this
+    // is a dispatch that is being driven and cannot be aged, not a missing one.
+    assert!(
+        !line.contains("UNDRIVEN"),
+        "a dispatch whose envelopes arrived unplaceable reads as one nothing is \
+         driving: {line}"
+    );
+
+    world.release("blind.go");
+}
+
+/// A dispatch heard from before its stamps could be placed is dated from the
+/// first arrival there was a moment for, and counted from there too.
+///
+/// The count and the age are one record, because a count standing on its own is
+/// what a view renders as an age. So the arrivals before the first placeable one
+/// are outside both: what is reported is smaller than what arrived, and every
+/// bit of it is something this build actually watched happen — which is the
+/// trade the whole readout is, an under-count over an invented moment.
+#[test]
+fn status_dates_and_counts_a_dispatch_from_its_first_placeable_envelope() {
+    let world = World::new("views-clockback");
+    world.script("late.turn-open", "");
+    world.script("late.wait", "hold");
+    // The member arrives on a clock this build cannot read, and the turn
+    // announced behind it on one it can.
+    world.script("late.unplaceable-member-start", "");
+    let path = world.plan("clockback", &plan_of("clockback", vec![agent("late", &[])]));
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+    world.until("the dispatch to announce its turn", |world| {
+        !world.events_of("clockback", "turn-started").is_empty()
+    });
+
+    // Both envelopes reached the store; only one of them is datable.
+    let relayed = world
+        .journal("clockback")
+        .into_iter()
+        .filter(|event| event["source"] == "agentgraph" && event["labels"]["node"] == "late")
+        .count();
+    assert_eq!(relayed, 2, "the dispatch did not announce itself twice");
+
+    let status = world.run(&["status", "clockback"]);
+    status.exited(0);
+    let line = status
+        .stdout
+        .lines()
+        .find(|line| line.trim_start().starts_with("late: running"))
+        .unwrap_or_else(|| panic!("`status` has no line for late:\n{}", status.stdout))
+        .to_string();
+    assert!(
+        line.contains("1 event(s)"),
+        "the arrival nothing could place was counted, so the count claims a \
+         record that reaches further back than the age beside it: {line}"
+    );
+    assert!(
+        seconds_since_activity(&status.stdout, "late") < 60,
+        "the work was dated from an arrival nothing could place: {line}"
+    );
+
+    world.release("late.go");
+}
+
+/// An arrival this build cannot place still counts, and does not move the age
+/// of the work.
+///
+/// It happened — dropping it would report a dispatch doing less than it is —
+/// and the one thing it cannot do is say when. So the record goes on counting
+/// and its age stands at the last arrival there was a moment for, rather than
+/// jumping to an instant nothing measured.
+#[test]
+fn status_counts_an_unplaceable_arrival_without_letting_it_move_the_age() {
+    let world = World::new("views-midturn");
+    world.script("drifting.turn-open", "");
+    world.script("drifting.wait", "hold");
+    // The member arrives on a clock this build can read, and the turn announced
+    // behind it on one it cannot.
+    world.script("drifting.unplaceable-turn-start", "");
+    let path = world.plan("midturn", &plan_of("midturn", vec![agent("drifting", &[])]));
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+    world.until("the dispatch to announce its turn", |world| {
+        !world.events_of("midturn", "turn-started").is_empty()
+    });
+
+    let status = world.run(&["status", "midturn"]);
+    status.exited(0);
+    let line = status
+        .stdout
+        .lines()
+        .find(|line| line.trim_start().starts_with("drifting: running"))
+        .unwrap_or_else(|| panic!("`status` has no line for drifting:\n{}", status.stdout))
+        .to_string();
+    assert!(
+        line.contains("2 event(s)"),
+        "the arrival nothing could place was dropped from the count, so a working \
+         dispatch reads as one doing less than it is: {line}"
+    );
+    // Seconds, because the run has just started: an age the unplaceable arrival
+    // moved would be the distance from an instant nothing measured, which is not
+    // an age this run could have.
+    assert!(
+        seconds_since_activity(&status.stdout, "drifting") < 60,
+        "an arrival nothing could place moved the age of the work: {line}"
+    );
+
+    world.release("drifting.go");
+}
+
+/// A dispatch whose clock stops being readable is still reported alive, by the
+/// last beat that could be placed.
+///
+/// The beats keep coming — the dispatch is as alive as it ever was — so a reader
+/// that dropped the liveness the moment it could not place a beat would report a
+/// live worker as one nothing had been heard from. What is retained is the last
+/// arrival there was a moment for, and it goes on ageing, which is the honest
+/// pair: still alive, and heard from that long ago.
+#[test]
+fn status_keeps_the_last_placeable_beat_when_the_clock_stops_being_readable() {
+    let world = World::new("views-lostclock");
+    world.script("fading.turn-open", "");
+    world.script("fading.wait", "hold");
+    world.script("fading.heartbeat", "100");
+    // One beat this build can place, and every one after it on a clock it
+    // cannot read.
+    world.script("fading.unplaceable-beats-after-the-first", "");
+    let path = world.plan(
+        "lostclock",
+        &plan_of("lostclock", vec![agent("fading", &[])]),
+    );
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+
+    // Long enough that a liveness taken from the newest beat and one taken from
+    // the last placeable beat cannot be confused.
+    world.until("the clock to have been unreadable for a while", |world| {
+        world
+            .events_of("lostclock", "member-heartbeat")
+            .iter()
+            .filter(|event| event["labels"]["onepipeline.node"] == "fading")
+            .count()
+            >= 30
+    });
+
+    let status = world.run(&["status", "lostclock"]);
+    status
+        .exited(0)
+        .out_has("fading: running")
+        .out_has("alive ");
+    assert!(
+        seconds_since_alive(&status.stdout, "fading") >= 2,
+        "the liveness was taken from a beat nothing can place, so a dispatch \
+         last heard from seconds ago reads as one heard from just now:\n{}",
+        status.stdout
+    );
+
+    world.release("fading.go");
+}
+
 /// A run that has dispatched nothing has no transcript, and says so rather than
 /// rendering an empty one.
 #[test]

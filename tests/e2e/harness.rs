@@ -82,6 +82,25 @@ pub const STARTUP_TIMEOUT_ENV: &str = "ONEPIPELINE_STARTUP_TIMEOUT_SECONDS";
 /// five-minute default, and that journey would fail on its own clock.
 pub const CANCEL_GRACE_ENV: &str = "ONEPIPELINE_CANCEL_GRACE_SECONDS";
 
+/// The variable that moves the threshold a silent dispatch is reported quiet
+/// past.
+///
+/// The suite's own copy for the same reason [`CANCEL_GRACE_ENV`] is one, and
+/// proved live by the same kind of journey:
+/// `a_worker_that_only_heartbeats_is_reported_quiet_rather_than_active` sets it
+/// to seconds and waits for the report. Renamed in the crate and not here, the
+/// override would be inert, the threshold would be the forty-minute default, and
+/// that journey would time out waiting rather than passing a little slower.
+pub const STALL_AFTER_ENV: &str = "ONEPIPELINE_STALL_AFTER_SECONDS";
+
+/// The variable that says how long a scripted hold waits before it gives up.
+///
+/// The doubles' own, not this crate's: a hold is how a journey keeps a dispatch
+/// open, and how long one may wait is the doubles' bound to enforce. Named here
+/// because two things set it — every command this world runs, at a value above
+/// its own patience, and the journey that proves an out-of-range one is refused.
+pub const RENDEZVOUS_SECONDS_ENV: &str = "ONEPIPELINE_FAKE_RENDEZVOUS_SECONDS";
+
 /// How long a launch given a one-second backstop may take before the override
 /// has to be presumed inert.
 ///
@@ -286,7 +305,7 @@ impl World {
             // because the run it names had settled. Set above `until`'s deadline
             // so a rendezvous nobody releases fails as the timeout it is, with
             // the evidence `until` prints.
-            .env("ONEPIPELINE_FAKE_RENDEZVOUS_SECONDS", "180")
+            .env(RENDEZVOUS_SECONDS_ENV, "180")
             .stdin(Stdio::null());
         command
     }

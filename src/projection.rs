@@ -10,6 +10,7 @@
 //! so what a node last recorded stands until it records something else.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::num::NonZeroU64;
 
 use serde_json::Value;
 
@@ -48,9 +49,9 @@ pub struct RunState {
     /// The plan the run was launched with, for the fields a graph does not
     /// carry — the goal and the name.
     pub plan: Option<Plan>,
-    /// The statuses the journal recorded. A node absent from this map has not
-    /// started, which is what `reparent` and `cancel` test for.
-    pub recorded: BTreeMap<String, NodeStatus>,
+    /// What the journal recorded about each node. A node absent from this map
+    /// has not started, which is what `reparent` and `cancel` test for.
+    pub recorded: BTreeMap<String, Recorded>,
     /// Each settled node's outcome, when it recorded one.
     pub outcomes: BTreeMap<String, String>,
     /// The branch each settled node left behind, as its dispatch reported it.
@@ -153,6 +154,54 @@ pub struct RunState {
     pub activity: BTreeMap<String, NodeActivity>,
 }
 
+/// What the journal recorded about one node: the status it stated, and — for the
+/// one status where "what the node is" and "what is running for it" are
+/// different questions — when the cancellation that parked it was asked for.
+///
+/// A `cancel` parks the node at once and *asks* the live turn to commit and end,
+/// so `parked` is the only status that can still have a dispatch behind it — and
+/// it is the same word for the opposite situation, a node the planner idled with
+/// nothing running.
+///
+/// One value rather than a status beside a map of cancellation times, so every
+/// transition writes the whole of it and a wait cannot outlive the park that
+/// carried it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Recorded {
+    /// The status the journal stated, with nothing left running for the node.
+    At(NodeStatus),
+    /// A node a `cancel` parked while its dispatch was still running.
+    ///
+    /// A variant rather than a timestamp beside `At(Parked)`: there is no status
+    /// field left to disagree with the wait, so a cancellation in flight cannot
+    /// be recorded against a node that is not parked.
+    Cancelling {
+        /// When the cancellation was asked for, in epoch milliseconds.
+        since: u64,
+    },
+}
+
+impl Recorded {
+    /// The status the journal stated. A cancellation in flight is a park: the
+    /// flag holding the node out of every later dispatch is already set, and
+    /// only a requeue clears it.
+    pub fn status(self) -> NodeStatus {
+        match self {
+            Self::At(status) => status,
+            Self::Cancelling { .. } => NodeStatus::Parked,
+        }
+    }
+
+    /// When the cancellation that parked this node was asked for, while the
+    /// dispatch it asked to stop is still out there.
+    pub fn cancelling_since(self) -> Option<u64> {
+        match self {
+            Self::At(_) => None,
+            Self::Cancelling { since } => Some(since),
+        }
+    }
+}
+
 /// A decision point a driver reported as holding dependents back and has not
 /// reported as released.
 ///
@@ -178,10 +227,72 @@ pub struct NodeActivity {
     /// "nothing", and reporting it as one is the misreading this whole readout
     /// exists to prevent.
     pub doing: Option<String>,
-    /// How many envelopes this node's dispatch has recorded.
-    pub events: u64,
-    /// When the last of them arrived, in epoch milliseconds.
-    pub last_at: Option<u64>,
+    /// What this node's dispatch has done, once it has done anything.
+    ///
+    /// Named for progress rather than for events because a heartbeat is an event
+    /// and is not one of these — see [`evidences_progress`] — so this is what the
+    /// dispatch has done rather than how long it has been alive.
+    pub progress: Option<Progress>,
+    /// When this node's dispatch last said it was **alive** without having
+    /// produced anything, in epoch milliseconds.
+    ///
+    /// Held apart from [`progress`](Self::progress) because the two answer
+    /// opposite questions, and their union answers neither.
+    pub last_heartbeat_at: Option<u64>,
+}
+
+/// What one node's dispatch has done that this build can date: how many
+/// envelopes evidencing progress have arrived since the first one it could place
+/// in time, and when the last of those did.
+///
+/// One value, because they are one fact. Apart, they admit a dispatch that has
+/// recorded events at no time and one that has recorded none at a time, and a
+/// view rendering either claims an age nothing measured — which is the misreading
+/// this whole readout exists to prevent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Progress {
+    events: NonZeroU64,
+    last_at: u64,
+}
+
+impl Progress {
+    /// The first envelope evidencing progress, where this build can place it in
+    /// time.
+    ///
+    /// A dispatch whose every envelope so far carries a stamp this build cannot
+    /// read has recorded nothing it can age, and is reported as having recorded
+    /// nothing rather than as having recorded something a moment ago. Those
+    /// arrivals are left out of the count as well, because there is nowhere to
+    /// hold them that does not also assert a moment — a count standing alone is
+    /// the half of this pair a view renders as an age.
+    pub(crate) fn first(at: Option<u64>) -> Option<Self> {
+        Some(Self {
+            events: NonZeroU64::MIN,
+            last_at: at?,
+        })
+    }
+
+    /// This record with one more envelope in it.
+    ///
+    /// One whose stamp this build cannot read still counts — it happened — and
+    /// leaves the age standing at the last arrival that could be placed, which is
+    /// the only thing there is to age it by.
+    pub(crate) fn and(self, at: Option<u64>) -> Self {
+        Self {
+            events: self.events.saturating_add(1),
+            last_at: at.unwrap_or(self.last_at),
+        }
+    }
+
+    /// How many have arrived since the first one this build could place in time.
+    pub fn events(self) -> u64 {
+        self.events.get()
+    }
+
+    /// When the last of those did, in epoch milliseconds.
+    pub fn last_at(self) -> u64 {
+        self.last_at
+    }
 }
 
 /// One candidate a node's identity chain stepped past, and how often it was
@@ -252,6 +363,21 @@ fn is_fallback_advanced(kind: &crate::event::EventKind) -> bool {
 /// without closing it.
 const TURN_ACTIVITY: &str = "turn-activity";
 
+/// Whether one relayed envelope is evidence that its dispatch **did**
+/// something, rather than only that it is still there.
+///
+/// Every kind but one is: fetching, gating, and publishing are work as much as
+/// a turn naming a tool. `member-heartbeat` is the exception by its producer's
+/// own definition — "a member is alive but has produced nothing since the last
+/// heartbeat" — and arrives every few seconds from any live process regardless
+/// of progress, so a clock it advanced could never read a stall.
+///
+/// The spelling is read off the producing library's enum, so a rename there is
+/// a compile error rather than a clock that silently stops reading.
+pub(crate) fn evidences_progress(event: &Envelope) -> bool {
+    event.kind.0 != oneagentgraph::event::EventKind::MemberHeartbeat.as_str()
+}
+
 impl RunState {
     /// Whether a stop has been recorded at all, however it went.
     ///
@@ -269,10 +395,21 @@ impl RunState {
     /// has it — see [`Frontier::in_flight`].
     pub fn frontier(&self) -> Frontier {
         Frontier {
-            recorded: self.recorded.clone(),
+            recorded: self.statuses_recorded(),
             attestations: self.attestations.clone(),
             in_flight: BTreeMap::new(),
         }
+    }
+
+    /// The statuses alone, for the two readers that judge a node by where it got
+    /// to and have no use for what may still be running for it: an edit, which
+    /// asks [`Frontier::in_flight`] that question instead, and the derivation,
+    /// which is about the graph rather than about any dispatch.
+    fn statuses_recorded(&self) -> BTreeMap<String, NodeStatus> {
+        self.recorded
+            .iter()
+            .map(|(id, recorded)| (id.clone(), recorded.status()))
+            .collect()
     }
 
     /// Whether a ready human action is outstanding: one nobody has attested.
@@ -301,7 +438,7 @@ impl RunState {
         &self,
         upstream: &dyn Fn(&str) -> Option<NodeStatus>,
     ) -> BTreeMap<String, NodeStatus> {
-        crate::graph::derive(&self.graph, &self.recorded, upstream)
+        crate::graph::derive(&self.graph, &self.statuses_recorded(), upstream)
     }
 }
 
@@ -347,7 +484,9 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
         Some(journal::PipelineKind::NodeReady) => {}
         Some(journal::PipelineKind::NodeDispatched) => {
             if let Some(node) = &event.labels.node {
-                state.recorded.insert(node.clone(), NodeStatus::Running);
+                state
+                    .recorded
+                    .insert(node.clone(), Recorded::At(NodeStatus::Running));
                 if let Some(ts) = millis_of(&event.ts) {
                     state.dispatched_at.insert(node.clone(), ts);
                 }
@@ -369,7 +508,9 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
                 .and_then(Value::as_str)
                 .and_then(NodeStatus::parse);
             if let Some(status) = status {
-                state.recorded.insert(node.clone(), status);
+                // The whole record, so the dispatch a cancellation was waiting
+                // on is not still awaited by a node that has settled.
+                state.recorded.insert(node.clone(), Recorded::At(status));
             }
             if let Some(outcome) = payload.get("outcome").and_then(Value::as_str) {
                 state.outcomes.insert(node.clone(), outcome.to_string());
@@ -429,7 +570,9 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
                 match operation {
                     Operation::HumanAttested { node } => {
                         state.attestations.insert(node.clone());
-                        state.recorded.insert(node.clone(), NodeStatus::Done);
+                        state
+                            .recorded
+                            .insert(node.clone(), Recorded::At(NodeStatus::Done));
                     }
                     // A completion request is recorded as its own event by
                     // whichever side took it, so folding it here too would
@@ -439,10 +582,24 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
                         // What the supersession did to the node it replaced. The
                         // node itself leaves the graph with the same edit, so
                         // this is what the run's record says became of it.
-                        state.recorded.insert(node.clone(), NodeStatus::Cancelled);
+                        state
+                            .recorded
+                            .insert(node.clone(), Recorded::At(NodeStatus::Cancelled));
                     }
                     Operation::NodeParked { node } => {
-                        state.recorded.insert(node.clone(), NodeStatus::Parked);
+                        // What the node was *before* the park decides which park
+                        // this is: a cancel of a running node asks a dispatch to
+                        // stop and leaves it running, and one of a node that
+                        // never started stops nothing. Both become `parked`, and
+                        // the difference rides the same single write.
+                        let was = state.recorded.get(node).map(|recorded| recorded.status());
+                        let parked = match (was, millis_of(&event.ts)) {
+                            (Some(NodeStatus::Running), Some(since)) => {
+                                Recorded::Cancelling { since }
+                            }
+                            _ => Recorded::At(NodeStatus::Parked),
+                        };
+                        state.recorded.insert(node.clone(), parked);
                     }
                     Operation::NodeRequeued { node, .. } => {
                         state.recorded.remove(node);
@@ -468,7 +625,7 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
                 state.attestations.insert(reference.to_string());
                 state
                     .recorded
-                    .insert(reference.to_string(), NodeStatus::Done);
+                    .insert(reference.to_string(), Recorded::At(NodeStatus::Done));
             }
         }
         Some(journal::PipelineKind::CompletionRequested) => {
@@ -486,7 +643,17 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
         Some(journal::PipelineKind::DriverAdopted) => {
             state
                 .recorded
-                .retain(|_, status| *status != NodeStatus::Running);
+                .retain(|_, recorded| recorded.status() != NodeStatus::Running);
+            // A cancellation in flight is a wait on a *process*, and the same
+            // proof ends it: the dispatch it asked to stop went with the driver
+            // that started it. The park itself stands — only a requeue clears
+            // that — and a run reporting a stop that nothing is still
+            // converging on would be a supervisor waiting for good.
+            for recorded in state.recorded.values_mut() {
+                if matches!(recorded, Recorded::Cancelling { .. }) {
+                    *recorded = Recorded::At(NodeStatus::Parked);
+                }
+            }
         }
         Some(journal::PipelineKind::DecisionPending) => {
             if let Some(reference) = payload.get("reference").and_then(Value::as_str) {
@@ -633,16 +800,24 @@ fn pin_preserved_branch(state: &mut RunState, id: &str, status: NodeStatus) {
 
 /// Fold one relayed envelope into the node's live activity.
 ///
-/// Every relayed envelope counts — a dispatch that is fetching, gating, or
-/// publishing is working just as much as one mid-turn — and only a
-/// `turn-activity` names a tool, because that is the only kind carrying one.
+/// Every envelope [`evidences_progress`] admits counts, and only a
+/// `turn-activity` names a tool, because that is the only kind carrying one. A
+/// heartbeat is recorded as the separate fact it is: the node still reads as
+/// one something is driving, without its arrival reading as work.
 fn fold_activity(state: &mut RunState, event: &Envelope) {
     let Some(node) = event.labels.node.as_deref() else {
         return;
     };
     let activity = state.activity.entry(node.to_string()).or_default();
-    activity.events += 1;
-    activity.last_at = millis_of(&event.ts).or(activity.last_at);
+    let at = millis_of(&event.ts);
+    if !evidences_progress(event) {
+        activity.last_heartbeat_at = at.or(activity.last_heartbeat_at);
+        return;
+    }
+    activity.progress = match activity.progress {
+        Some(progress) => Some(progress.and(at)),
+        None => Progress::first(at),
+    };
     if event.kind.0 != TURN_ACTIVITY {
         return;
     }
@@ -1030,7 +1205,7 @@ mod tests {
             state.graph.contains("build-2"),
             "the replacement is not in the plan of record"
         );
-        assert_eq!(state.recorded["build"], NodeStatus::Cancelled);
+        assert_eq!(state.recorded["build"].status(), NodeStatus::Cancelled);
         assert_eq!(state.outcomes["build"], "gate-failed");
         assert!(state.dispatched_at.contains_key("build"));
         assert!(state.settled_at.contains_key("build"));
@@ -1078,7 +1253,7 @@ mod tests {
                 &[("status", json!("done"))],
             ),
         ]);
-        assert_eq!(state.recorded["build"], NodeStatus::Done);
+        assert_eq!(state.recorded["build"].status(), NodeStatus::Done);
         assert_eq!(
             state.statuses()["ship"],
             NodeStatus::Ready,
@@ -1192,7 +1367,7 @@ mod tests {
             pipeline(journal::PipelineKind::NodeDispatched, 1, Some("build"), &[]),
         ];
         let held = fold(&events);
-        assert_eq!(held.recorded["build"], NodeStatus::Running);
+        assert_eq!(held.recorded["build"].status(), NodeStatus::Running);
         assert_eq!(held.statuses()["build"], NodeStatus::Running);
 
         let mut adopted = events;
@@ -1208,6 +1383,55 @@ mod tests {
             state.statuses()["build"],
             NodeStatus::Ready,
             "a node the dead driver left running was not offered to the fresh one"
+        );
+    }
+
+    /// The same proof ends a cancellation the previous driver was waiting on:
+    /// the dispatch it asked to stop was a thread of that process.
+    ///
+    /// The park stands, because a park is the planner's own idle and only a
+    /// requeue clears it. What ends is the wait — left standing, the run reports
+    /// a stop nothing is converging on for as long as it exists.
+    #[test]
+    fn an_adoption_ends_a_cancellation_the_driver_before_it_was_waiting_on() {
+        let plan = plan_of_nodes(vec![agent("sweep", &[])]);
+        let events = vec![
+            pipeline(
+                journal::PipelineKind::RunStarted,
+                0,
+                None,
+                &[("plan", json!(plan))],
+            ),
+            pipeline(journal::PipelineKind::NodeDispatched, 1, Some("sweep"), &[]),
+            pipeline(
+                journal::PipelineKind::EditCommitted,
+                2,
+                None,
+                &[(
+                    "operations",
+                    json!([Operation::NodeParked {
+                        node: "sweep".into()
+                    }]),
+                )],
+            ),
+        ];
+        assert!(
+            fold(&events).recorded["sweep"].cancelling_since().is_some(),
+            "the cancel left nothing for the adoption to end"
+        );
+
+        let mut adopted = events;
+        adopted.push(pipeline(
+            journal::PipelineKind::DriverAdopted,
+            3,
+            None,
+            &[("adoption", json!(1))],
+        ));
+        let state = fold(&adopted);
+        assert_eq!(
+            state.recorded["sweep"],
+            Recorded::At(NodeStatus::Parked),
+            "the run is still waiting on a dispatch that went with its driver"
         );
     }
 
@@ -1309,7 +1533,7 @@ mod tests {
         assert_eq!(state.surfaces_read, 1);
         assert!(state.last_surface_at.is_some());
         assert!(state.attestations.contains("approve"));
-        assert_eq!(state.recorded["approve"], NodeStatus::Done);
+        assert_eq!(state.recorded["approve"].status(), NodeStatus::Done);
         assert_eq!(state.completion_requests, vec!["verified".to_string()]);
         assert_eq!(state.cross_dag_watches["run:o#n"], 1);
         assert!(state.stop_recorded());
@@ -1339,7 +1563,13 @@ mod tests {
             "a sibling's envelope decided this crate's graph state"
         );
         assert!(state.last_write_at.is_some());
-        assert_eq!(state.activity["build"].events, 1);
+        assert_eq!(
+            state.activity["build"]
+                .progress
+                .expect("the relay counted")
+                .events(),
+            1
+        );
     }
 
     /// The readout an operator decides between cancel, retry, and wait on. A
@@ -1374,10 +1604,14 @@ mod tests {
         let seen = &state.activity["build"];
         assert_eq!(seen.doing.as_deref(), Some("Read src/engine.rs"));
         assert_eq!(
-            seen.events, 2,
+            seen.progress.expect("the activities counted").events(),
+            2,
             "the node-dispatched was counted as activity"
         );
-        assert_eq!(seen.last_at, millis_of(&activity(3, "Read", "x").ts));
+        assert_eq!(
+            Some(seen.progress.expect("the activities counted").last_at()),
+            millis_of(&activity(3, "Read", "x").ts)
+        );
     }
 
     /// A tool the producer named nothing for leaves the last thing it *did*
@@ -1396,7 +1630,13 @@ mod tests {
             state.activity["build"].doing.as_deref(),
             Some("Bash just check")
         );
-        assert_eq!(state.activity["build"].events, 2);
+        assert_eq!(
+            state.activity["build"]
+                .progress
+                .expect("the relays counted")
+                .events(),
+            2
+        );
     }
 
     /// Activity is the node's whole record, not one attempt's: a dispatch that
@@ -1419,7 +1659,113 @@ mod tests {
             pipeline(journal::PipelineKind::NodeDispatched, 2, Some("build"), &[]),
             activity(3),
         ]);
-        assert_eq!(state.activity["build"].events, 2);
+        assert_eq!(
+            state.activity["build"]
+                .progress
+                .expect("the relays counted")
+                .events(),
+            2
+        );
+    }
+
+    /// A heartbeat is evidence the dispatch is *there*, and evidence of nothing
+    /// else. Counted as work it makes every live node look busy: the producer
+    /// publishes one every few seconds whether or not anything happened.
+    #[test]
+    fn a_heartbeat_is_folded_as_liveness_rather_than_as_work() {
+        let relayed = |seq: u64, kind: &str| {
+            let mut event = pipeline(
+                journal::PipelineKind::NodeDispatched,
+                seq,
+                Some("build"),
+                &[("name", json!("Bash")), ("detail", json!("just check"))],
+            );
+            event.source = Source::Agentgraph;
+            event.kind = crate::event::EventKind(kind.into());
+            event
+        };
+        let beat = oneagentgraph::event::EventKind::MemberHeartbeat.as_str();
+        let state = fold(&[
+            relayed(1, TURN_ACTIVITY),
+            relayed(2, beat),
+            relayed(3, beat),
+        ]);
+
+        let seen = &state.activity["build"];
+        let progress = seen.progress.expect("the activity counted");
+        assert_eq!(progress.events(), 1, "a heartbeat was counted as work");
+        assert_eq!(
+            Some(progress.last_at()),
+            millis_of(&relayed(1, TURN_ACTIVITY).ts),
+            "a heartbeat advanced the age of the work"
+        );
+        assert_eq!(
+            seen.last_heartbeat_at,
+            millis_of(&relayed(3, beat).ts),
+            "the dispatch's liveness was dropped rather than recorded"
+        );
+        // And it does not overwrite what the node was last seen doing: a turn
+        // that is wedged is still wedged doing something.
+        assert_eq!(seen.doing.as_deref(), Some("Bash just check"));
+    }
+
+    /// A cancel of a *running* node leaves a dispatch behind it; a cancel of one
+    /// that never started leaves nothing. Both record `parked`, so the wait is
+    /// the only thing that tells them apart.
+    #[test]
+    fn only_a_cancel_that_left_a_dispatch_behind_records_a_cancellation_in_flight() {
+        let plan = plan_of_nodes(vec![agent("sweep", &[]), agent("later", &[])]);
+        let started = pipeline(
+            journal::PipelineKind::RunStarted,
+            0,
+            None,
+            &[("plan", json!(plan))],
+        );
+        let park = |seq: u64, node: &str| {
+            pipeline(
+                journal::PipelineKind::EditCommitted,
+                seq,
+                None,
+                &[(
+                    "operations",
+                    json!([Operation::NodeParked { node: node.into() }]),
+                )],
+            )
+        };
+        let dispatched = pipeline(journal::PipelineKind::NodeDispatched, 1, Some("sweep"), &[]);
+        let state = fold(&[
+            started.clone(),
+            dispatched.clone(),
+            park(2, "sweep"),
+            park(3, "later"),
+        ]);
+        assert_eq!(
+            state.recorded["sweep"],
+            Recorded::Cancelling {
+                since: millis_of(&park(2, "sweep").ts).expect("the park is stamped")
+            },
+            "a cancel that left a dispatch running recorded no wait"
+        );
+        assert_eq!(
+            state.recorded["later"],
+            Recorded::At(NodeStatus::Parked),
+            "a cancel of a node that never started reported a dispatch to wait for"
+        );
+
+        // The settlement is what ends the wait: the dispatch has let go, so the
+        // node's state and what is running for it agree again.
+        let settled = pipeline(
+            journal::PipelineKind::NodeSettled,
+            4,
+            Some("sweep"),
+            &[("status", json!("cancelled"))],
+        );
+        let state = fold(&[started, dispatched, park(2, "sweep"), settled]);
+        assert_eq!(
+            state.recorded["sweep"],
+            Recorded::At(NodeStatus::Cancelled),
+            "the settlement left the node still waiting on the dispatch that settled it"
+        );
     }
 
     #[test]
@@ -1445,7 +1791,7 @@ mod tests {
             ),
             park.clone(),
         ]);
-        assert_eq!(state.recorded["sweep"], NodeStatus::Parked);
+        assert_eq!(state.recorded["sweep"].status(), NodeStatus::Parked);
         assert!(state.graph.get("sweep").expect("sweep").parked);
 
         let requeue = pipeline(

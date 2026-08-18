@@ -304,11 +304,12 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     }
     if dir.join(format!("{key}.wait")).exists() {
         let go = dir.join(format!("{key}.go"));
-        if dir.join(format!("{key}.stops-when-interrupted")).exists() {
-            fake::wait_for_any(&[go, dir.join(format!("{key}.redirect"))]);
+        let until = if dir.join(format!("{key}.stops-when-interrupted")).exists() {
+            vec![go, dir.join(format!("{key}.redirect"))]
         } else {
-            fake::wait_for(&go);
-        }
+            vec![go]
+        };
+        hold(args, dir, &key, &node, step.as_deref(), &until);
     }
     // Whatever an `interrupt` delivered while the turn was held. Read after the
     // hold, because that is when the running turn would have acted on it.
@@ -586,6 +587,14 @@ fn write_work(args: &[String], name: &str, body: &str) {
 /// to reach. That is the case a harness without out-of-band control produces,
 /// and it is the one `auto` must fall through on.
 ///
+/// `<key>.unplaceable-member-start` and `<key>.unplaceable-turn-start` announce
+/// the member's arrival and the turn behind it on a clock this build cannot
+/// read, each on its own. Scripted together they are a producer whose every
+/// envelope so far a reader refuses — one whose stamps are rejected, not one
+/// that said nothing. Scripted singly they are a clock that comes back one
+/// envelope in, or one that fails one envelope in, and a reader has something
+/// different to say about all three.
+///
 /// `<key>.also-member` names a **second** member of the same graph run, which
 /// announces a turn of its own. A graph is a graph — several members work under
 /// one run — and a caller that addressed only the last member it saw would leave
@@ -594,12 +603,23 @@ fn write_work(args: &[String], name: &str, body: &str) {
 /// two answers, which is what a caller has to carry on from.
 fn open_turn(args: &[String], dir: &std::path::Path, key: &str, node: &str, step: Option<&str>) {
     let labels = member_labels(args, node, step);
+    let unplaceable = [
+        dir.join(format!("{key}.unplaceable-member-start")).exists(),
+        dir.join(format!("{key}.unplaceable-turn-start")).exists(),
+    ];
+    let stamp = |seq: usize| {
+        if unplaceable[seq] {
+            unplaceable_now()
+        } else {
+            fake::now()
+        }
+    };
     for (seq, kind) in [(0, "member-started"), (1, "turn-started")] {
         println!(
             "{}",
             serde_json::json!({
                 "v": 1,
-                "ts": fake::now(),
+                "ts": stamp(seq),
                 "stream": stream(),
                 "seq": seq,
                 "source": "agentgraph",
@@ -653,6 +673,104 @@ fn open_turn(args: &[String], dir: &std::path::Path, key: &str, node: &str, step
             record.display()
         ));
     }
+}
+
+/// Hold the dispatch until the test releases it, heartbeating while it waits
+/// where the script asks for one.
+///
+/// A held dispatch is silent by default: a worker that has started and recorded
+/// nothing. `<key>.heartbeat` holds a number of milliseconds and makes it the
+/// *other* case — a member alive and producing nothing, publishing the
+/// sibling's own `member-heartbeat` on that clock for as long as the hold
+/// lasts. The real one fires about every fifteen seconds; a journey states its
+/// own so the stall it is about lands inside a test's patience.
+///
+/// `<key>.unplaceable-beats-after-the-first` keeps beating on a clock that stops
+/// being readable: one placeable beat, then a stream of unplaceable ones, which
+/// is what a reader has to keep reporting liveness through.
+fn hold(
+    args: &[String],
+    dir: &std::path::Path,
+    key: &str,
+    node: &str,
+    step: Option<&str>,
+    until: &[std::path::PathBuf],
+) {
+    let Some(every) = fake::node_script(dir, key, "heartbeat") else {
+        fake::wait_for_any(until);
+        return;
+    };
+    // A scripted interval that is not one is a test that means something other
+    // than what it says: read leniently it becomes a hold that never beats,
+    // which is the scenario this scripting exists to tell apart from.
+    let every = match every.trim().parse::<u64>() {
+        Ok(millis) if millis > 0 => std::time::Duration::from_millis(millis),
+        _ => fake::fail(&format!(
+            "{key}.heartbeat holds {every:?}, which is not a positive number of milliseconds"
+        )),
+    };
+    let labels = member_labels(args, node, step);
+    // A producer whose clock stops being readable partway through the hold:
+    // every beat but the first carries a stamp this build cannot place in time.
+    // The first one still can be, which is the whole scenario — what a reader
+    // has left to report liveness by once the rest arrive unplaceable.
+    let loses_the_clock = dir
+        .join(format!("{key}.unplaceable-beats-after-the-first"))
+        .exists();
+    // Above every `seq` the turn's own envelopes use, so a beat can never be
+    // taken for one of them.
+    let mut seq = 100;
+    fake::wait_for_any_ticking(until, every, &mut || {
+        let stamp = if loses_the_clock && seq > 100 {
+            unplaceable_now()
+        } else {
+            fake::now()
+        };
+        publish(&serde_json::json!({
+            "v": 1,
+            "ts": stamp,
+            "stream": stream(),
+            "seq": seq,
+            "source": "agentgraph",
+            // The producing library's own spelling of the kind, read off its
+            // enum: a double that hand-wrote the word would keep emitting it
+            // after the sibling renamed it, which is an oracle for a stream
+            // nothing produces.
+            "kind": oneagentgraph::event::EventKind::MemberHeartbeat.as_str(),
+            "labels": labels,
+            "payload": {},
+        }));
+        seq += 1;
+    });
+}
+
+/// Write one envelope to the stream this double publishes on.
+///
+/// A fallible write rather than `println!`, which panics: the reader on the
+/// other end can go away — a driver that stopped waiting closes the pipe — and
+/// that is an ordinary I/O error rather than a scenario. Unwinding out of it
+/// would reach a test as a double that crashed, which is the one thing this
+/// program must never look like, so the error is reported and the process ends
+/// the way every other failure a double cannot act out ends.
+fn publish(envelope: &serde_json::Value) {
+    use std::io::Write;
+    if let Err(error) = writeln!(std::io::stdout().lock(), "{envelope}") {
+        fake::fail(&format!(
+            "cannot publish a {} envelope: {error}",
+            envelope["kind"]
+        ));
+    }
+}
+
+/// Now, stamped the way a producer this build cannot read stamps it.
+///
+/// A real RFC 3339 instant with a numeric UTC offset instead of `Z` — which the
+/// reader refuses, because the envelope fixes one spelling and a stranger's
+/// clock must never become this run's timing evidence. Derived from the real
+/// clock rather than frozen, so what a journey scripts is a producer whose
+/// stamps cannot be *placed*, not one stuck at some moment in 2001.
+fn unplaceable_now() -> String {
+    format!("{}+00:00", fake::now().trim_end_matches('Z'))
 }
 
 /// The turn is over, so nothing can be delivered into it any more.
