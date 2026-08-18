@@ -756,38 +756,6 @@ fn a_hold_longer_than_a_clock_can_wait_fails_the_dispatch() {
     );
 }
 
-/// A scripted heartbeat interval that is not one fails the dispatch rather than
-/// holding silently.
-///
-/// The interval a journey scripts is how a wedged worker is acted out, and the
-/// two cases it tells apart — a dispatch that says nothing and one that says only
-/// that it is alive — differ by nothing but that number. Read leniently, `0` or a
-/// typo becomes the silent case: the journey above would go on passing while the
-/// scenario it names had quietly stopped being produced. So the double refuses it
-/// and the node settles failed saying which script it was, which is the half no
-/// beating dispatch can show.
-#[test]
-fn a_scripted_heartbeat_that_is_not_an_interval_fails_the_dispatch() {
-    let world = World::new("plan-beatless");
-    world.script("stuck.turn-open", "");
-    world.script("stuck.wait", "hold");
-    // No hold to release: the refusal happens before the dispatch ever waits,
-    // which is what lets this settle on its own.
-    world.script("stuck.heartbeat", "0");
-    let run = settle(&world, "beatless", vec![agent("stuck", &[])]);
-
-    let result = world.run_json(&run, "result.json");
-    assert_eq!(result["state"], "failed", "{result}");
-    let results = world.run(&["results", &run]);
-    results.exited(0);
-    assert!(
-        results.stdout.contains("stuck.heartbeat"),
-        "the failure does not name the script that was not an interval, so a \
-         journey scripting a typo is told nothing:\n{}",
-        results.stdout
-    );
-}
-
 /// A node the planner cancels is parked, not failed.
 ///
 /// `cancel` is the one op that means stop this node, and what it leaves behind

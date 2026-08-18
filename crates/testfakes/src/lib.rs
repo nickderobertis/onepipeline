@@ -46,18 +46,10 @@ pub fn script_dir() -> PathBuf {
     }
 }
 
-/// The exit code a double answers a scenario it cannot act out with.
-///
-/// `EX_CONFIG`, because that is what these failures are: a script directory that
-/// is not there, a hold nobody released, a bound nothing could wait. Named so a
-/// journey asserting on one says which kind of refusal it expected rather than
-/// spelling the number.
-pub const MISCONFIGURED: u8 = 78;
-
 /// Report a configuration failure and exit, rather than unwinding.
 pub fn fail(message: &str) -> ! {
     eprintln!("{message}");
-    std::process::exit(i32::from(MISCONFIGURED));
+    std::process::exit(78);
 }
 
 /// The exit code a double answers a command line it does not speak with.
