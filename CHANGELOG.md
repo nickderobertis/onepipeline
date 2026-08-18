@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.5](https://github.com/nickderobertis/onepipeline/compare/v0.7.4...v0.7.5) - 2026-08-18
+
+### Added
+
+- *(lifecycle)* name the ending when a change request's body is not drafted ([#72](https://github.com/nickderobertis/onepipeline/pull/72))
+
 ## [0.7.4](https://github.com/nickderobertis/onepipeline/compare/v0.7.3...v0.7.4) - 2026-08-18
 
 ### Fixed
