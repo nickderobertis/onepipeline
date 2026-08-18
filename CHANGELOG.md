@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.2](https://github.com/nickderobertis/onepipeline/compare/v0.7.1...v0.7.2) - 2026-08-18
+
+### Fixed
+
+- tell a cancelling node from a parked one, and stop heartbeats hiding a stall ([#67](https://github.com/nickderobertis/onepipeline/pull/67))
+- prove a recorded pid is still its process, and stop what a run is running ([#65](https://github.com/nickderobertis/onepipeline/pull/65))
+- *(deps)* take up a stranded branch's session instead of refusing the retry ([#64](https://github.com/nickderobertis/onepipeline/pull/64))
+
 ## [0.7.1](https://github.com/nickderobertis/onepipeline/compare/v0.7.0...v0.7.1) - 2026-08-16
 
 ### Fixed
