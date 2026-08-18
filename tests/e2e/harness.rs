@@ -835,6 +835,16 @@ impl World {
         use std::os::unix::process::CommandExt;
 
         let mut command = self.cmd(args);
+        // The ceiling is on **every** file the child writes, and under `just
+        // test` one of them is the coverage profile the instrumented binary
+        // dumps at exit. Truncated, that profile is a corrupt header the whole
+        // run's merge then fails on — a green suite reported as a coverage
+        // failure. So this child's profile is written into the world's own
+        // scratch, outside the directory the merge reads.
+        command.env(
+            "LLVM_PROFILE_FILE",
+            self.root.join("under-a-ceiling-%p.profraw"),
+        );
         // SAFETY: the closure runs between `fork` and `exec` in the child, and
         // calls only async-signal-safe syscalls — no allocation, no locks.
         unsafe {
