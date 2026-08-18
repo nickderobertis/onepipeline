@@ -796,6 +796,72 @@ fn a_read_verb_tells_a_truncated_record_from_one_it_cannot_read() {
         .out_has("the record after the fragment");
 }
 
+/// A record whose terminator never landed is not a record yet.
+///
+/// The boundary case a short write stops on: the record itself is whole and
+/// parses, and the newline after it never arrived. It is a write that stopped in
+/// the middle — the append that writes it writes both in one call — so the next
+/// append discards it, and a reader that had counted it as a record would have
+/// handed back a record the store was about to say it lost.
+#[test]
+fn a_record_whose_terminator_never_landed_is_not_a_record_yet() {
+    let (world, run) = settled_run("journal-unterminated");
+    world
+        .run(&[
+            "surface",
+            &run,
+            "--kind",
+            "check-in",
+            "--message",
+            "the record with no newline after it",
+        ])
+        .exited(0);
+    let journal = world.run_file(&run, "events.jsonl");
+
+    // llmlint: ignore-block[tests_mirror_real_usage] the state is a write that stopped
+    // between a record and its terminator, which is a thing only a dying writer produces
+    // — no build carrying this fix leaves one, because an append that fails takes its own
+    // bytes back off the file. The record itself is one this run really wrote; what the
+    // journey does is take the newline off the end of the store, which is bytes on disk
+    // and not a stand-in for anything in the crate.
+    let text = std::fs::read_to_string(&journal).expect("the journal reads");
+    let whole = text.trim_end_matches('\n');
+    let last = whole.lines().next_back().expect("the store holds a record");
+    let offset = whole.len() - last.len();
+    std::fs::write(&journal, whole).expect("the store is written");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    world.run(&["status", &run]).exited(0).out_has(&format!(
+        "1 truncated record: line {} at byte {offset} ({} bytes)",
+        whole.lines().count(),
+        last.len()
+    ));
+    // Not handed back as a record, either: it is not one until its writer says
+    // so, and the store is about to discard it.
+    world
+        .run(&["monitor", &run])
+        .exited(0)
+        .out_lacks("the record with no newline after it");
+
+    // And that is exactly what the next append does — it heals the store back to
+    // its last boundary and reports the record as the loss it is.
+    world
+        .run(&[
+            "surface",
+            &run,
+            "--kind",
+            "check-in",
+            "--message",
+            "the next one",
+        ])
+        .exited(0)
+        .err_has("discarded a");
+    let recorded = read_torn_log(&world.run_file(&run, "events.jsonl.torn"));
+    assert_eq!(recorded.len(), 1, "{recorded:?}");
+    assert_eq!(recorded[0]["bytes"], json!(last.len()));
+    assert_eq!(recorded[0]["offset"], json!(offset));
+}
+
 /// The fragments an append healed out of one store, as it recorded them.
 fn read_torn_log(path: &std::path::Path) -> Vec<Value> {
     std::fs::read_to_string(path)

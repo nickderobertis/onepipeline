@@ -176,20 +176,29 @@ enum Reading {
 
 /// Which of the five a line is.
 ///
-/// The distinction a reader could not previously draw. `serde_json`'s own
-/// `is_eof` separates a record that stops early from one that is whole and
-/// unreadable, and an unterminated final line is a fragment whatever its parse
-/// says — the writer had not finished it.
+/// The distinction a reader could not previously draw. An unterminated final
+/// line is a fragment whatever its parse says — the writer had not finished it —
+/// and among the terminated ones `serde_json`'s own `is_eof` separates a record
+/// that stops early from one that is whole and unreadable.
 // llmlint: ignore-block[boundary_inputs_validated] the store is this crate's own record and not external input, and `docs/contract.md` is explicit about how it is read: a relayed envelope's kind is a wire string this library never rejects, and a record from a version this build does not know is *skipped and reported* rather than refused. `deny_unknown_fields` here would turn a newer build's record — the case this reader exists to name — into a parse failure indistinguishable from a torn one, and refusing an unknown `v` would do the same.
 fn reading(record: &ledger::Record) -> Reading {
     if record.text.trim().is_empty() {
         return Reading::Blank;
     }
+    // The terminator first, and before the parse, because a record is finished
+    // when its newline lands and not before: an append writes the record and its
+    // terminator in one call, so a line that parses whole and ends without one
+    // is a write that stopped in the middle — and the next append discards it as
+    // exactly that. A reader that counted it as a record would hand back a
+    // record the store is about to say it lost.
+    if !record.terminated {
+        return Reading::Truncated;
+    }
     match serde_json::from_str::<Envelope>(&record.text) {
         Ok(envelope) => Reading::Whole(envelope),
         Err(e) => match glued_tail(&record.text) {
             Some((lost, envelope)) => Reading::Glued { lost, envelope },
-            None if e.is_eof() || !record.terminated => Reading::Truncated,
+            None if e.is_eof() => Reading::Truncated,
             None => Reading::Unparseable,
         },
     }

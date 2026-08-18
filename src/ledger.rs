@@ -790,6 +790,7 @@ fn report_torn_tail(path: &Path, torn: &TornTail) {
 /// A file this process cannot open reads as one that is not there. That is the
 /// rule every ledger reader here follows — [`read_json_opt`] states it — and it
 /// is what lets a view render a live run rather than refuse it over one input.
+// llmlint: ignore[changed_behavior_has_e2e] the per-line decoding is three lines of one function, and `tests/e2e/journal.rs` drives them through the compiled binary against the store where a tear actually happens. Its other callers — the channel queue, the replies, the commands — differ only in the path they hand it, so a journey each would be the same three lines tested four times; the unit test below holds the decoding itself.
 pub fn read_records(path: &Path) -> Vec<Record> {
     // llmlint: ignore-block[no_panics_on_recoverable_errors] the leniency is the documented rule above and predates this reader; changing it changes every ledger reader in the crate — the channel queue, the replies, the commands — rather than this one.
     let Ok(bytes) = fs::read(path) else {
@@ -1303,6 +1304,41 @@ mod tests {
         // The blank line is still skipped by every reader that only wants the
         // records, which is what `read_lines` has always answered.
         assert_eq!(read_lines(&path), vec!["first", "second", "half"]);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A file torn mid-character is read for the records it holds.
+    ///
+    /// A record cut in the middle of a multi-byte character is not UTF-8, and
+    /// decoding the file whole failed on it — so *every* reader here, the
+    /// channel's queue and its replies as much as the journal, handed back an
+    /// empty file over one bad byte at the end of it. Per line, the tear costs
+    /// itself and nothing before it, and the offsets stay the file's own.
+    #[test]
+    fn a_file_torn_mid_character_still_reads_back_the_records_before_the_tear() {
+        let root = scratch("lossy");
+        let path = root.join("queue.jsonl");
+        fs::create_dir_all(&root).ok();
+        let mut bytes = b"{\"first\":1}\n{\"second\":2}\n{\"third\":".to_vec();
+        // The first byte of a three-byte character, and nothing after it.
+        bytes.push(0xE2);
+        fs::write(&path, &bytes).expect("the file is written");
+
+        let records = read_records(&path);
+        assert_eq!(
+            records.len(),
+            3,
+            "the tear took the file with it: {records:?}"
+        );
+        assert_eq!(records[0].text, "{\"first\":1}");
+        assert_eq!(records[1].text, "{\"second\":2}");
+        assert_eq!(records[2].offset, 25);
+        assert_eq!(
+            records[2].bytes, 10,
+            "the loss was measured in the reading rather than in the file"
+        );
+        assert!(!records[2].terminated);
+        assert_eq!(read_lines(&path).len(), 3);
         fs::remove_dir_all(&root).ok();
     }
 

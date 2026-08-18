@@ -1265,6 +1265,22 @@ impl Run {
         self
     }
 
+    /// Assert stdout does **not** carry a fragment.
+    ///
+    /// For a journey whose claim is that a view left something out: a record the
+    /// store is about to say it lost is not one a reader should be shown, and an
+    /// absence is only a claim when something asserts it.
+    pub fn out_lacks(&self, fragment: &str) -> &Self {
+        assert!(
+            !self.stdout.contains(fragment),
+            "`onepipeline {}` stdout carries {fragment:?}, which this journey says it \
+             should not:\n{}",
+            self.args,
+            self.stdout
+        );
+        self
+    }
+
     /// Assert an attached launch reported a settlement rather than failing.
     ///
     /// `start --attach` prints one `{"run_id": …, "settlement": …}` line however
