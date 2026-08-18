@@ -23,12 +23,24 @@
 //!
 //! So the two halves are split. [`retain`] runs at **ingest**, on the envelope a
 //! process this crate started has just written to its own stdout, and copies the
-//! report into the run's own [`reports_dir`](crate::ledger::RunPaths::reports_dir)
+//! report into the run's own [`reports_dir`](crate::views::RunPaths::reports_dir)
 //! — refusing anything that is not a plain file of the producing library's own
-//! name and size. [`evidence`] and [`read`] run at **read** time and open
-//! nothing but that copy, at a path derived from the settlement rather than
-//! taken from it. A settlement whose copy is not there is reported as unretained,
-//! naming the path that was not read.
+//! name and size. `evidence` and `read` run at **read** time and open nothing
+//! but that copy, at a path derived from the settlement rather than taken from
+//! it. A settlement whose copy is not there is reported as unretained, naming
+//! the path that was not read.
+//!
+//! # What is published, and what is behind it
+//!
+//! [`retain`] is the writer half of the contract's retention path, published
+//! beside the items a caller needs to build an envelope it will accept —
+//! [`MEMBER_SETTLED`], [`REPORT_PATH`], [`ACCEPTED_REPORT_FILE`], and
+//! [`MAX_REPORT_BYTES`] — so a consumer writes a report through the same
+//! promise it resolves one back through,
+//! [`RunPaths::report_for`](crate::views::RunPaths::report_for). Everything
+//! else here is the engine behind that surface and is crate-visible: what this
+//! crate's own views render out of a retained report is a rendering, not a
+//! promise.
 //!
 //! The document itself is read **structurally**, by field name, rather than into
 //! the producing library's own types. The report is a sibling's artifact and this
@@ -52,13 +64,21 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::event::{Envelope, Source};
-use crate::ledger::RunPaths;
+use crate::views::RunPaths;
 
 /// The kind `oneagentgraph` settles a member with.
 pub const MEMBER_SETTLED: &str = "member-settled";
 
 /// The payload key naming where the member's report was stored.
 pub const REPORT_PATH: &str = "report_path";
+
+/// The one base name [`retain`] accepts at [`REPORT_PATH`].
+///
+/// The producing library's own report file name, re-exported here so a consumer
+/// proving this path holds it from the crate that enforces it rather than from a
+/// `oneagentgraph` dependency of its own — and so there is one spelling of it,
+/// which is the one the refusal below is written against.
+pub const ACCEPTED_REPORT_FILE: &str = oneagentgraph::member::REPORT_FILE;
 
 /// The most of a report this run copies into its own storage.
 ///
@@ -75,8 +95,11 @@ pub const MAX_REPORT_BYTES: u64 = 32 * 1024 * 1024;
 /// Deliberately *not* named for having kept one: a settlement names a report
 /// whether or not the copy was made, and telling a reader which of those it is
 /// meeting is the whole job. [`read`] on [`kept`](Self::kept) is the answer.
+///
+/// Crate-visible: `docs/contract.md` names the retention path and the views
+/// rendered from it, not the shape this crate assembles a view out of.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Evidence {
+pub(crate) struct Evidence {
     /// The node whose dispatch produced it, when the envelope named one.
     pub node: Option<String>,
     /// The member within that dispatch, when the producer stamped one.
@@ -85,7 +108,7 @@ pub struct Evidence {
     /// opened**: it is a stranger's path on a journal line.
     pub named: PathBuf,
     /// This run's own copy, under its
-    /// [`reports_dir`](crate::ledger::RunPaths::reports_dir). The only file any
+    /// [`reports_dir`](crate::views::RunPaths::reports_dir). The only file any
     /// reader here opens, and derived from the settlement rather than taken
     /// from it.
     pub kept: PathBuf,
@@ -108,20 +131,28 @@ pub struct Evidence {
 // `report.json` it wrote into the run that spawned it, which is inside the authority it
 // already has: that same producer chooses the report's contents. Divergence 12 in
 // `docs/contract-divergences.md` records the missing accessor as the open proposal it is.
-/// Copy the report a relayed settlement names into the run's own storage.
+/// Copy the report a relayed settlement names into the run's own storage, at
+/// the path [`RunPaths::report_for`] derives for it.
 ///
-/// Called as the envelope is **ingested** — from the stdout of a process this
-/// crate started, before the line exists anywhere a stranger could have written
-/// it — which is the one moment the named path carries the producer's authority
-/// rather than the journal's.
+/// # The caller holds the producer's authority for the path
 ///
-/// Everything it refuses, it refuses out loud and without opening: a name that
-/// is not the producing library's own [`REPORT_FILE`](oneagentgraph::member::REPORT_FILE),
-/// anything that is not a plain file (a symlink is the case this exists for —
-/// it names one file and delivers another), and anything past
-/// [`MAX_REPORT_BYTES`]. A refusal costs the transcript its words and nothing
-/// else: the settlement still relays, and every reader says the copy is not
-/// there.
+/// This is the **precondition**, and publishing the function does not widen it.
+/// It is called as the envelope is **ingested** — from the stdout of a process
+/// the caller started, before the line exists anywhere a stranger could have
+/// written it — which is the one moment the named path carries the producer's
+/// authority rather than the journal's. A caller that does not hold that
+/// authority for the path the envelope names is handing this an arbitrary file
+/// to copy, chosen by whatever wrote the line. Reading a run's store back is not
+/// that moment: nothing here re-opens what a producer named, and a settlement
+/// this run kept no copy of stays uncopied rather than being fetched later.
+///
+/// Everything it refuses, it refuses out loud and without opening: an envelope
+/// that is not an `oneagentgraph` [`MEMBER_SETTLED`], a name at
+/// [`REPORT_PATH`] that is not [`ACCEPTED_REPORT_FILE`], anything that is not a
+/// plain file (a symlink is the case this exists for — it names one file and
+/// delivers another), and anything past [`MAX_REPORT_BYTES`]. A refusal costs
+/// the transcript its words and nothing else: the settlement still relays, and
+/// every reader says the copy is not there.
 pub fn retain(paths: &RunPaths, event: &Envelope) {
     if event.source != Source::Agentgraph || event.kind.0 != MEMBER_SETTLED {
         return;
@@ -137,12 +168,9 @@ pub fn retain(paths: &RunPaths, event: &Envelope) {
     let refuse = |why: &str| {
         eprintln!("onepipeline: not retaining the report at '{named}': {why}");
     };
-    if Path::new(named).file_name().and_then(|name| name.to_str())
-        != Some(oneagentgraph::member::REPORT_FILE)
-    {
+    if Path::new(named).file_name().and_then(|name| name.to_str()) != Some(ACCEPTED_REPORT_FILE) {
         return refuse(&format!(
-            "a report the producing library wrote is named {}",
-            oneagentgraph::member::REPORT_FILE
+            "a report the producing library wrote is named {ACCEPTED_REPORT_FILE}"
         ));
     }
     // A symlink named as a report is a path that says one thing and delivers
@@ -272,7 +300,7 @@ fn create_new_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
 /// What comes back names *both* paths and opens neither. The copy's name is
 /// derived from the settlement's own stream and sequence, so a reader reaches
 /// this run's storage whatever the journal line says the producer's path was.
-pub fn evidence(paths: &RunPaths, events: &[Envelope]) -> Vec<Evidence> {
+pub(crate) fn evidence(paths: &RunPaths, events: &[Envelope]) -> Vec<Evidence> {
     events
         .iter()
         .filter(|event| event.source == Source::Agentgraph && event.kind.0 == MEMBER_SETTLED)
@@ -310,7 +338,7 @@ pub fn evidence(paths: &RunPaths, events: &[Envelope]) -> Vec<Evidence> {
 /// at ingest, ran on another machine, or was swept has no copy here, and the
 /// caller says so on its own line. A copy that *is* there and is not a plain
 /// file is not ordinary, and is said out loud.
-pub fn read(kept: &Path) -> Option<Value> {
+pub(crate) fn read(kept: &Path) -> Option<Value> {
     let refuse = |why: &str| {
         eprintln!(
             "onepipeline: not reading the retained report at {}: {why}",
@@ -375,7 +403,7 @@ pub fn read(kept: &Path) -> Option<Value> {
 // llmlint: ignore-block[boundary_inputs_validated] the leniency above is the
 // decision, and it is the same one the onejudge arm has always made; `read` is the
 // boundary this document is validated at.
-pub fn turns(document: &Value) -> Vec<Turn> {
+pub(crate) fn turns(document: &Value) -> Vec<Turn> {
     if let Some(messages) = document
         .get("transcript")
         .and_then(|transcript| transcript.get("messages"))
@@ -407,7 +435,7 @@ fn results(document: &Value) -> impl Iterator<Item = &Value> {
 ///
 /// `None` for every other ending: no schema was asked for, no candidate ran, the
 /// answer did not conform, or it conformed and carries no body worth publishing.
-pub fn drafted_body(document: &Value) -> Option<String> {
+pub(crate) fn drafted_body(document: &Value) -> Option<String> {
     results(document)
         .filter(|result| result.get("schema_valid").and_then(Value::as_bool) == Some(true))
         .find_map(|result| {
@@ -419,7 +447,7 @@ pub fn drafted_body(document: &Value) -> Option<String> {
 
 /// One turn of a retained transcript.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Turn {
+pub(crate) struct Turn {
     /// Who produced it, as the report names them.
     pub role: String,
     /// What they said.
@@ -472,7 +500,7 @@ impl Turn {
 
 /// One tool call a turn made.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Tool {
+pub(crate) struct Tool {
     /// `tool_call` or `tool_result`, as the report names it.
     pub kind: String,
     /// The tool, where the harness named one.

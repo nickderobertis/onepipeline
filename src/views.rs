@@ -53,7 +53,7 @@ use crate::event::{Envelope, Source};
 use crate::filter::EventFilter;
 use crate::graph::{self, Landing, NodeStatus};
 use crate::journal::PipelineKind;
-use crate::ledger::{self, LaunchRecord, LockRecord, RunPaths};
+use crate::ledger::{self, LaunchRecord, LockRecord};
 use crate::projection::{self, MemberLabel, Refusal, RunState};
 use crate::sys;
 
@@ -62,6 +62,19 @@ use crate::sys;
 /// Re-exported where the views are, because a rejection is part of what a view
 /// reports: a root that was skipped is named on the same output a run is.
 pub use crate::ledger::Skipped;
+
+/// Where one run's durable state lives.
+///
+/// Re-exported where the views are, because it is the type a consumer already
+/// receives on [`RunView::paths`] and could not name — and because
+/// [`report_for`](RunPaths::report_for) is how a reader of this run's store
+/// resolves the copy [`report::retain`](crate::report::retain) wrote. What the
+/// contract promises of it is `run`, `dir`, [`new`](RunPaths::new),
+/// [`under`](RunPaths::under), [`reports_dir`](RunPaths::reports_dir), and
+/// `report_for`; the segment sanitiser behind the last of those stays private,
+/// so a report path is obtained by calling and never by restating.
+// llmlint: ignore[invalid_states_unrepresentable] naming the type changes nothing about a run id: `run` is a `String` for the reason `src/ledger.rs`'s file-level suppression states, and `ledger::is_valid_run_id` remains the boundary every externally-supplied id crosses.
+pub use crate::ledger::RunPaths;
 
 /// How long a launch may hold its pid without doing anything before it is
 /// reported [`Parked`](DriverLiveness::Parked).

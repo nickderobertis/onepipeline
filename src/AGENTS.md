@@ -43,6 +43,13 @@ Rules:
   `plan.json` is its launch record and is never rewritten.
 - `agentgraph.rs` and `vcs.rs` are the sibling CLIs, reached as subprocesses.
   Nothing here reimplements what they own.
+- `report.rs` is **half public**: `retain` and the constants an accepted
+  settlement is built from are the contract's retention path, published so a
+  consumer writes a report through the same promise it resolves one back
+  through — `RunPaths::report_for`, re-exported from `views`. Everything else
+  there is `pub(crate)`, because what this crate's views render out of a
+  retained report is a rendering rather than a promise, and the segment
+  sanitiser behind `report_for` stays private so nobody restates it.
 
 Two ordering rules in `engine.rs` are load-bearing and easy to undo:
 
