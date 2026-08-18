@@ -199,11 +199,28 @@ pub fn wait_for(path: &Path) {
 /// rendezvous ends the process rather than continuing as though it had been
 /// released.
 pub fn wait_for_any(paths: &[PathBuf]) {
+    // A hold with no clock of its own: `Duration::MAX` never elapses, so the
+    // tick below never fires and this waits exactly as it always has.
+    wait_for_any_ticking(paths, std::time::Duration::MAX, &mut || {});
+}
+
+/// [`wait_for_any`], running `tick` about every `every` for as long as it waits.
+///
+/// What a dispatch that goes on *saying* something while it holds needs: a real
+/// harness publishes its liveness whether or not the turn is doing anything, and
+/// a double that could only hold silently cannot act out a wedged worker at all.
+/// The bound is unchanged — an unreleased hold still ends the process.
+pub fn wait_for_any_ticking(paths: &[PathBuf], every: std::time::Duration, tick: &mut dyn FnMut()) {
     let deadline =
         std::time::Instant::now() + std::time::Duration::from_secs(rendezvous_timeout_seconds());
+    let mut ticked = std::time::Instant::now();
     while std::time::Instant::now() < deadline {
         if paths.iter().any(|path| path.exists()) {
             return;
+        }
+        if ticked.elapsed() >= every {
+            tick();
+            ticked = std::time::Instant::now();
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }

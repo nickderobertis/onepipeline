@@ -10,7 +10,7 @@
 // model turns to produce, and `dispatch.rs` is where the real `oneagentgraph` binary is
 // driven instead. `harness.rs` carries the same suppression and the full rationale.
 
-use crate::harness::{agent, human, plan_of, World, NOTHING_DRIVING, REFUSED};
+use crate::harness::{agent, human, plan_of, World, NOTHING_DRIVING, REFUSED, STALL_AFTER_ENV};
 use serde_json::json;
 
 /// Run a plan to settlement, attached, and return the run id.
@@ -595,7 +595,7 @@ fn a_worker_that_goes_quiet_is_surfaced_without_holding_anything_back() {
         &plan_of("quiet", vec![agent("slow", &[]), agent("busy", &[])]),
     );
     let mut command = world.cmd(&["start", &path.to_string_lossy(), "--detach"]);
-    command.env("ONEPIPELINE_STALL_AFTER_SECONDS", "1");
+    command.env(STALL_AFTER_ENV, "1");
     command.output().expect("the binary runs");
 
     // A stall is evidence rather than a verdict, so the surface is
@@ -649,6 +649,64 @@ fn a_worker_that_goes_quiet_is_surfaced_without_holding_anything_back() {
     world.release("slow.go");
     world.until("the run to settle", |world| {
         world.run_file("quiet", "result.json").is_file()
+    });
+}
+
+/// A worker that is alive and doing nothing is still reported quiet.
+///
+/// The watch was reset by the one event whose literal meaning is "nothing is
+/// happening", so it could fire for a worker that had *died* and never for one
+/// that was wedged. The heartbeat itself is not stopped — a member is declared
+/// dead on it one layer down — and the claim here is only that it is not
+/// mistaken for work.
+#[test]
+fn a_worker_that_only_heartbeats_is_reported_quiet_rather_than_active() {
+    let world = World::new("plan-heartbeat");
+    // Alive, addressable, and producing nothing: the turn is announced and then
+    // the dispatch does nothing but say it is still there.
+    world.script("stuck.turn-open", "");
+    world.script("stuck.wait", "hold");
+    world.script("stuck.heartbeat", "50");
+    let path = world.plan("wedged", &plan_of("wedged", vec![agent("stuck", &[])]));
+    let mut command = world.cmd(&["start", &path.to_string_lossy(), "--detach"]);
+    command.env(STALL_AFTER_ENV, "2");
+    world.run_on(command, "start --detach").exited(0);
+
+    // Heartbeating well past the threshold, which is the whole scenario: at
+    // twenty beats over two seconds nothing that counted them could ever call
+    // this dispatch quiet.
+    world.until(
+        "the wedged worker to heartbeat past the threshold",
+        |world| world.events_of("wedged", "member-heartbeat").len() >= 20,
+    );
+    world.until("the wedged worker to be reported quiet", |world| {
+        !world.events_of("wedged", "quiet-worker").is_empty()
+    });
+
+    let reported = world
+        .events_of("wedged", "quiet-worker")
+        .into_iter()
+        .find(|event| event["labels"]["node"] == "stuck")
+        .expect("the wedged worker was reported quiet");
+    assert_eq!(reported["payload"]["threshold_seconds"], 2);
+    assert!(
+        reported["payload"]["quiet_for_seconds"]
+            .as_u64()
+            .unwrap_or(0)
+            >= 2,
+        "the quiet stretch is shorter than the threshold that fired: {reported}"
+    );
+
+    // Still beating afterwards: what was reported is a worker that is alive and
+    // doing nothing, not one that stopped saying anything.
+    let beats = world.events_of("wedged", "member-heartbeat").len();
+    world.until("the wedged worker to go on heartbeating", |world| {
+        world.events_of("wedged", "member-heartbeat").len() > beats
+    });
+
+    world.release("stuck.go");
+    world.until("the run to settle", |world| {
+        world.run_file("wedged", "result.json").is_file()
     });
 }
 

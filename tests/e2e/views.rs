@@ -782,6 +782,113 @@ fn a_dispatch_that_has_named_no_tool_reports_its_count_rather_than_a_guess() {
     );
     world.release("service.go");
 }
+/// How many seconds ago one node's `status` line says it last did anything.
+///
+/// Read off the rendered line rather than out of the journal: the claim under
+/// test is what an operator sees, and an age taken from anywhere else would pass
+/// while the line said something different.
+fn seconds_since_activity(status: &str, node: &str) -> u64 {
+    let line = status
+        .lines()
+        .find(|line| line.trim_start().starts_with(&format!("{node}: running")))
+        .unwrap_or_else(|| panic!("`status` has no in-flight line for {node}:\n{status}"));
+    let at = line
+        .find(" ago")
+        .unwrap_or_else(|| panic!("`{line}` carries no age"));
+    let age: String = line[..at]
+        .chars()
+        .rev()
+        .take_while(|c| *c != ' ')
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    // The rendered spelling is `12s` under a minute and `1m30s` above it, and
+    // the second is already past anything this journey waits for.
+    age.strip_suffix('s')
+        .and_then(|seconds| seconds.parse().ok())
+        .unwrap_or_else(|| panic!("`{line}` carries no readable age in seconds"))
+}
+
+/// A dispatch that is only heartbeating is aged by the work it has done, not by
+/// the heartbeat.
+///
+/// An age over every envelope can never be older than one beat for anything
+/// that has not died: measured on a real run, a node reported as possibly
+/// wedged said "14s ago", and would have said the same after ten silent
+/// minutes. The liveness is reported beside the work rather than as it.
+#[test]
+fn status_ages_a_dispatch_by_its_work_rather_than_by_its_heartbeat() {
+    let world = World::new("views-heartbeat");
+    world.script("stuck.turn-open", "");
+    world.script("stuck.wait", "hold");
+    world.script("stuck.heartbeat", "100");
+    // A second dispatch that heartbeats without ever announcing a turn: alive
+    // from the first beat and having produced nothing at all, which is what a
+    // harness that has started and not begun looks like.
+    world.script("mute.wait", "hold");
+    world.script("mute.heartbeat", "100");
+    let path = world.plan(
+        "beating",
+        &plan_of("beating", vec![agent("stuck", &[]), agent("mute", &[])]),
+    );
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+
+    // Long enough that an age reading the heartbeat and one reading the work
+    // cannot be confused: the turn was announced once, and the beats have gone
+    // on for seconds since.
+    world.until("both dispatches to heartbeat for a while", |world| {
+        world
+            .events_of("beating", "member-heartbeat")
+            .iter()
+            .filter(|event| event["labels"]["onepipeline.node"] == "stuck")
+            .count()
+            >= 30
+            && world
+                .events_of("beating", "member-heartbeat")
+                .iter()
+                .filter(|event| event["labels"]["onepipeline.node"] == "mute")
+                .count()
+                >= 30
+    });
+
+    let status = world.run(&["status", "beating"]);
+    status.exited(0).out_has("stuck: running");
+    // The two envelopes the turn's announcement is: a member starting and a turn
+    // starting. Everything since has been a heartbeat, and none of it is work.
+    status.out_has("2 event(s)");
+    assert!(
+        seconds_since_activity(&status.stdout, "stuck") >= 2,
+        "the age of the work was taken from the heartbeat:\n{}",
+        status.stdout
+    );
+    // And the liveness is still reported, because a dispatch that has gone quiet
+    // and one that has died call for opposite actions.
+    status.out_has("alive ");
+
+    // The dispatch that has produced nothing says so, rather than claiming an
+    // age for work it has not done — and it does not read as a node nothing is
+    // driving, which is the opposite mistake.
+    let mute = status
+        .stdout
+        .lines()
+        .find(|line| line.trim_start().starts_with("mute: running"))
+        .unwrap_or_else(|| panic!("`status` has no line for mute:\n{}", status.stdout));
+    assert!(
+        mute.contains("nothing recorded yet") && mute.contains("alive "),
+        "a dispatch that has only ever heartbeated reads as one that has worked: {mute}"
+    );
+    assert!(
+        !mute.contains("UNDRIVEN"),
+        "a dispatch that is heartbeating reads as one nothing is driving: {mute}"
+    );
+
+    world.release("stuck.go");
+    world.release("mute.go");
+}
+
 /// A run that has dispatched nothing has no transcript, and says so rather than
 /// rendering an empty one.
 #[test]

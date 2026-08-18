@@ -295,11 +295,12 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     // one cannot tell a turn that stopped politely from one that was killed.
     if dir.join(format!("{key}.wait")).exists() {
         let go = dir.join(format!("{key}.go"));
-        if dir.join(format!("{key}.stops-when-interrupted")).exists() {
-            fake::wait_for_any(&[go, dir.join(format!("{key}.redirect"))]);
+        let until = if dir.join(format!("{key}.stops-when-interrupted")).exists() {
+            vec![go, dir.join(format!("{key}.redirect"))]
         } else {
-            fake::wait_for(&go);
-        }
+            vec![go]
+        };
+        hold(args, dir, &key, &node, step.as_deref(), &until);
     }
     // Whatever an `interrupt` delivered while the turn was held. Read after the
     // hold, because that is when the running turn would have acted on it.
@@ -644,6 +645,62 @@ fn open_turn(args: &[String], dir: &std::path::Path, key: &str, node: &str, step
             record.display()
         ));
     }
+}
+
+/// Hold the dispatch until the test releases it, heartbeating while it waits
+/// where the script asks for one.
+///
+/// A held dispatch is silent by default: a worker that has started and recorded
+/// nothing. `<key>.heartbeat` holds a number of milliseconds and makes it the
+/// *other* case — a member alive and producing nothing, publishing the
+/// sibling's own `member-heartbeat` on that clock for as long as the hold
+/// lasts. The real one fires about every fifteen seconds; a journey states its
+/// own so the stall it is about lands inside a test's patience.
+fn hold(
+    args: &[String],
+    dir: &std::path::Path,
+    key: &str,
+    node: &str,
+    step: Option<&str>,
+    until: &[std::path::PathBuf],
+) {
+    let Some(every) = fake::node_script(dir, key, "heartbeat") else {
+        fake::wait_for_any(until);
+        return;
+    };
+    // A scripted interval that is not one is a test that means something other
+    // than what it says: read leniently it becomes a hold that never beats,
+    // which is the scenario this scripting exists to tell apart from.
+    let every = match every.trim().parse::<u64>() {
+        Ok(millis) if millis > 0 => std::time::Duration::from_millis(millis),
+        _ => fake::fail(&format!(
+            "{key}.heartbeat holds {every:?}, which is not a positive number of milliseconds"
+        )),
+    };
+    let labels = member_labels(args, node, step);
+    // Above every `seq` the turn's own envelopes use, so a beat can never be
+    // taken for one of them.
+    let mut seq = 100;
+    fake::wait_for_any_ticking(until, every, &mut || {
+        println!(
+            "{}",
+            serde_json::json!({
+                "v": 1,
+                "ts": fake::now(),
+                "stream": stream(),
+                "seq": seq,
+                "source": "agentgraph",
+                // The producing library's own spelling of the kind, read off its
+                // enum: a double that hand-wrote the word would keep emitting it
+                // after the sibling renamed it, which is an oracle for a stream
+                // nothing produces.
+                "kind": oneagentgraph::event::EventKind::MemberHeartbeat.as_str(),
+                "labels": labels,
+                "payload": {},
+            })
+        );
+        seq += 1;
+    });
 }
 
 /// The turn is over, so nothing can be delivered into it any more.

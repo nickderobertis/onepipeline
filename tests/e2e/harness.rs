@@ -82,6 +82,17 @@ pub const STARTUP_TIMEOUT_ENV: &str = "ONEPIPELINE_STARTUP_TIMEOUT_SECONDS";
 /// five-minute default, and that journey would fail on its own clock.
 pub const CANCEL_GRACE_ENV: &str = "ONEPIPELINE_CANCEL_GRACE_SECONDS";
 
+/// The variable that moves the threshold a silent dispatch is reported quiet
+/// past.
+///
+/// The suite's own copy for the same reason [`CANCEL_GRACE_ENV`] is one, and
+/// proved live by the same kind of journey:
+/// `a_worker_that_only_heartbeats_is_reported_quiet_rather_than_active` sets it
+/// to seconds and waits for the report. Renamed in the crate and not here, the
+/// override would be inert, the threshold would be the forty-minute default, and
+/// that journey would time out waiting rather than passing a little slower.
+pub const STALL_AFTER_ENV: &str = "ONEPIPELINE_STALL_AFTER_SECONDS";
+
 /// How long a launch given a one-second backstop may take before the override
 /// has to be presumed inert.
 ///
