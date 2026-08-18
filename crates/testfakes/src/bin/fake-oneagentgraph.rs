@@ -594,7 +594,6 @@ fn write_work(args: &[String], name: &str, body: &str) {
 /// two answers, which is what a caller has to carry on from.
 fn open_turn(args: &[String], dir: &std::path::Path, key: &str, node: &str, step: Option<&str>) {
     let labels = member_labels(args, node, step);
-    // One per envelope the announcement is, in the order it emits them.
     let unplaceable = [
         dir.join(format!("{key}.unplaceable-member-start")).exists(),
         dir.join(format!("{key}.unplaceable-turn-start")).exists(),
