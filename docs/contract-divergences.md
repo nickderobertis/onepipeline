@@ -1056,7 +1056,7 @@ launch that named no pr-author graph, and a node that carried its own `body`.
 Neither spends a dispatch and neither is a failure, and a kind that fired for
 them would report the shipped default as a fault.
 
-`docs/contract.md` carries the ruling in the shipped-content paragraph, and
+The contract carries the ruling in its shipped-content paragraph, and
 `body-not-drafted` is in the closed set of this library's own kinds beside it.
 
 ## 35. A pinned branch cannot be compared against its base before a dispatch is spent — OPEN

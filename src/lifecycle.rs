@@ -330,6 +330,15 @@ fn publish(
                 ..Settlement::plain(&node.id, NodeStatus::Done, None)
             }
         }
+        // llmlint: ignore[changed_behavior_has_e2e] this arm is `onevcs` refusing the
+        // call outright, which no double can produce: the fake host answers a publish
+        // request, and the one refusal this crate can provoke — a title the sibling
+        // will not commit under — is caught before any dispatch runs, by
+        // `a_title_the_sibling_will_not_commit_under_is_refused_before_any_dispatch`.
+        // What the arm does with a drafting failure is not its own composition either:
+        // it is the same `publication_failed` the outcome arm above takes, which
+        // `a_publication_that_its_gate_rejects_settles_the_node_failed_by_name` drives
+        // end to end beside an undrafted body.
         Err(error) => publication_failed(error.to_string()),
     }
 }
