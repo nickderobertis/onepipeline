@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.3](https://github.com/nickderobertis/onepipeline/compare/v0.7.2...v0.7.3) - 2026-08-18
+
+### Added
+
+- *(contract)* publish report retention and its path as a supported surface ([#69](https://github.com/nickderobertis/onepipeline/pull/69))
+
 ## [0.7.2](https://github.com/nickderobertis/onepipeline/compare/v0.7.1...v0.7.2) - 2026-08-18
 
 ### Fixed
