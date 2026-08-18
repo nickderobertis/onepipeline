@@ -591,7 +591,7 @@ fn open_turn(args: &[String], dir: &std::path::Path, key: &str, node: &str, step
             "{}",
             serde_json::json!({
                 "v": 1,
-                "ts": stamp(dir, key, seq),
+                "ts": fake::now(),
                 "stream": stream(),
                 "seq": seq,
                 "source": "agentgraph",
@@ -647,32 +647,6 @@ fn open_turn(args: &[String], dir: &std::path::Path, key: &str, node: &str, step
     }
 }
 
-/// A stamp no consumer can place in time, for the dispatch that scripts one.
-///
-/// Real, and the reason a stamp is read as an option rather than as a time: a
-/// producer this build is newer or older than can put a spelling on that line
-/// that nothing here parses. What it must not become is an age — a dispatch
-/// whose every envelope is unplaceable has recorded nothing this build can age,
-/// and reporting it as having worked a moment ago is the misreading the whole
-/// readout exists to prevent.
-const UNREADABLE_STAMP: &str = "whenever it was";
-
-/// When an envelope says it happened, as this dispatch was scripted to say it.
-///
-/// Two flags rather than one holding a `seq`, because they are two scenarios and
-/// neither is a number a journey has to get right: `<key>.clock-unreadable` is a
-/// producer nothing here can place at all, and `<key>.clock-unreadable-first` is
-/// one whose opening envelope cannot be placed and whose later ones can — the
-/// transition, where a reader has something to age by at last and nothing to age
-/// the arrival before it.
-fn stamp(dir: &std::path::Path, key: &str, seq: u64) -> String {
-    let scripted = |name: &str| dir.join(format!("{key}.{name}")).exists();
-    if scripted("clock-unreadable") || (seq == 0 && scripted("clock-unreadable-first")) {
-        return UNREADABLE_STAMP.to_string();
-    }
-    fake::now()
-}
-
 /// Hold the dispatch until the test releases it, heartbeating while it waits
 /// where the script asks for one.
 ///
@@ -712,7 +686,7 @@ fn hold(
             "{}",
             serde_json::json!({
                 "v": 1,
-                "ts": stamp(dir, key, seq),
+                "ts": fake::now(),
                 "stream": stream(),
                 "seq": seq,
                 "source": "agentgraph",
