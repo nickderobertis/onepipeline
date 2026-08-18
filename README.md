@@ -69,7 +69,14 @@ A lifecycle node states the `title` its change request opens under, and may stat
 its `body` too. `--pr-author-graph REF` names an agent graph that drafts that body
 instead, from the branch's own diff, once the branch is verified and before the
 change request is opened; naming none is the default, and a drafting dispatch that
-does not get there costs the change request its body and nothing else.
+does not get there costs the change request its body and nothing else. It costs no
+visibility either: a drafting dispatch that was configured, attempted, and produced
+no body is recorded against the node under one of three endings — `dispatch-failed`
+for one that could not be run or ran without succeeding, `schema-refused` for one
+whose every answer the schema rejected, and `no-body` for one that answered inside
+the schema and put nothing in it, which are three different fixes — and the node's
+own settlement says the same thing, so `results` shows it. Naming no graph and
+writing the `body` yourself spend no dispatch and are not reported.
 
 The planner supervises over the channel:
 

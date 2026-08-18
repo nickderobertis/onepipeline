@@ -1026,19 +1026,42 @@ fn emit(
 /// reads a drafted change request body out of, so it is what this double
 /// answers a `pr-author` dispatch with.
 fn report_of(task: &str) -> serde_json::Value {
-    if let Some(body) = drafted_body(task, &fake::script_dir()) {
+    if let Some(answer) = drafted_answer(task, &fake::script_dir()) {
+        // A candidate the identity chain stepped past: it ran nothing, so it
+        // answered nothing, and a consumer that read the first entry rather than
+        // the one that ran would find no body here.
+        let stepped_past = serde_json::json!({
+            "harness": "codex", "status": "skipped", "text": null,
+            "structured": null, "schema_valid": null,
+        });
+        let answered = |harness: &str, body: &str, schema_valid: bool| {
+            serde_json::json!({
+                "harness": harness, "status": "ok",
+                "text": "Drafted the change request's body.",
+                "structured": {"body": body}, "schema_valid": schema_valid,
+            })
+        };
+        // The wire shape is a value and a flag per candidate, and only three of
+        // their four combinations mean anything — which is what [`Drafted`] is:
+        // the flag is derived from the answer here rather than scripted beside
+        // it. A blank answer is written as the **chain** that produces one in
+        // practice: an identity whose answer the schema refused, and the next
+        // one, which conformed and put nothing in it. A consumer that stopped at
+        // the refusal would report a schema that is working as the fault.
+        let results = match &answer {
+            Drafted::Body(body) => vec![stepped_past, answered("claude-code", body, true)],
+            Drafted::SchemaRefused(attempted) => {
+                vec![stepped_past, answered("claude-code", attempted, false)]
+            }
+            Drafted::Bodyless => vec![
+                stepped_past,
+                answered("codex", "half a bo", false),
+                answered("claude-code", "", true),
+            ],
+        };
         return serde_json::json!({
             "schema_version": "0.6",
-            "results": [
-                // A candidate the identity chain stepped past: it ran nothing,
-                // so it answered nothing, and a consumer that read the first
-                // entry rather than the one that ran would find no body here.
-                {"harness": "codex", "status": "skipped", "text": null,
-                 "structured": null, "schema_valid": null},
-                {"harness": "claude-code", "status": "ok",
-                 "text": "Drafted the change request's body.",
-                 "structured": {"body": body}, "schema_valid": true},
-            ],
+            "results": results,
             "usage": {"input_tokens": 40, "output_tokens": 20, "cost_usd": 0.01},
         });
     }
@@ -1072,19 +1095,50 @@ fn report_of(task: &str) -> serde_json::Value {
     })
 }
 
-/// The body a `pr-author` dispatch drafts, when it is one.
+/// What a `pr-author` dispatch's turn answered with.
+///
+/// Three answers rather than a body and a flag beside it, because only three of
+/// that pair's four combinations mean anything: prose the schema accepted, prose
+/// it refused, and an answer inside the schema with nothing in it. The fourth —
+/// a refused answer that is nonetheless the body to publish — is a state the
+/// consumer must never see, so this double cannot script one.
+enum Drafted {
+    /// A validated answer carrying the prose the change request opens with.
+    Body(String),
+    /// An answer the schema **refused**, holding the value the turn last
+    /// attempted — which the real library retains beside the flag, so a consumer
+    /// reading `structured` without reading the flag would publish prose that
+    /// never validated.
+    SchemaRefused(String),
+    /// An answer that conformed to the schema and put no body in it, which is a
+    /// drafter to correct rather than a schema.
+    Bodyless,
+}
+
+/// The answer a `pr-author` dispatch gives.
 ///
 /// Recognised by the task this crate composes for a drafting dispatch and by
-/// nothing else, so an ordinary node's dispatch never answers as one. Scripted
-/// with `pr-author.body` where a journey wants to read its own words back out
-/// of the change request; `pr-author.unschematic` is the other ending — a turn
-/// that answered with nothing the schema accepted, which is not a body.
-fn drafted_body(task: &str, dir: &std::path::Path) -> Option<String> {
-    if !task.starts_with("Read this branch's diff") || dir.join("pr-author.unschematic").exists() {
+/// nothing else, so an ordinary node's dispatch never answers as one — and
+/// `None` is exactly that: a dispatch which is not a drafting one, whose report
+/// is the two-party transcript every other member settles with.
+///
+/// Each of the three is scripted, because each is a different ending for the run
+/// that asked and they take three different fixes: `pr-author.body` is the prose
+/// a journey reads back out of the change request and is the default where
+/// nothing is scripted, `pr-author.unschematic` is the refused answer, and
+/// `pr-author.bodyless` is the conforming one with nothing in it.
+fn drafted_answer(task: &str, dir: &std::path::Path) -> Option<Drafted> {
+    if !task.starts_with("Read this branch's diff") {
         return None;
     }
-    Some(
+    if dir.join("pr-author.unschematic").exists() {
+        return Some(Drafted::SchemaRefused("half a bo".to_string()));
+    }
+    if dir.join("pr-author.bodyless").exists() {
+        return Some(Drafted::Bodyless);
+    }
+    Some(Drafted::Body(
         fake::node_script(dir, "pr-author", "body")
             .unwrap_or_else(|| "## What\nDrafted from the diff.".to_string()),
-    )
+    ))
 }

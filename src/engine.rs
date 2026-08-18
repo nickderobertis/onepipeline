@@ -332,8 +332,31 @@ pub(crate) enum Message {
     Redispatched(Box<Redispatch>),
     /// A cancellation reached a dispatch, or ran out of patience with one.
     Cancelling(Box<Cancelling>),
+    /// A configured drafting dispatch produced no change request body.
+    BodyNotDrafted(Box<UndraftedBody>),
     /// The dispatch settled.
     Settled(Box<Settlement>),
+}
+
+/// A change request whose body a configured drafting dispatch did not produce.
+///
+/// The loop owns the pipeline stream and the sequence it is numbered in, so a
+/// dispatch thread with something of its own to record hands over *what
+/// happened* rather than composing an envelope beside that series — which is
+/// what a relayed envelope is, and what a `seq` this side did not issue would
+/// make a reader read as loss.
+///
+/// The fields and not a kind with a payload map beside it: this is the one of
+/// this crate's own kinds a dispatch thread emits, and a kind selected
+/// independently of the payload it is paired with is a mismatch nothing would
+/// catch. The ending travels as the drafting side's own type for the same
+/// reason — the wire name and the sentence are read off it here, so an ending
+/// this build does not have is not a value this message can carry.
+pub(crate) struct UndraftedBody {
+    /// The node whose change request opened without one.
+    pub node: String,
+    /// Which ending it was.
+    pub ending: crate::lifecycle::Undrafted,
 }
 
 /// One transition of a cancellation, on its way to the planner.
@@ -582,6 +605,17 @@ fn converge(
             // because a planner reading its own updates is who decides what to
             // do next, and what to do next is not the same for the two.
             Ok(Message::Cancelling(step)) => raise(paths, journal, cancelling_surface(&step))?,
+            // Emitted rather than relayed: it is this crate's own kind, so it
+            // belongs in this crate's own stream, numbered by the writer that
+            // owns it.
+            Ok(Message::BodyNotDrafted(undrafted)) => journal.emit(
+                journal::PipelineKind::BodyNotDrafted,
+                journal::labels(&paths.run, Some(&undrafted.node)),
+                journal::payload(&[
+                    ("ending", json!(undrafted.ending.ending())),
+                    ("detail", json!(undrafted.ending.why())),
+                ]),
+            )?,
             Ok(Message::Settled(settlement)) => {
                 in_flight.remove(&settlement.node);
                 settle(paths, journal, &settlement)?;
@@ -1680,7 +1714,7 @@ fn failed(node: &str, outcome: &str) -> Settlement {
 }
 
 /// A reason bounded to what an envelope payload may carry.
-fn bounded(reason: &str) -> String {
+pub(crate) fn bounded(reason: &str) -> String {
     reason
         .chars()
         .take(crate::event::MAX_PAYLOAD_TEXT_BYTES / 4)

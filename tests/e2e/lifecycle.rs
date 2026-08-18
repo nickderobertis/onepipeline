@@ -262,6 +262,16 @@ fn a_lifecycle_node_opens_a_session_works_in_it_and_publishes_through_onevcs() {
         "the publication is missing from the merged store"
     );
 
+    // This launch named no drafting graph, which is the shipped default and not
+    // a failure: nothing was drafted and nothing is reported about it. The
+    // change request that opens with no body here is the one this kind must not
+    // be read off.
+    let reported = world.events_of(&run, "body-not-drafted");
+    assert!(
+        reported.is_empty(),
+        "a launch that named no pr-author graph reported a drafting failure: {reported:?}"
+    );
+
     let result = world.run_json(&run, "result.json");
     assert_eq!(
         result["nodes"][0]["status"],
@@ -448,6 +458,24 @@ fn a_session_record_that_cannot_be_read_falls_back_to_opening_a_session() {
         ),
         "a drafting dispatch ran with no worktree to read a diff in"
     );
+    // And it is in the run's own record as well as on stderr, under the ending
+    // that says the dispatch is what could not happen.
+    let undrafted = world.events_of("norecord", "body-not-drafted");
+    assert_eq!(undrafted.len(), 1, "{undrafted:?}");
+    assert_eq!(undrafted[0]["payload"]["ending"], "dispatch-failed");
+    assert_eq!(undrafted[0]["labels"]["node"], "service");
+    let detail = undrafted[0]["payload"]["detail"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        detail.contains("no worktree to read this branch's diff in"),
+        "the recorded ending does not say what could not happen: {detail}"
+    );
+    let settled = world.events_of("norecord", "node-settled");
+    assert_eq!(
+        settled[0]["payload"]["detail"], undrafted[0]["payload"]["detail"],
+        "the settlement of a node with nowhere to draft in did not name it"
+    );
     // It fell back rather than running nowhere: the second step asked for a
     // session of its own, which is what it would have done had the first never
     // opened one. Two distinct tokens, where a workstream whose record *is*
@@ -605,6 +633,12 @@ fn the_pr_author_dispatch_drafts_the_body_the_change_request_opens_with() {
         world.run_json("authored", "result.json")["state"],
         "complete"
     );
+    // A drafting dispatch that produced a body is not a failure, so nothing
+    // reports it: the kind exists for the three endings that produce none.
+    assert!(
+        world.events_of("authored", "body-not-drafted").is_empty(),
+        "a body that was drafted was reported as one that was not"
+    );
 }
 
 /// A launch that names no drafting graph is the shipped default, and it drafts
@@ -646,19 +680,49 @@ fn a_node_that_states_its_own_body_publishes_it_and_spends_no_dispatch() {
         ),
         "a body the planner wrote still spent a drafting dispatch"
     );
+    // And nothing was reported about the drafting that never happened: a node
+    // that wrote its own body spent no dispatch, which is not a failure.
+    let reported = world.events_of("bodied", "body-not-drafted");
+    assert!(
+        reported.is_empty(),
+        "a node that wrote its own body was reported as an undrafted one: {reported:?}"
+    );
 }
 
-/// Every way the drafting dispatch can end badly, and none of them reaches the
-/// publication.
+/// Every way the drafting dispatch can end badly: the publication proceeds, and
+/// the run says which ending it was.
 ///
 /// It runs after the branch is verified and is not on the publication path, so
 /// each of these is a change request that opens with no body and a node that
-/// settles on its publication as before.
+/// settles on its publication as before. What each of them is *not* is silent:
+/// the three endings need three different fixes — a drafter that will not
+/// finish, one whose answer the schema refuses, and one that answers inside the
+/// schema with nothing in it — so each is named twice, on `body-not-drafted` and
+/// on the node's own settlement, where `results` renders it.
 #[test]
 fn a_drafting_dispatch_that_ends_badly_leaves_the_publication_untouched() {
-    for (name, scenario) in [
-        ("failed", "service.pr-author.fail"),
-        ("unschematic", "pr-author.unschematic"),
+    for (name, scenario, ending, says) in [
+        (
+            "failed",
+            "service.pr-author.fail",
+            "dispatch-failed",
+            "settled without succeeding",
+        ),
+        (
+            "unschematic",
+            "pr-author.unschematic",
+            "schema-refused",
+            "answered nothing the schema it was validated against accepted",
+        ),
+        // A chain the schema refused once and then accepted, with nothing in
+        // the answer it accepted: the schema is working, so the ending is the
+        // drafter's and a reader is not sent to correct a schema instead.
+        (
+            "bodyless",
+            "pr-author.bodyless",
+            "no-body",
+            "succeeded and there was no body in what it answered with",
+        ),
     ] {
         let world = World::new(&format!("lifecycle-draft-{name}"));
         world.repository("change-open", &["true"]);
@@ -690,6 +754,45 @@ fn a_drafting_dispatch_that_ends_badly_leaves_the_publication_untouched() {
             "a drafting dispatch that {name} still put a body on the change request: {opened:?}"
         );
         assert_eq!(opened[0]["title"], "feat: land it anyway");
+
+        // Once, under the node it happened to, naming which of the three
+        // endings it was — the whole reason they are not collapsed into one.
+        let reported = world.events_of(name, "body-not-drafted");
+        assert_eq!(
+            reported.len(),
+            1,
+            "a drafting dispatch that {name} was not reported: {reported:?}"
+        );
+        assert_eq!(reported[0]["labels"]["node"], "service", "{}", reported[0]);
+        assert_eq!(
+            reported[0]["payload"]["ending"], ending,
+            "a drafting dispatch that {name} was reported under the wrong ending: {}",
+            reported[0]
+        );
+        let detail = reported[0]["payload"]["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            detail.contains(says),
+            "the {name} ending did not say what it was: {detail}"
+        );
+
+        // And beside the event, on the settlement — which is what a planner
+        // reading `results` is shown without opening the run's store.
+        let settled = world.events_of(name, "node-settled");
+        let settlement = settled[0]["payload"]["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        assert_eq!(
+            settlement, detail,
+            "the settlement of a drafting dispatch that {name} did not name the ending"
+        );
+        world
+            .run(&["results", name])
+            .exited(0)
+            .out_has("was not drafted");
     }
 }
 
@@ -1106,12 +1209,33 @@ fn an_unresolvable_repository_is_refused_before_a_run_starts() {
     assert!(!world.run_file("nosession", "launch.json").exists());
 }
 
+/// A publication its gate rejected, with a drafting dispatch that also failed.
+///
+/// Both endings in one journey because the settlement carries both, in one
+/// order: the publication's own reason is what settled the node, and the
+/// drafting ending follows it because it is true either way. A reader looking
+/// for the drafter must not have to know which of the two failed first.
 #[test]
 fn a_publication_that_its_gate_rejects_settles_the_node_failed_by_name() {
     let world = World::new("lifecycle-gate");
     world.repository("local-direct", &["false"]);
     world.script("service.work", "the worker wrote this\n");
-    let run = settle(&world, "rejected", vec![lifecycle("service", &[])]);
+    world.script("service.pr-author.fail", "1");
+    let drafting = world.pr_author_graph();
+    let path = world.plan(
+        "rejected",
+        &plan_of("rejected", vec![lifecycle("service", &[])]),
+    );
+    world
+        .run(&[
+            "start",
+            &path.to_string_lossy(),
+            "--attach",
+            "--pr-author-graph",
+            &drafting,
+        ])
+        .settled();
+    let run = "rejected".to_string();
 
     let result = world.run_json(&run, "result.json");
     assert_eq!(
@@ -1121,10 +1245,36 @@ fn a_publication_that_its_gate_rejects_settles_the_node_failed_by_name() {
         why(&world, &run)
     );
     assert_eq!(result["nodes"][0]["outcome"], "publication-failed");
-    world
-        .run(&["results", &run])
-        .exited(0)
-        .out_has("publication-failed");
+    let reported = world.run(&["results", &run]);
+    reported.exited(0).out_has("publication-failed");
+
+    // The sibling's own reason leads, and the drafting ending follows it.
+    let settled = world.events_of(&run, "node-settled");
+    let detail = settled[0]["payload"]["detail"]
+        .as_str()
+        .expect("the settlement says why");
+    let publication = detail
+        .find("onevcs:")
+        .expect("the sibling's own reason is what settled the node");
+    let drafted = detail
+        .find("the change request's body was not drafted")
+        .unwrap_or_else(|| panic!("the drafting ending is missing from: {detail}"));
+    assert!(
+        publication < drafted,
+        "the drafting ending displaced the reason the node failed: {detail}"
+    );
+    assert!(
+        reported.stdout.contains("was not drafted"),
+        "`results` did not show the drafting ending:\n{}",
+        reported.stdout
+    );
+
+    // And it is reported on its own kind as well, under the node it happened
+    // to: a publication that failed does not swallow the drafting failure.
+    let undrafted = world.events_of(&run, "body-not-drafted");
+    assert_eq!(undrafted.len(), 1, "{undrafted:?}");
+    assert_eq!(undrafted[0]["payload"]["ending"], "dispatch-failed");
+    assert_eq!(undrafted[0]["labels"]["node"], "service");
 }
 
 /// A title the sibling will not commit under never reaches a dispatch.
