@@ -889,6 +889,93 @@ fn status_ages_a_dispatch_by_its_work_rather_than_by_its_heartbeat() {
     world.release("mute.go");
 }
 
+/// A dispatch this build cannot place in time is reported as having recorded
+/// nothing, rather than as having worked a moment ago.
+///
+/// The stamp on a relayed envelope is a producer's, and a producer this build is
+/// newer or older than can spell it in a way nothing here parses. Counted anyway,
+/// such an envelope would give the readout an age it never measured — and the age
+/// is the whole thing an operator acts on, so a dispatch nobody can place would
+/// read as the freshest one on the run. It says what it knows instead: something
+/// arrived, and there is nothing here to age it by.
+#[test]
+fn status_reports_a_dispatch_it_cannot_place_in_time_as_having_recorded_nothing() {
+    let world = World::new("views-unplaceable");
+    // Announced, beating, and stamped by a clock this build cannot read.
+    world.script("blind.turn-open", "");
+    world.script("blind.wait", "hold");
+    world.script("blind.heartbeat", "100");
+    world.script("blind.clock-unreadable", "");
+    // The control: the same dispatch, said in a spelling this build reads. It is
+    // what makes the assertion about the stamp rather than about the scripting.
+    world.script("timed.turn-open", "");
+    world.script("timed.wait", "hold");
+    world.script("timed.heartbeat", "100");
+    let path = world.plan(
+        "unplaceable",
+        &plan_of(
+            "unplaceable",
+            vec![agent("blind", &[]), agent("timed", &[])],
+        ),
+    );
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+
+    // Both have announced their turn and beaten for a while, so the difference
+    // below is the stamp and nothing else.
+    let beats = |world: &World, node: &str| {
+        world
+            .events_of("unplaceable", "member-heartbeat")
+            .iter()
+            .filter(|event| event["labels"]["onepipeline.node"] == node)
+            .count()
+    };
+    world.until("both dispatches to heartbeat for a while", |world| {
+        beats(world, "blind") >= 20 && beats(world, "timed") >= 20
+    });
+
+    let status = world.run(&["status", "unplaceable"]);
+    status.exited(0);
+    let line = |node: &str| {
+        status
+            .stdout
+            .lines()
+            .find(|line| line.trim_start().starts_with(&format!("{node}: running")))
+            .unwrap_or_else(|| panic!("`status` has no line for {node}:\n{}", status.stdout))
+            .to_string()
+    };
+
+    // The control, so the two announcing envelopes and the beats are known to
+    // have arrived and to be readable when they can be read.
+    let timed = line("timed");
+    assert!(
+        timed.contains("2 event(s)") && timed.contains("alive "),
+        "the control dispatch did not record the turn it announced: {timed}"
+    );
+
+    let blind = line("blind");
+    assert!(
+        blind.contains("nothing recorded yet"),
+        "a dispatch whose every envelope is unplaceable was aged by one of them \
+         anyway: {blind}"
+    );
+    assert!(
+        !blind.contains("event(s)") && !blind.contains("alive "),
+        "an unplaceable stamp was counted as work or as liveness: {blind}"
+    );
+    // And it is still a dispatch that is running, which is the opposite mistake:
+    // unplaceable is not the same as absent.
+    assert!(
+        !blind.contains("UNDRIVEN"),
+        "a dispatch that is saying things this build cannot place reads as one \
+         nothing is driving: {blind}"
+    );
+
+    world.release("blind.go");
+    world.release("timed.go");
+}
+
 /// A run that has dispatched nothing has no transcript, and says so rather than
 /// rendering an empty one.
 #[test]

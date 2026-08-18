@@ -591,7 +591,7 @@ fn open_turn(args: &[String], dir: &std::path::Path, key: &str, node: &str, step
             "{}",
             serde_json::json!({
                 "v": 1,
-                "ts": fake::now(),
+                "ts": stamp(dir, key),
                 "stream": stream(),
                 "seq": seq,
                 "source": "agentgraph",
@@ -647,6 +647,24 @@ fn open_turn(args: &[String], dir: &std::path::Path, key: &str, node: &str, step
     }
 }
 
+/// A stamp no consumer can place in time, for the dispatch that scripts one.
+///
+/// Real, and the reason a stamp is read as an option rather than as a time: a
+/// producer this build is newer or older than can put a spelling on that line
+/// that nothing here parses. What it must not become is an age — a dispatch
+/// whose every envelope is unplaceable has recorded nothing this build can age,
+/// and reporting it as having worked a moment ago is the misreading the whole
+/// readout exists to prevent.
+const UNREADABLE_STAMP: &str = "whenever it was";
+
+/// When an envelope says it happened, as this dispatch was scripted to say it.
+fn stamp(dir: &std::path::Path, key: &str) -> String {
+    if dir.join(format!("{key}.clock-unreadable")).exists() {
+        return UNREADABLE_STAMP.to_string();
+    }
+    fake::now()
+}
+
 /// Hold the dispatch until the test releases it, heartbeating while it waits
 /// where the script asks for one.
 ///
@@ -686,7 +704,7 @@ fn hold(
             "{}",
             serde_json::json!({
                 "v": 1,
-                "ts": fake::now(),
+                "ts": stamp(dir, key),
                 "stream": stream(),
                 "seq": seq,
                 "source": "agentgraph",
