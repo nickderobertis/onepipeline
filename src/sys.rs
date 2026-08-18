@@ -712,6 +712,7 @@ fn platform_open_locked_append(path: &std::path::Path) -> std::io::Result<std::f
         }
     }
 }
+// llmlint: ignore-end[changed_behavior_has_e2e]
 
 /// Stop the processes this one starts from inheriting *its own* standard
 /// handles.

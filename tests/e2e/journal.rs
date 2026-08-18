@@ -516,6 +516,23 @@ fn a_fragment_a_dead_writer_left_is_healed_and_the_loss_is_reported() {
         2,
         "the loss log lost a record of its own: {recorded:?}"
     );
+
+    // A whole line of the loss log that is not one of its records — a hand
+    // edit, or a build that wrote them differently — costs that one line and
+    // not the account around it. A view that would not say what a run lost
+    // because the record of a loss was unreadable would be the silence this
+    // whole thing is about.
+    //
+    // llmlint: ignore-block[tests_mirror_real_usage] nothing a user can type writes a line into this log — this build writes only its own records there — so the claim, which is about what a *reader* does with one it cannot read, has no other way to reach its precondition. What is written is a line of a file, not a stand-in for anything in the crate: the reader under test is the compiled binary, run below.
+    std::fs::write(
+        &losses,
+        format!(
+            "{}{{\"not\":\"a loss\"}}\n",
+            std::fs::read_to_string(&losses).expect("the loss log reads")
+        ),
+    )
+    .expect("the loss log is written");
+    // llmlint: ignore-end[tests_mirror_real_usage]
     world.run(&["status", &run]).exited(0).out_has(&format!(
         "2 fragments discarded at append: byte {} ({} bytes), byte {} ({} bytes)",
         whole.len(),
@@ -735,10 +752,15 @@ fn a_read_verb_tells_a_truncated_record_from_one_it_cannot_read() {
     lines.push(future.to_string());
     lines.push(future.to_string());
     // The last line of all, with nothing after it: a record whose writer was
-    // stopped between the record and its terminator and has not come back.
+    // stopped between the record and its terminator and has not come back. Its
+    // last byte is the first of a character it never finished, because a writer
+    // stopped mid-record stops mid-*byte-sequence* as readily as between two —
+    // and a reader that decoded the file whole would fail on that one byte and
+    // hand back a store holding nothing at all.
     let tail = &fragment[..30];
-    std::fs::write(&journal, format!("{}\n{tail}", lines.join("\n")))
-        .expect("the store is written");
+    let mut store = format!("{}\n{tail}", lines.join("\n")).into_bytes();
+    store.push(0xE2);
+    std::fs::write(&journal, &store).expect("the store is written");
     // llmlint: ignore-end[tests_mirror_real_usage]
 
     let offset = |upto: usize| -> u64 { lines[..upto].iter().map(|l| l.len() as u64 + 1).sum() };
@@ -753,7 +775,7 @@ fn a_read_verb_tells_a_truncated_record_from_one_it_cannot_read() {
             fragment.len(),
             lines.len() + 1,
             offset(lines.len()),
-            tail.len()
+            tail.len() + 1
         ))
         .out_has(&format!(
             "2 lines this build cannot read: line {} at byte {} ({} bytes), \

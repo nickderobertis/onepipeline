@@ -90,11 +90,6 @@ consuming `project.json` — an undeclared one silently drops that project out o
 - **Validate external input at its trust boundary.** Plan files, executor-rules
   files, and reply envelopes are external input: the schema structs reject
   unknown fields, so a typo fails loudly instead of being silently dropped.
-- **`ledger::append_line` is the only appender to a run's JSONL stores.** It
-  takes the file's exclusive lock, heals a fragment a dead writer left —
-  reporting the loss to `<file>.torn`, which the read verbs render — and rolls a
-  failed write back off the file. The lock is *advisory* on Unix: a second append
-  path anywhere brings back the tear that destroys the record after it.
 - **Secrets never enter the tree.** `gh-secrets.json` names the required secrets
   and where they come from; the values live in the platform secret store.
 

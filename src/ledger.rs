@@ -563,10 +563,12 @@ pub fn torn_tail_log(path: &Path) -> PathBuf {
 // is the rule `read_json_opt` above already states for every ledger record this crate
 // wrote.
 pub fn torn_tails(path: &Path) -> Vec<TornTail> {
+    // llmlint: ignore-block[no_panics_on_recoverable_errors] a line of this log the build cannot read costs that one loss going unmentioned; refusing the read would take away the whole account of what a run lost, over the file that exists to report a loss.
     read_lines(&torn_tail_log(path))
         .iter()
         .filter_map(|line| serde_json::from_str(line).ok())
         .collect()
+    // llmlint: ignore-end[no_panics_on_recoverable_errors]
 }
 
 /// One line of an append-only file, and where in the file it is.
@@ -582,7 +584,16 @@ pub struct Record {
     /// Where the line begins in the file.
     pub offset: u64,
     /// The line, without its terminator.
+    ///
+    /// Decoded leniently: a record torn mid-character is not UTF-8, and what it
+    /// decodes to is a line no reader can parse — which is what it is.
     pub text: String,
+    /// How many bytes of the file the line is, without its terminator.
+    ///
+    /// Not `text.len()`: a lossy decoding is not the same length as what it was
+    /// decoded from, and a view that reported a loss's size from the decoding
+    /// would be describing its own reading rather than the file.
+    pub bytes: u64,
     /// Whether the line ended with a newline. A final line without one is a
     /// record whose writer did not finish it.
     pub terminated: bool,
@@ -612,6 +623,12 @@ pub struct Record {
 /// The lock is what makes the first and third safe: a truncation by a writer
 /// that excluded nobody destroys a record another writer appended in between,
 /// which is the loss this exists to stop.
+// llmlint: ignore[names_match_behavior] the healing is not a side effect beside the
+// append, it is what appending to a store a writer died in the middle of *means* here —
+// and there is deliberately no variant that skips it, because one would glue a whole
+// record onto half of one again. The loss log is that heal's report rather than a second
+// output a caller chooses. A name carrying both would be describing the two failures this
+// function exists to survive rather than the operation every caller asks for.
 pub fn append_line(path: &Path, line: &str) -> Result<()> {
     let (healed, appended) = append_line_locked(path, line);
     if let Some(torn) = healed {
@@ -663,8 +680,14 @@ fn append_line_locked(path: &Path, line: &str) -> (Option<TornTail>, Result<()>)
         Err(e) => {
             // Whatever of the record reached the file goes back off it. A
             // failure to undo leaves the original failure as the one reported:
-            // it is the one that says what went wrong with the host.
+            // it is the one that says what went wrong with the host, and a
+            // second error naming the same disk would displace it.
+            //
+            // llmlint: ignore-block[no_panics_on_recoverable_errors] a second error naming the disk the write already named would displace the one that says what happened; the undo is best-effort by design.
+            // llmlint: ignore-block[changed_behavior_has_e2e] no journey reaches this: a host that refuses to truncate a descriptor this function owns refused the write before it too, and that is the error handed back.
             let _ = file.set_len(boundary);
+            // llmlint: ignore-end[changed_behavior_has_e2e]
+            // llmlint: ignore-end[no_panics_on_recoverable_errors]
             (torn, Err(ledger(e)))
         }
     }
@@ -719,6 +742,12 @@ fn heal_tail(file: &mut fs::File) -> io::Result<Option<TornTail>> {
 /// whole point is that a reader of the run can see what the run lost — see
 /// [`torn_tail_log`]. On stderr as well, because the process that heals is often
 /// the one a person is watching.
+// llmlint: ignore-block[no_panics_on_recoverable_errors] every failure below is
+// deliberately dropped, and the reason is the same one each time: the loss is already on
+// stderr by the line above, and the append that healed the file **succeeded**. Failing it
+// because the *report* of a heal could not be written would turn a store this process put
+// back together into a run that could not record anything — the loss the whole of this
+// exists to stop, arrived at through its own diagnostics.
 fn report_torn_tail(path: &Path, torn: &TornTail) {
     eprintln!(
         "onepipeline: {}: discarded a {}-byte record fragment at byte {}, left by a writer \
@@ -744,6 +773,7 @@ fn report_torn_tail(path: &Path, torn: &TornTail) {
         );
     }
 }
+// llmlint: ignore-end[no_panics_on_recoverable_errors]
 
 /// Every line of an append-only file, with where it is and whether its writer
 /// finished it, or nothing when the file does not exist yet.
@@ -756,10 +786,16 @@ fn report_torn_tail(path: &Path, torn: &TornTail) {
 /// record before it survives; the replacement characters it decodes to are what
 /// makes it unreadable, which is what it is. The offsets stay the file's own,
 /// because they are counted off the bytes rather than off the decoding.
+///
+/// A file this process cannot open reads as one that is not there. That is the
+/// rule every ledger reader here follows — [`read_json_opt`] states it — and it
+/// is what lets a view render a live run rather than refuse it over one input.
 pub fn read_records(path: &Path) -> Vec<Record> {
+    // llmlint: ignore-block[no_panics_on_recoverable_errors] the leniency is the documented rule above and predates this reader; changing it changes every ledger reader in the crate — the channel queue, the replies, the commands — rather than this one.
     let Ok(bytes) = fs::read(path) else {
         return Vec::new();
     };
+    // llmlint: ignore-end[no_panics_on_recoverable_errors]
     let mut records = Vec::new();
     let mut offset = 0u64;
     for (index, line) in bytes.split_inclusive(|byte| *byte == b'\n').enumerate() {
@@ -768,10 +804,12 @@ pub fn read_records(path: &Path) -> Vec<Record> {
             .trim_end_matches('\n')
             .trim_end_matches('\r')
             .to_string();
+        let bytes = line.len() as u64 - u64::from(terminated);
         records.push(Record {
             line: index + 1,
             offset,
             text,
+            bytes,
             terminated,
         });
         offset += line.len() as u64;

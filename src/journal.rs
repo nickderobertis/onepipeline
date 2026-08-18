@@ -180,6 +180,7 @@ enum Reading {
 /// `is_eof` separates a record that stops early from one that is whole and
 /// unreadable, and an unterminated final line is a fragment whatever its parse
 /// says — the writer had not finished it.
+// llmlint: ignore-block[boundary_inputs_validated] the store is this crate's own record and not external input, and `docs/contract.md` is explicit about how it is read: a relayed envelope's kind is a wire string this library never rejects, and a record from a version this build does not know is *skipped and reported* rather than refused. `deny_unknown_fields` here would turn a newer build's record — the case this reader exists to name — into a parse failure indistinguishable from a torn one, and refusing an unknown `v` would do the same.
 fn reading(record: &ledger::Record) -> Reading {
     if record.text.trim().is_empty() {
         return Reading::Blank;
@@ -211,6 +212,7 @@ fn glued_tail(text: &str) -> Option<(u64, Envelope)> {
                 .map(|envelope| (at as u64, envelope))
         })
 }
+// llmlint: ignore-end[boundary_inputs_validated]
 
 /// One record a run's store does not hold whole, and where it is.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -314,7 +316,7 @@ pub fn integrity(path: &Path) -> Integrity {
         ..Integrity::default()
     };
     for record in ledger::read_records(path) {
-        let bytes = record.text.len() as u64;
+        let bytes = record.bytes;
         match reading(&record) {
             Reading::Whole(_) | Reading::Blank => {}
             Reading::Glued { lost, .. } => integrity.truncated.push(Loss {
