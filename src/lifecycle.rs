@@ -772,6 +772,43 @@ mod tests {
         assert_eq!(why.len(), endings.len(), "two endings say the same thing");
     }
 
+    /// The README summarises the same set, so it is gated the same way.
+    ///
+    /// It is a third copy of the endings — the enum, the contract, and the
+    /// user-facing prose — and the first two already hold each other. Left
+    /// ungated the README is the one that goes quietly stale: nothing compiles
+    /// it, and a reader meeting an ending it does not list has no way to know
+    /// which of the two is behind.
+    #[test]
+    fn the_readmes_ending_summary_is_the_set_this_module_emits() {
+        let raw = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md"),
+        )
+        .expect("the README ships");
+        // Wrapped prose, so match on its words rather than its line breaks.
+        let readme = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+        let clause = readme
+            .split_once("under one of three endings —")
+            .expect("the README summarises the endings a drafting dispatch can reach")
+            .1
+            .split_once("— and the node's own settlement")
+            .expect("the clause ends where the settlement's own half begins")
+            .0;
+        let listed: Vec<&str> = clause.split('`').skip(1).step_by(2).collect();
+        assert_eq!(
+            listed,
+            [
+                Undrafted::Dispatch(String::new()),
+                Undrafted::SchemaRefused,
+                Undrafted::Bodyless,
+            ]
+            .iter()
+            .map(Undrafted::ending)
+            .collect::<Vec<&'static str>>(),
+            "the README's endings are not the ones this module emits"
+        );
+    }
+
     /// A workstream refuses before it cuts a branch.
     ///
     /// The step's declaration is one no dispatch can run under, and it is found
