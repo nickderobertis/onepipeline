@@ -396,43 +396,55 @@ fn results(document: &Value) -> impl Iterator<Item = &Value> {
         .flatten()
 }
 
-/// What one retained run report answered a drafting dispatch with.
+/// What a drafting dispatch's retained reports answered with.
 ///
-/// Three readings of one document rather than a body or nothing, because the
-/// two endings that are not a body need different fixes: a graph whose answers
-/// the schema keeps refusing is a graph or a schema to correct, and one that
-/// answers inside the schema with nothing in it is a prompt to correct. A single
-/// `None` said neither, and a run that had just wired a drafter could not tell
-/// them apart from a launch that had wired none.
+/// Three readings rather than a body or nothing, because the two endings that
+/// are not a body need different fixes: a graph the schema will not accept an
+/// answer from is a graph or a schema to correct, and one that answers inside
+/// the schema with nothing in it is a prompt to correct. A single `None` said
+/// neither, and a run that had just wired a drafter could not tell them apart
+/// from a launch that had wired none.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Drafted {
     /// The validated answer's `body` — the prose the change request opens with.
     Body(String),
-    /// A schema was asked for an answer and refused every one the run made.
+    /// A schema was asked for an answer, refused one, and accepted none.
     SchemaRefused,
-    /// Nothing the report holds is a body worth publishing: no schema was asked
-    /// for, no candidate ran, or one conformed and answered with nothing in it.
+    /// Nothing that was asked of the schema is a body worth publishing: no
+    /// schema was asked for, no candidate ran, or one conformed and answered
+    /// with nothing in it.
     Bodyless,
 }
 
-/// What one run report drafted, read as one of the three endings above.
+/// What a dispatch's retained reports drafted, read as one of the three endings
+/// above.
 ///
-/// The answer lives at `results[].structured` of the harness that **ran** — the
-/// list holds one entry per candidate an identity chain tried, and one it
-/// stepped past carries no answer — and it is taken as a body only where the
-/// producing library says it conformed to the schema it was validated against. A
-/// last-attempted value that failed validation is retained there on purpose, so
-/// a consumer reading `structured` alone would take prose the schema rejected;
-/// here it is the [`Drafted::SchemaRefused`] ending instead.
+/// Every report at once, because a dispatch retains one per member that settled
+/// and each holds one entry per candidate an identity chain tried: which report
+/// an entry landed in is not the reader's business, and reading them one at a
+/// time is what makes a rule about "any refusal" disagree with itself across the
+/// boundary between two of them.
 ///
-/// A body wins outright wherever one is there to take: a chain whose first
-/// candidate was refused and whose second conformed drafted a body, and the
-/// refusal on the way to it is not the ending.
-pub fn drafted(document: &Value) -> Drafted {
+/// The answer lives at `results[].structured` of the harness that **ran** — a
+/// candidate the chain stepped past carries no answer — and it is taken as a
+/// body only where the producing library says it conformed to the schema it was
+/// validated against. A last-attempted value that failed validation is retained
+/// there on purpose, so a consumer reading `structured` alone would take prose
+/// the schema rejected.
+///
+/// The precedence is what the three endings mean. A body wins outright wherever
+/// one is there to take, so a chain refused on the way to an answer that
+/// conformed drafted a body. And a refusal is the ending only where **nothing**
+/// conformed: a chain whose next candidate the schema accepted has answered the
+/// question the schema was asked, and calling that `SchemaRefused` would send a
+/// reader to correct a schema that is working.
+pub fn drafted(reports: &[Value]) -> Drafted {
     let mut refused = false;
-    for result in results(document) {
+    let mut conformed = false;
+    for result in reports.iter().flat_map(results) {
         match result.get("schema_valid").and_then(Value::as_bool) {
             Some(true) => {
+                conformed = true;
                 let body = result
                     .get("structured")
                     .and_then(|structured| structured.get("body"))
@@ -452,7 +464,7 @@ pub fn drafted(document: &Value) -> Drafted {
             None => {}
         }
     }
-    if refused {
+    if refused && !conformed {
         Drafted::SchemaRefused
     } else {
         Drafted::Bodyless
@@ -787,9 +799,11 @@ mod tests {
     /// was.
     #[test]
     fn a_report_is_read_as_a_body_only_where_the_schema_accepted_one() {
-        let result = |valid: Value, structured: Value| json!({"results": [{"schema_valid": valid, "structured": structured}]});
+        let one = |valid: Value, structured: Value| {
+            vec![json!({"results": [{"schema_valid": valid, "structured": structured}]})]
+        };
         assert_eq!(
-            drafted(&result(json!(true), json!({"body": "## What\nit landed"}))),
+            drafted(&one(json!(true), json!({"body": "## What\nit landed"}))),
             Drafted::Body("## What\nit landed".to_owned())
         );
 
@@ -797,39 +811,70 @@ mod tests {
         // the report on purpose: taking it would publish prose the schema
         // rejected. The refusal is the ending, and it is named as one.
         assert_eq!(
-            drafted(&result(json!(false), json!({"body": "half a "}))),
+            drafted(&one(json!(false), json!({"body": "half a "}))),
             Drafted::SchemaRefused
         );
         // A schema nobody asked for leaves both fields null, which is neither a
         // refusal nor an answer.
-        assert_eq!(
-            drafted(&result(Value::Null, Value::Null)),
-            Drafted::Bodyless
-        );
+        assert_eq!(drafted(&one(Value::Null, Value::Null)), Drafted::Bodyless);
         // A conforming answer whose body is blank is no body at all.
         assert_eq!(
-            drafted(&result(json!(true), json!({"body": "  "}))),
+            drafted(&one(json!(true), json!({"body": "  "}))),
             Drafted::Bodyless
         );
         assert_eq!(
-            drafted(&result(json!(true), json!({"title": "feat: x"}))),
+            drafted(&one(json!(true), json!({"title": "feat: x"}))),
             Drafted::Bodyless
         );
-        // And a document that is not a run report at all.
+        // And a document that is not a run report at all — or no report at all.
         assert_eq!(
-            drafted(&json!({"transcript": {"messages": []}})),
+            drafted(&[json!({"transcript": {"messages": []}})]),
             Drafted::Bodyless
         );
+        assert_eq!(drafted(&[]), Drafted::Bodyless);
 
         // A chain that was refused on the way to an answer that conformed
         // drafted a body: the refusal is not the ending where there is prose to
         // publish.
         assert_eq!(
-            drafted(&json!({"results": [
+            drafted(&[json!({"results": [
                 {"schema_valid": false, "structured": {"body": "half a "}},
                 {"schema_valid": true, "structured": {"body": "## What\nit landed"}},
-            ]})),
+            ]})]),
             Drafted::Body("## What\nit landed".to_owned())
+        );
+
+        // And one refused on the way to an answer that conformed and said
+        // nothing is **not** a refusal: the schema accepted an answer, so a
+        // reader sent to correct it would be sent to correct the wrong thing.
+        // The drafter is what answered with nothing.
+        let refused_then_blank = json!({"results": [
+            {"schema_valid": false, "structured": {"body": "half a "}},
+            {"schema_valid": true, "structured": {"body": "   "}},
+        ]});
+        assert_eq!(
+            drafted(std::slice::from_ref(&refused_then_blank)),
+            Drafted::Bodyless
+        );
+
+        // Read across the reports rather than one at a time, so which report an
+        // entry landed in cannot change the ending: the same two entries split
+        // between two of a dispatch's retained reports answer identically.
+        assert_eq!(
+            drafted(&[
+                json!({"results": [{"schema_valid": false, "structured": {"body": "half a "}}]}),
+                json!({"results": [{"schema_valid": true, "structured": {"body": "   "}}]}),
+            ]),
+            Drafted::Bodyless
+        );
+        // In either order, because a chain is read for what it answered rather
+        // than for the order two files were written in.
+        assert_eq!(
+            drafted(&[
+                json!({"results": [{"schema_valid": true, "structured": {"body": "   "}}]}),
+                json!({"results": [{"schema_valid": false, "structured": {"body": "half a "}}]}),
+            ]),
+            Drafted::Bodyless
         );
     }
 

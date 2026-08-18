@@ -259,13 +259,10 @@ fn publish(
     // change request cannot say whether the drafter ran and failed or was never
     // wired at all — and those need different fixes.
     if let Some(ending) = &undrafted {
-        let _ = tx.send(Message::Reported(Box::new(engine::Reported {
-            kind: crate::journal::PipelineKind::BodyNotDrafted,
+        let _ = tx.send(Message::BodyNotDrafted(Box::new(engine::UndraftedBody {
             node: node.id.clone(),
-            payload: crate::journal::payload(&[
-                ("ending", serde_json::json!(ending.ending())),
-                ("detail", serde_json::json!(ending.why())),
-            ]),
+            ending: ending.ending(),
+            detail: ending.why(),
         })));
     }
     // And beside the event, on the settlement, so a planner reading `results`
@@ -512,15 +509,22 @@ fn drafted(
     // published anyway" would be asserting the opposite of what a stop means. Deleting the
     // arm is not the alternative either: it is the same `_` a failed settlement takes.
     match handle.wait() {
-        Ok(outcome) if outcome.succeeded => Some(
-            match answered(retained.iter().filter_map(|kept| crate::report::read(kept))) {
+        Ok(outcome) if outcome.succeeded => {
+            // Every report the dispatch retained, read as **one** answer: a
+            // fallback chain records a candidate per identity it tried, and
+            // which report an entry landed in is not the reader's business.
+            let kept: Vec<serde_json::Value> = retained
+                .iter()
+                .filter_map(|kept| crate::report::read(kept))
+                .collect();
+            Some(match crate::report::drafted(&kept) {
                 crate::report::Drafted::Body(body) => Drafted::Body(body),
                 crate::report::Drafted::SchemaRefused => {
                     Drafted::Undrafted(Undrafted::SchemaRefused)
                 }
                 crate::report::Drafted::Bodyless => Drafted::Undrafted(Undrafted::Bodyless),
-            },
-        ),
+            })
+        }
         Ok(outcome) => Some(Drafted::Undrafted(Undrafted::Dispatch(format!(
             "the drafting dispatch settled without succeeding: {}",
             first_line(&outcome.detail)
@@ -529,28 +533,6 @@ fn drafted(
             "the drafting dispatch could not be waited on: {error}"
         )))),
     } // llmlint: ignore-end[changed_behavior_has_e2e]
-}
-
-/// What a drafting dispatch's retained reports answered with, taken together.
-///
-/// A dispatch retains one report per member that settled, so the ending is read
-/// across them rather than off the first: a body wins wherever one of them holds
-/// one, and a refusal is the ending only where none does. Read in the order the
-/// reports were retained, which is the order the members settled in.
-fn answered(reports: impl Iterator<Item = serde_json::Value>) -> crate::report::Drafted {
-    let mut refused = false;
-    for report in reports {
-        match crate::report::drafted(&report) {
-            crate::report::Drafted::Body(body) => return crate::report::Drafted::Body(body),
-            crate::report::Drafted::SchemaRefused => refused = true,
-            crate::report::Drafted::Bodyless => {}
-        }
-    }
-    if refused {
-        crate::report::Drafted::SchemaRefused
-    } else {
-        crate::report::Drafted::Bodyless
-    }
 }
 
 /// A dispatch's own words, as one bounded line of a settlement detail.

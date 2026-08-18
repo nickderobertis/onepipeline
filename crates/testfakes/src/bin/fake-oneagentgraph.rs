@@ -900,26 +900,41 @@ fn emit(
 /// answers a `pr-author` dispatch with.
 fn report_of(task: &str) -> serde_json::Value {
     if let Some(answer) = drafted_answer(task, &fake::script_dir()) {
-        // The wire shape is a value and a flag, and only three of their four
-        // combinations mean anything — which is what [`Drafted`] is: the flag is
-        // derived from the answer here rather than scripted beside it.
-        let (body, schema_valid) = match &answer {
-            Drafted::Body(body) => (body.as_str(), true),
-            Drafted::SchemaRefused(attempted) => (attempted.as_str(), false),
-            Drafted::Bodyless => ("", true),
+        // A candidate the identity chain stepped past: it ran nothing, so it
+        // answered nothing, and a consumer that read the first entry rather than
+        // the one that ran would find no body here.
+        let stepped_past = serde_json::json!({
+            "harness": "codex", "status": "skipped", "text": null,
+            "structured": null, "schema_valid": null,
+        });
+        let answered = |harness: &str, body: &str, schema_valid: bool| {
+            serde_json::json!({
+                "harness": harness, "status": "ok",
+                "text": "Drafted the change request's body.",
+                "structured": {"body": body}, "schema_valid": schema_valid,
+            })
+        };
+        // The wire shape is a value and a flag per candidate, and only three of
+        // their four combinations mean anything — which is what [`Drafted`] is:
+        // the flag is derived from the answer here rather than scripted beside
+        // it. A blank answer is written as the **chain** that produces one in
+        // practice: an identity whose answer the schema refused, and the next
+        // one, which conformed and put nothing in it. A consumer that stopped at
+        // the refusal would report a schema that is working as the fault.
+        let results = match &answer {
+            Drafted::Body(body) => vec![stepped_past, answered("claude-code", body, true)],
+            Drafted::SchemaRefused(attempted) => {
+                vec![stepped_past, answered("claude-code", attempted, false)]
+            }
+            Drafted::Bodyless => vec![
+                stepped_past,
+                answered("codex", "half a bo", false),
+                answered("claude-code", "", true),
+            ],
         };
         return serde_json::json!({
             "schema_version": "0.6",
-            "results": [
-                // A candidate the identity chain stepped past: it ran nothing,
-                // so it answered nothing, and a consumer that read the first
-                // entry rather than the one that ran would find no body here.
-                {"harness": "codex", "status": "skipped", "text": null,
-                 "structured": null, "schema_valid": null},
-                {"harness": "claude-code", "status": "ok",
-                 "text": "Drafted the change request's body.",
-                 "structured": {"body": body}, "schema_valid": schema_valid},
-            ],
+            "results": results,
             "usage": {"input_tokens": 40, "output_tokens": 20, "cost_usd": 0.01},
         });
     }

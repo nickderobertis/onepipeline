@@ -19,7 +19,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Map, Value};
+use serde_json::json;
 
 use crate::agentgraph::{self, Interrupted, TurnAddress};
 use crate::channel::{ChannelState, Command, CommandOutcome, Deliver, Surface};
@@ -332,26 +332,31 @@ pub(crate) enum Message {
     Redispatched(Box<Redispatch>),
     /// A cancellation reached a dispatch, or ran out of patience with one.
     Cancelling(Box<Cancelling>),
-    /// One of this crate's own kinds, recorded from where the work happened.
-    Reported(Box<Reported>),
+    /// A configured drafting dispatch produced no change request body.
+    BodyNotDrafted(Box<UndraftedBody>),
     /// The dispatch settled.
     Settled(Box<Settlement>),
 }
 
-/// One of this crate's own events, on its way to the single writer.
+/// A change request whose body a configured drafting dispatch did not produce.
 ///
 /// The loop owns the pipeline stream and the sequence it is numbered in, so a
-/// dispatch thread with something of its own to record hands over the kind and
-/// its payload rather than composing an envelope beside that series — which is
+/// dispatch thread with something of its own to record hands over *what
+/// happened* rather than composing an envelope beside that series — which is
 /// what a relayed envelope is, and what a `seq` this side did not issue would
 /// make a reader read as loss.
-pub(crate) struct Reported {
-    /// What happened.
-    pub kind: journal::PipelineKind,
-    /// The node it happened to.
+///
+/// The fields and not a kind with a payload map beside it: this is the one of
+/// this crate's own kinds a dispatch thread emits, and a kind selected
+/// independently of the payload it is paired with is a mismatch nothing would
+/// catch.
+pub(crate) struct UndraftedBody {
+    /// The node whose change request opened without one.
     pub node: String,
-    /// Its detail.
-    pub payload: Map<String, Value>,
+    /// Which ending it was, as the event names it.
+    pub ending: &'static str,
+    /// Why, in the words the node's own settlement carries.
+    pub detail: String,
 }
 
 /// One transition of a cancellation, on its way to the planner.
@@ -591,10 +596,13 @@ fn converge(
             // Emitted rather than relayed: it is this crate's own kind, so it
             // belongs in this crate's own stream, numbered by the writer that
             // owns it.
-            Ok(Message::Reported(reported)) => journal.emit(
-                reported.kind,
-                journal::labels(&paths.run, Some(&reported.node)),
-                reported.payload,
+            Ok(Message::BodyNotDrafted(undrafted)) => journal.emit(
+                journal::PipelineKind::BodyNotDrafted,
+                journal::labels(&paths.run, Some(&undrafted.node)),
+                journal::payload(&[
+                    ("ending", json!(undrafted.ending)),
+                    ("detail", json!(undrafted.detail)),
+                ]),
             )?,
             Ok(Message::Settled(settlement)) => {
                 in_flight.remove(&settlement.node);

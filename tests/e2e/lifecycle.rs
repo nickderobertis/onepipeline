@@ -714,6 +714,9 @@ fn a_drafting_dispatch_that_ends_badly_leaves_the_publication_untouched() {
             "schema-refused",
             "answered nothing the schema it was validated against accepted",
         ),
+        // A chain the schema refused once and then accepted, with nothing in
+        // the answer it accepted: the schema is working, so the ending is the
+        // drafter's and a reader is not sent to correct a schema instead.
         (
             "bodyless",
             "pr-author.bodyless",
