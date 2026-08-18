@@ -165,6 +165,13 @@ pub enum PipelineKind {
     UpstreamModified,
     /// The planner requested completion, independently of graph mutation.
     CompletionRequested,
+    /// A drafting dispatch ran for a change request's body and produced none.
+    ///
+    /// Only where one was *configured and attempted*: a launch that named no
+    /// pr-author graph, and a node that carried its own `body`, both spend no
+    /// dispatch and neither is a failure to report. The payload's `ending` says
+    /// which of the three it was, because they need three different fixes.
+    BodyNotDrafted,
 }
 
 impl PipelineKind {
@@ -190,6 +197,7 @@ impl PipelineKind {
             Self::CrossDagSatisfied => "cross-dag-satisfied",
             Self::UpstreamModified => "upstream-modified",
             Self::CompletionRequested => "completion-requested",
+            Self::BodyNotDrafted => "body-not-drafted",
         }
     }
 
@@ -238,6 +246,7 @@ pub const PIPELINE_KINDS: &[PipelineKind] = &[
     PipelineKind::CrossDagSatisfied,
     PipelineKind::UpstreamModified,
     PipelineKind::CompletionRequested,
+    PipelineKind::BodyNotDrafted,
 ];
 
 /// A reference to evidence stored beside the stream rather than inside it.

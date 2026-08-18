@@ -244,10 +244,41 @@ fn publish(
 ) -> Settlement {
     // The plan's own body wins outright and spends no dispatch: a planner who
     // wrote the change request has already done the drafting.
-    let body = node
-        .body
-        .clone()
-        .or_else(|| drafted(executor, paths, launch, node, worktree, cancel, tx));
+    let (body, undrafted) = match node.body.clone() {
+        Some(body) => (Some(body), None),
+        // `None` is a launch that named no drafting graph, which drafts nothing
+        // and is not a failure: this crate ships the flag, not the document.
+        None => match drafted(executor, paths, launch, node, worktree, cancel, tx) {
+            None => (None, None),
+            Some(Drafted::Body(body)) => (Some(body), None),
+            Some(Drafted::Undrafted(ending)) => (None, Some(ending)),
+        },
+    };
+    // Said in the run's own record, at the moment it happened, and only where a
+    // drafting dispatch was configured and attempted. Without it a bodyless
+    // change request cannot say whether the drafter ran and failed or was never
+    // wired at all — and those need different fixes.
+    if let Some(ending) = &undrafted {
+        let _ = tx.send(Message::Reported(Box::new(engine::Reported {
+            kind: crate::journal::PipelineKind::BodyNotDrafted,
+            node: node.id.clone(),
+            payload: crate::journal::payload(&[
+                ("ending", serde_json::json!(ending.ending())),
+                ("detail", serde_json::json!(ending.why())),
+            ]),
+        })));
+    }
+    // And beside the event, on the settlement, so a planner reading `results`
+    // sees it without opening the run's store. On every ending of the
+    // publication, not only the one that succeeded: what the drafter did is true
+    // either way, and a reader looking for it must not have to know which
+    // failure came first. The publication's own reason leads, because that is
+    // what settled the node.
+    let undrafted = undrafted.map(|ending| ending.why());
+    let with_drafting = |detail: String| match &undrafted {
+        Some(why) => format!("{detail}. {why}"),
+        None => detail,
+    };
 
     match crate::vcs::publish(
         token,
@@ -264,7 +295,7 @@ fn publish(
             if let onevcs::PublishOutcome::Failed { reason, .. } = &published.outcome {
                 return Settlement {
                     branch,
-                    detail: Some(format!("onevcs: {reason}")),
+                    detail: Some(with_drafting(format!("onevcs: {reason}"))),
                     ..Settlement::plain(&node.id, NodeStatus::Failed, Some("publication-failed"))
                 };
             }
@@ -274,6 +305,9 @@ fn publish(
                 &published, &labels,
             ))));
             Settlement {
+                // What the node settles on is its publication, exactly as
+                // before; a drafting failure only ever adds words to it.
+                detail: undrafted.clone(),
                 // The branch the publication says carried the change, where a
                 // dispatch reported none: they are the same branch, and the
                 // sibling is the one that knows it.
@@ -296,7 +330,7 @@ fn publish(
         }
         Err(error) => Settlement {
             branch,
-            detail: Some(error.to_string()),
+            detail: Some(with_drafting(error.to_string())),
             ..Settlement::plain(&node.id, NodeStatus::Failed, Some("publication-failed"))
         },
     }
@@ -306,24 +340,86 @@ fn publish(
 const DRAFTING_TASK: &str = "Read this branch's diff and write the change request's body, \
      following the repository's own template. The task this branch delivered:";
 
+/// What one drafting dispatch ended as.
+///
+/// A body or an ending that is not one, because **every** ending here leaves the
+/// publication to proceed with no body: the two are what a change request opens
+/// with, not whether it opens.
+enum Drafted {
+    /// It drafted the change request's body.
+    Body(String),
+    /// It ended with none, and which of the three endings it was.
+    Undrafted(Undrafted),
+}
+
+/// A drafting dispatch that produced no body, and how.
+///
+/// Three endings kept apart rather than one "it did not work", because they need
+/// three different fixes: a graph that will not start or will not finish, one
+/// whose answers the schema refuses, and one that answers inside the schema with
+/// nothing in it. A run that had just wired a drafter could tell none of them
+/// from a launch that had wired no drafter at all.
+enum Undrafted {
+    /// It could not be run, or it ran and did not succeed — in its own words.
+    ///
+    /// One ending rather than three: a dispatch that never started, one that
+    /// failed, and one that was cancelled differ in the reason they carry and in
+    /// nothing else a publication carrying no body either way can act on.
+    Dispatch(String),
+    /// It succeeded, and the schema it was validated against refused every
+    /// answer it made.
+    SchemaRefused,
+    /// It succeeded and answered inside the schema, carrying no body.
+    Bodyless,
+}
+
+impl Undrafted {
+    /// The ending, as the event names it.
+    fn ending(&self) -> &'static str {
+        match self {
+            Self::Dispatch(_) => "dispatch-failed",
+            Self::SchemaRefused => "schema-refused",
+            Self::Bodyless => "no-body",
+        }
+    }
+
+    /// Why the change request opened with no body, in the words a planner reads
+    /// off `results`.
+    fn why(&self) -> String {
+        match self {
+            Self::Dispatch(reason) => {
+                format!("the change request's body was not drafted: {reason}")
+            }
+            Self::SchemaRefused => "the change request's body was not drafted: the drafting \
+                 dispatch answered nothing the schema it was validated against accepted"
+                .to_owned(),
+            Self::Bodyless => "the change request's body was not drafted: the drafting \
+                 dispatch answered inside its schema and carried no body"
+                .to_owned(),
+        }
+    }
+}
+
 /// One post-verification dispatch drafting the change request's body, when the
 /// launch named a graph to draft it with and the node carries none of its own.
 ///
 /// It runs **after** the branch has been verified and is not on the publication
 /// path: every way it can end badly leaves the change request to open with no
 /// body, and the node settles on its publication as before. That is the whole
-/// point of running it here rather than making it a step. There are three such
-/// endings and they take two arms — a dispatch that never started, and one that
-/// settled without succeeding, which is where a failed turn and a cancelled one
-/// both land because the difference between them is not a difference to a
-/// publication that carries no body either way. An answer the schema did not
-/// accept is the third, and it is a dispatch that succeeded and drafted nothing.
+/// point of running it here rather than making it a step. What each of those
+/// ways *was* is [`Undrafted`], reported beside the publication rather than
+/// folded into it.
 ///
 /// It runs in the node's **own** worktree, which is the only place the diff it is
 /// asked to read exists: a session of its own would be a fresh clone cut from the
 /// base, carrying nothing this node wrote — and opening one reclaims the session
 /// still holding the work. So a node with no worktree to run it in drafts
 /// nothing, out loud, rather than dispatching an agent to read an empty diff.
+///
+/// `None` is the one ending that is not a failure and is not reported: a launch
+/// that named no drafting graph. This crate ships the flag, not the document, so
+/// naming none is the shipped default and there is nothing to say about it. A
+/// node carrying its own `body` never reaches here at all.
 #[allow(
     clippy::too_many_arguments,
     reason = "the draft is a dispatch inside one lifecycle execution and needs that \
@@ -338,15 +434,19 @@ fn drafted(
     worktree: Option<&std::path::Path>,
     cancel: &crate::executor::CancellationToken,
     tx: &Sender<Message>,
-) -> Option<String> {
+) -> Option<Drafted> {
     let graph = launch.pr_author_graph.as_deref()?;
     let Some(worktree) = worktree else {
+        // A dispatch that was configured and could not be run at all, which is
+        // the same ending as one the executor refused: it is said out loud, as
+        // it always was, and now recorded as well.
+        let why = "there was no worktree to read this branch's diff in";
         eprintln!(
             "onepipeline: node '{}': no worktree to draft its change request in, \
              so it publishes with no body",
             node.id
         );
-        return None;
+        return Some(Drafted::Undrafted(Undrafted::Dispatch(why.to_owned())));
     };
     let dispatch = executor.dispatch(DispatchRequest {
         graph: oneagentgraph::config::ConfigRef(graph.to_owned()),
@@ -370,7 +470,9 @@ fn drafted(
                  so it publishes with no body: {error}",
                 node.id
             );
-            return None;
+            return Some(Drafted::Undrafted(Undrafted::Dispatch(format!(
+                "the drafting dispatch could not start: {error}"
+            ))));
         }
     };
     let mut retained = Vec::new();
@@ -402,22 +504,66 @@ fn drafted(
         }
         let _ = tx.send(Message::Event(Box::new(envelope)));
     }
-    // llmlint: ignore-block[changed_behavior_has_e2e] the arm below is reached by a
-    // dispatch that failed, one that answered nothing the schema accepted, and one that was
-    // cancelled; the first two have journeys of their own in `tests/e2e/lifecycle.rs`, and
-    // the third has none because it is not separately reachable. Nothing cancels a
-    // drafting dispatch except the node's own token being flipped, which happens when the
-    // run is being stopped — and a run whose driver is being torn down has no publication
-    // left to protect, so a journey claiming "it published anyway" would be asserting the
-    // opposite of what a stop means. Deleting the arm is not the alternative either: it is
-    // the same `_` a failed settlement takes.
+    // llmlint: ignore-block[changed_behavior_has_e2e] the last arm below is reached by a
+    // dispatch that failed and by one that was cancelled; the first has a journey of its
+    // own in `tests/e2e/lifecycle.rs` and the second has none because it is not separately
+    // reachable. Nothing cancels a drafting dispatch except the node's own token being
+    // flipped, which happens when the run is being stopped — and a run whose driver is
+    // being torn down has no publication left to protect, so a journey claiming "it
+    // published anyway" would be asserting the opposite of what a stop means. Deleting the
+    // arm is not the alternative either: it is the same `_` a failed settlement takes.
     match handle.wait() {
-        Ok(outcome) if outcome.succeeded => retained
-            .iter()
-            .filter_map(|kept| crate::report::read(kept))
-            .find_map(|report| crate::report::drafted_body(&report)),
-        _ => None,
+        Ok(outcome) if outcome.succeeded => Some(
+            match answered(retained.iter().filter_map(|kept| crate::report::read(kept))) {
+                crate::report::Drafted::Body(body) => Drafted::Body(body),
+                crate::report::Drafted::SchemaRefused => {
+                    Drafted::Undrafted(Undrafted::SchemaRefused)
+                }
+                crate::report::Drafted::Bodyless => Drafted::Undrafted(Undrafted::Bodyless),
+            },
+        ),
+        Ok(outcome) => Some(Drafted::Undrafted(Undrafted::Dispatch(format!(
+            "the drafting dispatch settled without succeeding: {}",
+            first_line(&outcome.detail)
+        )))),
+        Err(error) => Some(Drafted::Undrafted(Undrafted::Dispatch(format!(
+            "the drafting dispatch could not be waited on: {error}"
+        )))),
     } // llmlint: ignore-end[changed_behavior_has_e2e]
+}
+
+/// What a drafting dispatch's retained reports answered with, taken together.
+///
+/// A dispatch retains one report per member that settled, so the ending is read
+/// across them rather than off the first: a body wins wherever one of them holds
+/// one, and a refusal is the ending only where none does. Read in the order the
+/// reports were retained, which is the order the members settled in.
+fn answered(reports: impl Iterator<Item = serde_json::Value>) -> crate::report::Drafted {
+    let mut refused = false;
+    for report in reports {
+        match crate::report::drafted_body(&report) {
+            crate::report::Drafted::Body(body) => return crate::report::Drafted::Body(body),
+            crate::report::Drafted::SchemaRefused => refused = true,
+            crate::report::Drafted::Bodyless => {}
+        }
+    }
+    if refused {
+        crate::report::Drafted::SchemaRefused
+    } else {
+        crate::report::Drafted::Bodyless
+    }
+}
+
+/// A dispatch's own words, as one bounded line of a settlement detail.
+///
+/// The reason a dispatch gives is its stderr, which is many lines of a sibling's
+/// diagnostics; what belongs beside a publication is the first of them, held to
+/// the same bound every other payload text this crate writes is held to.
+fn first_line(detail: &str) -> String {
+    match detail.lines().find(|line| !line.trim().is_empty()) {
+        Some(line) => engine::bounded(line.trim()),
+        None => "it reported nothing".to_owned(),
+    }
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 

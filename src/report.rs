@@ -396,6 +396,25 @@ fn results(document: &Value) -> impl Iterator<Item = &Value> {
         .flatten()
 }
 
+/// What one retained run report answered a drafting dispatch with.
+///
+/// Three readings of one document rather than a body or nothing, because the
+/// two endings that are not a body need different fixes: a graph whose answers
+/// the schema keeps refusing is a graph or a schema to correct, and one that
+/// answers inside the schema with nothing in it is a prompt to correct. A single
+/// `None` said neither, and a run that had just wired a drafter could not tell
+/// them apart from a launch that had wired none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Drafted {
+    /// The validated answer's `body` — the prose the change request opens with.
+    Body(String),
+    /// A schema was asked for an answer and refused every one the run made.
+    SchemaRefused,
+    /// Nothing the report holds is a body worth publishing: no schema was asked
+    /// for, no candidate ran, or one conformed and answered with nothing in it.
+    Bodyless,
+}
+
 /// The `body` a structured-output run's validated answer carries, when one ran.
 ///
 /// The answer lives at `results[].structured` of the harness that **ran** — the
@@ -405,15 +424,38 @@ fn results(document: &Value) -> impl Iterator<Item = &Value> {
 /// last-attempted value that failed validation is retained there on purpose, so
 /// a consumer reading `structured` alone would take prose the schema rejected.
 ///
-/// `None` for every other ending: no schema was asked for, no candidate ran, the
-/// answer did not conform, or it conformed and carries no body worth publishing.
-pub fn drafted_body(document: &Value) -> Option<String> {
-    results(document)
-        .filter(|result| result.get("schema_valid").and_then(Value::as_bool) == Some(true))
-        .find_map(|result| {
-            let body = result.get("structured")?.get("body")?.as_str()?.trim();
-            (!body.is_empty()).then(|| body.to_owned())
-        })
+/// A body wins outright wherever one is there to take: a chain whose first
+/// candidate was refused and whose second conformed drafted a body, and the
+/// refusal on the way to it is not the ending.
+pub fn drafted_body(document: &Value) -> Drafted {
+    let mut refused = false;
+    for result in results(document) {
+        match result.get("schema_valid").and_then(Value::as_bool) {
+            Some(true) => {
+                let body = result
+                    .get("structured")
+                    .and_then(|structured| structured.get("body"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .unwrap_or_default();
+                if !body.is_empty() {
+                    return Drafted::Body(body.to_owned());
+                }
+            }
+            // The value the run last attempted is retained beside this flag, and
+            // it is deliberately not read: publishing prose a schema refused is
+            // the defect the flag exists to prevent.
+            Some(false) => refused = true,
+            // A run nobody asked for a schema leaves both fields null, which is
+            // neither an answer refused nor one that conformed.
+            None => {}
+        }
+    }
+    if refused {
+        Drafted::SchemaRefused
+    } else {
+        Drafted::Bodyless
+    }
 }
 // llmlint: ignore-end[boundary_inputs_validated]
 
@@ -740,26 +782,54 @@ mod tests {
     }
 
     /// The drafted body is the validated answer of the result that ran, and
-    /// nothing else is read as one.
+    /// nothing else is read as one — and where there is none, which ending it
+    /// was.
     #[test]
     fn a_drafted_body_is_taken_only_from_an_answer_the_schema_accepted() {
         let result = |valid: Value, structured: Value| json!({"results": [{"schema_valid": valid, "structured": structured}]});
         assert_eq!(
-            drafted_body(&result(json!(true), json!({"body": "## What\nit landed"}))).as_deref(),
-            Some("## What\nit landed")
+            drafted_body(&result(json!(true), json!({"body": "## What\nit landed"}))),
+            Drafted::Body("## What\nit landed".to_owned())
         );
 
         // The last-attempted value of a run that never conformed is retained on
         // the report on purpose: taking it would publish prose the schema
-        // rejected.
-        assert!(drafted_body(&result(json!(false), json!({"body": "half a "}))).is_none());
-        // A schema nobody asked for leaves both fields null.
-        assert!(drafted_body(&result(Value::Null, Value::Null)).is_none());
+        // rejected. The refusal is the ending, and it is named as one.
+        assert_eq!(
+            drafted_body(&result(json!(false), json!({"body": "half a "}))),
+            Drafted::SchemaRefused
+        );
+        // A schema nobody asked for leaves both fields null, which is neither a
+        // refusal nor an answer.
+        assert_eq!(
+            drafted_body(&result(Value::Null, Value::Null)),
+            Drafted::Bodyless
+        );
         // A conforming answer whose body is blank is no body at all.
-        assert!(drafted_body(&result(json!(true), json!({"body": "  "}))).is_none());
-        assert!(drafted_body(&result(json!(true), json!({"title": "feat: x"}))).is_none());
+        assert_eq!(
+            drafted_body(&result(json!(true), json!({"body": "  "}))),
+            Drafted::Bodyless
+        );
+        assert_eq!(
+            drafted_body(&result(json!(true), json!({"title": "feat: x"}))),
+            Drafted::Bodyless
+        );
         // And a document that is not a run report at all.
-        assert!(drafted_body(&json!({"transcript": {"messages": []}})).is_none());
+        assert_eq!(
+            drafted_body(&json!({"transcript": {"messages": []}})),
+            Drafted::Bodyless
+        );
+
+        // A chain that was refused on the way to an answer that conformed
+        // drafted a body: the refusal is not the ending where there is prose to
+        // publish.
+        assert_eq!(
+            drafted_body(&json!({"results": [
+                {"schema_valid": false, "structured": {"body": "half a "}},
+                {"schema_valid": true, "structured": {"body": "## What\nit landed"}},
+            ]})),
+            Drafted::Body("## What\nit landed".to_owned())
+        );
     }
 
     #[test]

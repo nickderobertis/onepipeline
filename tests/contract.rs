@@ -1584,7 +1584,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
     // undocumented wire; a kind the contract lists and the enum does not carry is
     // a promise nothing keeps. `PIPELINE_KINDS` is what `Journal::emit` accepts,
     // so this is the emitted set and not a second copy of it.
-    assert_eq!(PIPELINE_KINDS.len(), 19, "the closed set changed size");
+    assert_eq!(PIPELINE_KINDS.len(), 20, "the closed set changed size");
     let listed: BTreeSet<String> = backticked()
         .into_iter()
         .filter(|token| {
@@ -2031,6 +2031,7 @@ const RULINGS: &[(&str, &str)] = &[
     ("30.", "--launch-config FILE"),
     ("31.", "shaped event view beside the surface"),
     ("32.", "any run of characters including none"),
+    ("34.", "body-not-drafted"),
 ];
 
 #[test]

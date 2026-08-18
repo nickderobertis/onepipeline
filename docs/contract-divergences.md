@@ -6,12 +6,12 @@ code takes the nearest thing that does exist, and the divergence is recorded
 here as a proposal for the planner who owns the contract. Nothing on this list is
 resolved unilaterally.
 
-Entries **1–9 and 23–32** have since been **ruled on by the planner who owns
+Entries **1–9, 23–32 and 34** have since been **ruled on by the planner who owns
 the contract**, and `docs/contract.md` was amended to carry each ruling. They stay
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–22 and 33 are open**. Each states what the code does today and the
+Entries **10–22, 33 and 35 are open**. Each states what the code does today and the
 proposal it is waiting on — every one of them a question for a *producer* rather
 than for this crate, because `oneagentgraph` and `onevcs` are independent tools
 that expose general integration hooks only and nothing in them may know about
@@ -1021,3 +1021,90 @@ has re-read it since, and names the change to open —
 `a_change_that_merged_after_settlement_is_reported_as_of_settlement_not_as_now`.
 That is the honest half of what the change asked for: the stale fact is no longer
 asserted, and it still cannot be corrected from here.
+
+## 34. A drafting dispatch that produced no body was reported nowhere — RESOLVED
+
+**Ruling: a new event kind, `body-not-drafted`, carrying which of the three
+endings it was — plus the same words on the node's own settlement. A
+succeeded/failed boolean, and folding the outcome into `published`'s payload,
+were both put up and both refused.**
+
+The approved contract already said what a drafting dispatch that ends badly does
+to the publication: nothing. "A drafting dispatch that does not start, fails, is
+cancelled, or answers with nothing the schema accepted leaves the publication
+untouched." What it did not say is that the run should be able to *tell*, and the
+code took that literally: `lifecycle::drafted` answered `Option<String>` and the
+caller published `body.as_deref()`, so four situations produced an identical
+bodyless change request — the planner supplied no body, the launch named no
+pr-author graph, the dispatch failed, and the schema refused the answer. No kind
+in this library named drafting at all, and `published` was the only publication
+event, so the first remote lifecycle change request a newly wired drafter opened
+was its own only evidence — and a bodyless one cannot say whether the drafter ran
+and failed or was never wired.
+
+The three failure endings are kept apart because they take three different fixes:
+a graph that will not start or will not finish, a graph whose answers the schema
+refuses, and a graph that answers inside the schema with nothing in it. Collapsing
+them costs the diagnosis as well as the signal, which is why the boolean was
+refused. Folding them into `published` was refused for a second reason: drafting
+is not on the publication path, and a field on the publication's own record is
+exactly the reading — "the publication carries what the drafter did" — that
+"never on the publication path" exists to deny.
+
+Two endings are deliberately **not** emitted, and the contract now says so: a
+launch that named no pr-author graph, and a node that carried its own `body`.
+Neither spends a dispatch and neither is a failure, and a kind that fired for
+them would report the shipped default as a fault.
+
+`docs/contract.md` carries the ruling in the shipped-content paragraph, and
+`body-not-drafted` is in the closed set of this library's own kinds beside it.
+
+## 35. A pinned branch cannot be compared against its base before a dispatch is spent — OPEN
+
+**Proposal (for `onevcs`): a read that answers "does this branch carry anything
+its base does not?" for a branch named *before* a session exists — the comparison
+`Vcs::open_session` and `publish` already make internally, answering for a branch
+that does not exist as well as for one that does.**
+
+A branch-pinned lifecycle node whose content has already landed costs a whole
+dispatch — provider time, a worktree, a gate run — to discover it at publication,
+where `onevcs` answers `PublishOutcome::NothingToPublish` and this crate settles
+`no-changes`. Twice in one run a planner had to notice that by hand and park the
+node, once after a full dispatch had run to completion. The comparison that would
+have answered before anything started is a single `git diff`, and this crate can
+reach none of the four places it is already made:
+
+* **The repository the comparison runs in is not nameable here.** A node's `repo`
+  is an identity key, a registered alias, an origin URL, or a path, and its
+  `execution_checkout` is a *registered alias*; both resolve to a checkout path
+  through the registry document, which `onevcs` reads behind its own private
+  `store::load` and `home::registry_path`. `resolve_identity` is the only public
+  resolution and it answers an `Identity` — origin, workflow, repo type, gate —
+  with no path in it. Deriving the path here would be a second copy of a
+  sibling's rule, which `src/AGENTS.md` forbids.
+* **Inside a session it is a different question.** `open_session` cuts a pinned
+  branch **fresh from the base** — `git worktree add -b <branch> <path>
+  origin/<base>` — so in the session the branch and the base are identical by
+  construction, for every node. A comparison made after opening answers "no diff"
+  for all of them, which is the wrong answer given confidently.
+* **`Vcs::recoverable` makes the comparison and cannot be asked this.** It runs
+  `trees_differ` against the base *now*, which is exactly the judgement wanted —
+  but only over the branches `git::unpublished_branches` returns first, which is
+  those carrying commits on no `origin` remote-tracking ref. A branch whose
+  content landed, one that was pushed to open a change request, and one that
+  never existed are all equally absent from that list, so its silence cannot
+  separate "already landed" from "no such branch" — and the second must still
+  dispatch. Divergence 33 records the same limit met from the other side.
+* **`open_session` already makes it, and reports only the refusing half.** Its
+  `honour_or_refuse` compares a pinned branch against the base across every
+  checkout of the identity and against origin's copy, at exactly the moment
+  wanted, and refuses the pin where the branch carries commits the base does not.
+  A pin whose branch already landed passes silently, which is the case that costs
+  the dispatch.
+
+**What this crate does today.** Nothing new: a branch-pinned node dispatches as it
+always has, and a branch whose base already carries its content is discovered at
+publication and settles `no-changes`. Nothing here runs git — no path of this
+crate ever has — and a comparison written against a checkout it had to guess at
+would fail in the direction that matters, settling a node as already-landed
+because it looked at the wrong repository.

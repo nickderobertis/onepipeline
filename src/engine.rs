@@ -19,7 +19,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Map, Value};
 
 use crate::agentgraph::{self, Interrupted, TurnAddress};
 use crate::channel::{ChannelState, Command, CommandOutcome, Deliver, Surface};
@@ -332,8 +332,26 @@ pub(crate) enum Message {
     Redispatched(Box<Redispatch>),
     /// A cancellation reached a dispatch, or ran out of patience with one.
     Cancelling(Box<Cancelling>),
+    /// One of this crate's own kinds, recorded from where the work happened.
+    Reported(Box<Reported>),
     /// The dispatch settled.
     Settled(Box<Settlement>),
+}
+
+/// One of this crate's own events, on its way to the single writer.
+///
+/// The loop owns the pipeline stream and the sequence it is numbered in, so a
+/// dispatch thread with something of its own to record hands over the kind and
+/// its payload rather than composing an envelope beside that series — which is
+/// what a relayed envelope is, and what a `seq` this side did not issue would
+/// make a reader read as loss.
+pub(crate) struct Reported {
+    /// What happened.
+    pub kind: journal::PipelineKind,
+    /// The node it happened to.
+    pub node: String,
+    /// Its detail.
+    pub payload: Map<String, Value>,
 }
 
 /// One transition of a cancellation, on its way to the planner.
@@ -570,6 +588,14 @@ fn converge(
             // because a planner reading its own updates is who decides what to
             // do next, and what to do next is not the same for the two.
             Ok(Message::Cancelling(step)) => raise(paths, journal, cancelling_surface(&step))?,
+            // Emitted rather than relayed: it is this crate's own kind, so it
+            // belongs in this crate's own stream, numbered by the writer that
+            // owns it.
+            Ok(Message::Reported(reported)) => journal.emit(
+                reported.kind,
+                journal::labels(&paths.run, Some(&reported.node)),
+                reported.payload,
+            )?,
             Ok(Message::Settled(settlement)) => {
                 in_flight.remove(&settlement.node);
                 settle(paths, journal, &settlement)?;
@@ -1668,7 +1694,7 @@ fn failed(node: &str, outcome: &str) -> Settlement {
 }
 
 /// A reason bounded to what an envelope payload may carry.
-fn bounded(reason: &str) -> String {
+pub(crate) fn bounded(reason: &str) -> String {
     reason
         .chars()
         .take(crate::event::MAX_PAYLOAD_TEXT_BYTES / 4)

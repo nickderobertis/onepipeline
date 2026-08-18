@@ -899,7 +899,7 @@ fn emit(
 /// reads a drafted change request body out of, so it is what this double
 /// answers a `pr-author` dispatch with.
 fn report_of(task: &str) -> serde_json::Value {
-    if let Some(body) = drafted_body(task, &fake::script_dir()) {
+    if let Some((body, schema_valid)) = drafted_answer(task, &fake::script_dir()) {
         return serde_json::json!({
             "schema_version": "0.6",
             "results": [
@@ -910,7 +910,7 @@ fn report_of(task: &str) -> serde_json::Value {
                  "structured": null, "schema_valid": null},
                 {"harness": "claude-code", "status": "ok",
                  "text": "Drafted the change request's body.",
-                 "structured": {"body": body}, "schema_valid": true},
+                 "structured": {"body": body}, "schema_valid": schema_valid},
             ],
             "usage": {"input_tokens": 40, "output_tokens": 20, "cost_usd": 0.01},
         });
@@ -945,19 +945,38 @@ fn report_of(task: &str) -> serde_json::Value {
     })
 }
 
-/// The body a `pr-author` dispatch drafts, when it is one.
+/// The answer a `pr-author` dispatch gives, and whether the schema accepted it.
 ///
 /// Recognised by the task this crate composes for a drafting dispatch and by
-/// nothing else, so an ordinary node's dispatch never answers as one. Scripted
-/// with `pr-author.body` where a journey wants to read its own words back out
-/// of the change request; `pr-author.unschematic` is the other ending — a turn
-/// that answered with nothing the schema accepted, which is not a body.
-fn drafted_body(task: &str, dir: &std::path::Path) -> Option<String> {
-    if !task.starts_with("Read this branch's diff") || dir.join("pr-author.unschematic").exists() {
+/// nothing else, so an ordinary node's dispatch never answers as one — and
+/// `None` is exactly that: a dispatch which is not a drafting one, whose report
+/// is the two-party transcript every other member settles with.
+///
+/// The three answers a drafting turn can give are each scripted, because they
+/// are three different endings for the run that asked and they take three
+/// different fixes:
+///
+/// * `pr-author.body` — the prose a journey reads back out of the change
+///   request. The default where nothing is scripted.
+/// * `pr-author.unschematic` — a turn whose answer the schema **refused**. The
+///   value it last attempted is retained beside the flag, as the real library
+///   retains one, so a consumer reading `structured` without the flag would
+///   publish prose that never validated.
+/// * `pr-author.bodyless` — a turn that answered **inside** the schema and put
+///   no body in it, which is a drafter to correct rather than a schema.
+fn drafted_answer(task: &str, dir: &std::path::Path) -> Option<(String, bool)> {
+    if !task.starts_with("Read this branch's diff") {
         return None;
     }
-    Some(
+    if dir.join("pr-author.unschematic").exists() {
+        return Some(("half a bo".to_string(), false));
+    }
+    if dir.join("pr-author.bodyless").exists() {
+        return Some((String::new(), true));
+    }
+    Some((
         fake::node_script(dir, "pr-author", "body")
             .unwrap_or_else(|| "## What\nDrafted from the diff.".to_string()),
-    )
+        true,
+    ))
 }
