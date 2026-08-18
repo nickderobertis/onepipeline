@@ -578,6 +578,11 @@ fn write_work(args: &[String], name: &str, body: &str) {
 /// to reach. That is the case a harness without out-of-band control produces,
 /// and it is the one `auto` must fall through on.
 ///
+/// `<key>.unplaceable-turn` announces the turn on a clock this build cannot
+/// read, so the dispatch's very first envelopes arrive evidencing progress that
+/// nothing can place in time. That is a producer whose stamps a reader refuses,
+/// not one that said nothing, and the two are opposite things to report.
+///
 /// `<key>.also-member` names a **second** member of the same graph run, which
 /// announces a turn of its own. A graph is a graph — several members work under
 /// one run — and a caller that addressed only the last member it saw would leave
@@ -586,37 +591,39 @@ fn write_work(args: &[String], name: &str, body: &str) {
 /// two answers, which is what a caller has to carry on from.
 fn open_turn(args: &[String], dir: &std::path::Path, key: &str, node: &str, step: Option<&str>) {
     let labels = member_labels(args, node, step);
+    let unplaceable = dir.join(format!("{key}.unplaceable-turn")).exists();
+    let stamp = || {
+        if unplaceable {
+            unplaceable_now()
+        } else {
+            fake::now()
+        }
+    };
     for (seq, kind) in [(0, "member-started"), (1, "turn-started")] {
-        println!(
-            "{}",
-            serde_json::json!({
-                "v": 1,
-                "ts": fake::now(),
-                "stream": stream(),
-                "seq": seq,
-                "source": "agentgraph",
-                "kind": kind,
-                "labels": labels,
-                "payload": {},
-            })
-        );
+        publish(&serde_json::json!({
+            "v": 1,
+            "ts": stamp(),
+            "stream": stream(),
+            "seq": seq,
+            "source": "agentgraph",
+            "kind": kind,
+            "labels": labels,
+            "payload": {},
+        }));
     }
     if let Some(member) = fake::node_script(dir, key, "also-member") {
         let mut labels = labels.clone();
         labels.insert("member".to_string(), member.into());
-        println!(
-            "{}",
-            serde_json::json!({
-                "v": 1,
-                "ts": fake::now(),
-                "stream": stream(),
-                "seq": 5,
-                "source": "agentgraph",
-                "kind": "turn-started",
-                "labels": labels,
-                "payload": {},
-            })
-        );
+        publish(&serde_json::json!({
+            "v": 1,
+            "ts": stamp(),
+            "stream": stream(),
+            "seq": 5,
+            "source": "agentgraph",
+            "kind": "turn-started",
+            "labels": labels,
+            "payload": {},
+        }));
     }
     if dir.join(format!("{key}.no-lever")).exists() {
         return;
@@ -656,6 +663,10 @@ fn open_turn(args: &[String], dir: &std::path::Path, key: &str, node: &str, step
 /// sibling's own `member-heartbeat` on that clock for as long as the hold
 /// lasts. The real one fires about every fifteen seconds; a journey states its
 /// own so the stall it is about lands inside a test's patience.
+///
+/// `<key>.unplaceable-beats-after-the-first` keeps beating on a clock that stops
+/// being readable: one placeable beat, then a stream of unplaceable ones, which
+/// is what a reader has to keep reporting liveness through.
 fn hold(
     args: &[String],
     dir: &std::path::Path,
@@ -678,13 +689,25 @@ fn hold(
         )),
     };
     let labels = member_labels(args, node, step);
+    // A producer whose clock stops being readable partway through the hold:
+    // every beat but the first carries a stamp this build cannot place in time.
+    // The first one still can be, which is the whole scenario — what a reader
+    // has left to report liveness by once the rest arrive unplaceable.
+    let loses_the_clock = dir
+        .join(format!("{key}.unplaceable-beats-after-the-first"))
+        .exists();
     // Above every `seq` the turn's own envelopes use, so a beat can never be
     // taken for one of them.
     let mut seq = 100;
     fake::wait_for_any_ticking(until, every, &mut || {
+        let stamp = if loses_the_clock && seq > 100 {
+            unplaceable_now()
+        } else {
+            fake::now()
+        };
         publish(&serde_json::json!({
             "v": 1,
-            "ts": fake::now(),
+            "ts": stamp,
             "stream": stream(),
             "seq": seq,
             "source": "agentgraph",
@@ -716,6 +739,17 @@ fn publish(envelope: &serde_json::Value) {
             envelope["kind"]
         ));
     }
+}
+
+/// Now, stamped the way a producer this build cannot read stamps it.
+///
+/// A real RFC 3339 instant with a numeric UTC offset instead of `Z` — which the
+/// reader refuses, because the envelope fixes one spelling and a stranger's
+/// clock must never become this run's timing evidence. Derived from the real
+/// clock rather than frozen, so what a journey scripts is a producer whose
+/// stamps cannot be *placed*, not one stuck at some moment in 2001.
+fn unplaceable_now() -> String {
+    format!("{}+00:00", fake::now().trim_end_matches('Z'))
 }
 
 /// The turn is over, so nothing can be delivered into it any more.

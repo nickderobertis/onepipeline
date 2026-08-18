@@ -889,6 +889,134 @@ fn status_ages_a_dispatch_by_its_work_rather_than_by_its_heartbeat() {
     world.release("mute.go");
 }
 
+/// How long ago one node's `status` line says it was last heard from alive.
+///
+/// Read off the rendered line for the same reason the age of the work is: the
+/// claim under test is the one an operator reads, and the line carries two ages
+/// — the work's and the liveness — so this one is picked out by the word that
+/// introduces it rather than by position.
+fn seconds_since_alive(status: &str, node: &str) -> u64 {
+    let line = status
+        .lines()
+        .find(|line| line.trim_start().starts_with(&format!("{node}: running")))
+        .unwrap_or_else(|| panic!("`status` has no in-flight line for {node}:\n{status}"));
+    let age = line
+        .split("alive ")
+        .nth(1)
+        .and_then(|rest| rest.split(" ago").next())
+        .unwrap_or_else(|| panic!("`{line}` reports no liveness"));
+    // The rendered spelling is `12s` under a minute and `1m30s` above it, and
+    // the second is already past anything this journey waits for.
+    age.strip_suffix('s')
+        .and_then(|seconds| seconds.parse().ok())
+        .unwrap_or_else(|| panic!("`{line}` carries no readable liveness age in seconds"))
+}
+
+/// A dispatch whose every envelope so far carries a stamp this build cannot
+/// read has recorded nothing it can age, and says so.
+///
+/// The envelopes arrived — the node is not one nothing is driving — but not one
+/// of them can be placed in time, so there is no moment to date the work to. An
+/// age invented for it would be the same lie the whole readout exists to stop
+/// telling, and "0s ago" is the worst of them: it reads as a dispatch that was
+/// working a moment ago.
+#[test]
+fn status_reports_no_work_for_a_dispatch_whose_envelopes_cannot_be_placed_in_time() {
+    let world = World::new("views-unplaceable");
+    world.script("blind.turn-open", "");
+    world.script("blind.wait", "hold");
+    // The sibling announces its turn on a clock this build cannot read.
+    world.script("blind.unplaceable-turn", "");
+    let path = world.plan(
+        "unplaceable",
+        &plan_of("unplaceable", vec![agent("blind", &[])]),
+    );
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+    world.until("the dispatch to announce its turn", |world| {
+        !world.events_of("unplaceable", "turn-started").is_empty()
+    });
+
+    let status = world.run(&["status", "unplaceable"]);
+    status.exited(0);
+    let line = status
+        .stdout
+        .lines()
+        .find(|line| line.trim_start().starts_with("blind: running"))
+        .unwrap_or_else(|| panic!("`status` has no line for blind:\n{}", status.stdout))
+        .to_string();
+    assert!(
+        line.contains("nothing recorded yet"),
+        "a dispatch whose envelopes cannot be placed in time is reported as having \
+         worked: {line}"
+    );
+    assert!(
+        !line.contains("event(s)") && !line.contains(" ago"),
+        "an age was claimed for work nothing can date: {line}"
+    );
+    // And it is not the other mistake either: the envelopes did arrive, so this
+    // is a dispatch that is being driven and cannot be aged, not a missing one.
+    assert!(
+        !line.contains("UNDRIVEN"),
+        "a dispatch whose envelopes arrived unplaceable reads as one nothing is \
+         driving: {line}"
+    );
+
+    world.release("blind.go");
+}
+
+/// A dispatch whose clock stops being readable is still reported alive, by the
+/// last beat that could be placed.
+///
+/// The beats keep coming — the dispatch is as alive as it ever was — so a reader
+/// that dropped the liveness the moment it could not place a beat would report a
+/// live worker as one nothing had been heard from. What is retained is the last
+/// arrival there was a moment for, and it goes on ageing, which is the honest
+/// pair: still alive, and heard from that long ago.
+#[test]
+fn status_keeps_the_last_placeable_beat_when_the_clock_stops_being_readable() {
+    let world = World::new("views-lostclock");
+    world.script("fading.turn-open", "");
+    world.script("fading.wait", "hold");
+    world.script("fading.heartbeat", "100");
+    // One beat this build can place, and every one after it on a clock it
+    // cannot read.
+    world.script("fading.unplaceable-beats-after-the-first", "");
+    let path = world.plan(
+        "lostclock",
+        &plan_of("lostclock", vec![agent("fading", &[])]),
+    );
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+
+    // Long enough that a liveness taken from the newest beat and one taken from
+    // the last placeable beat cannot be confused.
+    world.until("the clock to have been unreadable for a while", |world| {
+        world
+            .events_of("lostclock", "member-heartbeat")
+            .iter()
+            .filter(|event| event["labels"]["onepipeline.node"] == "fading")
+            .count()
+            >= 30
+    });
+
+    let status = world.run(&["status", "lostclock"]);
+    status
+        .exited(0)
+        .out_has("fading: running")
+        .out_has("alive ");
+    assert!(
+        seconds_since_alive(&status.stdout, "fading") >= 2,
+        "the liveness was taken from a beat nothing can place, so a dispatch \
+         last heard from seconds ago reads as one heard from just now:\n{}",
+        status.stdout
+    );
+
+    world.release("fading.go");
+}
+
 /// A run that has dispatched nothing has no transcript, and says so rather than
 /// rendering an empty one.
 #[test]

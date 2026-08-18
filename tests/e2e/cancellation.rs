@@ -562,6 +562,97 @@ fn an_adoption_ends_a_cancellation_the_driver_it_replaced_was_waiting_on() {
     world.release("slow.go");
 }
 
+/// A park this build cannot place in time reads as an ordinary park, and never
+/// as a stop that has been pending since some invented moment.
+///
+/// The pending stop is rendered as an age — "asked to stop 40s ago" — and the
+/// only moment there is to measure it from is the one the edit was committed at.
+/// A journal written by a build whose stamps this one cannot read carries no
+/// such moment, so there is nothing to age the wait by; the node keeps the state
+/// every reader already has a word for rather than being handed a duration
+/// nothing measured, which is the same invented age the readout exists to
+/// prevent.
+#[test]
+fn a_park_whose_moment_cannot_be_placed_reads_as_a_park_rather_than_a_pending_stop() {
+    let world = World::new("cancel-unplaceable");
+    // A deadline nothing waits out: the dispatch stays held so the node stays
+    // one whose cancellation would otherwise still be converging.
+    let run = held(&world, "cancelunplaceable", "600");
+    cancel(&world, &run, "slow");
+    world.until("the cancellation to be reported pending", |world| {
+        world
+            .run(&["status", &run])
+            .stdout
+            .contains("slow: cancelling")
+    });
+
+    // The driver has nothing left to write while the dispatch it asked to stop
+    // is held, and this waits until it has stopped writing: what follows reads
+    // the store back and rewrites it, so a record still being appended would be
+    // lost rather than re-read.
+    world.until("the run to have gone quiet", |world| {
+        let mut status = world.cmd(&["status", &run]);
+        status.env(PARKED_AFTER_ENV, "1");
+        let quiet = status.output().expect("the binary runs");
+        String::from_utf8_lossy(&quiet.stdout).contains("PARKED")
+    });
+
+    // A run store this build did not write: the commit that parked the node
+    // carries a real RFC 3339 instant with a numeric UTC offset instead of `Z`,
+    // which this build refuses because the envelope fixes one spelling. No
+    // command on this build's surface can produce one — every record it writes
+    // is stamped by its own clock — so writing it is the only way to replay a
+    // journal a sibling build left behind, and that replay is what this is
+    // about. Nothing else about the record is touched.
+    let journal = world.run_file(&run, "events.jsonl");
+    let store = std::fs::read_to_string(&journal).expect("the journal reads");
+    let mut unplaceable = 0;
+    let replayed: Vec<String> = store
+        .lines()
+        .map(|line| {
+            let Ok(mut event) = serde_json::from_str::<Value>(line) else {
+                return line.to_string();
+            };
+            let parks = event["payload"]["operations"]
+                .as_array()
+                .is_some_and(|ops| ops.iter().any(|op| op["kind"] == "node-parked"));
+            if !parks {
+                return line.to_string();
+            }
+            let stamp = event["ts"].as_str().unwrap_or_default().to_string();
+            event["ts"] = json!(format!("{}+00:00", stamp.trim_end_matches('Z')));
+            unplaceable += 1;
+            event.to_string()
+        })
+        .collect();
+    assert_eq!(
+        unplaceable, 1,
+        "the commit that parked the node was not the one record restamped:\n{store}"
+    );
+    std::fs::write(&journal, format!("{}\n", replayed.join("\n"))).expect("the journal is written");
+
+    // The node is still parked — the park itself was never in doubt — and
+    // nothing claims a stop has been pending for any length of time.
+    let status = world.run(&["status", &run]);
+    status.exited(0);
+    assert!(
+        !status.stdout.contains("cancelling"),
+        "a park nothing can place in time is reported as a stop pending since an \
+         invented moment:\n{}",
+        status.stdout
+    );
+    let results = world.run(&["results", &run]);
+    results.exited(0).out_has("parked");
+    assert!(
+        !results.stdout.contains("cancelling"),
+        "the same invented wait reaches the view a planner reads an outcome \
+         from:\n{}",
+        results.stdout
+    );
+
+    world.release("slow.go");
+}
+
 /// A dispatch that has said **nothing** is cancelled on the loop's own clock.
 ///
 /// This is the case that made the defect expensive. A dispatch nothing has heard
