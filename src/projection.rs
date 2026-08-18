@@ -533,6 +533,19 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
                 journal::StopTeardown::NothingToStop
                 | journal::StopTeardown::NotAttempted
                 | journal::StopTeardown::PartlySignalled
+                // llmlint: ignore[changed_behavior_has_e2e] this pattern is forced by
+                // exhaustiveness over a value the journal newly carries, and it renders
+                // nothing new: `refused` lands on `WorkersUndetermined`, the same state the
+                // four variants beside it map to, and three of those — `nothing-to-stop`,
+                // `not-attempted`, and `elsewhere` — are driven through this projection end to
+                // end in `tests/e2e/driver.rs`. A journey could not reach it in any case, for the
+                // reason the `stop` arm that writes the value carries the same directive: a
+                // `run-stopped` payload only says `refused` when every process of a run's tree
+                // refused this user's signal, and a process this user may not signal is not a
+                // thing for a suite to go and make. What the value is established from is
+                // proved where it can be, at `sys::established`'s
+                // `a_teardown_refused_by_everything_it_aimed_at_reports_no_signal_at_all` and
+                // `a_stop_that_could_signal_nothing_it_aimed_at_says_so`.
                 | journal::StopTeardown::Refused
                 | journal::StopTeardown::Elsewhere => StopState::WorkersUndetermined,
             };
