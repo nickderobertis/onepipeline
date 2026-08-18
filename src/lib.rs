@@ -19,8 +19,9 @@
 //! types, so the two cannot drift.
 //!
 //! A run's durable state is one directory: the plan it was launched with, the
-//! merged event store every view reads, the run's own result, and the channel's
-//! transport. The process driving the run is that ledger's **single writer**,
+//! merged event store every view reads, the run's own result, the channel's
+//! transport, and — beside the store — the account of any record a writer left
+//! half-written. The process driving the run is that ledger's **single writer**,
 //! guarded by the run's ownership lock; everything else reads.
 //!
 //! Composition is by subprocess. The agents come from `oneagentgraph` and the

@@ -591,6 +591,7 @@ pub fn status(survey: &Survey) -> String {
                 view.paths.run
             ));
         }
+        out.push_str(&journal_loss_line(view));
         if let Some(health) = crate::agentgraph::health() {
             out.push_str(&format!("  providers: {health}\n"));
         }
@@ -1067,6 +1068,26 @@ fn landed_phrase(landing: Landing, settled_at: Option<u64>) -> String {
     }
 }
 
+/// What a view says about the records the run's own store does not hold whole,
+/// or nothing when it holds them all.
+///
+/// Every line either view prints is folded from that store, so a loss inside it
+/// is the one fact that makes the rest of them unprovable — a `node-settled`
+/// nobody can read renders as a node that never settled, and an `edit-committed`
+/// nobody can read renders as a node the run never had. It is said here because
+/// the only place it used to be said was the driver's stderr, which a detached
+/// run writes to a log file nobody opens.
+fn journal_loss_line(view: &RunView) -> String {
+    let integrity = crate::journal::integrity(&view.paths.journal());
+    if integrity.is_whole() {
+        return String::new();
+    }
+    format!(
+        "  journal: {} — this run's record of itself is incomplete\n",
+        integrity.phrase()
+    )
+}
+
 /// `onepipeline results` — per-node outcomes, with each node's own evidence.
 pub fn results(view: &RunView) -> String {
     // The run and how its graph stands — deliberately not the node tally the
@@ -1157,6 +1178,7 @@ pub fn results(view: &RunView) -> String {
             }
         }
     }
+    out.push_str(&journal_loss_line(view));
     out
 }
 

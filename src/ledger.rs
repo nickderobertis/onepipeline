@@ -6,7 +6,11 @@
 //!
 //! Writes that a reader could catch half-finished are atomic — written to a
 //! temporary beside the target and renamed over it — because every view here
-//! reads a live run's directory while its driver is writing to it.
+//! reads a live run's directory while its driver is writing to it. An append
+//! cannot be written that way, since the file is everything already recorded, so
+//! it holds the file's exclusive lock instead: it heals a fragment a dead writer
+//! left before it writes, reports what that cost, and takes its own bytes back
+//! off the file when the write fails.
 
 // llmlint: ignore-file[invalid_states_unrepresentable] a run id, a host name, and a
 // timestamp are `String`s in these records because each one is a *serialized* field: the
@@ -588,43 +592,315 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     fs::rename(&temp, path).map_err(ledger)
 }
 
+/// A record fragment an append found at the end of a file and discarded.
+///
+/// A writer that dies mid-record — the disk it was writing to ran out, the
+/// process it was in was killed — leaves bytes that are not a whole line. The
+/// next append heals the file back to its last record boundary, and this is the
+/// account of what that cost: the loss is *reported* rather than quietly
+/// repaired, because a store that silently patches itself is a store whose own
+/// record of a run is wrong with nothing saying so.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TornTail {
+    /// When the append that met the fragment healed the file.
+    pub at: String,
+    /// Where the fragment began: the offset just past the last terminated
+    /// record.
+    pub offset: u64,
+    /// How many bytes were discarded.
+    pub bytes: u64,
+    /// The process that healed it.
+    pub healed_by: u32,
+}
+
+/// Where the fragments healed out of one append-only file are recorded.
+///
+/// Beside the file itself rather than inside it: the journal's own kinds are a
+/// closed set the contract names, so a loss cannot be written there as an event,
+/// and a reader that had to interpret a non-record line in the store would be
+/// reading the very ambiguity this is about.
+pub fn torn_tail_log(path: &Path) -> PathBuf {
+    let mut name = path.file_name().map_or_else(
+        || std::ffi::OsString::from("torn"),
+        std::ffi::OsStr::to_os_string,
+    );
+    name.push(".torn");
+    path.with_file_name(name)
+}
+
+/// Every fragment an append has healed out of one file, oldest first.
+///
+// llmlint: ignore[boundary_inputs_validated] the loss log is not external input: it is
+// written by `report_torn_tail` in this build and by nothing else, and `TornTail` is
+// `deny_unknown_fields`, so a line that is not one is refused rather than partly read.
+// What a lenient read costs is one loss going unmentioned; what refusing would cost is
+// the whole run's record, taken away over the file that exists to report a loss — which
+// is the rule `read_json_opt` above already states for every ledger record this crate
+// wrote.
+pub fn torn_tails(path: &Path) -> Vec<TornTail> {
+    // llmlint: ignore-block[no_panics_on_recoverable_errors] a line of this log the build cannot read costs that one loss going unmentioned; refusing the read would take away the whole account of what a run lost, over the file that exists to report a loss.
+    read_lines(&torn_tail_log(path))
+        .iter()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect()
+    // llmlint: ignore-end[no_panics_on_recoverable_errors]
+}
+
+/// One line of an append-only file, and where in the file it is.
+///
+/// The terminator is carried because it is the only signal a store holds that a
+/// writer finished: a final line with no `\n` reads exactly like a terminated
+/// one through [`str::lines`], which is how a torn record used to reach a reader
+/// as an ordinary one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Record {
+    /// The 1-based line number, counting every line including the blank ones.
+    pub line: usize,
+    /// Where the line begins in the file.
+    pub offset: u64,
+    /// The line, without its terminator.
+    ///
+    /// Decoded leniently: a record torn mid-character is not UTF-8, and what it
+    /// decodes to is a line no reader can parse — which is what it is.
+    pub text: String,
+    /// How many bytes of the file the line is, without its terminator.
+    ///
+    /// Not `text.len()`: a lossy decoding is not the same length as what it was
+    /// decoded from, and a view that reported a loss's size from the decoding
+    /// would be describing its own reading rather than the file.
+    pub bytes: u64,
+    /// Whether the line ended with a newline. A final line without one is a
+    /// record whose writer did not finish it.
+    pub terminated: bool,
+}
+
 /// Append one line to a durable append-only file.
+///
+/// Three things happen under one exclusive lock, and each of them is about a
+/// writer that failed rather than about the ordinary case:
+///
+/// - **Heal.** A file that does not end in `\n` ends in a fragment a dead writer
+///   left. It is truncated back to just past the last terminator *before*
+///   anything is appended, so a whole record is never glued onto half of one —
+///   the measured shape of this loss was a line holding a fragment and, after
+///   it, the complete record that reported the death of the process that left
+///   the fragment. The discarded bytes are reported, never silently repaired.
+/// - **One `write_all` of the record and its terminator**, never `writeln!`:
+///   that macro writes the text and the newline as two calls, and a run's
+///   journal is appended by several processes at once. A second appender landing
+///   between the two tears the record in half.
+/// - **Roll back.** `write_all` loops on short writes, and a full disk answers
+///   the first `write(2)` with a partial count: those bytes are in the file
+///   before the retry returns the error. The length is captured before the write
+///   and restored after a failure, so an append that fails leaves the file on
+///   the record boundary it started on.
+///
+/// The lock is what makes the first and third safe: a truncation by a writer
+/// that excluded nobody destroys a record another writer appended in between,
+/// which is the loss this exists to stop.
+// llmlint: ignore[names_match_behavior] the healing is not a side effect beside the
+// append, it is what appending to a store a writer died in the middle of *means* here —
+// and there is deliberately no variant that skips it, because one would glue a whole
+// record onto half of one again. The loss log is that heal's report rather than a second
+// output a caller chooses. A name carrying both would be describing the two failures this
+// function exists to survive rather than the operation every caller asks for.
 pub fn append_line(path: &Path, line: &str) -> Result<()> {
-    use std::io::Write;
+    let (healed, appended) = append_line_locked(path, line);
+    if let Some(torn) = healed {
+        report_torn_tail(path, &torn);
+    }
+    appended
+}
+
+/// The append itself: what it healed, and whether it wrote.
+///
+/// Two answers rather than one, because a heal and a failed write happen on the
+/// same call and the loss must be reported either way — an append that healed a
+/// fragment and then failed on a disk that is still full has still discarded the
+/// fragment.
+fn append_line_locked(path: &Path, line: &str) -> (Option<TornTail>, Result<()>) {
+    use std::io::{Seek, SeekFrom, Write};
 
     let ledger = |e: io::Error| Error::Ledger {
         path: path.to_path_buf(),
         source: e,
     };
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(ledger)?;
+        if let Err(e) = fs::create_dir_all(parent) {
+            return (None, Err(ledger(e)));
+        }
     }
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .map_err(ledger)?;
-    // One `write_all` of the record *and* its terminator, never `writeln!`:
-    // that macro writes the text and the newline as two calls, and a run's
-    // journal is appended by several processes at once — the launcher's relay
-    // and the driving process's own writer among them. A second appender landing between
-    // the two tears the record in half, and a torn line is silently skipped by
-    // every reader here, so the event simply disappears.
-    file.write_all(format!("{line}\n").as_bytes())
-        .map_err(ledger)?;
-    file.flush().map_err(ledger)
+    let mut file = match sys::open_locked_append(path) {
+        Ok(file) => file,
+        Err(e) => return (None, Err(ledger(e))),
+    };
+    let torn = match heal_tail(&mut file) {
+        Ok(torn) => torn,
+        Err(e) => return (None, Err(ledger(e))),
+    };
+    // To the end explicitly rather than on the strength of the open mode: one of
+    // the two platforms hands back a plain write handle, because an append-only
+    // one cannot be truncated and truncating is half of what happens above. The
+    // answer is the boundary this append starts on, which is what a failure
+    // restores.
+    let boundary = match file.seek(SeekFrom::End(0)) {
+        Ok(length) => length,
+        Err(e) => return (torn, Err(ledger(e))),
+    };
+    let written = file
+        .write_all(format!("{line}\n").as_bytes())
+        .and_then(|()| file.flush());
+    match written {
+        Ok(()) => (torn, Ok(())),
+        Err(e) => {
+            // Whatever of the record reached the file goes back off it. A
+            // failure to undo leaves the original failure as the one reported:
+            // it is the one that says what went wrong with the host, and a
+            // second error naming the same disk would displace it.
+            //
+            // llmlint: ignore-block[no_panics_on_recoverable_errors] a second error naming the disk the write already named would displace the one that says what happened; the undo is best-effort by design.
+            // llmlint: ignore-block[changed_behavior_has_e2e] no journey reaches this: a host that refuses to truncate a descriptor this function owns refused the write before it too, and that is the error handed back.
+            let _ = file.set_len(boundary);
+            // llmlint: ignore-end[changed_behavior_has_e2e]
+            // llmlint: ignore-end[no_panics_on_recoverable_errors]
+            (torn, Err(ledger(e)))
+        }
+    }
+}
+
+/// Truncate a fragment a dead writer left, and say what was discarded.
+///
+/// Called with the file's exclusive lock already held, so nothing is appending
+/// while the tail is read and cut.
+fn heal_tail(file: &mut fs::File) -> io::Result<Option<TornTail>> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let length = file.metadata()?.len();
+    if length == 0 {
+        return Ok(None);
+    }
+    let mut last = [0u8; 1];
+    file.seek(SeekFrom::Start(length - 1))?;
+    file.read_exact(&mut last)?;
+    if last[0] == b'\n' {
+        return Ok(None);
+    }
+    // Backwards a chunk at a time: a run's journal reaches megabytes, and the
+    // fragment is at the end of it.
+    const CHUNK: u64 = 64 * 1024;
+    let mut buffer = vec![0u8; CHUNK as usize];
+    let mut end = length;
+    let mut boundary = 0;
+    while end > 0 {
+        let start = end.saturating_sub(CHUNK);
+        let size = (end - start) as usize;
+        file.seek(SeekFrom::Start(start))?;
+        file.read_exact(&mut buffer[..size])?;
+        if let Some(at) = buffer[..size].iter().rposition(|byte| *byte == b'\n') {
+            boundary = start + at as u64 + 1;
+            break;
+        }
+        end = start;
+    }
+    file.set_len(boundary)?;
+    Ok(Some(TornTail {
+        at: sys::now_rfc3339(),
+        offset: boundary,
+        bytes: length - boundary,
+        healed_by: sys::pid(),
+    }))
+}
+
+/// Report a healed fragment: durably beside the file, and on stderr.
+///
+/// Durably, because stderr on a detached run is a log nobody opens, and the
+/// whole point is that a reader of the run can see what the run lost — see
+/// [`torn_tail_log`]. On stderr as well, because the process that heals is often
+/// the one a person is watching.
+// llmlint: ignore-block[no_panics_on_recoverable_errors] every failure below is
+// deliberately dropped, and the reason is the same one each time: the loss is already on
+// stderr by the line above, and the append that healed the file **succeeded**. Failing it
+// because the *report* of a heal could not be written would turn a store this process put
+// back together into a run that could not record anything — the loss the whole of this
+// exists to stop, arrived at through its own diagnostics.
+fn report_torn_tail(path: &Path, torn: &TornTail) {
+    eprintln!(
+        "onepipeline: {}: discarded a {}-byte record fragment at byte {}, left by a writer \
+         that did not finish it; the record it was is lost",
+        path.display(),
+        torn.bytes,
+        torn.offset
+    );
+    let Ok(line) = serde_json::to_string(torn) else {
+        return;
+    };
+    // The log of tears is appended through the same locked path, and its own
+    // heal is reported on stderr alone: recording it would need a log of its
+    // own, and that recursion has no end. A failed write is not propagated —
+    // the loss is already on stderr, and the append that healed the file
+    // succeeded.
+    let (healed, _) = append_line_locked(&torn_tail_log(path), &line);
+    if let Some(torn) = healed {
+        eprintln!(
+            "onepipeline: {}: discarded a {}-byte fragment of the loss log itself",
+            torn_tail_log(path).display(),
+            torn.bytes
+        );
+    }
+}
+// llmlint: ignore-end[no_panics_on_recoverable_errors]
+
+/// Every line of an append-only file, with where it is and whether its writer
+/// finished it, or nothing when the file does not exist yet.
+///
+/// Read as **bytes** and decoded a line at a time, which is not a detail: a
+/// record torn mid-character leaves a byte sequence that is not UTF-8, and
+/// decoding the file whole would fail on it and hand back an empty store — every
+/// view of that run rendering as a run that recorded nothing, over one bad byte
+/// at the end. Decoded per line, the tear is one unreadable line and every whole
+/// record before it survives; the replacement characters it decodes to are what
+/// makes it unreadable, which is what it is. The offsets stay the file's own,
+/// because they are counted off the bytes rather than off the decoding.
+///
+/// A file this process cannot open reads as one that is not there. That is the
+/// rule every ledger reader here follows — [`read_json_opt`] states it — and it
+/// is what lets a view render a live run rather than refuse it over one input.
+// llmlint: ignore[changed_behavior_has_e2e] the per-line decoding is three lines of one function, and `tests/e2e/journal.rs` drives them through the compiled binary against the store where a tear actually happens. Its other callers — the channel queue, the replies, the commands — differ only in the path they hand it, so a journey each would be the same three lines tested four times; the unit test below holds the decoding itself.
+pub fn read_records(path: &Path) -> Vec<Record> {
+    // llmlint: ignore-block[no_panics_on_recoverable_errors] the leniency is the documented rule above and predates this reader; changing it changes every ledger reader in the crate — the channel queue, the replies, the commands — rather than this one.
+    let Ok(bytes) = fs::read(path) else {
+        return Vec::new();
+    };
+    // llmlint: ignore-end[no_panics_on_recoverable_errors]
+    let mut records = Vec::new();
+    let mut offset = 0u64;
+    for (index, line) in bytes.split_inclusive(|byte| *byte == b'\n').enumerate() {
+        let terminated = line.ends_with(b"\n");
+        let text = String::from_utf8_lossy(line)
+            .trim_end_matches('\n')
+            .trim_end_matches('\r')
+            .to_string();
+        let bytes = line.len() as u64 - u64::from(terminated);
+        records.push(Record {
+            line: index + 1,
+            offset,
+            text,
+            bytes,
+            terminated,
+        });
+        offset += line.len() as u64;
+    }
+    records
 }
 
 /// Every line of an append-only file, or nothing when it does not exist yet.
 pub fn read_lines(path: &Path) -> Vec<String> {
-    fs::read_to_string(path)
-        .map(|text| {
-            text.lines()
-                .filter(|line| !line.trim().is_empty())
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
+    read_records(path)
+        .into_iter()
+        .filter(|record| !record.text.trim().is_empty())
+        .map(|record| record.text)
+        .collect()
 }
 
 /// Who holds a run's single-writer lock.
@@ -1358,6 +1634,147 @@ mod tests {
         append_line(&path, "").expect("appended");
         append_line(&path, "second").expect("appended");
         assert_eq!(read_lines(&path), vec!["first", "second"]);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A record's own position and terminator survive the read.
+    ///
+    /// `str::lines` discards the one signal a store holds that a writer
+    /// finished: a final line with no `\n` reads exactly like a terminated one,
+    /// which is how a torn record used to reach a reader as an ordinary one.
+    #[test]
+    fn a_record_carries_where_it_is_and_whether_its_writer_finished_it() {
+        let root = scratch("records");
+        let path = root.join("events.jsonl");
+        fs::write(&path, "first\n\nsecond\nhalf").expect("the file is written");
+
+        let records = read_records(&path);
+        assert_eq!(records.len(), 4);
+        assert_eq!(records[0].offset, 0);
+        assert_eq!(records[2].text, "second");
+        assert_eq!(records[2].offset, 7);
+        assert!(records[2].terminated);
+        assert_eq!(records[3].text, "half");
+        assert_eq!(records[3].offset, 14);
+        assert!(
+            !records[3].terminated,
+            "a fragment read as a record its writer had finished"
+        );
+        // The blank line is still skipped by every reader that only wants the
+        // records, which is what `read_lines` has always answered.
+        assert_eq!(read_lines(&path), vec!["first", "second", "half"]);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A file torn mid-character is read for the records it holds.
+    ///
+    /// A record cut in the middle of a multi-byte character is not UTF-8, and
+    /// decoding the file whole failed on it — so *every* reader here, the
+    /// channel's queue and its replies as much as the journal, handed back an
+    /// empty file over one bad byte at the end of it. Per line, the tear costs
+    /// itself and nothing before it, and the offsets stay the file's own.
+    #[test]
+    fn a_file_torn_mid_character_still_reads_back_the_records_before_the_tear() {
+        let root = scratch("lossy");
+        let path = root.join("queue.jsonl");
+        fs::create_dir_all(&root).ok();
+        let mut bytes = b"{\"first\":1}\n{\"second\":2}\n{\"third\":".to_vec();
+        // The first byte of a three-byte character, and nothing after it.
+        bytes.push(0xE2);
+        fs::write(&path, &bytes).expect("the file is written");
+
+        let records = read_records(&path);
+        assert_eq!(
+            records.len(),
+            3,
+            "the tear took the file with it: {records:?}"
+        );
+        assert_eq!(records[0].text, "{\"first\":1}");
+        assert_eq!(records[1].text, "{\"second\":2}");
+        assert_eq!(records[2].offset, 25);
+        assert_eq!(
+            records[2].bytes, 10,
+            "the loss was measured in the reading rather than in the file"
+        );
+        assert!(!records[2].terminated);
+        assert_eq!(read_lines(&path).len(), 3);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A fragment a dead writer left is cut back to the last boundary, and what
+    /// it cost is recorded beside the store rather than quietly repaired.
+    #[test]
+    fn an_append_heals_a_fragment_and_records_what_it_discarded() {
+        let root = scratch("heal");
+        let path = root.join("events.jsonl");
+        append_line(&path, "first").expect("appended");
+        let whole = fs::read_to_string(&path).expect("the file reads");
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .and_then(|mut file| std::io::Write::write_all(&mut file, b"{\"half\":"))
+            .expect("the fragment is written");
+
+        append_line(&path, "second").expect("appended");
+
+        assert_eq!(
+            fs::read_to_string(&path).expect("the file reads"),
+            format!("{whole}second\n"),
+            "the heal cut into a whole record, or left the fragment in"
+        );
+        let recorded = torn_tails(&path);
+        assert_eq!(recorded.len(), 1, "{recorded:?}");
+        assert_eq!(recorded[0].offset, whole.len() as u64);
+        assert_eq!(recorded[0].bytes, 8);
+        assert_eq!(recorded[0].healed_by, sys::pid());
+        // The next append meets a store that ends on a boundary and records
+        // nothing further: healing is not something a reader sees twice.
+        append_line(&path, "third").expect("appended");
+        assert_eq!(torn_tails(&path).len(), 1);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A store whose *whole* content is one unterminated fragment.
+    ///
+    /// The measured shape of this loss: sixteen kilobytes with no newline in
+    /// them at all. There is no boundary to cut back to but the start of the
+    /// file, and the whole of what is discarded is reported.
+    #[test]
+    fn a_store_that_is_nothing_but_a_fragment_heals_to_empty_and_says_so() {
+        let root = scratch("heal-whole");
+        let path = root.join("events.jsonl");
+        fs::write(&path, "x".repeat(70 * 1024)).expect("the fragment is written");
+
+        append_line(&path, "first").expect("appended");
+
+        assert_eq!(
+            fs::read_to_string(&path).expect("the file reads"),
+            "first\n"
+        );
+        let recorded = torn_tails(&path);
+        assert_eq!(recorded.len(), 1, "{recorded:?}");
+        assert_eq!(recorded[0].offset, 0);
+        assert_eq!(recorded[0].bytes, 70 * 1024);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// The log of tears is named from the store it is about, and reads as
+    /// nothing when there has never been one.
+    #[test]
+    fn a_store_that_lost_nothing_records_nothing() {
+        let root = scratch("torn-absent");
+        let path = root.join("events.jsonl");
+        assert_eq!(
+            torn_tail_log(&path),
+            root.join("events.jsonl.torn"),
+            "the loss log is not beside the store it is about"
+        );
+        assert!(torn_tails(&path).is_empty());
+        append_line(&path, "first").expect("appended");
+        assert!(
+            torn_tails(&path).is_empty(),
+            "an append that healed nothing reported a loss"
+        );
         fs::remove_dir_all(&root).ok();
     }
 

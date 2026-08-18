@@ -872,6 +872,111 @@ fn platform_process_start_token(pid: u32) -> Option<String> {
         .then(|| format!("{}:{}", created.dwHighDateTime, created.dwLowDateTime))
 }
 
+/// Open an append-only file so this process is its **only** appender until the
+/// handle is dropped.
+///
+/// Every append to a run's files goes through one choke point —
+/// [`ledger::append_line`](crate::ledger::append_line) — and that function both
+/// appends and, when it finds a fragment a dead writer left, truncates it away.
+/// Truncation is what makes the exclusion load-bearing: a writer that took no
+/// lock and truncated back to the last record boundary would destroy a *whole*
+/// record a second writer had appended in between, which is exactly the loss the
+/// healing exists to stop. So the lock is taken by every appender, on the same
+/// handle the append is made through, and never on the healing path alone.
+///
+/// The handle is opened for reading too, because the appender has to look at the
+/// file's own tail before it writes, and the caller seeks to the end before it
+/// writes rather than relying on the open mode — the two platforms give a
+/// truncatable handle in different ways, and only one of them can truncate an
+/// append-only one.
+pub fn open_locked_append(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    platform_open_locked_append(path)
+}
+
+/// `flock(2)`: an advisory exclusive lock, released when the description closes
+/// — including when the process holding it dies, which is the case that matters
+/// here, since a writer dying mid-record is what leaves the fragment.
+///
+/// Advisory means it excludes only the writers that take it, which is why
+/// `append_line` must stay the sole appender. The runs root is host-local, so
+/// the caveat about locks over NFS does not apply.
+#[cfg(unix)]
+fn platform_open_locked_append(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::io::AsRawFd;
+
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .read(true)
+        .open(path)?;
+    loop {
+        // SAFETY: the descriptor is one this function just opened and still
+        // owns, and `flock` borrows no memory.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
+            return Ok(file);
+        }
+        let failed = std::io::Error::last_os_error();
+        // A signal delivered while waiting is not a refusal: keep waiting.
+        if failed.kind() != std::io::ErrorKind::Interrupted {
+            return Err(failed);
+        }
+    }
+}
+
+/// Windows has no advisory lock a reader can ignore: `LockFileEx` is
+/// *mandatory*, so a range lock over the file's data would fail every view
+/// reading a live run — the one thing this crate's readers must never do. The
+/// exclusion is taken at `CreateFile` instead, by opening with a share mode that
+/// admits readers and no second writer, and waiting for the writer that holds it
+/// to let go.
+///
+/// A plain write handle rather than an append-only one, which is what that share
+/// mode buys: a handle opened for appending alone cannot be truncated here —
+/// setting the end of a file needs write access — and truncating the fragment is
+/// half of what the caller does. Nothing else may hold this file for writing
+/// while this handle is open, so seeking to the end and writing there *is* an
+/// append.
+///
+/// A sharing violation is the *contended* answer rather than a failure, and the
+/// wait is bounded so an appender can never hang a view or a driver: past the
+/// deadline the error is handed back as what it is.
+// llmlint: ignore-block[changed_behavior_has_e2e] the *uncontended* half of this arm is
+// driven by every journey that appends, on the Windows leg of CI, which runs the same
+// suite. What has no journey is the contended half, and the reason is that the holder a
+// journey needs is a second writer this suite can only be on the platform it is written
+// on: `tests/e2e/journal.rs` holds the store with `flock` and says so. A Windows journey
+// authored here would be one nobody has ever seen pass or fail — this host cannot link
+// that target, let alone run it — which is a worse thing to ship than a stated gap.
+#[cfg(windows)]
+fn platform_open_locked_append(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Foundation::ERROR_SHARING_VIOLATION;
+    use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+
+    /// How long an appender waits for the writer ahead of it.
+    const DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+
+    let waiting_since = std::time::Instant::now();
+    loop {
+        let opened = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(path);
+        match opened {
+            Err(e)
+                if e.raw_os_error() == Some(ERROR_SHARING_VIOLATION as i32)
+                    && waiting_since.elapsed() < DEADLINE =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            other => return other,
+        }
+    }
+}
+// llmlint: ignore-end[changed_behavior_has_e2e]
+
 /// Stop the processes this one starts from inheriting *its own* standard
 /// handles.
 ///
