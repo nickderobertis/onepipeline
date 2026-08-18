@@ -327,7 +327,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -927,6 +927,7 @@ name = "onepipeline"
 version = "0.7.1"
 dependencies = [
  "clap",
+ "fs4",
  "libc",
  "oneagentgraph",
  "onepipeline-testfakes",
@@ -935,6 +936,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_norway",
+ "sha2",
  "thiserror",
  "windows-sys 0.61.2",
 ]
@@ -943,15 +945,16 @@ dependencies = [
 name = "onepipeline-testfakes"
 version = "0.0.0"
 dependencies = [
+ "libc",
  "oneagentgraph",
  "serde_json",
 ]
 
 [[package]]
 name = "onevcs"
-version = "0.4.1"
+version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "783acfeca003bbacd4967b6da788e74ac1616038bcd448d580ab0652a6868435"
+checksum = "8580dc19066c568d99061b93a7eca14ba0b9d7281ff11be666f0c3d27844efca"
 dependencies = [
  "clap",
  "dunce",
@@ -1178,7 +1181,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1235,7 +1238,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1915,7 +1918,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
