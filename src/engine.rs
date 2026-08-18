@@ -349,14 +349,14 @@ pub(crate) enum Message {
 /// The fields and not a kind with a payload map beside it: this is the one of
 /// this crate's own kinds a dispatch thread emits, and a kind selected
 /// independently of the payload it is paired with is a mismatch nothing would
-/// catch.
+/// catch. The ending travels as the drafting side's own type for the same
+/// reason — the wire name and the sentence are read off it here, so an ending
+/// this build does not have is not a value this message can carry.
 pub(crate) struct UndraftedBody {
     /// The node whose change request opened without one.
     pub node: String,
-    /// Which ending it was, as the event names it.
-    pub ending: &'static str,
-    /// Why, in the words the node's own settlement carries.
-    pub detail: String,
+    /// Which ending it was.
+    pub ending: crate::lifecycle::Undrafted,
 }
 
 /// One transition of a cancellation, on its way to the planner.
@@ -600,8 +600,8 @@ fn converge(
                 journal::PipelineKind::BodyNotDrafted,
                 journal::labels(&paths.run, Some(&undrafted.node)),
                 journal::payload(&[
-                    ("ending", json!(undrafted.ending)),
-                    ("detail", json!(undrafted.detail)),
+                    ("ending", json!(undrafted.ending.ending())),
+                    ("detail", json!(undrafted.ending.why())),
                 ]),
             )?,
             Ok(Message::Settled(settlement)) => {

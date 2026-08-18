@@ -254,24 +254,26 @@ fn publish(
             Some(Drafted::Undrafted(ending)) => (None, Some(ending)),
         },
     };
-    // Said in the run's own record, at the moment it happened, and only where a
-    // drafting dispatch was configured and attempted. Without it a bodyless
-    // change request cannot say whether the drafter ran and failed or was never
-    // wired at all — and those need different fixes.
-    if let Some(ending) = &undrafted {
+    // Said twice, and only where a drafting dispatch was configured and
+    // attempted: in the run's own record at the moment it happened, and on the
+    // node's settlement, where a planner reading `results` is shown it without
+    // opening the store. Without either, a bodyless change request cannot say
+    // whether the drafter ran and failed or was never wired at all — and those
+    // need different fixes.
+    //
+    // On the settlement whatever the publication went on to do, not only where
+    // it succeeded: what the drafter did is true either way, and a reader
+    // looking for it must not have to know which failure came first. The
+    // publication's own reason leads there, because that is what settled the
+    // node.
+    let undrafted = undrafted.map(|ending| {
+        let why = ending.why();
         let _ = tx.send(Message::BodyNotDrafted(Box::new(engine::UndraftedBody {
             node: node.id.clone(),
-            ending: ending.ending(),
-            detail: ending.why(),
+            ending,
         })));
-    }
-    // And beside the event, on the settlement, so a planner reading `results`
-    // sees it without opening the run's store. On every ending of the
-    // publication, not only the one that succeeded: what the drafter did is true
-    // either way, and a reader looking for it must not have to know which
-    // failure came first. The publication's own reason leads, because that is
-    // what settled the node.
-    let undrafted = undrafted.map(|ending| ending.why());
+        why
+    });
     // One composition for both endings of a publication that did not happen, so
     // there is one place the two reasons are put together rather than two that
     // can come to disagree.
@@ -355,7 +357,7 @@ enum Drafted {
 /// whose answers the schema refuses, and one that answers inside the schema with
 /// nothing in it. A run that had just wired a drafter could tell none of them
 /// from a launch that had wired no drafter at all.
-enum Undrafted {
+pub(crate) enum Undrafted {
     /// It could not be run, or it ran and did not succeed — in its own words.
     ///
     /// One ending rather than three: a dispatch that never started, one that
@@ -371,7 +373,7 @@ enum Undrafted {
 
 impl Undrafted {
     /// The ending, as the event names it.
-    fn ending(&self) -> &'static str {
+    pub(crate) fn ending(&self) -> &'static str {
         match self {
             Self::Dispatch(_) => "dispatch-failed",
             Self::SchemaRefused => "schema-refused",
@@ -381,7 +383,7 @@ impl Undrafted {
 
     /// Why the change request opened with no body, in the words a planner reads
     /// off `results`.
-    fn why(&self) -> String {
+    pub(crate) fn why(&self) -> String {
         match self {
             Self::Dispatch(reason) => {
                 format!("the change request's body was not drafted: {reason}")
