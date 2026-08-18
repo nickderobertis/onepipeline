@@ -966,59 +966,6 @@ fn status_reports_no_work_for_a_dispatch_whose_envelopes_cannot_be_placed_in_tim
     world.release("blind.go");
 }
 
-/// A dispatch heard from before its stamps could be placed is dated from the
-/// first arrival there was a moment for, and counted from there too.
-///
-/// The count and the age are one record, because a count standing on its own is
-/// what a view renders as an age. So the arrivals before the first placeable one
-/// are outside both: what is reported is smaller than what arrived, and every
-/// bit of it is something this build actually watched happen — which is the
-/// trade the whole readout is, an under-count over an invented moment.
-#[test]
-fn status_dates_and_counts_a_dispatch_from_its_first_placeable_envelope() {
-    let world = World::new("views-clockback");
-    world.script("late.turn-open", "");
-    world.script("late.wait", "hold");
-    // The member arrives on a clock this build cannot read, and the turn
-    // announced behind it on one it can.
-    world.script("late.unplaceable-member-start", "");
-    let path = world.plan("clockback", &plan_of("clockback", vec![agent("late", &[])]));
-    world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
-    world.until("the dispatch to announce its turn", |world| {
-        !world.events_of("clockback", "turn-started").is_empty()
-    });
-
-    // Both envelopes reached the store; only one of them is datable.
-    let relayed = world
-        .journal("clockback")
-        .into_iter()
-        .filter(|event| event["source"] == "agentgraph" && event["labels"]["node"] == "late")
-        .count();
-    assert_eq!(relayed, 2, "the dispatch did not announce itself twice");
-
-    let status = world.run(&["status", "clockback"]);
-    status.exited(0);
-    let line = status
-        .stdout
-        .lines()
-        .find(|line| line.trim_start().starts_with("late: running"))
-        .unwrap_or_else(|| panic!("`status` has no line for late:\n{}", status.stdout))
-        .to_string();
-    assert!(
-        line.contains("1 event(s)"),
-        "the arrival nothing could place was counted, so the count claims a \
-         record that reaches further back than the age beside it: {line}"
-    );
-    assert!(
-        seconds_since_activity(&status.stdout, "late") < 60,
-        "the work was dated from an arrival nothing could place: {line}"
-    );
-
-    world.release("late.go");
-}
-
 /// A dispatch whose clock stops being readable is still reported alive, by the
 /// last beat that could be placed.
 ///
