@@ -22,13 +22,10 @@
 //!
 //! [`EventKind::carries_session`]: oneagentgraph::event::EventKind::carries_session
 
-// llmlint: ignore-file[e2e_not_mocked] `World` substitutes `oneagentgraph` at its
-// subprocess boundary and nothing inside the crate under test, which is driven as a real
-// compiled binary. The double stamps the session through that library's *own*
-// `carries_session` and `session_label`, and builds the `oneharness-session` payload and
-// artifact out of its own types, so what these journeys read back is the sibling's shape
-// rather than a copy of it. `harness.rs` carries the same suppression and the full
-// rationale.
+// llmlint: ignore-file[e2e_not_mocked] the rationale is `harness.rs`'s; what is specific
+// here is that the double emits this contract out of the sibling's *own* `carries_session`,
+// `session_label`, `OneharnessSession` and `Artifact`, so these journeys read back that
+// library's shape rather than a copy of it.
 
 use crate::harness::{agent, plan_of, World};
 use oneagentgraph::event::{

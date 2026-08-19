@@ -1008,7 +1008,7 @@ fn emit(
     // Where this turn's conversation was written down. Published per oneharness
     // invocation, as the real member publishes it, and before the turn it
     // belongs to completes.
-    oneharness_session(&labels, node);
+    publish_oneharness_session(&labels, node);
     let report = report_of(task);
     envelope(
         3,
@@ -1113,7 +1113,7 @@ fn emit(
 ///
 /// [`OneharnessSession`]: oneagentgraph::event::OneharnessSession
 /// [`Artifact`]: oneagentgraph::event::Artifact
-fn oneharness_session(labels: &serde_json::Map<String, serde_json::Value>, node: &str) {
+fn publish_oneharness_session(labels: &serde_json::Map<String, serde_json::Value>, node: &str) {
     let record = format!("{}-{}", fake::segment(node), std::process::id());
     let store = fake::script_dir().join("history");
     let project = "fake-project";
@@ -1153,31 +1153,32 @@ fn oneharness_session(labels: &serde_json::Map<String, serde_json::Value>, node:
         bytes: body.len() as u64,
     };
     let kind = oneagentgraph::event::EventKind::OneharnessSession;
-    println!(
-        "{}",
-        serde_json::json!({
-            "v": 1,
-            "ts": fake::now(),
-            "stream": stream(),
-            // Above the turn's own envelopes and below the candidates a chain
-            // stepped past, so no reader can take it for either.
-            "seq": 6,
-            "source": "agentgraph",
-            "kind": kind.as_str(),
-            // No conversation on it: the record *names* one, and a consumer
-            // that read this as a transcript turn would render the pointer
-            // beside the thing it points at.
-            "labels": stamp_session(labels, &stream(), kind),
-            "payload": match serde_json::to_value(&session) {
-                Ok(payload) => payload,
-                Err(error) => fake::fail(&format!("a session is not an object: {error}")),
-            },
-            "artifacts": [match serde_json::to_value(&artifact) {
-                Ok(artifact) => artifact,
-                Err(error) => fake::fail(&format!("an artifact is not an object: {error}")),
-            }],
-        })
-    );
+    // Through `publish` rather than `println!`: the reader on the other end can
+    // go away, and a driver that stopped waiting closes the pipe. That is an
+    // ordinary I/O error, and unwinding out of it would reach a test as a double
+    // that crashed.
+    publish(&serde_json::json!({
+        "v": 1,
+        "ts": fake::now(),
+        "stream": stream(),
+        // Above the turn's own envelopes and below the candidates a chain
+        // stepped past, so no reader can take it for either.
+        "seq": 6,
+        "source": "agentgraph",
+        "kind": kind.as_str(),
+        // No conversation on it: the record *names* one, and a consumer that
+        // read this as a transcript turn would render the pointer beside the
+        // thing it points at.
+        "labels": stamp_session(labels, &stream(), kind),
+        "payload": match serde_json::to_value(&session) {
+            Ok(payload) => payload,
+            Err(error) => fake::fail(&format!("a session is not an object: {error}")),
+        },
+        "artifacts": [match serde_json::to_value(&artifact) {
+            Ok(artifact) => artifact,
+            Err(error) => fake::fail(&format!("an artifact is not an object: {error}")),
+        }],
+    }));
 }
 
 /// The report a settled member stores.
