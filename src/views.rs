@@ -864,10 +864,11 @@ fn refusal_phrase(refusal: &Refusal) -> String {
 /// reader following the chain back knows whether the next hop is the end of it.
 fn skipped_by_phrase(causes: &[(String, NodeStatus)]) -> String {
     if causes.is_empty() {
-        // A `drop` detaches an edge without settling anything, so a node can be
-        // skipped by a dependency the graph no longer holds. Saying so is the
-        // whole answer available; naming nothing would read as a rendering bug.
-        return "a dependency the graph no longer holds".to_string();
+        // Unreachable by construction — the skip and this list come out of one
+        // status map through one predicate — and phrased anyway, because an
+        // empty list rendered as nothing at all would read as a fact the view
+        // lost rather than as everything the run can say.
+        return "a dependency this run can no longer name".to_string();
     }
     causes
         .iter()
@@ -1786,19 +1787,17 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// A skip whose cause the graph no longer holds still says the node was
-    /// never attempted.
+    /// A skip with no cause to name still says the node was never attempted.
     ///
-    /// Not reachable from a plan this crate executes — a detached edge is not
-    /// consulted, so it cannot skip anything — but the phrase is what `results`
-    /// prints if one ever is, and an empty list rendered as nothing at all would
-    /// read as a rendering that had lost the fact rather than as the run's whole
-    /// answer.
+    /// The empty list is unreachable from a plan this crate executes, so the
+    /// phrase has no journey of its own — and it is held here rather than left
+    /// untested, because what it guards against is `results` printing a bare
+    /// `skipped by:` that a reader takes for a view that lost the fact.
     #[test]
     fn a_skip_with_no_cause_left_in_the_graph_is_still_phrased() {
         assert_eq!(
             skipped_by_phrase(&[]),
-            "a dependency the graph no longer holds"
+            "a dependency this run can no longer name"
         );
         assert_eq!(
             skipped_by_phrase(&[

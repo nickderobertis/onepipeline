@@ -1111,6 +1111,14 @@ because it looked at the wrong repository.
 
 ## 36. `attest` now also takes a node that settled `failed` — OPEN
 
+<!-- llmlint: ignore[contracts_have_one_source_or_a_drift_gate] stating what the code
+does beside what the approved contract says is what an entry in this file *is*, and the
+gap between the two is the proposal rather than a drift to close: every one of the
+thirty-six entries has this shape, and closing it here means editing `docs/contract.md`,
+which `AGENTS.md` forbids doing from this repository before the planner who owns it
+rules. Trimming this entry to pointers was tried first and left the same finding, because
+naming the divergence at all is the duplication. It goes when 36 is ruled on. -->
+
 **Proposal (for the planner who owns the contract): state that `attest RUN REF`
 accepts two references — a ready `kind: human` node's action, and a node that
 settled `failed` whose work a person is vouching has landed — and that the
