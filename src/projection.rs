@@ -67,7 +67,7 @@ pub struct RunState {
     /// finished with. Read for a node still recorded `running`, which is the
     /// only time the question — *where is the work being done right now?* — has
     /// an answer at all.
-    pub sessions: BTreeMap<String, onevcs::Session>,
+    pub sessions: BTreeMap<String, crate::vcs::DispatchSession>,
     /// The dispatch each node had in flight when an adoption cleared it.
     ///
     /// A driver's death does not end the session its dispatch opened: the
@@ -75,7 +75,7 @@ pub struct RunState {
     /// there, and this is the only record of where. Without it the node becomes
     /// ready again, is dispatched into a fresh session, and the previous one is
     /// left unnamed anywhere a manager looks.
-    pub abandoned: BTreeMap<String, onevcs::Session>,
+    pub abandoned: BTreeMap<String, crate::vcs::DispatchSession>,
     /// Where a human reads the change each published node opened.
     pub change_urls: BTreeMap<String, String>,
     /// Whether each published node's change reached its base branch.
@@ -435,7 +435,7 @@ impl RunState {
     /// repository and so has no branch to be anywhere. Nor is a settled node —
     /// a session an earlier attempt finished with is closed, and naming it would
     /// send a reader to a worktree that is gone.
-    pub fn sessions_in_flight(&self) -> BTreeMap<String, onevcs::Session> {
+    pub fn sessions_in_flight(&self) -> BTreeMap<String, crate::vcs::DispatchSession> {
         self.recorded
             .iter()
             .filter(|(_, recorded)| recorded.status() == NodeStatus::Running)
@@ -824,7 +824,7 @@ fn abandon_the_dispatch_in_flight(state: &mut RunState) {
         state.sessions.remove(&id);
         if let Some(node) = state.graph.get_mut(&id) {
             if node.branch.is_none() {
-                node.branch = Some(session.branch.clone());
+                node.branch = Some(session.branch().as_str().to_owned());
             }
         }
         state.abandoned.insert(id, session);
@@ -849,9 +849,16 @@ fn abandon_the_dispatch_in_flight(state: &mut RunState) {
 /// token with no branch is a pin this crate would have to invent.
 ///
 /// Which node it belongs to is the *enricher's* stamp rather than the
-/// producer's, so it is checked here: an envelope naming no node belongs to no
-/// dispatch. Whether that node still has one running is the reader's question —
-/// [`RunState::sessions_in_flight`] is where it is asked.
+/// producer's, so both halves of it are checked here: an envelope naming no node
+/// belongs to no dispatch, and one naming a node this run's graph does not hold
+/// is not about a dispatch of this run's at all. Whether that node still has one
+/// running is the reader's question — [`RunState::sessions_in_flight`] is where
+/// it is asked, because a session outlives the pass that observed it and the
+/// answer changes without another record arriving.
+///
+/// The payload itself is read and checked by
+/// [`DispatchSession::read_from`](crate::vcs::DispatchSession::read_from), which
+/// is the trust boundary for a session record.
 fn fold_session(state: &mut RunState, event: &Envelope) {
     if event.source != Source::Vcs || !crate::vcs::is_session_opened(&event.kind) {
         return;
@@ -859,21 +866,12 @@ fn fold_session(state: &mut RunState, event: &Envelope) {
     let Some(node) = event.labels.node.as_deref() else {
         return;
     };
-    // llmlint: ignore-block[boundary_inputs_validated] the type is the *producer's* own
-    // declaration of a session, and the two writers of this kind are `onevcs` itself —
-    // whose payload carries seven fields of its own beside these four — and this crate's
-    // copy of it. A reader that denied unknown fields here would refuse the sibling's own
-    // record of the session it just opened, which is the one thing this fold exists to
-    // read. What it does refuse is a record it cannot read a whole session out of: every
-    // field is required by the type, so a misspelled or missing `branch` drops the record
-    // rather than being half-read into a manager's only pointer at the work. And nothing
-    // taken from it is acted on — the token and the branch are handed back to `onevcs`,
-    // which resolves both against its own records, and the path is never opened here.
-    let Ok(session) =
-        serde_json::from_value::<onevcs::Session>(Value::Object(event.payload.clone()))
-    else {
+    if state.graph.get(node).is_none() {
         return;
-    }; // llmlint: ignore-end[boundary_inputs_validated]
+    }
+    let Some(session) = crate::vcs::DispatchSession::read_from(&event.payload) else {
+        return;
+    };
     state.sessions.insert(node.to_string(), session);
 }
 
@@ -1578,8 +1576,8 @@ mod tests {
         let state = fold(&events);
 
         let left = &state.abandoned["service"];
-        assert_eq!(left.token, onevcs::SessionToken("s-abc".into()));
-        assert_eq!(left.branch, "onevcs/s-abc");
+        assert_eq!(left.token(), &onevcs::SessionToken("s-abc".into()));
+        assert_eq!(left.branch().as_str(), "onevcs/s-abc");
         assert!(
             !state.abandoned.contains_key("audit"),
             "a dispatch that opened no session was reported as work left somewhere"
@@ -1647,13 +1645,19 @@ mod tests {
         );
     }
 
-    /// A record this build cannot read a whole session out of names nothing.
+    /// A record this fold cannot place, or cannot read a whole session out of,
+    /// names nothing.
     ///
-    /// Half a session is worse than none: a branch with no token leaves a
-    /// manager unable to find the worktree, and a token with no branch is a
-    /// pin this crate would have to invent.
+    /// Which node a session belongs to is stamped by the *enricher* rather than
+    /// by the producer that opened it, so a record naming none — or naming one
+    /// this run's graph does not hold — is not a dispatch of this run's. And
+    /// half a session is worse than none: a branch with no token leaves a
+    /// manager unable to find the worktree, and a token with no branch is a pin
+    /// this crate would have to invent. What makes a *value* usable is decided
+    /// where it is read, in
+    /// [`DispatchSession::read_from`](crate::vcs::DispatchSession::read_from).
     #[test]
-    fn a_session_record_naming_no_node_or_no_branch_is_left_out_of_the_fold() {
+    fn a_session_record_this_run_cannot_place_is_left_out_of_the_fold() {
         let plan = plan_of_nodes(vec![agent("service", &[])]);
         let mut unlabelled = opened(2, "service", "s-abc", "onevcs/s-abc");
         unlabelled.labels.node = None;
@@ -1674,14 +1678,22 @@ mod tests {
             ),
             unlabelled,
             branchless,
+            // A node no plan of this run's ever named, dispatched and opened
+            // against by a stamp nothing here wrote.
+            pipeline(journal::PipelineKind::NodeDispatched, 4, Some("ghost"), &[]),
+            opened(5, "ghost", "s-ghost", "onevcs/s-ghost"),
             pipeline(
                 journal::PipelineKind::DriverAdopted,
-                4,
+                6,
                 None,
                 &[("adoption", json!(1))],
             ),
         ]);
         assert!(state.abandoned.is_empty(), "{:?}", state.abandoned);
+        assert!(
+            !state.sessions.contains_key("ghost"),
+            "a session was folded against a node this run's graph never held"
+        );
         assert!(
             state
                 .graph

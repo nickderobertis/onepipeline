@@ -1048,7 +1048,8 @@ fn adopt(args: &RunArgs) -> Result<i32> {
             "onepipeline: '{node}' had a dispatch in flight; its work is on branch \
              '{}' in onevcs session {}, and the node is pinned there so the run \
              continues that branch rather than cutting a second one beside it",
-            session.branch, session.token.0
+            session.branch(),
+            session.token().0
         );
     }
     let mut adopted = vec![
@@ -1062,8 +1063,8 @@ fn adopt(args: &RunArgs) -> Result<i32> {
                 .iter()
                 .map(|(node, session)| json!({
                     "node": node,
-                    "session": session.token.0,
-                    "branch": session.branch,
+                    "session": session.token().0,
+                    "branch": session.branch().as_str(),
                 }))
                 .collect::<Vec<_>>()),
         ));

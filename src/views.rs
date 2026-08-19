@@ -1360,7 +1360,8 @@ pub fn results(view: &RunView) -> String {
             out.push_str(&format!(
                 " — a dispatch was abandoned when the run was adopted; its work is on {} \
                  (onevcs session {})",
-                session.branch, session.token.0
+                session.branch(),
+                session.token().0
             ));
         }
         // The one piece of evidence a person actually opens.
