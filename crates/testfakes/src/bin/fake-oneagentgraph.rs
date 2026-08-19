@@ -34,6 +34,41 @@ fn invalid_config() -> ExitCode {
     ExitCode::from(u8::try_from(oneagentgraph::error::EXIT_INVALID_CONFIG).unwrap_or(1))
 }
 
+/// The labels one envelope carries, with the conversation its turn belongs to
+/// stamped exactly where the sibling stamps it — and left off everything else.
+///
+/// Both halves come from that library rather than from a copy of its rule here:
+/// [`EventKind::carries_session`] decides *which* kinds carry the label and
+/// [`session_label`] computes the value. The exclusion is the load-bearing half.
+/// A consumer renders every labelled envelope that is not a `turn-activity` or a
+/// `turn-interrupted` as one transcript turn, so a double that stamped a
+/// heartbeat would be an oracle for a transcript nothing produces — and a
+/// hand-written `"{stream}.{member}"` would keep writing the old value the day
+/// that function's sanitising or its length bound moved.
+///
+/// [`EventKind::carries_session`]: oneagentgraph::event::EventKind::carries_session
+/// [`session_label`]: oneagentgraph::event::session_label
+fn with_session(
+    labels: &serde_json::Map<String, serde_json::Value>,
+    stream: &str,
+    kind: oneagentgraph::event::EventKind,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut labels = labels.clone();
+    let session = kind
+        .carries_session()
+        .then(|| labels.get("member").and_then(serde_json::Value::as_str))
+        .flatten()
+        .and_then(|member| oneagentgraph::event::session_label(stream, member));
+    match session {
+        Some(session) => labels.insert(
+            oneagentgraph::event::SESSION_LABEL.to_string(),
+            session.into(),
+        ),
+        None => labels.remove(oneagentgraph::event::SESSION_LABEL),
+    };
+    labels
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let dir = fake::script_dir();
@@ -160,16 +195,31 @@ fn interrupt(args: &[String], dir: &std::path::Path) -> ExitCode {
     if dir.join("interrupt.unreadable").exists() {
         println!("{{\"from\":\"a newer oneagentgraph\"}}");
     }
+    // The verb's own stream — an envelope's `stream` is a unique id per producing
+    // process, and this process is the one producing it — which is also half of
+    // the conversation the interrupted turn belongs to.
+    let stream = format!("{run}-interrupt-{}", std::process::id());
+    let labels = serde_json::Map::from_iter([
+        ("run_id".to_string(), serde_json::Value::from(run.clone())),
+        (
+            "member".to_string(),
+            serde_json::Value::from(member.clone()),
+        ),
+    ]);
     println!(
         "{}",
         serde_json::json!({
             "v": 1,
             "ts": fake::now(),
-            "stream": format!("{run}-interrupt-{}", std::process::id()),
+            "stream": stream,
             "seq": 0,
             "source": "agentgraph",
-            "kind": "turn-interrupted",
-            "labels": {"run_id": run, "member": member},
+            "kind": oneagentgraph::event::EventKind::TurnInterrupted.as_str(),
+            "labels": with_session(
+                &labels,
+                &stream,
+                oneagentgraph::event::EventKind::TurnInterrupted,
+            ),
             "payload": {
                 "member": member,
                 "delivered": reason.is_none(),
@@ -623,7 +673,13 @@ fn open_turn(args: &[String], dir: &std::path::Path, key: &str, node: &str, step
             fake::now()
         }
     };
-    for (seq, kind) in [(0, "member-started"), (1, "turn-started")] {
+    // The member's arrival and the turn behind it, and only the second of them
+    // names a conversation — which is the pair a consumer tells a transcript
+    // turn from everything else by.
+    for (seq, kind) in [
+        (0, oneagentgraph::event::EventKind::MemberStarted),
+        (1, oneagentgraph::event::EventKind::TurnStarted),
+    ] {
         println!(
             "{}",
             serde_json::json!({
@@ -632,8 +688,8 @@ fn open_turn(args: &[String], dir: &std::path::Path, key: &str, node: &str, step
                 "stream": stream(),
                 "seq": seq,
                 "source": "agentgraph",
-                "kind": kind,
-                "labels": labels,
+                "kind": kind.as_str(),
+                "labels": with_session(&labels, &stream(), kind),
                 "payload": {},
             })
         );
@@ -641,6 +697,7 @@ fn open_turn(args: &[String], dir: &std::path::Path, key: &str, node: &str, step
     if let Some(member) = fake::node_script(dir, key, "also-member") {
         let mut labels = labels.clone();
         labels.insert("member".to_string(), member.into());
+        let kind = oneagentgraph::event::EventKind::TurnStarted;
         println!(
             "{}",
             serde_json::json!({
@@ -649,8 +706,12 @@ fn open_turn(args: &[String], dir: &std::path::Path, key: &str, node: &str, step
                 "stream": stream(),
                 "seq": 5,
                 "source": "agentgraph",
-                "kind": "turn-started",
-                "labels": labels,
+                "kind": kind.as_str(),
+                // A second member of the one graph run is a second
+                // conversation, because the label joins the stream to the
+                // *member*: two members on one stream that shared a session
+                // would render as one transcript.
+                "labels": with_session(&labels, &stream(), kind),
                 "payload": {},
             })
         );
@@ -746,7 +807,15 @@ fn hold(
             // after the sibling renamed it, which is an oracle for a stream
             // nothing produces.
             "kind": oneagentgraph::event::EventKind::MemberHeartbeat.as_str(),
-            "labels": labels,
+            // Through the same stamp as every other envelope, which leaves a
+            // beat with no conversation on it: a member publishes thousands
+            // over a run, and a consumer counting labelled envelopes as
+            // transcript turns would count every one of them.
+            "labels": with_session(
+                &labels,
+                &stream(),
+                oneagentgraph::event::EventKind::MemberHeartbeat,
+            ),
             "payload": {},
         }));
         seq += 1;
@@ -887,7 +956,7 @@ fn emit(
         (true, 3) => STEPPED_BACK.to_string(),
         _ => fake::now(),
     };
-    let envelope = |seq: u64, kind: &str, payload: serde_json::Value| {
+    let envelope = |seq: u64, kind: oneagentgraph::event::EventKind, payload: serde_json::Value| {
         println!(
             "{}",
             serde_json::json!({
@@ -896,8 +965,8 @@ fn emit(
                 "stream": stream(),
                 "seq": seq,
                 "source": "agentgraph",
-                "kind": kind,
-                "labels": labels,
+                "kind": kind.as_str(),
+                "labels": with_session(&labels, &stream(), kind),
                 "payload": payload,
             })
         );
@@ -905,7 +974,7 @@ fn emit(
 
     envelope(
         2,
-        "turn-activity",
+        oneagentgraph::event::EventKind::TurnActivity,
         serde_json::json!({
             "kind": "tool_call",
             "name": "bash",
@@ -926,7 +995,7 @@ fn emit(
     if duplicate_seq {
         envelope(
             2,
-            "turn-activity",
+            oneagentgraph::event::EventKind::TurnActivity,
             serde_json::json!({
                 "kind": "tool_call",
                 "name": "bash",
@@ -935,10 +1004,14 @@ fn emit(
             }),
         );
     }
+    // Where this turn's conversation was written down. Published per oneharness
+    // invocation, as the real member publishes it, and before the turn it
+    // belongs to completes.
+    oneharness_session(&labels, node);
     let report = report_of(task);
     envelope(
         3,
-        "turn-completed",
+        oneagentgraph::event::EventKind::TurnCompleted,
         serde_json::json!({"usage": report["usage"]}),
     );
     // The report is *stored*, and the settlement says where — the sibling's own
@@ -1011,13 +1084,97 @@ fn emit(
     };
     envelope(
         4,
-        "member-settled",
+        oneagentgraph::event::EventKind::MemberSettled,
         serde_json::json!({
             "completed": true,
             "verdict": [],
             "completion_reason": "done_when_met",
             "report_path": named.map(|path| path.display().to_string()),
         }),
+    );
+}
+
+/// Publish where this turn's oneharness invocation wrote its conversation down.
+///
+/// The pointer a consumer renders an agent's actual transcript from, and the
+/// half of the session contract that is not a label: the payload names the
+/// history record and the three arguments its reader takes, and the artifact
+/// beside it is that record, under the `kind` the sibling names it by.
+///
+/// Built through the sibling's **own** [`OneharnessSession`] and [`Artifact`]
+/// types — like [`refuse_candidates`] above, and for the same reason: a
+/// hand-rolled object here would be a second reading of a schema that library
+/// owns, and it would keep serializing after the schema moved.
+///
+/// The record is really written, into this double's own scratch, so the artifact
+/// reference names a file that exists and has a size. A consumer that followed
+/// the path it was handed finds a conversation there rather than nothing.
+///
+/// [`OneharnessSession`]: oneagentgraph::event::OneharnessSession
+/// [`Artifact`]: oneagentgraph::event::Artifact
+fn oneharness_session(labels: &serde_json::Map<String, serde_json::Value>, node: &str) {
+    let record = format!("{}-{}", fake::segment(node), std::process::id());
+    let store = fake::script_dir().join("history");
+    let project = "fake-project";
+    let path = store.join(project).join(format!("{record}.jsonl"));
+    if let Some(parent) = path.parent() {
+        if let Err(error) = std::fs::create_dir_all(parent) {
+            fake::fail(&format!(
+                "cannot make {} to write a session into: {error}",
+                parent.display()
+            ));
+        }
+    }
+    // One conversation, in the shape oneharness records one. Written rather
+    // than claimed: a reference to a file nobody wrote is the missing-evidence
+    // scenario, and this is not it.
+    let conversation = serde_json::json!({"role": "assistant", "content": "Ran what the task asked for."});
+    let body = format!("{conversation}\n");
+    if let Err(error) = std::fs::write(&path, &body) {
+        fake::fail(&format!("cannot write {}: {error}", path.display()));
+    }
+    let session = oneagentgraph::event::OneharnessSession {
+        role: oneagentgraph::event::Role::Agent,
+        turn: 1,
+        identity: "fake-provider/claude-code".to_string(),
+        session_id: Some(format!("fake-harness-{record}")),
+        history_id: record.clone(),
+        history_dir: store.display().to_string(),
+        history_project: project.to_string(),
+        history_session: record.clone(),
+    };
+    let artifact = oneagentgraph::event::Artifact {
+        // The payload's own `history_id`, because the sibling's contract is that
+        // the record the invocation wrote *is* the artifact beside it.
+        id: record,
+        kind: oneagentgraph::event::ONEHARNESS_SESSION_ARTIFACT.to_string(),
+        bytes: body.len() as u64,
+    };
+    let kind = oneagentgraph::event::EventKind::OneharnessSession;
+    println!(
+        "{}",
+        serde_json::json!({
+            "v": 1,
+            "ts": fake::now(),
+            "stream": stream(),
+            // Above the turn's own envelopes and below the candidates a chain
+            // stepped past, so no reader can take it for either.
+            "seq": 6,
+            "source": "agentgraph",
+            "kind": kind.as_str(),
+            // No conversation on it: the record *names* one, and a consumer
+            // that read this as a transcript turn would render the pointer
+            // beside the thing it points at.
+            "labels": with_session(labels, &stream(), kind),
+            "payload": match serde_json::to_value(&session) {
+                Ok(payload) => payload,
+                Err(error) => fake::fail(&format!("a session is not an object: {error}")),
+            },
+            "artifacts": [match serde_json::to_value(&artifact) {
+                Ok(artifact) => artifact,
+                Err(error) => fake::fail(&format!("an artifact is not an object: {error}")),
+            }],
+        })
     );
 }
 
