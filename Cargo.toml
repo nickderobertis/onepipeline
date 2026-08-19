@@ -74,8 +74,25 @@ resolver = "2"
 #   drafted body is *for*: below it a change request opens with the boilerplate
 #   this crate has no way to replace. 0.4.1 adds a stacked-branch publish above it.
 #
-# One floor is carried by `Cargo.lock` rather than by the requirement below, and
-# deliberately: `onevcs` 0.4.2 takes up the session a stopped run left on a pinned
+# Two floors are carried by `Cargo.lock` rather than by the requirement below,
+# and deliberately.
+#
+# `oneagentgraph` 0.3.3 is the release the **session-conversation producer**
+# ships in: the `session` label on exactly `turn-started`, `turn-activity`,
+# `turn-completed` and `turn-interrupted`, and the `oneharness-session` event
+# naming the history record one oneharness invocation wrote, with that record as
+# its artifact. It is what an operator's conversation view renders an agent's
+# actual transcript out of, and this crate relays all of it. `^0.3.0` already
+# permits it, so the resolution is the whole of the fix and widening the
+# requirement would buy nothing — and would teach the next reader the wrong
+# lesson, which is the trap recorded for `onevcs` 0.4.2 immediately below, met a
+# second time. `src/agentgraph.rs`'s
+# `the_linked_oneagentgraph_produces_the_session_conversation_this_crate_relays`
+# is what holds the resolution there: it is spelled in the *older* release's
+# vocabulary on purpose, so below the floor it fails saying the lock is stale
+# rather than failing to compile. `tests/e2e/session.rs` is the relay itself.
+#
+# `onevcs` 0.4.2 takes up the session a stopped run left on a pinned
 # branch instead of cutting a second one on the same name, which is what lets a
 # retry reach work its predecessor stranded. `^0.4.1` already permits it, so the
 # resolution is the whole of the fix and widening the requirement would buy

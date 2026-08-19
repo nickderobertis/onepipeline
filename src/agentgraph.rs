@@ -1865,6 +1865,70 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// The linked `oneagentgraph` produces the session conversation this crate
+    /// relays.
+    ///
+    /// A **floor**, not a behaviour of this crate's own. The
+    /// session-conversation producer — the `session` label on the four kinds
+    /// that name a turn, and the `oneharness-session` event — shipped in
+    /// `oneagentgraph 0.3.3`, and `Cargo.toml`'s `^0.3.0` has permitted that
+    /// release since the day it landed. So the *requirement* cannot go stale;
+    /// only `Cargo.lock` can, and when it does every graph this engine drives
+    /// emits none of it, whatever `oneagentgraph` is installed on the host.
+    /// Nothing else here would notice, because a label nobody produces is a
+    /// label nobody misses: the suite's own double emits what it is taught to,
+    /// so it would go on passing against a build that relayed nothing.
+    ///
+    /// This is the trap `AGENTS.md` records for `onevcs` 0.4.2, a second time. A
+    /// reader who meets it and edits the requirement observes no change and
+    /// wrongly concludes the bug is open; the fix is `cargo update -p
+    /// oneagentgraph`.
+    ///
+    /// Both halves are spelled with items the **older** resolution also has —
+    /// [`Emitter`](oneagentgraph::event::Emitter), [`Labels`], and
+    /// [`EventKind`](oneagentgraph::event::EventKind)'s own deserializer — and
+    /// the label key is the literal string rather than that library's
+    /// `SESSION_LABEL` constant. Deliberately: an assertion written in 0.3.3's
+    /// new vocabulary would be a *compile* error below the floor, and a compile
+    /// error names a missing symbol rather than a stale lock.
+    ///
+    /// The first half is not a probe either — [`published`] is what this crate
+    /// puts on the merged stream for every live redirection it delivers through
+    /// the library path, so the assertion is on the envelope an operator really
+    /// gets.
+    #[test]
+    fn the_linked_oneagentgraph_produces_the_session_conversation_this_crate_relays() {
+        let run_id =
+            oneagentgraph::run::RunId::parse("node-scope-1786304152340-19").expect("a run id");
+        let [envelope] = &published(&run_id, "worker", 12, None)[..] else {
+            panic!("an interrupt publishes exactly one envelope");
+        };
+        let conversation = format!("{}.worker", envelope.stream);
+        assert_eq!(
+            envelope
+                .labels
+                .extra
+                .get("session")
+                .and_then(serde_json::Value::as_str),
+            Some(conversation.as_str()),
+            "the linked oneagentgraph stamps no `session` on a turn it names: the \
+             session-conversation producer ships in 0.3.3, `Cargo.toml`'s `^0.3.0` has \
+             permitted that release all along, so `Cargo.lock` is stale and \
+             `cargo update -p oneagentgraph` is the whole of the fix — editing the \
+             requirement changes nothing"
+        );
+        assert!(
+            serde_json::from_value::<oneagentgraph::event::EventKind>(serde_json::Value::String(
+                "oneharness-session".to_string()
+            ))
+            .is_ok(),
+            "the linked oneagentgraph does not know the `oneharness-session` kind, so no run \
+             this engine drives can say where an agent's conversation was written down: that \
+             event ships in 0.3.3 and `Cargo.lock` predates it — `cargo update -p \
+             oneagentgraph`"
+        );
+    }
+
     /// An envelope is the same value whichever way it crossed.
     ///
     /// This is the *content* half of the streaming promise: the subprocess path
