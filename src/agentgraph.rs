@@ -1865,6 +1865,54 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// The linked `oneagentgraph` produces the session conversation this crate
+    /// relays.
+    ///
+    /// The floor it holds, and why it is carried by `Cargo.lock` rather than by
+    /// the requirement, are with the pin in `Cargo.toml`.
+    ///
+    /// What is not obvious here is the **spelling**: both halves are written in
+    /// items the *older* resolution also has — [`Emitter`], [`Labels`], and
+    /// [`EventKind`]'s own deserializer — and the label key is the literal
+    /// string rather than that library's `SESSION_LABEL` constant. 0.3.3's new
+    /// vocabulary would make this a *compile* error below the floor, and a
+    /// compile error names a missing symbol rather than a stale lock.
+    ///
+    /// [`Emitter`]: oneagentgraph::event::Emitter
+    /// [`EventKind`]: oneagentgraph::event::EventKind
+    #[test]
+    fn the_linked_oneagentgraph_produces_the_session_conversation_this_crate_relays() {
+        let run_id =
+            oneagentgraph::run::RunId::parse("node-scope-1786304152340-19").expect("a run id");
+        let [envelope] = &published(&run_id, "worker", 12, None)[..] else {
+            panic!("an interrupt publishes exactly one envelope");
+        };
+        let conversation = format!("{}.worker", envelope.stream);
+        assert_eq!(
+            envelope
+                .labels
+                .extra
+                .get("session")
+                .and_then(serde_json::Value::as_str),
+            Some(conversation.as_str()),
+            "the linked oneagentgraph stamps no `session` on a turn it names: the \
+             session-conversation producer ships in 0.3.3, `Cargo.toml`'s `^0.3.0` has \
+             permitted that release all along, so `Cargo.lock` is stale and \
+             `cargo update -p oneagentgraph` is the whole of the fix — editing the \
+             requirement changes nothing"
+        );
+        assert!(
+            serde_json::from_value::<oneagentgraph::event::EventKind>(serde_json::Value::String(
+                "oneharness-session".to_string()
+            ))
+            .is_ok(),
+            "the linked oneagentgraph does not know the `oneharness-session` kind, so no run \
+             this engine drives can say where an agent's conversation was written down: that \
+             event ships in 0.3.3 and `Cargo.lock` predates it — `cargo update -p \
+             oneagentgraph`"
+        );
+    }
+
     /// An envelope is the same value whichever way it crossed.
     ///
     /// This is the *content* half of the streaming promise: the subprocess path
