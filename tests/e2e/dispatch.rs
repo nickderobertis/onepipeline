@@ -2719,3 +2719,59 @@ fn the_retained_driver_reads_its_own_event_filter_and_refuses_an_unusable_one() 
         driven.stdout
     );
 }
+
+/// A worker turn of a **detached** run knows which run it may ask its manager on.
+///
+/// Detached with no dag-scope graph, because that is the shape the direction was
+/// closed on and the one a long run is launched in; every other journey here
+/// launches attached, which proves the shape that already worked.
+///
+/// Read off the turn rather than the dispatch: the turn is the process the
+/// `ask-manager` wrapper runs in, and the real `oneagentgraph` composing a
+/// member's environment per launch is what stands between the two.
+// llmlint: ignore[tests_mirror_real_usage] no product surface reports the environment a
+// turn was handed — it is read by a wrapper inside that turn — so the double's record is
+// the only place the fact exists, as it is for `dispatched_run_ids` in `driver.rs`.
+#[test]
+fn a_detached_runs_worker_turn_carries_the_run_it_may_ask_its_manager_on() {
+    let world = World::new("real-detached-run-id");
+    world.write_graphs();
+    let path = world.plan("askable", &plan_of("askable", vec![agent("build", &[])]));
+
+    let started = world.run_on(
+        world.agentgraph_cmd(&["start", &path.to_string_lossy(), "--detach"]),
+        "start --detach with no dag-scope graph",
+    );
+    started.exited(0);
+    let run = started.json()["run_id"]
+        .as_str()
+        .expect("a detached launch names its run")
+        .to_string();
+
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+    assert_eq!(
+        world.run_json(&run, "result.json")["state"],
+        "complete",
+        "the run did not settle: {}",
+        world.dump()
+    );
+
+    let turns = world.turns();
+    let worker: Vec<&crate::harness::Turn> = turns
+        .iter()
+        .filter(|turn| turn.member == "worker")
+        .collect();
+    assert!(
+        !worker.is_empty(),
+        "no worker turn ran, so nothing here is about what one carried: {}",
+        world.dump()
+    );
+    for turn in worker {
+        assert_eq!(
+            turn.run, run,
+            "a worker of a detached run could not say which run it may ask on: {turn:?}"
+        );
+    }
+}

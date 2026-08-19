@@ -23,6 +23,16 @@ use std::path::{Path, PathBuf};
 /// The environment variable naming the directory a double is scripted from.
 pub const SCRIPT_DIR_ENV: &str = "ONEPIPELINE_FAKE_DIR";
 
+/// The environment variable naming the run a launch or a dispatch belongs to.
+///
+/// The doubles read it out of their own environment, because what a journey
+/// states is that the pair *arrived*.
+// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the crate under test declares
+// this key in a module `src/lib.rs` keeps private, so there is no item to import and no
+// source to share. The reconciling gate is a journey, as it is for `MODES` in
+// `fake-claude.rs`: a spelling that drifted leaves every double reading an unset variable.
+pub const RUN_ID_ENV: &str = "ONEPIPELINE_RUN_ID";
+
 /// The environment variable a member's own harness config stamps its name into.
 ///
 /// A single-sided member's turn is a library call inside `oneagentgraph`, so the
@@ -361,9 +371,9 @@ pub fn now() -> String {
 pub fn observe(dir: &Path) -> std::process::ExitCode {
     // Required, not defaulted: an empty run id would leave every assertion
     // about what this observer saw pointing at a run named by nothing.
-    let run = match std::env::var("ONEPIPELINE_RUN_ID") {
+    let run = match std::env::var(RUN_ID_ENV) {
         Ok(run) if !run.is_empty() => run,
-        _ => fail("ONEPIPELINE_RUN_ID is unset: no run to observe"),
+        _ => fail(&format!("{RUN_ID_ENV} is unset: no run to observe")),
     };
     // The first thing a real monitor member does is read the run's ledger, so
     // the first thing this one records is whether that ledger was there to be

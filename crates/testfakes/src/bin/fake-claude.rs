@@ -195,10 +195,13 @@ fn turn(args: &[String], dir: &std::path::Path) -> ExitCode {
         Err(error) => return fake::refuse(&format!("claude has no working directory: {error}")),
     };
     let member = std::env::var(fake::MEMBER_ENV).unwrap_or_default();
+    // The run this turn belongs to, out of the turn's own environment — where the
+    // `ask-manager` wrapper reads it. Empty is a worker that could not ask.
+    let run = std::env::var(fake::RUN_ID_ENV).unwrap_or_default();
     fake::record(
         dir,
         "claude-turn",
-        &[prompt.clone(), cwd.display().to_string(), member],
+        &[prompt.clone(), cwd.display().to_string(), member, run],
     );
 
     // A worker turn that leaves something behind in the worktree it was given.

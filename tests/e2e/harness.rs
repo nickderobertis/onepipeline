@@ -144,6 +144,9 @@ pub struct Turn {
     /// The member it was, from its own config's `[env]`. Empty for a turn whose
     /// config a journey wrote itself and did not stamp.
     pub member: String,
+    /// The run it belonged to, out of the turn's own environment. Empty is a
+    /// worker with no run whose channel to ask its manager on.
+    pub run: String,
 }
 
 /// The prose [`REPORTING_MEMBER`] carries as its own `task`.
@@ -1015,7 +1018,7 @@ impl World {
     }
 
     /// Every model turn that really ran, in order: what it was asked to do,
-    /// where it worked, and which member it was.
+    /// where it worked, which member it was, and the run it belonged to.
     ///
     /// The one place a journey can read a member's *prose* from. A single-sided
     /// member's turn is a library call inside `oneagentgraph` from 0.2.18 on, so
@@ -1028,11 +1031,23 @@ impl World {
             .into_iter()
             .filter(|call| call["tool"] == "claude-turn")
             .map(|call| Turn {
-                prompt: call["args"][0].as_str().unwrap_or_default().to_string(),
-                cwd: call["args"][1].as_str().unwrap_or_default().to_string(),
-                member: call["args"][2].as_str().unwrap_or_default().to_string(),
+                prompt: Self::recorded(&call, 0, "the prompt"),
+                cwd: Self::recorded(&call, 1, "the working directory"),
+                member: Self::recorded(&call, 2, "the member"),
+                run: Self::recorded(&call, 3, "the run"),
             })
             .collect()
+    }
+
+    /// One recorded string off a double's invocation, refused if it is not there.
+    ///
+    /// A field read leniently would let a double that stopped recording one look,
+    /// to every assertion here, exactly like one still recording it correctly.
+    fn recorded(call: &Value, at: usize, what: &str) -> String {
+        call["args"][at]
+            .as_str()
+            .unwrap_or_else(|| panic!("a recorded turn carries no string for {what}: {call}"))
+            .to_string()
     }
 
     /// The prose one named member's turn was given.
@@ -1046,6 +1061,14 @@ impl World {
             .find(|turn| turn.member == member)
             .map(|turn| turn.prompt.clone())
             .unwrap_or_else(|| panic!("no member '{member}' ran a turn: {turns:?}"))
+    }
+
+    /// What every node dispatch's own environment carried, in dispatch order.
+    ///
+    /// Recorded by the `oneagentgraph` double, so it is what the launched process
+    /// was handed rather than what a record says it should have been.
+    pub fn dispatch_env(&self) -> Vec<Value> {
+        read_jsonl(&self.fakes.join("dispatch-env.jsonl"))
     }
 
     /// What each observer the launcher started found waiting for it, in order.

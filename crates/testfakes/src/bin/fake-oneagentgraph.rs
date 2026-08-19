@@ -257,6 +257,18 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     let node = fake::label(args, "onepipeline.node").unwrap_or_else(|| "unknown".into());
     let step = fake::label(args, "onepipeline.step");
     let persona = fake::label(args, "onepipeline.persona");
+    // What this dispatch's own environment carried. Recorded rather than checked:
+    // the double states what it was handed and the journey decides what it means.
+    fake::append(
+        &dir.join("dispatch-env.jsonl"),
+        &serde_json::json!({
+            "node": node,
+            "step": step,
+            "persona": persona,
+            "run": std::env::var(fake::RUN_ID_ENV).unwrap_or_default(),
+        })
+        .to_string(),
+    );
     // A node dispatches under more than one persona — its own worker, and the
     // `pr-author` that drafts its change request — so a script may name either
     // the persona or the node/step it applies to.

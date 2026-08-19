@@ -239,12 +239,13 @@ impl Executor for LocalExecutor {
         let filters = launched_with(&req.labels)?
             .map(|record| record.filters)
             .unwrap_or_default();
+        let env = dispatch_env(&req.labels);
         let mut run = GraphRun::start(&Launch {
             graph: &req.graph.0,
             task: &req.task,
             dir: &dir,
             labels: &req.labels,
-            env: &[],
+            env: &env,
             sets: &node_sets,
             filter: filters.agentgraph.as_ref(),
             output: GraphOutput::Relayed,
@@ -285,6 +286,26 @@ impl Executor for LocalExecutor {
             _claim: claim,
         }))
     }
+}
+
+/// The run's own identity, in the environment of every dispatch it makes.
+///
+/// A dispatched agent's one supported way to put a blocking question to its
+/// manager is the operator's `ask-manager` wrapper, which reads this variable out
+/// of its own environment and refuses without one. Declared here so every
+/// dispatch carries it, rather than left to what the driver process happens to
+/// hold: only a run launched with an observer graph ever put it there.
+///
+/// The run id and nothing else: it is constant for the life of a driver, which is
+/// the case [`export`](crate::agentgraph) allows on the process the library
+/// backend runs in. A dispatch outside a run carries no pair, for the same reason
+/// it registers nothing — there is no run for the wrapper to address.
+fn dispatch_env(labels: &Labels) -> Vec<(String, String)> {
+    labels
+        .run_id
+        .iter()
+        .map(|run| (crate::agentgraph::RUN_ID_ENV.to_string(), run.clone()))
+        .collect()
 }
 
 /// Record this dispatch in its run's registry, and hold the entry open.
