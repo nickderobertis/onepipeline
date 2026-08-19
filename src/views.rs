@@ -374,9 +374,9 @@ impl RunView {
 /// triage.
 #[derive(Debug, Default)]
 struct Unread {
-    /// How many surfaces are waiting.
     count: usize,
-    /// How long the oldest has waited, in seconds. Absent when none is.
+    /// Absent when nothing is waiting, rather than a zero that reads as a queue
+    /// somebody has just emptied.
     oldest_seconds: Option<u64>,
     /// The kinds waiting and how many of each, in the order the line names them:
     /// the kinds with a **blocking** surface among them first, because a
@@ -429,7 +429,8 @@ impl Unread {
         }
     }
 
-    /// The kinds waiting, as the parenthetical the line carries.
+    /// The kinds, bounded: past [`MAX_NAMED_KINDS`] the line says how many it
+    /// left out rather than ending where a reader cannot tell it was cut.
     fn phrase(&self) -> String {
         let named: Vec<String> = self
             .kinds
