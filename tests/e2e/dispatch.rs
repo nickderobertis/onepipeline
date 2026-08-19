@@ -2722,12 +2722,13 @@ fn a_run_whose_observer_graph_is_watching_and_then_is_killed_reads_as_each() {
     // And the driver said so where a detached run's driver says everything: an
     // operator following the log learns its monitor went, rather than only
     // noticing it had stopped saying anything.
-    let log = std::fs::read_to_string(world.run_file("watched", "driver.log"))
-        .expect("the detached driver keeps a log");
-    assert!(
-        log.contains("has stopped watching"),
-        "the driver never said its observer had gone:\n{log}"
-    );
+    //
+    // Waited for rather than read once: the verdict above answers off the
+    // ownership lock, which is true the instant the process dies, while this
+    // line comes from the driver's own watch on its own poll — so reading the
+    // log the moment the views agree is a race the driver loses on a loaded
+    // host, and did, on macOS.
+    world.until_run_file_holds("watched", "driver.log", "has stopped watching");
     world.release("observer.go");
     world.release("turn.go");
     world.release("turn.settle");
