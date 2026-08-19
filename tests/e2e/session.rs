@@ -104,14 +104,19 @@ fn every_turn_relayed_into_the_journal_names_the_conversation_it_belongs_to() {
 
     let events = world.journal("conversation");
     for kind in NAMES_A_CONVERSATION {
-        let named: Vec<&Value> = events.iter().filter(|event| event["kind"] == kind).collect();
+        let named: Vec<&Value> = events
+            .iter()
+            .filter(|event| event["kind"] == kind)
+            .collect();
         assert!(
             !named.is_empty(),
             "no {kind} reached the journal at all, so this journey proves nothing about it: {:?}",
             world.kinds("conversation")
         );
         for event in named {
-            let stream = event["stream"].as_str().expect("an envelope names its stream");
+            let stream = event["stream"]
+                .as_str()
+                .expect("an envelope names its stream");
             let member = event["labels"]["member"]
                 .as_str()
                 .unwrap_or_else(|| panic!("a {kind} names no member: {event}"));
@@ -137,7 +142,10 @@ fn every_turn_relayed_into_the_journal_names_the_conversation_it_belongs_to() {
     }
 
     for kind in NAMES_NONE {
-        let named: Vec<&Value> = events.iter().filter(|event| event["kind"] == kind).collect();
+        let named: Vec<&Value> = events
+            .iter()
+            .filter(|event| event["kind"] == kind)
+            .collect();
         assert!(
             !named.is_empty(),
             "no {kind} reached the journal at all, so the exclusion below proves nothing: {:?}",

@@ -1128,7 +1128,8 @@ fn oneharness_session(labels: &serde_json::Map<String, serde_json::Value>, node:
     // One conversation, in the shape oneharness records one. Written rather
     // than claimed: a reference to a file nobody wrote is the missing-evidence
     // scenario, and this is not it.
-    let conversation = serde_json::json!({"role": "assistant", "content": "Ran what the task asked for."});
+    let conversation =
+        serde_json::json!({"role": "assistant", "content": "Ran what the task asked for."});
     let body = format!("{conversation}\n");
     if let Err(error) = std::fs::write(&path, &body) {
         fake::fail(&format!("cannot write {}: {error}", path.display()));
