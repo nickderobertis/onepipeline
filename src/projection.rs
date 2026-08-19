@@ -430,12 +430,12 @@ impl RunState {
 
     /// The session each node still recorded `running` is working in.
     ///
-    /// Nothing about a settled node: a session an earlier attempt finished with
-    /// is closed, and naming it would send a reader to a worktree that is gone.
-    /// The answer is empty for a run with no dispatch in flight, and for one
-    /// whose dispatches opened no session — a direct agent node has no
-    /// repository and so has no branch to be anywhere.
-    pub fn dispatches_in_flight(&self) -> BTreeMap<String, onevcs::Session> {
+    /// The **sessions**, and so not every dispatch in flight: a node whose
+    /// dispatch opened none is not in it, because a direct agent node has no
+    /// repository and so has no branch to be anywhere. Nor is a settled node —
+    /// a session an earlier attempt finished with is closed, and naming it would
+    /// send a reader to a worktree that is gone.
+    pub fn sessions_in_flight(&self) -> BTreeMap<String, onevcs::Session> {
         self.recorded
             .iter()
             .filter(|(_, recorded)| recorded.status() == NodeStatus::Running)
@@ -820,7 +820,7 @@ fn abandon_the_dispatch_in_flight(state: &mut RunState) {
     // derivation rather than two that can come to disagree. A dispatch that had
     // opened no session — a direct agent node, or a lifecycle node the driver
     // died ahead of — is not in it: there is no branch to name and none to pin.
-    for (id, session) in state.dispatches_in_flight() {
+    for (id, session) in state.sessions_in_flight() {
         state.sessions.remove(&id);
         if let Some(node) = state.graph.get_mut(&id) {
             if node.branch.is_none() {
@@ -851,7 +851,7 @@ fn abandon_the_dispatch_in_flight(state: &mut RunState) {
 /// Which node it belongs to is the *enricher's* stamp rather than the
 /// producer's, so it is checked here: an envelope naming no node belongs to no
 /// dispatch. Whether that node still has one running is the reader's question —
-/// [`RunState::dispatches_in_flight`] is where it is asked.
+/// [`RunState::sessions_in_flight`] is where it is asked.
 fn fold_session(state: &mut RunState, event: &Envelope) {
     if event.source != Source::Vcs || !crate::vcs::is_session_opened(&event.kind) {
         return;

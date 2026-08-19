@@ -1042,7 +1042,7 @@ fn adopt(args: &RunArgs) -> Result<i32> {
     // the session each one was working in is the only record of where its
     // commits are: named here, that branch is in the run's own account of the
     // adoption rather than only in a process that has exited.
-    let abandoned = view.state.dispatches_in_flight();
+    let abandoned = view.state.sessions_in_flight();
     for (node, session) in &abandoned {
         eprintln!(
             "onepipeline: '{node}' had a dispatch in flight; its work is on branch \
