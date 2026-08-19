@@ -597,7 +597,10 @@ pub fn session_opened_event(session: &Session, labels: &crate::event::Labels) ->
         stream: format!("onevcs-{}", session.token.0),
         seq: 0,
         source: crate::event::Source::Vcs,
-        kind: crate::event::EventKind("session-opened".into()),
+        // The sibling's own spelling, through its own serializer: this envelope
+        // stands beside the ones `onevcs` writes for the same session, and a
+        // reader that folds one of them has to fold both.
+        kind: kind_of(onevcs::EventKind::SessionOpened),
         labels: labels.clone(),
         payload: crate::journal::payload(&[
             ("token", serde_json::json!(session.token.0)),
@@ -635,6 +638,16 @@ pub fn published_event(published: &Publication, labels: &crate::event::Labels) -
         ]),
         artifacts: Vec::new(),
     }
+}
+
+/// Whether an envelope is a session opening, in `onevcs`'s own vocabulary.
+///
+/// Asked through that library's enum rather than against a string of this
+/// crate's, for the reason [`kind_of`] gives: how a kind is spelled is the
+/// sibling's to decide, and a literal here would keep matching after a rename
+/// and silently stop folding anything.
+pub fn is_session_opened(kind: &crate::event::EventKind) -> bool {
+    *kind == kind_of(onevcs::EventKind::SessionOpened)
 }
 
 /// The session a lifecycle node asks for.

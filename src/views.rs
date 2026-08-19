@@ -1351,6 +1351,18 @@ pub fn results(view: &RunView) -> String {
         {
             out.push_str(&format!(" — preserved on {branch}"));
         }
+        // Where the dispatch an adoption cleared had got to. The node itself is
+        // dispatched again and settles under its own words, and none of them say
+        // that an *earlier* dispatch committed work somewhere: the driver that
+        // was running it exited without settling anything, so this line is the
+        // only place that branch and that session are ever named.
+        if let Some(session) = view.state.abandoned.get(&node.id) {
+            out.push_str(&format!(
+                " — a dispatch was abandoned when the run was adopted; its work is on {} \
+                 (onevcs session {})",
+                session.branch, session.token.0
+            ));
+        }
         // The one piece of evidence a person actually opens.
         if let Some(url) = view.state.change_urls.get(&node.id) {
             out.push_str(&format!(" — {url}"));

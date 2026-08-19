@@ -483,6 +483,17 @@ impl StopTeardown {
 /// change of its own — see [`crate::graph::Landing`].
 pub const SETTLED_LANDING: &str = "landing";
 
+/// The `driver-adopted` payload field naming the dispatches the adoption
+/// cleared, and where each one's work is.
+///
+/// An array of `{node, session, branch}`, and absent where the run had no
+/// dispatch in flight — the shape every optional field this crate writes takes.
+/// The projection derives the same answer from the journal it is folding rather
+/// than reading this back, so an adoption an older build recorded still reports
+/// what it abandoned; this is what a person reading the store, or a tool that
+/// does not fold it, finds at the moment it happened.
+pub const ADOPTED_ABANDONED: &str = "abandoned";
+
 /// The payload of a `node-settled` event, as the projection folds it.
 pub fn settled_payload(
     status: &str,

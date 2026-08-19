@@ -2691,3 +2691,128 @@ fn an_adopted_runs_worker_can_ask_its_manager() {
         "build: the approval says nothing about the schema. Which one?"
     );
 }
+
+/// Adopting a run that had a dispatch in flight, which is what `adopt` is for.
+///
+/// The driver dies mid-dispatch and the work does not: `onevcs` commits the
+/// worktree onto the session's branch before it gates, so the branch holds
+/// whatever the worker had done and the session is the only thing that knows
+/// where. Adoption used to drop the record and nothing else — the node became
+/// ready, was dispatched into a brand-new session, and the previous branch was
+/// left unreferenced and unnamed anywhere a manager looks. It was found once
+/// only because the worker happened to have committed.
+///
+/// So the branch is named where the adoption is recorded and where an operator
+/// reads results, and the node is pinned to it, which makes `onevcs` take that
+/// session up rather than cut a second one on the same work.
+#[test]
+fn adopting_a_run_whose_dispatch_was_in_flight_leaves_that_dispatchs_work_reachable() {
+    let world = World::new("driver-adopt-inflight");
+    // A gate this journey holds, which is how a dispatch is caught in flight
+    // with its work already committed.
+    let go = world.fakes.join("gate.go");
+    let held = crate::harness::gate_script(&world, &["wait-for", &go.to_string_lossy()]);
+    let repo = world.repository(
+        "local-direct",
+        &held.iter().map(String::as_str).collect::<Vec<_>>(),
+    );
+    world.script("service.work", "the worker wrote this\n");
+
+    // No branch pin at all — the measured case. The session names the branch, so
+    // nothing in the plan says where the dispatch's work is.
+    let run = "inflight".to_string();
+    let path = world.plan(
+        &run,
+        &plan_of(&run, vec![crate::harness::lifecycle("service", &[])]),
+    );
+    let mut owner = world
+        .cmd(&["start", &path.to_string_lossy(), "--attach"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the run's first driver starts");
+    world.until("the dispatch to reach its gate", |world| {
+        world
+            .journal(&run)
+            .iter()
+            .any(|event| event["source"] == "vcs" && event["kind"] == "gate-started")
+    });
+    let abandoned = world
+        .events_of(&run, "session-opened")
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| panic!("the dispatch opened no session:\n{}", world.dump()));
+    let token = abandoned["payload"]["token"]
+        .as_str()
+        .expect("the session names its token")
+        .to_owned();
+    let branch = abandoned["payload"]["branch"]
+        .as_str()
+        .expect("the session names its branch")
+        .to_owned();
+
+    owner.kill().expect("the run's first driver is terminated");
+    owner.wait().expect("the run's first driver exits");
+    world.until("the driver to exit", |world| {
+        world.run(&["status", &run]).stdout.contains("DRIVER DEAD")
+    });
+    // The gate the dead driver was held at, released so the adoption's own
+    // publication can finish.
+    world.release("gate.go");
+
+    let adopted = world.run(&["adopt", &run]);
+    adopted.exited(0);
+    // The operator who typed `adopt` is told at the moment it happens, because
+    // this is when they can still act on it.
+    adopted
+        .err_has("had a dispatch in flight")
+        .err_has(&branch)
+        .err_has(&token);
+
+    let recorded = world.events_of(&run, "driver-adopted");
+    assert_eq!(recorded.len(), 1, "{recorded:?}");
+    assert_eq!(
+        recorded[0]["payload"]["abandoned"],
+        json!([{"node": "service", "session": token, "branch": branch}]),
+        "the adoption did not name the dispatch it cleared: {}",
+        recorded[0]
+    );
+    world
+        .run(&["results", &run])
+        .exited(0)
+        .out_has(&branch)
+        .out_has(&token);
+
+    // The re-dispatch continued that session rather than cutting a second one on
+    // the same work. Both halves are asserted, because either alone passes for
+    // the wrong reason: every session this run ever opened is the one the
+    // abandoned dispatch was working in, and `onevcs` — which is what decides
+    // whether a session is taken up — says it took one up.
+    let openings = world.events_of(&run, "session-opened");
+    let tokens: Vec<String> = openings
+        .iter()
+        .filter_map(|event| event["payload"]["token"].as_str().map(str::to_owned))
+        .collect();
+    assert!(
+        tokens.len() > 1,
+        "the adopted run's own dispatch opened no session at all: {tokens:?}"
+    );
+    assert!(
+        tokens.iter().all(|opened| *opened == token),
+        "the adopted run cut a session beside the one holding the work: {tokens:?}"
+    );
+    assert!(
+        openings
+            .iter()
+            .any(|event| event["payload"]["reused"] == json!(true)),
+        "the sibling never recorded taking a session up, so the re-dispatch reached \
+         that branch some other way: {openings:?}"
+    );
+    // Which is the only thing an operator cares about: the work the dead driver
+    // left on that branch reached the base.
+    assert_eq!(
+        repo.base_file("service.md").as_deref().map(str::trim),
+        Some("the worker wrote this"),
+        "the abandoned dispatch's work never reached the base"
+    );
+}

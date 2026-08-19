@@ -60,6 +60,22 @@ pub struct RunState {
     /// work actually landed on, which for an unpinned node the sibling named,
     /// and it is the only record of where preserved work is.
     pub branches: BTreeMap<String, String>,
+    /// The `onevcs` session each node's **current** dispatch opened.
+    ///
+    /// Cleared when the node is dispatched again, so what it holds is the
+    /// session that dispatch is working in rather than one an earlier attempt
+    /// finished with. Read for a node still recorded `running`, which is the
+    /// only time the question — *where is the work being done right now?* — has
+    /// an answer at all.
+    pub sessions: BTreeMap<String, onevcs::Session>,
+    /// The dispatch each node had in flight when an adoption cleared it.
+    ///
+    /// A driver's death does not end the session its dispatch opened: the
+    /// branch, the worktree, and whatever the worker had committed are all still
+    /// there, and this is the only record of where. Without it the node becomes
+    /// ready again, is dispatched into a fresh session, and the previous one is
+    /// left unnamed anywhere a manager looks.
+    pub abandoned: BTreeMap<String, onevcs::Session>,
     /// Where a human reads the change each published node opened.
     pub change_urls: BTreeMap<String, String>,
     /// Whether each published node's change reached its base branch.
@@ -412,6 +428,21 @@ impl RunState {
             .collect()
     }
 
+    /// The session each node still recorded `running` is working in.
+    ///
+    /// Nothing about a settled node: a session an earlier attempt finished with
+    /// is closed, and naming it would send a reader to a worktree that is gone.
+    /// The answer is empty for a run with no dispatch in flight, and for one
+    /// whose dispatches opened no session — a direct agent node has no
+    /// repository and so has no branch to be anywhere.
+    pub fn dispatches_in_flight(&self) -> BTreeMap<String, onevcs::Session> {
+        self.recorded
+            .iter()
+            .filter(|(_, recorded)| recorded.status() == NodeStatus::Running)
+            .filter_map(|(id, _)| Some((id.clone(), self.sessions.get(id)?.clone())))
+            .collect()
+    }
+
     /// Whether a ready human action is outstanding: one nobody has attested.
     ///
     /// Half of what makes a stalled run *waiting on a person* rather than
@@ -463,10 +494,12 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
     if event.source != Source::Pipeline {
         // A relayed envelope does not decide this crate's graph state — a
         // sibling library does not settle a node — but it is the only evidence
-        // of what the node it belongs to is doing while it runs, and the only
-        // evidence of which identity refused when it stops running.
+        // of what the node it belongs to is doing while it runs, the only
+        // evidence of which identity refused when it stops running, and the only
+        // evidence of where it is doing it.
         fold_activity(state, event);
         fold_refusal(state, event);
+        fold_session(state, event);
         return;
     }
     let payload = &event.payload;
@@ -490,6 +523,11 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
                 if let Some(ts) = millis_of(&event.ts) {
                     state.dispatched_at.insert(node.clone(), ts);
                 }
+                // A dispatch has not opened its session yet, and the one the
+                // attempt before it worked in is finished with. Left standing,
+                // it would name a re-dispatched node's work on the branch its
+                // *previous* attempt used.
+                state.sessions.remove(node);
                 // The note rode this dispatch, so it is spent. Carrying it into
                 // a later one would repeat a correction the worker has already
                 // been given.
@@ -640,7 +678,14 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
         // never ready, so never dispatched again, and never terminal, so the
         // loop that adopted it would spin on it forever. The record stands as
         // history; what it means for the *frontier* ends here.
+        //
+        // The *work* is a different question from the process, and it does
+        // survive: what the dispatch had committed is on the branch its session
+        // opened, and that session is still open. So it is named before the
+        // record clearing it, and the node is pinned there — see
+        // [`abandon_the_dispatch_in_flight`].
         Some(journal::PipelineKind::DriverAdopted) => {
+            abandon_the_dispatch_in_flight(state);
             state
                 .recorded
                 .retain(|_, recorded| recorded.status() != NodeStatus::Running);
@@ -747,6 +792,89 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
         }
         _ => {}
     }
+}
+
+/// Record where each dispatch an adoption is clearing was working, and pin its
+/// node there.
+///
+/// Only the nodes the arm above is about to drop: a node not recorded `running`
+/// has no dispatch in flight, and an adoption of a run that had none changes
+/// nothing at all.
+///
+/// **Naming it is the floor, and pinning it is what recovers the work.** The
+/// session `onevcs` opened for the dead driver's dispatch is still open, and
+/// that library takes an open session up again when the branch it holds is the
+/// branch the next dispatch pins — so a node pinned here continues on the branch
+/// its previous dispatch committed to instead of cutting a second one beside it
+/// and leaving the first unreferenced.
+///
+/// A `branch` the *planner* wrote wins outright, exactly as it does in
+/// [`pin_preserved_branch`]: naming one is a decision somebody made, and a pin
+/// this crate derived must not overwrite it. It is the same branch in every case
+/// this can reach — `onevcs` honours a pin or refuses it, so a session that
+/// opened at all opened on the branch the node named — and the rule is stated
+/// once rather than assumed twice.
+fn abandon_the_dispatch_in_flight(state: &mut RunState) {
+    // The same answer the adopting driver records in the journal, so what a
+    // reader folds and what the run's own `driver-adopted` says are one
+    // derivation rather than two that can come to disagree. A dispatch that had
+    // opened no session — a direct agent node, or a lifecycle node the driver
+    // died ahead of — is not in it: there is no branch to name and none to pin.
+    for (id, session) in state.dispatches_in_flight() {
+        state.sessions.remove(&id);
+        if let Some(node) = state.graph.get_mut(&id) {
+            if node.branch.is_none() {
+                node.branch = Some(session.branch.clone());
+            }
+        }
+        state.abandoned.insert(id, session);
+    }
+}
+
+/// Fold one relayed `session-opened` into where the node's dispatch is working.
+///
+/// Only `onevcs` opens a session, so only an envelope that library's own source
+/// and kind is one: a record of another producer's, wearing the kind, is not
+/// evidence about a repository and would put a manager onto a branch nobody
+/// cut. Both writers of it land here — the sibling's own record and the envelope
+/// this crate writes beside it for the merged stream — and the last one wins,
+/// because they describe the same session.
+///
+/// The payload is read into [`onevcs::Session`], the sibling's **own**
+/// declaration of what a session is, exactly as [`fold_refusal`] reads
+/// `oneagentgraph`'s: the shape this crate expects is then the shape the
+/// producer publishes, and a record that is not one is a record this build has
+/// no reading of. A half-named session is dropped rather than half-read — a
+/// branch with no token leaves a manager unable to find the worktree, and a
+/// token with no branch is a pin this crate would have to invent.
+///
+/// Which node it belongs to is the *enricher's* stamp rather than the
+/// producer's, so it is checked here: an envelope naming no node belongs to no
+/// dispatch. Whether that node still has one running is the reader's question —
+/// [`RunState::dispatches_in_flight`] is where it is asked.
+fn fold_session(state: &mut RunState, event: &Envelope) {
+    if event.source != Source::Vcs || !crate::vcs::is_session_opened(&event.kind) {
+        return;
+    }
+    let Some(node) = event.labels.node.as_deref() else {
+        return;
+    };
+    // llmlint: ignore-block[boundary_inputs_validated] the type is the *producer's* own
+    // declaration of a session, and the two writers of this kind are `onevcs` itself —
+    // whose payload carries seven fields of its own beside these four — and this crate's
+    // copy of it. A reader that denied unknown fields here would refuse the sibling's own
+    // record of the session it just opened, which is the one thing this fold exists to
+    // read. What it does refuse is a record it cannot read a whole session out of: every
+    // field is required by the type, so a misspelled or missing `branch` drops the record
+    // rather than being half-read into a manager's only pointer at the work. And nothing
+    // taken from it is acted on — the token and the branch are handed back to `onevcs`,
+    // which resolves both against its own records, and the path is never opened here.
+    let Ok(session) =
+        serde_json::from_value::<onevcs::Session>(Value::Object(event.payload.clone()))
+    else {
+        return;
+    }; // llmlint: ignore-end[boundary_inputs_validated]
+    state.sessions.insert(node.to_string(), session);
 }
 
 /// Statuses whose work is still on the branch the attempt left behind.
@@ -1383,6 +1511,184 @@ mod tests {
             state.statuses()["build"],
             NodeStatus::Ready,
             "a node the dead driver left running was not offered to the fresh one"
+        );
+    }
+
+    /// The `session-opened` a lifecycle dispatch's session produces, as it is
+    /// relayed into the merged store.
+    ///
+    /// Built through [`crate::vcs::session_opened_event`] rather than by naming
+    /// the kind and the fields here: what a session opening is spelled as, and
+    /// which fields carry the token and the branch, is `onevcs`'s vocabulary —
+    /// and a fixture that restated it would keep folding after the producer
+    /// changed and prove nothing about what arrives.
+    fn opened(seq: u64, node: &str, token: &str, branch: &str) -> Envelope {
+        let session = onevcs::Session {
+            token: onevcs::SessionToken(token.into()),
+            worktree: std::path::PathBuf::from("/tmp/worktree"),
+            branch: branch.into(),
+            base: "main".into(),
+        };
+        Envelope {
+            seq,
+            ..crate::vcs::session_opened_event(
+                &session,
+                &Labels {
+                    node: Some(node.to_string()),
+                    ..labels("demo", None)
+                },
+            )
+        }
+    }
+
+    /// A driver dying does not end the *work* its dispatch was doing: the branch
+    /// holds whatever the worker committed and the session still knows where.
+    ///
+    /// Both halves of what the adoption owes are held here — the session is
+    /// named, so a manager can find the branch, and the node is pinned to it, so
+    /// the re-dispatch continues that branch rather than cutting a second one
+    /// beside committed work nothing points at.
+    #[test]
+    fn an_adoption_names_the_dispatch_it_cleared_and_pins_its_node_to_that_branch() {
+        let plan = plan_of_nodes(vec![agent("service", &[]), agent("audit", &[])]);
+        let events = vec![
+            pipeline(
+                journal::PipelineKind::RunStarted,
+                0,
+                None,
+                &[("plan", json!(plan))],
+            ),
+            pipeline(
+                journal::PipelineKind::NodeDispatched,
+                1,
+                Some("service"),
+                &[],
+            ),
+            opened(2, "service", "s-abc", "onevcs/s-abc"),
+            // A second node dispatched with no session of its own: a direct
+            // agent node has no repository, so there is no branch to name.
+            pipeline(journal::PipelineKind::NodeDispatched, 3, Some("audit"), &[]),
+            pipeline(
+                journal::PipelineKind::DriverAdopted,
+                4,
+                None,
+                &[("adoption", json!(1))],
+            ),
+        ];
+        let state = fold(&events);
+
+        let left = &state.abandoned["service"];
+        assert_eq!(left.token, onevcs::SessionToken("s-abc".into()));
+        assert_eq!(left.branch, "onevcs/s-abc");
+        assert!(
+            !state.abandoned.contains_key("audit"),
+            "a dispatch that opened no session was reported as work left somewhere"
+        );
+        assert_eq!(
+            state
+                .graph
+                .get("service")
+                .and_then(|node| node.branch.clone()),
+            Some("onevcs/s-abc".to_string()),
+            "the cleared node was not pinned to the branch its dispatch committed on"
+        );
+        // And it is offered to the fresh driver exactly as it always was.
+        assert_eq!(state.statuses()["service"], NodeStatus::Ready);
+        assert!(state.sessions.is_empty());
+    }
+
+    /// The session an *earlier* attempt worked in is not where the current one
+    /// is.
+    ///
+    /// A node dispatched again after settling has a new dispatch and no session
+    /// yet, and an adoption that read the old one would send a manager to a
+    /// branch this attempt never touched — and pin the node to it.
+    #[test]
+    fn a_session_an_earlier_attempt_finished_with_is_not_where_the_next_one_is_working() {
+        let plan = plan_of_nodes(vec![agent("service", &[])]);
+        let events = vec![
+            pipeline(
+                journal::PipelineKind::RunStarted,
+                0,
+                None,
+                &[("plan", json!(plan))],
+            ),
+            pipeline(
+                journal::PipelineKind::NodeDispatched,
+                1,
+                Some("service"),
+                &[],
+            ),
+            opened(2, "service", "s-first", "onevcs/s-first"),
+            pipeline(
+                journal::PipelineKind::NodeSettled,
+                3,
+                Some("service"),
+                &[("status", json!("failed"))],
+            ),
+            pipeline(
+                journal::PipelineKind::NodeDispatched,
+                4,
+                Some("service"),
+                &[],
+            ),
+            pipeline(
+                journal::PipelineKind::DriverAdopted,
+                5,
+                None,
+                &[("adoption", json!(1))],
+            ),
+        ];
+        let state = fold(&events);
+        assert!(
+            state.abandoned.is_empty(),
+            "an adoption named a session the current dispatch never opened: {:?}",
+            state.abandoned
+        );
+    }
+
+    /// A record this build cannot read a whole session out of names nothing.
+    ///
+    /// Half a session is worse than none: a branch with no token leaves a
+    /// manager unable to find the worktree, and a token with no branch is a
+    /// pin this crate would have to invent.
+    #[test]
+    fn a_session_record_naming_no_node_or_no_branch_is_left_out_of_the_fold() {
+        let plan = plan_of_nodes(vec![agent("service", &[])]);
+        let mut unlabelled = opened(2, "service", "s-abc", "onevcs/s-abc");
+        unlabelled.labels.node = None;
+        let mut branchless = opened(3, "service", "s-abc", "");
+        branchless.payload.remove("branch");
+        let state = fold(&[
+            pipeline(
+                journal::PipelineKind::RunStarted,
+                0,
+                None,
+                &[("plan", json!(plan))],
+            ),
+            pipeline(
+                journal::PipelineKind::NodeDispatched,
+                1,
+                Some("service"),
+                &[],
+            ),
+            unlabelled,
+            branchless,
+            pipeline(
+                journal::PipelineKind::DriverAdopted,
+                4,
+                None,
+                &[("adoption", json!(1))],
+            ),
+        ]);
+        assert!(state.abandoned.is_empty(), "{:?}", state.abandoned);
+        assert!(
+            state
+                .graph
+                .get("service")
+                .and_then(|node| node.branch.clone())
+                .is_none(),
+            "a node was pinned to a branch no record named"
         );
     }
 
