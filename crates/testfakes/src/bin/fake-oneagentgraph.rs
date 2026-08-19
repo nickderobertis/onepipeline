@@ -35,7 +35,8 @@ fn invalid_config() -> ExitCode {
 }
 
 /// The labels one envelope carries, with the conversation its turn belongs to
-/// stamped exactly where the sibling stamps it — and left off everything else.
+/// stamped on when `kind` names one and taken off when it does not — the same
+/// two directions, under the same name, as the sibling's own `stamp_session`.
 ///
 /// Both halves come from that library rather than from a copy of its rule here:
 /// [`EventKind::carries_session`] decides *which* kinds carry the label and
@@ -48,7 +49,7 @@ fn invalid_config() -> ExitCode {
 ///
 /// [`EventKind::carries_session`]: oneagentgraph::event::EventKind::carries_session
 /// [`session_label`]: oneagentgraph::event::session_label
-fn with_session(
+fn stamp_session(
     labels: &serde_json::Map<String, serde_json::Value>,
     stream: &str,
     kind: oneagentgraph::event::EventKind,
@@ -215,7 +216,7 @@ fn interrupt(args: &[String], dir: &std::path::Path) -> ExitCode {
             "seq": 0,
             "source": "agentgraph",
             "kind": oneagentgraph::event::EventKind::TurnInterrupted.as_str(),
-            "labels": with_session(
+            "labels": stamp_session(
                 &labels,
                 &stream,
                 oneagentgraph::event::EventKind::TurnInterrupted,
@@ -689,7 +690,7 @@ fn open_turn(args: &[String], dir: &std::path::Path, key: &str, node: &str, step
                 "seq": seq,
                 "source": "agentgraph",
                 "kind": kind.as_str(),
-                "labels": with_session(&labels, &stream(), kind),
+                "labels": stamp_session(&labels, &stream(), kind),
                 "payload": {},
             })
         );
@@ -711,7 +712,7 @@ fn open_turn(args: &[String], dir: &std::path::Path, key: &str, node: &str, step
                 // conversation, because the label joins the stream to the
                 // *member*: two members on one stream that shared a session
                 // would render as one transcript.
-                "labels": with_session(&labels, &stream(), kind),
+                "labels": stamp_session(&labels, &stream(), kind),
                 "payload": {},
             })
         );
@@ -811,7 +812,7 @@ fn hold(
             // beat with no conversation on it: a member publishes thousands
             // over a run, and a consumer counting labelled envelopes as
             // transcript turns would count every one of them.
-            "labels": with_session(
+            "labels": stamp_session(
                 &labels,
                 &stream(),
                 oneagentgraph::event::EventKind::MemberHeartbeat,
@@ -966,7 +967,7 @@ fn emit(
                 "seq": seq,
                 "source": "agentgraph",
                 "kind": kind.as_str(),
-                "labels": with_session(&labels, &stream(), kind),
+                "labels": stamp_session(&labels, &stream(), kind),
                 "payload": payload,
             })
         );
@@ -1166,7 +1167,7 @@ fn oneharness_session(labels: &serde_json::Map<String, serde_json::Value>, node:
             // No conversation on it: the record *names* one, and a consumer
             // that read this as a transcript turn would render the pointer
             // beside the thing it points at.
-            "labels": with_session(labels, &stream(), kind),
+            "labels": stamp_session(labels, &stream(), kind),
             "payload": match serde_json::to_value(&session) {
                 Ok(payload) => payload,
                 Err(error) => fake::fail(&format!("a session is not an object: {error}")),

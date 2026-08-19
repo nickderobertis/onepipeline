@@ -1868,34 +1868,18 @@ mod tests {
     /// The linked `oneagentgraph` produces the session conversation this crate
     /// relays.
     ///
-    /// A **floor**, not a behaviour of this crate's own. The
-    /// session-conversation producer — the `session` label on the four kinds
-    /// that name a turn, and the `oneharness-session` event — shipped in
-    /// `oneagentgraph 0.3.3`, and `Cargo.toml`'s `^0.3.0` has permitted that
-    /// release since the day it landed. So the *requirement* cannot go stale;
-    /// only `Cargo.lock` can, and when it does every graph this engine drives
-    /// emits none of it, whatever `oneagentgraph` is installed on the host.
-    /// Nothing else here would notice, because a label nobody produces is a
-    /// label nobody misses: the suite's own double emits what it is taught to,
-    /// so it would go on passing against a build that relayed nothing.
+    /// The floor it holds, and why it is carried by `Cargo.lock` rather than by
+    /// the requirement, are with the pin in `Cargo.toml`.
     ///
-    /// This is the trap `AGENTS.md` records for `onevcs` 0.4.2, a second time. A
-    /// reader who meets it and edits the requirement observes no change and
-    /// wrongly concludes the bug is open; the fix is `cargo update -p
-    /// oneagentgraph`.
+    /// What is not obvious here is the **spelling**: both halves are written in
+    /// items the *older* resolution also has — [`Emitter`], [`Labels`], and
+    /// [`EventKind`]'s own deserializer — and the label key is the literal
+    /// string rather than that library's `SESSION_LABEL` constant. 0.3.3's new
+    /// vocabulary would make this a *compile* error below the floor, and a
+    /// compile error names a missing symbol rather than a stale lock.
     ///
-    /// Both halves are spelled with items the **older** resolution also has —
-    /// [`Emitter`](oneagentgraph::event::Emitter), [`Labels`], and
-    /// [`EventKind`](oneagentgraph::event::EventKind)'s own deserializer — and
-    /// the label key is the literal string rather than that library's
-    /// `SESSION_LABEL` constant. Deliberately: an assertion written in 0.3.3's
-    /// new vocabulary would be a *compile* error below the floor, and a compile
-    /// error names a missing symbol rather than a stale lock.
-    ///
-    /// The first half is not a probe either — [`published`] is what this crate
-    /// puts on the merged stream for every live redirection it delivers through
-    /// the library path, so the assertion is on the envelope an operator really
-    /// gets.
+    /// [`Emitter`]: oneagentgraph::event::Emitter
+    /// [`EventKind`]: oneagentgraph::event::EventKind
     #[test]
     fn the_linked_oneagentgraph_produces_the_session_conversation_this_crate_relays() {
         let run_id =
