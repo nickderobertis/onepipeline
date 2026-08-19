@@ -701,10 +701,39 @@ fn drive_run(args: &RunArgs) -> Result<i32> {
     record.driven_by_this_process();
     ledger::write_json(&paths.launch(), &record)?;
 
-    let settled = engine::drive_holding(&paths, lock)?;
+    // The loop moves to a thread so this one can keep an eye on the observer,
+    // exactly as an attached launch does — and for the same two reasons. A graph
+    // that stopped watching a run still being driven is a fact somebody has to
+    // be told, and the probe is a `try_wait`, so it also **reaps** the graph it
+    // finds gone. An unreaped one stays a zombie for the life of this driver,
+    // and a zombie answers a liveness probe as the live process it is not — so
+    // the ownership record the views read that verdict off would go on naming a
+    // graph nothing is running.
+    let driving = paths.clone();
+    let engine = std::thread::Builder::new()
+        .name(format!("drive-{}", paths.run))
+        .spawn(move || engine::drive_holding(&driving, lock))
+        .map_err(|e| Error::Invalid(format!("cannot start the engine loop: {e}")))?;
+    let mut observer_gone = false;
+    while !engine.is_finished() {
+        if let Some(run) = observer.as_mut() {
+            if run.has_exited() && !observer_gone {
+                observer_gone = true;
+                eprintln!(
+                    "onepipeline: the observer graph for '{}' has stopped watching; \
+                     the run is still being driven",
+                    paths.run
+                );
+            }
+        }
+        std::thread::sleep(ATTACH_POLL);
+    }
     if let Some(run) = observer.as_mut() {
         run.cancel();
     }
+    let settled = engine
+        .join()
+        .map_err(|_| Error::Invalid(format!("the engine loop for '{}' panicked", paths.run)))??;
     Ok(settled.exit_code())
 }
 

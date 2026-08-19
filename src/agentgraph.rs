@@ -321,27 +321,36 @@ pub fn recorded_graph_run(recorded: &str, run: &str) -> Result<GraphRunId> {
 }
 
 /// Whether the graph run a launch record names has **stopped running**, as the
-/// sibling's own record says.
+/// sibling's own ownership records say.
 ///
-/// That record is the whole of the evidence, and it is enough because of where
-/// an observer lives: the graph runs inside the process tree of the driver that
-/// launched it, and this question is only ever asked of a run whose driver is
-/// alive — so the ending this answers is the graph's own, which the sibling
-/// stamps `finished_ms` as it settles. Nothing here sweeps a process table for a
-/// matching command line, which knows nothing about whose work it matched.
+/// Two answers, because a graph can stop in two ways and only one of them
+/// writes anything down. The run record carries `finished_ms` once the graph
+/// settles, which covers every ordinary ending. A graph whose process was killed
+/// outright never got to write one — and what answers *that* is the
+/// `owner.lock` the sibling claims a run's state under, the pid-with-start-token
+/// this stack decides every other dispatch's ownership by:
+/// [`reclaimable`](oneagentgraph::scratch::reclaimable) clears only where
+/// nothing holds the lock **and** the identity it records is no longer that
+/// process. Nothing here sweeps a process table for a matching command line,
+/// which knows nothing about whose work it matched.
 ///
 /// Every answer this host cannot prove resolves toward **still running**, for
 /// the reason the driver verdict's do: a run reported unwatched invites an
 /// operator to intervene, and doing that to a run whose observer is working is
-/// worse than saying nothing. An id this crate never wrote and a record that
-/// cannot be read are both `false`.
+/// worse than saying nothing. An id this crate never wrote, a record that cannot
+/// be read, and a platform whose locks prove nothing are all `false`.
 pub fn graph_run_ended(recorded: &str, run: &str) -> bool {
+    let root = state_dir(&process_env());
     recorded_graph_run(recorded, run)
         .ok()
         .and_then(|graph_run| {
-            oneagentgraph::history::show(&state_dir(&process_env()), graph_run.as_str()).ok()
+            let record = oneagentgraph::history::show(&root, graph_run.as_str()).ok()?;
+            Some(
+                record.finished_ms.is_some()
+                    || oneagentgraph::scratch::reclaimable(&root.join(&graph_run)).is_ok(),
+            )
         })
-        .is_some_and(|record| record.finished_ms.is_some())
+        .unwrap_or(false)
 }
 
 /// Render the reserved label keys as the `k=v` pairs the CLI takes, each under
