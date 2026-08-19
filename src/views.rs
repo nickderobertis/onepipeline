@@ -145,15 +145,11 @@ impl ObserverLiveness {
     }
 }
 
-/// Whether anything is watching this run, decided from what this crate itself
-/// recorded about the graph it launched.
+/// Whether anything is watching this run.
 ///
-/// The launch record says whether there is an observer at all and names the
-/// `oneagentgraph` run it minted; that run's own record and the scratch lock
-/// under it say whether it is still going. Nothing here reads a process table:
-/// a pattern matched against a command line knows nothing about whose work it
-/// matched, and the ownership evidence this stack already keeps answers exactly
-/// this question — see [`agentgraph::graph_run_ended`].
+/// The launch record answers the first half — whether there is an observer at
+/// all — and names the graph run whose own liveness is the second, which
+/// [`agentgraph::graph_run_ended`] decides and documents.
 ///
 /// [`agentgraph::graph_run_ended`]: crate::agentgraph::graph_run_ended
 fn observer_liveness(launch: &LaunchRecord) -> ObserverLiveness {

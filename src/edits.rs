@@ -631,15 +631,10 @@ fn compile_requeue(
 /// The attestation does not erase the failure. The `node-settled` that recorded
 /// it stays on the journal, the `human-attested` beside it is the evidence a
 /// person supplied, and the views report the pair rather than either alone.
-// llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] `docs/contract.md`
-// still names one accepted reference and this function accepts two, which is a real
-// divergence and is filed as an open one — number 36 in `docs/contract-divergences.md`,
-// under the repository's own mechanism for exactly this. There is no second source to
-// gate against: the contract is committed **verbatim as approved** and is never edited
-// to match the code, so writing the failed node into it here is the unilateral
-// resolution `AGENTS.md` forbids, and a gate asserting the doc already says this would
-// have to be satisfied by making that edit. It closes when the planner who owns the
-// contract rules on 36, and the ruling — not this site — is what amends the document.
+// llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] the second reference
+// below diverges from `docs/contract.md`, which is filed open as divergence 36. There is
+// nothing to gate against until it is ruled on: the only edit that would satisfy a gate
+// is the one to the approved contract that `AGENTS.md` forbids making from here.
 fn compile_attest(frontier: &Frontier, reference: &str) -> Result<Vec<Operation>> {
     // Before the settlement check, because an attestation *changes* the
     // settlement: it folds the node to `done`, so a second one would otherwise
