@@ -1,12 +1,11 @@
 //! The conversation a turn belongs to, and the record it was written into.
 //!
-//! `oneagentgraph` names the conversation behind every turn — a `session` label
-//! on exactly the four kinds that name one, and an `oneharness-session` event
-//! naming the history record an invocation wrote — and an operator reads an
-//! agent's actual transcript out of that. Both are the *sibling's*; what these
-//! journeys hold is this crate's half, which is that they survive the relay into
-//! the run's own journal with their values, their payload, and their artifact
-//! reference intact.
+//! `oneagentgraph` names the conversation behind a member's turns — a `session`
+//! label on the kinds that name one, and an `oneharness-session` event naming the
+//! history record an invocation wrote — and an operator reads an agent's actual
+//! transcript out of that. Both are the *sibling's*; what these journeys hold is
+//! this crate's half, which is that they survive the relay into the run's own
+//! journal with their values, their payload, and their artifact reference intact.
 //!
 //! Worth journeys of its own rather than a line in `journal.rs`, because
 //! everything in between is a place a label can be lost: the envelope crosses a
@@ -15,6 +14,13 @@
 //! process. Nothing here would fail if a `session` were dropped at any of them —
 //! which is exactly how a producer that was written, released, and adopted
 //! reached the operator emitting nothing at all.
+//!
+//! **Which** kinds carry one is upstream's to say and is never restated here:
+//! every assertion below asks [`EventKind::carries_session`], and the set of
+//! kinds it answers yes to is read off that library's own deserializer, so a
+//! fifth kind added there fails this file rather than passing it unnoticed.
+//!
+//! [`EventKind::carries_session`]: oneagentgraph::event::EventKind::carries_session
 
 // llmlint: ignore-file[e2e_not_mocked] `World` substitutes `oneagentgraph` at its
 // subprocess boundary and nothing inside the crate under test, which is driven as a real
@@ -26,35 +32,51 @@
 
 use crate::harness::{agent, plan_of, World};
 use oneagentgraph::event::{
-    session_label, OneharnessSession, Role, ONEHARNESS_SESSION_ARTIFACT, SESSION_LABEL,
+    session_label, EventKind, OneharnessSession, Role, ONEHARNESS_SESSION_ARTIFACT, SESSION_LABEL,
 };
 use serde_json::{json, Value};
+use std::collections::BTreeSet;
 
 /// A note written while the worker is working, which is what pulls the lever
-/// that publishes a `turn-interrupted` — the fourth kind that names a
+/// that publishes a `turn-interrupted` — one of the kinds that names a
 /// conversation, and the only one no ordinary dispatch produces.
 const NOTE: &str = "the fixture moved to tests/data";
 
-/// Exactly the kinds `oneagentgraph` names a conversation on.
-const NAMES_A_CONVERSATION: [&str; 4] = [
-    "turn-started",
-    "turn-activity",
-    "turn-completed",
-    "turn-interrupted",
-];
-
-/// Kinds beside them that must reach the journal carrying no conversation.
+/// Every event kind the linked `oneagentgraph` can produce.
 ///
-/// The exclusion is the load-bearing half: a consumer renders every labelled
-/// envelope that is not an activity or an interruption as one transcript turn,
-/// so a `session` riding the thousands of heartbeats one member publishes would
-/// make every turn count served from that transcript wrong.
-const NAMES_NONE: [&str; 4] = [
-    "member-started",
-    "member-heartbeat",
-    "member-settled",
-    "oneharness-session",
-];
+/// Read off that library's own deserializer rather than listed here. There is no
+/// public array of them — the sibling keeps its exhaustive one private to its own
+/// tests — so this takes the enumeration from the one place the linked build
+/// still states it in full: the `expected one of …` serde writes when it is
+/// handed a kind it does not know. Round about, and worth it. A copy of the set
+/// written out in this file would be a second statement of something that
+/// library owns, and would go on passing on the day it grew — which is the whole
+/// thing the caller below is checking for.
+fn every_kind() -> Vec<EventKind> {
+    let refused = serde_json::from_value::<EventKind>(json!("not-a-kind"))
+        .expect_err("a kind the sibling does not know is refused")
+        .to_string();
+    let listed = refused
+        .split_once("expected one of ")
+        .unwrap_or_else(|| {
+            panic!("serde no longer lists the kinds it knows, so nothing here enumerates them: {refused}")
+        })
+        .1;
+    let kinds: Vec<EventKind> = listed
+        .split(',')
+        .map(|quoted| quoted.trim().trim_matches('`').to_string())
+        .map(|name| {
+            serde_json::from_value(json!(name)).unwrap_or_else(|error| {
+                panic!("{name:?} is listed as a kind but does not read back as one: {error}")
+            })
+        })
+        .collect();
+    assert!(
+        kinds.iter().copied().any(EventKind::carries_session),
+        "no kind the linked oneagentgraph knows names a conversation, so this file proves          nothing: {refused}"
+    );
+    kinds
+}
 
 /// The journey the whole link exists for: every turn a run relays says which
 /// conversation it belongs to, and says it with the value its producer stamped.
@@ -102,63 +124,78 @@ fn every_turn_relayed_into_the_journal_names_the_conversation_it_belongs_to() {
         world.run_file("conversation", "result.json").is_file()
     });
 
-    let events = world.journal("conversation");
-    for kind in NAMES_A_CONVERSATION {
-        let named: Vec<&Value> = events
-            .iter()
-            .filter(|event| event["kind"] == kind)
-            .collect();
-        assert!(
-            !named.is_empty(),
-            "no {kind} reached the journal at all, so this journey proves nothing about it: {:?}",
-            world.kinds("conversation")
-        );
-        for event in named {
-            let stream = event["stream"]
-                .as_str()
-                .expect("an envelope names its stream");
-            let member = event["labels"]["member"]
-                .as_str()
-                .unwrap_or_else(|| panic!("a {kind} names no member: {event}"));
-            // The value, not merely its presence: a conversation is one
-            // member's turns on one stream, so a label that had lost either
-            // half would merge two members into one transcript.
-            assert_eq!(
-                event["labels"][SESSION_LABEL],
-                json!(format!("{stream}.{member}")),
-                "a {kind} reached the journal without the conversation its producer stamped: \
-                 {event}"
-            );
-            // And it is the value that library computes rather than a join that
-            // happens to agree on these ids: the sanitising and the length bound
-            // are the consumer's rule, and a relay that had rewritten either
-            // would put a label at the far end that nothing can be opened by.
-            assert_eq!(
-                event["labels"][SESSION_LABEL],
-                json!(session_label(stream, member).expect("a stream and a member name one")),
-                "a {kind}'s conversation is not the one its producer would compute: {event}"
-            );
+    // Every relayed envelope, judged by the producer's own rule rather than by a
+    // list restated here.
+    let mut carried: BTreeSet<&str> = BTreeSet::new();
+    let mut bare = 0_usize;
+    for event in world.journal("conversation") {
+        if event["source"] != "agentgraph" {
+            continue;
         }
+        let kind: EventKind = serde_json::from_value(event["kind"].clone()).unwrap_or_else(|error| {
+            panic!("a relayed envelope names a kind the linked oneagentgraph does not know: {error}: {event}")
+        });
+        let session = &event["labels"][SESSION_LABEL];
+        if !kind.carries_session() {
+            // The exclusion is the load-bearing half: a consumer renders every
+            // labelled envelope that is not an activity or an interruption as
+            // one transcript turn, so a `session` riding the thousands of
+            // heartbeats one member publishes would make every turn count
+            // served from that transcript wrong.
+            assert_eq!(
+                session,
+                &Value::Null,
+                "a {} carries a conversation, which renders it as a transcript turn: {event}",
+                kind.as_str()
+            );
+            bare += 1;
+            continue;
+        }
+        let stream = event["stream"]
+            .as_str()
+            .expect("an envelope names its stream");
+        let member = event["labels"]["member"]
+            .as_str()
+            .unwrap_or_else(|| panic!("a {} names no member: {event}", kind.as_str()));
+        // The value, not merely its presence: a conversation is one member's
+        // turns on one stream, so a label that had lost either half would merge
+        // two members into one transcript.
+        assert_eq!(
+            session,
+            &json!(format!("{stream}.{member}")),
+            "a {} reached the journal without the conversation its producer stamped: {event}",
+            kind.as_str()
+        );
+        // And it is the value that library computes rather than a join that
+        // happens to agree on these ids: the sanitising and the length bound are
+        // the consumer's rule, and a relay that had rewritten either would put a
+        // label at the far end that nothing can be opened by.
+        assert_eq!(
+            session,
+            &json!(session_label(stream, member).expect("a stream and a member name one")),
+            "a {}'s conversation is not the one its producer would compute: {event}",
+            kind.as_str()
+        );
+        carried.insert(kind.as_str());
     }
 
-    for kind in NAMES_NONE {
-        let named: Vec<&Value> = events
-            .iter()
-            .filter(|event| event["kind"] == kind)
-            .collect();
-        assert!(
-            !named.is_empty(),
-            "no {kind} reached the journal at all, so the exclusion below proves nothing: {:?}",
-            world.kinds("conversation")
-        );
-        for event in named {
-            assert_eq!(
-                event["labels"][SESSION_LABEL],
-                Value::Null,
-                "a {kind} carries a conversation, which renders it as a transcript turn: {event}"
-            );
-        }
-    }
+    // The drift gate, and the reason the two sets above are derived: this run
+    // must reach *every* kind the linked sibling names a conversation on. A
+    // fifth one added upstream is a kind the double does not emit, so this fails
+    // naming it rather than passing over a half-proven contract.
+    let names_one: BTreeSet<&str> = every_kind()
+        .into_iter()
+        .filter(|kind| kind.carries_session())
+        .map(EventKind::as_str)
+        .collect();
+    assert_eq!(
+        carried, names_one,
+        "this run does not reach every kind the linked oneagentgraph names a conversation on —          teach the double the ones it is missing"
+    );
+    assert!(
+        bare > 0,
+        "no relayed envelope named no conversation, so the exclusion proves nothing"
+    );
 }
 
 /// The other half of the producer: the pointer an operator opens the agent's
