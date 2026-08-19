@@ -323,22 +323,14 @@ pub fn recorded_graph_run(recorded: &str, run: &str) -> Result<GraphRunId> {
 /// Whether the graph run a launch record names has **stopped running**, as the
 /// sibling's own ownership records say.
 ///
-/// Two answers, because a graph can stop in two ways and only one of them
-/// writes anything down. The run record carries `finished_ms` once the graph
-/// settles, which covers every ordinary ending. A graph whose process was killed
-/// outright never got to write one — and what answers *that* is the
-/// `owner.lock` the sibling claims a run's state under, the pid-with-start-token
-/// this stack decides every other dispatch's ownership by:
-/// [`reclaimable`](oneagentgraph::scratch::reclaimable) clears only where
-/// nothing holds the lock **and** the identity it records is no longer that
-/// process. Nothing here sweeps a process table for a matching command line,
-/// which knows nothing about whose work it matched.
+/// Two of them, because a graph killed outright never wrote the ending a graph
+/// that settles does — so the `owner.lock` answers where `finished_ms` cannot.
+/// Nothing here sweeps a process table, which knows nothing about whose work it
+/// matched.
 ///
-/// Every answer this host cannot prove resolves toward **still running**, for
-/// the reason the driver verdict's do: a run reported unwatched invites an
-/// operator to intervene, and doing that to a run whose observer is working is
-/// worse than saying nothing. An id this crate never wrote, a record that cannot
-/// be read, and a platform whose locks prove nothing are all `false`.
+/// Anything this host cannot prove is `false`: a run reported unwatched invites
+/// an operator to intervene, and doing that to a working observer is worse than
+/// saying nothing.
 pub fn graph_run_ended(recorded: &str, run: &str) -> bool {
     let root = state_dir(&process_env());
     recorded_graph_run(recorded, run)

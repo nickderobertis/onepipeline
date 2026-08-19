@@ -2593,25 +2593,12 @@ fn the_observer_graphs_own_stream_is_filtered_too_and_the_spec_may_be_a_file() {
     );
 }
 
-/// A run executing with nothing watching it says so, says it only once its
-/// observer has actually stopped, and says it differently from a run that was
-/// never given anything to watch it with.
+/// An observer killed outright — mid-turn, having written no ending — is the
+/// death only the `owner.lock` can report, and this drives it.
 ///
-/// Three answers on one line, and all three matter. Reporting a working observer
-/// dead costs the run its watcher for nothing; reporting a dead one as fine is
-/// the silence this verdict exists to end; and the two ways a run ends up
-/// unwatched take different fixes — one is a graph to relaunch, the other a
-/// launch flag nobody passed — so rendering them alike sends an operator to look
-/// for a member that never existed.
-///
-/// The observer here dies the way a settled record cannot describe: killed
-/// outright, mid-turn, having written no ending. The process to end is resolved
-/// from the **graph run's own ownership record** — the `owner.lock` the sibling
-/// claims that run's state under, holding the pid and start token this stack
-/// decides every dispatch's ownership by — and never by matching a command line,
-/// which knows nothing about whose work it matched. That is the same record the
-/// verdict is read back off, which is the whole of what makes this half of it
-/// answerable.
+/// The process to kill comes from that graph run's own lock rather than from
+/// anything matched against a command line, which knows nothing about whose work
+/// it matched.
 #[cfg(unix)]
 #[test]
 fn a_run_whose_observer_graph_is_watching_and_then_is_killed_reads_as_each() {

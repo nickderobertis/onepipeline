@@ -702,23 +702,13 @@ fn drive_run(args: &RunArgs) -> Result<i32> {
     record.driven_by_this_process();
     ledger::write_json(&paths.launch(), &record)?;
 
-    // The observer is watched beside the loop, as an attached launch watches it,
-    // and for the same two reasons. A graph that stopped watching a run still
-    // being driven is a fact somebody has to be told — and the probe is a
-    // `try_wait`, so it also **reaps** the graph it finds gone. An unreaped one
-    // stays a zombie for the life of this driver, and a zombie answers a
-    // liveness probe as the live process it is not, so the ownership record the
-    // views read the observer's verdict off would go on naming a graph nothing
-    // is running.
-    //
-    // Scoped, so the watcher borrows the observer for exactly as long as the
-    // loop runs and is joined before this returns: a detached driver that left
-    // a thread holding its observer would be the leak `stop` exists to prevent.
+    // Scoped, so the watch is joined before this returns rather than left holding
+    // the observer of a driver that has finished with it.
     let settled = {
         let driving = AtomicBool::new(true);
         let watched = observer.as_mut();
         std::thread::scope(|scope| {
-            scope.spawn(|| watch_the_observer(watched, &paths.run, &driving));
+            scope.spawn(|| watch_and_reap_observer(watched, &paths.run, &driving));
             let settled = engine::drive_holding(&paths, lock);
             driving.store(false, Ordering::Release);
             settled
@@ -730,12 +720,13 @@ fn drive_run(args: &RunArgs) -> Result<i32> {
     Ok(settled.exit_code())
 }
 
-/// Say once, on the driver's own log, that the graph watching this run has gone.
+/// Reap the graph watching this run once it goes, and say so on the driver's log.
 ///
-/// Reaping is half of what this is for — see the caller. The other half is the
-/// sentence: a detached run's observer could die without a word anywhere, and
-/// the operator's only sign was a monitor that had stopped saying anything.
-fn watch_the_observer(
+/// The reaping is the load-bearing half: unreaped, a dead observer is a zombie
+/// for the life of this driver, and a zombie answers a liveness probe as the
+/// live process it is not — so the `owner.lock` the views read the observer's
+/// verdict off would go on naming a graph nothing is running.
+fn watch_and_reap_observer(
     observer: Option<&mut agentgraph::GraphRun>,
     run: &str,
     driving: &AtomicBool,

@@ -114,12 +114,10 @@ fn became_of_the_worker(state: &crate::projection::RunState) -> &'static str {
 
 /// Whether the run's **observer** graph is still watching, and if not, why not.
 ///
-/// A second verdict beside [`DriverLiveness`] rather than a value inside it,
-/// because the two are about different processes and a run can be in any pairing
-/// of them: a live driver executing unwatched is exactly the state this exists to
-/// report, and it reads `ACTIVE` on every other measure. Private, and rendered as
-/// a word rather than promised as a type — `docs/contract.md` names the driver
-/// tier and what a view renders beside it is a rendering.
+/// Beside [`DriverLiveness`] rather than inside it: the two are about different
+/// processes and a run can be in any pairing of them, and a live driver
+/// executing unwatched is the state this exists to report. Private, because
+/// `docs/contract.md` names the driver tier and this is a rendering beside it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum ObserverLiveness {
     /// The launch named an observer graph and nothing says its run has ended.
@@ -362,31 +360,24 @@ impl RunView {
 
 /// What one run's unread surfaces are, as the one line reporting them needs them.
 ///
-/// The count and the staleness alone were a number a reader could not act on. A
-/// blocking surface produces no other signal — this is the one line a supervisor
-/// is not allowed to filter out — and on a host whose history holds thousands of
-/// routine `monitor` updates against a handful of questions, "8 waiting" read
-/// exactly the same either way. Naming the kinds is what turns the count into a
-/// triage.
+/// A blocking surface produces no other signal, and on a host holding thousands
+/// of routine `monitor` updates against a handful of questions a bare count read
+/// the same either way.
 #[derive(Debug, Default)]
 struct Unread {
     count: usize,
     /// Absent when nothing is waiting, rather than a zero that reads as a queue
     /// somebody has just emptied.
     oldest_seconds: Option<u64>,
-    /// The kinds waiting and how many of each, in the order the line names them:
-    /// the kinds with a **blocking** surface among them first, because a
-    /// blocking one is what the run is actually held on, and then the rarest
-    /// first, because the whole failure this repairs is a rare kind hidden
-    /// behind a common one. Ties break by name so a line is stable to read.
+    /// Blocking kinds first — that is what the run is held on — then rarest
+    /// first, since a rare kind behind a common one is the burial this repairs;
+    /// then by name, so the line is stable to read.
     kinds: Vec<(String, usize)>,
 }
 
 /// How many kinds a line names before it summarises the rest.
 ///
-/// A queue of unrelated kinds must not push the run's own row off the screen,
-/// and what a reader triages on is the first few — but the count that replaces
-/// the rest is said out loud rather than dropped, because a silently truncated
+/// The remainder is counted out loud rather than dropped: a silently truncated
 /// list reads as the whole answer.
 const MAX_NAMED_KINDS: usize = 4;
 
@@ -858,16 +849,13 @@ fn refusal_phrase(refusal: &Refusal) -> String {
 
 /// How the dependencies that skipped a node read on that node's own line.
 ///
-/// Each cause carries its own status, because the two that skip a dependent are
-/// different facts to act on: a `failed` dependency is work that was attempted
-/// and lost, and a `skipped` one is a node that was never tried either — so a
-/// reader following the chain back knows whether the next hop is the end of it.
+/// Each carries its own status: a `failed` cause is work attempted and lost and
+/// a `skipped` one is another node never tried, so a reader following the chain
+/// back knows whether the next hop is the end of it.
 fn skipped_by_phrase(causes: &[(String, NodeStatus)]) -> String {
     if causes.is_empty() {
-        // Unreachable by construction — the skip and this list come out of one
-        // status map through one predicate — and phrased anyway, because an
-        // empty list rendered as nothing at all would read as a fact the view
-        // lost rather than as everything the run can say.
+        // Unreachable by construction, and phrased anyway: rendering nothing
+        // would read as a fact the view lost.
         return "a dependency this run can no longer name".to_string();
     }
     causes
@@ -879,12 +867,9 @@ fn skipped_by_phrase(causes: &[(String, NodeStatus)]) -> String {
 
 /// Whether a person attested that a node this run **failed** had in fact landed.
 ///
-/// Two records rather than one, because either alone says something else: the
-/// attestation on its own is how every human action completes, and the failure
-/// on its own is what the node's status said before anybody looked. Together
-/// they are the fact a reader of `results` needs — the run could not finish this
-/// work, and somebody has since vouched that it is there — and they are why the
-/// node's dependents stopped being skipped.
+/// Two records, because either alone says something else: an attestation is how
+/// every human action completes, and the failure is what the status said before
+/// anybody looked.
 fn attested_after_failing(view: &RunView, node: &str) -> bool {
     view.state.attestations.contains(node)
         && view.events.iter().any(|event| {

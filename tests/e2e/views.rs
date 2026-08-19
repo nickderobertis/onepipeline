@@ -154,15 +154,11 @@ fn results_reports_each_nodes_own_evidence() {
         .out_has("unblocks: gated");
 }
 
-/// A skip is a node the run **never asked**, and the dependency that stopped it
+/// A skip is a node the run **never asked**, and which dependency stopped it
 /// being asked is the fact the status word does not carry.
 ///
-/// The chain matters as much as the first hop: `ship` was skipped by work that
-/// was attempted and lost, and `announce` by a node that was never tried either,
-/// so a reader following the causes back reaches the failures that have to be
-/// fixed rather than three nodes that look alike. `ship` is held out by **two**
-/// of them, because a reader told about one would fix it and watch the node stay
-/// skipped.
+/// Two causes on one node and a chain through another, because a reader told
+/// about one of two would fix it and watch the node stay skipped.
 #[test]
 fn results_names_every_skipped_node_and_the_dependency_that_skipped_it() {
     let world = World::new("views-skipped-nodes");
@@ -210,13 +206,9 @@ fn results_names_every_skipped_node_and_the_dependency_that_skipped_it() {
 /// An observer this host cannot ask about is reported as watching, never as
 /// dead.
 ///
-/// The direction is the whole safety of the verdict. `OBSERVER DEAD` sends
-/// somebody to relaunch a graph, and saying it of an observer that is working
-/// costs a run its watcher for nothing — so a launch that really attached one,
-/// whose graph run this host holds no record of, reads exactly as it reads while
-/// that observer is fine. The verdict does speak on this line when it can:
-/// `dispatch::a_run_whose_observer_graph_is_watching_and_then_is_not_reads_as_each`
-/// is the same rendering with the proof present.
+/// The direction is the safety of the verdict: `OBSERVER DEAD` sends somebody to
+/// relaunch a graph, and saying it of a working observer costs a run its watcher
+/// for nothing.
 #[test]
 fn an_observer_this_host_cannot_ask_about_is_never_reported_dead() {
     let world = World::new("views-observer-unprovable");

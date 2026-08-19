@@ -615,21 +615,12 @@ fn compile_requeue(
     }])
 }
 
-/// Compile an `attest`, which two different settlements accept.
-///
-/// The second — a node that settled `failed`, whose work a person is vouching
-/// has landed — is open divergence 36, and that entry is where it is argued and
-/// where the settlements below are the source rather than a copy.
-///
-/// What this compiles does not erase the failure: `HumanAttested` settles the
-/// node, and the `node-settled` recording the failure stays on the journal for
-/// the views to report beside it.
+/// Compile an `attest`, whose accepted settlements are open divergence 36's —
+/// argued and sourced there, not here.
 fn compile_attest(frontier: &Frontier, reference: &str) -> Result<Vec<Operation>> {
-    // Before the settlement check, because an attestation *changes* the
-    // settlement: it folds the node to `done`, so a second one would otherwise
-    // be answered with the reference this op does not take — telling a planner
-    // to look for a node that is wrong, when the answer they need is that
-    // somebody already vouched for this one.
+    // Before the settlement check, because an attestation folds the node to
+    // `done`: asked the other way round, a second one is answered with the
+    // reference this op does not take rather than with what it needs to hear.
     if frontier.attestations.contains(reference) {
         return Err(refuse(format!(
             "attest: '{reference}' was already attested"

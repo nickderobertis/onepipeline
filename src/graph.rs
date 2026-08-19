@@ -850,10 +850,9 @@ fn eligibility(
 
 /// Whether a dependency in this state makes executing its dependents unsafe.
 ///
-/// The one predicate behind both halves of a skip: [`eligibility`] derives the
-/// status from it, and [`skipped_by`] names the dependencies that answered it.
-/// Two spellings of this would let the run report a skip whose cause it could
-/// not name, which is the reading a skipped node had for its whole history.
+/// One predicate for both halves of a skip — [`eligibility`] derives it,
+/// [`skipped_by`] names what answered it — so a run cannot report a skip whose
+/// cause it disagrees with.
 fn skips_dependents(status: NodeStatus) -> bool {
     matches!(status, NodeStatus::Failed | NodeStatus::Skipped)
 }
@@ -861,19 +860,11 @@ fn skips_dependents(status: NodeStatus) -> bool {
 /// The dependencies whose own failure or skip is why `id` derived
 /// [`Skipped`](NodeStatus::Skipped), in the order the node declared them.
 ///
-/// A skip is derived rather than stored, so the cause is derived with it and
-/// out of the same map: the statuses handed in are the fixpoint [`derive`]
-/// settled on, and this asks each of the node's dependencies the very question
-/// [`eligibility`] asked while it was deciding.
-///
-/// Empty unless `id` is skipped — a failed dependency is not a *cause* of
-/// anything for a node that settled some other way, and a park outranks the
-/// gates, so a parked node with a failed dependency would otherwise be handed a
-/// reason it is not being held for. Empty, too, for a dependency the graph no
-/// longer holds or an upstream in another run, because neither has a status in
-/// this map, and neither can cause a skip: a detached edge is not consulted at
-/// all, and a cross-DAG upstream that failed leaves its consumer blocked, since
-/// it may still arrive.
+/// `statuses` must be a [`derive`] fixpoint: the cause is re-derived out of the
+/// map the skip itself came from. Empty unless `id` is skipped — a park outranks
+/// the gates, so a parked node with a failed dependency is not being held by it.
+/// A detached edge and a cross-DAG upstream have no status here and cannot cause
+/// a skip either.
 pub fn skipped_by(
     graph: &Graph,
     statuses: &BTreeMap<String, NodeStatus>,
