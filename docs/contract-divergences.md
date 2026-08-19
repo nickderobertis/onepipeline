@@ -1111,14 +1111,6 @@ because it looked at the wrong repository.
 
 ## 36. `attest` now also takes a node that settled `failed` — OPEN
 
-<!-- llmlint: ignore[contracts_have_one_source_or_a_drift_gate] stating what the code
-does beside what the approved contract says is what an entry in this file *is*, and the
-gap between the two is the proposal rather than a drift to close: every one of the
-thirty-six entries has this shape, and closing it here means editing `docs/contract.md`,
-which `AGENTS.md` forbids doing from this repository before the planner who owns it
-rules. Trimming this entry to pointers was tried first and left the same finding, because
-naming the divergence at all is the duplication. It goes when 36 is ruled on. -->
-
 **Proposal (for the planner who owns the contract): state that `attest RUN REF`
 accepts two references — a ready `kind: human` node's action, and a node that
 settled `failed` whose work a person is vouching has landed — and that the
@@ -1136,13 +1128,30 @@ be dispatched again. Measured: a 27-node run permanently skipped a node over a
 dependency whose change was already merged on `main` as a pull request, and the
 run had no answer to type.
 
-**What this crate does today.** `attest` takes the failed node as a second
-reference beside the human action, on the same op, the same journal kind, and the
-same release of the subtree the ready human action already had. `src/edits.rs`
-is where the two accepted settlements are declared and `src/views.rs` is where a
-node carrying both a failure and an attestation is rendered; the journeys in
-`tests/e2e/channel.rs` drive the whole statement through the CLI, which is what
-holds this paragraph to the build rather than to itself.
+**What this crate does today is the block below, and the block is the source.**
+It is not prose restating the build: `tests/e2e/channel.rs` parses it **out of
+this file** and drives every settlement it names through `onepipeline attest` on
+a real run, so a build that stopped taking one of them, or grew a third, fails
+`just check` here. That is the same mechanism `docs/contract.md` is held by,
+pointed at the one statement this repository may make while the divergence is
+open — because until it is ruled on, the accepted references have no home in the
+approved contract, and a divergence nothing gates is a divergence that quietly
+stops being true.
+
+```json
+{
+  "op": "attest",
+  "settlements": ["waiting", "failed"],
+  "refuses": ["running"]
+}
+```
+
+`settlements` are the node settlements a reference may name, spelled as
+`NodeStatus` writes them; `refuses` is a settlement that is not one, which the
+refusal answers by naming both that are. Everything else about the op — the
+journal record, the release of the skipped subtree, what `results` renders
+afterwards — is the contract's own `attest` unchanged, and is stated there
+rather than a second time here.
 
 The proposal is whether this belongs on `attest` at all, or whether the second
 statement — "this failure's work is in the base; stop gating on it" — deserves an

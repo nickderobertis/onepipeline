@@ -539,6 +539,87 @@ fn attesting_a_failed_node_releases_the_dependents_it_had_skipped() {
         .out_lacks("never attempted");
 }
 
+/// The settlements `attest` takes are read **out of the divergence record** and
+/// driven through the CLI, so the two cannot drift apart.
+///
+/// `docs/contract.md` is committed verbatim as approved and still names one
+/// accepted reference; this build takes two, which is open divergence 36. Until
+/// that is ruled on the divergence record is the only place the second may be
+/// written down, so it is the *source* rather than a description — parsed here,
+/// and answered by a real run. A build that stopped taking a settlement the
+/// entry names, or grew one it does not, fails this rather than leaving the
+/// record quietly untrue.
+#[test]
+fn attest_takes_exactly_the_settlements_the_divergence_record_names() {
+    let record = std::fs::read_to_string(crate::harness::repo_file("docs/contract-divergences.md"))
+        .expect("the divergence record reads");
+    let entry = record
+        .split("\n## ")
+        .find(|entry| entry.starts_with("36."))
+        .expect("the divergence record still carries entry 36");
+    let block = entry
+        .split("```json")
+        .nth(1)
+        .and_then(|rest| rest.split("```").next())
+        .expect("entry 36 carries the json block this journey drives");
+    let source: serde_json::Value = serde_json::from_str(block).expect("entry 36's block is JSON");
+    assert_eq!(source["op"], "attest", "{source}");
+
+    let world = World::new("channel-attest-source");
+    world.script("wrong.fail", "1");
+    world.script("running.wait", "hold");
+    let run = running(
+        &world,
+        "sourced",
+        vec![
+            agent("running", &[]),
+            agent("wrong", &[]),
+            human("approve", &[]),
+        ],
+    );
+    // Both settled references have to *be* settled before either is attested.
+    world.until("the two settlements to be recorded", |world| {
+        let settled: Vec<_> = world
+            .events_of(&run, "node-settled")
+            .iter()
+            .filter_map(|event| event["labels"]["node"].as_str().map(str::to_string))
+            .collect();
+        settled.iter().any(|node| node == "wrong") && settled.iter().any(|node| node == "approve")
+    });
+
+    // The node this run has in each settlement the entry names, and the one it
+    // has in the settlement the entry says is refused.
+    let node_in = |settlement: &str| match settlement {
+        "waiting" => "approve",
+        "failed" => "wrong",
+        "running" => "running",
+        other => panic!(
+            "divergence 36 names the settlement '{other}', which this journey has no \
+             node in — extend it, or the entry is describing a build nothing drives"
+        ),
+    };
+
+    let settlements: Vec<String> = serde_json::from_value(source["settlements"].clone())
+        .expect("entry 36 names the settlements it accepts");
+    assert!(!settlements.is_empty(), "{source}");
+    for settlement in &settlements {
+        world.run(&["attest", &run, node_in(settlement)]).exited(0);
+    }
+
+    let refuses: Vec<String> =
+        serde_json::from_value(source["refuses"].clone()).expect("entry 36 names what it refuses");
+    for settlement in &refuses {
+        let refused = world.run(&["attest", &run, node_in(settlement)]);
+        refused.exited(REFUSED);
+        // And the refusal names every settlement the entry says is taken, so a
+        // planner reads what would have been accepted off the refusal itself.
+        for accepted in &settlements {
+            refused.err_has(accepted);
+        }
+    }
+    world.release("running.go");
+}
+
 #[test]
 fn attesting_something_that_is_not_a_ready_human_action_is_refused_by_name() {
     let world = World::new("channel-attest-refuse");

@@ -215,7 +215,7 @@ fn results_names_every_skipped_node_and_the_dependency_that_skipped_it() {
 /// costs a run its watcher for nothing — so a launch that really attached one,
 /// whose graph run this host holds no record of, reads exactly as it reads while
 /// that observer is fine. The verdict does speak on this line when it can:
-/// `dispatch::a_run_whose_observer_graph_has_ended_reads_differently_from_one_launched_without_any`
+/// `dispatch::a_run_whose_observer_graph_is_watching_and_then_is_not_reads_as_each`
 /// is the same rendering with the proof present.
 #[test]
 fn an_observer_this_host_cannot_ask_about_is_never_reported_dead() {

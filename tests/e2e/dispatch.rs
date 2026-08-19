@@ -2593,24 +2593,28 @@ fn the_observer_graphs_own_stream_is_filtered_too_and_the_spec_may_be_a_file() {
     );
 }
 
-/// A run executing with nothing watching it says so, and says it differently
-/// from a run that was never given anything to watch it with.
+/// A run executing with nothing watching it says so, says it only once its
+/// observer has actually stopped, and says it differently from a run that was
+/// never given anything to watch it with.
 ///
-/// The two take different fixes — one is a graph to relaunch, the other a launch
-/// flag nobody passed — so a view that rendered them alike would send an operator
-/// to look for a member that never existed. The verdict comes off the ownership
-/// evidence this stack already keeps: the graph run the launch record names, that
-/// run's own record, and the scratch lock under it. Nothing here reads a process
-/// table.
+/// Three answers on one line, and all three matter. Reporting a working observer
+/// dead costs the run its watcher for nothing; reporting a dead one as fine is
+/// the silence this verdict exists to end; and the two ways a run ends up
+/// unwatched take different fixes — one is a graph to relaunch, the other a
+/// launch flag nobody passed — so rendering them alike sends an operator to look
+/// for a member that never existed. The evidence is the graph run the launch
+/// record names and that run's own record, read where the sibling keeps it.
 #[test]
-fn a_run_whose_observer_graph_has_ended_reads_differently_from_one_launched_without_any() {
+fn a_run_whose_observer_graph_is_watching_and_then_is_not_reads_as_each() {
     let world = World::new("real-observer-dead");
     world.write_graphs();
-    // The *node's* turn is held, so both runs are still executing when the views
-    // are read — an observer verdict is about a run that is working unwatched.
-    // The observing turn is deliberately not held: it takes its one turn and its
-    // graph settles, which is a dead observer beside a live run.
+    // The node's turn is held for the whole journey, so both runs are executing
+    // throughout: an observer verdict is about a run that is *working*.
     world.script("turn.hold", "hold");
+    // And the observing turn is held too, at first — the observer graph here has
+    // one member with one turn to take, so without this it would settle before
+    // the first reading and the watched half could never be taken.
+    world.script("observer.wait", "hold");
 
     for (run, dag_graph) in [("watched", true), ("bare", false)] {
         let path = world.plan(run, &plan_of(run, vec![agent("build", &[])]));
@@ -2625,9 +2629,6 @@ fn a_run_whose_observer_graph_has_ended_reads_differently_from_one_launched_with
             .exited(0);
     }
 
-    // The observer graph here is a single-sided member with one turn to take, so
-    // it settles while the run it was watching is still held open — which is
-    // exactly a run executing unwatched.
     let graph_run = || {
         world.run_json("watched", "launch.json")["graph_run"]
             .as_str()
@@ -2637,35 +2638,57 @@ fn a_run_whose_observer_graph_has_ended_reads_differently_from_one_launched_with
     world.until("the observer graph to be recorded", |_| {
         !graph_run().is_empty()
     });
-    world.until("the observer graph to stop watching", |world| {
+    let settled = |world: &World| {
         std::fs::read_to_string(world.graph_state().join(graph_run()).join("record.json"))
             .is_ok_and(|record| record.contains("finished_ms"))
-    });
+    };
 
-    // Both runs are being driven, and only one of them ever had an observer.
-    for view in [vec!["runs"], vec!["status"]] {
-        let rendered = world.run_on_agentgraph(&view);
+    let line = |run: &str, view: &[&str]| -> String {
+        let rendered = world.run_on_agentgraph(view);
         rendered.exited(0);
-        let line = |run: &str| {
-            rendered
-                .stdout
-                .lines()
-                .find(|line| line.contains(run))
-                .unwrap_or_else(|| panic!("no line for {run} in:\n{}", rendered.stdout))
-                .to_string()
-        };
-        assert!(line("watched").contains("ACTIVE"), "{}", line("watched"));
+        rendered
+            .stdout
+            .lines()
+            .find(|line| line.contains(run))
+            .unwrap_or_else(|| panic!("no line for {run} in:\n{}", rendered.stdout))
+            .to_string()
+    };
+
+    for view in [vec!["runs"], vec!["status"]] {
+        assert!(!settled(&world), "the observer settled before it was read");
+        // Watching: the record names no ending, so the line says nothing about
+        // the observer beyond the run being driven.
+        let watching = line("watched", &view);
         assert!(
-            line("watched").contains("OBSERVER DEAD"),
-            "a run whose observer has stopped watching is reported as watched: {}",
-            line("watched")
+            watching.contains("ACTIVE") && !watching.contains("OBSERVER"),
+            "a run whose observer is still taking its turn is reported unwatched: {watching}"
         );
+        // Never observed: a different fact, on the same line, from the start.
+        let bare = line("bare", &view);
         assert!(
-            line("bare").contains("NO OBSERVER") && !line("bare").contains("OBSERVER DEAD"),
-            "a run launched with no observer reads as one whose observer died: {}",
-            line("bare")
+            bare.contains("NO OBSERVER") && !bare.contains("OBSERVER DEAD"),
+            "a run launched with no observer reads as one whose observer died: {bare}"
         );
-        assert_ne!(line("watched"), line("bare"));
+        assert_ne!(watching, bare);
+    }
+
+    // The observer takes its turn and its graph settles, while the run it was
+    // watching is still held open — a run executing unwatched.
+    world.release("observer.go");
+    world.until("the observer graph to stop watching", settled);
+
+    for view in [vec!["runs"], vec!["status"]] {
+        let dead = line("watched", &view);
+        assert!(
+            dead.contains("ACTIVE") && dead.contains("OBSERVER DEAD"),
+            "a run whose observer has stopped watching is still reported as watched: {dead}"
+        );
+        let bare = line("bare", &view);
+        assert!(
+            bare.contains("NO OBSERVER") && !bare.contains("OBSERVER DEAD"),
+            "the run that never had an observer changed when another run's died: {bare}"
+        );
+        assert_ne!(dead, bare);
     }
     world.release("turn.go");
     world.release("turn.settle");
