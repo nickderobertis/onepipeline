@@ -219,6 +219,13 @@ fn turn(args: &[String], dir: &std::path::Path) -> ExitCode {
             // asked, first, whether the turn before it wrote anything.
             fake::record(dir, "claude-work", &[path.display().to_string()]);
         }
+        // The turn that stops and asks its manager, through the operator's
+        // `ask-manager` wrapper — which runs *inside this process*, and reads the
+        // run it addresses out of this process's own environment. Scripted, and
+        // never for the observer: a monitor member watches and asks nothing.
+        if let Some(question) = fake::node_script(dir, "harness", "asks") {
+            fake::ask_manager(&question);
+        }
     }
 
     // The turn itself. The monitor member's prompt says it is watching the run,

@@ -35,7 +35,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
-use onepipeline_testfakes::{MEMBER_ENV, SCRIPT_DIR_ENV};
+use onepipeline_testfakes::{CLI_BIN_ENV, MEMBER_ENV, SCRIPT_DIR_ENV};
 use serde_json::Value;
 
 // The exit codes are the crate's own, not a second copy of them. A suite that
@@ -285,7 +285,10 @@ impl World {
             .env("GIT_COMMITTER_NAME", GIT_WHO)
             .env("GIT_COMMITTER_EMAIL", GIT_EMAIL)
             .env(SCRIPT_DIR_ENV, &self.fakes)
-            .env("ONEPIPELINE_FAKE_DRIVER_BIN", binary())
+            // Where a dispatched double reaches this crate's own channel: the
+            // `ask-manager` wrapper a worker asks its manager through runs
+            // `onepipeline`, and the build under test is the one it has to run.
+            .env(CLI_BIN_ENV, binary())
             .env("ONEPIPELINE_LAUNCHER", "e2e")
             .env("ONEPIPELINE_LAUNCHER_SESSION", &self.session)
             .env("ONEPIPELINE_PROJECT_DIR", &self.project)
@@ -1028,11 +1031,22 @@ impl World {
             .into_iter()
             .filter(|call| call["tool"] == "claude-turn")
             .map(|call| Turn {
-                prompt: call["args"][0].as_str().unwrap_or_default().to_string(),
-                cwd: call["args"][1].as_str().unwrap_or_default().to_string(),
-                member: call["args"][2].as_str().unwrap_or_default().to_string(),
+                prompt: Self::recorded(&call, 0, "the prompt"),
+                cwd: Self::recorded(&call, 1, "the working directory"),
+                member: Self::recorded(&call, 2, "the member"),
             })
             .collect()
+    }
+
+    /// One recorded string off a double's invocation, refused if it is not there.
+    ///
+    /// A field read leniently would let a double that stopped recording one look,
+    /// to every assertion here, exactly like one still recording it correctly.
+    fn recorded(call: &Value, at: usize, what: &str) -> String {
+        call["args"][at]
+            .as_str()
+            .unwrap_or_else(|| panic!("a recorded turn carries no string for {what}: {call}"))
+            .to_string()
     }
 
     /// The prose one named member's turn was given.
@@ -1051,6 +1065,50 @@ impl World {
     /// What each observer the launcher started found waiting for it, in order.
     pub fn observer_saw(&self) -> Vec<Value> {
         read_jsonl(&self.fakes.join("observer-saw.jsonl"))
+    }
+
+    /// The question this run's channel hands its manager, read the way a manager
+    /// reads one: `onepipeline next`.
+    ///
+    /// Panics when the channel had nothing to hand out, because a journey about
+    /// a worker that asked has nothing to say about a run nobody asked on.
+    pub fn question_for_the_manager(&self, run: &str) -> String {
+        self.question_for_the_manager_on(self.cmd(&["next", run]), run)
+    }
+
+    /// The same read, made by an already-configured command — the journeys that
+    /// drive the real `oneagentgraph` build theirs with
+    /// [`agentgraph_cmd`](World::agentgraph_cmd).
+    pub fn question_for_the_manager_on(&self, command: Command, run: &str) -> String {
+        let read = self.run_on(command, &format!("next {run}"));
+        read.exited(0);
+        match read.json()["surface"]["message"].as_str() {
+            Some(question) => question.to_string(),
+            None => panic!(
+                "this run's manager was handed no question:\n{}\nthe runs root held:\n{}",
+                read.stdout,
+                self.dump()
+            ),
+        }
+    }
+
+    /// Every question that reached this run's channel, off the stream a manager
+    /// watches it on: `onepipeline monitor`, whose line for a queued surface
+    /// carries the words it was raised with.
+    ///
+    /// What [`question_for_the_manager`](World::question_for_the_manager) reads is
+    /// the *next* one, and a newer check-in replaces the queued one rather than
+    /// waiting behind it — so a run whose workers asked more than once says so
+    /// here.
+    pub fn questions_on_the_stream(&self, run: &str) -> Vec<String> {
+        let streamed = self.run(&["monitor", run]);
+        streamed.exited(0);
+        streamed
+            .stdout
+            .lines()
+            .filter_map(|line| line.split_once("planner-surface-queued "))
+            .map(|(_, question)| question.trim().to_string())
+            .collect()
     }
 
     /// The dag-scope graph this world writes, as the flag `start` takes it.

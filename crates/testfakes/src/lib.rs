@@ -23,6 +23,27 @@ use std::path::{Path, PathBuf};
 /// The environment variable naming the directory a double is scripted from.
 pub const SCRIPT_DIR_ENV: &str = "ONEPIPELINE_FAKE_DIR";
 
+/// The environment variable naming the run a launch or a dispatch belongs to.
+///
+/// The doubles read it out of their own environment, because that is where the
+/// processes they stand in for read it: an observer addresses the run it was
+/// started for, and a worker addresses the run it may ask its manager on.
+// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the crate under test declares
+// this key in a module `src/lib.rs` keeps private, so there is no item to import and no
+// source to share. The reconciling gate is a journey, as it is for `MODES` in
+// `fake-claude.rs`: a spelling that drifted leaves [`ask_manager`] with no run to ask on,
+// and the journeys that read the question off the channel fail.
+pub const RUN_ID_ENV: &str = "ONEPIPELINE_RUN_ID";
+
+/// The environment variable naming the `onepipeline` executable a double asks
+/// its manager through.
+///
+/// The operator's `ask-manager` wrapper finds it on the `PATH`; a double is told
+/// where it is, because the binary under test is built to a path this suite
+/// holds a private name for and the directory it sits in holds every other
+/// binary cargo built too.
+pub const CLI_BIN_ENV: &str = "ONEPIPELINE_FAKE_CLI_BIN";
+
 /// The environment variable a member's own harness config stamps its name into.
 ///
 /// A single-sided member's turn is a library call inside `oneagentgraph`, so the
@@ -347,6 +368,47 @@ pub fn now() -> String {
     )
 }
 
+/// Put one question to this run's manager, the way a dispatched agent does.
+///
+/// The operator's `ask-manager` wrapper is a dispatched agent's one supported
+/// way to stop and ask: it reads the run out of **its own environment** — it is
+/// told none and infers none, and refuses without one — and puts the question on
+/// that run's channel. So this does that, through the real `onepipeline` and the
+/// same verb an operator raises a surface with; a double that wrote the queue
+/// itself would leave a journey asserting against a file rather than against a
+/// question its manager can read.
+///
+/// A refusal ends the dispatch, loudly. An ask that did not land leaves the
+/// journey around it waiting on a question nobody put, and why it did not land
+/// belongs in that node's own evidence rather than in a gap.
+pub fn ask_manager(question: &str) {
+    let run = match std::env::var(RUN_ID_ENV) {
+        Ok(run) if !run.is_empty() => run,
+        _ => fail(&format!(
+            "{RUN_ID_ENV} is unset: no run to ask a manager on"
+        )),
+    };
+    let cli = match std::env::var(CLI_BIN_ENV) {
+        Ok(cli) if !cli.is_empty() => cli,
+        _ => fail(&format!(
+            "{CLI_BIN_ENV} is unset: no channel to put a question on"
+        )),
+    };
+    let asked = std::process::Command::new(&cli)
+        .args(["surface", &run, "--kind", "check-in", "--message", question])
+        .stdin(std::process::Stdio::null())
+        .output();
+    match asked {
+        Err(error) => fail(&format!("cannot run `{cli} surface {run}`: {error}")),
+        Ok(asked) if !asked.status.success() => fail(&format!(
+            "`onepipeline surface {run}` was refused, so this dispatch has no manager to \
+             ask: {}",
+            String::from_utf8_lossy(&asked.stderr).trim()
+        )),
+        Ok(_) => {}
+    }
+}
+
 /// Act as the dag-scope graph's monitor member: observe, and change nothing.
 ///
 /// Exactly what the shipped `monitor` persona is for. It runs **no engine
@@ -361,9 +423,9 @@ pub fn now() -> String {
 pub fn observe(dir: &Path) -> std::process::ExitCode {
     // Required, not defaulted: an empty run id would leave every assertion
     // about what this observer saw pointing at a run named by nothing.
-    let run = match std::env::var("ONEPIPELINE_RUN_ID") {
+    let run = match std::env::var(RUN_ID_ENV) {
         Ok(run) if !run.is_empty() => run,
-        _ => fail("ONEPIPELINE_RUN_ID is unset: no run to observe"),
+        _ => fail(&format!("{RUN_ID_ENV} is unset: no run to observe")),
     };
     // The first thing a real monitor member does is read the run's ledger, so
     // the first thing this one records is whether that ledger was there to be

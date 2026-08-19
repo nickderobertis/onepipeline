@@ -2569,3 +2569,125 @@ fn a_stop_that_reaches_part_of_the_tree_refuses_and_names_what_it_left() {
     });
     world.release("build.go");
 }
+
+/// A worker of a **detached** run can put a question to its manager, with no
+/// observer graph to have named the run for it.
+///
+/// The whole of what makes that direction open is the run id arriving *at the
+/// dispatched process*: the operator's `ask-manager` wrapper reads it out of its
+/// own environment, is told none and infers none, and refuses without one — so a
+/// worker that carried nothing is a worker that cannot ask. The doubles ask
+/// exactly that way, and what each journey below states is that the question
+/// reached the channel its manager reads.
+///
+/// This is the shape that had no run id at all: a detached driver launches its
+/// observer as a subprocess, so the pair reached that child and never the
+/// driver's own environment — and with no dag-scope graph, the shipped default,
+/// nothing exported anything anywhere.
+#[test]
+fn a_detached_runs_worker_can_ask_its_manager() {
+    let world = World::new("driver-detached-run-id");
+    world.script(
+        "first.asks",
+        "first: the origin refuses me. Do I wait or fail?",
+    );
+    world.script(
+        "second.asks",
+        "second: first left no branch. Do I open one?",
+    );
+    let run = start_detached(
+        &world,
+        "askabledetached",
+        vec![agent("first", &[]), agent("second", &["first"])],
+    );
+
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+    // Both dispatches asked, and both questions are on the stream the manager
+    // watches. A dispatch that carried no run id refuses its own ask, which fails
+    // the node — so a run that settled complete with both questions on it is two
+    // workers that each reached this run and no other.
+    assert_eq!(
+        world.questions_on_the_stream(&run),
+        vec![
+            "first: the origin refuses me. Do I wait or fail?".to_string(),
+            "second: first left no branch. Do I open one?".to_string(),
+        ],
+        "a worker of a detached run could not ask its manager: {}",
+        world.dump()
+    );
+    assert_eq!(
+        world.run_json(&run, "result.json")["state"],
+        "complete",
+        "the run did not settle: {}",
+        world.dump()
+    );
+
+    // And the manager reads one: the newest, because a check-in replaces the
+    // queued one at the channel rather than queueing behind it.
+    assert_eq!(
+        world.question_for_the_manager(&run),
+        "second: first left no branch. Do I open one?"
+    );
+}
+
+/// The same of an **attached** launch, which is the shape every other journey
+/// here takes.
+#[test]
+fn an_attached_runs_worker_can_ask_its_manager() {
+    let world = World::new("driver-attached-run-id");
+    world.script(
+        "build.asks",
+        "build: the gate is red on main. Do I fix it here?",
+    );
+    let path = world.plan(
+        "askableattached",
+        &plan_of("askableattached", vec![agent("build", &[])]),
+    );
+    world
+        .run(&["start", &path.to_string_lossy(), "--attach"])
+        .exited(0)
+        .settled();
+
+    assert_eq!(
+        world.question_for_the_manager("askableattached"),
+        "build: the gate is red on main. Do I fix it here?"
+    );
+}
+
+/// And of an **adoption**, the third process a run can be driven in. It reaches
+/// one the way a run does: a human gate attested, leaving work to do and nobody
+/// driving it.
+#[test]
+fn an_adopted_runs_worker_can_ask_its_manager() {
+    let world = World::new("driver-adopted-run-id");
+    world.script(
+        "build.asks",
+        "build: the approval says nothing about the schema. Which one?",
+    );
+    let path = world.plan(
+        "askableadopted",
+        &plan_of(
+            "askableadopted",
+            vec![human("approve", &[]), agent("build", &["approve"])],
+        ),
+    );
+    world
+        .run(&["start", &path.to_string_lossy(), "--attach"])
+        .exited(0);
+    world
+        .run(&["attest", "askableadopted", "approve"])
+        .exited(0);
+    assert!(
+        world.questions_on_the_stream("askableadopted").is_empty(),
+        "something asked before the adopted run dispatched anything: {}",
+        world.dump()
+    );
+
+    world.run(&["adopt", "askableadopted"]).exited(0).settled();
+    assert_eq!(
+        world.question_for_the_manager("askableadopted"),
+        "build: the approval says nothing about the schema. Which one?"
+    );
+}

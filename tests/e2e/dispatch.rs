@@ -2719,3 +2719,47 @@ fn the_retained_driver_reads_its_own_event_filter_and_refuses_an_unusable_one() 
         driven.stdout
     );
 }
+
+/// A worker **turn** of a detached run can put a question to its manager,
+/// through the real `oneagentgraph`.
+///
+/// One process further in than the journeys in `driver.rs`: the operator's
+/// `ask-manager` wrapper runs inside the model turn, so what has to arrive is
+/// the run id in *that* process's environment — and the real sibling composing a
+/// member's environment per launch is what stands between the dispatch and it.
+/// Detached with no dag-scope graph, because that is the shipped default and the
+/// shape a long run is launched in.
+#[test]
+fn a_detached_runs_worker_turn_can_ask_its_manager() {
+    let world = World::new("real-detached-run-id");
+    world.write_graphs();
+    world.script(
+        "harness.asks",
+        "the worker: this repository has two mains. Which?",
+    );
+    let path = world.plan("askable", &plan_of("askable", vec![agent("build", &[])]));
+
+    let started = world.run_on(
+        world.agentgraph_cmd(&["start", &path.to_string_lossy(), "--detach"]),
+        "start --detach with no dag-scope graph",
+    );
+    started.exited(0);
+    let run = started.json()["run_id"]
+        .as_str()
+        .expect("a detached launch names its run")
+        .to_string();
+
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+    assert_eq!(
+        world.question_for_the_manager_on(world.agentgraph_cmd(&["next", &run]), &run),
+        "the worker: this repository has two mains. Which?"
+    );
+    assert_eq!(
+        world.run_json(&run, "result.json")["state"],
+        "complete",
+        "the run did not settle: {}",
+        world.dump()
+    );
+}

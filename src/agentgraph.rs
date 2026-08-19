@@ -985,6 +985,14 @@ impl ProcessGraphRun {
 /// through here.
 fn export(env: &[(String, String)]) {
     for (key, value) in env {
+        // A pair already holding what it is about to be given is left alone. The
+        // caller that made this per-dispatch is `crate::executor`, and a driver's
+        // several concurrent dispatches all carry the same run id — so writing it
+        // once and then reading it is the difference between one process-wide
+        // mutation per driver and one per node.
+        if std::env::var(key).is_ok_and(|held| &held == value) {
+            continue;
+        }
         std::env::set_var(key, value);
     }
 }

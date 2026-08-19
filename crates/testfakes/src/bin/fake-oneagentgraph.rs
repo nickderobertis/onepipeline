@@ -376,6 +376,15 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         write_work(args, &fake::segment(&key), &body);
     }
 
+    // A worker that stops and puts a question to its manager, which is what the
+    // operator's `ask-manager` wrapper is for. Scripted here because it is the
+    // *agent's* behaviour, and an agent is what this program stands in for: every
+    // other journey is about the dispatch, and a question nobody asked would be a
+    // surface the planner never had a reason to get.
+    if let Some(question) = fake::node_script(dir, &key, "asks") {
+        fake::ask_manager(&question);
+    }
+
     // A worker that publishes its own branch before it is finished with. This is
     // the incident: an agent that ran `onevcs publish` in its final turn opened
     // a change request the engine's own publication step never ran, and then
