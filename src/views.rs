@@ -289,7 +289,19 @@ impl RunView {
             0 => String::new(),
             count => format!(", {count} not landed as of settlement"),
         };
-        format!("{done}/{} done{unlanded}", statuses.len())
+        // What is *missing* from the count above splits two ways, and only one
+        // of them is work that was attempted: `n/n done` on its own left a
+        // reader unable to tell a node the run tried and lost from one it never
+        // asked at all. Absent rather than a zero, like the clause before it.
+        let skipped = match statuses
+            .values()
+            .filter(|status| **status == NodeStatus::Skipped)
+            .count()
+        {
+            0 => String::new(),
+            count => format!(", {count} never attempted"),
+        };
+        format!("{done}/{} done{unlanded}{skipped}", statuses.len())
     }
 }
 
@@ -679,6 +691,26 @@ fn refusal_phrase(refusal: &Refusal) -> String {
         "{side}: identity '{}' refused {reason}{again}",
         refusal.advanced.identity
     ))
+}
+
+/// How the dependencies that skipped a node read on that node's own line.
+///
+/// Each cause carries its own status, because the two that skip a dependent are
+/// different facts to act on: a `failed` dependency is work that was attempted
+/// and lost, and a `skipped` one is a node that was never tried either — so a
+/// reader following the chain back knows whether the next hop is the end of it.
+fn skipped_by_phrase(causes: &[(String, NodeStatus)]) -> String {
+    if causes.is_empty() {
+        // A `drop` detaches an edge without settling anything, so a node can be
+        // skipped by a dependency the graph no longer holds. Saying so is the
+        // whole answer available; naming nothing would read as a rendering bug.
+        return "a dependency the graph no longer holds".to_string();
+    }
+    causes
+        .iter()
+        .map(|(dependency, status)| format!("{dependency} ({})", status.as_str()))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// The nodes whose change had not reached its base when they settled, in id
@@ -1168,6 +1200,18 @@ pub fn results(view: &RunView) -> String {
                 out.push_str(&format!("      provider: {}\n", refusal_phrase(refusal)));
             }
         }
+        // Why the run never asked this node to do anything. `skipped` on its own
+        // says a dependency of *some* kind went wrong and leaves a reader to
+        // rebuild the graph by hand to find which — which is how a node stayed
+        // skipped over work that had already merged. The dependency is known at
+        // the moment the skip is derived, so it is named where the skip is
+        // reported.
+        if status == NodeStatus::Skipped {
+            out.push_str(&format!(
+                "      never attempted; skipped by: {}\n",
+                skipped_by_phrase(&graph::skipped_by(&view.state.graph, &statuses, &node.id))
+            ));
+        }
         if status == NodeStatus::Waiting {
             if let Some(task) = &node.task {
                 out.push_str(&format!("      action: {task}\n"));
@@ -1484,6 +1528,29 @@ mod tests {
 
     fn dead_pid() -> u32 {
         sys::reaped_pid()
+    }
+
+    /// A skip whose cause the graph no longer holds still says the node was
+    /// never attempted.
+    ///
+    /// Not reachable from a plan this crate executes — a detached edge is not
+    /// consulted, so it cannot skip anything — but the phrase is what `results`
+    /// prints if one ever is, and an empty list rendered as nothing at all would
+    /// read as a rendering that had lost the fact rather than as the run's whole
+    /// answer.
+    #[test]
+    fn a_skip_with_no_cause_left_in_the_graph_is_still_phrased() {
+        assert_eq!(
+            skipped_by_phrase(&[]),
+            "a dependency the graph no longer holds"
+        );
+        assert_eq!(
+            skipped_by_phrase(&[
+                ("build".to_string(), NodeStatus::Failed),
+                ("lint".to_string(), NodeStatus::Skipped),
+            ]),
+            "build (failed), lint (skipped)"
+        );
     }
 
     #[test]

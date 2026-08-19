@@ -154,6 +154,54 @@ fn results_reports_each_nodes_own_evidence() {
         .out_has("unblocks: gated");
 }
 
+/// A skip is a node the run **never asked**, and the dependency that stopped it
+/// being asked is the fact the status word does not carry.
+///
+/// The chain matters as much as the first hop: `ship` was skipped by work that
+/// was attempted and lost, and `announce` by a node that was never tried either,
+/// so a reader following the causes back reaches the one failure that has to be
+/// fixed rather than three that look alike.
+#[test]
+fn results_names_every_skipped_node_and_the_dependency_that_skipped_it() {
+    let world = World::new("views-skipped-nodes");
+    world.script("build.fail", "1");
+    let run = settled(
+        &world,
+        "unattempted",
+        vec![
+            agent("build", &[]),
+            agent("ship", &["build"]),
+            agent("announce", &["ship"]),
+            agent("aside", &[]),
+        ],
+    );
+
+    let results = world.run(&["results", &run]);
+    results.exited(0);
+    for (node, cause) in [
+        ("ship", "never attempted; skipped by: build (failed)"),
+        ("announce", "never attempted; skipped by: ship (skipped)"),
+    ] {
+        results.out_has(node).out_has(cause);
+    }
+    // The node that was attempted and lost is not one of them: it carries the
+    // dispatch's own detail instead, which is what a reader acts on.
+    assert!(
+        !results.stdout.contains("skipped by: aside")
+            && results.stdout.matches("never attempted").count() == 2,
+        "{}",
+        results.stdout
+    );
+
+    // And the run's one-line summary separates the two halves of what is not
+    // done, so the split is readable without opening `results` at all.
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("1/4 done, 2 never attempted");
+    world.run(&["runs"]).exited(0).out_has("2 never attempted");
+}
+
 #[test]
 fn goals_says_what_each_run_is_for_and_which_identities_it_holds() {
     let world = World::new("views-goals");

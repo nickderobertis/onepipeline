@@ -813,7 +813,7 @@ fn eligibility(
 
         match status {
             NodeStatus::Done => {}
-            NodeStatus::Failed | NodeStatus::Skipped => {
+            _ if skips_dependents(status) => {
                 failed = true;
                 all_done = false;
             }
@@ -846,6 +846,44 @@ fn eligibility(
         return Some(NodeStatus::Waiting);
     }
     Some(NodeStatus::Ready)
+}
+
+/// Whether a dependency in this state makes executing its dependents unsafe.
+///
+/// The one predicate behind both halves of a skip: [`eligibility`] derives the
+/// status from it, and [`skipped_by`] names the dependencies that answered it.
+/// Two spellings of this would let the run report a skip whose cause it could
+/// not name, which is the reading a skipped node had for its whole history.
+fn skips_dependents(status: NodeStatus) -> bool {
+    matches!(status, NodeStatus::Failed | NodeStatus::Skipped)
+}
+
+/// The dependencies whose own failure or skip is why `id` derived
+/// [`Skipped`](NodeStatus::Skipped), in the order the node declared them.
+///
+/// A skip is derived rather than stored, so the cause is derived with it and
+/// out of the same map: the statuses handed in are the fixpoint [`derive`]
+/// settled on, and this asks each of the node's dependencies the very question
+/// [`eligibility`] asked while it was deciding. Empty for a node that is not
+/// skipped — and empty, too, for a dependency the graph no longer holds or an
+/// upstream in another run, because neither has a status in this map. Neither
+/// can *cause* a skip: a detached edge is not consulted at all, and a cross-DAG
+/// upstream that failed leaves its consumer blocked, since it may still arrive.
+pub fn skipped_by(
+    graph: &Graph,
+    statuses: &BTreeMap<String, NodeStatus>,
+    id: &str,
+) -> Vec<(String, NodeStatus)> {
+    let Some(node) = graph.get(id) else {
+        return Vec::new();
+    };
+    node.deps
+        .iter()
+        .filter_map(|dep| {
+            let status = *statuses.get(dep)?;
+            skips_dependents(status).then(|| (dep.clone(), status))
+        })
+        .collect()
 }
 
 /// How a graph with these statuses settled.
@@ -1410,6 +1448,39 @@ mod tests {
         let failed = |_: &str| Some(NodeStatus::Failed);
         let statuses = derive(&graph, &BTreeMap::new(), &failed);
         assert_eq!(statuses["consume"], NodeStatus::Skipped);
+    }
+
+    /// A derived skip and its named cause are one answer, so they are held to
+    /// the same map here: whatever `derive` settled on, `skipped_by` names the
+    /// dependencies that made it say so.
+    #[test]
+    fn every_skipped_node_names_the_dependencies_that_skipped_it() {
+        let graph = Graph::from_plan(&plan_of(vec![
+            agent("build", &[]),
+            agent("lint", &[]),
+            agent("ship", &["build", "lint"]),
+            agent("announce", &["ship"]),
+        ]));
+        let mut recorded = BTreeMap::new();
+        recorded.insert("build".to_string(), NodeStatus::Failed);
+        let statuses = derive(&graph, &recorded, &no_cross_dag);
+
+        assert_eq!(statuses["ship"], NodeStatus::Skipped);
+        assert_eq!(statuses["announce"], NodeStatus::Skipped);
+        // The dependency that failed, and not the one beside it that ran.
+        assert_eq!(
+            skipped_by(&graph, &statuses, "ship"),
+            vec![("build".to_string(), NodeStatus::Failed)]
+        );
+        // The chain back: a node skipped by a node that was itself skipped.
+        assert_eq!(
+            skipped_by(&graph, &statuses, "announce"),
+            vec![("ship".to_string(), NodeStatus::Skipped)]
+        );
+        // Nothing skipped the node that ran, and a node the graph does not hold
+        // is answered rather than panicked on.
+        assert!(skipped_by(&graph, &statuses, "lint").is_empty());
+        assert!(skipped_by(&graph, &statuses, "nowhere").is_empty());
     }
 
     #[test]
