@@ -15,6 +15,7 @@
 
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::json;
@@ -701,11 +702,48 @@ fn drive_run(args: &RunArgs) -> Result<i32> {
     record.driven_by_this_process();
     ledger::write_json(&paths.launch(), &record)?;
 
-    let settled = engine::drive_holding(&paths, lock)?;
+    // Scoped, so the watch is joined before this returns rather than left holding
+    // the observer of a driver that has finished with it.
+    let settled = {
+        let driving = AtomicBool::new(true);
+        let watched = observer.as_mut();
+        std::thread::scope(|scope| {
+            scope.spawn(|| watch_and_reap_observer(watched, &paths.run, &driving));
+            let settled = engine::drive_holding(&paths, lock);
+            driving.store(false, Ordering::Release);
+            settled
+        })?
+    };
     if let Some(run) = observer.as_mut() {
         run.cancel();
     }
     Ok(settled.exit_code())
+}
+
+/// Reap the graph watching this run once it goes, and say so on the driver's log.
+///
+/// The reaping is the load-bearing half: unreaped, a dead observer is a zombie
+/// for the life of this driver, and a zombie answers a liveness probe as the
+/// live process it is not — so the `owner.lock` the views read the observer's
+/// verdict off would go on naming a graph nothing is running.
+fn watch_and_reap_observer(
+    observer: Option<&mut agentgraph::GraphRun>,
+    run: &str,
+    driving: &AtomicBool,
+) {
+    let Some(observer) = observer else {
+        return;
+    };
+    while driving.load(Ordering::Acquire) {
+        if observer.has_exited() {
+            eprintln!(
+                "onepipeline: the observer graph for '{run}' has stopped watching; \
+                 the run is still being driven"
+            );
+            return;
+        }
+        std::thread::sleep(ATTACH_POLL);
+    }
 }
 
 /// Start the dag-scope graph that **observes** the run.

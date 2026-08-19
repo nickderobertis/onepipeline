@@ -267,6 +267,79 @@ fn unread_surfaces_are_reported_separately_by_the_views_a_planner_reads() {
     world.release("build.go");
 }
 
+/// The one line a supervisor is not allowed to filter out says *what* is
+/// waiting, not only how much.
+///
+/// A blocking question is a run's only signal that it is held on a person, and
+/// behind a pile of routine `monitor` updates a bare count rendered the two
+/// identically. So the kinds ride the line, and the blocking one leads it.
+#[test]
+fn the_unread_line_names_the_kinds_waiting_so_a_question_is_not_buried() {
+    use std::io::Write;
+
+    let world = World::new("channel-unread-kinds");
+    world.script("build.wait", "hold");
+    let run = running(&world, "buried", vec![agent("build", &[])]);
+
+    // An observer's judge side, raising what it saw: routine updates first, and
+    // the one question it stopped to ask last — the order that buries it.
+    let mut frames = String::new();
+    for update in 0..5 {
+        frames.push_str(&format!(
+            "{{\"kind\":\"monitor\",\"message\":\"update {update}\",\"blocking\":false}}\n"
+        ));
+    }
+    frames.push_str(
+        "{\"kind\":\"planner-question\",\"message\":\"Which base should build target?\"}\n",
+    );
+    // The last of these carries a newline inside its kind. A kind is the
+    // observer persona's own word, so it is a stranger's string on the one line
+    // a supervisor may not filter out — and a second line spliced into that line
+    // is how a run hides the question above it.
+    for kind in ["edit-rejected", "quiet-worker", "check-in", "pro\\nposal"] {
+        frames.push_str(&format!(
+            "{{\"kind\":\"{kind}\",\"message\":\"one {kind}\",\"blocking\":false}}\n"
+        ));
+    }
+
+    // The server waits for a verdict after every frame, and nothing here is
+    // going to answer six of them: a one-second bound makes each frame's wait
+    // its own synthesized `continue`, which is the timeout path this journey
+    // rides rather than the question it is about.
+    let mut command = world.cmd(&["channel", "serve", &run]);
+    command
+        .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped());
+    let mut serving = command.spawn().expect("the channel server starts");
+    let mut stdin = serving.stdin.take().expect("stdin is piped");
+    stdin
+        .write_all(frames.as_bytes())
+        .expect("the frames write");
+    drop(stdin);
+    serving.wait().expect("the channel server ends");
+
+    world.until("every frame to reach the planner", |world| {
+        world.events_of(&run, "planner-surface-queued").len() == 10
+    });
+
+    // The one question leads the parenthetical rather than sitting behind the
+    // five updates that outnumber it; a queue of more kinds than a line can
+    // carry says how many it left out rather than cutting them silently; and the
+    // kind carrying a newline is rendered on the one line it belongs to.
+    for view in [vec!["runs"], vec!["status", &run]] {
+        let rendered = world.run(&view);
+        rendered
+            .exited(0)
+            .out_has(
+                "10 planner update(s) waiting (1 planner-question, 1 check-in, 1 edit-rejected, \
+                 1 pro posal, and 2 other kind(s))",
+            )
+            .out_lacks("\nposal");
+    }
+    world.release("build.go");
+}
+
 #[test]
 fn a_legacy_verdict_is_accepted_and_recorded() {
     let world = World::new("channel-verdict");
@@ -389,20 +462,224 @@ fn attest_completes_a_ready_waiting_human_action() {
     world.run(&["results", &run]).exited(0).out_has("approve");
 }
 
+/// A skip is not permanent when the work it was waiting for did in fact land.
+///
+/// The dependency failed here and its dependent was never asked — and stays
+/// never asked, because the skip is re-derived from that failure on every pass.
+/// Attesting the failed node is the statement that the work is there anyway, and
+/// the run releases what it was holding inside the loop that was already going.
+#[test]
+fn attesting_a_failed_node_releases_the_dependents_it_had_skipped() {
+    let world = World::new("channel-attest-failed");
+    world.script("build.fail", "1");
+    // A third branch, held open, so the loop is still running when the
+    // attestation arrives: what is under test is the release *inside* it.
+    world.script("hold.wait", "hold");
+    let run = running(
+        &world,
+        "landed",
+        vec![
+            agent("build", &[]),
+            agent("ship", &["build"]),
+            agent("hold", &[]),
+        ],
+    );
+    world.until("the dependency to fail", |world| {
+        world
+            .events_of(&run, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "build")
+    });
+
+    world
+        .run(&["results", &run])
+        .exited(0)
+        .out_has("never attempted; skipped by: build (failed)");
+    assert!(
+        world
+            .events_of(&run, "node-dispatched")
+            .iter()
+            .all(|event| event["labels"]["node"] != "ship"),
+        "the skipped node ran before anything was attested: {:?}",
+        world.kinds(&run)
+    );
+
+    // Nothing else in the vocabulary would do: the skip is re-derived from the
+    // failure on every pass, so only saying the work landed releases it.
+    world.run(&["attest", &run, "build"]).exited(0);
+    // Once, like any other attestation, whichever settlement it was taken on.
+    world
+        .run(&["attest", &run, "build"])
+        .exited(REFUSED)
+        .err_has("already attested");
+    world.until("the node it had skipped to run", |world| {
+        world
+            .events_of(&run, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "ship")
+    });
+    let settled: Vec<_> = world
+        .events_of(&run, "node-settled")
+        .into_iter()
+        .filter(|event| event["labels"]["node"] == "ship")
+        .collect();
+    assert_eq!(settled[0]["payload"]["status"], "done", "{settled:?}");
+
+    let attested = world.events_of(&run, "human-attested");
+    assert_eq!(attested.len(), 1, "{attested:?}");
+    assert_eq!(attested[0]["payload"]["ref"], "build");
+    world.release("hold.go");
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+    world
+        .run(&["results", &run])
+        .exited(0)
+        .out_has("settled failed, attested as landed")
+        .out_lacks("never attempted");
+}
+
+/// The gate on divergence 36: its settlements, driven against a run holding a
+/// node in every settlement this journey can reach.
+///
+/// Both directions, which is what makes it a gate rather than a demonstration —
+/// one the entry names and the build refuses fails here, and so does one the
+/// build takes that the entry does not name, because every settlement outside
+/// the list is asserted refused rather than left unasked.
+#[test]
+fn attest_takes_exactly_the_settlements_the_divergence_record_names() {
+    let record = std::fs::read_to_string(crate::harness::repo_file("docs/contract-divergences.md"))
+        .expect("the divergence record reads");
+    let entry = record
+        .split("\n## ")
+        .find(|entry| entry.starts_with("36."))
+        .expect("the divergence record still carries entry 36");
+    let block = entry
+        .split("```json")
+        .nth(1)
+        .and_then(|rest| rest.split("```").next())
+        .expect("entry 36 carries the json block this journey drives");
+    let source: serde_json::Value = serde_json::from_str(block).expect("entry 36's block is JSON");
+    assert_eq!(source["op"], "attest", "{source}");
+    let settlements: Vec<String> = serde_json::from_value(source["settlements"].clone())
+        .expect("entry 36 names the settlements it accepts");
+    assert!(!settlements.is_empty(), "{source}");
+
+    let world = World::new("channel-attest-source");
+    world.script("wrong.fail", "1");
+    world.script("running.wait", "hold");
+    // Held so a `cancel` has a dispatch to stop: a node that settles first is a
+    // node the planner can no longer idle.
+    world.script("idle.wait", "hold");
+    let run = running(
+        &world,
+        "sourced",
+        vec![
+            agent("running", &[]),
+            agent("queued", &["running"]),
+            agent("wrong", &[]),
+            agent("after", &["wrong"]),
+            agent("finished", &[]),
+            human("approve", &[]),
+            agent("later", &["approve"]),
+            agent("idle", &[]),
+        ],
+    );
+    world.until("the run to reach every settlement it can", |world| {
+        let of = |kind: &str| -> Vec<String> {
+            world
+                .events_of(&run, kind)
+                .iter()
+                .filter_map(|event| event["labels"]["node"].as_str().map(str::to_string))
+                .collect()
+        };
+        let (settled, dispatched) = (of("node-settled"), of("node-dispatched"));
+        ["wrong", "finished", "approve"]
+            .iter()
+            .all(|node| settled.iter().any(|seen| seen == node))
+            && dispatched.iter().any(|seen| seen == "idle")
+    });
+    // The planner's own idle, so a `parked` node is among the settlements below.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            r#"{"version":1,"commands":[{"op":"cancel","id":"idle"}]}"#,
+        )
+        .exited(0);
+
+    // Each node's settlement as a reader sees it, off the view that prints it.
+    let nodes = [
+        "running", "queued", "wrong", "after", "finished", "approve", "later", "idle",
+    ];
+    let settlement_of = |world: &World, node: &str| -> String {
+        let results = world.run(&["results", &run]);
+        results.exited(0);
+        results
+            .stdout
+            .lines()
+            .filter_map(|line| {
+                let mut words = line.split_whitespace();
+                Some((words.next()?.to_string(), words.next()?.to_string()))
+            })
+            .find(|(id, _)| id == node)
+            .map(|(_, settlement)| settlement)
+            .unwrap_or_else(|| panic!("no settlement for {node} in:\n{}", results.stdout))
+    };
+
+    // Refused first, because a refusal changes nothing: every settlement the
+    // entry does not name is answered with the two it does. This is the half
+    // that fails when the build grows an acceptance nobody wrote down.
+    let mut reached = std::collections::BTreeSet::new();
+    for node in nodes {
+        let settlement = settlement_of(&world, node);
+        reached.insert(settlement.clone());
+        if settlements.contains(&settlement) {
+            continue;
+        }
+        let refused = world.run(&["attest", &run, node]);
+        refused.exited(REFUSED);
+        for accepted in &settlements {
+            refused.err_has(accepted);
+        }
+    }
+    // And not a vacuous sweep: the run really did hold a node in each of the
+    // named settlements, and in several the entry says nothing about.
+    for named in &settlements {
+        assert!(
+            reached.contains(named),
+            "no node reached '{named}', so nothing here answered for it: {reached:?}"
+        );
+    }
+    assert!(
+        reached.len() >= settlements.len() + 4,
+        "too few settlements to say what `attest` refuses: {reached:?}"
+    );
+
+    for node in nodes {
+        if settlements.contains(&settlement_of(&world, node)) {
+            world.run(&["attest", &run, node]).exited(0);
+        }
+    }
+    world.release("running.go");
+    world.release("idle.go");
+}
+
 #[test]
 fn attesting_something_that_is_not_a_ready_human_action_is_refused_by_name() {
     let world = World::new("channel-attest-refuse");
     world.script("build.wait", "hold");
     let run = running(&world, "noaction", vec![agent("build", &[])]);
 
-    world
-        .run(&["attest", &run, "build"])
-        .exited(REFUSED)
-        .err_has("not a ready, waiting human action");
-    world
-        .run(&["attest", &run, "nowhere"])
-        .exited(REFUSED)
-        .err_has("not a ready, waiting human action");
+    // A running node is neither reference `attest` takes, and a name no node
+    // has is neither either — and both refusals say what would have been
+    // accepted rather than only what was not.
+    for reference in ["build", "nowhere"] {
+        world
+            .run(&["attest", &run, reference])
+            .exited(REFUSED)
+            .err_has("not a ready, waiting human action")
+            .err_has("nor a node that settled failed");
+    }
     world.release("build.go");
 }
 

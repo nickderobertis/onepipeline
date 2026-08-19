@@ -154,6 +154,124 @@ fn results_reports_each_nodes_own_evidence() {
         .out_has("unblocks: gated");
 }
 
+/// A skip is a node the run **never asked**, and which dependency stopped it
+/// being asked is the fact the status word does not carry.
+///
+/// Two causes on one node and a chain through another, because a reader told
+/// about one of two would fix it and watch the node stay skipped.
+#[test]
+fn results_names_every_skipped_node_and_the_dependency_that_skipped_it() {
+    let world = World::new("views-skipped-nodes");
+    world.script("build.fail", "1");
+    world.script("lint.fail", "1");
+    let run = settled(
+        &world,
+        "unattempted",
+        vec![
+            agent("build", &[]),
+            agent("lint", &[]),
+            agent("ship", &["build", "lint"]),
+            agent("announce", &["ship"]),
+            agent("aside", &[]),
+        ],
+    );
+
+    let results = world.run(&["results", &run]);
+    results.exited(0);
+    for (node, cause) in [
+        (
+            "ship",
+            "never attempted; skipped by: build (failed), lint (failed)",
+        ),
+        ("announce", "never attempted; skipped by: ship (skipped)"),
+    ] {
+        results.out_has(node).out_has(cause);
+    }
+    assert!(
+        !results.stdout.contains("skipped by: aside")
+            && results.stdout.matches("never attempted").count() == 2,
+        "{}",
+        results.stdout
+    );
+
+    // The split is readable without opening `results` at all, which is where a
+    // supervisor scanning a host meets a run before they read anything of it.
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("1/5 done, 2 never attempted");
+    world.run(&["runs"]).exited(0).out_has("2 never attempted");
+}
+
+/// An observer this host cannot ask about is reported as watching, never as
+/// dead.
+///
+/// The direction is the safety of the verdict: `OBSERVER DEAD` sends somebody to
+/// relaunch a graph, and saying it of a working observer costs a run its watcher
+/// for nothing.
+#[test]
+fn an_observer_this_host_cannot_ask_about_is_never_reported_dead() {
+    let world = World::new("views-observer-unprovable");
+    world.script("build.wait", "hold");
+    let path = world.plan(
+        "unprovable",
+        &plan_of("unprovable", vec![agent("build", &[])]),
+    );
+    // The sibling's run store, pointed at this world rather than at whatever the
+    // host running these tests keeps in its own: the answer below has to be that
+    // *this* run's observer cannot be asked about, not that a stranger's could.
+    let read = |world: &World, view: &[&str]| -> String {
+        let mut command = world.cmd(view);
+        command.env("ONEAGENTGRAPH_STATE_DIR", world.graph_state());
+        let rendered = world.run_on(command, "a view over an unprovable observer");
+        rendered.exited(0);
+        rendered
+            .stdout
+            .lines()
+            .find(|line| line.contains("unprovable"))
+            .unwrap_or_else(|| panic!("no line for the run in:\n{}", rendered.stdout))
+            .to_string()
+    };
+
+    let mut launch = world.cmd(&[
+        "start",
+        &path.to_string_lossy(),
+        "--detach",
+        "--dag-graph",
+        &world.shipped_dag_graph(),
+    ]);
+    launch.env("ONEAGENTGRAPH_STATE_DIR", world.graph_state());
+    world.run_on(launch, "start unprovable").exited(0);
+    world.until("the run to dispatch its node", |world| {
+        !world.events_of("unprovable", "node-dispatched").is_empty()
+    });
+
+    // Not a vacuous claim: the launch really did attach an observer and really
+    // did record the graph run it minted, so there is something to ask about —
+    // and the store it would be asked about in holds no record of it.
+    let recorded = world.run_json("unprovable", "launch.json");
+    let graph_run = recorded["graph_run"].as_str().unwrap_or_default();
+    assert!(
+        !recorded["graph"].as_str().unwrap_or_default().is_empty() && !graph_run.is_empty(),
+        "the launch attached no observer, so nothing below is about one: {recorded}"
+    );
+    assert!(
+        !world.graph_state().join(graph_run).exists(),
+        "the sibling holds a record for {graph_run}, so this journey is not about an \
+         observer nothing can answer for"
+    );
+
+    for view in [vec!["runs"], vec!["status"]] {
+        let line = read(&world, &view);
+        assert!(
+            line.contains("ACTIVE") && !line.contains("OBSERVER"),
+            "a run whose observer this host cannot ask about is not reported as \
+             watched: {line}"
+        );
+    }
+    world.release("build.go");
+}
+
 #[test]
 fn goals_says_what_each_run_is_for_and_which_identities_it_holds() {
     let world = World::new("views-goals");

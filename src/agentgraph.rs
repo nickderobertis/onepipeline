@@ -320,6 +320,31 @@ pub fn recorded_graph_run(recorded: &str, run: &str) -> Result<GraphRunId> {
         .map_err(|error| sibling(format!("run '{run}' records '{recorded}': {error}")))
 }
 
+/// Whether the graph run a launch record names has **stopped running**, as the
+/// sibling's own ownership records say.
+///
+/// Two of them, because a graph killed outright never wrote the ending a graph
+/// that settles does — so the `owner.lock` answers where `finished_ms` cannot.
+/// Nothing here sweeps a process table, which knows nothing about whose work it
+/// matched.
+///
+/// Anything this host cannot prove is `false`: a run reported unwatched invites
+/// an operator to intervene, and doing that to a working observer is worse than
+/// saying nothing.
+pub fn graph_run_ended(recorded: &str, run: &str) -> bool {
+    let root = state_dir(&process_env());
+    recorded_graph_run(recorded, run)
+        .ok()
+        .and_then(|graph_run| {
+            let record = oneagentgraph::history::show(&root, graph_run.as_str()).ok()?;
+            Some(
+                record.finished_ms.is_some()
+                    || oneagentgraph::scratch::reclaimable(&root.join(&graph_run)).is_ok(),
+            )
+        })
+        .unwrap_or(false)
+}
+
 /// Render the reserved label keys as the `k=v` pairs the CLI takes, each under
 /// [`LABEL_PREFIX`].
 ///
@@ -1922,6 +1947,29 @@ mod tests {
                 .is_file(),
             "the reset left no signal where the run watches for one"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A recorded value that is not an address leaves the observer reported as
+    /// watching.
+    ///
+    /// The record is a file a later process re-reads, so this is the interfered-with
+    /// launch record `recorded_graph_run` exists for — and the direction is the
+    /// point: this verdict is what tells an operator a run is executing unwatched,
+    /// and saying that because a *field* was unreadable would send somebody to
+    /// relaunch a graph that is working. What the sibling's record says, in both
+    /// directions, is driven through the views themselves by
+    /// `dispatch::a_run_whose_observer_graph_is_watching_and_then_is_not_reads_as_each`
+    /// and `views::an_observer_this_host_cannot_ask_about_is_never_reported_dead`.
+    #[test]
+    fn a_recorded_value_that_is_not_an_address_leaves_the_observer_watching() {
+        let root = state_dir_holding("dag-scope-1786304152340-19", &["monitor"]);
+        for recorded in ["   ", "../elsewhere"] {
+            assert!(
+                !graph_run_ended(recorded, "demo"),
+                "'{recorded}' was read as a graph run that had ended"
+            );
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 

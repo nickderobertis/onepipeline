@@ -11,7 +11,7 @@ the contract**, and `docs/contract.md` was amended to carry each ruling. They st
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–22, 33 and 35 are open**. Each states what the code does today and the
+Entries **10–22, 33, 35 and 36 are open**. Each states what the code does today and the
 proposal it is waiting on — every one of them a question for a *producer* rather
 than for this crate, because `oneagentgraph` and `onevcs` are independent tools
 that expose general integration hooks only and nothing in them may know about
@@ -1108,3 +1108,45 @@ publication and settles `no-changes`. Nothing here runs git — no path of this
 crate ever has — and a comparison written against a checkout it had to guess at
 would fail in the direction that matters, settling a node as already-landed
 because it looked at the wrong repository.
+
+## 36. `attest` now also takes a node that settled `failed` — OPEN
+
+**Proposal (for the planner who owns the contract): state that `attest RUN REF`
+accepts two references — a ready `kind: human` node's action, and a node that
+settled `failed` whose work a person is vouching has landed — and that the
+second releases every node the failure had skipped.**
+
+The contract names `attest` in one shape only: a decision point is "a ready
+`kind: human` node's attestation", and clearing it "auto-resumes the paused
+subtree". That leaves a failed node's dependents with no way back at all. A skip
+is *derived* — re-computed from the dependency's status on every reconcile pass —
+so a node whose dependency failed is skipped for the whole life of the run, and
+nothing in the edit vocabulary says the thing that would release it. `retry`
+re-runs work that is already done, `drop` detaches the dependents from the
+dependency they actually had, and a `context` note reaches a node that will never
+be dispatched again. Measured: a 27-node run permanently skipped a node over a
+dependency whose change was already merged on `main` as a pull request, and the
+run had no answer to type.
+
+**What this crate does today is the block below, and the block is the source.**
+`tests/e2e/channel.rs` parses it out of this file and answers it with a run
+holding a node in every settlement it can reach — each one this list names is
+attested, and each one it does not is asserted refused. So the list and the
+build fail `just check` the moment either gains a settlement without the other.
+A divergence nothing gates is one that quietly stops being true, and while this
+is open there is nowhere else the second reference may be written down.
+
+```json
+{
+  "op": "attest",
+  "settlements": ["waiting", "failed"]
+}
+```
+
+They are node settlements, spelled as `results` prints them, and the refusal
+every other settlement gets names both of these.
+
+The proposal is whether this belongs on `attest` at all, or whether the second
+statement — "this failure's work is in the base; stop gating on it" — deserves an
+op of its own. This crate is built against `attest` and will move if the ruling
+says otherwise.

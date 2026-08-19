@@ -2593,6 +2593,208 @@ fn the_observer_graphs_own_stream_is_filtered_too_and_the_spec_may_be_a_file() {
     );
 }
 
+/// An observer killed outright — mid-turn, having written no ending — is the
+/// death only the `owner.lock` can report, and this drives it.
+///
+/// The process to kill comes from that graph run's own lock rather than from
+/// anything matched against a command line, which knows nothing about whose work
+/// it matched.
+#[cfg(unix)]
+#[test]
+fn a_run_whose_observer_graph_is_watching_and_then_is_killed_reads_as_each() {
+    let world = World::new("real-observer-dead");
+    world.write_graphs();
+    // The node's turn is held for the whole journey, so both runs are executing
+    // throughout: an observer verdict is about a run that is *working*.
+    world.script("turn.hold", "hold");
+    // And the observing turn is held, so the graph is mid-turn when it is killed
+    // rather than a graph that had already finished and said so.
+    world.script("observer.wait", "hold");
+
+    for (run, dag_graph) in [("watched", true), ("bare", false)] {
+        let path = world.plan(run, &plan_of(run, vec![agent("build", &[])]));
+        let mut launch = vec!["start".to_string(), path.to_string_lossy().into_owned()];
+        launch.push("--detach".into());
+        if dag_graph {
+            launch.push("--dag-graph".into());
+            launch.push(world.dag_graph());
+        }
+        world
+            .run_on_agentgraph(&launch.iter().map(String::as_str).collect::<Vec<_>>())
+            .exited(0);
+    }
+
+    let graph_run = || {
+        world.run_json("watched", "launch.json")["graph_run"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    };
+    world.until("the observer graph to be recorded", |_| {
+        !graph_run().is_empty()
+    });
+    let graph_dir = world.graph_state().join(graph_run());
+    let record = || {
+        std::fs::read_to_string(graph_dir.join(oneagentgraph::run::RECORD_FILE)).unwrap_or_default()
+    };
+    let line = |run: &str, view: &[&str]| -> String {
+        let rendered = world.run_on_agentgraph(view);
+        rendered.exited(0);
+        rendered
+            .stdout
+            .lines()
+            .find(|line| line.contains(run))
+            .unwrap_or_else(|| panic!("no line for {run} in:\n{}", rendered.stdout))
+            .to_string()
+    };
+
+    for view in [vec!["runs"], vec!["status"]] {
+        assert!(
+            !record().contains("finished_ms"),
+            "the observer settled before it was read"
+        );
+        // Watching: nothing says the graph has stopped, so the line says nothing
+        // about the observer beyond the run being driven.
+        let watching = line("watched", &view);
+        assert!(
+            watching.contains("ACTIVE") && !watching.contains("OBSERVER"),
+            "a run whose observer is still taking its turn is reported unwatched: {watching}"
+        );
+        // Never observed: a different fact, on the same line, from the start.
+        let bare = line("bare", &view);
+        assert!(
+            bare.contains("NO OBSERVER") && !bare.contains("OBSERVER DEAD"),
+            "a run launched with no observer reads as one whose observer died: {bare}"
+        );
+        assert_ne!(watching, bare);
+    }
+
+    // The process that owns this graph run's state, as that run's own lock names
+    // it: `<pid> <start token>`. Nothing is searched for and nothing is matched —
+    // the sibling wrote down which process holds this directory.
+    let lock = std::fs::read_to_string(graph_dir.join(oneagentgraph::liveness::OWNER_LOCK_FILE))
+        .expect("the graph run records who owns its state");
+    let owner: i32 = lock
+        .split_whitespace()
+        .next()
+        .and_then(|pid| pid.parse().ok())
+        .unwrap_or_else(|| panic!("the owner lock names no process: {lock:?}"));
+    assert!(
+        oneagentgraph::scratch::reclaimable(&graph_dir).is_err(),
+        "the graph run's state was already unowned, so killing its owner proves nothing"
+    );
+    // SAFETY: `kill` takes a pid and a signal and reports failure in its return
+    // value; nothing is borrowed. The pid is the one this run's own ownership
+    // record names, which is the only process this journey may end.
+    assert_eq!(
+        unsafe { libc::kill(owner, libc::SIGKILL) },
+        0,
+        "could not end the process the graph run's own lock names"
+    );
+
+    // Killed outright, so no ending was ever written: what answers now is the
+    // ownership record alone, which is the half of this verdict a settled record
+    // cannot cover.
+    world.until("the driver to notice its observer is gone", |_| {
+        line("watched", &["runs"]).contains("OBSERVER DEAD")
+    });
+    assert!(
+        !record().contains("finished_ms"),
+        "the observer wrote an ending after being killed, so this proves the \
+         record rather than the lock: {}",
+        record()
+    );
+
+    for view in [vec!["runs"], vec!["status"]] {
+        let dead = line("watched", &view);
+        assert!(
+            dead.contains("ACTIVE") && dead.contains("OBSERVER DEAD"),
+            "a run whose observer was killed is still reported as watched: {dead}"
+        );
+        let bare = line("bare", &view);
+        assert!(
+            bare.contains("NO OBSERVER") && !bare.contains("OBSERVER DEAD"),
+            "the run that never had an observer changed when another run's died: {bare}"
+        );
+        assert_ne!(dead, bare);
+    }
+
+    // And the driver said so where a detached run's driver says everything: an
+    // operator following the log learns its monitor went, rather than only
+    // noticing it had stopped saying anything.
+    //
+    // Waited for rather than read once: the verdict above answers off the
+    // ownership lock, which is true the instant the process dies, while this
+    // line comes from the driver's own watch on its own poll — so reading the
+    // log the moment the views agree is a race the driver loses on a loaded
+    // host, and did, on macOS.
+    world.until_run_file_holds("watched", "driver.log", "has stopped watching");
+    world.release("observer.go");
+    world.release("turn.go");
+    world.release("turn.settle");
+}
+
+/// The other way an observer stops: it finishes, and the run it was watching
+/// does not.
+///
+/// A graph that settles writes an ending into its own run record, which is what
+/// this half of the verdict reads — the ordinary case, beside the killed one
+/// that never got to write anything.
+#[test]
+fn a_run_whose_observer_graph_finished_is_reported_unwatched() {
+    let world = World::new("real-observer-finished");
+    world.write_graphs();
+    // The node's turn is held and the observing one is not, so the graph settles
+    // while the run it was watching is still going.
+    world.script("turn.hold", "hold");
+
+    let path = world.plan("outlived", &plan_of("outlived", vec![agent("build", &[])]));
+    world
+        .run_on_agentgraph(&[
+            "start",
+            &path.to_string_lossy(),
+            "--detach",
+            "--dag-graph",
+            &world.dag_graph(),
+        ])
+        .exited(0);
+
+    let graph_run = || {
+        world.run_json("outlived", "launch.json")["graph_run"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    };
+    world.until("the observer graph to be recorded", |_| {
+        !graph_run().is_empty()
+    });
+    world.until("the observer graph to write its ending", |world| {
+        std::fs::read_to_string(
+            world
+                .graph_state()
+                .join(graph_run())
+                .join(oneagentgraph::run::RECORD_FILE),
+        )
+        .is_ok_and(|record| record.contains("finished_ms"))
+    });
+
+    for view in [vec!["runs"], vec!["status"]] {
+        let rendered = world.run_on_agentgraph(&view);
+        rendered.exited(0);
+        let line = rendered
+            .stdout
+            .lines()
+            .find(|line| line.contains("outlived"))
+            .unwrap_or_else(|| panic!("no line for the run in:\n{}", rendered.stdout));
+        assert!(
+            line.contains("ACTIVE") && line.contains("OBSERVER DEAD"),
+            "a run whose observer finished is still reported as watched: {line}"
+        );
+    }
+    world.release("turn.go");
+    world.release("turn.settle");
+}
+
 /// `adopt` replays the launch's source filter onto the observer it relaunches.
 ///
 /// An adoption starts a **fresh** graph run, from a different process and often

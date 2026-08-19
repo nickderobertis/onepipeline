@@ -615,15 +615,24 @@ fn compile_requeue(
     }])
 }
 
+/// Compile an `attest`, whose accepted settlements are open divergence 36's —
+/// argued and sourced there, not here.
 fn compile_attest(frontier: &Frontier, reference: &str) -> Result<Vec<Operation>> {
-    if frontier.recorded.get(reference) != Some(&NodeStatus::Waiting) {
-        return Err(refuse(format!(
-            "attest: '{reference}' is not a ready, waiting human action"
-        )));
-    }
+    // Before the settlement check, because an attestation folds the node to
+    // `done`: asked the other way round, a second one is answered with the
+    // reference this op does not take rather than with what it needs to hear.
     if frontier.attestations.contains(reference) {
         return Err(refuse(format!(
             "attest: '{reference}' was already attested"
+        )));
+    }
+    if !matches!(
+        frontier.recorded.get(reference),
+        Some(NodeStatus::Waiting | NodeStatus::Failed)
+    ) {
+        return Err(refuse(format!(
+            "attest: '{reference}' is not a ready, waiting human action, nor a node \
+             that settled failed; attest accepts one of those two references"
         )));
     }
     Ok(vec![Operation::HumanAttested {
@@ -1334,6 +1343,59 @@ mod tests {
         .unwrap_err()
         .to_string()
         .contains("already attested"));
+    }
+
+    /// The second settlement `attest` accepts, and the refusal that names both.
+    ///
+    /// A failed node gates every dependent that named it for ever — the skip is
+    /// re-derived on every pass — so an attestation that the work landed anyway
+    /// is the only thing in this vocabulary that can release them.
+    #[test]
+    fn attest_takes_a_node_that_settled_failed_and_names_both_references_when_it_refuses() {
+        let mut graph = graph_of(vec![agent("build", &[]), agent("ship", &["build"])]);
+
+        let failed = frontier(&[("build", NodeStatus::Failed)]);
+        assert_eq!(
+            compile(
+                &mut graph,
+                &failed,
+                &Command::Attest {
+                    reference: "build".into(),
+                },
+            )
+            .expect("a failed node attests"),
+            vec![Operation::HumanAttested {
+                node: "build".into()
+            }]
+        );
+
+        let mut again = failed.clone();
+        again.attestations.insert("build".into());
+        assert!(compile(
+            &mut graph,
+            &again,
+            &Command::Attest {
+                reference: "build".into()
+            }
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("already attested"));
+
+        let message = compile(
+            &mut graph,
+            &frontier(&[("build", NodeStatus::Running)]),
+            &Command::Attest {
+                reference: "build".into(),
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            message.contains("not a ready, waiting human action"),
+            "{message}"
+        );
+        assert!(message.contains("node that settled failed"), "{message}");
     }
 
     #[test]

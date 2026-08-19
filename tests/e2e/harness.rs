@@ -966,16 +966,36 @@ impl World {
 
     /// Wait until a predicate holds, or fail with what was seen instead.
     pub fn until(&self, what: &str, mut ready: impl FnMut(&Self) -> bool) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-        while std::time::Instant::now() < deadline {
-            if ready(self) {
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
+        if waited(|| ready(self)) {
+            return;
         }
         panic!(
             "timed out waiting for {what}; the runs root held:\n{}",
             self.dump()
+        );
+    }
+
+    /// Wait until a file inside a run's directory holds `needle`, or fail with
+    /// what it held instead.
+    ///
+    /// [`until`](Self::until) dumps the runs root, which is where a journey
+    /// waiting on an *event* finds its evidence. A journey waiting on a line
+    /// some other process writes on its own cadence needs the file it was
+    /// waiting on, so that is what this one prints.
+    pub fn until_run_file_holds(&self, run: &str, relative: &str, needle: &str) {
+        let path = self.run_file(run, relative);
+        // Read leniently: a file the writer has not created yet is a wait, not a
+        // failure, and if it never appears the reason is the evidence a timeout
+        // has to print.
+        let held =
+            || std::fs::read_to_string(&path).unwrap_or_else(|e| format!("(unreadable: {e})"));
+        if waited(|| held().contains(needle)) {
+            return;
+        }
+        panic!(
+            "timed out waiting for {needle:?} in {}; it held:\n{}",
+            path.display(),
+            held()
         );
     }
 
@@ -1197,6 +1217,23 @@ impl World {
         )
         .unwrap_or_else(|e| panic!("{} is not JSON: {e}", path.display()))
     }
+}
+
+/// Poll until `ready` holds, reporting whether it did before the deadline.
+///
+/// Every wait in this suite is on work another process or thread is doing, so
+/// the shape is always the same and the deadline is one number: what differs is
+/// the evidence a caller prints when it runs out, which is why this answers
+/// rather than panicking.
+fn waited(mut ready: impl FnMut() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    while std::time::Instant::now() < deadline {
+        if ready() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    false
 }
 
 /// How many worlds this process still holds.
@@ -1767,7 +1804,7 @@ fn place(published: &Path, mine: &Path) -> std::io::Result<()> {
 // are every other test in this directory, all of which drive the compiled binary.
 #[test]
 fn a_double_is_placed_whole_or_not_at_all() {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::Arc;
 
     let dir = std::env::temp_dir().join(format!("onepipeline-place-{}", std::process::id()));
@@ -1786,13 +1823,14 @@ fn a_double_is_placed_whole_or_not_at_all() {
 
     let watching = Arc::new(AtomicBool::new(true));
     let stop = Arc::clone(&watching);
+    let looked = Arc::new(AtomicU64::new(0));
+    let looks = Arc::clone(&looked);
     let destination = mine.clone();
     let whole = [replaced.len() as u64, replacement.len() as u64];
     let reader = std::thread::spawn(move || {
-        let mut looked: u64 = 0;
         let mut partial: Option<u64> = None;
         while stop.load(Ordering::Relaxed) {
-            looked += 1;
+            looks.fetch_add(1, Ordering::Relaxed);
             // A name that does not resolve is one of the three: a reader that
             // finds nothing there looks again, and never execs a fragment.
             if let Ok(seen) = std::fs::metadata(&destination) {
@@ -1801,14 +1839,21 @@ fn a_double_is_placed_whole_or_not_at_all() {
                 }
             }
         }
-        (looked, partial)
+        partial
     });
 
+    // The window this journey is about is the one *during* the placement, and a
+    // thread the scheduler has not run yet is not in it: wait for the reader to
+    // be looking before the placement starts, rather than spawning it and
+    // trusting the host to have started it in time. It did not, on macOS.
+    assert!(
+        waited(|| looked.load(Ordering::Relaxed) > 0),
+        "the reader never looked at the destination"
+    );
     place(&published, &mine).expect("the double is placed");
     watching.store(false, Ordering::Relaxed);
-    let (looked, partial) = reader.join().expect("the reader ends");
+    let partial = reader.join().expect("the reader ends");
 
-    assert!(looked > 0, "the reader never looked at the destination");
     assert_eq!(
         partial,
         None,
