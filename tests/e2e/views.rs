@@ -200,6 +200,97 @@ fn results_names_every_skipped_node_and_the_dependency_that_skipped_it() {
     world.run(&["runs"]).exited(0).out_has("2 never attempted");
 }
 
+/// An observer this host cannot ask about is reported as watching, never as
+/// dead.
+///
+/// The direction is the whole safety of the verdict. `OBSERVER DEAD` sends
+/// somebody to relaunch a graph, and saying it of an observer that is working
+/// costs the run its watcher for nothing — so a graph run no store on this host
+/// holds, a record the launch no longer names, and a value the sibling would
+/// never answer to all leave the run reported exactly as it reads while its
+/// observer is fine. The verdict really does speak on this line when it can:
+/// `dispatch::a_run_whose_observer_graph_has_ended_reads_differently_from_one_launched_without_any`
+/// is the same rendering with the proof present.
+#[test]
+fn an_observer_this_host_cannot_ask_about_is_never_reported_dead() {
+    let world = World::new("views-observer-unprovable");
+    world.script("build.wait", "hold");
+    let path = world.plan(
+        "unprovable",
+        &plan_of("unprovable", vec![agent("build", &[])]),
+    );
+    // An empty run store for the sibling, so what this journey states is that
+    // the *answer* is unavailable rather than that some other run answered it.
+    let read = |world: &World, view: &[&str]| -> String {
+        let mut command = world.cmd(view);
+        command.env("ONEAGENTGRAPH_STATE_DIR", world.graph_state());
+        let rendered = world.run_on(command, "a view over an unprovable observer");
+        rendered.exited(0);
+        rendered
+            .stdout
+            .lines()
+            .find(|line| line.contains("unprovable"))
+            .unwrap_or_else(|| panic!("no line for the run in:\n{}", rendered.stdout))
+            .to_string()
+    };
+
+    let mut launch = world.cmd(&[
+        "start",
+        &path.to_string_lossy(),
+        "--detach",
+        "--dag-graph",
+        &world.shipped_dag_graph(),
+    ]);
+    launch.env("ONEAGENTGRAPH_STATE_DIR", world.graph_state());
+    world.run_on(launch, "start unprovable").exited(0);
+    world.until("the run to dispatch its node", |world| {
+        !world.events_of("unprovable", "node-dispatched").is_empty()
+    });
+
+    // Not a vacuous claim: the launch really did attach an observer and really
+    // did record the graph run it minted, so there is something to ask about.
+    let recorded = world.run_json("unprovable", "launch.json");
+    assert!(
+        !recorded["graph"].as_str().unwrap_or_default().is_empty()
+            && !recorded["graph_run"]
+                .as_str()
+                .unwrap_or_default()
+                .is_empty(),
+        "the launch attached no observer, so nothing below is about one: {recorded}"
+    );
+
+    for what in [
+        "a graph run no store holds",
+        "no graph run at all",
+        "not an address",
+    ] {
+        for view in [vec!["runs"], vec!["status"]] {
+            let line = read(&world, &view);
+            assert!(
+                line.contains("ACTIVE") && !line.contains("OBSERVER"),
+                "with {what}, a run whose observer this host cannot ask about is not \
+                 reported as watched: {line}"
+            );
+        }
+        let mut record = world.run_json("unprovable", "launch.json");
+        match what {
+            "a graph run no store holds" => {
+                record
+                    .as_object_mut()
+                    .expect("the record is an object")
+                    .remove("graph_run");
+            }
+            _ => record["graph_run"] = serde_json::json!("../elsewhere"),
+        }
+        std::fs::write(
+            world.run_file("unprovable", "launch.json"),
+            record.to_string(),
+        )
+        .expect("the record is rewritten");
+    }
+    world.release("build.go");
+}
+
 #[test]
 fn goals_says_what_each_run_is_for_and_which_identities_it_holds() {
     let world = World::new("views-goals");

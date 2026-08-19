@@ -409,7 +409,6 @@ impl Unread {
             .into_iter()
             .map(|(kind, (blocking, count))| (blocking, count, kind))
             .collect();
-        // Blocking kinds first, then rarest first, then by name.
         ordered.sort_by(|a, b| {
             b.0.cmp(&a.0)
                 .then(a.1.cmp(&b.1))

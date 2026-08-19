@@ -292,7 +292,11 @@ fn the_unread_line_names_the_kinds_waiting_so_a_question_is_not_buried() {
     frames.push_str(
         "{\"kind\":\"planner-question\",\"message\":\"Which base should build target?\"}\n",
     );
-    for kind in ["edit-rejected", "quiet-worker", "check-in", "proposal"] {
+    // The last of these carries a newline inside its kind. A kind is the
+    // observer persona's own word, so it is a stranger's string on the one line
+    // a supervisor may not filter out — and a second line spliced into that line
+    // is how a run hides the question above it.
+    for kind in ["edit-rejected", "quiet-worker", "check-in", "pro\\nposal"] {
         frames.push_str(&format!(
             "{{\"kind\":\"{kind}\",\"message\":\"one {kind}\",\"blocking\":false}}\n"
         ));
@@ -320,14 +324,18 @@ fn the_unread_line_names_the_kinds_waiting_so_a_question_is_not_buried() {
     });
 
     // The one question leads the parenthetical rather than sitting behind the
-    // five updates that outnumber it, and a queue of more kinds than a line can
-    // carry says how many it left out rather than cutting them silently.
+    // five updates that outnumber it; a queue of more kinds than a line can
+    // carry says how many it left out rather than cutting them silently; and the
+    // kind carrying a newline is rendered on the one line it belongs to.
     for view in [vec!["runs"], vec!["status", &run]] {
         let rendered = world.run(&view);
-        rendered.exited(0).out_has(
-            "10 planner update(s) waiting (1 planner-question, 1 check-in, 1 edit-rejected, \
-             1 proposal, and 2 other kind(s))",
-        );
+        rendered
+            .exited(0)
+            .out_has(
+                "10 planner update(s) waiting (1 planner-question, 1 check-in, 1 edit-rejected, \
+                 1 pro posal, and 2 other kind(s))",
+            )
+            .out_lacks("\nposal");
     }
     world.release("build.go");
 }
