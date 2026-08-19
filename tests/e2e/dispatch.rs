@@ -2731,7 +2731,78 @@ fn a_run_whose_observer_graph_is_watching_and_then_is_killed_reads_as_each() {
         );
         assert_ne!(dead, bare);
     }
+
+    // And the driver said so where a detached run's driver says everything: an
+    // operator following the log learns its monitor went, rather than only
+    // noticing it had stopped saying anything.
+    let log = std::fs::read_to_string(world.run_file("watched", "driver.log"))
+        .expect("the detached driver keeps a log");
+    assert!(
+        log.contains("has stopped watching"),
+        "the driver never said its observer had gone:\n{log}"
+    );
     world.release("observer.go");
+    world.release("turn.go");
+    world.release("turn.settle");
+}
+
+/// The other way an observer stops: it finishes, and the run it was watching
+/// does not.
+///
+/// A graph that settles writes an ending into its own run record, which is what
+/// this half of the verdict reads — the ordinary case, beside the killed one
+/// that never got to write anything.
+#[test]
+fn a_run_whose_observer_graph_finished_is_reported_unwatched() {
+    let world = World::new("real-observer-finished");
+    world.write_graphs();
+    // The node's turn is held and the observing one is not, so the graph settles
+    // while the run it was watching is still going.
+    world.script("turn.hold", "hold");
+
+    let path = world.plan("outlived", &plan_of("outlived", vec![agent("build", &[])]));
+    world
+        .run_on_agentgraph(&[
+            "start",
+            &path.to_string_lossy(),
+            "--detach",
+            "--dag-graph",
+            &world.dag_graph(),
+        ])
+        .exited(0);
+
+    let graph_run = || {
+        world.run_json("outlived", "launch.json")["graph_run"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    };
+    world.until("the observer graph to be recorded", |_| {
+        !graph_run().is_empty()
+    });
+    world.until("the observer graph to write its ending", |world| {
+        std::fs::read_to_string(
+            world
+                .graph_state()
+                .join(graph_run())
+                .join(oneagentgraph::run::RECORD_FILE),
+        )
+        .is_ok_and(|record| record.contains("finished_ms"))
+    });
+
+    for view in [vec!["runs"], vec!["status"]] {
+        let rendered = world.run_on_agentgraph(&view);
+        rendered.exited(0);
+        let line = rendered
+            .stdout
+            .lines()
+            .find(|line| line.contains("outlived"))
+            .unwrap_or_else(|| panic!("no line for the run in:\n{}", rendered.stdout));
+        assert!(
+            line.contains("ACTIVE") && line.contains("OBSERVER DEAD"),
+            "a run whose observer finished is still reported as watched: {line}"
+        );
+    }
     world.release("turn.go");
     world.release("turn.settle");
 }
