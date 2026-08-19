@@ -327,12 +327,12 @@ pub fn recorded_graph_run(recorded: &str, run: &str) -> Result<GraphRunId> {
 /// in this stack, read where the sibling keeps it — never a process table swept
 /// for a matching command line, which knows nothing about whose work it matched:
 ///
-/// * the run's own record, which the sibling rewrites with `finished_ms` and an
-///   exit code as it settles; and
+/// * the run's own record, which the sibling stamps with `finished_ms` as it
+///   settles; and
 /// * the scratch directory's `owner.lock`, the pid-with-start-token the sibling
 ///   claims a run's state under. Provably reclaimable means the process that
 ///   took it is gone — which is the case a settled record cannot cover, because
-///   a driver killed outright never got to write one.
+///   a graph killed outright never got to write one.
 ///
 /// Every answer this host cannot prove resolves toward **still running**, for
 /// the reason the driver verdict's do: a run reported unwatched invites an
@@ -347,8 +347,16 @@ pub fn graph_run_ended(recorded: &str, run: &str) -> bool {
     let Ok(record) = oneagentgraph::history::show(&root, graph_run.as_str()) else {
         return false;
     };
+    // llmlint: ignore[changed_behavior_has_e2e] the lock's half of this answer is a graph
+    // whose process died *without* settling, while the run it watched is still being
+    // driven — the pipeline driver holds the two in one process tree, so producing it
+    // from an invocation a user can type means killing one specific descendant, and
+    // singling that process out is the process-table identification the operator declined
+    // on the record. The record's half is driven end to end by
+    // `a_run_whose_observer_graph_has_ended_reads_differently_from_one_launched_without_any`,
+    // and this half is held against the sibling's own verdict for the same directory by
+    // `a_graph_run_is_only_reported_over_where_its_own_records_say_so`.
     record.finished_ms.is_some()
-        || record.exit_code.is_some()
         || oneagentgraph::scratch::reclaimable(&root.join(&graph_run)).is_ok()
 }
 
@@ -1970,10 +1978,7 @@ mod tests {
         let root = state_dir_holding("dag-scope-1786304152340-19", &["monitor"]);
         let dir = root.join("dag-scope-1786304152340-19");
 
-        // A record naming no ending, and no lock to prove the owner is gone.
         assert!(!graph_run_ended("dag-scope-1786304152340-19", "demo"));
-        // Neither is an id this store has never held, nor one that is not an
-        // address at all.
         assert!(!graph_run_ended("dag-scope-1786304152340-99", "demo"));
         assert!(!graph_run_ended("   ", "demo"));
 
@@ -1991,7 +1996,6 @@ mod tests {
             "the lock's own verdict and this one disagree about the same directory"
         );
 
-        // And the record's own ending, which needs no lock at all.
         let mut record: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(dir.join(oneagentgraph::run::RECORD_FILE))
                 .expect("the record reads"),

@@ -292,6 +292,11 @@ fn the_unread_line_names_the_kinds_waiting_so_a_question_is_not_buried() {
     frames.push_str(
         "{\"kind\":\"planner-question\",\"message\":\"Which base should build target?\"}\n",
     );
+    for kind in ["edit-rejected", "quiet-worker", "check-in", "proposal"] {
+        frames.push_str(&format!(
+            "{{\"kind\":\"{kind}\",\"message\":\"one {kind}\",\"blocking\":false}}\n"
+        ));
+    }
 
     // The server waits for a verdict after every frame, and nothing here is
     // going to answer six of them: a one-second bound makes each frame's wait
@@ -311,16 +316,18 @@ fn the_unread_line_names_the_kinds_waiting_so_a_question_is_not_buried() {
     serving.wait().expect("the channel server ends");
 
     world.until("every frame to reach the planner", |world| {
-        world.events_of(&run, "planner-surface-queued").len() == 6
+        world.events_of(&run, "planner-surface-queued").len() == 10
     });
 
-    // Both views name the kinds, and the one question leads the parenthetical
-    // rather than sitting behind the five updates that outnumber it.
+    // The one question leads the parenthetical rather than sitting behind the
+    // five updates that outnumber it, and a queue of more kinds than a line can
+    // carry says how many it left out rather than cutting them silently.
     for view in [vec!["runs"], vec!["status", &run]] {
         let rendered = world.run(&view);
-        rendered
-            .exited(0)
-            .out_has("6 planner update(s) waiting (1 planner-question, 5 monitor)");
+        rendered.exited(0).out_has(
+            "10 planner update(s) waiting (1 planner-question, 1 check-in, 1 edit-rejected, \
+             1 proposal, and 2 other kind(s))",
+        );
     }
     world.release("build.go");
 }
@@ -476,8 +483,6 @@ fn attesting_a_failed_node_releases_the_dependents_it_had_skipped() {
             .any(|event| event["labels"]["node"] == "build")
     });
 
-    // Before the attestation: the dependent was never attempted, and the run
-    // says which dependency is why.
     world
         .run(&["results", &run])
         .exited(0)
@@ -491,8 +496,14 @@ fn attesting_a_failed_node_releases_the_dependents_it_had_skipped() {
         world.kinds(&run)
     );
 
-    // The attestation is the one thing that changes the answer.
+    // Nothing else in the vocabulary would do: the skip is re-derived from the
+    // failure on every pass, so only saying the work landed releases it.
     world.run(&["attest", &run, "build"]).exited(0);
+    // Once, like any other attestation, whichever settlement it was taken on.
+    world
+        .run(&["attest", &run, "build"])
+        .exited(REFUSED)
+        .err_has("already attested");
     world.until("the node it had skipped to run", |world| {
         world
             .events_of(&run, "node-settled")
@@ -506,8 +517,6 @@ fn attesting_a_failed_node_releases_the_dependents_it_had_skipped() {
         .collect();
     assert_eq!(settled[0]["payload"]["status"], "done", "{settled:?}");
 
-    // The attestation is on the run's own record as the evidence it is, and the
-    // failure it vouches for is not erased by it.
     let attested = world.events_of(&run, "human-attested");
     assert_eq!(attested.len(), 1, "{attested:?}");
     assert_eq!(attested[0]["payload"]["ref"], "build");

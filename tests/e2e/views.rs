@@ -184,8 +184,6 @@ fn results_names_every_skipped_node_and_the_dependency_that_skipped_it() {
     ] {
         results.out_has(node).out_has(cause);
     }
-    // The node that was attempted and lost is not one of them: it carries the
-    // dispatch's own detail instead, which is what a reader acts on.
     assert!(
         !results.stdout.contains("skipped by: aside")
             && results.stdout.matches("never attempted").count() == 2,
@@ -193,8 +191,8 @@ fn results_names_every_skipped_node_and_the_dependency_that_skipped_it() {
         results.stdout
     );
 
-    // And the run's one-line summary separates the two halves of what is not
-    // done, so the split is readable without opening `results` at all.
+    // The split is readable without opening `results` at all, which is where a
+    // supervisor scanning a host meets a run before they read anything of it.
     world
         .run(&["status", &run])
         .exited(0)

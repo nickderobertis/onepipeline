@@ -632,6 +632,16 @@ fn compile_requeue(
 /// it stays on the journal, the `human-attested` beside it is the evidence a
 /// person supplied, and the views report the pair rather than either alone.
 fn compile_attest(frontier: &Frontier, reference: &str) -> Result<Vec<Operation>> {
+    // Before the settlement check, because an attestation *changes* the
+    // settlement: it folds the node to `done`, so a second one would otherwise
+    // be answered with the reference this op does not take — telling a planner
+    // to look for a node that is wrong, when the answer they need is that
+    // somebody already vouched for this one.
+    if frontier.attestations.contains(reference) {
+        return Err(refuse(format!(
+            "attest: '{reference}' was already attested"
+        )));
+    }
     if !matches!(
         frontier.recorded.get(reference),
         Some(NodeStatus::Waiting | NodeStatus::Failed)
@@ -639,11 +649,6 @@ fn compile_attest(frontier: &Frontier, reference: &str) -> Result<Vec<Operation>
         return Err(refuse(format!(
             "attest: '{reference}' is not a ready, waiting human action, nor a node \
              that settled failed; attest accepts one of those two references"
-        )));
-    }
-    if frontier.attestations.contains(reference) {
-        return Err(refuse(format!(
-            "attest: '{reference}' was already attested"
         )));
     }
     Ok(vec![Operation::HumanAttested {
@@ -1380,7 +1385,6 @@ mod tests {
             }]
         );
 
-        // Once, like any other attestation.
         let mut again = failed.clone();
         again.attestations.insert("build".into());
         assert!(compile(
@@ -1394,9 +1398,6 @@ mod tests {
         .to_string()
         .contains("already attested"));
 
-        // And a reference that is neither is refused by both names, so the
-        // planner reads what would have been accepted rather than only what was
-        // not.
         let message = compile(
             &mut graph,
             &frontier(&[("build", NodeStatus::Running)]),

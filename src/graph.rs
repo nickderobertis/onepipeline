@@ -1467,18 +1467,14 @@ mod tests {
 
         assert_eq!(statuses["ship"], NodeStatus::Skipped);
         assert_eq!(statuses["announce"], NodeStatus::Skipped);
-        // The dependency that failed, and not the one beside it that ran.
         assert_eq!(
             skipped_by(&graph, &statuses, "ship"),
             vec![("build".to_string(), NodeStatus::Failed)]
         );
-        // The chain back: a node skipped by a node that was itself skipped.
         assert_eq!(
             skipped_by(&graph, &statuses, "announce"),
             vec![("ship".to_string(), NodeStatus::Skipped)]
         );
-        // Nothing skipped the node that ran, and a node the graph does not hold
-        // is answered rather than panicked on.
         assert!(skipped_by(&graph, &statuses, "lint").is_empty());
         assert!(skipped_by(&graph, &statuses, "nowhere").is_empty());
     }

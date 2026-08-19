@@ -1128,18 +1128,13 @@ be dispatched again. Measured: a 27-node run permanently skipped a node over a
 dependency whose change was already merged on `main` as a pull request, and the
 run had no answer to type.
 
-**What this crate does today.** `attest RUN REF` accepts a reference naming
-either a ready, waiting `kind: human` node **or** a node the journal recorded as
-`failed`. Both compile to the same `human-attested` operation and the same
-`human-attested` record on the journal, carrying the node as `ref`; the node is
-folded to `done` from that point, so every dependent it had skipped re-derives
-ready on the next pass and is dispatched inside the loop that was already
-running — no relaunch, no `adopt`. Neither reference may be attested twice.
-A reference that is neither is refused, and the refusal names both of the two it
-would have taken. The `node-settled` recording the failure is **not** rewritten:
-it stays on the journal beside the attestation, and `results` renders the node as
-`done — settled failed, attested as landed`, so no reader is shown a dispatch
-that failed as one that succeeded.
+**What this crate does today.** `attest` takes the failed node as a second
+reference beside the human action, on the same op, the same journal kind, and the
+same release of the subtree the ready human action already had. `src/edits.rs`
+is where the two accepted settlements are declared and `src/views.rs` is where a
+node carrying both a failure and an attestation is rendered; the journeys in
+`tests/e2e/channel.rs` drive the whole statement through the CLI, which is what
+holds this paragraph to the build rather than to itself.
 
 The proposal is whether this belongs on `attest` at all, or whether the second
 statement — "this failure's work is in the base; stop gating on it" — deserves an
