@@ -582,8 +582,6 @@ fn observer_word(view: &RunView) -> &'static str {
     observer_liveness(&view.launch).as_str()
 }
 
-/// The observer word as it joins a rendered line: separated when there is one,
-/// and nothing at all when there is not.
 fn observer_suffix(view: &RunView) -> String {
     match observer_word(view) {
         "" => String::new(),
