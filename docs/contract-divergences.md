@@ -11,7 +11,7 @@ the contract**, and `docs/contract.md` was amended to carry each ruling. They st
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–22, 33 and 35 are open**. Each states what the code does today and the
+Entries **10–22, 33, 35 and 36 are open**. Each states what the code does today and the
 proposal it is waiting on — every one of them a question for a *producer* rather
 than for this crate, because `oneagentgraph` and `onevcs` are independent tools
 that expose general integration hooks only and nothing in them may know about
@@ -1108,3 +1108,40 @@ publication and settles `no-changes`. Nothing here runs git — no path of this
 crate ever has — and a comparison written against a checkout it had to guess at
 would fail in the direction that matters, settling a node as already-landed
 because it looked at the wrong repository.
+
+## 36. `attest` now also takes a node that settled `failed` — OPEN
+
+**Proposal (for the planner who owns the contract): state that `attest RUN REF`
+accepts two references — a ready `kind: human` node's action, and a node that
+settled `failed` whose work a person is vouching has landed — and that the
+second releases every node the failure had skipped.**
+
+The contract names `attest` in one shape only: a decision point is "a ready
+`kind: human` node's attestation", and clearing it "auto-resumes the paused
+subtree". That leaves a failed node's dependents with no way back at all. A skip
+is *derived* — re-computed from the dependency's status on every reconcile pass —
+so a node whose dependency failed is skipped for the whole life of the run, and
+nothing in the edit vocabulary says the thing that would release it. `retry`
+re-runs work that is already done, `drop` detaches the dependents from the
+dependency they actually had, and a `context` note reaches a node that will never
+be dispatched again. Measured: a 27-node run permanently skipped a node over a
+dependency whose change was already merged on `main` as a pull request, and the
+run had no answer to type.
+
+**What this crate does today.** `attest RUN REF` accepts a reference naming
+either a ready, waiting `kind: human` node **or** a node the journal recorded as
+`failed`. Both compile to the same `human-attested` operation and the same
+`human-attested` record on the journal, carrying the node as `ref`; the node is
+folded to `done` from that point, so every dependent it had skipped re-derives
+ready on the next pass and is dispatched inside the loop that was already
+running — no relaunch, no `adopt`. Neither reference may be attested twice.
+A reference that is neither is refused, and the refusal names both of the two it
+would have taken. The `node-settled` recording the failure is **not** rewritten:
+it stays on the journal beside the attestation, and `results` renders the node as
+`done — settled failed, attested as landed`, so no reader is shown a dispatch
+that failed as one that succeeded.
+
+The proposal is whether this belongs on `attest` at all, or whether the second
+statement — "this failure's work is in the base; stop gating on it" — deserves an
+op of its own. This crate is built against `attest` and will move if the ruling
+says otherwise.

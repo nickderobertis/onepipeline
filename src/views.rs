@@ -713,6 +713,27 @@ fn skipped_by_phrase(causes: &[(String, NodeStatus)]) -> String {
         .join(", ")
 }
 
+/// Whether a person attested that a node this run **failed** had in fact landed.
+///
+/// Two records rather than one, because either alone says something else: the
+/// attestation on its own is how every human action completes, and the failure
+/// on its own is what the node's status said before anybody looked. Together
+/// they are the fact a reader of `results` needs — the run could not finish this
+/// work, and somebody has since vouched that it is there — and they are why the
+/// node's dependents stopped being skipped.
+fn attested_after_failing(view: &RunView, node: &str) -> bool {
+    view.state.attestations.contains(node)
+        && view.events.iter().any(|event| {
+            event.kind.0 == PipelineKind::NodeSettled.as_str()
+                && event.labels.node.as_deref() == Some(node)
+                && event
+                    .payload
+                    .get("status")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(NodeStatus::Failed.as_str())
+        })
+}
+
 /// The nodes whose change had not reached its base when they settled, in id
 /// order.
 ///
@@ -1155,6 +1176,13 @@ pub fn results(view: &RunView) -> String {
         if let Some(landing) = view.state.landings.get(&node.id) {
             let settled_at = view.state.settled_at.get(&node.id).copied();
             out.push_str(&format!(" — {}", landed_phrase(*landing, settled_at)));
+        }
+        // The attestation settles the node, so the status word alone would
+        // report a dispatch that failed as one that succeeded. Both records
+        // ride the line instead: what this run got, and what a person said
+        // afterwards — which is also what released everything under it.
+        if attested_after_failing(view, &node.id) {
+            out.push_str(" — settled failed, attested as landed");
         }
         if status == NodeStatus::Running && view.state.stop_recorded() {
             out.push_str(&format!(" — {}", became_of_the_worker(&view.state)));

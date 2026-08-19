@@ -389,20 +389,97 @@ fn attest_completes_a_ready_waiting_human_action() {
     world.run(&["results", &run]).exited(0).out_has("approve");
 }
 
+/// A skip is not permanent when the work it was waiting for did in fact land.
+///
+/// The dependency failed here and its dependent was never asked — and stays
+/// never asked, because the skip is re-derived from that failure on every pass.
+/// Attesting the failed node is the statement that the work is there anyway, and
+/// the run releases what it was holding inside the loop that was already going.
+#[test]
+fn attesting_a_failed_node_releases_the_dependents_it_had_skipped() {
+    let world = World::new("channel-attest-failed");
+    world.script("build.fail", "1");
+    // A third branch, held open, so the loop is still running when the
+    // attestation arrives: what is under test is the release *inside* it.
+    world.script("hold.wait", "hold");
+    let run = running(
+        &world,
+        "landed",
+        vec![
+            agent("build", &[]),
+            agent("ship", &["build"]),
+            agent("hold", &[]),
+        ],
+    );
+    world.until("the dependency to fail", |world| {
+        world
+            .events_of(&run, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "build")
+    });
+
+    // Before the attestation: the dependent was never attempted, and the run
+    // says which dependency is why.
+    world
+        .run(&["results", &run])
+        .exited(0)
+        .out_has("never attempted; skipped by: build (failed)");
+    assert!(
+        world
+            .events_of(&run, "node-dispatched")
+            .iter()
+            .all(|event| event["labels"]["node"] != "ship"),
+        "the skipped node ran before anything was attested: {:?}",
+        world.kinds(&run)
+    );
+
+    // The attestation is the one thing that changes the answer.
+    world.run(&["attest", &run, "build"]).exited(0);
+    world.until("the node it had skipped to run", |world| {
+        world
+            .events_of(&run, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "ship")
+    });
+    let settled: Vec<_> = world
+        .events_of(&run, "node-settled")
+        .into_iter()
+        .filter(|event| event["labels"]["node"] == "ship")
+        .collect();
+    assert_eq!(settled[0]["payload"]["status"], "done", "{settled:?}");
+
+    // The attestation is on the run's own record as the evidence it is, and the
+    // failure it vouches for is not erased by it.
+    let attested = world.events_of(&run, "human-attested");
+    assert_eq!(attested.len(), 1, "{attested:?}");
+    assert_eq!(attested[0]["payload"]["ref"], "build");
+    world.release("hold.go");
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+    world
+        .run(&["results", &run])
+        .exited(0)
+        .out_has("settled failed, attested as landed")
+        .out_lacks("never attempted");
+}
+
 #[test]
 fn attesting_something_that_is_not_a_ready_human_action_is_refused_by_name() {
     let world = World::new("channel-attest-refuse");
     world.script("build.wait", "hold");
     let run = running(&world, "noaction", vec![agent("build", &[])]);
 
-    world
-        .run(&["attest", &run, "build"])
-        .exited(REFUSED)
-        .err_has("not a ready, waiting human action");
-    world
-        .run(&["attest", &run, "nowhere"])
-        .exited(REFUSED)
-        .err_has("not a ready, waiting human action");
+    // A running node is neither reference `attest` takes, and a name no node
+    // has is neither either — and both refusals say what would have been
+    // accepted rather than only what was not.
+    for reference in ["build", "nowhere"] {
+        world
+            .run(&["attest", &run, reference])
+            .exited(REFUSED)
+            .err_has("not a ready, waiting human action")
+            .err_has("nor a node that settled failed");
+    }
     world.release("build.go");
 }
 

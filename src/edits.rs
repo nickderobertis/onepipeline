@@ -615,10 +615,30 @@ fn compile_requeue(
     }])
 }
 
+/// Compile an `attest`, which two different settlements accept.
+///
+/// A ready human action is the one this op was written for: a person did the
+/// thing, and saying so is what settles the node. A node that settled **failed**
+/// is the second, and it is the same statement about the same kind of evidence —
+/// the work this run could not finish is landed, and a person is vouching for
+/// it. It has to be sayable, because a failure gates every dependent that named
+/// it *for ever*: a skip is derived from the dependency's status and re-derived
+/// on every pass, so nothing else in this vocabulary can make a node the run
+/// gave up on stop holding its subtree back. `retry` re-runs work that is
+/// already done and `drop` detaches the dependents from the thing they actually
+/// depended on; neither says what happened.
+///
+/// The attestation does not erase the failure. The `node-settled` that recorded
+/// it stays on the journal, the `human-attested` beside it is the evidence a
+/// person supplied, and the views report the pair rather than either alone.
 fn compile_attest(frontier: &Frontier, reference: &str) -> Result<Vec<Operation>> {
-    if frontier.recorded.get(reference) != Some(&NodeStatus::Waiting) {
+    if !matches!(
+        frontier.recorded.get(reference),
+        Some(NodeStatus::Waiting | NodeStatus::Failed)
+    ) {
         return Err(refuse(format!(
-            "attest: '{reference}' is not a ready, waiting human action"
+            "attest: '{reference}' is not a ready, waiting human action, nor a node \
+             that settled failed; attest accepts one of those two references"
         )));
     }
     if frontier.attestations.contains(reference) {
@@ -1334,6 +1354,63 @@ mod tests {
         .unwrap_err()
         .to_string()
         .contains("already attested"));
+    }
+
+    /// The second settlement `attest` accepts, and the refusal that names both.
+    ///
+    /// A failed node gates every dependent that named it for ever — the skip is
+    /// re-derived on every pass — so an attestation that the work landed anyway
+    /// is the only thing in this vocabulary that can release them.
+    #[test]
+    fn attest_takes_a_node_that_settled_failed_and_names_both_references_when_it_refuses() {
+        let mut graph = graph_of(vec![agent("build", &[]), agent("ship", &["build"])]);
+
+        let failed = frontier(&[("build", NodeStatus::Failed)]);
+        assert_eq!(
+            compile(
+                &mut graph,
+                &failed,
+                &Command::Attest {
+                    reference: "build".into(),
+                },
+            )
+            .expect("a failed node attests"),
+            vec![Operation::HumanAttested {
+                node: "build".into()
+            }]
+        );
+
+        // Once, like any other attestation.
+        let mut again = failed.clone();
+        again.attestations.insert("build".into());
+        assert!(compile(
+            &mut graph,
+            &again,
+            &Command::Attest {
+                reference: "build".into()
+            }
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("already attested"));
+
+        // And a reference that is neither is refused by both names, so the
+        // planner reads what would have been accepted rather than only what was
+        // not.
+        let message = compile(
+            &mut graph,
+            &frontier(&[("build", NodeStatus::Running)]),
+            &Command::Attest {
+                reference: "build".into(),
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            message.contains("not a ready, waiting human action"),
+            "{message}"
+        );
+        assert!(message.contains("node that settled failed"), "{message}");
     }
 
     #[test]
