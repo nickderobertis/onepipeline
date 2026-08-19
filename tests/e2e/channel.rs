@@ -267,6 +267,64 @@ fn unread_surfaces_are_reported_separately_by_the_views_a_planner_reads() {
     world.release("build.go");
 }
 
+/// The one line a supervisor is not allowed to filter out says *what* is
+/// waiting, not only how much.
+///
+/// A blocking question is a run's only signal that it is held on a person, and
+/// behind a pile of routine `monitor` updates a bare count rendered the two
+/// identically. So the kinds ride the line, and the blocking one leads it.
+#[test]
+fn the_unread_line_names_the_kinds_waiting_so_a_question_is_not_buried() {
+    use std::io::Write;
+
+    let world = World::new("channel-unread-kinds");
+    world.script("build.wait", "hold");
+    let run = running(&world, "buried", vec![agent("build", &[])]);
+
+    // An observer's judge side, raising what it saw: routine updates first, and
+    // the one question it stopped to ask last — the order that buries it.
+    let mut frames = String::new();
+    for update in 0..5 {
+        frames.push_str(&format!(
+            "{{\"kind\":\"monitor\",\"message\":\"update {update}\",\"blocking\":false}}\n"
+        ));
+    }
+    frames.push_str(
+        "{\"kind\":\"planner-question\",\"message\":\"Which base should build target?\"}\n",
+    );
+
+    // The server waits for a verdict after every frame, and nothing here is
+    // going to answer six of them: a one-second bound makes each frame's wait
+    // its own synthesized `continue`, which is the timeout path this journey
+    // rides rather than the question it is about.
+    let mut command = world.cmd(&["channel", "serve", &run]);
+    command
+        .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped());
+    let mut serving = command.spawn().expect("the channel server starts");
+    let mut stdin = serving.stdin.take().expect("stdin is piped");
+    stdin
+        .write_all(frames.as_bytes())
+        .expect("the frames write");
+    drop(stdin);
+    serving.wait().expect("the channel server ends");
+
+    world.until("every frame to reach the planner", |world| {
+        world.events_of(&run, "planner-surface-queued").len() == 6
+    });
+
+    // Both views name the kinds, and the one question leads the parenthetical
+    // rather than sitting behind the five updates that outnumber it.
+    for view in [vec!["runs"], vec!["status", &run]] {
+        let rendered = world.run(&view);
+        rendered
+            .exited(0)
+            .out_has("6 planner update(s) waiting (1 planner-question, 5 monitor)");
+    }
+    world.release("build.go");
+}
+
 #[test]
 fn a_legacy_verdict_is_accepted_and_recorded() {
     let world = World::new("channel-verdict");

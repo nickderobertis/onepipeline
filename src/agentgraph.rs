@@ -320,6 +320,38 @@ pub fn recorded_graph_run(recorded: &str, run: &str) -> Result<GraphRunId> {
         .map_err(|error| sibling(format!("run '{run}' records '{recorded}': {error}")))
 }
 
+/// Whether the graph run a launch record names has **stopped running**, as the
+/// sibling's own records say.
+///
+/// The evidence is the one that decides ownership of a dispatch everywhere else
+/// in this stack, read where the sibling keeps it — never a process table swept
+/// for a matching command line, which knows nothing about whose work it matched:
+///
+/// * the run's own record, which the sibling rewrites with `finished_ms` and an
+///   exit code as it settles; and
+/// * the scratch directory's `owner.lock`, the pid-with-start-token the sibling
+///   claims a run's state under. Provably reclaimable means the process that
+///   took it is gone — which is the case a settled record cannot cover, because
+///   a driver killed outright never got to write one.
+///
+/// Every answer this host cannot prove resolves toward **still running**, for
+/// the reason the driver verdict's do: a run reported unwatched invites an
+/// operator to intervene, and doing that to a run whose observer is working is
+/// worse than saying nothing. A record that cannot be read, an id this crate
+/// never wrote, a platform whose locks prove nothing — all of them are `false`.
+pub fn graph_run_ended(recorded: &str, run: &str) -> bool {
+    let Ok(graph_run) = recorded_graph_run(recorded, run) else {
+        return false;
+    };
+    let root = state_dir(&process_env());
+    let Ok(record) = oneagentgraph::history::show(&root, graph_run.as_str()) else {
+        return false;
+    };
+    record.finished_ms.is_some()
+        || record.exit_code.is_some()
+        || oneagentgraph::scratch::reclaimable(&root.join(&graph_run)).is_ok()
+}
+
 /// Render the reserved label keys as the `k=v` pairs the CLI takes, each under
 /// [`LABEL_PREFIX`].
 ///
@@ -1922,6 +1954,57 @@ mod tests {
                 .is_file(),
             "the reset left no signal where the run watches for one"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A graph run is reported over only where this host can *prove* it, and
+    /// every answer short of that leaves it running.
+    ///
+    /// The direction is the point. This verdict is what tells an operator a run
+    /// is executing unwatched, and reporting that of an observer still doing its
+    /// job sends somebody to relaunch a graph that is working — so an unreadable
+    /// record, an id no store has heard of, and a directory carrying no lock all
+    /// answer "still watching".
+    #[test]
+    fn a_graph_run_is_only_reported_over_where_its_own_records_say_so() {
+        let root = state_dir_holding("dag-scope-1786304152340-19", &["monitor"]);
+        let dir = root.join("dag-scope-1786304152340-19");
+
+        // A record naming no ending, and no lock to prove the owner is gone.
+        assert!(!graph_run_ended("dag-scope-1786304152340-19", "demo"));
+        // Neither is an id this store has never held, nor one that is not an
+        // address at all.
+        assert!(!graph_run_ended("dag-scope-1786304152340-99", "demo"));
+        assert!(!graph_run_ended("   ", "demo"));
+
+        // The lock the sibling claims a run's state under, left by a process
+        // this host can prove is gone: the case a settled record cannot cover,
+        // because a driver killed outright never wrote one.
+        std::fs::write(
+            dir.join(oneagentgraph::liveness::OWNER_LOCK_FILE),
+            format!("{} 1\n", crate::sys::reaped_pid()),
+        )
+        .expect("the owner lock is written");
+        assert_eq!(
+            graph_run_ended("dag-scope-1786304152340-19", "demo"),
+            oneagentgraph::scratch::reclaimable(&dir).is_ok(),
+            "the lock's own verdict and this one disagree about the same directory"
+        );
+
+        // And the record's own ending, which needs no lock at all.
+        let mut record: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join(oneagentgraph::run::RECORD_FILE))
+                .expect("the record reads"),
+        )
+        .expect("the record is JSON");
+        record["finished_ms"] = serde_json::json!(1_786_304_155_000u64);
+        std::fs::write(
+            dir.join(oneagentgraph::run::RECORD_FILE),
+            record.to_string(),
+        )
+        .expect("the record is rewritten");
+        assert!(graph_run_ended("dag-scope-1786304152340-19", "demo"));
+
         let _ = std::fs::remove_dir_all(&root);
     }
 

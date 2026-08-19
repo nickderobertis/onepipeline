@@ -47,6 +47,7 @@ pub enum DriverLiveness {
 }
 // llmlint: ignore-end[names_match_behavior]
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::event::{Envelope, Source};
@@ -109,6 +110,60 @@ fn became_of_the_worker(state: &crate::projection::RunState) -> &'static str {
         crate::projection::StopState::WorkersUndetermined => OUTLIVED_THE_STOP,
         _ => ENDED_BY_THE_STOP,
     }
+}
+
+/// Whether the run's **observer** graph is still watching, and if not, why not.
+///
+/// A second verdict beside [`DriverLiveness`] rather than a value inside it,
+/// because the two are about different processes and a run can be in any pairing
+/// of them: a live driver executing unwatched is exactly the state this exists to
+/// report, and it reads `ACTIVE` on every other measure. Private, and rendered as
+/// a word rather than promised as a type — `docs/contract.md` names the driver
+/// tier and what a view renders beside it is a rendering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ObserverLiveness {
+    /// The launch named an observer graph and nothing says its run has ended.
+    Watching,
+    /// The launch named one and this host can prove that graph run is over. The
+    /// run is executing with nothing watching it.
+    ObserverDead,
+    /// The launch named no observer graph at all — the shipped default, since no
+    /// agent is required to execute a plan. Nothing is watching this run either,
+    /// and nothing ever was: a different fact, and a different fix.
+    Unobserved,
+}
+
+impl ObserverLiveness {
+    /// The word a view prints beside the driver tier, or nothing when the
+    /// observer is doing its job.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Watching => "",
+            Self::ObserverDead => "OBSERVER DEAD",
+            Self::Unobserved => "NO OBSERVER",
+        }
+    }
+}
+
+/// Whether anything is watching this run, decided from what this crate itself
+/// recorded about the graph it launched.
+///
+/// The launch record says whether there is an observer at all and names the
+/// `oneagentgraph` run it minted; that run's own record and the scratch lock
+/// under it say whether it is still going. Nothing here reads a process table:
+/// a pattern matched against a command line knows nothing about whose work it
+/// matched, and the ownership evidence this stack already keeps answers exactly
+/// this question — see [`agentgraph::graph_run_ended`].
+///
+/// [`agentgraph::graph_run_ended`]: crate::agentgraph::graph_run_ended
+fn observer_liveness(launch: &LaunchRecord) -> ObserverLiveness {
+    if launch.observer_graph().is_none() {
+        return ObserverLiveness::Unobserved;
+    }
+    if crate::agentgraph::graph_run_ended(&launch.graph_run, &launch.run_id) {
+        return ObserverLiveness::ObserverDead;
+    }
+    ObserverLiveness::Watching
 }
 
 impl DriverLiveness {
@@ -256,13 +311,17 @@ impl RunView {
     /// above says only `ACTIVE`, and the delivery record they would look for is
     /// written on consumption, which has not happened.
     pub fn unread_surfaces(&self) -> (usize, Option<u64>) {
-        let queue = crate::channel::ChannelState::new(&self.paths).queue();
-        let oldest = queue
-            .waiting
-            .iter()
-            .map(|surface| sys::now_millis().saturating_sub(surface.queued_at) / 1_000)
-            .max();
-        (queue.waiting.len(), oldest)
+        let unread = self.unread();
+        (unread.count, unread.oldest_seconds)
+    }
+
+    /// The same read, with what the queue is holding as well as how much.
+    ///
+    /// Crate-visible and behind the pair above: the count and the staleness are
+    /// what the contract names, and which kinds are waiting is a rendering — see
+    /// [`Unread`] for why the line carries it.
+    fn unread(&self) -> Unread {
+        Unread::of(&crate::channel::ChannelState::new(&self.paths).queue())
     }
 
     /// A one-line summary of where the run has got to.
@@ -302,6 +361,87 @@ impl RunView {
             count => format!(", {count} never attempted"),
         };
         format!("{done}/{} done{unlanded}{skipped}", statuses.len())
+    }
+}
+
+/// What one run's unread surfaces are, as the one line reporting them needs them.
+///
+/// The count and the staleness alone were a number a reader could not act on. A
+/// blocking surface produces no other signal — this is the one line a supervisor
+/// is not allowed to filter out — and on a host whose history holds thousands of
+/// routine `monitor` updates against a handful of questions, "8 waiting" read
+/// exactly the same either way. Naming the kinds is what turns the count into a
+/// triage.
+#[derive(Debug, Default)]
+struct Unread {
+    /// How many surfaces are waiting.
+    count: usize,
+    /// How long the oldest has waited, in seconds. Absent when none is.
+    oldest_seconds: Option<u64>,
+    /// The kinds waiting and how many of each, in the order the line names them:
+    /// the kinds with a **blocking** surface among them first, because a
+    /// blocking one is what the run is actually held on, and then the rarest
+    /// first, because the whole failure this repairs is a rare kind hidden
+    /// behind a common one. Ties break by name so a line is stable to read.
+    kinds: Vec<(String, usize)>,
+}
+
+/// How many kinds a line names before it summarises the rest.
+///
+/// A queue of unrelated kinds must not push the run's own row off the screen,
+/// and what a reader triages on is the first few — but the count that replaces
+/// the rest is said out loud rather than dropped, because a silently truncated
+/// list reads as the whole answer.
+const MAX_NAMED_KINDS: usize = 4;
+
+impl Unread {
+    fn of(queue: &crate::channel::Queue) -> Self {
+        let mut counts: BTreeMap<String, (bool, usize)> = BTreeMap::new();
+        for surface in &queue.waiting {
+            // The kind is a stranger's: an observer's frame names it in that
+            // persona's own vocabulary, so it goes through the same strip every
+            // other borrowed value on these views does.
+            let seen = counts.entry(one_line(&surface.kind)).or_insert((false, 0));
+            seen.0 |= surface.blocking;
+            seen.1 += 1;
+        }
+        let mut ordered: Vec<(bool, usize, String)> = counts
+            .into_iter()
+            .map(|(kind, (blocking, count))| (blocking, count, kind))
+            .collect();
+        // Blocking kinds first, then rarest first, then by name.
+        ordered.sort_by(|a, b| {
+            b.0.cmp(&a.0)
+                .then(a.1.cmp(&b.1))
+                .then_with(|| a.2.cmp(&b.2))
+        });
+        Self {
+            count: queue.waiting.len(),
+            oldest_seconds: queue
+                .waiting
+                .iter()
+                .map(|surface| sys::now_millis().saturating_sub(surface.queued_at) / 1_000)
+                .max(),
+            kinds: ordered
+                .into_iter()
+                .map(|(_, count, kind)| (kind, count))
+                .collect(),
+        }
+    }
+
+    /// The kinds waiting, as the parenthetical the line carries.
+    fn phrase(&self) -> String {
+        let named: Vec<String> = self
+            .kinds
+            .iter()
+            .take(MAX_NAMED_KINDS)
+            .map(|(kind, count)| format!("{count} {kind}"))
+            .collect();
+        let rest = match self.kinds.len().saturating_sub(named.len()) {
+            0 => String::new(),
+            more => format!(", and {more} other kind(s)"),
+        };
+        format!("{}{rest}", named.join(", "))
     }
 }
 
@@ -432,6 +572,29 @@ pub fn liveness_word(view: &RunView) -> &'static str {
     view.liveness().as_str()
 }
 
+/// What a view prints about the graph **watching** the run, beside the word for
+/// the one driving it.
+///
+/// Only for a run that is actually executing. A settled run needs no observer,
+/// and a run nothing is driving has bigger news on the same line — reporting
+/// either as unwatched would send an operator after a graph whose absence is not
+/// the problem.
+fn observer_word(view: &RunView) -> &'static str {
+    if liveness_word(view) != DriverLiveness::Driving.as_str() {
+        return "";
+    }
+    observer_liveness(&view.launch).as_str()
+}
+
+/// The observer word as it joins a rendered line: separated when there is one,
+/// and nothing at all when there is not.
+fn observer_suffix(view: &RunView) -> String {
+    match observer_word(view) {
+        "" => String::new(),
+        word => format!("  {word}"),
+    }
+}
+
 /// `onepipeline runs`.
 ///
 /// A run root under this root that could not be read is named at the end rather
@@ -447,11 +610,12 @@ pub fn runs(root: &Path, mine_only: bool, session: &str) -> String {
         }
         let marker = if owned { '*' } else { ' ' };
         out.push_str(&format!(
-            "{marker} {:<24} {:<24} {}  {}\n",
+            "{marker} {:<24} {:<24} {}  {}{}\n",
             view.paths.run,
             view.launch.owner_label(session),
             view.summary(),
-            liveness_word(view)
+            liveness_word(view),
+            observer_suffix(view)
         ));
         // A run reported stopped keeps the line saying why it stopped rather
         // than an invitation to read updates nothing will follow up on.
@@ -464,11 +628,13 @@ pub fn runs(root: &Path, mine_only: bool, session: &str) -> String {
             ));
             continue;
         }
-        if let (count, Some(stale)) = view.unread_surfaces() {
+        let unread = view.unread();
+        if let (count, Some(stale)) = (unread.count, unread.oldest_seconds) {
             if count > 0 {
                 out.push_str(&format!(
-                    "    {count} planner update(s) waiting, unread for {}; \
+                    "    {count} planner update(s) waiting ({}), unread for {}; \
                      read them with: onepipeline next {}\n",
+                    unread.phrase(),
                     crate::telemetry::duration(stale * 1_000),
                     view.paths.run
                 ));
@@ -487,9 +653,10 @@ pub fn status(survey: &Survey) -> String {
     let mut out = String::new();
     for view in &survey.views {
         out.push_str(&format!(
-            "{}  {}  {}\n",
+            "{}  {}{}  {}\n",
             view.paths.run,
             liveness_word(view),
+            observer_suffix(view),
             view.summary()
         ));
         if view.liveness().is_undriven() {
@@ -510,11 +677,13 @@ pub fn status(survey: &Survey) -> String {
                 pending.message
             ));
         }
-        let (unread, stale) = view.unread_surfaces();
-        if unread > 0 {
+        let unread = view.unread();
+        if unread.count > 0 {
             out.push_str(&format!(
-                "  {unread} planner update(s) waiting, unread for {}\n",
-                crate::telemetry::duration(stale.unwrap_or(0) * 1_000)
+                "  {} planner update(s) waiting ({}), unread for {}\n",
+                unread.count,
+                unread.phrase(),
+                crate::telemetry::duration(unread.oldest_seconds.unwrap_or(0) * 1_000)
             ));
         }
         let statuses = view.state.statuses();
@@ -1556,6 +1725,71 @@ mod tests {
 
     fn dead_pid() -> u32 {
         sys::reaped_pid()
+    }
+
+    /// The one line a supervisor may not filter out says *what* is waiting.
+    ///
+    /// A blocking question behind a pile of routine updates is exactly the case
+    /// a bare count hid: this host's own history holds a handful of questions
+    /// against thousands of `monitor` surfaces, and both rendered as a number.
+    /// So the kinds are named, the blocking one leads, and a queue of unrelated
+    /// kinds is summarised out loud rather than silently cut.
+    #[test]
+    fn the_unread_line_names_the_kinds_waiting_and_leads_with_a_blocking_one() {
+        let root = scratch("unread-kinds");
+        let paths = write_run(
+            &root,
+            "demo",
+            sys::pid(),
+            &[event(
+                crate::journal::PipelineKind::RunStarted,
+                None,
+                &[("plan", json!(plan()))],
+            )],
+        );
+        let channel = crate::channel::ChannelState::new(&paths);
+        let queue = |kind: &str, blocking: bool| {
+            channel
+                .push(crate::channel::Surface {
+                    id: 0,
+                    kind: kind.into(),
+                    message: format!("something about {kind}"),
+                    source: "proposal".into(),
+                    blocking,
+                    queued_at: sys::now_millis(),
+                    workstream: None,
+                })
+                .expect("the surface queues");
+        };
+        for _ in 0..6 {
+            queue("monitor", false);
+        }
+        queue("planner-question", true);
+        for kind in ["edit-rejected", "quiet-worker", "check-in", "proposal"] {
+            queue(kind, false);
+        }
+
+        let view = RunView::open(&paths).expect("the run reads");
+        assert_eq!(view.unread_surfaces().0, 11);
+        let unread = view.unread();
+        // The blocking kind leads; then the rarest, so the common one that
+        // buries it never comes first; then the count that stands for the rest.
+        assert_eq!(
+            unread.phrase(),
+            "1 planner-question, 1 check-in, 1 edit-rejected, 1 proposal, and 2 other kind(s)"
+        );
+
+        let rendered = runs(&root, false, "session-a");
+        assert!(
+            rendered.contains("11 planner update(s) waiting (1 planner-question,"),
+            "{rendered}"
+        );
+        assert!(
+            status(&Survey::of(&root)).contains("1 planner-question,"),
+            "{}",
+            status(&Survey::of(&root))
+        );
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// A skip whose cause the graph no longer holds still says the node was

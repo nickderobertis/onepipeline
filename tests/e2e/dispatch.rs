@@ -2593,6 +2593,84 @@ fn the_observer_graphs_own_stream_is_filtered_too_and_the_spec_may_be_a_file() {
     );
 }
 
+/// A run executing with nothing watching it says so, and says it differently
+/// from a run that was never given anything to watch it with.
+///
+/// The two take different fixes — one is a graph to relaunch, the other a launch
+/// flag nobody passed — so a view that rendered them alike would send an operator
+/// to look for a member that never existed. The verdict comes off the ownership
+/// evidence this stack already keeps: the graph run the launch record names, that
+/// run's own record, and the scratch lock under it. Nothing here reads a process
+/// table.
+#[test]
+fn a_run_whose_observer_graph_has_ended_reads_differently_from_one_launched_without_any() {
+    let world = World::new("real-observer-dead");
+    world.write_graphs();
+    // The *node's* turn is held, so both runs are still executing when the views
+    // are read — an observer verdict is about a run that is working unwatched.
+    // The observing turn is deliberately not held: it takes its one turn and its
+    // graph settles, which is a dead observer beside a live run.
+    world.script("turn.hold", "hold");
+
+    for (run, dag_graph) in [("watched", true), ("bare", false)] {
+        let path = world.plan(run, &plan_of(run, vec![agent("build", &[])]));
+        let mut launch = vec!["start".to_string(), path.to_string_lossy().into_owned()];
+        launch.push("--detach".into());
+        if dag_graph {
+            launch.push("--dag-graph".into());
+            launch.push(world.dag_graph());
+        }
+        world
+            .run_on_agentgraph(&launch.iter().map(String::as_str).collect::<Vec<_>>())
+            .exited(0);
+    }
+
+    // The observer graph here is a single-sided member with one turn to take, so
+    // it settles while the run it was watching is still held open — which is
+    // exactly a run executing unwatched.
+    let graph_run = || {
+        world.run_json("watched", "launch.json")["graph_run"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    };
+    world.until("the observer graph to be recorded", |_| {
+        !graph_run().is_empty()
+    });
+    world.until("the observer graph to stop watching", |world| {
+        std::fs::read_to_string(world.graph_state().join(graph_run()).join("record.json"))
+            .is_ok_and(|record| record.contains("finished_ms"))
+    });
+
+    // Both runs are being driven, and only one of them ever had an observer.
+    for view in [vec!["runs"], vec!["status"]] {
+        let rendered = world.run_on_agentgraph(&view);
+        rendered.exited(0);
+        let line = |run: &str| {
+            rendered
+                .stdout
+                .lines()
+                .find(|line| line.contains(run))
+                .unwrap_or_else(|| panic!("no line for {run} in:\n{}", rendered.stdout))
+                .to_string()
+        };
+        assert!(line("watched").contains("ACTIVE"), "{}", line("watched"));
+        assert!(
+            line("watched").contains("OBSERVER DEAD"),
+            "a run whose observer has stopped watching is reported as watched: {}",
+            line("watched")
+        );
+        assert!(
+            line("bare").contains("NO OBSERVER") && !line("bare").contains("OBSERVER DEAD"),
+            "a run launched with no observer reads as one whose observer died: {}",
+            line("bare")
+        );
+        assert_ne!(line("watched"), line("bare"));
+    }
+    world.release("turn.go");
+    world.release("turn.settle");
+}
+
 /// `adopt` replays the launch's source filter onto the observer it relaunches.
 ///
 /// An adoption starts a **fresh** graph run, from a different process and often
