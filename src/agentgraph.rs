@@ -339,6 +339,20 @@ pub fn recorded_graph_run(recorded: &str, run: &str) -> Result<GraphRunId> {
 /// operator to intervene, and doing that to a run whose observer is working is
 /// worse than saying nothing. A record that cannot be read, an id this crate
 /// never wrote, a platform whose locks prove nothing — all of them are `false`.
+// llmlint: ignore-block[changed_behavior_has_e2e] two of the four answers below are
+// unreachable from an invocation a user can type, and the journeys that would reach them
+// are ones `tests_mirror_real_usage` refuses. A recorded value that is not an address
+// exists only in a launch record something interfered with, so an end-to-end case would
+// have to write that record behind the CLI; and the lock's half is a graph whose process
+// died *without* settling while the run it watched is still driven, which — the pipeline
+// driver holding both in one process tree — means killing one specific descendant, the
+// process-table identification the operator declined on the record. Both are held at unit
+// level by `a_graph_run_is_only_reported_over_where_its_own_records_say_so`, the second
+// against the sibling's own verdict for the same directory. The two a user *can* reach
+// are driven end to end: a graph run this host holds no record of by
+// `views::an_observer_this_host_cannot_ask_about_is_never_reported_dead`, and a settled
+// record by
+// `dispatch::a_run_whose_observer_graph_has_ended_reads_differently_from_one_launched_without_any`.
 pub fn graph_run_ended(recorded: &str, run: &str) -> bool {
     let Ok(graph_run) = recorded_graph_run(recorded, run) else {
         return false;
@@ -347,18 +361,9 @@ pub fn graph_run_ended(recorded: &str, run: &str) -> bool {
     let Ok(record) = oneagentgraph::history::show(&root, graph_run.as_str()) else {
         return false;
     };
-    // llmlint: ignore[changed_behavior_has_e2e] the lock's half of this answer is a graph
-    // whose process died *without* settling, while the run it watched is still being
-    // driven — the pipeline driver holds the two in one process tree, so producing it
-    // from an invocation a user can type means killing one specific descendant, and
-    // singling that process out is the process-table identification the operator declined
-    // on the record. The record's half is driven end to end by
-    // `a_run_whose_observer_graph_has_ended_reads_differently_from_one_launched_without_any`,
-    // and this half is held against the sibling's own verdict for the same directory by
-    // `a_graph_run_is_only_reported_over_where_its_own_records_say_so`.
     record.finished_ms.is_some()
         || oneagentgraph::scratch::reclaimable(&root.join(&graph_run)).is_ok()
-}
+} // llmlint: ignore-end[changed_behavior_has_e2e]
 
 /// Render the reserved label keys as the `k=v` pairs the CLI takes, each under
 /// [`LABEL_PREFIX`].

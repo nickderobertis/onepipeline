@@ -159,18 +159,22 @@ fn results_reports_each_nodes_own_evidence() {
 ///
 /// The chain matters as much as the first hop: `ship` was skipped by work that
 /// was attempted and lost, and `announce` by a node that was never tried either,
-/// so a reader following the causes back reaches the one failure that has to be
-/// fixed rather than three that look alike.
+/// so a reader following the causes back reaches the failures that have to be
+/// fixed rather than three nodes that look alike. `ship` is held out by **two**
+/// of them, because a reader told about one would fix it and watch the node stay
+/// skipped.
 #[test]
 fn results_names_every_skipped_node_and_the_dependency_that_skipped_it() {
     let world = World::new("views-skipped-nodes");
     world.script("build.fail", "1");
+    world.script("lint.fail", "1");
     let run = settled(
         &world,
         "unattempted",
         vec![
             agent("build", &[]),
-            agent("ship", &["build"]),
+            agent("lint", &[]),
+            agent("ship", &["build", "lint"]),
             agent("announce", &["ship"]),
             agent("aside", &[]),
         ],
@@ -179,7 +183,10 @@ fn results_names_every_skipped_node_and_the_dependency_that_skipped_it() {
     let results = world.run(&["results", &run]);
     results.exited(0);
     for (node, cause) in [
-        ("ship", "never attempted; skipped by: build (failed)"),
+        (
+            "ship",
+            "never attempted; skipped by: build (failed), lint (failed)",
+        ),
         ("announce", "never attempted; skipped by: ship (skipped)"),
     ] {
         results.out_has(node).out_has(cause);
@@ -196,7 +203,7 @@ fn results_names_every_skipped_node_and_the_dependency_that_skipped_it() {
     world
         .run(&["status", &run])
         .exited(0)
-        .out_has("1/4 done, 2 never attempted");
+        .out_has("1/5 done, 2 never attempted");
     world.run(&["runs"]).exited(0).out_has("2 never attempted");
 }
 
@@ -205,10 +212,9 @@ fn results_names_every_skipped_node_and_the_dependency_that_skipped_it() {
 ///
 /// The direction is the whole safety of the verdict. `OBSERVER DEAD` sends
 /// somebody to relaunch a graph, and saying it of an observer that is working
-/// costs the run its watcher for nothing — so a graph run no store on this host
-/// holds, a record the launch no longer names, and a value the sibling would
-/// never answer to all leave the run reported exactly as it reads while its
-/// observer is fine. The verdict really does speak on this line when it can:
+/// costs a run its watcher for nothing — so a launch that really attached one,
+/// whose graph run this host holds no record of, reads exactly as it reads while
+/// that observer is fine. The verdict does speak on this line when it can:
 /// `dispatch::a_run_whose_observer_graph_has_ended_reads_differently_from_one_launched_without_any`
 /// is the same rendering with the proof present.
 #[test]
@@ -219,8 +225,9 @@ fn an_observer_this_host_cannot_ask_about_is_never_reported_dead() {
         "unprovable",
         &plan_of("unprovable", vec![agent("build", &[])]),
     );
-    // An empty run store for the sibling, so what this journey states is that
-    // the *answer* is unavailable rather than that some other run answered it.
+    // The sibling's run store, pointed at this world rather than at whatever the
+    // host running these tests keeps in its own: the answer below has to be that
+    // *this* run's observer cannot be asked about, not that a stranger's could.
     let read = |world: &World, view: &[&str]| -> String {
         let mut command = world.cmd(view);
         command.env("ONEAGENTGRAPH_STATE_DIR", world.graph_state());
@@ -248,45 +255,27 @@ fn an_observer_this_host_cannot_ask_about_is_never_reported_dead() {
     });
 
     // Not a vacuous claim: the launch really did attach an observer and really
-    // did record the graph run it minted, so there is something to ask about.
+    // did record the graph run it minted, so there is something to ask about —
+    // and the store it would be asked about in holds no record of it.
     let recorded = world.run_json("unprovable", "launch.json");
+    let graph_run = recorded["graph_run"].as_str().unwrap_or_default();
     assert!(
-        !recorded["graph"].as_str().unwrap_or_default().is_empty()
-            && !recorded["graph_run"]
-                .as_str()
-                .unwrap_or_default()
-                .is_empty(),
+        !recorded["graph"].as_str().unwrap_or_default().is_empty() && !graph_run.is_empty(),
         "the launch attached no observer, so nothing below is about one: {recorded}"
     );
+    assert!(
+        !world.graph_state().join(graph_run).exists(),
+        "the sibling holds a record for {graph_run}, so this journey is not about an \
+         observer nothing can answer for"
+    );
 
-    for what in [
-        "a graph run no store holds",
-        "no graph run at all",
-        "not an address",
-    ] {
-        for view in [vec!["runs"], vec!["status"]] {
-            let line = read(&world, &view);
-            assert!(
-                line.contains("ACTIVE") && !line.contains("OBSERVER"),
-                "with {what}, a run whose observer this host cannot ask about is not \
-                 reported as watched: {line}"
-            );
-        }
-        let mut record = world.run_json("unprovable", "launch.json");
-        match what {
-            "a graph run no store holds" => {
-                record
-                    .as_object_mut()
-                    .expect("the record is an object")
-                    .remove("graph_run");
-            }
-            _ => record["graph_run"] = serde_json::json!("../elsewhere"),
-        }
-        std::fs::write(
-            world.run_file("unprovable", "launch.json"),
-            record.to_string(),
-        )
-        .expect("the record is rewritten");
+    for view in [vec!["runs"], vec!["status"]] {
+        let line = read(&world, &view);
+        assert!(
+            line.contains("ACTIVE") && !line.contains("OBSERVER"),
+            "a run whose observer this host cannot ask about is not reported as \
+             watched: {line}"
+        );
     }
     world.release("build.go");
 }
