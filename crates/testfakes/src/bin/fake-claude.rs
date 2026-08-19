@@ -195,13 +195,10 @@ fn turn(args: &[String], dir: &std::path::Path) -> ExitCode {
         Err(error) => return fake::refuse(&format!("claude has no working directory: {error}")),
     };
     let member = std::env::var(fake::MEMBER_ENV).unwrap_or_default();
-    // The run this turn belongs to, out of the turn's own environment — where the
-    // `ask-manager` wrapper reads it. Empty is a worker that could not ask.
-    let run = std::env::var(fake::RUN_ID_ENV).unwrap_or_default();
     fake::record(
         dir,
         "claude-turn",
-        &[prompt.clone(), cwd.display().to_string(), member, run],
+        &[prompt.clone(), cwd.display().to_string(), member],
     );
 
     // A worker turn that leaves something behind in the worktree it was given.
@@ -221,6 +218,13 @@ fn turn(args: &[String], dir: &std::path::Path) -> ExitCode {
             // publication that turns out to have had nothing to publish is
             // asked, first, whether the turn before it wrote anything.
             fake::record(dir, "claude-work", &[path.display().to_string()]);
+        }
+        // The turn that stops and asks its manager, through the operator's
+        // `ask-manager` wrapper — which runs *inside this process*, and reads the
+        // run it addresses out of this process's own environment. Scripted, and
+        // never for the observer: a monitor member watches and asks nothing.
+        if let Some(question) = fake::node_script(dir, "harness", "asks") {
+            fake::ask_manager(&question);
         }
     }
 

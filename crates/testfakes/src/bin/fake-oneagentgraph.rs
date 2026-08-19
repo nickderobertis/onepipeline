@@ -257,18 +257,6 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     let node = fake::label(args, "onepipeline.node").unwrap_or_else(|| "unknown".into());
     let step = fake::label(args, "onepipeline.step");
     let persona = fake::label(args, "onepipeline.persona");
-    // What this dispatch's own environment carried. Recorded rather than checked:
-    // the double states what it was handed and the journey decides what it means.
-    fake::append(
-        &dir.join("dispatch-env.jsonl"),
-        &serde_json::json!({
-            "node": node,
-            "step": step,
-            "persona": persona,
-            "run": std::env::var(fake::RUN_ID_ENV).unwrap_or_default(),
-        })
-        .to_string(),
-    );
     // A node dispatches under more than one persona — its own worker, and the
     // `pr-author` that drafts its change request — so a script may name either
     // the persona or the node/step it applies to.
@@ -386,6 +374,15 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     // asked for.
     if let Some(body) = fake::node_script(dir, &key, "work") {
         write_work(args, &fake::segment(&key), &body);
+    }
+
+    // A worker that stops and puts a question to its manager, which is what the
+    // operator's `ask-manager` wrapper is for. Scripted here because it is the
+    // *agent's* behaviour, and an agent is what this program stands in for: every
+    // other journey is about the dispatch, and a question nobody asked would be a
+    // surface the planner never had a reason to get.
+    if let Some(question) = fake::node_script(dir, &key, "asks") {
+        fake::ask_manager(&question);
     }
 
     // A worker that publishes its own branch before it is finished with. This is

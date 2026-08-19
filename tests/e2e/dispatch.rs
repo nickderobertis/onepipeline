@@ -2720,22 +2720,23 @@ fn the_retained_driver_reads_its_own_event_filter_and_refuses_an_unusable_one() 
     );
 }
 
-/// A worker turn of a **detached** run knows which run it may ask its manager on.
+/// A worker **turn** of a detached run can put a question to its manager,
+/// through the real `oneagentgraph`.
 ///
-/// Detached with no dag-scope graph, because that is the shape the direction was
-/// closed on and the one a long run is launched in; every other journey here
-/// launches attached, which proves the shape that already worked.
-///
-/// Read off the turn rather than the dispatch: the turn is the process the
-/// `ask-manager` wrapper runs in, and the real `oneagentgraph` composing a
-/// member's environment per launch is what stands between the two.
-// llmlint: ignore[tests_mirror_real_usage] no product surface reports the environment a
-// turn was handed — it is read by a wrapper inside that turn — so the double's record is
-// the only place the fact exists, as it is for `dispatched_run_ids` in `driver.rs`.
+/// One process further in than the journeys in `driver.rs`: the operator's
+/// `ask-manager` wrapper runs inside the model turn, so what has to arrive is
+/// the run id in *that* process's environment — and the real sibling composing a
+/// member's environment per launch is what stands between the dispatch and it.
+/// Detached with no dag-scope graph, because that is the shipped default and the
+/// shape a long run is launched in.
 #[test]
-fn a_detached_runs_worker_turn_carries_the_run_it_may_ask_its_manager_on() {
+fn a_detached_runs_worker_turn_can_ask_its_manager() {
     let world = World::new("real-detached-run-id");
     world.write_graphs();
+    world.script(
+        "harness.asks",
+        "the worker: this repository has two mains. Which?",
+    );
     let path = world.plan("askable", &plan_of("askable", vec![agent("build", &[])]));
 
     let started = world.run_on(
@@ -2752,26 +2753,13 @@ fn a_detached_runs_worker_turn_carries_the_run_it_may_ask_its_manager_on() {
         world.run_file(&run, "result.json").is_file()
     });
     assert_eq!(
+        world.question_for_the_manager_on(world.agentgraph_cmd(&["next", &run]), &run),
+        "the worker: this repository has two mains. Which?"
+    );
+    assert_eq!(
         world.run_json(&run, "result.json")["state"],
         "complete",
         "the run did not settle: {}",
         world.dump()
     );
-
-    let turns = world.turns();
-    let worker: Vec<&crate::harness::Turn> = turns
-        .iter()
-        .filter(|turn| turn.member == "worker")
-        .collect();
-    assert!(
-        !worker.is_empty(),
-        "no worker turn ran, so nothing here is about what one carried: {}",
-        world.dump()
-    );
-    for turn in worker {
-        assert_eq!(
-            turn.run, run,
-            "a worker of a detached run could not say which run it may ask on: {turn:?}"
-        );
-    }
 }

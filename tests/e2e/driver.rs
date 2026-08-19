@@ -2570,44 +2570,31 @@ fn a_stop_that_reaches_part_of_the_tree_refuses_and_names_what_it_left() {
     world.release("build.go");
 }
 
-/// The run each node dispatch was handed in its own environment, by node, in
-/// dispatch order.
+/// A worker of a **detached** run can put a question to its manager, with no
+/// observer graph to have named the run for it.
 ///
-/// A dispatched agent's `ask-manager` wrapper reads `ONEPIPELINE_RUN_ID` out of
-/// its environment and refuses without one, so the pair arriving *at the process*
-/// is the whole of what makes that direction open. Empty is a dispatch that
-/// carried nothing.
-// llmlint: ignore-block[tests_mirror_real_usage] no product surface of this crate reports
-// the environment a dispatch is launched with — it is read one process below anything this
-// crate can be asked — so the double's record is the only place that fact exists, exactly
-// as `dag_launch_dirs` above reads the argv.
-fn dispatched_run_ids(world: &World) -> Vec<(String, String)> {
-    world
-        .dispatch_env()
-        .iter()
-        .map(|seen| {
-            let named = |key: &str| {
-                seen[key]
-                    .as_str()
-                    .unwrap_or_else(|| panic!("a recorded dispatch carries no {key}: {seen}"))
-                    .to_string()
-            };
-            (named("node"), named("run"))
-        })
-        .collect()
-}
-// llmlint: ignore-end[tests_mirror_real_usage]
-
-/// A **detached** run's dispatches name the run they belong to, with no observer
-/// graph to have named it for them.
+/// The whole of what makes that direction open is the run id arriving *at the
+/// dispatched process*: the operator's `ask-manager` wrapper reads it out of its
+/// own environment, is told none and infers none, and refuses without one — so a
+/// worker that carried nothing is a worker that cannot ask. The doubles ask
+/// exactly that way, and what each journey below states is that the question
+/// reached the channel its manager reads.
 ///
-/// The shape that had none: a detached driver launches its observer as a
-/// subprocess, so the pair reached that child and never the driver's own
-/// environment — and with no dag-scope graph, the shipped default, nothing
-/// exported anything at all.
+/// This is the shape that had no run id at all: a detached driver launches its
+/// observer as a subprocess, so the pair reached that child and never the
+/// driver's own environment — and with no dag-scope graph, the shipped default,
+/// nothing exported anything anywhere.
 #[test]
-fn a_detached_runs_dispatches_carry_the_run_they_belong_to() {
+fn a_detached_runs_worker_can_ask_its_manager() {
     let world = World::new("driver-detached-run-id");
+    world.script(
+        "first.asks",
+        "first: the origin refuses me. Do I wait or fail?",
+    );
+    world.script(
+        "second.asks",
+        "second: first left no branch. Do I open one?",
+    );
     let run = start_detached(
         &world,
         "askabledetached",
@@ -2617,28 +2604,43 @@ fn a_detached_runs_dispatches_carry_the_run_they_belong_to() {
     world.until("the run to settle", |world| {
         world.run_file(&run, "result.json").is_file()
     });
+    // Both dispatches asked, and both questions are on the stream the manager
+    // watches. A dispatch that carried no run id refuses its own ask, which fails
+    // the node — so a run that settled complete with both questions on it is two
+    // workers that each reached this run and no other.
+    assert_eq!(
+        world.questions_on_the_stream(&run),
+        vec![
+            "first: the origin refuses me. Do I wait or fail?".to_string(),
+            "second: first left no branch. Do I open one?".to_string(),
+        ],
+        "a worker of a detached run could not ask its manager: {}",
+        world.dump()
+    );
     assert_eq!(
         world.run_json(&run, "result.json")["state"],
         "complete",
         "the run did not settle: {}",
         world.dump()
     );
+
+    // And the manager reads one: the newest, because a check-in replaces the
+    // queued one at the channel rather than queueing behind it.
     assert_eq!(
-        dispatched_run_ids(&world),
-        vec![
-            ("first".to_string(), run.clone()),
-            ("second".to_string(), run.clone()),
-        ],
-        "a dispatch of a detached run could not say which run it was in: {}",
-        world.dump()
+        world.question_for_the_manager(&run),
+        "second: first left no branch. Do I open one?"
     );
 }
 
 /// The same of an **attached** launch, which is the shape every other journey
 /// here takes.
 #[test]
-fn an_attached_runs_dispatches_carry_the_run_they_belong_to() {
+fn an_attached_runs_worker_can_ask_its_manager() {
     let world = World::new("driver-attached-run-id");
+    world.script(
+        "build.asks",
+        "build: the gate is red on main. Do I fix it here?",
+    );
     let path = world.plan(
         "askableattached",
         &plan_of("askableattached", vec![agent("build", &[])]),
@@ -2649,10 +2651,8 @@ fn an_attached_runs_dispatches_carry_the_run_they_belong_to() {
         .settled();
 
     assert_eq!(
-        dispatched_run_ids(&world),
-        vec![("build".to_string(), "askableattached".to_string())],
-        "a dispatch of an attached run could not say which run it was in: {}",
-        world.dump()
+        world.question_for_the_manager("askableattached"),
+        "build: the gate is red on main. Do I fix it here?"
     );
 }
 
@@ -2660,8 +2660,12 @@ fn an_attached_runs_dispatches_carry_the_run_they_belong_to() {
 /// one the way a run does: a human gate attested, leaving work to do and nobody
 /// driving it.
 #[test]
-fn an_adopted_runs_dispatches_carry_the_run_they_belong_to() {
+fn an_adopted_runs_worker_can_ask_its_manager() {
     let world = World::new("driver-adopted-run-id");
+    world.script(
+        "build.asks",
+        "build: the approval says nothing about the schema. Which one?",
+    );
     let path = world.plan(
         "askableadopted",
         &plan_of(
@@ -2676,16 +2680,14 @@ fn an_adopted_runs_dispatches_carry_the_run_they_belong_to() {
         .run(&["attest", "askableadopted", "approve"])
         .exited(0);
     assert!(
-        dispatched_run_ids(&world).is_empty(),
-        "the gate dispatched something: {}",
+        world.questions_on_the_stream("askableadopted").is_empty(),
+        "something asked before the adopted run dispatched anything: {}",
         world.dump()
     );
 
     world.run(&["adopt", "askableadopted"]).exited(0).settled();
     assert_eq!(
-        dispatched_run_ids(&world),
-        vec![("build".to_string(), "askableadopted".to_string())],
-        "a dispatch of an adopted run could not say which run it was in: {}",
-        world.dump()
+        world.question_for_the_manager("askableadopted"),
+        "build: the approval says nothing about the schema. Which one?"
     );
 }
