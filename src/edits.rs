@@ -617,26 +617,13 @@ fn compile_requeue(
 
 /// Compile an `attest`, which two different settlements accept.
 ///
-/// A ready human action is the one this op was written for: a person did the
-/// thing, and saying so is what settles the node. A node that settled **failed**
-/// is the second, and it is the same statement about the same kind of evidence —
-/// the work this run could not finish is landed, and a person is vouching for
-/// it. It has to be sayable, because a failure gates every dependent that named
-/// it *for ever*: a skip is derived from the dependency's status and re-derived
-/// on every pass, so nothing else in this vocabulary can make a node the run
-/// gave up on stop holding its subtree back. `retry` re-runs work that is
-/// already done and `drop` detaches the dependents from the thing they actually
-/// depended on; neither says what happened.
+/// The second — a node that settled `failed`, whose work a person is vouching
+/// has landed — is open divergence 36, and that entry is where it is argued and
+/// where the settlements below are the source rather than a copy.
 ///
-/// The attestation does not erase the failure. The `node-settled` that recorded
-/// it stays on the journal, the `human-attested` beside it is the evidence a
-/// person supplied, and the views report the pair rather than either alone.
-///
-/// The second reference is a divergence from the approved contract, open as
-/// number 36 in `docs/contract-divergences.md`. The settlements below are that
-/// entry's, and `attest_takes_exactly_the_settlements_the_divergence_record_names`
-/// drives them out of it through the CLI — so this match and the record it is
-/// filed under cannot stop agreeing while the ruling is outstanding.
+/// What this compiles does not erase the failure: `HumanAttested` settles the
+/// node, and the `node-settled` recording the failure stays on the journal for
+/// the views to report beside it.
 fn compile_attest(frontier: &Frontier, reference: &str) -> Result<Vec<Operation>> {
     // Before the settlement check, because an attestation *changes* the
     // settlement: it folds the node to `done`, so a second one would otherwise

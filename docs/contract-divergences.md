@@ -1129,29 +1129,22 @@ dependency whose change was already merged on `main` as a pull request, and the
 run had no answer to type.
 
 **What this crate does today is the block below, and the block is the source.**
-It is not prose restating the build: `tests/e2e/channel.rs` parses it **out of
-this file** and drives every settlement it names through `onepipeline attest` on
-a real run, so a build that stopped taking one of them, or grew a third, fails
-`just check` here. That is the same mechanism `docs/contract.md` is held by,
-pointed at the one statement this repository may make while the divergence is
-open — because until it is ruled on, the accepted references have no home in the
-approved contract, and a divergence nothing gates is a divergence that quietly
-stops being true.
+`tests/e2e/channel.rs` parses it out of this file and answers it with a run
+holding a node in every settlement it can reach — each one this list names is
+attested, and each one it does not is asserted refused. So the list and the
+build fail `just check` the moment either gains a settlement without the other.
+A divergence nothing gates is one that quietly stops being true, and while this
+is open there is nowhere else the second reference may be written down.
 
 ```json
 {
   "op": "attest",
-  "settlements": ["waiting", "failed"],
-  "refuses": ["running"]
+  "settlements": ["waiting", "failed"]
 }
 ```
 
-`settlements` are the node settlements a reference may name, spelled as
-`NodeStatus` writes them; `refuses` is a settlement that is not one, which the
-refusal answers by naming both that are. Everything else about the op — the
-journal record, the release of the skipped subtree, what `results` renders
-afterwards — is the contract's own `attest` unchanged, and is stated there
-rather than a second time here.
+They are node settlements, spelled as `results` prints them, and the refusal
+every other settlement gets names both of these.
 
 The proposal is whether this belongs on `attest` at all, or whether the second
 statement — "this failure's work is in the base; stop gating on it" — deserves an

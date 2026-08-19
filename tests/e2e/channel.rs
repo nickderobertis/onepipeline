@@ -539,16 +539,13 @@ fn attesting_a_failed_node_releases_the_dependents_it_had_skipped() {
         .out_lacks("never attempted");
 }
 
-/// The settlements `attest` takes are read **out of the divergence record** and
-/// driven through the CLI, so the two cannot drift apart.
+/// The gate on divergence 36: its settlements, driven against a run holding a
+/// node in every settlement this journey can reach.
 ///
-/// `docs/contract.md` is committed verbatim as approved and still names one
-/// accepted reference; this build takes two, which is open divergence 36. Until
-/// that is ruled on the divergence record is the only place the second may be
-/// written down, so it is the *source* rather than a description — parsed here,
-/// and answered by a real run. A build that stopped taking a settlement the
-/// entry names, or grew one it does not, fails this rather than leaving the
-/// record quietly untrue.
+/// Both directions, which is what makes it a gate rather than a demonstration —
+/// one the entry names and the build refuses fails here, and so does one the
+/// build takes that the entry does not name, because every settlement outside
+/// the list is asserted refused rather than left unasked.
 #[test]
 fn attest_takes_exactly_the_settlements_the_divergence_record_names() {
     let record = std::fs::read_to_string(crate::harness::repo_file("docs/contract-divergences.md"))
@@ -564,60 +561,107 @@ fn attest_takes_exactly_the_settlements_the_divergence_record_names() {
         .expect("entry 36 carries the json block this journey drives");
     let source: serde_json::Value = serde_json::from_str(block).expect("entry 36's block is JSON");
     assert_eq!(source["op"], "attest", "{source}");
+    let settlements: Vec<String> = serde_json::from_value(source["settlements"].clone())
+        .expect("entry 36 names the settlements it accepts");
+    assert!(!settlements.is_empty(), "{source}");
 
     let world = World::new("channel-attest-source");
     world.script("wrong.fail", "1");
     world.script("running.wait", "hold");
+    // Held so a `cancel` has a dispatch to stop: a node that settles first is a
+    // node the planner can no longer idle.
+    world.script("idle.wait", "hold");
     let run = running(
         &world,
         "sourced",
         vec![
             agent("running", &[]),
+            agent("queued", &["running"]),
             agent("wrong", &[]),
+            agent("after", &["wrong"]),
+            agent("finished", &[]),
             human("approve", &[]),
+            agent("later", &["approve"]),
+            agent("idle", &[]),
         ],
     );
-    // Both settled references have to *be* settled before either is attested.
-    world.until("the two settlements to be recorded", |world| {
-        let settled: Vec<_> = world
-            .events_of(&run, "node-settled")
+    world.until("the run to reach every settlement it can", |world| {
+        let of = |kind: &str| -> Vec<String> {
+            world
+                .events_of(&run, kind)
+                .iter()
+                .filter_map(|event| event["labels"]["node"].as_str().map(str::to_string))
+                .collect()
+        };
+        let (settled, dispatched) = (of("node-settled"), of("node-dispatched"));
+        ["wrong", "finished", "approve"]
             .iter()
-            .filter_map(|event| event["labels"]["node"].as_str().map(str::to_string))
-            .collect();
-        settled.iter().any(|node| node == "wrong") && settled.iter().any(|node| node == "approve")
+            .all(|node| settled.iter().any(|seen| seen == node))
+            && dispatched.iter().any(|seen| seen == "idle")
     });
+    // The planner's own idle, so a `parked` node is among the settlements below.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            r#"{"version":1,"commands":[{"op":"cancel","id":"idle"}]}"#,
+        )
+        .exited(0);
 
-    // The node this run has in each settlement the entry names, and the one it
-    // has in the settlement the entry says is refused.
-    let node_in = |settlement: &str| match settlement {
-        "waiting" => "approve",
-        "failed" => "wrong",
-        "running" => "running",
-        other => panic!(
-            "divergence 36 names the settlement '{other}', which this journey has no \
-             node in — extend it, or the entry is describing a build nothing drives"
-        ),
+    // Each node's settlement as a reader sees it, off the view that prints it.
+    let nodes = [
+        "running", "queued", "wrong", "after", "finished", "approve", "later", "idle",
+    ];
+    let settlement_of = |world: &World, node: &str| -> String {
+        let results = world.run(&["results", &run]);
+        results.exited(0);
+        results
+            .stdout
+            .lines()
+            .filter_map(|line| {
+                let mut words = line.split_whitespace();
+                Some((words.next()?.to_string(), words.next()?.to_string()))
+            })
+            .find(|(id, _)| id == node)
+            .map(|(_, settlement)| settlement)
+            .unwrap_or_else(|| panic!("no settlement for {node} in:\n{}", results.stdout))
     };
 
-    let settlements: Vec<String> = serde_json::from_value(source["settlements"].clone())
-        .expect("entry 36 names the settlements it accepts");
-    assert!(!settlements.is_empty(), "{source}");
-    for settlement in &settlements {
-        world.run(&["attest", &run, node_in(settlement)]).exited(0);
-    }
-
-    let refuses: Vec<String> =
-        serde_json::from_value(source["refuses"].clone()).expect("entry 36 names what it refuses");
-    for settlement in &refuses {
-        let refused = world.run(&["attest", &run, node_in(settlement)]);
+    // Refused first, because a refusal changes nothing: every settlement the
+    // entry does not name is answered with the two it does. This is the half
+    // that fails when the build grows an acceptance nobody wrote down.
+    let mut reached = std::collections::BTreeSet::new();
+    for node in nodes {
+        let settlement = settlement_of(&world, node);
+        reached.insert(settlement.clone());
+        if settlements.contains(&settlement) {
+            continue;
+        }
+        let refused = world.run(&["attest", &run, node]);
         refused.exited(REFUSED);
-        // And the refusal names every settlement the entry says is taken, so a
-        // planner reads what would have been accepted off the refusal itself.
         for accepted in &settlements {
             refused.err_has(accepted);
         }
     }
+    // And not a vacuous sweep: the run really did hold a node in each of the
+    // named settlements, and in several the entry says nothing about.
+    for named in &settlements {
+        assert!(
+            reached.contains(named),
+            "no node reached '{named}', so nothing here answered for it: {reached:?}"
+        );
+    }
+    assert!(
+        reached.len() >= settlements.len() + 4,
+        "too few settlements to say what `attest` refuses: {reached:?}"
+    );
+
+    for node in nodes {
+        if settlements.contains(&settlement_of(&world, node)) {
+            world.run(&["attest", &run, node]).exited(0);
+        }
+    }
     world.release("running.go");
+    world.release("idle.go");
 }
 
 #[test]

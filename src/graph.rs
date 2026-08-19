@@ -864,16 +864,24 @@ fn skips_dependents(status: NodeStatus) -> bool {
 /// A skip is derived rather than stored, so the cause is derived with it and
 /// out of the same map: the statuses handed in are the fixpoint [`derive`]
 /// settled on, and this asks each of the node's dependencies the very question
-/// [`eligibility`] asked while it was deciding. Empty for a node that is not
-/// skipped — and empty, too, for a dependency the graph no longer holds or an
-/// upstream in another run, because neither has a status in this map. Neither
-/// can *cause* a skip: a detached edge is not consulted at all, and a cross-DAG
-/// upstream that failed leaves its consumer blocked, since it may still arrive.
+/// [`eligibility`] asked while it was deciding.
+///
+/// Empty unless `id` is skipped — a failed dependency is not a *cause* of
+/// anything for a node that settled some other way, and a park outranks the
+/// gates, so a parked node with a failed dependency would otherwise be handed a
+/// reason it is not being held for. Empty, too, for a dependency the graph no
+/// longer holds or an upstream in another run, because neither has a status in
+/// this map, and neither can cause a skip: a detached edge is not consulted at
+/// all, and a cross-DAG upstream that failed leaves its consumer blocked, since
+/// it may still arrive.
 pub fn skipped_by(
     graph: &Graph,
     statuses: &BTreeMap<String, NodeStatus>,
     id: &str,
 ) -> Vec<(String, NodeStatus)> {
+    if statuses.get(id) != Some(&NodeStatus::Skipped) {
+        return Vec::new();
+    }
     let Some(node) = graph.get(id) else {
         return Vec::new();
     };
@@ -1477,6 +1485,15 @@ mod tests {
         );
         assert!(skipped_by(&graph, &statuses, "lint").is_empty());
         assert!(skipped_by(&graph, &statuses, "nowhere").is_empty());
+
+        // A park outranks the derived gates, so this node is not skipped — and
+        // is handed no reason for a skip it is not being held by.
+        let mut parked = agent("sweep", &["build"]);
+        parked.parked = true;
+        let graph = Graph::from_plan(&plan_of(vec![agent("build", &[]), parked]));
+        let statuses = derive(&graph, &recorded, &no_cross_dag);
+        assert_eq!(statuses["sweep"], NodeStatus::Parked);
+        assert!(skipped_by(&graph, &statuses, "sweep").is_empty());
     }
 
     #[test]
