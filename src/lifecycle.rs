@@ -274,15 +274,16 @@ fn publish(
         })));
         why
     });
-    // One composition for both endings of a publication that did not happen, so
-    // there is one place the two reasons are put together rather than two that
-    // can come to disagree.
+    // One composition wherever a publication's own words and a drafting failure
+    // are put together, so the places that do it cannot come to disagree about
+    // the order or the punctuation.
+    let with_undrafted = |detail: String| match &undrafted {
+        Some(why) => format!("{detail}. {why}"),
+        None => detail,
+    };
     let publication_failed = |detail: String| Settlement {
         branch: branch.clone(),
-        detail: Some(match &undrafted {
-            Some(why) => format!("{detail}. {why}"),
-            None => detail,
-        }),
+        detail: Some(with_undrafted(detail)),
         ..Settlement::plain(&node.id, NodeStatus::Failed, Some("publication-failed"))
     };
 
@@ -306,10 +307,31 @@ fn publish(
             let _ = tx.send(Message::Event(Box::new(crate::vcs::published_event(
                 &published, &labels,
             ))));
+            // What a `no-changes` compared against. It is the one outcome whose
+            // word says nothing a reader can act on: a node whose worker wrote
+            // nothing and a node whose branch was compared against itself settle
+            // identically, and the second is what a node pinned with a
+            // `base_branch` equal to its `branch` asks for — see
+            // [`crate::plan::Node::base_branch`]. The base is read off the
+            // session's own record, because a node naming none took the
+            // identity's default and this crate never saw it; where the record
+            // cannot be read the settlement says what it always did rather than
+            // naming a ref nothing established.
+            let compared = match published.outcome {
+                onevcs::PublishOutcome::NothingToPublish => {
+                    crate::vcs::base_of(token).map(|base| {
+                        format!(
+                            "compared against {base}: {} carries nothing it does not",
+                            published.branch
+                        )
+                    })
+                }
+                _ => None,
+            };
             Settlement {
                 // What the node settles on is its publication, exactly as
                 // before; a drafting failure only ever adds words to it.
-                detail: undrafted.clone(),
+                detail: compared.map(&with_undrafted).or_else(|| undrafted.clone()),
                 // The branch the publication says carried the change, where a
                 // dispatch reported none: they are the same branch, and the
                 // sibling is the one that knows it.

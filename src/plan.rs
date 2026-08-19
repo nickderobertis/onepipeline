@@ -323,10 +323,28 @@ pub struct Node {
     /// How the finished branch is published.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge_policy: Option<MergePolicy>,
-    /// The branch this node's work is cut from.
+    /// The **integration target**: the branch this node's work is cut from,
+    /// kept in sync with, and — at publication — compared against. Absent, the
+    /// repository identity's own default base applies.
+    ///
+    /// It is not a second spelling of [`branch`](Self::branch), and setting it
+    /// equal to one is **not a supported way to continue an existing branch**.
+    /// A node written that way is asked at publication what its branch adds to
+    /// itself, which is nothing by construction — so it settles `no-changes`
+    /// whatever it committed, and the work stays where it was with the real
+    /// integration target never told about it. The settlement names the ref it
+    /// compared against for exactly that reason: a tautology reads differently
+    /// from a node that genuinely changed nothing.
+    ///
+    /// To continue work a previous attempt preserved, pin [`branch`](Self::branch)
+    /// to it and leave this naming the branch the work is going to land on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_branch: Option<String>,
     /// Pin the work to a named branch instead of generating one.
+    ///
+    /// **Where the work goes**, and never what it is measured against: one
+    /// branch for the node, shared by every one of its [`steps`](Self::steps).
+    /// Absent, `onevcs` names the branch when it opens the node's session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
     /// The change request's title. Required on a lifecycle node from
@@ -420,6 +438,75 @@ pub struct Resume {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// This schema's own source, which is where its documentation lives.
+    ///
+    /// `docs/contract.md` names the node shapes and not what each field of one
+    /// means, so the doc comments here are the whole of the plan schema's
+    /// documentation — and a statement nothing checks is one that goes stale the
+    /// first time somebody trims it.
+    const SCHEMA: &str = include_str!("plan.rs");
+
+    /// The doc comment a field carries, as this file writes it.
+    ///
+    /// The contiguous `///` lines immediately above the declaration, joined into
+    /// one string. Empty when the field is not declared at all, which fails the
+    /// assertion that reads it rather than passing an empty search.
+    fn documentation_of(field: &str) -> String {
+        let declaration = format!("pub {field}:");
+        let mut lines: Vec<&str> = Vec::new();
+        for line in SCHEMA.lines() {
+            let line = line.trim();
+            if line.starts_with("///") {
+                lines.push(line.trim_start_matches("///").trim());
+                continue;
+            }
+            if line.starts_with(&declaration) {
+                return lines.join(" ");
+            }
+            // Anything else — an attribute is the ordinary case — leaves the
+            // comment standing, and a blank line or another item ends it.
+            if !line.starts_with('#') {
+                lines.clear();
+            }
+        }
+        String::new()
+    }
+
+    /// The two fields that decide where a lifecycle node's work goes and what it
+    /// is measured against say which is which.
+    ///
+    /// A drift test rather than a restatement: it holds the *claims* and not the
+    /// wording, so the sentences can be rewritten and only removing what they
+    /// say fails. The other half — that the consequence it names is still what
+    /// happens — is
+    /// `a_node_whose_base_branch_is_its_branch_settles_no_changes_naming_what_it_compared_against`
+    /// in `tests/e2e/lifecycle.rs`, which drives a plan written that way through
+    /// the real repository side. Between them the statement cannot go stale in
+    /// either direction: one fails if the documentation stops saying it, the
+    /// other if the behaviour stops doing it.
+    #[test]
+    fn the_schema_says_what_branch_and_base_branch_mean_for_a_lifecycle_node() {
+        let branch = documentation_of("branch");
+        assert!(
+            branch.contains("Where the work goes"),
+            "`branch` no longer documents that it names where the work goes: {branch}"
+        );
+        let base = documentation_of("base_branch");
+        for claim in [
+            "integration target",
+            "compared against",
+            "not a supported way to continue an existing branch",
+            "no-changes",
+        ] {
+            assert!(
+                base.contains(claim),
+                "`base_branch`'s documentation no longer states '{claim}', which is what \
+                 stops a planner writing `base_branch` equal to `branch` and reading the \
+                 `no-changes` it settles as a verdict about the work: {base}"
+            );
+        }
+    }
 
     fn scratch(name: &str) -> std::path::PathBuf {
         let dir =

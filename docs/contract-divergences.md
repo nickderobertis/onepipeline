@@ -11,7 +11,7 @@ the contract**, and `docs/contract.md` was amended to carry each ruling. They st
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–22, 33, 35 and 36 are open**. Each states what the code does today and the
+Entries **10–22, 33 and 35–37 are open**. Each states what the code does today and the
 proposal it is waiting on — every one of them a question for a *producer* rather
 than for this crate, because `oneagentgraph` and `onevcs` are independent tools
 that expose general integration hooks only and nothing in them may know about
@@ -1150,3 +1150,43 @@ The proposal is whether this belongs on `attest` at all, or whether the second
 statement — "this failure's work is in the base; stop gating on it" — deserves an
 op of its own. This crate is built against `attest` and will move if the ruling
 says otherwise.
+
+## 37. A plan cannot say "continue the work already on this branch" — OPEN
+
+**Proposal (for the planner who owns the contract): state what a plan node writes
+to continue a branch a previous attempt preserved — either that a node's `resume`
+pins the session's branch as a `retry`'s does, or that `branch` alone is the way
+and `resume` is only ever written by an edit.**
+
+The contract says `resume` "continues a node on the branch its previous attempt
+preserved: `{branch, checkpoint?, completed_steps?}`". In this build that is true
+of a `retry` edit and not of a plan file: `edits::pin_retry_branch` turns a
+replacement's `resume` into its branch pin, and nothing does the same for a node
+read out of a plan. A plan node stating `resume` therefore skips the steps the
+branch already carries — the `completed_steps` half — and then opens a session on
+a **fresh** branch, so the steps that were skipped are missing from the branch
+that gets published.
+
+What a planner has left is `branch`, and `onevcs` honours a pin onto a branch
+carrying commits its base does not in one case only: where an open session
+already holds that branch, which is the reuse `onevcs` 0.4.2 added. A preserved
+branch nobody still holds a session for is refused — `already carries N
+commit(s) that main does not` — and the *only* spelling that gets past it is
+`base_branch` equal to `branch`, because the comparison the refusal is made on is
+then empty by construction. That spelling is folklore, it is undocumented, and it
+costs the run its report: the publication compares the branch against itself,
+answers `PublishOutcome::NothingToPublish`, and the node settles `no-changes` with
+its integration target never told about any of it. Measured: four nodes across
+three runs, every one of them carrying the work it reported it had not written.
+
+**What this crate does today.** `src/plan.rs` documents both fields — `branch` is
+where the work goes, `base_branch` is the integration target, and setting the
+second equal to the first is not a supported way to continue a branch and reports
+`no-changes` whatever was committed — and a `no-changes` settlement now names the
+ref it compared against, so the tautology is visible in `results` rather than
+reading exactly like a node that genuinely changed nothing. The statement is held
+to the code from both sides: a drift test over the field's own documentation in
+`src/plan.rs`, and a journey in `tests/e2e/lifecycle.rs` that drives a plan
+written that way through the real repository side. Nothing about the plan schema
+is widened here — what a node may say is the contract's, and the semantics the
+pin runs into are `onevcs`'s.

@@ -650,6 +650,37 @@ pub fn is_session_opened(kind: &crate::event::EventKind) -> bool {
     *kind == kind_of(onevcs::EventKind::SessionOpened)
 }
 
+/// The base an open session's branch was cut from, and is compared against.
+///
+/// The sibling's **own** record of the session, for the same reason
+/// [`worktree_of`] is: which base a session ended up on is `onevcs`'s answer —
+/// a node naming none takes the identity's default, which this crate never sees
+/// — and a second copy assembled from the plan here would name a ref the
+/// comparison was not made against.
+///
+/// A read, not a claim: [`onevcs::session`] takes no lease and changes nothing.
+///
+/// `None` when the record cannot be read, which leaves the caller to say what it
+/// knows without naming a ref it does not.
+// llmlint: ignore[invalid_states_unrepresentable] a token reaches this module as a
+// `String` and cannot arrive as anything else: it comes off `DispatchOutcome::session`,
+// which the contract declares as `Option<String>`, and every function here that takes one
+// — `worktree_of`, `session_close`, `publish`, `change_opened_in` — takes `&str` and
+// constructs the sibling's newtype at the call into it, which is where the token stops
+// being text and starts addressing a session. Taking `&SessionToken` here alone would
+// move that one construction to the caller, validate nothing more (the newtype is
+// `#[serde(transparent)]` over a `String`), and leave this module answering the same
+// question two ways.
+pub fn base_of(token: &str) -> Option<String> {
+    onevcs::session(&providers(), &SessionToken(token.to_owned()))
+        .map(|record| record.session.base)
+        .map_err(|error| {
+            eprintln!("onepipeline: cannot read session {token}'s record: {error}");
+            error
+        })
+        .ok()
+}
+
 /// The session a lifecycle node asks for.
 pub fn request_for(node: &crate::plan::Node) -> Option<SessionRequest> {
     Some(SessionRequest {

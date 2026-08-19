@@ -34,6 +34,12 @@ use serde_json::json;
 /// here so a journey can hold the whole subject rather than a prefix, and so a
 /// sibling that changes what it derives fails a test that says why instead of
 /// one that reads differently.
+/// The branch a run before this one preserved its work on.
+///
+/// Named once because two journeys pin it and both then assert on the name: a
+/// branch spelled twice is a journey that passes when the pin never took.
+const KEPT: &str = "feature/kept";
+
 fn derived_subject(branch: &str) -> String {
     format!("chore: preserve work on {branch}")
 }
@@ -472,9 +478,13 @@ fn a_session_record_that_cannot_be_read_falls_back_to_opening_a_session() {
         "the recorded ending does not say what could not happen: {detail}"
     );
     let settled = world.events_of("norecord", "node-settled");
-    assert_eq!(
-        settled[0]["payload"]["detail"], undrafted[0]["payload"]["detail"],
-        "the settlement of a node with nowhere to draft in did not name it"
+    // After the publication's own words, where it had any: what settled the node
+    // leads, and the drafting failure is added to it — the same order
+    // `publication_failed` composes the two in.
+    let settled_detail = settled[0]["payload"]["detail"].as_str().unwrap_or_default();
+    assert!(
+        settled_detail.ends_with(detail),
+        "the settlement of a node with nowhere to draft in did not name it:          {settled_detail}"
     );
     // It fell back rather than running nowhere: the second step asked for a
     // session of its own, which is what it would have done had the first never
@@ -1568,8 +1578,14 @@ fn a_publication_that_had_nothing_to_publish_says_so_rather_than_claiming_it_lan
         "{}",
         published[0]
     );
+    // And it says what it compared against, which `no-changes` alone does not:
+    // the same word covers a worker that wrote nothing and a branch measured
+    // against itself, and only the ref tells them apart.
     let results = world.run(&["results", &run]);
-    results.exited(0).out_has("no-changes");
+    results
+        .exited(0)
+        .out_has("no-changes")
+        .out_has("compared against main");
     assert!(
         !results.stdout.contains("landed"),
         "a node with nothing to publish is reported as one whose change did or did not land:\n{}",
@@ -2492,4 +2508,102 @@ fn a_change_this_crate_cannot_read_the_record_of_settles_as_a_plain_task_failure
         settled["payload"]["change_url"].is_null(),
         "a settlement carries a change request it could not read: {settled}"
     );
+}
+
+/// What a `no-changes` was measured against, where the measurement is a
+/// tautology.
+///
+/// `base_branch` equal to `branch` is the only way a plan can *look* like it is
+/// asking to continue an existing branch — `onevcs` honours a pin onto a branch
+/// carrying work its base does not only when the base is that same branch — and
+/// it is not one: the node is then asked at publication what its branch adds to
+/// itself, which is nothing by construction. Four nodes across three runs were
+/// written that way and every one reported it had changed nothing while carrying
+/// the work, with the integration target never told about any of it.
+///
+/// Both halves of what [`onepipeline::plan::Node::base_branch`] documents are
+/// held here: the settlement is `no-changes` whatever the branch carries, and it
+/// now names the ref that was compared, so a reader sees the branch measured
+/// against itself instead of a node that reads exactly like one which genuinely
+/// changed nothing.
+#[test]
+fn a_node_whose_base_branch_is_its_branch_settles_no_changes_naming_what_it_compared_against() {
+    let world = World::new("lifecycle-selfbase");
+    let repo = world.repository("change-direct", &["true"]);
+    // The preserved branch a planner is trying to continue: it carries work the
+    // repository's integration target does not, which is the whole reason to
+    // point a node at it.
+    let kept = world.root.join("kept");
+    crate::harness::git(
+        &world,
+        &repo.checkout,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            KEPT,
+            &kept.to_string_lossy(),
+            "main",
+        ],
+    );
+    std::fs::write(kept.join("service.md"), "the work already done\n").expect("the kept work");
+    crate::harness::git(&world, &kept, &["add", "-A"]);
+    crate::harness::git(
+        &world,
+        &kept,
+        &["commit", "-m", "feat: what the last run did"],
+    );
+    crate::harness::git(&world, &repo.checkout, &["push", "origin", KEPT]);
+    crate::harness::git(
+        &world,
+        &repo.checkout,
+        &["worktree", "remove", &kept.to_string_lossy()],
+    );
+
+    let mut node = lifecycle("service", &[]);
+    node["branch"] = json!(KEPT);
+    node["base_branch"] = json!(KEPT);
+    let run = settle(&world, "selfbase", vec![node]);
+
+    let settled = world.run_json(&run, "result.json")["nodes"][0].clone();
+    assert_eq!(
+        settled["status"],
+        "done",
+        "{settled}\n{}",
+        why(&world, &run)
+    );
+    assert_eq!(
+        settled["outcome"],
+        "no-changes",
+        "a node pinned with `base_branch` equal to its `branch` no longer reports \
+         `no-changes`; `Node::base_branch` documents that it does, and the field's \
+         documentation is what needs to change with it: {settled}\n{}",
+        why(&world, &run)
+    );
+    // And the branch was never merged anywhere: the work the node was pointed at
+    // is still only on that branch, which is what makes an unexplained
+    // `no-changes` a report nobody can act on.
+    assert_eq!(
+        repo.base_file("service.md"),
+        None,
+        "the preserved branch reached the repository's base, so this journey is no \
+         longer about work that went nowhere"
+    );
+
+    // The ref the comparison was made against, in the run's own record and in
+    // what an operator reads — and it is the node's own branch, so the
+    // measurement is visibly a tautology rather than a verdict about the work.
+    let detail = world.events_of(&run, "node-settled")[0]["payload"]["detail"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    assert!(
+        detail.contains(&format!("compared against {KEPT}")),
+        "the settlement does not say what it compared against: {detail}"
+    );
+    world
+        .run(&["results", &run])
+        .exited(0)
+        .out_has("no-changes")
+        .out_has(&format!("compared against {KEPT}"));
 }
