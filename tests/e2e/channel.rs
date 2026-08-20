@@ -26,6 +26,27 @@ fn running(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
     name.to_string()
 }
 
+/// Wait for `ready`, failing at once — and with what it was handed — if the
+/// observer member died instead.
+///
+/// A member that has died satisfies no wait this journey makes, so one that only
+/// timed out would report the wait rather than the death that made it
+/// impossible.
+fn until_still_supervising(world: &World, what: &str, mut ready: impl FnMut(&World) -> bool) {
+    world.until(what, |world| {
+        let died = world
+            .observer_supervision()
+            .into_iter()
+            .find(|record| !record["died"].is_null());
+        assert!(
+            died.is_none(),
+            "the observer member died rather than {what}: its judge side was answered with {}",
+            died.expect("a death")["died"]
+        );
+        ready(world)
+    });
+}
+
 /// The same, with an observer graph attached.
 ///
 /// Only the pacemaker journeys need one: the clock a surface resets belongs to a
@@ -748,6 +769,160 @@ fn the_channel_server_relays_an_observer_frame_and_writes_back_the_verdict() {
     drop(stdin);
     world.release("build.go");
     let _ = serving.wait();
+}
+
+/// The whole seam, through a **real observer member and its judge side**: a live
+/// edit issued while that member is between turns leaves it supervising.
+///
+/// The other journeys drive `channel serve` directly, which proves the routing
+/// but not the thing that broke: what died was a *member*, because the side
+/// supervising it was handed a graph edit where a ruling belongs and a graph
+/// edit supervises nothing. So this one runs the member the shipped dag-scope
+/// graph declares, through the judge-side command provider that document names,
+/// and the operator's correction arrives exactly where it used to kill it —
+/// between the member's turns, while its judge side waits on the answer.
+#[test]
+fn a_live_edit_while_the_observer_member_is_between_turns_leaves_it_supervising() {
+    let world = World::new("channel-observer-member");
+    world.script("build.wait", "hold");
+    // The node the operator's correction adds, held like the first: what proves
+    // the correction reached the graph is the run *dispatching* it.
+    world.script("sweep.wait", "hold");
+    // Two supervision turns: the first is the one the live edit arrives during,
+    // and the second is what proves supervision went on after it.
+    world.script("observer.supervise", "2");
+    let path = world.plan("watched", &plan_of("watched", vec![agent("build", &[])]));
+    let mut start = world.cmd(&[
+        "start",
+        &path.to_string_lossy(),
+        "--detach",
+        "--dag-graph",
+        &world.shipped_dag_graph(),
+    ]);
+    // Inherited by the launched graph, and through it by the member's judge
+    // side: a wait that expired would answer the member with a synthesized
+    // verdict, and this journey would be reading that rather than the planner's.
+    start.env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "120");
+    world
+        .run_on(start, "start watched --detach --dag-graph")
+        .exited(0);
+
+    world.until("the observer member to raise its first turn", |world| {
+        world
+            .observer_supervision()
+            .iter()
+            .any(|record| record["turn"] == 1)
+    });
+    world.until("the member's question to reach the planner", |world| {
+        world
+            .events_of("watched", "planner-surface-queued")
+            .iter()
+            .any(|event| event["payload"]["kind"] == "monitor-question")
+    });
+    world
+        .run(&["next", "watched"])
+        .exited(0)
+        .out_has("anything to correct?");
+
+    // The operator corrects the run while the member waits on its ruling. This
+    // is the envelope that used to end it.
+    world
+        .run_with_stdin(
+            &["reply", "watched"],
+            &json!({"version": 1, "commands": [
+                {"op": "add", "node": {"id": "sweep", "persona": "engineer",
+                                       "task": "## What\nsweep what build left"}}
+            ]})
+            .to_string(),
+        )
+        .exited(0)
+        .out_has("\"applied\"");
+    // Not the record of the edit but its effect: the run reconciled the
+    // correction and dispatched the work it added, which is a pass of the loop
+    // and a dispatch of its own after the envelope reached the channel — and the
+    // member's judge side polls that channel throughout.
+    until_still_supervising(&world, "the added node to be dispatched", |world| {
+        world
+            .events_of("watched", "node-dispatched")
+            .iter()
+            .any(|event| event["labels"]["node"] == "sweep")
+    });
+    let supervision = world.observer_supervision();
+    assert!(
+        supervision.iter().all(|record| record["ruling"].is_null()),
+        "the member was ruled by something the planner never sent: {supervision:#?}"
+    );
+
+    // The planner rules *after* the correction rather than in the same instant.
+    // The member's judge side reads this channel on a 50ms poll of its own, so a
+    // correction and a ruling written inside one of those polls are read
+    // together — and a journey that ruled that fast would be proving what a
+    // batch does rather than where an unaccompanied live edit goes, which is the
+    // case an operator correcting a run mid-supervision actually creates. The
+    // correction is left on its own for several of those polls first; a member
+    // that took it dies during this wait rather than after it.
+    let ruling_is_due = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    until_still_supervising(&world, "the correction to sit unclaimed", |_| {
+        std::time::Instant::now() >= ruling_is_due
+    });
+
+    // The planner rules. The member takes it and goes on supervising, which is
+    // the run still having a watcher.
+    world
+        .run_with_stdin(
+            &["reply", "watched"],
+            r#"{"completion":false,"reason":"noted, carry on"}"#,
+        )
+        .exited(0);
+    until_still_supervising(
+        &world,
+        "the member to be ruled and take another turn",
+        |world| {
+            world
+                .observer_supervision()
+                .iter()
+                .any(|record| record["turn"] == 2)
+        },
+    );
+    let ruled = world
+        .observer_supervision()
+        .into_iter()
+        .find(|record| record["ruling"].is_string())
+        .expect("the member was ruled");
+    assert!(
+        ruled["ruling"]
+            .as_str()
+            .is_some_and(|ruling| ruling.contains("noted, carry on")),
+        "the member was ruled with something other than the planner's verdict: {ruled}"
+    );
+    until_still_supervising(&world, "the second turn to reach the planner", |world| {
+        world
+            .events_of("watched", "planner-surface-queued")
+            .iter()
+            .filter(|event| event["payload"]["kind"] == "monitor-question")
+            .count()
+            >= 2
+    });
+
+    // And it finishes supervising rather than being left mid-turn.
+    world.run(&["next", "watched"]).exited(0);
+    world
+        .run_with_stdin(
+            &["reply", "watched"],
+            r#"{"completion":false,"reason":"nothing further"}"#,
+        )
+        .exited(0);
+    until_still_supervising(&world, "the member to finish its second turn", |world| {
+        world
+            .observer_supervision()
+            .iter()
+            .filter(|record| record["ruling"].is_string())
+            .count()
+            >= 2
+    });
+
+    world.release("build.go");
+    world.release("sweep.go");
 }
 
 /// A live edit issued while the observer's side waits is the command path's, and

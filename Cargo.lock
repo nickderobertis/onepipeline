@@ -959,6 +959,7 @@ dependencies = [
  "oneagentgraph",
  "onevcs",
  "serde_json",
+ "serde_norway",
 ]
 
 [[package]]

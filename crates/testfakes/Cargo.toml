@@ -31,6 +31,10 @@ oneagentgraph = { workspace = true }
 # the shape `onevcs` declares — a restatement here would keep parsing after that
 # library changed it, and the journey would pass having proved the fixture.
 onevcs = { workspace = true }
+# The graph document's own reader, so the observer double runs the judge-side
+# provider the graph *declares* rather than one it remembered: a graph that named
+# a different provider would otherwise still be supervised by this copy.
+serde_norway = "0.9"
 
 # So a double can act out the one dispatch behaviour a rendezvous cannot: a
 # worker that keeps working through the polite ask to stop. The crate under test
