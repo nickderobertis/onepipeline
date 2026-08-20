@@ -78,6 +78,13 @@ the schema and put nothing in it, which are three different fixes — and the no
 own settlement says the same thing, so `results` shows it. Naming no graph and
 writing the `body` yourself spend no dispatch and are not reported.
 
+`onepipeline validate plan.json` asks the same question without launching
+anything: it reads the plan and puts it through the validation `start` does, and
+mints nothing — no run, no session, no ledger entry, no agent graph — so it is
+safe to run beside live work. It exits `0` when the plan loads and validates and
+`2` when it could not be read or was refused, printing the refusal `start` would
+print for that same plan, naming the node and the field, on stderr.
+
 The planner supervises over the channel:
 
 ```bash

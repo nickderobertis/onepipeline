@@ -802,3 +802,159 @@ fn a_node_the_planner_cancels_settles_parked_and_the_run_still_settles() {
         .expect("the cancelled node is still named");
     assert_eq!(slow["status"], "parked", "{result}");
 }
+
+/// Everything under a directory, relative and sorted.
+///
+/// A whole-world listing rather than a check for a run directory by name,
+/// because *mints nothing* is a claim about everything a launch would have
+/// written — the runs root, the run's own ledger, an `onevcs` session's state —
+/// and naming only the shapes this journey happened to think of would pass a
+/// verb that wrote one it did not.
+fn everything_under(root: &std::path::Path) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            found.push(
+                path.strip_prefix(root)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+            if path.is_dir() {
+                pending.push(path);
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+/// `validate` is the launch's own validation asked as a question.
+///
+/// The refusal a plan-writing agent could never see: a plan is refused at a
+/// launch long after its author has finished and gone. This verb is that same
+/// reading, answered while the author is still there — so what it has to prove
+/// is that it answers *identically* and costs nothing.
+#[test]
+fn validate_answers_as_start_does_and_mints_nothing_either_way() {
+    let world = World::new("plan-validate");
+    let valid = world.plan(
+        "valid",
+        &plan_of(
+            "valid",
+            vec![agent("build", &[]), human("sign", &["build"])],
+        ),
+    );
+    // A lifecycle node at the version that requires a title, naming none — the
+    // refusal that a planner met at launch, with nobody left to fix it.
+    let untitled = world.raw_plan(
+        "untitled.plan.json",
+        r#"{"schema_version":3,"name":"untitled","tasks":[
+            {"id":"publish","repo":"service","persona":"engineer","task":"t"}]}"#,
+    );
+
+    // The harness's own git config is written the first time it builds a
+    // command, so it is written here — before the snapshot — rather than left to
+    // appear inside it and read as something the binary put there.
+    world.gitconfig();
+    let before = everything_under(&world.root);
+
+    let accepted = world.run(&["validate", &valid.to_string_lossy()]);
+    accepted.exited(0);
+    assert!(
+        accepted.stdout.is_empty() && accepted.stderr.is_empty(),
+        "a plan that validates is answered by the status alone, and this one also said\n\
+         stdout: {}\nstderr: {}",
+        accepted.stdout,
+        accepted.stderr
+    );
+
+    let refused = world.run(&["validate", &untitled.to_string_lossy()]);
+    refused
+        .exited(REFUSED)
+        .err_has("node 'publish'")
+        .err_has("names no `title`");
+    assert!(
+        refused.stdout.is_empty(),
+        "the refusal reached stdout, where a caller reading the plan's verdict off \
+         that stream would take it for output:\n{}",
+        refused.stdout
+    );
+
+    // A plan file that could not be read at all is the same refusal: it is not a
+    // plan this launch would accept, and the code says so rather than the text.
+    world
+        .run(&["validate", "no-such.plan.json"])
+        .exited(REFUSED)
+        .err_has("no-such.plan.json");
+
+    // Neither run wrote anything anywhere in the world: no run root, no run id,
+    // no session, no ledger entry.
+    assert_eq!(
+        before,
+        everything_under(&world.root),
+        "a read-only verb wrote into the world it was pointed at"
+    );
+    assert!(
+        world.invocations().is_empty(),
+        "`validate` launched an agent graph: {:?}",
+        world.invocations()
+    );
+
+    // The same plan, the same words, on the same stream: this verb is `start`'s
+    // own validation rather than a second reading of the schema beside it.
+    let launched = world.run(&["start", &untitled.to_string_lossy()]);
+    launched.exited(REFUSED);
+    assert_eq!(
+        refused.stderr, launched.stderr,
+        "`validate` refuses a plan in different words from the launch it stands for"
+    );
+}
+
+/// A plan is validated as the version its own document declares.
+///
+/// The rule `start` reads it by, inherited rather than tightened: a verb that
+/// answered as the strictest version this build knows would refuse plans the
+/// launch it stands for accepts, which is worse than no verb at all.
+#[test]
+fn validate_reads_a_plan_as_the_schema_version_it_declares() {
+    let world = World::new("plan-validate-version");
+    let untitled = |version: u32| {
+        format!(
+            r#"{{"schema_version":{version},"name":"v{version}","tasks":[
+                {{"id":"publish","repo":"service","persona":"engineer","task":"t"}}]}}"#
+        )
+    };
+
+    // A lifecycle node's `title` arrived at 3. A plan written before it states
+    // none, and publishes under the subject `onevcs` derives instead.
+    for version in [1, 2] {
+        let path = world.raw_plan(&format!("v{version}.plan.json"), &untitled(version));
+        world.run(&["validate", &path.to_string_lossy()]).exited(0);
+    }
+    let path = world.raw_plan("v3.plan.json", &untitled(3));
+    world
+        .run(&["validate", &path.to_string_lossy()])
+        .exited(REFUSED)
+        .err_has("node 'publish'")
+        .err_has("names no `title`");
+
+    // And the other direction: a field a declared version never had is refused
+    // by that field's own name, which is the reading `start` makes of it too.
+    let early = world.raw_plan(
+        "earlybody.plan.json",
+        r#"{"schema_version":2,"name":"earlybody","tasks":[
+            {"id":"publish","repo":"service","persona":"engineer","task":"t",
+             "title":"feat: ship it","body":"what it landed"}]}"#,
+    );
+    world
+        .run(&["validate", &early.to_string_lossy()])
+        .exited(REFUSED)
+        .err_has("node 'publish': `body` is a schema 3 field")
+        .err_lacks("is not one this build reads");
+}
