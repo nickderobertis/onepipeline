@@ -1927,6 +1927,19 @@ fn a_refusal_that_names_no_side_is_attributed_to_its_member_rather_than_invented
         "a fall-through nothing can answer for was reported as a refusal:\n{}",
         results.stdout
     );
+
+    // The same on the view a planner reads first, which words a node's chains
+    // itself: an unattributed fall-through is evidence beside the failure, never
+    // the failure.
+    let status = world.run(&["status", &run]);
+    status
+        .exited(0)
+        .out_has("build: fallback — member 'worker' fell through 'codex' (auth)");
+    assert!(
+        !status.stdout.contains("build: failed — member"),
+        "a fall-through nothing can answer for was reported as the node's failure:\n{}",
+        status.stdout
+    );
 }
 
 #[test]

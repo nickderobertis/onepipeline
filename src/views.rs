@@ -2407,6 +2407,18 @@ mod tests {
 
     /// One advance a member's chain published, as the producer publishes it.
     fn advanced(role: Option<&str>, turn: Option<u64>, identity: &str, reason: &str) -> Envelope {
+        advanced_for("worker", role, turn, identity, reason)
+    }
+
+    /// The same, for a named member: a dispatch runs more than one, and each
+    /// numbers its own turns.
+    fn advanced_for(
+        member: &str,
+        role: Option<&str>,
+        turn: Option<u64>,
+        identity: &str,
+        reason: &str,
+    ) -> Envelope {
         let mut fields = vec![("identity", json!(identity)), ("reason", json!(reason))];
         if let Some(role) = role {
             fields.push(("role", json!(role)));
@@ -2421,16 +2433,23 @@ mod tests {
             &fields,
         );
         envelope.stream = "oneagentgraph-1".into();
-        envelope
-            .labels
-            .extra
-            .insert("member".into(), "worker".into());
+        envelope.labels.extra.insert("member".into(), member.into());
         envelope
     }
 
     /// One invocation that ran, built through the producing library's own
     /// payload type so what is folded is what that library publishes.
     fn invocation(role: oneagentgraph::event::Role, turn: u64, identity: &str) -> Envelope {
+        invocation_for("worker", role, turn, identity)
+    }
+
+    /// The same, for a named member.
+    fn invocation_for(
+        member: &str,
+        role: oneagentgraph::event::Role,
+        turn: u64,
+        identity: &str,
+    ) -> Envelope {
         let session = oneagentgraph::event::OneharnessSession {
             role,
             turn,
@@ -2452,10 +2471,7 @@ mod tests {
             Ok(serde_json::Value::Object(payload)) => payload,
             other => panic!("a session is not an object: {other:?}"),
         };
-        envelope
-            .labels
-            .extra
-            .insert("member".into(), "worker".into());
+        envelope.labels.extra.insert("member".into(), member.into());
         envelope
     }
 
@@ -2656,17 +2672,39 @@ mod tests {
         );
 
         // An invocation of the *other* side, or of another member, never answers
-        // for this one: each numbers its own turns.
-        let crossed = projection::fold(&[
-            advanced(Some("judge"), Some(1), "codex", "quota"),
+        // for this one: each numbers its own turns, so pairing across either
+        // would name an identity that served somebody else's chain. A dispatch
+        // runs more than one member, and the double every journey here drives
+        // labels every envelope with the one it runs — so the second member is
+        // stated at this level, where a record can carry the label the producer
+        // stamps on a member of its own.
+        for crossing in [
             invocation(oneagentgraph::event::Role::Agent, 1, "claude-code"),
+            invocation_for("reviewer", oneagentgraph::event::Role::Judge, 1, "codex-2"),
+        ] {
+            let crossed =
+                projection::fold(&[advanced(Some("judge"), Some(1), "codex", "quota"), crossing]);
+            assert_eq!(
+                chain_records(&crossed, "build")
+                    .iter()
+                    .map(chain_phrase)
+                    .collect::<Vec<_>>(),
+                vec!["the judge side: identity 'codex' refused (quota)".to_string()]
+            );
+        }
+
+        // And the member's *own* invocation still answers for it, so the
+        // isolation above is a boundary rather than a chain nothing can pair.
+        let paired = projection::fold(&[
+            advanced_for("reviewer", Some("judge"), Some(1), "codex", "quota"),
+            invocation_for("reviewer", oneagentgraph::event::Role::Judge, 1, "codex-2"),
         ]);
         assert_eq!(
-            chain_records(&crossed, "build")
+            chain_records(&paired, "build")
                 .iter()
                 .map(chain_phrase)
                 .collect::<Vec<_>>(),
-            vec!["the judge side: identity 'codex' refused (quota)".to_string()]
+            vec!["the judge side fell through 'codex' (quota) → served by 'codex-2'".to_string()]
         );
     }
 

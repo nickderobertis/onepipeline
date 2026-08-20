@@ -543,11 +543,7 @@ fn refuse_candidates(args: &[String], node: &str, step: Option<&str>, script: &s
             },
             turn: match turn {
                 "-" => None,
-                other => Some(other.parse::<u64>().unwrap_or_else(|_| {
-                    fake::fail(&format!(
-                        "a `.refused` line names the turn {other:?}, which is not a turn number"
-                    ))
-                })),
+                other => Some(scripted_turn(".refused", other)),
             },
         };
         // The sibling's **own** envelope, serialized through the sibling's own
@@ -1339,14 +1335,25 @@ fn served_invocations(
                         "a `.served` line names the role {role:?}: {error}"
                     ))
                 });
-            let Ok(turn) = turn.parse::<u64>() else {
-                fake::fail(&format!(
-                    "a `.served` line names the turn {turn:?}, which is not a turn number"
-                ));
-            };
-            (role, turn, identity.to_string())
+            (role, scripted_turn(".served", turn), identity.to_string())
         })
         .collect()
+}
+
+/// A scripted turn number, which a member counts from **one**.
+///
+/// `0` is refused with everything else that is not a turn: the producer numbers
+/// a side's turns from the first one it ran, so a record stamped `0` is one no
+/// member publishes — and a double that wrote it would be an oracle for a
+/// protocol nothing speaks.
+fn scripted_turn(script: &str, turn: &str) -> u64 {
+    match turn.parse::<u64>() {
+        Ok(turn) if turn > 0 => turn,
+        _ => fake::fail(&format!(
+            "a `{script}` line names the turn {turn:?}, which is not a turn number: a member \
+             counts its turns from one"
+        )),
+    }
 }
 
 /// The verdicts this dispatch's member settles with.
