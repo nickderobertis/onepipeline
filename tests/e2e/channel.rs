@@ -824,8 +824,8 @@ fn a_live_edit_while_the_observer_member_is_between_turns_leaves_it_supervising(
         .exited(0)
         .out_has("anything to correct?");
 
-    // The operator corrects the run while the member waits on its ruling. This
-    // is the envelope that used to end it.
+    // The envelope that used to end the member, arriving where it used to: on
+    // the wait its judge side is sitting in.
     world
         .run_with_stdin(
             &["reply", "watched"],
@@ -866,8 +866,8 @@ fn a_live_edit_while_the_observer_member_is_between_turns_leaves_it_supervising(
         std::time::Instant::now() >= ruling_is_due
     });
 
-    // The planner rules. The member takes it and goes on supervising, which is
-    // the run still having a watcher.
+    // A ruling, so the turn the edit did not answer is answered and the member
+    // has a second turn to still be alive for.
     world
         .run_with_stdin(
             &["reply", "watched"],
@@ -904,7 +904,6 @@ fn a_live_edit_while_the_observer_member_is_between_turns_leaves_it_supervising(
             >= 2
     });
 
-    // And it finishes supervising rather than being left mid-turn.
     world.run(&["next", "watched"]).exited(0);
     world
         .run_with_stdin(
@@ -1066,7 +1065,6 @@ fn an_observer_graph_whose_judge_names_no_command_is_refused_and_the_run_goes_on
         "a graph that named no judge side supervised anyway: {reported:#?}"
     );
 
-    // The run it was watching is untouched: it dispatched and it settled.
     assert!(
         !world.events_of("unwatched", "node-settled").is_empty(),
         "a misconfigured observer stopped the run it was watching: {:?}",
@@ -1523,7 +1521,8 @@ fn two_verdicts_written_at_once_are_delivered_one_per_question() {
         !world.events_of(&run, "planner-surface-queued").is_empty()
     });
 
-    // Both rulings, back to back — the second before the first has been read.
+    // The second written before the first has been read, which is the only way
+    // to have two unclaimed verdicts waiting at once.
     for reason in ["answering the first", "answering the second"] {
         world
             .run_with_stdin(
@@ -1851,8 +1850,8 @@ fn the_two_readers_contend_for_the_channel_without_losing_or_repeating_a_reply()
         });
         world.run(&["next", &run]).exited(0);
 
-        // Live edits and a ruling, contending for one queue. Every edit is the
-        // reconciler's, whatever order they arrive in.
+        // Interleaved deliberately: whichever order the two readers reach the
+        // queue in, every edit is still the reconciler's.
         for note in ["the scope changed", "and again"] {
             world
                 .run_with_stdin(

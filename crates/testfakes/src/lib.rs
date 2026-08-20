@@ -452,7 +452,6 @@ pub fn observe(dir: &Path) -> std::process::ExitCode {
 /// all — which is what every journey that never asked for one keeps getting.
 const SUPERVISE_SCRIPT: &str = "observer.supervise";
 
-/// Where a supervised observer records what it raised and what it was ruled.
 const SUPERVISION_RECORD: &str = "observer-supervision.jsonl";
 
 /// Act as the observer member's **judge side**, through the provider its graph
