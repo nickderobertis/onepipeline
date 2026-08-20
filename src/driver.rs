@@ -1759,7 +1759,7 @@ fn submit(paths: &RunPaths, envelope: &Reply) -> Result<i32> {
                 }
             }
             lock.release();
-            channel.answer(envelope)?;
+            channel.answer_if_verdict(envelope)?;
             println!("{}", json!({"reply": 0, "state": "applied"}));
             Ok(EXIT_SUCCESS)
         }
@@ -1768,7 +1768,7 @@ fn submit(paths: &RunPaths, envelope: &Reply) -> Result<i32> {
             let deadline = Instant::now() + Duration::from_secs(reply_timeout_seconds());
             while Instant::now() < deadline {
                 if let Some(outcome) = channel.outcome_of(id) {
-                    channel.answer(envelope)?;
+                    channel.answer_if_verdict(envelope)?;
                     if outcome.applied {
                         println!("{}", json!({"reply": id, "state": "applied"}));
                         return Ok(EXIT_SUCCESS);
@@ -1863,8 +1863,11 @@ fn serve(args: &RunArgs) -> Result<i32> {
             ]),
         )?;
 
-        // Wait for whichever reader claims the planner's answer first. A reply
-        // reaches exactly one reader, and at a boundary this is it.
+        // Wait for whichever reader claims the planner's verdict first. A reply
+        // reaches exactly one reader, and at a boundary this is it — and a live
+        // edit arriving while this waits is not one of them: it carries no
+        // ruling, so it goes to the command path and leaves this wait standing
+        // rather than ending the member with an envelope it cannot read.
         let answer = wait_for_reply(&channel)?;
         println!(
             "{}",

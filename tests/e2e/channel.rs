@@ -750,6 +750,375 @@ fn the_channel_server_relays_an_observer_frame_and_writes_back_the_verdict() {
     let _ = serving.wait();
 }
 
+/// A live edit issued while the observer's side waits is the command path's, and
+/// the wait is left standing.
+///
+/// The measured failure this prevents: an operator's correction, submitted
+/// mid-supervision, was claimed off the reply queue by the observer member's
+/// judge-side provider, which cannot read a graph edit as a supervisor ruling —
+/// so the member died and the run went blind while somebody was watching it.
+#[test]
+fn a_commands_only_reply_reaches_the_command_path_while_the_observers_side_waits() {
+    use std::io::{BufRead, BufReader, Write};
+
+    let world = World::new("channel-reply-routing");
+    world.script("build.wait", "hold");
+    let run = running(&world, "routed", vec![agent("build", &[])]);
+
+    let mut serving = world
+        .cmd(&["channel", "serve", &run])
+        // The wait itself is not what this journey is about: bounded well past
+        // the handful of verbs below, so a slow machine answers the question
+        // rather than the timeout answering it.
+        .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "120")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the channel server starts");
+    let mut stdin = serving.stdin.take().expect("stdin is piped");
+    writeln!(
+        stdin,
+        r#"{{"kind":"blocker","message":"build is doing something odd; go on?","node":"build"}}"#
+    )
+    .expect("the frame is written");
+    stdin.flush().expect("flushed");
+
+    // Read, so the question is outstanding and the observer member is between
+    // turns with its judge side blocked on the answer.
+    world.until("the frame to reach the planner", |world| {
+        !world.events_of(&run, "planner-surface-queued").is_empty()
+    });
+    world.run(&["next", &run]).exited(0).out_has("go on?");
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("waiting for planner decision");
+
+    // The operator corrects the run while it is being supervised. This is a live
+    // edit and nothing else: there is no verdict in it for anybody to read.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({"version": 1, "commands": [
+                {"op": "context", "id": "build", "note": "the scope changed", "deliver": "next"}
+            ]})
+            .to_string(),
+        )
+        .exited(0)
+        .out_has("\"applied\"");
+    world.until("the edit to reach the graph", |world| {
+        !world.events_of(&run, "edit-committed").is_empty()
+    });
+
+    // It answered nothing, because it said nothing: the question is still
+    // outstanding, the subtree it holds is still held, and the observer's side
+    // is still there.
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("waiting for planner decision");
+    assert!(
+        world.events_of(&run, "decision-cleared").is_empty(),
+        "a live edit cleared a decision it never answered: {:?}",
+        world.kinds(&run)
+    );
+    assert!(
+        serving
+            .try_wait()
+            .expect("the observer's side is readable")
+            .is_none(),
+        "the observer's side ended on a live edit it was never sent"
+    );
+
+    // The planner answers. That is what reaches the observer's conversation, and
+    // it is the *first* thing that does: the edit never entered this queue.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            r#"{"completion":false,"reason":"carry on"}"#,
+        )
+        .exited(0);
+    let stdout = serving.stdout.take().expect("stdout is piped");
+    let first = BufReader::new(stdout)
+        .lines()
+        .next()
+        .expect("the server wrote a line")
+        .expect("the line reads");
+    assert!(
+        !first.contains("commands"),
+        "a graph edit was written back to the observer as a ruling: {first}"
+    );
+    assert!(
+        first.contains("carry on"),
+        "the observer's side was handed something other than the planner's verdict: {first}"
+    );
+
+    drop(stdin);
+    world.release("build.go");
+    let _ = serving.wait();
+}
+
+/// A run carried across the upgrade: the live edit an older build already left
+/// on the reply queue is passed over rather than handed out.
+///
+/// The routing keeps a commands-only envelope off this queue, but durable state
+/// outlives the build that wrote it, and a run in flight when this landed can
+/// have one sitting there already. It is skipped, the reader it was never for is
+/// not ended by it, and the cursor does not move until that reader takes
+/// something — the verdict behind it, exactly once.
+#[test]
+fn a_live_edit_an_older_build_left_on_the_reply_queue_is_passed_over() {
+    use std::io::{BufRead, BufReader, Write};
+
+    let world = World::new("channel-reply-legacy");
+    world.script("build.wait", "hold");
+    let run = running(&world, "upgraded", vec![agent("build", &[])]);
+
+    // llmlint: ignore-block[tests_mirror_real_usage] this writes the durable reply queue
+    // directly because the case under test is one no build in this tree can produce any
+    // more: an envelope the *previous* build queued there before the routing existed.
+    // Through the front door `reply` now routes it to the command path, which is the fix
+    // — and would leave the reader this journey is about with nothing to skip.
+    std::fs::write(
+        world.run_file(&run, "channel/replies.jsonl"),
+        format!(
+            "{}\n",
+            json!({
+                "id": 0,
+                "at": 1,
+                "reply": {"version": 1, "commands": [
+                    {"op": "context", "id": "build", "note": "from the old build"}
+                ]}
+            })
+        ),
+    )
+    .expect("the older build's reply is queued");
+
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let mut serving = world
+        .cmd(&["channel", "serve", &run])
+        .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "120")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the channel server starts");
+    let mut stdin = serving.stdin.take().expect("stdin is piped");
+    writeln!(
+        stdin,
+        r#"{{"kind":"blocker","message":"is the old note still right?","node":"build"}}"#
+    )
+    .expect("the frame is written");
+    stdin.flush().expect("flushed");
+    world.until("the frame to reach the planner", |world| {
+        !world.events_of(&run, "planner-surface-queued").is_empty()
+    });
+
+    // Waiting, with an envelope it will not take sitting in front of it: the
+    // cursor stays where it is, because only a claim moves it and this reader
+    // has claimed nothing.
+    assert!(
+        !world.run_file(&run, "channel/replies-cursor.json").exists(),
+        "a reader that took nothing advanced the cursor past a waiting envelope"
+    );
+
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            r#"{"completion":false,"reason":"still right; carry on"}"#,
+        )
+        .exited(0);
+    let stdout = serving.stdout.take().expect("stdout is piped");
+    let first = BufReader::new(stdout)
+        .lines()
+        .next()
+        .expect("the server wrote a line")
+        .expect("the line reads");
+    assert!(
+        first.contains("still right; carry on"),
+        "the reader was handed the older build's edit instead of the verdict: {first}"
+    );
+
+    // And the cursor moved over both: the one it took, and the one behind it
+    // whose reader is the command queue, which holds its own copy.
+    world.until("the cursor to be written", |world| {
+        world.run_file(&run, "channel/replies-cursor.json").exists()
+    });
+    assert_eq!(
+        world.run_json(&run, "channel/replies-cursor.json"),
+        json!(2),
+        "the reply the reader took is claimable a second time"
+    );
+
+    drop(stdin);
+    world.release("build.go");
+    let _ = serving.wait();
+}
+
+/// An envelope carrying both halves is delivered to both readers.
+///
+/// The edits are the reconciler's and the verdict is the pending surface's, and
+/// a planner who corrects the graph *and* rules in one envelope gets both — the
+/// routing splits the envelope by what is in it, and never drops a half.
+#[test]
+fn a_reply_carrying_both_halves_reaches_both_readers() {
+    use std::io::{BufRead, BufReader, Write};
+
+    let world = World::new("channel-reply-both");
+    world.script("build.wait", "hold");
+    let run = running(&world, "bothhalves", vec![agent("build", &[])]);
+
+    let mut serving = world
+        .cmd(&["channel", "serve", &run])
+        .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "120")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the channel server starts");
+    let mut stdin = serving.stdin.take().expect("stdin is piped");
+    writeln!(
+        stdin,
+        r#"{{"kind":"blocker","message":"build looks stuck; retry it?","node":"build"}}"#
+    )
+    .expect("the frame is written");
+    stdin.flush().expect("flushed");
+    world.until("the frame to reach the planner", |world| {
+        !world.events_of(&run, "planner-surface-queued").is_empty()
+    });
+    world.run(&["next", &run]).exited(0);
+
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({
+                "completion": false,
+                "reason": "noted — carry on with the note in hand",
+                "version": 1,
+                "commands": [
+                    {"op": "context", "id": "build", "note": "the fixture moved", "deliver": "next"}
+                ]
+            })
+            .to_string(),
+        )
+        .exited(0)
+        .out_has("\"applied\"");
+
+    world.until("the edit to reach the graph", |world| {
+        !world.events_of(&run, "edit-committed").is_empty()
+    });
+    world.until("the decision to be cleared", |world| {
+        !world.events_of(&run, "decision-cleared").is_empty()
+    });
+    let stdout = serving.stdout.take().expect("stdout is piped");
+    let written = BufReader::new(stdout)
+        .lines()
+        .next()
+        .expect("the server wrote a line")
+        .expect("the line reads");
+    assert!(
+        written.contains("with the note in hand"),
+        "the verdict half never reached the observer: {written}"
+    );
+
+    drop(stdin);
+    world.release("build.go");
+    let _ = serving.wait();
+}
+
+/// Both readers on the queue at once: neither loses a message and neither is
+/// handed one twice.
+///
+/// Two rounds, because one proves only that the right envelope arrived. The
+/// second proves the cursor moved over exactly what its reader took: a verdict
+/// already read is never read again, and the live edits between the two rounds
+/// are the reconciler's every time.
+#[test]
+fn the_two_readers_contend_for_the_channel_without_losing_or_repeating_a_reply() {
+    use std::io::{BufRead, BufReader, Write};
+
+    let world = World::new("channel-reply-contention");
+    world.script("build.wait", "hold");
+    let run = running(&world, "contended", vec![agent("build", &[])]);
+
+    let mut serving = world
+        .cmd(&["channel", "serve", &run])
+        .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "120")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the channel server starts");
+    let mut stdin = serving.stdin.take().expect("stdin is piped");
+    let stdout = serving.stdout.take().expect("stdout is piped");
+    let mut written = BufReader::new(stdout).lines();
+
+    let mut edits = 0;
+    for (round, verdict) in [(1, "first ruling"), (2, "second ruling")] {
+        writeln!(
+            stdin,
+            r#"{{"kind":"blocker","message":"round {round}: go on?","node":"build"}}"#
+        )
+        .expect("the frame is written");
+        stdin.flush().expect("flushed");
+        world.until("the frame to reach the planner", |world| {
+            world.events_of(&run, "planner-surface-queued").len() >= round
+        });
+        world.run(&["next", &run]).exited(0);
+
+        // Live edits and a ruling, contending for one queue. Every edit is the
+        // reconciler's, whatever order they arrive in.
+        for note in ["the scope changed", "and again"] {
+            world
+                .run_with_stdin(
+                    &["reply", &run],
+                    &json!({"version": 1, "commands": [
+                        {"op": "context", "id": "build", "note": note, "deliver": "next"}
+                    ]})
+                    .to_string(),
+                )
+                .exited(0)
+                .out_has("\"applied\"");
+            edits += 1;
+        }
+        world
+            .run_with_stdin(
+                &["reply", &run],
+                &json!({"completion": false, "reason": verdict}).to_string(),
+            )
+            .exited(0);
+
+        // Every edit reached the graph exactly once, and this round's verdict —
+        // and only this round's — reached the observer.
+        world.until("the edits to reach the graph", |world| {
+            world.events_of(&run, "edit-committed").len() >= edits
+        });
+        assert_eq!(
+            world.events_of(&run, "edit-committed").len(),
+            edits,
+            "an edit was reconciled more than once: {:?}",
+            world.events_of(&run, "edit-committed")
+        );
+        let line = written
+            .next()
+            .expect("the server wrote a line")
+            .expect("the line reads");
+        assert!(
+            line.contains(verdict),
+            "round {round} read back something other than its own verdict: {line}"
+        );
+        assert!(
+            !line.contains("commands"),
+            "a graph edit was written back to the observer as a ruling: {line}"
+        );
+    }
+
+    drop(stdin);
+    world.release("build.go");
+    let _ = serving.wait();
+}
+
 #[test]
 fn the_channel_server_synthesizes_a_continuing_verdict_when_nobody_answers() {
     use std::io::Write;

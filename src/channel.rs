@@ -4,6 +4,11 @@
 //! edits, or both. The edits' required fields and validation semantics are
 //! `ai-orchestrator`'s live-edit protocol exactly, per `docs/contract.md`.
 //!
+//! Which reader takes one follows from **which of those three it is**, and not
+//! from which reader reached the queue first: the verdict half is the pending
+//! surface's, the commands half is the reconciler's, and an envelope carrying
+//! only edits never reaches the reader waiting for a ruling. See [`Reply`].
+//!
 //! `ChannelState` is the transport: it queues surfaces and replies, hands each
 //! out once, and records what a submitted command list was answered with. It
 //! does not *judge* an edit — whether a target exists, is in the right state,
@@ -153,8 +158,18 @@ pub fn target_of(command: &Command) -> Option<String> {
 
 /// One reply to a planner surface.
 ///
-/// A command-only envelope gets a synthesized continuing verdict; commands can
-/// instead accompany either legacy verdict.
+/// It carries two halves, and each has its own reader. The **verdict** half —
+/// [`completion`](Self::completion), [`message`](Self::message),
+/// [`reason`](Self::reason) — is what answers a pending surface, and is what a
+/// supervisor-side reader waiting on the channel reads. The **commands** half is
+/// the reconciler's, reconciled against the graph in order. An envelope carrying
+/// both is delivered to both: its commands to the command path, and the envelope
+/// itself to the pending surface, out of which its reader reads the verdict.
+///
+/// A **commands-only** envelope — a version and commands, no verdict — is the
+/// command path's alone. It is never queued on the reply path, because the
+/// reader waiting there asked for a ruling and a graph edit is not one: handing
+/// it over is what killed the observers this routing exists to keep alive.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Reply {
@@ -176,6 +191,29 @@ pub struct Reply {
     /// The graph edits, reconciled in order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub commands: Vec<Command>,
+}
+
+impl Reply {
+    /// Whether this envelope carries a verdict half.
+    ///
+    /// The verdict is three optional fields rather than one, because the
+    /// protocol lets a planner send any of them alone — a bare `message` is as
+    /// much a ruling as a `completion` is. Any of the three present is a reply
+    /// a pending surface can be answered with, and a reader waiting for a
+    /// ruling can read.
+    pub(crate) fn carries_verdict(&self) -> bool {
+        self.completion.is_some() || self.message.is_some() || self.reason.is_some()
+    }
+
+    /// Whether this envelope is the command path's alone.
+    ///
+    /// Edits and no verdict: nothing in it answers a question, so nothing in it
+    /// belongs on the reply path. This is the discrimination the two readers are
+    /// routed by, and it is made from the shape the envelope already declares
+    /// rather than from an address it would have had to remember to carry.
+    pub(crate) fn is_commands_only(&self) -> bool {
+        !self.commands.is_empty() && !self.carries_verdict()
+    }
 }
 
 /// What happens to a dropped node's direct dependents.
@@ -484,6 +522,12 @@ impl ChannelState {
     }
 
     /// Record that a reply answered whatever was pending.
+    ///
+    /// This is the **verdict** path: what it queues is what a reader waiting on
+    /// a ruling takes, and clearing `pending` is what releases the subtree a
+    /// blocking surface held. An envelope with edits reaches it through
+    /// [`answer_if_verdict`](Self::answer_if_verdict), which is where the two
+    /// halves are routed apart.
     pub fn answer(&self, reply: &Reply) -> crate::Result<u64> {
         let mut queue = self.queue();
         queue.pending = None;
@@ -503,6 +547,22 @@ impl ChannelState {
         Ok(id)
     }
 
+    /// Route a reply that carried edits by the halves it carries.
+    ///
+    /// Its commands have already reached the command path — applied inline, or
+    /// through the durable queue [`submit`](Self::submit) writes — so what is
+    /// left to route is the verdict half. Present, it answers the pending
+    /// surface exactly as a commandless reply does. Absent, this envelope is the
+    /// command path's alone: `pending` is left standing, because a graph edit
+    /// answers no question, and nothing is queued for a reader that could only
+    /// misread it as a ruling.
+    pub fn answer_if_verdict(&self, reply: &Reply) -> crate::Result<()> {
+        if reply.carries_verdict() {
+            self.answer(reply)?;
+        }
+        Ok(())
+    }
+
     /// Every reply the planner has written, in order.
     pub fn replies(&self) -> Vec<QueuedReply> {
         crate::ledger::read_lines(&self.paths.channel("replies.jsonl"))
@@ -511,18 +571,28 @@ impl ChannelState {
             .collect()
     }
 
-    /// Claim the replies no reader has taken yet.
+    /// Claim the verdicts no reader has taken yet.
     ///
     /// A reply is claimed from the durable queue by whichever reader reaches it
     /// next, each claim advancing the cursor, so one reply reaches exactly one
-    /// reader and no reader can lose it.
+    /// reader and no reader can lose it. **Which** readers reach it is decided
+    /// before arrival order gets a say: this queue is the verdict side of the
+    /// channel, so a commands-only envelope is not on it and is not handed out
+    /// here. [`answer_if_verdict`](Self::answer_if_verdict) keeps it off, and it
+    /// is skipped here as well for the run whose queue an older build already
+    /// wrote one into — that envelope's reader is the command queue, which holds
+    /// its own copy behind its own cursor, so passing over this one takes
+    /// nothing from anybody. Only a claim moves the cursor, and only to just
+    /// past the last verdict actually handed out: a skipped envelope is left
+    /// behind a delivery rather than stepped over on its own account, and a poll
+    /// that takes nothing leaves the cursor exactly where it was.
     pub fn claim_replies(&self) -> crate::Result<Vec<QueuedReply>> {
         let cursor_path = self.paths.channel("replies-cursor.json");
         let claimed_through: u64 = crate::ledger::read_json_opt(&cursor_path).unwrap_or(0);
         let fresh: Vec<QueuedReply> = self
             .replies()
             .into_iter()
-            .filter(|reply| reply.id >= claimed_through)
+            .filter(|queued| queued.id >= claimed_through && !queued.reply.is_commands_only())
             .collect();
         if let Some(last) = fresh.last() {
             crate::ledger::write_json(&cursor_path, &(last.id + 1))?;

@@ -1479,6 +1479,77 @@ fn a_command_only_envelope_and_a_verdict_envelope_are_both_replies() {
     assert!(CONTRACT.contains(r#"{"version": 1, "commands": [...]}"#));
 }
 
+/// The routing the contract states, read off the shapes the envelope declares.
+///
+/// A pending surface is answered by a **verdict half** and nothing else, so the
+/// three fields it is spelled with are what tells the two readers' envelopes
+/// apart — and a commands-only envelope carries none of them. No addressing
+/// field was minted for this: the discrimination is already in the wire shape.
+#[test]
+fn a_reply_is_routed_by_the_halves_it_carries() {
+    let verdict_half = |value: Value| {
+        let reply: Reply = serde_json::from_value(value).expect("the envelope parses");
+        reply.completion.is_some() || reply.message.is_some() || reply.reason.is_some()
+    };
+
+    assert!(
+        !verdict_half(json!({
+            "version": 1,
+            "commands": [{"op": "context", "id": "plan", "note": "the scope changed"}]
+        })),
+        "a commands-only envelope is read as a verdict"
+    );
+    for half in ["completion", "message", "reason"] {
+        let value = match half {
+            "completion" => json!({"completion": false}),
+            _ => json!({half: "keep going"}),
+        };
+        assert!(
+            verdict_half(value),
+            "`{half}` alone is not read as a verdict"
+        );
+    }
+    assert!(
+        verdict_half(json!({
+            "completion": false,
+            "reason": "retry it",
+            "version": 1,
+            "commands": [{"op": "cancel", "id": "slow"}]
+        })),
+        "an envelope carrying both halves is not read as a verdict"
+    );
+
+    assert!(
+        CONTRACT.contains(
+            "**A reply is routed by the halves it carries, never by which reader reaches the \
+             queue first.**"
+        ),
+        "the contract no longer states that a reply is routed by its halves"
+    );
+    assert!(
+        CONTRACT.contains(
+            "It answers a pending surface only when it carries a **verdict half** — \
+             `completion`, `message`, or `reason`"
+        ),
+        "the contract no longer says which half answers a pending surface"
+    );
+    assert!(
+        CONTRACT.contains(
+            "belongs to the command path alone: it leaves the pending surface, and any reader \
+             waiting there for a verdict, untouched"
+        ),
+        "the contract no longer says where a commands-only envelope goes"
+    );
+    assert!(
+        CONTRACT.contains("One carrying both is delivered to both"),
+        "the contract no longer says what an envelope carrying both halves does"
+    );
+    assert!(
+        CONTRACT.contains("Neither reader advances the other's cursor"),
+        "the contract no longer promises the two cursors stay apart"
+    );
+}
+
 #[test]
 fn the_only_surface_kind_the_contract_names_is_check_in() {
     let kind: SurfaceKind = serde_json::from_value(json!("check-in")).expect("parses");
