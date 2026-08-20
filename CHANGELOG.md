@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0](https://github.com/nickderobertis/onepipeline/compare/v0.8.6...v0.9.0) - 2026-08-20
+
+### Fixed
+
+- *(channel)* [**breaking**] route a reply by the halves it carries, not by arrival order ([#90](https://github.com/nickderobertis/onepipeline/pull/90))
+
 ## [0.8.6](https://github.com/nickderobertis/onepipeline/compare/v0.8.5...v0.8.6) - 2026-08-20
 
 ### Fixed
