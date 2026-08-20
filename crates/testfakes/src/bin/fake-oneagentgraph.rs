@@ -509,6 +509,17 @@ fn refuse_candidates(args: &[String], node: &str, step: Option<&str>, script: &s
                 "a `.refused` line reads {line:?}, which is not `ROLE TURN IDENTITY REASON`"
             ));
         };
+        // `-` in both columns or in neither: the side and the turn are one fact
+        // about who published the advance. A two-party member stamps both, a
+        // single-sided one has one chain and stamps neither, and no member
+        // publishes half of the pair — so a script that named half of it would
+        // ask this double to write a record the real library never does.
+        if (role == "-") != (turn == "-") {
+            fake::fail(&format!(
+                "a `.refused` line reads {line:?}, which names a side without a turn or a turn \
+                 without a side: a member stamps both or neither"
+            ));
+        }
         let advanced = oneagentgraph::event::FallbackAdvanced {
             identity: identity.to_string(),
             reason: reason.to_string(),
