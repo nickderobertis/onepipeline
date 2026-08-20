@@ -22,8 +22,7 @@ use crate::harness::{agent, human, plan_of, World, NOTHING_DRIVING, REFUSED};
 // which compiles the unix half, cannot see.
 #[cfg(unix)]
 use crate::harness::{end_process, reaped_pid};
-use onepipeline::event::{Envelope, EventKind, Labels, PipelineKind, Source};
-use serde_json::{json, Value};
+use serde_json::json;
 
 fn start_detached(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
     start_detached_announcing(world, name, nodes).0
@@ -2693,142 +2692,64 @@ fn an_adopted_runs_worker_can_ask_its_manager() {
     );
 }
 
+/// The prefix every branch those records name carries.
+///
+/// One prefix, so the journey can tell what it wrote from what the run did
+/// without knowing which malformation is which — and so a line of `results`
+/// carrying any of them fails the assertion that reads it.
+const FORGED: &str = "onevcs/forged";
+
 /// A branch name carrying what reads as another node's line in `results`.
 ///
 /// The forgery is the point: `results` is read line by line, so a value that
-/// carries a newline is a record about a node nobody dispatched.
-const FORGED_LINE: &str = "onevcs/forged\n  audit                    running";
+/// carries a newline would put a record about a node nobody dispatched into a
+/// view a manager reads.
+const FORGED_LINE: &str = "onevcs/forged-line\n  audit                    running";
 
-/// Records nothing in this stack writes, put into the store the adoption is
-/// about to fold.
-///
-/// This is where a session record is *external* input: the store is a file on
-/// disk, the run that was writing it is dead, and what the next reader folds is
-/// whatever it holds by then. Each of these is a pointer at work that does not
-/// exist — a branch carrying a line of its own, which a view read line by line
-/// would print as another node's; a branch as long as the bound a producer cuts
-/// text at, which addresses no branch; and a whole session against a node no
-/// plan of this run ever named. Every one is appended *after* the real record,
-/// so a reader that took them would take them over it and every assertion in the
-/// journey would be about the wrong branch.
-///
-// llmlint: ignore-block[tests_mirror_real_usage] the *arrangement* below is a store this
-// build did not write, which is the condition under test and not a shortcut around an
-// interface: no command on this build's surface produces a record like these — `onevcs`
-// opens the sessions and this crate writes its own copy beside them, and both name a
-// branch git accepted and a node the run holds — so a producer that could be scripted
-// into one would be this suite's own invention rather than anything a run meets. What a
-// run *does* meet is this file: a merged store is external input to every reader of it,
-// and a record it cannot act on is exactly what the fold refuses. `tests/e2e/journal.rs`
-// arranges the same condition the same way, for the same reason. Everything asserted
-// afterwards is through the compiled binary — `adopt`, then `results`.
-fn forge_records_no_producer_writes(world: &World, run: &str) {
-    forge_session(world, run, "service", "s-forged", FORGED_LINE);
-    // As long as the bound a producer cuts a payload text field at, read off the
-    // reader's own declaration of it: a build that lowered the bound and left
-    // this at a number would stop testing anything.
-    forge_session(
-        world,
-        run,
-        "service",
-        "s-forged",
-        &"b".repeat(onepipeline::event::MAX_PAYLOAD_TEXT_BYTES),
-    );
-    forge_dispatch(world, run, "ghost");
-    forge_session(world, run, "ghost", "s-ghost", "onevcs/ghost");
-}
+/// The branch a record about a *different* session names.
+const FORGED_ELSEWHERE: &str = "onevcs/forged-elsewhere";
 
-/// One `session-opened` naming `branch`, as nothing in this stack would.
+/// What the dispatch puts on its session's own stream: records the merged store's
+/// reader cannot act on.
 ///
-/// Every part of the record comes from the declaration that owns it — the
-/// envelope from this crate's own public [`Envelope`], the kind and the payload
-/// from `onevcs`'s [`EventKind`](onevcs::EventKind) and
-/// [`Session`](onevcs::Session) — so a producer that changes either makes this
-/// fixture change with it rather than leaving a forged record the fold stopped
-/// recognising and a journey that passes for the wrong reason.
-fn forge_session(world: &World, run: &str, node: &str, token: &str, branch: &str) {
-    let session = onevcs::Session {
-        token: onevcs::SessionToken(token.to_owned()),
-        worktree: PathBuf::from("/tmp/forged"),
-        branch: branch.to_owned(),
-        base: "main".to_owned(),
-    };
-    let Ok(Value::Object(payload)) = serde_json::to_value(&session) else {
-        panic!("a onevcs session no longer renders as an event payload");
-    };
-    append(
-        world,
-        run,
-        &Envelope {
-            source: Source::Vcs,
-            kind: vcs_kind(onevcs::EventKind::SessionOpened),
-            labels: forged_labels(run, node),
-            payload,
-            ..forged_envelope(token)
+/// A session's stream is **a file on disk that any process holding the token
+/// appends to** — `src/vcs.rs` says so where it reads a change request off one —
+/// and the dispatch is a process holding the token. So these arrive the way every
+/// session record does: written to the stream while the session is open, read by
+/// the compiled binary's own follow of it, relayed into the merged store, and
+/// folded from there by the adoption that reads it.
+///
+/// Each is refused for a reason of its own, and each is written *after* the real
+/// record — so a reader that took any of them would take it over the real one,
+/// and every assertion in the journey would then be about the wrong session:
+///
+/// * a branch carrying a line of its own;
+/// * a branch as long as the bound a producer cuts payload text at, which is what
+///   a *cut* value looks like;
+/// * a token that is no handle at all, on a branch that reads perfectly well;
+/// * a record that is no session at all, naming no branch to read one out of;
+/// * a record about a different session entirely, on this session's log.
+fn unusable_session_records() -> String {
+    json!([
+        {"branch": FORGED_LINE},
+        // The bound read off the reader's own declaration of it: a build that
+        // lowered the bound and left a number here would stop testing anything.
+        {
+            "branch": format!(
+                "{FORGED}-long{}",
+                "g".repeat(onepipeline::event::MAX_PAYLOAD_TEXT_BYTES),
+            ),
         },
-    );
+        // Half a record is worse than none — the branch says where work is and
+        // the token is how the worktree holding it is found — so a branch a
+        // manager could act on under a token nothing can be addressed by is
+        // refused as whole as the others.
+        {"token": "  ", "branch": format!("{FORGED}-token")},
+        {"token": "s-elsewhere", "branch": FORGED_ELSEWHERE},
+        {},
+    ])
+    .to_string()
 }
-
-/// The same, for a dispatch of a node the run's graph does not hold.
-///
-/// Without it the session above is a record about nothing: what makes a node's
-/// session one the adoption reports is that the node was dispatched.
-fn forge_dispatch(world: &World, run: &str, node: &str) {
-    append(
-        world,
-        run,
-        &Envelope {
-            source: Source::Pipeline,
-            kind: EventKind(PipelineKind::NodeDispatched.as_str().to_owned()),
-            labels: forged_labels(run, node),
-            ..forged_envelope(node)
-        },
-    );
-}
-
-/// The envelope every forged record shares, on a stream of its own so it cannot
-/// disturb the sequence any real writer is keeping.
-fn forged_envelope(stream: &str) -> Envelope {
-    Envelope {
-        v: onepipeline::event::ENVELOPE_VERSION,
-        ts: "2026-01-01T00:00:00.000Z".to_owned(),
-        stream: format!("forged-{stream}"),
-        seq: 0,
-        source: Source::Vcs,
-        kind: EventKind(String::new()),
-        labels: Labels::default(),
-        payload: serde_json::Map::new(),
-        artifacts: Vec::new(),
-    }
-}
-
-fn forged_labels(run: &str, node: &str) -> Labels {
-    Labels {
-        run_id: Some(run.to_owned()),
-        node: Some(node.to_owned()),
-        ..Labels::default()
-    }
-}
-
-/// A kind as `onevcs` spells it, asked of the sibling's own serializer.
-fn vcs_kind(kind: onevcs::EventKind) -> EventKind {
-    let spelled = serde_json::to_value(kind).expect("a kind renders");
-    EventKind(
-        spelled
-            .as_str()
-            .expect("a kind renders as a string")
-            .to_owned(),
-    )
-}
-
-fn append(world: &World, run: &str, record: &Envelope) {
-    let path = world.run_file(run, "events.jsonl");
-    let mut text = std::fs::read_to_string(&path).expect("the run's store reads");
-    text.push_str(&serde_json::to_string(record).expect("an envelope renders"));
-    text.push('\n');
-    std::fs::write(&path, text).expect("the run's store is written");
-}
-// llmlint: ignore-end[tests_mirror_real_usage]
 
 /// Adopting a run that had a dispatch in flight, which is what `adopt` is for.
 ///
@@ -2855,6 +2776,11 @@ fn adopting_a_run_whose_dispatch_was_in_flight_leaves_that_dispatchs_work_reacha
         &held.iter().map(String::as_str).collect::<Vec<_>>(),
     );
     world.script("service.work", "the worker wrote this\n");
+    // The other half of this journey: the dispatch puts records on its own
+    // session's stream that no producer writes — see
+    // [`unusable_session_records`] — so what the adoption folds is a store that
+    // carries them beside the real one.
+    world.script("service.session-records", &unusable_session_records());
 
     // No branch pin at all — the measured case. The session names the branch, so
     // nothing in the plan says where the dispatch's work is.
@@ -2895,11 +2821,6 @@ fn adopting_a_run_whose_dispatch_was_in_flight_leaves_that_dispatchs_work_reacha
         world.run(&["status", &run]).stdout.contains("DRIVER DEAD")
     });
 
-    // The condition the second half of this journey is about, arranged the one
-    // way there is to arrange it — see `forge_records_no_producer_writes`.
-    // llmlint: ignore[tests_mirror_real_usage] the store *is* the interface here: it is
-    // external input to every reader of a run, and this is a state a reader meets.
-    forge_records_no_producer_writes(&world, &run);
     // The gate the dead driver was held at, released so the adoption's own
     // publication can finish.
     world.release("gate.go");
@@ -2926,7 +2847,7 @@ fn adopting_a_run_whose_dispatch_was_in_flight_leaves_that_dispatchs_work_reacha
     results.exited(0).out_has(&branch).out_has(&token);
     for line in results.stdout.lines() {
         assert!(
-            !line.contains("audit") && !line.contains("s-forged"),
+            !line.contains("audit") && !line.contains(FORGED) && !line.contains("s-elsewhere"),
             "a record the store was handed put a line of its own into results:\n{}",
             results.stdout
         );
@@ -2937,21 +2858,41 @@ fn adopting_a_run_whose_dispatch_was_in_flight_leaves_that_dispatchs_work_reacha
     // the wrong reason: every session this run ever opened is the one the
     // abandoned dispatch was working in, and `onevcs` — which is what decides
     // whether a session is taken up — says it took one up.
-    let openings: Vec<serde_json::Value> = world
-        .events_of(&run, "session-opened")
+    let recorded_openings = world.events_of(&run, "session-opened");
+    let branch_of = |event: &serde_json::Value| event["payload"]["branch"].clone();
+    let forged = |event: &serde_json::Value| {
+        branch_of(event)
+            .as_str()
+            .is_none_or(|branch| branch.starts_with(FORGED))
+    };
+    // The scripted records reached the merged store the ordinary way — through
+    // the session's own stream and this crate's follow of it — so what the
+    // assertions below are about is a reader that met them and refused them,
+    // rather than a producer path that quietly dropped them on the way.
+    let arrived: std::collections::BTreeSet<String> = recorded_openings
+        .iter()
+        .filter(|event| forged(event))
+        .map(|event| branch_of(event).to_string())
+        .collect();
+    assert_eq!(
+        arrived.len(),
+        5,
+        "the records the dispatch put on its session's stream did not all reach the \
+         merged store — one per refusal, each arriving at least once — so nothing \
+         here is about what a reader does with them: {arrived:?}"
+    );
+    let openings: Vec<serde_json::Value> = recorded_openings
         .into_iter()
-        // Not the ones this journey appended: what the run did with those is
-        // asserted where it shows, in what the adoption recorded and what
-        // `results` prints.
-        .filter(|event| {
-            event["stream"]
-                .as_str()
-                .is_some_and(|stream| !stream.starts_with("forged-"))
-        })
+        .filter(|event| !forged(event))
         .collect();
     let tokens: Vec<String> = openings
         .iter()
-        .filter_map(|event| event["payload"]["token"].as_str().map(str::to_owned))
+        .map(|event| {
+            event["payload"]["token"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        })
         .collect();
     assert!(
         tokens.len() > 1,

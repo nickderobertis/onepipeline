@@ -808,12 +808,11 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
 /// its previous dispatch committed to instead of cutting a second one beside it
 /// and leaving the first unreferenced.
 ///
-/// A `branch` the *planner* wrote wins outright, exactly as it does in
-/// [`pin_preserved_branch`]: naming one is a decision somebody made, and a pin
-/// this crate derived must not overwrite it. It is the same branch in every case
-/// this can reach — `onevcs` honours a pin or refuses it, so a session that
-/// opened at all opened on the branch the node named — and the rule is stated
-/// once rather than assumed twice.
+/// There is one branch to pin rather than two to choose between, which is why
+/// nothing here weighs a `branch` the *planner* wrote against the session's: a
+/// pin is honoured or refused, so a session that opened at all opened on the
+/// branch the node named, and a node that named none has the branch `onevcs`
+/// gave it. The session is asked either way — it is the one that knows.
 fn abandon_the_dispatch_in_flight(state: &mut RunState) {
     // The same answer the adopting driver records in the journal, so what a
     // reader folds and what the run's own `driver-adopted` says are one
@@ -823,9 +822,7 @@ fn abandon_the_dispatch_in_flight(state: &mut RunState) {
     for (id, session) in state.sessions_in_flight() {
         state.sessions.remove(&id);
         if let Some(node) = state.graph.get_mut(&id) {
-            if node.branch.is_none() {
-                node.branch = Some(session.branch().as_str().to_owned());
-            }
+            node.branch = Some(session.branch().as_str().to_owned());
         }
         state.abandoned.insert(id, session);
     }
@@ -848,13 +845,12 @@ fn abandon_the_dispatch_in_flight(state: &mut RunState) {
 /// branch with no token leaves a manager unable to find the worktree, and a
 /// token with no branch is a pin this crate would have to invent.
 ///
-/// Which node it belongs to is the *enricher's* stamp rather than the
-/// producer's, so both halves of it are checked here: an envelope naming no node
-/// belongs to no dispatch, and one naming a node this run's graph does not hold
-/// is not about a dispatch of this run's at all. Whether that node still has one
-/// running is the reader's question — [`RunState::sessions_in_flight`] is where
-/// it is asked, because a session outlives the pass that observed it and the
-/// answer changes without another record arriving.
+/// Which node it belongs to is the *enricher's* stamp rather than the producer's,
+/// and an envelope naming none belongs to no dispatch. That is the whole of what
+/// the label decides here: it is a **key**, and what makes it a dispatch anything
+/// reports is asked at read time, by [`RunState::sessions_in_flight`] — a session
+/// outlives the pass that observed it, and whether its node is still running
+/// changes without another record arriving.
 ///
 /// The payload itself is read and checked by
 /// [`DispatchSession::read_from`](crate::vcs::DispatchSession::read_from), which
@@ -866,10 +862,7 @@ fn fold_session(state: &mut RunState, event: &Envelope) {
     let Some(node) = event.labels.node.as_deref() else {
         return;
     };
-    if state.graph.get(node).is_none() {
-        return;
-    }
-    let Some(session) = crate::vcs::DispatchSession::read_from(&event.payload) else {
+    let Some(session) = crate::vcs::DispatchSession::read_from(event) else {
         return;
     };
     state.sessions.insert(node.to_string(), session);
@@ -1649,12 +1642,11 @@ mod tests {
     /// names nothing.
     ///
     /// Which node a session belongs to is stamped by the *enricher* rather than
-    /// by the producer that opened it, so a record naming none — or naming one
-    /// this run's graph does not hold — is not a dispatch of this run's. And
-    /// half a session is worse than none: a branch with no token leaves a
-    /// manager unable to find the worktree, and a token with no branch is a pin
-    /// this crate would have to invent. What makes a *value* usable is decided
-    /// where it is read, in
+    /// by the producer that opened it, so a record naming none is not a dispatch
+    /// of this run's. And half a session is worse than none: a branch with no
+    /// token leaves a manager unable to find the worktree, and a token with no
+    /// branch is a pin this crate would have to invent. What makes a *value*
+    /// usable is decided where it is read, in
     /// [`DispatchSession::read_from`](crate::vcs::DispatchSession::read_from).
     #[test]
     fn a_session_record_this_run_cannot_place_is_left_out_of_the_fold() {
@@ -1678,22 +1670,14 @@ mod tests {
             ),
             unlabelled,
             branchless,
-            // A node no plan of this run's ever named, dispatched and opened
-            // against by a stamp nothing here wrote.
-            pipeline(journal::PipelineKind::NodeDispatched, 4, Some("ghost"), &[]),
-            opened(5, "ghost", "s-ghost", "onevcs/s-ghost"),
             pipeline(
                 journal::PipelineKind::DriverAdopted,
-                6,
+                4,
                 None,
                 &[("adoption", json!(1))],
             ),
         ]);
         assert!(state.abandoned.is_empty(), "{:?}", state.abandoned);
-        assert!(
-            !state.sessions.contains_key("ghost"),
-            "a session was folded against a node this run's graph never held"
-        );
         assert!(
             state
                 .graph

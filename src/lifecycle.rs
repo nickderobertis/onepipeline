@@ -187,7 +187,7 @@ pub fn execute(
         branch = drained.branch.or(branch);
         if stream.is_none() {
             if let Some(token) = &session {
-                let opened = crate::vcs::workspace_of(token);
+                let opened = crate::vcs::working_session(token);
                 worktree = opened.as_ref().map(|open| open.worktree.clone());
                 base = opened.map(|open| open.base);
                 stream = crate::vcs::follow(token, vcs_filter, relay_into(tx, whose.clone()));
