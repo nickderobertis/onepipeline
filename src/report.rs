@@ -380,6 +380,7 @@ pub(crate) fn failed_verdicts(events: &[Envelope], node: &str) -> Vec<FailedVerd
         })
         .collect()
 }
+// llmlint: ignore-end[boundary_inputs_validated]
 
 /// One string a sibling's record carried, or `None` for one it did not.
 ///

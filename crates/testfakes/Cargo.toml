@@ -31,6 +31,20 @@ oneagentgraph = { workspace = true }
 # the shape `onevcs` declares — a restatement here would keep parsing after that
 # library changed it, and the journey would pass having proved the fixture.
 onevcs = { workspace = true }
+# The verdict a two-party member settles on, in the shape **onejudge** declares
+# it: `oneagentgraph` copies its report's own `verdicts` onto the settlement it
+# publishes, so a double that hand-rolled that object would be an oracle for a
+# settlement nothing writes — and would go on serializing after onejudge moved
+# the field the crate under test reads. Nothing else in this workspace names
+# this crate, and nothing should: `onepipeline` composes `oneagentgraph` and
+# `onevcs`, and reads a report of a *grandchild's* leniently and structurally by
+# the decision `src/report.rs` records. This is the drift gate under that
+# decision, and it belongs to the test support rather than to the crate.
+#
+# The version must be the one `oneagentgraph`'s own pin resolves to — the
+# runner and this double have to write the same shape — so it moves when that
+# pin does.
+onejudge = "0.4"
 
 # So a double can act out the one dispatch behaviour a rendezvous cannot: a
 # worker that keeps working through the polite ask to stop. The crate under test

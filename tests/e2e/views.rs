@@ -1716,15 +1716,12 @@ fn host_renders_the_live_dispatches_of_a_run_that_was_adopted() {
 /// A chain that fell through and was then served is reported as the recovery it
 /// was, naming the identity that actually ran the turn.
 ///
-/// This is the line that cost four wrong diagnoses in one day: the views said a
-/// chain *refused* when it had recovered, and every reader went at a
-/// subscription that had never blocked a turn. The evidence for the recovery is
-/// on the stream already — the candidate the chain stepped past, and the
-/// invocation that ran that side's turn beside it.
+/// The regression this holds down is a recovered chain rendered as a refusal,
+/// which sends every reader at a subscription that never blocked a turn.
 #[test]
 fn a_chain_that_fell_through_and_was_served_names_the_identity_that_served_it() {
     let world = World::new("views-recovered");
-    world.script("build.refused", "agent claude-code:alternate quota\n");
+    world.script("build.refused", "agent 1 claude-code:alternate quota\n");
     // The turn the agent side's chain went on to run, under the next candidate.
     world.script("build.served", "agent 1 claude-code:alternate2\n");
     world.script("build.fail", "1");
@@ -1755,6 +1752,38 @@ fn a_chain_that_fell_through_and_was_served_names_the_identity_that_served_it() 
     );
 }
 
+/// One chain, three turns, two endings: the turns it recovered on are counted
+/// as the one fact they are, and the turn it ran out on is its own.
+///
+/// The fold keeps a chain's turns apart for exactly this. A record that had
+/// collapsed them could only ever be rendered as one of the two endings, and
+/// whichever it picked would decide where every reader went next.
+#[test]
+fn one_chain_that_recovers_and_then_runs_out_reports_both_endings() {
+    let world = World::new("views-both-endings");
+    world.script(
+        "build.refused",
+        "agent 1 claude-code quota\nagent 2 claude-code quota\nagent 3 claude-code quota\n",
+    );
+    // Two of the three turns went on to run under the next candidate; the third
+    // reached the end of the chain with nothing left to try.
+    world.script(
+        "build.served",
+        "agent 1 claude-code:alternate\nagent 2 claude-code:alternate\n",
+    );
+    world.script("build.fail", "1");
+    let run = settled(&world, "endings", vec![agent("build", &[])]);
+
+    world
+        .run(&["results", &run])
+        .exited(0)
+        .out_has(
+            "fallback: the agent side fell through 'claude-code' (quota) → served by \
+             'claude-code:alternate', recorded 2 times",
+        )
+        .out_has("provider: the agent side: identity 'claude-code' refused (quota)");
+}
+
 /// A node that failed because an identity chain ran out says which side asked
 /// and which identity refused — and only that chain gets the provider line.
 ///
@@ -1770,7 +1799,7 @@ fn a_provider_refusal_names_the_side_and_the_identity_in_results_and_status() {
         "build.refused",
         // The judge side's chain refuses twice over, which is one fact recorded
         // twice rather than two facts.
-        "agent claude-code quota\njudge codex rate_limit\njudge codex rate_limit\n",
+        "agent 1 claude-code quota\njudge 1 codex rate_limit\njudge 1 codex rate_limit\n",
     );
     // Only the agent side ever ran a turn: the judge side's chain reached its
     // end with no successful candidate, which is what a bare "refused" is for.
@@ -1816,11 +1845,12 @@ fn a_node_that_failed_on_a_judge_verdict_says_why_and_names_no_provider() {
     world.script(
         "build.verdict",
         "true|the branch is pushed|it is\n\
-         false|the change builds|cargo build fails in src/views.rs\n",
+         false|the change builds|cargo build fails in src/views.rs\n\
+         false||\n",
     );
     // A chain that fell through and recovered, which is what used to be printed
     // as the reason a node like this failed.
-    world.script("build.refused", "agent claude-code quota\n");
+    world.script("build.refused", "agent 1 claude-code quota\n");
     world.script("build.served", "agent 1 claude-code:alternate\n");
     world.script("build.fail", "1");
     let run = settled(&world, "judged", vec![agent("build", &[])]);
@@ -1828,7 +1858,14 @@ fn a_node_that_failed_on_a_judge_verdict_says_why_and_names_no_provider() {
     let results = world.run(&["results", &run]);
     results
         .exited(0)
-        .out_has("verdict: 'the change builds' failed — cargo build fails in src/views.rs");
+        .out_has("verdict: 'the change builds' failed — cargo build fails in src/views.rs")
+        // A judge that named neither the criterion nor a reason still failed
+        // this node, which is the fact a provider line above it would otherwise
+        // be read as. An empty string is a criterion nobody wrote, not one worth
+        // a bare pair of quotes on a line.
+        .out_has(
+            "verdict: a criterion the record does not name failed — the record carries no reason",
+        );
     assert!(
         !results.stdout.contains("provider:"),
         "a node that failed on its judge was given a provider line:\n{}",
@@ -1849,7 +1886,7 @@ fn a_node_that_failed_on_a_judge_verdict_says_why_and_names_no_provider() {
 #[test]
 fn a_refusal_that_names_no_side_is_attributed_to_its_member_rather_than_invented() {
     let world = World::new("views-refused-side");
-    world.script("build.refused", "- codex auth\n");
+    world.script("build.refused", "- - codex auth\n");
     world.script("build.fail", "1");
     let run = settled(&world, "sideless", vec![agent("build", &[])]);
 

@@ -162,8 +162,8 @@ pub struct RunState {
     /// tells a chain which recovered from one which ran out: an advance names
     /// the candidate a chain stepped past, and the invocation published beside
     /// it names the identity that went on to serve that side's turn. Without it
-    /// every fall-through reads as fatal, and four wrong diagnoses in one day is
-    /// what that costs.
+    /// every fall-through reads as fatal, and a reader is sent at a
+    /// subscription that never blocked a turn.
     pub served: BTreeMap<String, Vec<Served>>,
     /// What each node's dispatch is doing *now*, from the relayed stream.
     ///

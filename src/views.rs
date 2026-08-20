@@ -737,8 +737,7 @@ pub fn status(survey: &Survey) -> String {
         //
         // Only a chain that ran out is reported under the node's failure. One
         // that fell through and was then served is reported as the recovery it
-        // was, under its own word — reading a recovered chain as the reason a
-        // node failed cost four wrong diagnoses in one day.
+        // was, under its own word.
         for (id, node_status) in &statuses {
             if *node_status != NodeStatus::Failed {
                 continue;
@@ -819,7 +818,11 @@ struct ChainRecord<'a> {
     /// What became of that side's turn afterwards.
     became: Fallthrough,
     /// How many records carried this same side, identity, reason, and ending.
-    records: u64,
+    ///
+    /// Non-zero for the reason [`Refusal::records`] is: a line exists only by
+    /// having been recorded at least once, and a rendering that could hold a
+    /// zero would be one that could say a chain recorded nothing.
+    records: std::num::NonZeroU64,
 }
 
 impl ChainRecord<'_> {
@@ -860,7 +863,7 @@ fn chain_records<'a>(state: &'a RunState, node: &str) -> Vec<ChainRecord<'a>> {
         records.push(ChainRecord {
             refusal,
             became,
-            records: refusal.records.get(),
+            records: refusal.records,
         });
     }
     records
@@ -965,7 +968,7 @@ fn chain_phrase(record: &ChainRecord) -> String {
     // identity, reason, and ending. The producer stamps a turn on each advance
     // and nothing here counts them, so "on N turns" would be a measurement this
     // line never made.
-    let again = if record.records > 1 {
+    let again = if record.records.get() > 1 {
         format!(", recorded {} times", record.records)
     } else {
         String::new()
@@ -2519,8 +2522,6 @@ mod tests {
             ),
             "{rendered}"
         );
-        // The chain that recovered is never reported as the reason the node
-        // failed: that is the line that cost four wrong diagnoses in one day.
         assert!(
             !rendered.contains("provider: the agent side"),
             "a recovered chain was reported as a refusal:\n{rendered}"
@@ -2562,7 +2563,7 @@ mod tests {
             chain_phrase(&ChainRecord {
                 refusal: &single,
                 became: Fallthrough::Unrecorded,
-                records: 1,
+                records: std::num::NonZeroU64::MIN,
             }),
             "member 'worker' fell through 'codex' (auth); nothing this run recorded names what \
              served that turn"
@@ -2575,7 +2576,7 @@ mod tests {
         let phrase = chain_phrase(&ChainRecord {
             refusal: &bare,
             became: Fallthrough::Refused,
-            records: 1,
+            records: std::num::NonZeroU64::MIN,
         });
         assert!(
             phrase.contains("a side the record does not name"),
@@ -2593,7 +2594,7 @@ mod tests {
         let phrase = chain_phrase(&ChainRecord {
             refusal: &unreadable,
             became: Fallthrough::Served("codex:alternate".into()),
-            records: 2,
+            records: std::num::NonZeroU64::new(2).expect("two records"),
         });
         assert_eq!(
             phrase,
@@ -2767,7 +2768,7 @@ mod tests {
         let phrase = chain_phrase(&ChainRecord {
             refusal: &refusal,
             became: Fallthrough::Served("codex\r\nprovider: forged".into()),
-            records: 1,
+            records: std::num::NonZeroU64::MIN,
         });
         assert!(!phrase.contains('\n') && !phrase.contains('\r'), "{phrase}");
         let phrase = verdict_phrase(&crate::report::FailedVerdict {

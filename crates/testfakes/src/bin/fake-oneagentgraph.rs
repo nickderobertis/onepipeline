@@ -455,9 +455,9 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
 
     // Every candidate this dispatch's identity chains stepped past, published
     // one per candidate exactly as the real CLI publishes them. Scripted
-    // `<key>.refused`, one `ROLE IDENTITY REASON` per line, with `-` for the
-    // role of a single-sided member — which has one side and so nothing to
-    // distinguish.
+    // `<key>.refused`, one `ROLE TURN IDENTITY REASON` per line, with `-` for
+    // the role and the turn of a single-sided member — which has one chain, so
+    // there is neither a side nor a per-side turn to attribute it to.
     if let Some(script) = fake::node_script(dir, &key, "refused") {
         refuse_candidates(args, &node, step.as_deref(), &script);
     }
@@ -494,27 +494,31 @@ fn refuse_candidates(args: &[String], node: &str, step: Option<&str>, script: &s
         .enumerate()
     {
         let mut columns = line.split_whitespace();
-        // Exactly three, and the fourth column is checked for: a script this
+        // Exactly four, and the fifth column is checked for: a script this
         // read leniently would emit a candidate the test author did not write,
         // and a double that publishes something other than what its script says
         // is an oracle for nothing.
-        let (Some(role), Some(identity), Some(reason), None) = (
+        let (Some(role), Some(turn), Some(identity), Some(reason), None) = (
+            columns.next(),
             columns.next(),
             columns.next(),
             columns.next(),
             columns.next(),
         ) else {
             fake::fail(&format!(
-                "a `.refused` line reads {line:?}, which is not `ROLE IDENTITY REASON`"
+                "a `.refused` line reads {line:?}, which is not `ROLE TURN IDENTITY REASON`"
             ));
         };
         let advanced = oneagentgraph::event::FallbackAdvanced {
             identity: identity.to_string(),
             reason: reason.to_string(),
-            // `-` is a single-sided member: one side, so no side to name.
-            // Every word but `-` is read through the sibling's **own** `Role`, so
-            // the script's grammar is that library's spelling rather than a copy
-            // of it that keeps parsing after a rename.
+            // `-` is a single-sided member: one chain, so no side to name and no
+            // per-side turn to attribute it to — the real library leaves both
+            // absent there, and a double that filled either in would be an
+            // oracle for a record nothing publishes. Every word but `-` is read
+            // through the sibling's **own** `Role`, so the script's grammar is
+            // that library's spelling rather than a copy of it that keeps
+            // parsing after a rename.
             role: match role {
                 "-" => None,
                 other => Some(
@@ -526,7 +530,14 @@ fn refuse_candidates(args: &[String], node: &str, step: Option<&str>, script: &s
                         }),
                 ),
             },
-            turn: Some(1),
+            turn: match turn {
+                "-" => None,
+                other => Some(other.parse::<u64>().unwrap_or_else(|_| {
+                    fake::fail(&format!(
+                        "a `.refused` line names the turn {other:?}, which is not a turn number"
+                    ))
+                })),
+            },
         };
         // The sibling's **own** envelope, serialized through the sibling's own
         // type: a hand-rolled object here would be an independent copy of a
@@ -1350,17 +1361,22 @@ fn scripted_verdicts(dir: &std::path::Path, key: &str) -> Vec<serde_json::Value>
                     "a `.verdict` line names the value {value:?}, which is not `true` or `false`"
                 ));
             };
-            // onejudge's own `NamedVerdict` shape: the criterion, the kind of
-            // judgement, and the verdict itself. Written out here rather than
-            // built through that library's type because nothing in this
-            // workspace depends on it — the report document beside it is
-            // written the same way, and what holds both honest is the journey
-            // driving the real `oneagentgraph`.
-            serde_json::json!({
-                "criterion": criterion.trim(),
-                "kind": "boolean",
-                "verdict": {"value": value, "reason": reason.trim()},
-            })
+            // Built through **onejudge's own** `NamedVerdict`, like every other
+            // sibling-owned payload this double writes: a hand-rolled object
+            // here would be an independent copy of a schema that library owns,
+            // and it would keep serializing after the schema moved while the
+            // crate under test went on reading the old one.
+            let named = onejudge::NamedVerdict::new(
+                criterion.trim(),
+                onejudge::JudgeKind::Boolean,
+                onejudge::JudgeVerdict {
+                    value: onejudge::JudgeValue::Bool(value),
+                    reason: reason.trim().to_string(),
+                    usage: None,
+                },
+            );
+            serde_json::to_value(&named)
+                .unwrap_or_else(|error| fake::fail(&format!("a verdict will not write: {error}")))
         })
         .collect()
 }

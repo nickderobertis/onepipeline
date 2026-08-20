@@ -947,6 +947,7 @@ version = "0.0.0"
 dependencies = [
  "libc",
  "oneagentgraph",
+ "onejudge",
  "onevcs",
  "serde_json",
 ]
