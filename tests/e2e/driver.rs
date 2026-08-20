@@ -2739,6 +2739,9 @@ fn unusable_session_records() -> String {
         // same record as one that names no field at all, and neither is a
         // pointer at work.
         {"token": "", "branch": format!("{FORGED}-empty")},
+        // A token that walks somewhere: both libraries name a file by one, so a
+        // handle carrying a path is no handle.
+        {"token": "../elsewhere", "branch": format!("{FORGED}-path")},
         {"branch": ""},
         // `null` is how a record says a field is *absent*, which is a different
         // record from one naming it empty.
@@ -2873,7 +2876,7 @@ fn adopting_a_run_whose_dispatch_was_in_flight_leaves_that_dispatchs_work_reacha
         .collect();
     assert_eq!(
         arrived.len(),
-        7,
+        8,
         "the records the dispatch put on its session's stream did not all reach the \
          merged store — one per refusal, each arriving at least once — so nothing \
          here is about what a reader does with them: {arrived:?}"

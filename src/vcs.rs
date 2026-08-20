@@ -719,7 +719,7 @@ impl DispatchSession {
     pub fn read_from(envelope: &Envelope) -> Option<Self> {
         let session: Session =
             serde_json::from_value(serde_json::Value::Object(envelope.payload.clone())).ok()?;
-        let token = SessionToken(usable(&session.token.0)?);
+        let token = token_of(&session.token.0)?;
         if !wrote(&envelope.stream, &token) {
             return None;
         }
@@ -749,6 +749,22 @@ impl DispatchSession {
 /// [`session_opened_event`]. Both are that session's, and neither is another's.
 fn wrote(stream: &str, token: &SessionToken) -> bool {
     stream == token.0 || stream == format!("onevcs-{}", token.0)
+}
+
+/// One session token off a stream's record, where it is one this crate can hand
+/// back.
+///
+/// [`usable`], and one rule more that is about what a token is *for*: it
+/// addresses a session, and both libraries name a file by it, so a value
+/// carrying a path separator — or one that is a directory hop — is no handle
+/// however well it reads. What a token may otherwise be is `onevcs`'s to say,
+/// and it says so by refusing one it does not know.
+fn token_of(value: &str) -> Option<SessionToken> {
+    let value = usable(value)?;
+    if value.contains(['/', '\\']) || value.trim_matches('.').is_empty() {
+        return None;
+    }
+    Some(SessionToken(value))
 }
 
 /// One payload text field, where it is whole and names something.
@@ -887,8 +903,19 @@ mod tests {
                 None,
                 "a branch that is {why} was read as one a manager can be sent to"
             );
+        }
+        // A token is everything a branch is, and a plain name besides: both
+        // libraries name a file by it, and a branch — which may hold a `/` —
+        // this crate only ever hands back.
+        let hops = [
+            ("a directory hop", "..".to_owned()),
+            ("carrying a path separator", "onevcs/../x".to_owned()),
+        ];
+        for (why, value) in unusable().into_iter().chain(hops) {
+            let mut record = ours(&value, "onevcs/s-abc");
+            record.stream = value.clone();
             assert_eq!(
-                DispatchSession::read_from(&ours(&value, "onevcs/s-abc")),
+                DispatchSession::read_from(&record),
                 None,
                 "a token that is {why} was read as one a session answers to"
             );
