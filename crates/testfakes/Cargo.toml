@@ -34,6 +34,10 @@ oneagentgraph = { workspace = true }
 # the shape `onevcs` declares — a restatement here would keep parsing after that
 # library changed it, and the journey would pass having proved the fixture.
 onevcs = { workspace = true }
+# The verdict a two-party member settles on, so this double writes it in the
+# shape **onejudge** declares rather than one hand-rolled here — the same reason
+# the two pins above are taken rather than restated.
+onejudge = { workspace = true }
 # The graph document's own reader, so the observer double runs the judge-side
 # provider the graph *declares* rather than one it remembered: a graph that named
 # a different provider would otherwise still be supervised by this copy.

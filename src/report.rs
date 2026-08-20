@@ -46,8 +46,18 @@
 //! the producing library's own types. The report is a sibling's artifact and this
 //! crate is a consumer of it: a stricter read would refuse a whole report over
 //! one field it did not recognise and report nothing at all, which for evidence
-//! is the wrong direction to fail in. Every other cross-library read here is
-//! lenient for the same reason.
+//! is the wrong direction to fail in.
+//!
+//! The **verdicts** are the exception, and the boundary is what makes it one. A
+//! report is a transcript, and a field this build did not recognise must not
+//! cost the whole of it; a verdict is four fields that either are one of
+//! onejudge's verdicts or are not, and there is nothing partial to salvage out
+//! of a record that is not. So the verdict reader below deserializes into that
+//! library's own [`NamedVerdict`] — the rule this crate follows everywhere else
+//! it reads a sibling's payload — and a criterion or a reason renamed upstream
+//! fails here rather than quietly rendering nothing.
+//!
+//! [`NamedVerdict`]: onejudge::NamedVerdict
 
 // llmlint: ignore-file[invalid_states_unrepresentable] `Turn::role` and `Tool::kind` are
 // **onejudge's** vocabulary, read out of an artifact that library wrote, and this crate
@@ -323,6 +333,103 @@ pub(crate) fn evidence(paths: &RunPaths, events: &[Envelope]) -> Vec<Evidence> {
             })
         })
         .collect()
+}
+
+/// The payload key a settlement carries its verdicts inline on.
+///
+/// `oneagentgraph` copies the report's own `verdicts` onto every
+/// [`MEMBER_SETTLED`] it publishes, so what failed a node's judge is on the
+/// stream this run already merged — the reason it can be said without any file
+/// being opened, retained or not.
+// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the producer spells this key
+// as a literal inside a private function of its own — it declares no type, and no constant,
+// for the settlement payload — so there is no item to import and no source to share. The
+// reconciling gate is a journey, as it is for `RUN_ID_ENV` in `crates/testfakes/src/lib.rs`:
+// a spelling that drifted on either side leaves a judged node with no verdict line, and
+// `a_node_that_failed_on_a_judge_verdict_says_why_and_names_no_provider` in
+// `tests/e2e/views.rs` fails.
+const VERDICT: &str = "verdict";
+
+/// One judge verdict that **failed** the member it was scored against.
+///
+/// Crate-visible, like everything else here that is not the retention path: what
+/// a view renders out of a settlement is a rendering rather than a promise.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FailedVerdict {
+    /// The criterion that was scored, when the record named one.
+    pub criterion: Option<String>,
+    /// The judge's own justification, when the record carried one.
+    ///
+    /// The single most useful sentence about a node that failed on its judge,
+    /// and until it was rendered it was reachable only by opening the node's
+    /// retained report by hand.
+    pub reason: Option<String>,
+}
+
+/// One source for the verdict contract: the `onejudge` this module reads a
+/// settlement's verdicts through **is** the one `oneagentgraph` composes.
+///
+/// [`failed_verdicts`] deserializes into that library's own [`NamedVerdict`],
+/// which only says what the producer wrote while the two crates resolve to one
+/// `onejudge` — cargo links two copies of a dependency whose majors differ, and
+/// this crate would then read a contract the runner never writes. Both would
+/// compile, and every verdict would silently stop being read.
+///
+/// This is the gate. `oneagentgraph` declares the conversion below **from its
+/// own** `onejudge`'s type, so the coercion type-checks only where that crate is
+/// this crate's `onejudge` too. Two copies, and the build fails here, naming the
+/// pin to move.
+///
+/// [`NamedVerdict`]: onejudge::NamedVerdict
+const _: fn(onejudge::TelemetryRole) -> oneagentgraph::event::Role =
+    oneagentgraph::event::Role::from;
+
+/// Every judge verdict that failed one node's dispatches, in settlement order.
+///
+/// **Only a boolean verdict that came back false is one.** That is the whole of
+/// what onejudge fails a run over — a numeric score is reported and gates
+/// nothing — so a consumer that treated a low score as a failure would name a
+/// verdict that failed nothing as the reason a node failed. The distinction is
+/// [`JudgeValue`]'s own, read off the type rather than off the JSON, so a
+/// numeric verdict cannot be mistaken for a boolean one here.
+///
+/// Read through **onejudge's own** [`NamedVerdict`] rather than by field name —
+/// the rule this crate follows for every cross-library payload, and the
+/// exception to the structural reading of the report *document* beside it. The
+/// document is read leniently because a field this build did not recognise must
+/// not cost a whole retained transcript; a verdict is four fields that either
+/// are a verdict or are not, and a criterion or a reason renamed upstream has to
+/// fail here rather than quietly render nothing.
+///
+/// A record that is **not** one of that library's verdicts is dropped rather
+/// than mined for whatever fields happen to be present: an attribution assembled
+/// out of the remains would put a sentence nobody wrote under a criterion nobody
+/// scored, which is the invented attribution these lines exist to replace.
+pub(crate) fn failed_verdicts(events: &[Envelope], node: &str) -> Vec<FailedVerdict> {
+    events
+        .iter()
+        .filter(|event| event.source == Source::Agentgraph && event.kind.0 == MEMBER_SETTLED)
+        .filter(|event| event.labels.node.as_deref() == Some(node))
+        .filter_map(|event| event.payload.get(VERDICT))
+        .filter_map(Value::as_array)
+        .flatten()
+        .filter_map(|named| serde_json::from_value::<onejudge::NamedVerdict>(named.clone()).ok())
+        .filter(|named| matches!(named.verdict.value, onejudge::JudgeValue::Bool(false)))
+        .map(|named| FailedVerdict {
+            criterion: text_of(&named.criterion),
+            reason: text_of(&named.verdict.reason),
+        })
+        .collect()
+}
+
+/// One string a sibling's record carried, or `None` for one it did not.
+///
+/// Empty is absent: onejudge declares both of these as required `String`s, so a
+/// judge that scored an unnamed criterion or gave no sentence arrives as `""` —
+/// and rendering that would put a bare pair of quotes where the missing-value
+/// phrase belongs.
+fn text_of(text: &str) -> Option<String> {
+    (!text.trim().is_empty()).then(|| text.to_string())
 }
 
 /// Read this run's own copy of one report, or `None` when it did not keep one.
