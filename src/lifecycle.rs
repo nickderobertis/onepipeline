@@ -318,15 +318,14 @@ fn publish(
                 &published, &labels,
             ))));
             // What a `no-changes` compared against. It is the one outcome whose
-            // word says nothing a reader can act on: a node whose worker wrote
-            // nothing and a node whose branch was compared against itself settle
-            // identically, and the second is what a node pinned with a
-            // `base_branch` equal to its `branch` asks for — see
-            // [`crate::plan::Node::base_branch`]. The base is the session's
-            // own, because a node naming none took the identity's default and
-            // this crate never saw it; a session whose record could not be read
-            // has none, and the settlement then says what it always did rather
-            // than naming a ref nothing established.
+            // word says nothing a reader can act on — a worker that wrote
+            // nothing, a worker whose change was already on the base, and a base
+            // that has since taken the work another way all settle identically,
+            // and only the ref separates them. The base is the session's own,
+            // because a node naming none took the identity's default and this
+            // crate never saw it; a session whose record could not be read has
+            // none, and the settlement then says what it always did rather than
+            // naming a ref nothing established.
             let compared = match published.outcome {
                 // Composed out of two of the sibling's own strings and stripped
                 // of controls on the way, by the same rule every view applies to

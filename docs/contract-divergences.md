@@ -1083,10 +1083,12 @@ reach none of the four places it is already made:
   with no path in it. Deriving the path here would be a second copy of a
   sibling's rule, which `src/AGENTS.md` forbids.
 * **Inside a session it is a different question.** `open_session` cuts a pinned
-  branch **fresh from the base** — `git worktree add -b <branch> <path>
-  origin/<base>` — so in the session the branch and the base are identical by
-  construction, for every node. A comparison made after opening answers "no diff"
-  for all of them, which is the wrong answer given confidently.
+  branch nothing carries yet **fresh from the base** — `git worktree add -b
+  <branch> <path> origin/<base>` — so in the session the branch and the base are
+  identical by construction, which is every node this comparison is wanted for: a
+  node whose content already landed is one whose branch is the base's own tree.
+  A comparison made after opening answers "no diff" for all of them, which is the
+  wrong answer given confidently.
 * **`Vcs::recoverable` makes the comparison and cannot be asked this.** It runs
   `trees_differ` against the base *now*, which is exactly the judgement wanted —
   but only over the branches `git::unpublished_branches` returns first, which is
@@ -1095,12 +1097,12 @@ reach none of the four places it is already made:
   never existed are all equally absent from that list, so its silence cannot
   separate "already landed" from "no such branch" — and the second must still
   dispatch. Divergence 33 records the same limit met from the other side.
-* **`open_session` already makes it, and reports only the refusing half.** Its
-  `honour_or_refuse` compares a pinned branch against the base across every
-  checkout of the identity and against origin's copy, at exactly the moment
-  wanted, and refuses the pin where the branch carries commits the base does not.
-  A pin whose branch already landed passes silently, which is the case that costs
-  the dispatch.
+* **`open_session` looks the branch up and answers nothing about it.** It reads a
+  pinned branch across every checkout of the identity and against origin's copy,
+  at exactly the moment wanted, and — from `onevcs` 0.8.0 — continues the branch
+  it finds instead of refusing it. Every pin now passes silently, the one whose
+  content already landed included, so what used to be one silent case is the only
+  case. `Session` reports the branch and its base and no comparison of the two.
 
 **What this crate does today.** Nothing new: a branch-pinned node dispatches as it
 always has, and a branch whose base already carries its content is discovered at
@@ -1167,26 +1169,37 @@ branch already carries — the `completed_steps` half — and then opens a sessi
 a **fresh** branch, so the steps that were skipped are missing from the branch
 that gets published.
 
-What a planner has left is `branch`, and `onevcs` honours a pin onto a branch
-carrying commits its base does not in one case only: where an open session
-already holds that branch, which is the reuse `onevcs` 0.4.2 added. A preserved
-branch nobody still holds a session for is refused — `already carries N
-commit(s) that main does not` — and the *only* spelling that gets past it is
-`base_branch` equal to `branch`, because the comparison the refusal is made on is
-then empty by construction. That spelling is folklore, it is undocumented, and it
-costs the run its report: the publication compares the branch against itself,
-answers `PublishOutcome::NothingToPublish`, and the node settles `no-changes` with
-its integration target never told about any of it. Measured: four nodes across
-three runs, every one of them carrying the work it reported it had not written.
+What a planner has left is `branch`, and `onevcs` 0.8.0 is where that became
+enough. Below it a pin onto a branch carrying commits its base does not was
+honoured in one case only — where an open session already held that branch, the
+reuse `onevcs` 0.4.2 added — and a preserved branch nobody still held a session
+for was refused with `already carries N commit(s) that main does not`. The *only*
+spelling that got past that was `base_branch` equal to `branch`, because the
+comparison the refusal is made on is then empty by construction; that spelling was
+folklore, it was undocumented, and it cost the run its report: the publication
+compared the branch against itself, answered `PublishOutcome::NothingToPublish`,
+and the node settled `no-changes` with its integration target never told about any
+of it. Measured, before the adoption: four nodes across three runs, every one of
+them carrying the work it reported it had not written. From 0.8.0 a pinned branch
+that already exists is **continued** from its own tip whatever left it there — a
+session still open, a session its owner closed, or a branch somebody landed by
+hand — and `base_branch` equal to `branch` is refused when the session opens,
+naming the pin in its place.
+
+That answers the capability the proposal was blocked on. It does not answer the
+proposal, which is about what a *plan node writes*: `resume` still means one thing
+in a `retry` edit and another in a plan file, and which of the two spellings the
+contract intends is the planner's to say.
 
 **What this crate does today.** `src/plan.rs` documents both fields — `branch` is
-where the work goes, `base_branch` is the integration target, and setting the
-second equal to the first is not a supported way to continue a branch and reports
-`no-changes` whatever was committed — and a `no-changes` settlement now names the
-ref it compared against, so the tautology is visible in `results` rather than
-reading exactly like a node that genuinely changed nothing. The statement is held
-to the code from both sides: a drift test over the field's own documentation in
-`src/plan.rs`, and a journey in `tests/e2e/lifecycle.rs` that drives a plan
-written that way through the real repository side. Nothing about the plan schema
-is widened here — what a node may say is the contract's, and the semantics the
-pin runs into are `onevcs`'s.
+where the work goes and a name that already exists is continued from its own tip,
+`base_branch` is the integration target, and setting the second equal to the first
+is not a supported way to continue a branch and is refused by `onevcs` before the
+dispatch is spent, so the node settles `infrastructure-failure` carrying the
+sibling's own sentence rather than a `no-changes` nobody can act on. The statement
+is held to the code from both sides: a drift test over the fields' own
+documentation in `src/plan.rs`, a journey in `tests/e2e/lifecycle.rs` that drives
+the refused spelling through the real repository side, and one in
+`tests/e2e/session_reuse.rs` that drives the spelling it points a planner at.
+Nothing about the plan schema is widened here — what a node may say is the
+contract's, and the semantics the pin runs into are `onevcs`'s.

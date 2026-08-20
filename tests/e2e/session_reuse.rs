@@ -13,9 +13,13 @@
 //! record, on this identity, this branch, this base, this execution checkout,
 //! with its run root still on disk and nobody holding it — and everything else
 //! falls through to cutting a session the ordinary way. Two of those shapes are
-//! what most of the stranded branches were actually in, and they are still
-//! refused; they are asserted here as they are, because widening the rule is the
-//! sibling's to do and not this crate's.
+//! what most of the stranded branches were actually in — a session its owner
+//! closed, and a branch somebody landed by hand — and cutting a session the
+//! ordinary way used to refuse both. `onevcs` 0.8.0 continues an existing branch
+//! from its own tip instead, so the fresh session lands on the work rather than
+//! beside it; that too is a fact about `Cargo.lock`, and it is asserted here as
+//! the sibling decides it because widening the rule was the sibling's to do and
+//! not this crate's.
 //!
 //! Offline and hermetic, like every journey beside it: a bare repository on disk
 //! is the origin and the identity publishes `local-direct`, so no host is asked
@@ -37,13 +41,6 @@ use crate::harness::{
 use onevcs::Session;
 
 const STRANDED: &str = "feature/stranded";
-
-/// The refusal a pin whose branch already carries work is met with.
-///
-/// The sibling's own sentence, quoted to the point where it counts the commits:
-/// a journey asserting on "refused" alone would pass against every other reason a
-/// session can fail to open.
-const ALREADY_CARRIES: &str = "already carries 1 commit(s) that main does not";
 
 /// Why a run settled the way it did, as the sibling itself said it.
 ///
@@ -360,14 +357,18 @@ fn a_retry_takes_up_the_session_a_stopped_run_left_its_work_in() {
 
 /// Everything reuse does *not* cover, in the order the sibling decides it.
 ///
-/// Four fall through to cutting a session the ordinary way — which is not a
-/// refusal and never was — and two are still refused. The two are here because
-/// they are the shapes most of the stranded branches were in: a run root that has
-/// been reclaimed and its session finished, and a branch somebody landed by hand.
-/// Asserted as they are rather than changed: what a pin whose branch already
-/// carries work may do is the sibling's rule.
+/// All six fall through to cutting a session the ordinary way, which is not a
+/// refusal and never was. What separates them is what the fresh session is cut
+/// *onto*: four name a branch nothing carries yet and get one cut from the base,
+/// and the last two name one that already exists — a session its owner closed,
+/// and a branch somebody landed by hand — and are continued from its own tip.
+/// Those two are here because they are the shapes most of the stranded branches
+/// were in, and until `onevcs` 0.8.0 both were refused outright with the work
+/// sitting where no plan could reach it. Asserted as they are rather than
+/// changed: what a pin whose branch already carries work may do is the sibling's
+/// rule.
 #[test]
-fn every_other_shape_cuts_a_fresh_session_or_is_refused_as_it_always_was() {
+fn every_other_shape_cuts_a_fresh_session_onto_its_branch_or_from_the_base() {
     let world = World::new("session-reuse-fallbacks");
     let repo = world.repository("local-direct", &["true"]);
 
@@ -464,11 +465,12 @@ fn every_other_shape_cuts_a_fresh_session_or_is_refused_as_it_always_was() {
 
     // 5. A predecessor that was **closed**. Closing is the statement that a
     //    session is finished: the branch goes back to the execution checkout and
-    //    the record is spent, so the retry meets the branch and not the session —
-    //    and is refused, exactly as it was before this rule existed.
+    //    the record is spent, so the retry meets the branch and not the session.
+    //    A fresh session is cut — and `onevcs` 0.8.0 cuts it *onto that branch*,
+    //    continuing the work rather than refusing a pin it cannot honour.
     let finished = abandoned_session(&world, "feature/closed");
     std::fs::write(
-        finished.worktree.join("closed.md"),
+        finished.worktree.join("left-behind.md"),
         "the work somebody left\n",
     )
     .expect("the finished work is written");
@@ -479,23 +481,39 @@ fn every_other_shape_cuts_a_fresh_session_or_is_refused_as_it_always_was() {
         &["commit", "-m", "feat: what the closed session did"],
     );
     onevcs(&world, &["session", "close", &finished.token.0]);
-    let (settled, _) = dispatched(&world, "closed", Some("feature/closed"));
+    let (settled, session) = dispatched(&world, "closed", Some("feature/closed"));
     assert_eq!(
-        settled["nodes"][0]["status"], "failed",
-        "a branch whose session was closed is no longer refused — the sibling has \
-         widened what it takes up, and this journey is the record of what it used \
-         to do: {settled}"
+        settled["nodes"][0]["status"],
+        "done",
+        "{settled}\n{}",
+        why(&world, "closed")
     );
-    assert!(
-        why(&world, "closed").contains(ALREADY_CARRIES),
-        "the refusal was not the one this case is about:\n{}",
+    assert_ne!(
+        session["payload"]["token"].as_str(),
+        Some(finished.token.0.as_str()),
+        "a session its owner closed was taken up rather than replaced: {session}"
+    );
+    // Continued rather than cut afresh, which is the whole difference: both the
+    // closed session's commit and this run's own reached the base.
+    assert_eq!(
+        repo.base_file("left-behind.md").as_deref().map(str::trim),
+        Some("the work somebody left"),
+        "the closed session's work never reached the base, so the pin was not \
+         continued:\n{}",
+        why(&world, "closed")
+    );
+    assert_eq!(
+        repo.base_file("closed.md").as_deref().map(str::trim),
+        Some("closed wrote this"),
+        "the run's own work never reached the base:\n{}",
         why(&world, "closed")
     );
 
     // 6. No session at all. A branch somebody finished by hand is work no record
     //    points at, which is the other half of what a reclaimed run root leaves —
-    //    and it is refused for the same reason.
-    let handmade = world.root.join("handmade");
+    //    and it is continued for the same reason: the branch exists, so it is
+    //    where the work goes.
+    let handmade = world.root.join("by-hand");
     git(
         &world,
         &repo.checkout,
@@ -509,7 +527,7 @@ fn every_other_shape_cuts_a_fresh_session_or_is_refused_as_it_always_was() {
         ],
     );
     std::fs::write(
-        handmade.join("handmade.md"),
+        handmade.join("by-hand.md"),
         "somebody finished this by hand\n",
     )
     .expect("the hand-finished work is written");
@@ -526,12 +544,22 @@ fn every_other_shape_cuts_a_fresh_session_or_is_refused_as_it_always_was() {
     );
     let (settled, _) = dispatched(&world, "handmade", Some("feature/handmade"));
     assert_eq!(
-        settled["nodes"][0]["status"], "failed",
-        "a branch no session ever held is no longer refused: {settled}"
+        settled["nodes"][0]["status"],
+        "done",
+        "{settled}\n{}",
+        why(&world, "handmade")
     );
-    assert!(
-        why(&world, "handmade").contains(ALREADY_CARRIES),
-        "the refusal was not the one this case is about:\n{}",
+    assert_eq!(
+        repo.base_file("by-hand.md").as_deref().map(str::trim),
+        Some("somebody finished this by hand"),
+        "the hand-finished work never reached the base, so the pin was not \
+         continued:\n{}",
+        why(&world, "handmade")
+    );
+    assert_eq!(
+        repo.base_file("handmade.md").as_deref().map(str::trim),
+        Some("handmade wrote this"),
+        "the run's own work never reached the base:\n{}",
         why(&world, "handmade")
     );
 }

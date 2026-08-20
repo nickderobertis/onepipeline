@@ -2510,18 +2510,20 @@ fn a_change_this_crate_cannot_read_the_record_of_settles_as_a_plain_task_failure
     );
 }
 
-/// What a `no-changes` was measured against, where the measurement is a
-/// tautology.
+/// A node that writes its own branch as its integration target is refused, and
+/// told the spelling that continues one.
 ///
 /// `base_branch` equal to `branch` is the only way a plan can *look* like it is
-/// asking to continue an existing branch — `onevcs` honours a pin onto a branch
-/// carrying work its base does not only when the base is that same branch — and
-/// it is not one: the node is then asked what its branch adds to itself. Both
-/// halves of what [`onepipeline::plan::Node::base_branch`] documents are held
-/// here: the settlement is `no-changes` whatever the branch carries, and it names
-/// the ref that was compared, so the tautology is readable.
+/// asking to continue an existing branch, and it never was one: the node would be
+/// asked at publication what its branch adds to itself. `onevcs` 0.8.0 stops it
+/// where a planner can act on it — before the dispatch is spent, rather than in a
+/// `no-changes` that reads exactly like a node whose worker wrote nothing — and
+/// names `branch` on its own as the spelling that does continue a branch. What
+/// [`onepipeline::plan::Node::base_branch`] documents is held here: the run fails
+/// rather than reporting on work it never integrated, and the reason reaches the
+/// settlement.
 #[test]
-fn a_node_whose_base_branch_is_its_branch_settles_no_changes_naming_what_it_compared_against() {
+fn a_node_whose_base_branch_is_its_branch_is_refused_and_told_what_continues_a_branch() {
     let world = World::new("lifecycle-selfbase");
     let repo = world.repository("change-direct", &["true"]);
     // The preserved branch a planner is trying to continue: it carries work the
@@ -2562,21 +2564,22 @@ fn a_node_whose_base_branch_is_its_branch_settles_no_changes_naming_what_it_comp
     let settled = world.run_json(&run, "result.json")["nodes"][0].clone();
     assert_eq!(
         settled["status"],
-        "done",
-        "{settled}\n{}",
+        "failed",
+        "a node pinned with `base_branch` equal to its `branch` is no longer \
+         refused; `Node::base_branch` documents that it is, and the field's \
+         documentation is what needs to change with it: {settled}\n{}",
         why(&world, &run)
     );
     assert_eq!(
         settled["outcome"],
-        "no-changes",
-        "a node pinned with `base_branch` equal to its `branch` no longer reports \
-         `no-changes`; `Node::base_branch` documents that it does, and the field's \
-         documentation is what needs to change with it: {settled}\n{}",
+        "infrastructure-failure",
+        "the refusal reached the settlement as something other than a dispatch \
+         that never began: {settled}\n{}",
         why(&world, &run)
     );
     // And the branch was never merged anywhere: the work the node was pointed at
-    // is still only on that branch, which is what makes an unexplained
-    // `no-changes` a report nobody can act on.
+    // is still only on that branch, which is what a planner is being told to go
+    // and re-pin rather than being handed a report about.
     assert_eq!(
         repo.base_file("service.md"),
         None,
@@ -2584,20 +2587,23 @@ fn a_node_whose_base_branch_is_its_branch_settles_no_changes_naming_what_it_comp
          longer about work that went nowhere"
     );
 
-    // The ref the comparison was made against, in the run's own record and in
-    // what an operator reads — and it is the node's own branch, so the
-    // measurement is visibly a tautology rather than a verdict about the work.
+    // The reason, in the run's own record and in what an operator reads — it names
+    // the branch and the spelling that continues one, so the fix is in the message
+    // rather than in folklore about which fields may be equal.
     let detail = world.events_of(&run, "node-settled")[0]["payload"]["detail"]
         .as_str()
         .unwrap_or_default()
         .to_owned();
-    assert!(
-        detail.contains(&format!("compared against {KEPT}")),
-        "the settlement does not say what it compared against: {detail}"
-    );
+    for claim in [KEPT, "is also this session's base", "on its own"] {
+        assert!(
+            detail.contains(claim),
+            "the settlement does not say '{claim}', so the refusal it carries is not \
+             the one this journey is about: {detail}"
+        );
+    }
     world
         .run(&["results", &run])
         .exited(0)
-        .out_has("no-changes")
-        .out_has(&format!("compared against {KEPT}"));
+        .out_has("infrastructure-failure")
+        .out_has("is also this session's base");
 }

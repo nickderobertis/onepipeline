@@ -329,12 +329,11 @@ pub struct Node {
     ///
     /// It is not a second spelling of [`branch`](Self::branch), and setting it
     /// equal to one is **not a supported way to continue an existing branch**.
-    /// A node written that way is asked at publication what its branch adds to
-    /// itself, which is nothing by construction — so it settles `no-changes`
-    /// whatever it committed, and the work stays where it was with the real
-    /// integration target never told about it. The settlement names the ref it
-    /// compared against for exactly that reason: a tautology reads differently
-    /// from a node that genuinely changed nothing.
+    /// A node written that way would be asked at publication what its branch
+    /// adds to itself, which is nothing by construction, so `onevcs` **refuses**
+    /// it when the session opens rather than at the end of a dispatch nobody can
+    /// use: the node settles `infrastructure-failure` carrying the sibling's own
+    /// sentence, which names the spelling below.
     ///
     /// To continue work a previous attempt preserved, pin [`branch`](Self::branch)
     /// to it and leave this naming the branch the work is going to land on.
@@ -345,6 +344,11 @@ pub struct Node {
     /// **Where the work goes**, and never what it is measured against: one
     /// branch for the node, shared by every one of its [`steps`](Self::steps).
     /// Absent, `onevcs` names the branch when it opens the node's session.
+    ///
+    /// A name that already exists is **continued** from its own tip, so this is
+    /// the whole of what a node pinned at work a previous attempt preserved has
+    /// to say — whether that work is on a session still open, a session its
+    /// owner closed, or a branch somebody landed by hand.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
     /// The change request's title. Required on a lifecycle node from
@@ -480,30 +484,35 @@ mod tests {
     /// wording, so the sentences can be rewritten and only removing what they
     /// say fails. The other half — that the consequence it names is still what
     /// happens — is
-    /// `a_node_whose_base_branch_is_its_branch_settles_no_changes_naming_what_it_compared_against`
+    /// `a_node_whose_base_branch_is_its_branch_is_refused_and_told_what_continues_a_branch`
     /// in `tests/e2e/lifecycle.rs`, which drives a plan written that way through
-    /// the real repository side. Between them the statement cannot go stale in
-    /// either direction: one fails if the documentation stops saying it, the
-    /// other if the behaviour stops doing it.
+    /// the real repository side, beside `session_reuse.rs` for the spelling it
+    /// points a planner at. Between them the statement cannot go stale in either
+    /// direction: one fails if the documentation stops saying it, the others if
+    /// the behaviour stops doing it.
     #[test]
     fn the_schema_says_what_branch_and_base_branch_mean_for_a_lifecycle_node() {
         let branch = documentation_of("branch");
-        assert!(
-            branch.contains("Where the work goes"),
-            "`branch` no longer documents that it names where the work goes: {branch}"
-        );
+        for claim in ["Where the work goes", "continued"] {
+            assert!(
+                branch.contains(claim),
+                "`branch` no longer documents '{claim}', which is what tells a planner \
+                 that pinning it is the whole of how work already on a branch is \
+                 continued: {branch}"
+            );
+        }
         let base = documentation_of("base_branch");
         for claim in [
             "integration target",
             "compared against",
             "not a supported way to continue an existing branch",
-            "no-changes",
+            "refuses",
         ] {
             assert!(
                 base.contains(claim),
                 "`base_branch`'s documentation no longer states '{claim}', which is what \
                  stops a planner writing `base_branch` equal to `branch` and reading the \
-                 `no-changes` it settles as a verdict about the work: {base}"
+                 refusal it earns as a verdict about the work: {base}"
             );
         }
     }
