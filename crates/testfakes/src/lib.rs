@@ -569,10 +569,18 @@ pub fn supervise(dir: &Path, graph: &str) -> std::process::ExitCode {
     }
 
     // Supervision is over because this member has taken every turn it was
-    // scripted for; the provider goes with it.
+    // scripted for; the provider goes with it. How it went is part of the
+    // supervision: a judge side that could not be waited on, or that ended
+    // badly, is a member whose conversation did not close cleanly, and a
+    // journey reading only the rulings would call that a clean run.
     drop(asking);
-    let _ = provider.wait();
-    std::process::ExitCode::SUCCESS
+    match provider.wait() {
+        Err(error) => fail(&format!("cannot wait for the judge side to end: {error}")),
+        Ok(status) if !status.success() => fail(&format!(
+            "the judge side ended badly after {turns} turn(s): {status}"
+        )),
+        Ok(_) => std::process::ExitCode::SUCCESS,
+    }
 }
 
 /// The verdict half of an answer, as the side supervising a member reads it.
