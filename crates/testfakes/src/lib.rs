@@ -586,15 +586,21 @@ pub fn supervise(dir: &Path, graph: &str) -> std::process::ExitCode {
 ///
 /// A **typed** reading rather than a probe for keys: a `reason` that is a number
 /// is not a reason, and a side that accepted it would be a weaker oracle than
-/// the provider it stands in for. Unknown keys are left alone — an envelope may
-/// carry a version and commands beside its verdict, and that is still a ruling.
-///
-/// The shape below is the *wire*, where every half is optional and none of them
-/// being there is the very case this answers, so it is deliberately the
-/// permissive one and no value of it outlives this function: what leaves is the
-/// yes-or-no the member acts on, and there is no type here claiming to be a
-/// ruling that carries nothing.
+/// the provider it stands in for.
 fn is_a_ruling(answer: &str) -> bool {
+    // llmlint: ignore[boundary_inputs_validated] rejecting unknown fields here would
+    // invert the very routing this double exists to police: an envelope carrying both
+    // halves arrives with `version` and `commands` beside its verdict, and denying those
+    // would make the one shape that *is* a ruling read as not one. The validation this
+    // boundary owes is that each half it does name is the type the wire declares, which
+    // is what the typed read below gives it; the crate under test is what owns the
+    // envelope's own strictness, and it has `deny_unknown_fields` on `Reply`.
+    // llmlint: ignore[invalid_states_unrepresentable] three independent options is the
+    // wire, and the state the rule wants unrepresentable — no half present — is the
+    // exact input this function was written to recognize. A type that could not hold it
+    // could not be parsed into from an answer that had it, and the member would die on a
+    // deserialization error instead of the named refusal. No value of it escapes: what
+    // leaves is the yes-or-no, so nothing downstream can hold a ruling that carries none.
     #[derive(serde::Deserialize)]
     struct Halves {
         completion: Option<bool>,

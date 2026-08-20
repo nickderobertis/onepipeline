@@ -1378,6 +1378,124 @@ fn a_rejected_reply_carrying_both_halves_still_delivers_its_verdict() {
     let _ = serving.wait();
 }
 
+/// An envelope refused before it is routed is refused **whole**: neither half
+/// reaches either reader.
+///
+/// Routing the halves apart makes this a question it never was: an envelope that
+/// carries a perfectly good ruling can still be refused for what rides beside
+/// it, and "deliver the half that was fine" is a tempting reading of the routing
+/// that would be the wrong one. Validation is about the envelope, and an
+/// envelope the submitter is told to fix is one it will send again — delivering
+/// half of it first would answer a question with a ruling whose edits never
+/// happened, and there is nothing the reader could do with that.
+///
+/// So the three refusals that precede routing — the envelope version, the
+/// author's op allowlist, and the reconciler's own pre-queue validation — each
+/// leave the pending surface standing and the reader still waiting, and the
+/// submitter carries the refusal away alone.
+#[test]
+fn a_reply_refused_before_routing_delivers_neither_half() {
+    use std::io::{BufRead, BufReader, Write};
+
+    let world = World::new("channel-reply-refused-whole");
+    world.script("build.wait", "hold");
+    let path = world.plan("whole", &plan_of("whole", vec![agent("build", &[])]));
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+
+    let mut serving = world
+        .cmd(&["channel", "serve", "whole"])
+        .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "120")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the channel server starts");
+    let mut stdin = serving.stdin.take().expect("stdin is piped");
+    writeln!(
+        stdin,
+        r#"{{"kind":"blocker","message":"build has been at this a while; go on?","node":"build"}}"#
+    )
+    .expect("the frame is written");
+    stdin.flush().expect("flushed");
+    world.until("the frame to reach the planner", |world| {
+        !world
+            .events_of("whole", "planner-surface-queued")
+            .is_empty()
+    });
+    world.run(&["next", "whole"]).exited(0);
+
+    let ruling = "carry on regardless";
+    for (refusal, envelope) in [
+        (
+            "an edit envelope requires version",
+            json!({
+                "completion": false, "reason": ruling,
+                "commands": [{"op": "context", "id": "build", "note": "a note"}]
+            }),
+        ),
+        (
+            "not an op the monitor may issue",
+            json!({
+                "completion": false, "reason": ruling, "author": "monitor",
+                "version": 1, "commands": [{"op": "complete", "reason": "looks done from here"}]
+            }),
+        ),
+        (
+            "nowhere",
+            json!({
+                "completion": false, "reason": ruling,
+                "version": 1, "commands": [{"op": "cancel", "id": "nowhere"}]
+            }),
+        ),
+    ] {
+        world
+            .run_with_stdin(&["reply", "whole"], &envelope.to_string())
+            .exited(REFUSED)
+            .err_has(refusal);
+        assert!(
+            world.events_of("whole", "edit-committed").is_empty(),
+            "a refused envelope's edits reached the graph: {:?}",
+            world.kinds("whole")
+        );
+        world
+            .run(&["status", "whole"])
+            .exited(0)
+            .out_has("waiting for planner decision");
+        assert!(
+            serving
+                .try_wait()
+                .expect("the reader is readable")
+                .is_none(),
+            "the waiting reader was handed a half of an envelope refused as a whole"
+        );
+    }
+
+    // The same ruling, in an envelope nothing refuses: what the reader takes is
+    // this one, so none of the three above left a copy of it on the queue.
+    world
+        .run_with_stdin(
+            &["reply", "whole"],
+            &json!({"completion": false, "reason": "and now for real"}).to_string(),
+        )
+        .exited(0);
+    let stdout = serving.stdout.take().expect("stdout is piped");
+    let taken = BufReader::new(stdout)
+        .lines()
+        .next()
+        .expect("the server wrote a line")
+        .expect("the line reads");
+    assert!(
+        taken.contains("and now for real") && !taken.contains(ruling),
+        "the reader was handed a ruling out of an envelope that was refused: {taken}"
+    );
+
+    drop(stdin);
+    world.release("build.go");
+    let _ = serving.wait();
+}
+
 /// The same routing where the reply process is the one applying the edit.
 ///
 /// Nothing is driving this run, so `reply` takes the ownership lock and
