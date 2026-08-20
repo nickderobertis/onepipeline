@@ -958,6 +958,7 @@ dependencies = [
  "libc",
  "oneagentgraph",
  "onevcs",
+ "serde",
  "serde_json",
  "serde_norway",
 ]

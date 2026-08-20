@@ -22,6 +22,9 @@ license = "MIT"
 description = "Subprocess doubles for oneagentgraph and onevcs, used by onepipeline's e2e tests."
 
 [dependencies]
+# The supervising side reads a verdict as a *typed* shape rather than probing a
+# JSON object for keys, so a half of the wrong type is not a ruling here either.
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # The sibling itself, so the `oneagentgraph` double refuses a `--label` by asking
 # the real CLI's own parser rather than by keeping a second copy of the keys it

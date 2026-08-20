@@ -11,7 +11,7 @@
 // model turns to produce, and `dispatch.rs` is where the real `oneagentgraph` binary is
 // driven instead. `harness.rs` carries the same suppression and the full rationale.
 
-use crate::harness::{agent, human, plan_of, World, NOTHING_DRIVING, REFUSED};
+use crate::harness::{agent, human, plan_of, World, NOTHING_DRIVING, QUEUED, REFUSED};
 use serde_json::json;
 
 /// Start a run detached and wait until it is executing.
@@ -1458,6 +1458,91 @@ fn two_verdicts_written_at_once_are_delivered_one_per_question() {
     assert!(
         second.contains("answering the second"),
         "the ruling written while the first question was open never reached anybody: {second}"
+    );
+
+    drop(stdin);
+    world.release("build.go");
+    let _ = serving.wait();
+}
+
+/// Edits still queued when the wait runs out do not hold the verdict beside
+/// them.
+///
+/// The two halves have two readers and two fates: the edits are durable and the
+/// reconciler will reach them, which is what exit 1 says; the ruling answers a
+/// question that was asked and answered, and the member waiting on it has no
+/// stake in whether a reconcile pass has happened yet. Held back, it would be
+/// lost outright — nothing queues it afterwards — and the run would go on
+/// waiting for a decision its planner had already made.
+#[test]
+fn a_verdict_beside_edits_that_are_still_queued_is_delivered_anyway() {
+    use std::io::{BufRead, BufReader, Write};
+
+    let world = World::new("channel-queued-verdict");
+    world.script("build.wait", "hold");
+    let run = running(&world, "queuededit", vec![agent("build", &[])]);
+
+    let mut serving = world
+        .cmd(&["channel", "serve", &run])
+        .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "120")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the channel server starts");
+    let mut stdin = serving.stdin.take().expect("stdin is piped");
+    writeln!(
+        stdin,
+        r#"{{"kind":"blocker","message":"is build worth continuing?","node":"build"}}"#
+    )
+    .expect("the frame is written");
+    stdin.flush().expect("flushed");
+    world.until("the question to reach the planner", |world| {
+        !world.events_of(&run, "planner-surface-queued").is_empty()
+    });
+    world.run(&["next", &run]).exited(0);
+
+    // llmlint: ignore-block[tests_mirror_real_usage] the reconciler's cursor is advanced
+    // past this envelope on purpose, which is how a reader-starved command queue is
+    // arranged: exit 1 exists for a reconciler that did not get to the edits in time, and
+    // no invocation a planner can type guarantees that timing. `live_edit.rs` arranges the
+    // commands-only half of this verdict the same way and for the same reason.
+    std::fs::write(world.run_file(&run, "channel/commands-cursor.json"), "99")
+        .expect("the cursor is advanced");
+    let mut queued = world.cmd(&["reply", &run]);
+    queued.env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "1");
+
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    world
+        .run_with_stdin_on(
+            queued,
+            &json!({
+                "completion": false,
+                "reason": "carry on while that lands",
+                "version": 1,
+                "commands": [{"op": "context", "id": "build", "note": "a note", "deliver": "next"}]
+            })
+            .to_string(),
+        )
+        .exited(QUEUED)
+        .out_has("\"queued\"");
+
+    // The edits are still waiting for the reconciler...
+    assert!(
+        world.events_of(&run, "edit-committed").is_empty(),
+        "the edits this journey needs queued were reconciled: {:?}",
+        world.kinds(&run)
+    );
+    // ...and the ruling reached the reader that was waiting for one.
+    let stdout = serving.stdout.take().expect("stdout is piped");
+    let verdict = BufReader::new(stdout)
+        .lines()
+        .next()
+        .expect("the server wrote a line")
+        .expect("the line reads");
+    assert!(
+        verdict.contains("carry on while that lands"),
+        "the verdict half was held back with the edits: {verdict}"
     );
 
     drop(stdin);

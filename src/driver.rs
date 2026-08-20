@@ -1783,7 +1783,12 @@ fn submit(paths: &RunPaths, envelope: &Reply) -> Result<i32> {
             }
 
             // Accepted and durable, but not reconciled within the timeout: they
-            // remain queued, and this is not an instruction to resend.
+            // remain queued, and this is not an instruction to resend. The
+            // verdict half does not wait on that — it answers a question rather
+            // than the graph, and the reader waiting for it is not the reader
+            // waiting for the edits — so it is delivered here as it is on every
+            // other path, and only the edits are reported still queued.
+            channel.answer_if_verdict(envelope)?;
             println!("{}", json!({"reply": id, "state": "queued"}));
             Ok(EXIT_QUEUED)
         }
