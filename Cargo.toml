@@ -107,21 +107,11 @@ resolver = "2"
 oneagentgraph = "0.3.0"
 onevcs = "0.8.0"
 # **Not a third sibling this crate composes** — nothing here launches, calls, or
-# spawns onejudge, and the agent concerns stay in `oneagentgraph`. It is here for
-# one vocabulary: the verdicts a two-party member settles on, which
-# `oneagentgraph` copies from its report onto the `member-settled` this crate
-# relays. That payload is onejudge's, so it is read through onejudge's own
-# `NamedVerdict` rather than by field name — the rule `src/AGENTS.md` states for
-# every cross-library payload, and the only way a criterion or a reason renamed
-# upstream fails here instead of quietly rendering nothing.
-#
-# It must be the version `oneagentgraph`'s own pin resolves to, or the two write
-# and read different contracts. Two copies is not a version skew but a compile
-# error, exactly as for `onevcs-testing` below: `src/report.rs` coerces through
-# the conversion `oneagentgraph` declares **from its own** onejudge's type, which
-# type-checks only where that crate is this one.
-#
-# It adds nothing to the dependency graph: `oneagentgraph` already builds it.
+# spawns onejudge. It is one vocabulary: the verdicts a two-party member settles
+# on, which `oneagentgraph` copies onto the `member-settled` this crate relays.
+# It adds nothing to the dependency graph, because `oneagentgraph` already builds
+# it — and it must resolve to the version *that* pin does. `src/report.rs` is
+# where the build fails if it ever resolves to two, and why.
 onejudge = "0.4"
 # The sibling's own test-support crate, from the **same** revision as the library
 # it implements — here by resolving both from the registry at the releases cut

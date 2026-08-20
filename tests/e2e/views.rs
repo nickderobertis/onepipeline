@@ -1844,9 +1844,15 @@ fn a_node_that_failed_on_a_judge_verdict_says_why_and_names_no_provider() {
     let world = World::new("views-verdict");
     world.script(
         "build.verdict",
+        // A verdict that passed, one that failed, one that named neither half,
+        // a **numeric** one — which onejudge reports and fails nothing over —
+        // and a record that is not one of onejudge's verdicts at all, which is
+        // what a producer newer than this build writes.
         "true|the branch is pushed|it is\n\
          false|the change builds|cargo build fails in src/views.rs\n\
-         false||\n",
+         false||\n\
+         2.0|how readable it is|it is dense\n\
+         ?|the tests pass|the suite is red\n",
     );
     // A chain that fell through and recovered, which is what used to be printed
     // as the reason a node like this failed.
@@ -1871,12 +1877,24 @@ fn a_node_that_failed_on_a_judge_verdict_says_why_and_names_no_provider() {
         "a node that failed on its judge was given a provider line:\n{}",
         results.stdout
     );
-    // A verdict that passed failed nothing, so it is not named as the reason.
-    assert!(
-        !results.stdout.contains("the branch is pushed"),
-        "a verdict that passed was named as the failure:\n{}",
-        results.stdout
-    );
+    // A verdict that passed failed nothing; a score gates nothing; and a record
+    // this build cannot read is dropped whole rather than mined for the fields
+    // it happens to carry. Naming any of the three would put a sentence nobody
+    // wrote under a criterion nobody failed the node on.
+    for absent in [
+        "the branch is pushed",
+        "how readable it is",
+        "it is dense",
+        "the tests pass",
+        "the suite is red",
+    ] {
+        assert!(
+            !results.stdout.contains(absent),
+            "a verdict that failed nothing, or that this build cannot read, was named as the \
+             failure:\n{}",
+            results.stdout
+        );
+    }
 }
 
 /// A single-sided member has one side and stamps no role, so the member it ran

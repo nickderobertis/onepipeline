@@ -341,6 +341,13 @@ pub(crate) fn evidence(paths: &RunPaths, events: &[Envelope]) -> Vec<Evidence> {
 /// [`MEMBER_SETTLED`] it publishes, so what failed a node's judge is on the
 /// stream this run already merged — the reason it can be said without any file
 /// being opened, retained or not.
+// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the producer spells this key
+// as a literal inside a private function of its own — it declares no type, and no constant,
+// for the settlement payload — so there is no item to import and no source to share. The
+// reconciling gate is a journey, as it is for `RUN_ID_ENV` in `crates/testfakes/src/lib.rs`:
+// a spelling that drifted on either side leaves a judged node with no verdict line, and
+// `a_node_that_failed_on_a_judge_verdict_says_why_and_names_no_provider` in
+// `tests/e2e/views.rs` fails.
 const VERDICT: &str = "verdict";
 
 /// One judge verdict that **failed** the member it was scored against.
@@ -371,9 +378,7 @@ pub(crate) struct FailedVerdict {
 /// This is the gate. `oneagentgraph` declares the conversion below **from its
 /// own** `onejudge`'s type, so the coercion type-checks only where that crate is
 /// this crate's `onejudge` too. Two copies, and the build fails here, naming the
-/// pin to move. The same reasoning is written out at `onejudge` in
-/// `[workspace.dependencies]`, and it is why `crates/testfakes` — which *writes*
-/// this payload — takes the pin from there rather than declaring one.
+/// pin to move.
 ///
 /// [`NamedVerdict`]: onejudge::NamedVerdict
 const _: fn(onejudge::TelemetryRole) -> oneagentgraph::event::Role =

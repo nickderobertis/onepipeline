@@ -31,13 +31,9 @@ oneagentgraph = { workspace = true }
 # the shape `onevcs` declares — a restatement here would keep parsing after that
 # library changed it, and the journey would pass having proved the fixture.
 onevcs = { workspace = true }
-# The verdict a two-party member settles on, in the shape **onejudge** declares
-# it: `oneagentgraph` copies its report's own `verdicts` onto the settlement it
-# publishes, so a double that hand-rolled that object would be an oracle for a
-# settlement nothing writes — and would go on serializing after onejudge moved
-# the field the crate under test reads. The workspace pin is what keeps this
-# double and that crate writing one shape; `src/report.rs` is where the build
-# fails if it ever resolves to two.
+# The verdict a two-party member settles on, so this double writes it in the
+# shape **onejudge** declares rather than one hand-rolled here — the same reason
+# the two pins above are taken rather than restated.
 onejudge = { workspace = true }
 
 # So a double can act out the one dispatch behaviour a rendezvous cannot: a

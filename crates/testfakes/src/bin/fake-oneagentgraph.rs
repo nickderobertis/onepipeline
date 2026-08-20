@@ -1254,6 +1254,15 @@ fn emit(
             .is_ok()
             .then(|| path.clone())
     };
+    // llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] the producer spells
+    // both of these keys as literals inside a private function of its own — it declares no
+    // type, and no constant, for the settlement payload or for the report document it copies
+    // from — so there is no item to import and no source to share, and restating what the
+    // producer restates is what a double *is*. The reconciling gate is a journey, as it is
+    // for `RUN_ID_ENV` in `crates/testfakes/src/lib.rs`: either spelling drifting leaves a
+    // judged node with no verdict line, and
+    // `a_node_that_failed_on_a_judge_verdict_says_why_and_names_no_provider` in
+    // `tests/e2e/views.rs` fails.
     envelope(
         4,
         oneagentgraph::event::EventKind::MemberSettled,
@@ -1270,6 +1279,7 @@ fn emit(
             "report_path": named.map(|path| path.display().to_string()),
         }),
     );
+    // llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
 }
 
 /// Every oneharness invocation this dispatch's member actually ran.
@@ -1330,10 +1340,19 @@ fn served_invocations(
 
 /// The verdicts this dispatch's member settles with.
 ///
-/// Scripted `<key>.verdict`, one `VALUE|CRITERION|REASON` per line, where
-/// `VALUE` is `true` or `false` — a boolean verdict, which is the only kind
-/// onejudge fails a run over. Nothing scripted is a member that was scored
-/// against nothing, which is what every other journey here settles as.
+/// Scripted `<key>.verdict`, one `VALUE|CRITERION|REASON` per line. `VALUE` is
+/// one of three things a settlement really carries:
+///
+/// - `true` / `false` — a **boolean** verdict, the only kind onejudge fails a
+///   run over.
+/// - a number — a **numeric** verdict, which onejudge reports and gates nothing
+///   on, so a consumer that named one as the reason a node failed would be
+///   pointing at a score that failed nothing.
+/// - `?` — a record that is **not** one of onejudge's verdicts at all, which is
+///   what a producer newer than this build writes.
+///
+/// Nothing scripted is a member that was scored against nothing, which is what
+/// every other journey here settles as.
 ///
 /// Pipe-separated rather than by whitespace, because a judge's reason is a
 /// sentence and splitting it on spaces would keep only its first word.
@@ -1356,22 +1375,33 @@ fn scripted_verdicts(dir: &std::path::Path, key: &str) -> Vec<serde_json::Value>
                     "a `.verdict` line reads {line:?}, which is not `VALUE|CRITERION|REASON`"
                 ));
             };
-            let Ok(value) = value.trim().parse::<bool>() else {
-                fake::fail(&format!(
-                    "a `.verdict` line names the value {value:?}, which is not `true` or `false`"
-                ));
-            };
+            let (criterion, reason) = (criterion.trim(), reason.trim());
+            // The one record that cannot go through the sibling's own type,
+            // because what it *is* is a record this build has no reading of: a
+            // criterion and a verdict with no `kind` beside them, which is the
+            // shape a field renamed or added upstream would arrive in. Written
+            // by hand for exactly that reason, and only for it.
+            if value.trim() == "?" {
+                return serde_json::json!({
+                    "criterion": criterion,
+                    "verdict": {"value": false, "reason": reason},
+                });
+            }
             // Built through **onejudge's own** `NamedVerdict`, like every other
             // sibling-owned payload this double writes: a hand-rolled object
             // here would be an independent copy of a schema that library owns,
             // and it would keep serializing after the schema moved while the
             // crate under test went on reading the old one.
+            let value = scripted_value(value);
             let named = onejudge::NamedVerdict::new(
-                criterion.trim(),
-                onejudge::JudgeKind::Boolean,
+                criterion,
+                match value {
+                    onejudge::JudgeValue::Bool(_) => onejudge::JudgeKind::Boolean,
+                    onejudge::JudgeValue::Number(_) => onejudge::JudgeKind::Numeric,
+                },
                 onejudge::JudgeVerdict {
-                    value: onejudge::JudgeValue::Bool(value),
-                    reason: reason.trim().to_string(),
+                    value,
+                    reason: reason.to_string(),
                     usage: None,
                 },
             );
@@ -1379,6 +1409,25 @@ fn scripted_verdicts(dir: &std::path::Path, key: &str) -> Vec<serde_json::Value>
                 .unwrap_or_else(|error| fake::fail(&format!("a verdict will not write: {error}")))
         })
         .collect()
+}
+
+/// A scripted `VALUE`, read as `true`, `false`, or a score.
+///
+/// A word that is none of the three is fatal: a script read leniently would
+/// settle a member on a verdict the test author did not write, and a double that
+/// publishes something other than what its script says is an oracle for nothing.
+fn scripted_value(value: &str) -> onejudge::JudgeValue {
+    let value = value.trim();
+    if let Ok(boolean) = value.parse::<bool>() {
+        return onejudge::JudgeValue::Bool(boolean);
+    }
+    let Ok(score) = value.parse::<f64>() else {
+        fake::fail(&format!(
+            "a `.verdict` line names the value {value:?}, which is not `true`, `false`, a score, \
+             or `?`"
+        ));
+    };
+    onejudge::JudgeValue::Number(score)
 }
 
 /// Publish where this turn's oneharness invocation wrote its conversation down.
@@ -1537,7 +1586,15 @@ fn report_of(task: &str, verdicts: Vec<serde_json::Value>) -> serde_json::Value 
                  "input": {"command": "echo the turn ran"}, "index": 0},
             ]},
         ]},
+        // The key `oneagentgraph`'s own member reads a settlement's verdicts out
+        // of, spelled as it spells it.
+        //
+        // llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] the producer
+        // reads this key as a literal inside a private function of its own, so a double
+        // that imitates it has no item to import and no source to share. Held by the same
+        // journey as the settlement key above.
         "verdicts": verdicts,
+        // llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
         "completion_reason": "done_when_met",
         "usage": {
             "input_tokens": 1_200, "output_tokens": 340,
