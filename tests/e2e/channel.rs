@@ -925,6 +925,156 @@ fn a_live_edit_while_the_observer_member_is_between_turns_leaves_it_supervising(
     world.release("sweep.go");
 }
 
+/// Every shape a verdict is spelled in rules a supervised member.
+///
+/// Contract E names three fields — `completion`, `message`, `reason` — and any
+/// one of them alone is a ruling. The side supervising a member decides what a
+/// ruling is out of its own reading of that list, and this is the gate that
+/// keeps the two readings together: a half this crate calls a verdict and the
+/// supervising side does not would end the member the moment a planner used it,
+/// and the run would go blind with nobody having changed anything visible.
+#[test]
+fn every_verdict_half_the_contract_names_rules_a_supervised_member() {
+    let world = World::new("channel-verdict-halves");
+    world.script("build.wait", "hold");
+    world.script("observer.supervise", "3");
+    let path = world.plan("halves", &plan_of("halves", vec![agent("build", &[])]));
+    let mut start = world.cmd(&[
+        "start",
+        &path.to_string_lossy(),
+        "--detach",
+        "--dag-graph",
+        &world.shipped_dag_graph(),
+    ]);
+    start.env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "120");
+    world
+        .run_on(start, "start halves --detach --dag-graph")
+        .exited(0);
+
+    // One turn per half, each ruled with that half and nothing else.
+    for (turn, verdict) in [
+        (1, json!({"completion": false})),
+        (2, json!({"message": "keep going"})),
+        (3, json!({"reason": "nothing to change"})),
+    ] {
+        until_still_supervising(&world, "the member to raise its turn", |world| {
+            world
+                .observer_supervision()
+                .iter()
+                .any(|record| record["turn"] == turn)
+        });
+        world
+            .run_with_stdin(&["reply", "halves"], &verdict.to_string())
+            .exited(0);
+        until_still_supervising(&world, "the half to rule the member", |world| {
+            world
+                .observer_supervision()
+                .iter()
+                .filter(|record| record["ruling"].is_string())
+                .count()
+                >= turn as usize
+        });
+    }
+
+    let rulings: Vec<String> = world
+        .observer_supervision()
+        .into_iter()
+        .filter_map(|record| record["ruling"].as_str().map(str::to_string))
+        .collect();
+    assert_eq!(rulings.len(), 3, "{rulings:?}");
+    for (half, ruling) in ["completion", "message", "reason"].iter().zip(&rulings) {
+        assert!(
+            ruling.contains(half),
+            "the member was ruled by turn with something other than the `{half}` half: {ruling}"
+        );
+    }
+
+    world.release("build.go");
+}
+
+/// A graph whose command judge names no command is refused by name, and the run
+/// it was watching goes on without it.
+///
+/// The observer's judge side is a document an operator writes, so it is external
+/// input like a plan or a reply. A command judge with nothing to run is refused
+/// through `oneagentgraph`'s own validation of that document — not a second copy
+/// of the rule — rather than the member being started on whatever an empty
+/// command resolved to. And an observer that could not start is not a run that
+/// stops: the run is left unwatched, which the launcher says out loud, and it
+/// still executes, which is why it says it rather than failing.
+#[test]
+fn an_observer_graph_whose_judge_names_no_command_is_refused_and_the_run_goes_on() {
+    use oneagentgraph::config::{JudgeSide, Member};
+
+    let world = World::new("channel-observer-nocommand");
+    world.script("observer.supervise", "1");
+    let graphs = world.graphs();
+    std::fs::create_dir_all(&graphs).expect("a directory for the graph configs");
+
+    // The shipped document with its judge side emptied, rather than a graph
+    // written out here: what this journey is about is that *one* field being
+    // unusable, and a hand-written stand-in would drift into proving something
+    // else about a document nobody ships.
+    let mut config: oneagentgraph::config::GraphConfig = serde_norway::from_str(
+        &std::fs::read_to_string(world.shipped_dag_graph()).expect("the shipped dag-scope graph"),
+    )
+    .expect("the shipped dag-scope graph parses");
+    let mut emptied = 0;
+    for member in config.members.values_mut() {
+        if let Member::Onejudge(member) = member {
+            if let JudgeSide::Command(command) = &mut member.judge {
+                command.command.clear();
+                emptied += 1;
+            }
+        }
+    }
+    assert_eq!(
+        emptied, 1,
+        "the shipped dag-scope graph no longer declares exactly one command judge"
+    );
+    let broken = graphs.join("dag-scope-nocommand.yaml");
+    std::fs::write(
+        &broken,
+        serde_norway::to_string(&config).expect("the emptied graph serializes"),
+    )
+    .expect("the graph is written");
+
+    let path = world.plan(
+        "unwatched",
+        &plan_of("unwatched", vec![agent("build", &[])]),
+    );
+    world
+        .run(&[
+            "start",
+            &path.to_string_lossy(),
+            "--attach",
+            "--dag-graph",
+            &broken.display().to_string(),
+        ])
+        .exited(0)
+        .err_has("has stopped watching");
+
+    let reported = world.observer_supervision();
+    assert_eq!(reported.len(), 1, "{reported:#?}");
+    assert!(
+        reported[0]["misconfigured"]
+            .as_str()
+            .is_some_and(|why| why.contains("needs a command to run")),
+        "the misconfiguration was not named: {reported:#?}"
+    );
+    assert!(
+        reported.iter().all(|record| record["asked"].is_null()),
+        "a graph that named no judge side supervised anyway: {reported:#?}"
+    );
+
+    // The run it was watching is untouched: it dispatched and it settled.
+    assert!(
+        !world.events_of("unwatched", "node-settled").is_empty(),
+        "a misconfigured observer stopped the run it was watching: {:?}",
+        world.kinds("unwatched")
+    );
+}
+
 /// A live edit issued while the observer's side waits is the command path's, and
 /// the wait is left standing.
 ///

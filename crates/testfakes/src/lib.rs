@@ -485,17 +485,33 @@ pub fn supervise(dir: &Path, graph: &str) -> std::process::ExitCode {
         Ok(run) if !run.is_empty() => run,
         _ => fail(&format!("{RUN_ID_ENV} is unset: no run to supervise")),
     };
-    let command = judge_command(graph);
     let record = dir.join(SUPERVISION_RECORD);
+    // A graph this double cannot supervise through is recorded before it is
+    // reported: the launcher does not relay a graph's stderr, so a journey
+    // asserting that the misconfiguration was *named* has nowhere else to read
+    // it — and "named" is exactly what distinguishes this from the member dying
+    // on whatever an unchecked command resolved to.
+    let (program, arguments) = match judge_command(graph) {
+        Ok(command) => command,
+        Err(why) => {
+            append(
+                &record,
+                &serde_json::json!({"run": run, "misconfigured": why}).to_string(),
+            );
+            fail(&why)
+        }
+    };
 
-    let mut provider = match std::process::Command::new(&command[0])
-        .args(&command[1..])
+    let mut provider = match std::process::Command::new(&program)
+        .args(&arguments)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()
     {
         Ok(provider) => provider,
-        Err(error) => fail(&format!("cannot run the judge side {command:?}: {error}")),
+        Err(error) => fail(&format!(
+            "cannot run the judge side {program} {arguments:?}: {error}"
+        )),
     };
     let mut asking = provider
         .stdin
@@ -572,20 +588,45 @@ fn is_a_ruling(answer: &str) -> bool {
     })
 }
 
-/// The command the graph declares its observer member's judge side is.
+/// The program and arguments the graph declares its observer member's judge
+/// side is, resolved for this world — or why the document names none.
 ///
-/// Read through `oneagentgraph`'s own config types, so the provider acted out is
-/// the one the document names. `${VAR}` in an argument is the environment the
-/// launcher composed — the run id reaches the provider that way and no other —
-/// and `onepipeline` is the build under test rather than whatever an operator
-/// has installed, which is the same substitution [`ask_manager`] makes.
-fn judge_command(graph: &str) -> Vec<String> {
+/// `${VAR}` in an argument is the environment the launcher composed — the run id
+/// reaches the provider that way and no other — and `onepipeline` is the build
+/// under test rather than whatever an operator has installed, which is the same
+/// substitution [`ask_manager`] makes.
+fn judge_command(graph: &str) -> std::result::Result<(String, Vec<String>), String> {
+    let (program, arguments) = declared_judge_command(graph)?;
+    let program = match expand(&program) {
+        program if program == "onepipeline" => match std::env::var(CLI_BIN_ENV) {
+            Ok(cli) if !cli.is_empty() => cli,
+            _ => fail(&format!(
+                "{CLI_BIN_ENV} is unset: no build to supervise through"
+            )),
+        },
+        program => program,
+    };
+    Ok((program, arguments.iter().map(|part| expand(part)).collect()))
+}
+
+/// The command one graph document declares a command judge with, or why it
+/// declares none this double can run.
+///
+/// The document is external input like any other, and it is read through
+/// `oneagentgraph`'s own config types **and its own `validate`** — so a graph
+/// this double acts out is one the real CLI would run, and the rules it is held
+/// to, among them that a command judge needs a command, are the sibling's rather
+/// than a second copy kept here. Answers rather than exiting, so the refusal is
+/// the caller's to report at its own boundary and a test can state it.
+fn declared_judge_command(graph: &str) -> std::result::Result<(String, Vec<String>), String> {
     use oneagentgraph::config::{JudgeSide, Member};
 
     let text = std::fs::read_to_string(graph)
-        .unwrap_or_else(|error| fail(&format!("cannot read the graph {graph}: {error}")));
+        .map_err(|error| format!("cannot read the graph {graph}: {error}"))?;
     let config: oneagentgraph::config::GraphConfig = serde_norway::from_str(&text)
-        .unwrap_or_else(|error| fail(&format!("{graph} is not an agent graph: {error}")));
+        .map_err(|error| format!("{graph} is not an agent graph: {error}"))?;
+    oneagentgraph::config::validate(&config)
+        .map_err(|refusal| format!("{graph} is not a graph oneagentgraph would run: {refusal}"))?;
     let declared = config
         .members
         .values()
@@ -596,25 +637,11 @@ fn judge_command(graph: &str) -> Vec<String> {
             },
             _ => None,
         })
-        .unwrap_or_else(|| {
-            fail(&format!(
-                "{graph} declares no command judge to supervise with"
-            ))
-        });
-
-    let mut command: Vec<String> = declared.iter().map(|part| expand(part)).collect();
-    if command
-        .first()
-        .is_some_and(|program| program == "onepipeline")
-    {
-        command[0] = match std::env::var(CLI_BIN_ENV) {
-            Ok(cli) if !cli.is_empty() => cli,
-            _ => fail(&format!(
-                "{CLI_BIN_ENV} is unset: no build to supervise through"
-            )),
-        };
-    }
-    command
+        .ok_or_else(|| format!("{graph} declares no command judge to supervise with"))?;
+    let (program, arguments) = declared
+        .split_first()
+        .ok_or_else(|| format!("{graph} declares a command judge with no command to run"))?;
+    Ok((program.clone(), arguments.to_vec()))
 }
 
 /// One `${VAR}` reference in a declared command, from this process's own
