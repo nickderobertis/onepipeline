@@ -859,6 +859,99 @@ fn a_commands_only_reply_reaches_the_command_path_while_the_observers_side_waits
     let _ = serving.wait();
 }
 
+/// The same routing where the reply process is the one applying the edit.
+///
+/// Nothing is driving this run, so `reply` takes the ownership lock and
+/// reconciles the edit itself rather than queuing it for a loop. Which of the
+/// two applied it is an accident of what was running; the reader waiting for a
+/// ruling must not be handed the edit either way.
+#[test]
+fn a_commands_only_reply_applied_under_the_lock_leaves_the_observers_side_waiting() {
+    use std::io::{BufRead, BufReader, Write};
+
+    let world = World::new("channel-reply-unlocked");
+    let path = world.plan(
+        "underlock",
+        &plan_of("underlock", vec![human("approve", &[])]),
+    );
+    world
+        .run(&["start", &path.to_string_lossy(), "--attach"])
+        .exited(0);
+
+    let mut serving = world
+        .cmd(&["channel", "serve", "underlock"])
+        .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "120")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the channel server starts");
+    let mut stdin = serving.stdin.take().expect("stdin is piped");
+    writeln!(
+        stdin,
+        r#"{{"kind":"blocker","message":"is anyone going to approve this?","node":"approve"}}"#
+    )
+    .expect("the frame is written");
+    stdin.flush().expect("flushed");
+    world.until("the frame to reach the planner", |world| {
+        !world
+            .events_of("underlock", "planner-surface-queued")
+            .is_empty()
+    });
+    world.run(&["next", "underlock"]).exited(0);
+
+    world
+        .run_with_stdin(
+            &["reply", "underlock"],
+            &json!({"version": 1, "commands": [
+                {"op": "add", "node": {"id": "late", "persona": "engineer", "task": "## What\nsweep"}}
+            ]})
+            .to_string(),
+        )
+        .exited(0)
+        .out_has("\"applied\"");
+    assert!(
+        !world.events_of("underlock", "edit-committed").is_empty(),
+        "the edit was not applied under the lock: {:?}",
+        world.kinds("underlock")
+    );
+    world
+        .run(&["status", "underlock"])
+        .exited(0)
+        .out_has("waiting for planner decision");
+    assert!(
+        serving
+            .try_wait()
+            .expect("the observer's side is readable")
+            .is_none(),
+        "the observer's side ended on a live edit it was never sent"
+    );
+
+    world
+        .run_with_stdin(
+            &["reply", "underlock"],
+            r#"{"completion":false,"reason":"approve it yourself"}"#,
+        )
+        .exited(0);
+    let stdout = serving.stdout.take().expect("stdout is piped");
+    let first = BufReader::new(stdout)
+        .lines()
+        .next()
+        .expect("the server wrote a line")
+        .expect("the line reads");
+    assert!(
+        !first.contains("commands"),
+        "a graph edit applied under the lock was written back as a ruling: {first}"
+    );
+    assert!(
+        first.contains("approve it yourself"),
+        "the observer's side was handed something other than the planner's verdict: {first}"
+    );
+
+    drop(stdin);
+    let _ = serving.wait();
+}
+
 /// A run carried across the upgrade: the live edit an older build already left
 /// on the reply queue is passed over rather than handed out.
 ///
