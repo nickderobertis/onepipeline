@@ -930,6 +930,7 @@ dependencies = [
  "fs4",
  "libc",
  "oneagentgraph",
+ "onejudge",
  "onepipeline-testfakes",
  "onevcs",
  "onevcs-testing",

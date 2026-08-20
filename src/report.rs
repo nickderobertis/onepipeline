@@ -46,8 +46,18 @@
 //! the producing library's own types. The report is a sibling's artifact and this
 //! crate is a consumer of it: a stricter read would refuse a whole report over
 //! one field it did not recognise and report nothing at all, which for evidence
-//! is the wrong direction to fail in. Every other cross-library read here is
-//! lenient for the same reason.
+//! is the wrong direction to fail in.
+//!
+//! The **verdicts** are the exception, and the boundary is what makes it one. A
+//! report is a transcript, and a field this build did not recognise must not
+//! cost the whole of it; a verdict is four fields that either are one of
+//! onejudge's verdicts or are not, and there is nothing partial to salvage out
+//! of a record that is not. So the verdict reader below deserializes into that
+//! library's own [`NamedVerdict`] — the rule this crate follows everywhere else
+//! it reads a sibling's payload — and a criterion or a reason renamed upstream
+//! fails here rather than quietly rendering nothing.
+//!
+//! [`NamedVerdict`]: onejudge::NamedVerdict
 
 // llmlint: ignore-file[invalid_states_unrepresentable] `Turn::role` and `Tool::kind` are
 // **onejudge's** vocabulary, read out of an artifact that library wrote, and this crate
@@ -349,22 +359,47 @@ pub(crate) struct FailedVerdict {
     pub reason: Option<String>,
 }
 
+/// One source for the verdict contract: the `onejudge` this module reads a
+/// settlement's verdicts through **is** the one `oneagentgraph` composes.
+///
+/// [`failed_verdicts`] deserializes into that library's own [`NamedVerdict`],
+/// which only says what the producer wrote while the two crates resolve to one
+/// `onejudge` — cargo links two copies of a dependency whose majors differ, and
+/// this crate would then read a contract the runner never writes. Both would
+/// compile, and every verdict would silently stop being read.
+///
+/// This is the gate. `oneagentgraph` declares the conversion below **from its
+/// own** `onejudge`'s type, so the coercion type-checks only where that crate is
+/// this crate's `onejudge` too. Two copies, and the build fails here, naming the
+/// pin to move. The same reasoning is written out at `onejudge` in
+/// `[workspace.dependencies]`, and it is why `crates/testfakes` — which *writes*
+/// this payload — takes the pin from there rather than declaring one.
+///
+/// [`NamedVerdict`]: onejudge::NamedVerdict
+const _: fn(onejudge::TelemetryRole) -> oneagentgraph::event::Role =
+    oneagentgraph::event::Role::from;
+
 /// Every judge verdict that failed one node's dispatches, in settlement order.
 ///
 /// **Only a boolean verdict that came back false is one.** That is the whole of
 /// what onejudge fails a run over — a numeric score is reported and gates
 /// nothing — so a consumer that treated a low score as a failure would name a
-/// verdict that failed nothing as the reason a node failed.
+/// verdict that failed nothing as the reason a node failed. The distinction is
+/// [`JudgeValue`]'s own, read off the type rather than off the JSON, so a
+/// numeric verdict cannot be mistaken for a boolean one here.
 ///
-/// Read **structurally**, by field name, exactly as the report document beside
-/// it is and for the reason this module's header gives: these are a sibling's
-/// records, nothing here acts on them, and a stricter read would answer a real
-/// settlement by rendering nothing at all. A field a newer producer spells
-/// differently costs that field rather than the verdict.
-// llmlint: ignore-block[boundary_inputs_validated] the leniency is the decision above,
-// and the same one every other cross-library read here makes: this is a relayed envelope
-// already in the run's own merged store, and what comes out of it is rendered for a
-// person and acted on by nothing.
+/// Read through **onejudge's own** [`NamedVerdict`] rather than by field name —
+/// the rule this crate follows for every cross-library payload, and the
+/// exception to the structural reading of the report *document* beside it. The
+/// document is read leniently because a field this build did not recognise must
+/// not cost a whole retained transcript; a verdict is four fields that either
+/// are a verdict or are not, and a criterion or a reason renamed upstream has to
+/// fail here rather than quietly render nothing.
+///
+/// A record that is **not** one of that library's verdicts is dropped rather
+/// than mined for whatever fields happen to be present: an attribution assembled
+/// out of the remains would put a sentence nobody wrote under a criterion nobody
+/// scored, which is the invented attribution these lines exist to replace.
 pub(crate) fn failed_verdicts(events: &[Envelope], node: &str) -> Vec<FailedVerdict> {
     events
         .iter()
@@ -373,25 +408,23 @@ pub(crate) fn failed_verdicts(events: &[Envelope], node: &str) -> Vec<FailedVerd
         .filter_map(|event| event.payload.get(VERDICT))
         .filter_map(Value::as_array)
         .flatten()
-        .filter(|named| named.pointer("/verdict/value") == Some(&Value::Bool(false)))
+        .filter_map(|named| serde_json::from_value::<onejudge::NamedVerdict>(named.clone()).ok())
+        .filter(|named| matches!(named.verdict.value, onejudge::JudgeValue::Bool(false)))
         .map(|named| FailedVerdict {
-            criterion: text_of(named.get("criterion")),
-            reason: text_of(named.pointer("/verdict/reason")),
+            criterion: text_of(&named.criterion),
+            reason: text_of(&named.verdict.reason),
         })
         .collect()
 }
-// llmlint: ignore-end[boundary_inputs_validated]
 
 /// One string a sibling's record carried, or `None` for one it did not.
 ///
-/// Empty is absent: a criterion nobody wrote and an empty one are the same fact
-/// to a reader, and rendering the empty string would put a bare pair of quotes
-/// where the missing-value phrase belongs.
-fn text_of(value: Option<&Value>) -> Option<String> {
-    value
-        .and_then(Value::as_str)
-        .filter(|text| !text.trim().is_empty())
-        .map(str::to_string)
+/// Empty is absent: onejudge declares both of these as required `String`s, so a
+/// judge that scored an unnamed criterion or gave no sentence arrives as `""` —
+/// and rendering that would put a bare pair of quotes where the missing-value
+/// phrase belongs.
+fn text_of(text: &str) -> Option<String> {
+    (!text.trim().is_empty()).then(|| text.to_string())
 }
 
 /// Read this run's own copy of one report, or `None` when it did not keep one.

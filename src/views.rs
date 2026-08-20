@@ -2715,6 +2715,13 @@ mod tests {
                     // is a criterion nobody wrote, not one worth a bare pair of
                     // quotes on a line.
                     {"criterion": "", "kind": "boolean", "verdict": {"value": false}},
+                    // Not one of the producing library's verdicts at all: it
+                    // names no kind. Dropped whole rather than mined for the
+                    // fields it does carry — a sentence lifted out of a record
+                    // this build cannot read would be attributed to a criterion
+                    // nobody scored.
+                    {"criterion": "the tests pass",
+                     "verdict": {"value": false, "reason": "the suite is red"}},
                 ])),
                 event(
                     crate::journal::PipelineKind::NodeSettled,
@@ -2741,10 +2748,15 @@ mod tests {
             ),
             "{rendered}"
         );
-        for passed in ["the branch is pushed", "how readable it is"] {
+        for absent in [
+            "the branch is pushed",
+            "how readable it is",
+            "the suite is red",
+        ] {
             assert!(
-                !rendered.contains(passed),
-                "a verdict that failed nothing was named as the failure:\n{rendered}"
+                !rendered.contains(absent),
+                "a verdict that failed nothing, or that this build cannot read, was named as \
+                 the failure:\n{rendered}"
             );
         }
         std::fs::remove_dir_all(&root).ok();

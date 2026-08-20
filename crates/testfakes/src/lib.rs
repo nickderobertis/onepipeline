@@ -455,19 +455,3 @@ fn launch_record(run: &str) -> Option<PathBuf> {
     let root = std::env::var("ONEPIPELINE_RUNS_DIR").ok()?;
     (!root.is_empty() && !run.is_empty()).then(|| PathBuf::from(root).join(run).join("launch.json"))
 }
-
-/// One source for the verdict contract: the `onejudge` this crate writes a
-/// settlement's verdicts through **is** the one `oneagentgraph` composes.
-///
-/// The double builds a verdict through [`onejudge::NamedVerdict`] so it writes
-/// the shape that library declares rather than a copy of it. That only holds
-/// while the two crates resolve to one `onejudge`: cargo links two copies of a
-/// dependency whose majors differ, and the double would then serialize a
-/// contract the runner never writes — silently, because both would compile.
-///
-/// This is the gate. `oneagentgraph` declares the conversion below **from its
-/// own** `onejudge`'s type, so the coercion type-checks only where that crate
-/// is this crate's `onejudge` too. Two copies, and the build fails here, naming
-/// the pin to move.
-const _: fn(onejudge::TelemetryRole) -> oneagentgraph::event::Role =
-    oneagentgraph::event::Role::from;
