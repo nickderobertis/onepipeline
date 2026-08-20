@@ -11,7 +11,8 @@
 // driven instead. `harness.rs` carries the same suppression and the full rationale.
 
 use crate::harness::{
-    agent, human, plan_of, World, NOTHING_DRIVING, REFUSED, RENDEZVOUS_SECONDS_ENV, STALL_AFTER_ENV,
+    agent, human, plan_of, World, NOTHING_DRIVING, REFUSED, RENDEZVOUS_SECONDS_ENV,
+    STALL_AFTER_ENV, USAGE_ERROR,
 };
 use serde_json::json;
 
@@ -957,4 +958,59 @@ fn validate_reads_a_plan_as_the_schema_version_it_declares() {
         .exited(REFUSED)
         .err_has("node 'publish': `body` is a schema 3 field")
         .err_lacks("is not one this build reads");
+}
+
+/// One operand, both plan formats, and a file that is not a plan at all.
+///
+/// `validate` reads what `start` reads: a YAML plan as readily as a JSON one,
+/// which reach the schema by different paths, and a readable file the schema
+/// cannot make a plan of is refused as the document it is rather than reported
+/// as one that could not be found. The operand is the whole of the surface — a
+/// flag here would be a way to be refused differently from the launch this verb
+/// stands for.
+#[test]
+fn validate_takes_one_plan_operand_and_reads_both_plan_formats() {
+    let world = World::new("plan-validate-operand");
+
+    let yaml = world.raw_plan(
+        "ok.plan.yaml",
+        "schema_version: 3\nname: yamlok\ntasks:\n  - id: build\n    persona: engineer\n    \
+         task: ship it\n",
+    );
+    world.run(&["validate", &yaml.to_string_lossy()]).exited(0);
+
+    let retired = world.raw_plan(
+        "retired.plan.yaml",
+        "schema_version: 1\nname: yamlbad\ntasks:\n  - id: build\n    persona: engineer\n    \
+         task: ship it\n    done_when: the gate is green\n",
+    );
+    world
+        .run(&["validate", &retired.to_string_lossy()])
+        .exited(REFUSED)
+        .err_has("`done_when` is no longer a plan field")
+        .err_has("`## Acceptance criteria` section of its own task");
+
+    // A file that reads but is not a plan. The two failures a caller can act on
+    // differently — a path that is not there, and a document that is — must not
+    // be answered in each other's words.
+    let malformed = world.raw_plan("malformed.plan.json", r#"{"schema_version":3,"tasks":["#);
+    world
+        .run(&["validate", &malformed.to_string_lossy()])
+        .exited(REFUSED)
+        .err_has("malformed.plan.json")
+        .err_lacks("No such file");
+
+    // The operand and nothing beside it.
+    world
+        .run(&["validate", &yaml.to_string_lossy(), "second.plan.json"])
+        .exited(USAGE_ERROR)
+        .err_has("unexpected argument");
+    world
+        .run(&["validate", &yaml.to_string_lossy(), "--detach"])
+        .exited(USAGE_ERROR)
+        .err_has("--detach");
+    world
+        .run(&["validate"])
+        .exited(USAGE_ERROR)
+        .err_has("<PLAN>");
 }
