@@ -72,7 +72,7 @@ help="$(onepipeline --help 2>&1 | tr -d '\r')" || fail \
 # `the_smoke_scripts_command_list_is_the_binarys_whole_surface` parses this very
 # line and asserts it equals the binary's subcommands, so a command added or
 # renamed fails the gate here rather than leaving a published artifact unchecked.
-for command in start adopt channel next reply surface attest stop runs status host monitor results goals transcript telemetry; do
+for command in start validate adopt channel next reply surface attest stop runs status host monitor results goals transcript telemetry; do
   case "$help" in
     *"$command"*) ;;
     *) fail "'--help' does not list the '$command' command" \

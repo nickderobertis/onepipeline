@@ -40,6 +40,8 @@ pub struct Cli {
 pub enum Command {
     /// Execute a plan: drive its DAG continuously to settlement.
     Start(StartArgs),
+    /// Read a plan and report whether `start` would accept it.
+    Validate(ValidateArgs),
     /// Attach a fresh driver to a run whose ledger is intact.
     Adopt(RunArgs),
     /// The channel's server side.
@@ -147,6 +149,17 @@ pub struct StartArgs {
     /// Repeatable. `planner` and `monitor` ship and are overridden by name.
     #[arg(long = "filter-profile", value_name = "NAME=SPEC")]
     pub filter_profiles: Vec<String>,
+}
+
+/// `onepipeline validate`.
+///
+/// The operand `start` takes and nothing beside it: this verb is that launch's
+/// own validation asked as a question, so a flag here would be a way to be
+/// refused differently from the launch it stands for.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct ValidateArgs {
+    /// The plan file.
+    pub plan: PathBuf,
 }
 
 /// A read verb that shapes its event view through a filter profile.
