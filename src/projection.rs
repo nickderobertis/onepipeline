@@ -830,31 +830,19 @@ fn abandon_the_dispatch_in_flight(state: &mut RunState) {
 
 /// Fold one relayed `session-opened` into where the node's dispatch is working.
 ///
-/// Only `onevcs` opens a session, so only an envelope that library's own source
-/// and kind is one: a record of another producer's, wearing the kind, is not
-/// evidence about a repository and would put a manager onto a branch nobody
-/// cut. Both writers of it land here — the sibling's own record and the envelope
-/// this crate writes beside it for the merged stream — and the last one wins,
+/// Only `onevcs` opens a session, so only an envelope of that library's own
+/// source and kind is one; both writers of it land here — the sibling's own
+/// record and the copy this crate writes beside it — and the last one wins,
 /// because they describe the same session.
 ///
-/// The payload is read into [`onevcs::Session`], the sibling's **own**
-/// declaration of what a session is, exactly as [`fold_refusal`] reads
-/// `oneagentgraph`'s: the shape this crate expects is then the shape the
-/// producer publishes, and a record that is not one is a record this build has
-/// no reading of. A half-named session is dropped rather than half-read — a
-/// branch with no token leaves a manager unable to find the worktree, and a
-/// token with no branch is a pin this crate would have to invent.
+/// Which node it belongs to is the *enricher's* stamp, and an envelope naming
+/// none belongs to no dispatch. That is all the label decides here: it is a
+/// **key**, and whether its node still has a dispatch running is asked at read
+/// time, by [`RunState::sessions_in_flight`].
 ///
-/// Which node it belongs to is the *enricher's* stamp rather than the producer's,
-/// and an envelope naming none belongs to no dispatch. That is the whole of what
-/// the label decides here: it is a **key**, and what makes it a dispatch anything
-/// reports is asked at read time, by [`RunState::sessions_in_flight`] — a session
-/// outlives the pass that observed it, and whether its node is still running
-/// changes without another record arriving.
-///
-/// The payload itself is read and checked by
-/// [`DispatchSession::read_from`](crate::vcs::DispatchSession::read_from), which
-/// is the trust boundary for a session record.
+/// What the record has to be for this crate to act on it is
+/// [`DispatchSession::read_from`](crate::vcs::DispatchSession::read_from)'s
+/// question, which is where it is answered.
 fn fold_session(state: &mut RunState, event: &Envelope) {
     if event.source != Source::Vcs || !crate::vcs::is_session_opened(&event.kind) {
         return;

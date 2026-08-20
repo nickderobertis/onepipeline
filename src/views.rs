@@ -1539,7 +1539,11 @@ pub(crate) fn nodes_with_agent_records(view: &RunView, only: Option<&str>) -> Ve
 
 /// One control-stripped line, so a relayed value cannot rewrite the rendering
 /// around it.
-fn one_line(text: &str) -> String {
+///
+/// Shared with the settlements this crate *composes* out of a sibling's values —
+/// `crate::lifecycle` names the ref a publication compared against — so the rule
+/// is one rule rather than one per place a sibling's text reaches a line.
+pub(crate) fn one_line(text: &str) -> String {
     text.chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect()

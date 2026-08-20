@@ -174,30 +174,16 @@ pub fn change_url(outcome: &PublishOutcome) -> Option<String> {
     }
 }
 
-/// One read of an open session's own record — the sibling's own value, carrying
-/// where the session is being worked in and what its branch is measured against.
+/// One read of an open session's own record: the sibling's own value, carrying
+/// the worktree its dispatches work in and the base its branch is measured
+/// against. Read once, because a second read at publication would ask a question
+/// already answered on a path where the answer cannot have changed.
 ///
-/// Both are wanted at one moment and come from one record, so they are read
-/// once: a second read at publication would ask `onevcs` a question it has
-/// already answered, on a path where a failure could not happen — a publication
-/// that succeeded is a record that was readable.
-///
-/// Held as [`Session`] rather than copied into a shape of this crate's, for the
-/// reason [`DispatchSession::read_from`] parses one: what a session *is* is the
-/// sibling's declaration. Its values are taken as that record states them, which
-/// is what this crate already does with the heavier of the two — the worktree it
-/// hands a dispatch as the directory it works in. A record is `onevcs`'s own
-/// state, written under its occupancy lease when it cut this very session; a
-/// session's **stream** is the untrusted one, a log any process holding the token
-/// appends to, and what this crate reads off one is checked where it enters.
-///
-/// What the second and later dispatches of one lifecycle node run in. They must
-/// **not** open a session of their own: `onevcs` cuts each session its own clone
-/// from the execution checkout, so a second one carries none of the first's
-/// uncommitted work — and opening it reclaims the first's workspace outright,
-/// because a run root whose branch holds no commit the origin lacks is one the
-/// sibling reads as abandoned. Both are recorded in
-/// `docs/contract-divergences.md`.
+/// Its values are taken as that record states them. A record is `onevcs`'s own
+/// state, written under its occupancy lease when it cut this session; a session's
+/// **stream** is the untrusted one — a log any process holding the token appends
+/// to — and what this crate reads off one is checked where it enters, by
+/// [`DispatchSession::read_from`].
 ///
 /// A read, not a claim: [`onevcs::session`] takes no lease, commits nothing, and
 /// reclaims nothing, so asking where a session is working cannot disturb it —
@@ -205,7 +191,11 @@ pub fn change_url(outcome: &PublishOutcome) -> Option<String> {
 /// incomplete-step marker.
 ///
 /// `None` when the record cannot be read, which leaves the caller to open a
-/// session as it would have.
+/// session as it would have. The second and later dispatches of one lifecycle
+/// node run in the worktree it names; they must **not** open a session of their
+/// own, because `onevcs` cuts each session its own clone and opening a second one
+/// reclaims the first's workspace. Both are recorded in
+/// `docs/contract-divergences.md`.
 pub fn working_session(token: &SessionToken) -> Option<Session> {
     onevcs::session(&providers(), token)
         .map(|record| record.session)
@@ -682,26 +672,16 @@ pub struct DispatchSession {
     branch: BranchName,
 }
 
-/// A branch as a session record named it, checked for what this crate does with
-/// it.
+/// A branch a stream's record named, and [`usable`] accepted.
 ///
-/// Deliberately **not** a claim that git would accept the name. That parser is
-/// git's — `onevcs` asks it, through a type it does not export — and asking it
-/// here would mean this crate running git, which no path of it ever has. What
-/// this promises is what [`usable`] checks, which is what has to be true before
-/// a name is rendered into a view and handed back to the sibling as a pin.
-///
-/// The field is private and the only constructor is that check, so a branch this
-/// crate has not looked at cannot be held in one.
+/// Deliberately **not** a claim that git would accept the name: that parser is
+/// git's, and asking it would mean this crate running git, which no path of it
+/// ever has.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BranchName(String);
 
 impl BranchName {
-    /// A name off a **stream**, where it is one this crate can act on.
-    ///
-    /// A session's stream is a log any process holding the token appends to, so
-    /// what arrives on one is checked here — see [`usable`] — and a value that
-    /// is not a name yields nothing rather than a branch nobody can be sent to.
+    /// A name off a stream's record, where it is one this crate can act on.
     pub fn checked(value: &str) -> Option<Self> {
         usable(value).map(Self)
     }
@@ -719,36 +699,23 @@ impl std::fmt::Display for BranchName {
 }
 
 impl DispatchSession {
-    /// Read a session out of a relayed `session-opened` payload.
+    /// Read a session out of a relayed `session-opened`, where it is one this
+    /// crate can act on.
     ///
-    /// **This is the trust boundary for a session record**, and the envelope
-    /// module says so: it declares the wire shape and its bounds and leaves the
-    /// semantic checks — that a text field was whole at
-    /// [`MAX_PAYLOAD_TEXT_BYTES`](crate::event::MAX_PAYLOAD_TEXT_BYTES) — to the
-    /// reader seam that parses a stream, which is this.
+    /// **The trust boundary for a session record**, which the envelope module
+    /// leaves to the reader seam that parses a stream. Three questions, and only
+    /// the last two are this crate's:
     ///
-    /// Two steps, and they answer different questions. **Which fields** is
-    /// [`Session`]'s to say, so the payload is parsed through the producer's own
-    /// declaration rather than by key: the shape this crate expects is then the
-    /// shape the producer publishes, and a rename there is a record this build
-    /// reads nothing out of instead of a key that silently stops matching. The
-    /// fields it does *not* declare are left where they are on purpose — the
-    /// same kind is written by `onevcs` itself, whose record carries seven more
-    /// of its own, and a reader that refused them would refuse the producer's
-    /// own account of the session it just opened. That tolerance is one-way: a
-    /// field this crate acts on is required by the type, so a misspelled or
-    /// missing `branch` drops the record rather than being half-read into a
-    /// manager's only pointer at the work.
-    ///
-    /// **Whether the values are usable** is this crate's, because it is the one
-    /// that acts on them: see [`usable`].
-    ///
-    /// And **whether the record is about the session that carried it**, which no
-    /// value inside it can answer: a session's stream is a log any process
-    /// holding the token appends to, so a record on one naming a *different*
-    /// session is not evidence about that session — it is a pointer at somebody
-    /// else's work, arriving where nobody can check it. The stream says whose
-    /// log it is, and the two must agree.
+    /// * **Which fields** is [`Session`]'s, so the payload is parsed through the
+    ///   producer's own declaration rather than by key. The fields it does not
+    ///   declare are left alone — `onevcs`'s own record of the same session
+    ///   carries seven more — while a field this crate acts on is required by the
+    ///   type, so a missing or misspelled `branch` drops the record.
+    /// * **Whether the values are usable**: see [`usable`].
+    /// * **Whether the record is about the session that carried it**, which no
+    ///   value inside it can answer. A stream is a log any process holding the
+    ///   token appends to, so a record on one naming a *different* session is a
+    ///   pointer at somebody else's work, arriving where nobody can check it.
     pub fn read_from(envelope: &Envelope) -> Option<Self> {
         let session: Session =
             serde_json::from_value(serde_json::Value::Object(envelope.payload.clone())).ok()?;

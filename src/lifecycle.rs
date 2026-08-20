@@ -328,11 +328,16 @@ fn publish(
             // has none, and the settlement then says what it always did rather
             // than naming a ref nothing established.
             let compared = match published.outcome {
+                // Composed out of two of the sibling's own strings and stripped
+                // of controls on the way, by the same rule every view applies to
+                // a relayed value it renders — see `views::one_line`. A
+                // settlement's detail is read back on one line, and this is where
+                // this crate makes one out of somebody else's.
                 onevcs::PublishOutcome::NothingToPublish => base.map(|base| {
-                    format!(
+                    crate::views::one_line(&format!(
                         "compared against {base}: {} carries nothing it does not",
                         published.branch
-                    )
+                    ))
                 }),
                 _ => None,
             };
