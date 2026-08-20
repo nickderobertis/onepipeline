@@ -1479,45 +1479,50 @@ fn a_command_only_envelope_and_a_verdict_envelope_are_both_replies() {
     assert!(CONTRACT.contains(r#"{"version": 1, "commands": [...]}"#));
 }
 
-/// The routing the contract states, read off the shapes the envelope declares.
+/// The halves the contract routes a reply by, as the wire shape declares them.
 ///
 /// A pending surface is answered by a **verdict half** and nothing else, so the
 /// three fields it is spelled with are what tells the two readers' envelopes
-/// apart — and a commands-only envelope carries none of them. No addressing
-/// field was minted for this: the discrimination is already in the wire shape.
+/// apart — and a commands-only envelope declares none of them. No addressing
+/// field was minted for this: the discrimination is already in the wire shape,
+/// which is what this asserts, alongside the routing the document states.
 #[test]
-fn a_reply_is_routed_by_the_halves_it_carries() {
-    let verdict_half = |value: Value| {
-        let reply: Reply = serde_json::from_value(value).expect("the envelope parses");
-        reply.completion.is_some() || reply.message.is_some() || reply.reason.is_some()
-    };
+fn a_reply_declares_the_halves_the_contract_routes_it_by() {
+    let read = |value: Value| serde_json::from_value::<Reply>(value).expect("the envelope parses");
 
-    assert!(
-        !verdict_half(json!({
-            "version": 1,
-            "commands": [{"op": "context", "id": "plan", "note": "the scope changed"}]
-        })),
-        "a commands-only envelope is read as a verdict"
-    );
-    for half in ["completion", "message", "reason"] {
-        let value = match half {
-            "completion" => json!({"completion": false}),
-            _ => json!({half: "keep going"}),
-        };
+    let commands_only = read(json!({
+        "version": 1,
+        "commands": [{"op": "context", "id": "plan", "note": "the scope changed"}]
+    }));
+    assert_eq!(commands_only.completion, None);
+    assert_eq!(commands_only.message, None);
+    assert_eq!(commands_only.reason, None);
+    assert_eq!(commands_only.commands.len(), 1);
+
+    for (half, value) in [
+        ("completion", json!({"completion": false})),
+        ("message", json!({"message": "keep going"})),
+        ("reason", json!({"reason": "keep going"})),
+    ] {
+        let alone = read(value);
         assert!(
-            verdict_half(value),
-            "`{half}` alone is not read as a verdict"
+            alone.completion.is_some() || alone.message.is_some() || alone.reason.is_some(),
+            "`{half}` alone declares no verdict half"
+        );
+        assert!(
+            alone.commands.is_empty(),
+            "`{half}` alone declares a commands half"
         );
     }
-    assert!(
-        verdict_half(json!({
-            "completion": false,
-            "reason": "retry it",
-            "version": 1,
-            "commands": [{"op": "cancel", "id": "slow"}]
-        })),
-        "an envelope carrying both halves is not read as a verdict"
-    );
+
+    let both = read(json!({
+        "completion": false,
+        "reason": "retry it",
+        "version": 1,
+        "commands": [{"op": "cancel", "id": "slow"}]
+    }));
+    assert_eq!(both.reason.as_deref(), Some("retry it"));
+    assert_eq!(both.commands.len(), 1);
 
     assert!(
         CONTRACT.contains(

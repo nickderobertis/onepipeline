@@ -859,6 +859,107 @@ fn a_commands_only_reply_reaches_the_command_path_while_the_observers_side_waits
     let _ = serving.wait();
 }
 
+/// A live edit the **reconciler** rejects is the command path's too.
+///
+/// The rejection comes back to the process that submitted it, not to the
+/// channel: the question the observer's side asked is still unanswered, and a
+/// refusal is no more a ruling than the edit was.
+#[test]
+fn a_rejected_commands_only_reply_leaves_the_observers_side_waiting() {
+    use std::io::{BufRead, BufReader, Write};
+
+    let world = World::new("channel-reply-rejected");
+    // A turn that is open, beside a node that never dispatches: a `live` note
+    // for the second passes the submission check and is refused by the
+    // reconciler, which is the only way to be rejected from the durable queue.
+    world.script("slow.turn-open", "");
+    world.script("slow.wait", "hold");
+    let path = world.plan(
+        "refused",
+        &plan_of(
+            "refused",
+            vec![agent("slow", &[]), agent("later", &["slow"])],
+        ),
+    );
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+    world.until("the held node's turn to open", |world| {
+        !world.events_of("refused", "turn-started").is_empty()
+    });
+
+    let mut serving = world
+        .cmd(&["channel", "serve", "refused"])
+        .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "120")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the channel server starts");
+    let mut stdin = serving.stdin.take().expect("stdin is piped");
+    writeln!(
+        stdin,
+        r#"{{"kind":"blocker","message":"slow has been at this a while; go on?","node":"slow"}}"#
+    )
+    .expect("the frame is written");
+    stdin.flush().expect("flushed");
+    world.until("the frame to reach the planner", |world| {
+        !world
+            .events_of("refused", "planner-surface-queued")
+            .is_empty()
+    });
+    world.run(&["next", "refused"]).exited(0);
+
+    world
+        .run_with_stdin(
+            &["reply", "refused"],
+            &json!({"version": 1, "commands": [
+                {"op": "context", "id": "later", "note": "start from the fixture", "deliver": "live"}
+            ]})
+            .to_string(),
+        )
+        .exited(REFUSED)
+        .err_has("no controllable turn in flight");
+
+    assert!(
+        world.events_of("refused", "edit-committed").is_empty(),
+        "a rejected edit reached the graph: {:?}",
+        world.kinds("refused")
+    );
+    world
+        .run(&["status", "refused"])
+        .exited(0)
+        .out_has("waiting for planner decision");
+    assert!(
+        serving
+            .try_wait()
+            .expect("the observer's side is readable")
+            .is_none(),
+        "the observer's side ended on an edit that was never even applied"
+    );
+
+    world
+        .run_with_stdin(
+            &["reply", "refused"],
+            r#"{"completion":false,"reason":"go on without the note"}"#,
+        )
+        .exited(0);
+    let stdout = serving.stdout.take().expect("stdout is piped");
+    let first = BufReader::new(stdout)
+        .lines()
+        .next()
+        .expect("the server wrote a line")
+        .expect("the line reads");
+    assert!(
+        first.contains("go on without the note"),
+        "the observer's side was handed something other than the planner's verdict: {first}"
+    );
+
+    drop(stdin);
+    world.release("slow.go");
+    let _ = serving.wait();
+}
+
 /// The same routing where the reply process is the one applying the edit.
 ///
 /// Nothing is driving this run, so `reply` takes the ownership lock and

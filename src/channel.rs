@@ -203,17 +203,16 @@ impl Reply {
         self.completion.is_some() || self.message.is_some() || self.reason.is_some()
     }
 
-    /// Whether this envelope is the command path's alone — the contract's
-    /// **commands-only** envelope.
+    /// Whether this envelope carries edits and no verdict — the contract's
+    /// **commands-only** envelope, the one shape with nothing in it for the
+    /// reply path.
     ///
-    /// Edits and no verdict: nothing in it answers a question, so nothing in it
-    /// belongs on the reply path. This is the discrimination the two readers are
-    /// routed by, and it is made from the shape the envelope already declares
-    /// rather than from an address it would have had to remember to carry. An
-    /// envelope carrying neither — no edits and no verdict — is **not** one of
-    /// these: it commands nothing, so the command path has nothing to do for it,
-    /// and it stays on the path a commandless reply has always taken.
-    pub(crate) fn belongs_to_the_command_path(&self) -> bool {
+    /// This is the discrimination the two readers are routed by, and it is made
+    /// from the shape the envelope already declares rather than from an address
+    /// it would have had to remember to carry. It says nothing about the
+    /// envelopes that carry both halves, which reach the command path too — it
+    /// asks only whether the reply path is owed anything.
+    pub(crate) fn carries_edits_without_a_verdict(&self) -> bool {
         !self.commands.is_empty() && !self.carries_verdict()
     }
 }
@@ -595,7 +594,7 @@ impl ChannelState {
             .replies()
             .into_iter()
             .filter(|queued| {
-                queued.id >= claimed_through && !queued.reply.belongs_to_the_command_path()
+                queued.id >= claimed_through && !queued.reply.carries_edits_without_a_verdict()
             })
             .collect();
         if let Some(last) = fresh.last() {
