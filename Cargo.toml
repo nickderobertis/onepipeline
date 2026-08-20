@@ -73,9 +73,23 @@ resolver = "2"
 # - `onevcs` 0.4.0 carries `PublishRequest.body`, which is the whole of what a
 #   drafted body is *for*: below it a change request opens with the boilerplate
 #   this crate has no way to replace. 0.4.1 adds a stacked-branch publish above it.
+# - `onevcs` 0.8.0 **continues** a pinned branch that already exists, cutting the
+#   session onto its own tip instead of refusing the pin with `already carries N
+#   commit(s) that main does not`. That refusal is what stranded a retry on work
+#   its predecessor preserved, and 0.4.2's session reuse only reached the narrow
+#   case where the predecessor's session was still open — a closed one, or a
+#   branch somebody landed by hand, met the refusal. It is a **requirement** and
+#   not merely a lock floor because `^0.4.1` excludes it: pre-1.0, the minor is
+#   the breaking position, so the declaration rather than the lock is what
+#   permits the resolution. The same release refuses `base_branch` equal to
+#   `branch` — the folklore spelling that got past the old refusal by comparing a
+#   branch with itself — when the session opens, and names the pin above in its
+#   place; `src/plan.rs` documents both fields against that. `tests/e2e/
+#   session_reuse.rs` and `tests/e2e/lifecycle.rs` drive the two halves, so a pin
+#   below 0.8.0 fails rather than reads differently.
 #
-# Two floors are carried by `Cargo.lock` rather than by the requirement below,
-# and deliberately.
+# One floor is carried by `Cargo.lock` rather than by the requirement below, and
+# deliberately.
 #
 # `oneagentgraph` 0.3.3 carries the **session-conversation producer**: a `session`
 # label naming the conversation a member's turns belong to, and the
@@ -89,25 +103,17 @@ resolver = "2"
 # `the_linked_oneagentgraph_produces_the_session_conversation_this_crate_relays`
 # is what holds the resolution there — below the floor it fails saying the lock
 # is stale — and `tests/e2e/session.rs` drives the relay itself.
-#
-# `onevcs` 0.4.2 takes up the session a stopped run left on a pinned
-# branch instead of cutting a second one on the same name, which is what lets a
-# retry reach work its predecessor stranded. `^0.4.1` already permits it, so the
-# resolution is the whole of the fix and widening the requirement would buy
-# nothing. `tests/e2e/session_reuse.rs` is what holds the resolution there: below
-# 0.4.2 the retry is refused before it dispatches and that journey fails saying so,
-# rather than reading differently.
 [workspace.dependencies]
 oneagentgraph = "0.3.0"
-onevcs = "0.4.1"
+onevcs = "0.8.0"
 # The sibling's own test-support crate, from the **same** revision as the library
 # it implements — here by resolving both from the registry at the releases cut
-# from one commit: `onevcs-testing` v0.2.1 and `onevcs` v0.4.1 are the same tag,
-# and v0.2.1 requires `onevcs = "0.4.1"`, so the build has one copy. Two copies
+# from one commit: `onevcs-testing` v0.2.7 and `onevcs` v0.8.0 are the same tag,
+# and v0.2.7 requires `onevcs = "0.8.0"`, so the build has one copy. Two copies
 # is not a version skew but a compile error: `tests/onevcs_seam.rs` — whose whole
 # job is to drive this crate's seam against those providers — would not build,
 # because the two copies' types are different types.
-onevcs-testing = "0.2.1"
+onevcs-testing = "0.2.7"
 
 [package]
 name = "onepipeline"

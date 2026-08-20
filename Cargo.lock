@@ -327,7 +327,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -339,6 +339,16 @@ dependencies = [
  "bit-set",
  "regex-automata",
  "regex-syntax",
+]
+
+[[package]]
+name = "filetime"
+version = "0.2.29"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c287a33c7f0a620c38e641e7f60827713987b3c0f26e8ddc9462cc69cf75759"
+dependencies = [
+ "cfg-if",
+ "libc",
 ]
 
 [[package]]
@@ -953,13 +963,15 @@ dependencies = [
 
 [[package]]
 name = "onevcs"
-version = "0.4.2"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8580dc19066c568d99061b93a7eca14ba0b9d7281ff11be666f0c3d27844efca"
+checksum = "92c154a5582ba559f28361feb20e9250bf6f667faf720cd9efbf62aaba01c0fe"
 dependencies = [
  "clap",
  "dunce",
+ "filetime",
  "fs4",
+ "icu_properties",
  "libc",
  "serde",
  "serde_json",
@@ -973,9 +985,9 @@ dependencies = [
 
 [[package]]
 name = "onevcs-testing"
-version = "0.2.1"
+version = "0.2.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cfdd064e3beb2793079c0d8a438371f0c6204b99a0604f477c333bf9ffedbec5"
+checksum = "6e982b89b20ab44b84f0d737fef8437b4210fc5623dbb19ad4457114db65118e"
 dependencies = [
  "onevcs",
  "serde",
@@ -1182,7 +1194,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1239,7 +1251,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1919,7 +1931,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
