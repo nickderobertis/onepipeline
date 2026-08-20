@@ -55,7 +55,7 @@ use crate::filter::EventFilter;
 use crate::graph::{self, Landing, NodeStatus};
 use crate::journal::PipelineKind;
 use crate::ledger::{self, LaunchRecord, LockRecord};
-use crate::projection::{self, MemberLabel, Refusal, RunState};
+use crate::projection::{self, MemberLabel, Refusal, RunState, Served};
 use crate::sys;
 
 /// A run root a view refused, and the reason it gave.
@@ -734,12 +734,20 @@ pub fn status(survey: &Survey) -> String {
         // What refused, for the nodes that failed. A failed node otherwise reads
         // the same whether its own gate failed or an identity chain ran out, and
         // the two call for opposite actions from whoever is reading this.
+        //
+        // Only a chain that ran out is reported under the node's failure. One
+        // that fell through and was then served is reported as the recovery it
+        // was, under its own word.
         for (id, node_status) in &statuses {
             if *node_status != NodeStatus::Failed {
                 continue;
             }
-            for refusal in refusals_of(&view.state, id) {
-                out.push_str(&format!("  {id}: failed — {}\n", refusal_phrase(refusal)));
+            for record in chain_records(&view.state, id) {
+                out.push_str(&format!(
+                    "  {id}: {} — {}\n",
+                    record.lead_in(),
+                    chain_phrase(&record)
+                ));
             }
         }
         // The settled nodes whose work has not reached anyone. This view
@@ -780,21 +788,145 @@ fn cancelling_for(state: &RunState, id: &str) -> Option<String> {
     ))
 }
 
+/// What became of one candidate a node's identity chain stepped past.
+///
+/// Three answers rather than a bool, because the third is a different fact and
+/// reading it as either of the others is a claim nothing supports: a chain this
+/// run's records cannot follow is **not** a chain that ran out of candidates,
+/// and a view that called it one would send every reader at a subscription that
+/// was never the problem.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Fallthrough {
+    /// Another identity went on to run that side's invocation on that turn.
+    Served(String),
+    /// Nothing served it: the chain had no successful candidate.
+    Refused,
+    /// This run's records do not say. A single-sided member attributes nothing
+    /// per side or per turn, so nothing it publishes can be paired with.
+    Unrecorded,
+}
+
+/// One rendered line's worth of what a node's identity chains did.
+///
+/// The advance, what became of it, and how many records said the same thing —
+/// the last collapsed **here** rather than in the fold, because two turns of one
+/// chain can end differently and a record that had collapsed them could only be
+/// rendered as one of the two.
+struct ChainRecord<'a> {
+    /// The candidate the chain stepped past.
+    refusal: &'a Refusal,
+    /// What became of that side's turn afterwards.
+    became: Fallthrough,
+    /// How many records carried this same side, identity, reason, and ending.
+    ///
+    /// Non-zero for the reason [`Refusal::records`] is: a line exists only by
+    /// having been recorded at least once, and a rendering that could hold a
+    /// zero would be one that could say a chain recorded nothing.
+    records: std::num::NonZeroU64,
+}
+
+impl ChainRecord<'_> {
+    /// The word this record is reported under.
+    ///
+    /// A chain that ran out is why the node failed; one that recovered is
+    /// evidence beside it, and saying `failed` over it is exactly the confusion
+    /// this exists to end.
+    fn lead_in(&self) -> &'static str {
+        match self.became {
+            Fallthrough::Refused => "failed",
+            Fallthrough::Served(_) | Fallthrough::Unrecorded => "fallback",
+        }
+    }
+}
+
+/// What one node's identity chains did, in arrival order and one entry per line
+/// a view will render.
+///
+/// Records that agree on the side, the identity, the reason **and** the ending
+/// are one fact recorded several times; records that differ in the ending are
+/// two facts, and a run whose chain recovered on one turn and ran out on the
+/// next says both.
+fn chain_records<'a>(state: &'a RunState, node: &str) -> Vec<ChainRecord<'a>> {
+    let mut records: Vec<ChainRecord<'a>> = Vec::new();
+    for refusal in refusals_of(state, node) {
+        let became = became_of(state, node, refusal);
+        if let Some(same) = records.iter_mut().find(|seen| {
+            seen.refusal.advanced.identity == refusal.advanced.identity
+                && seen.refusal.advanced.role == refusal.advanced.role
+                && seen.refusal.advanced.reason == refusal.advanced.reason
+                && seen.refusal.member == refusal.member
+                && seen.became == became
+        }) {
+            same.records = same.records.saturating_add(refusal.records.get());
+            continue;
+        }
+        records.push(ChainRecord {
+            refusal,
+            became,
+            records: refusal.records,
+        });
+    }
+    records
+}
+
+/// What became of the turn one advance was recorded on.
+///
+/// Paired by **side and turn**, which is what the producer stamps on both
+/// records: a two-party member runs one chain per side per turn, publishes an
+/// advance per candidate that chain stepped past, and publishes the invocation
+/// that actually ran beside them. An advance carrying neither — which is a
+/// single-sided member's, the one kind that publishes no invocation at all — has
+/// nothing to pair with, and is said to have nothing rather than assumed to have
+/// run out.
+fn became_of(state: &RunState, node: &str, refusal: &Refusal) -> Fallthrough {
+    let (Some(role), Some(turn)) = (refusal.advanced.role, refusal.advanced.turn) else {
+        return Fallthrough::Unrecorded;
+    };
+    match served_in(state, node, &refusal.member, role, turn) {
+        Some(served) => Fallthrough::Served(served.session.identity.clone()),
+        None => Fallthrough::Refused,
+    }
+}
+
+/// The invocation that ran one member's side on one turn, if this run recorded
+/// one.
+///
+/// The member is part of the key as well as the side and the turn: a dispatch
+/// runs more than one member, each numbers its own turns, and pairing across two
+/// of them would name an identity that served somebody else's chain.
+fn served_in<'a>(
+    state: &'a RunState,
+    node: &str,
+    member: &MemberLabel,
+    role: oneagentgraph::event::Role,
+    turn: u64,
+) -> Option<&'a Served> {
+    state.served.get(node)?.iter().find(|served| {
+        served.member == *member && served.session.role == role && served.session.turn == turn
+    })
+}
+
 /// Every provider refusal one node's dispatches recorded, in arrival order.
 fn refusals_of<'a>(state: &'a RunState, node: &str) -> &'a [Refusal] {
     state.refusals.get(node).map_or(&[], Vec::as_slice)
 }
 
-/// How one provider refusal reads on a rendered line.
+/// How one candidate a chain stepped past reads on a rendered line.
 ///
 /// The side first, because it is the half a reader most often gets wrong: the
 /// two sides of a member prefer different identities, and an operator who
 /// restored the wrong subscription spent a night watching the same failure.
 ///
+/// A bare "refused" is reserved for a chain with **no** successful candidate.
+/// Every other ending says the chain fell through and what happened next, so no
+/// reader takes a recovery for the reason a node failed.
+///
 /// Every value on the line is a stranger's — an identity, a classification, a
-/// role, and a member name, all read off a sibling's envelope — so the whole
-/// phrase goes through the same control strip the rest of this module uses.
-fn refusal_phrase(refusal: &Refusal) -> String {
+/// role, and a member name, all read off a sibling's envelope, and for a
+/// recovery a second identity read off a second one — so the whole phrase goes
+/// through the same control strip the rest of this module uses.
+fn chain_phrase(record: &ChainRecord) -> String {
+    let refusal = record.refusal;
     // The role's own spelling, taken from the producing library's serialization
     // rather than matched into words of this crate's: the sides are that
     // library's vocabulary, and a second spelling of them here is a second thing
@@ -833,18 +965,45 @@ fn refusal_phrase(refusal: &Refusal) -> String {
     };
     // llmlint: ignore-end[changed_behavior_has_e2e]
     // What was counted, said as what it is: records carrying this same side,
-    // identity, and reason. The producer stamps a turn on each advance and
-    // nothing here reads it, so "on N turns" would be a measurement this line
-    // never made.
-    let again = if refusal.records.get() > 1 {
-        format!(", recorded {} times", refusal.records)
+    // identity, reason, and ending. The producer stamps a turn on each advance
+    // and nothing here counts them, so "on N turns" would be a measurement this
+    // line never made.
+    let again = if record.records.get() > 1 {
+        format!(", recorded {} times", record.records)
     } else {
         String::new()
     };
-    one_line(&format!(
-        "{side}: identity '{}' refused {reason}{again}",
-        refusal.advanced.identity
-    ))
+    let identity = &refusal.advanced.identity;
+    one_line(&match &record.became {
+        Fallthrough::Refused => format!("{side}: identity '{identity}' refused {reason}{again}"),
+        Fallthrough::Served(who) => {
+            format!("{side} fell through '{identity}' {reason} → served by '{who}'{again}")
+        }
+        Fallthrough::Unrecorded => format!(
+            "{side} fell through '{identity}' {reason}; nothing this run recorded names what \
+             served that turn{again}"
+        ),
+    })
+}
+
+/// How one judge verdict that failed a node reads on a rendered line.
+///
+/// Both halves are a stranger's — the criterion a graph declared and the
+/// sentence a judge wrote — so the phrase goes through the same control strip
+/// every other relayed value on these views does.
+fn verdict_phrase(verdict: &crate::report::FailedVerdict) -> String {
+    // A record that named neither is still worth a line: it says the node failed
+    // on its judge, which is the fact a provider line above it would otherwise
+    // be read as.
+    let criterion = match &verdict.criterion {
+        Some(criterion) => format!("'{criterion}'"),
+        None => "a criterion the record does not name".to_string(),
+    };
+    let reason = match &verdict.reason {
+        Some(reason) => reason.clone(),
+        None => "the record carries no reason".to_string(),
+    };
+    one_line(&format!("{criterion} failed — {reason}"))
 }
 
 /// How the dependencies that skipped a node read on that node's own line.
@@ -1382,12 +1541,31 @@ pub fn results(view: &RunView) -> String {
         {
             out.push_str(&format!("      detail: {}\n", one_line(detail)));
         }
-        // Which side asked, and which identity refused. A failed node's own
-        // detail says what the dispatch reported; this says who would not serve
-        // it, which is the fact a retry aimed at the wrong chain does not change.
+        // Why the judge failed it, then which chains ran out, then which
+        // recovered — in that order, because that is the order they matter in.
+        //
+        // The verdict is first because it is the thing that actually failed the
+        // node, and it used to be reachable only by opening the node's retained
+        // report by hand while three provider lines sat above it pointing
+        // somewhere else. A chain that ran out gets the `provider` line, which
+        // is a retry aimed at a subscription; a chain that recovered gets its
+        // own word, because a fix aimed at it changes nothing.
         if status == NodeStatus::Failed {
-            for refusal in refusals_of(&view.state, &node.id) {
-                out.push_str(&format!("      provider: {}\n", refusal_phrase(refusal)));
+            for verdict in crate::report::failed_verdicts(&view.events, &node.id) {
+                out.push_str(&format!("      verdict: {}\n", verdict_phrase(&verdict)));
+            }
+            let chains = chain_records(&view.state, &node.id);
+            for record in chains
+                .iter()
+                .filter(|record| record.became == Fallthrough::Refused)
+            {
+                out.push_str(&format!("      provider: {}\n", chain_phrase(record)));
+            }
+            for record in chains
+                .iter()
+                .filter(|record| record.became != Fallthrough::Refused)
+            {
+                out.push_str(&format!("      fallback: {}\n", chain_phrase(record)));
             }
         }
         // Why the run never asked this node to do anything. `skipped` on its own
@@ -2227,33 +2405,86 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// A node that failed because an identity chain ran out says which side
-    /// asked and which identity refused.
+    /// One advance a member's chain published, as the producer publishes it.
+    fn advanced(role: Option<&str>, turn: Option<u64>, identity: &str, reason: &str) -> Envelope {
+        advanced_for("worker", role, turn, identity, reason)
+    }
+
+    /// The same, for a named member: a dispatch runs more than one, and each
+    /// numbers its own turns.
+    fn advanced_for(
+        member: &str,
+        role: Option<&str>,
+        turn: Option<u64>,
+        identity: &str,
+        reason: &str,
+    ) -> Envelope {
+        let mut fields = vec![("identity", json!(identity)), ("reason", json!(reason))];
+        if let Some(role) = role {
+            fields.push(("role", json!(role)));
+        }
+        if let Some(turn) = turn {
+            fields.push(("turn", json!(turn)));
+        }
+        let mut envelope = relayed(
+            EventKind("fallback-advanced".into()),
+            Source::Agentgraph,
+            Some("build"),
+            &fields,
+        );
+        envelope.stream = "oneagentgraph-1".into();
+        envelope.labels.extra.insert("member".into(), member.into());
+        envelope
+    }
+
+    /// One invocation that ran, built through the producing library's own
+    /// payload type so what is folded is what that library publishes.
+    fn invocation(role: oneagentgraph::event::Role, turn: u64, identity: &str) -> Envelope {
+        invocation_for("worker", role, turn, identity)
+    }
+
+    /// The same, for a named member.
+    fn invocation_for(
+        member: &str,
+        role: oneagentgraph::event::Role,
+        turn: u64,
+        identity: &str,
+    ) -> Envelope {
+        let session = oneagentgraph::event::OneharnessSession {
+            role,
+            turn,
+            identity: identity.to_string(),
+            session_id: None,
+            history_id: "record-1".into(),
+            history_dir: "/store".into(),
+            history_project: "project".into(),
+            history_session: "record-1".into(),
+        };
+        let mut envelope = relayed(
+            EventKind("oneharness-session".into()),
+            Source::Agentgraph,
+            Some("build"),
+            &[],
+        );
+        envelope.stream = "oneagentgraph-1".into();
+        envelope.payload = match serde_json::to_value(&session) {
+            Ok(serde_json::Value::Object(payload)) => payload,
+            other => panic!("a session is not an object: {other:?}"),
+        };
+        envelope.labels.extra.insert("member".into(), member.into());
+        envelope
+    }
+
+    /// A node that failed says which chain **ran out** and which merely fell
+    /// through and was served — and never the second under the first's word.
     ///
     /// Both sides, because they are the point: a two-party member runs one chain
     /// per side and they prefer different identities, so a fix aimed at the wrong
-    /// one changes nothing and the run fails the same way again.
+    /// one changes nothing and the run fails the same way again. And a fix aimed
+    /// at a chain that recovered changes nothing at all.
     #[test]
-    fn a_failed_node_names_the_side_and_the_identity_that_refused() {
+    fn a_failed_node_tells_a_recovered_chain_from_one_that_ran_out() {
         let root = scratch("refusal");
-        let refused = |role: Option<&str>, identity: &str, reason: &str| {
-            let mut fields = vec![("identity", json!(identity)), ("reason", json!(reason))];
-            if let Some(role) = role {
-                fields.push(("role", json!(role)));
-            }
-            let mut envelope = relayed(
-                EventKind("fallback-advanced".into()),
-                Source::Agentgraph,
-                Some("build"),
-                &fields,
-            );
-            envelope.stream = "oneagentgraph-1".into();
-            envelope
-                .labels
-                .extra
-                .insert("member".into(), "worker".into());
-            envelope
-        };
         write_run(
             &root,
             "refused",
@@ -2269,11 +2500,18 @@ mod tests {
                     Some("build"),
                     &[],
                 ),
-                refused(Some("agent"), "claude-code", "quota"),
-                refused(Some("judge"), "codex", "rate_limit"),
+                advanced(Some("agent"), Some(1), "claude-code", "quota"),
+                // The agent side's turn went on to run under the next candidate,
+                // so its chain recovered and nothing about it failed this node.
+                invocation(
+                    oneagentgraph::event::Role::Agent,
+                    1,
+                    "claude-code:alternate",
+                ),
+                advanced(Some("judge"), Some(1), "codex", "rate_limit"),
                 // The same side refusing the same way again is one fact
                 // recorded twice, not two facts.
-                refused(Some("judge"), "codex", "rate_limit"),
+                advanced(Some("judge"), Some(1), "codex", "rate_limit"),
                 event(
                     crate::journal::PipelineKind::NodeSettled,
                     Some("build"),
@@ -2287,18 +2525,34 @@ mod tests {
 
         let survey = Survey::of(&root);
         let rendered = results(&survey.views[0]);
-        assert!(rendered.contains("the agent side"), "{rendered}");
-        assert!(rendered.contains("claude-code"), "{rendered}");
-        assert!(rendered.contains("(quota)"), "{rendered}");
-        assert!(rendered.contains("the judge side"), "{rendered}");
-        assert!(rendered.contains("codex"), "{rendered}");
-        assert!(rendered.contains("recorded 2 times"), "{rendered}");
+        assert!(
+            rendered.contains(
+                "fallback: the agent side fell through 'claude-code' (quota) → served by \
+                 'claude-code:alternate'"
+            ),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "provider: the judge side: identity 'codex' refused (rate_limit), recorded 2 times"
+            ),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("provider: the agent side"),
+            "a recovered chain was reported as a refusal:\n{rendered}"
+        );
 
         // The same attribution on the view a planner reads first.
         let rendered = status(&survey);
-        assert!(rendered.contains("build: failed —"), "{rendered}");
-        assert!(rendered.contains("the judge side"), "{rendered}");
-        assert!(rendered.contains("codex"), "{rendered}");
+        assert!(
+            rendered.contains("build: failed — the judge side: identity 'codex' refused"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("build: fallback — the agent side fell through 'claude-code'"),
+            "{rendered}"
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -2307,27 +2561,39 @@ mod tests {
     /// on is what this whole line exists to replace.
     #[test]
     fn an_unattributed_refusal_is_never_given_a_side_it_did_not_carry() {
-        let advanced = |reason: &str| oneagentgraph::event::FallbackAdvanced {
+        let advance = |reason: &str| oneagentgraph::event::FallbackAdvanced {
             identity: "codex".into(),
             reason: reason.into(),
             role: None,
             turn: None,
         };
         let single = Refusal {
-            advanced: advanced("auth"),
+            advanced: advance("auth"),
             member: MemberLabel::Named("worker".into()),
             records: std::num::NonZeroU64::MIN,
         };
+        // A record carrying neither side nor turn has nothing to pair with, so
+        // it is neither a recovery nor a refusal — and saying "refused" over it
+        // would be naming a subscription that was never the problem.
         assert_eq!(
-            refusal_phrase(&single),
-            "member 'worker': identity 'codex' refused (auth)"
+            chain_phrase(&ChainRecord {
+                refusal: &single,
+                became: Fallthrough::Unrecorded,
+                records: std::num::NonZeroU64::MIN,
+            }),
+            "member 'worker' fell through 'codex' (auth); nothing this run recorded names what \
+             served that turn"
         );
         let bare = Refusal {
-            advanced: advanced(""),
+            advanced: advance(""),
             member: MemberLabel::Unstamped,
             records: std::num::NonZeroU64::MIN,
         };
-        let phrase = refusal_phrase(&bare);
+        let phrase = chain_phrase(&ChainRecord {
+            refusal: &bare,
+            became: Fallthrough::Refused,
+            records: std::num::NonZeroU64::MIN,
+        });
         assert!(
             phrase.contains("a side the record does not name"),
             "{phrase}"
@@ -2335,6 +2601,21 @@ mod tests {
         assert!(
             phrase.contains("for a reason the record does not carry"),
             "{phrase}"
+        );
+        let unreadable = Refusal {
+            advanced: advance("auth"),
+            member: MemberLabel::Unreadable,
+            records: std::num::NonZeroU64::MIN,
+        };
+        let phrase = chain_phrase(&ChainRecord {
+            refusal: &unreadable,
+            became: Fallthrough::Served("codex:alternate".into()),
+            records: std::num::NonZeroU64::new(2).expect("two records"),
+        });
+        assert_eq!(
+            phrase,
+            "a side this build cannot read fell through 'codex' (auth) → served by \
+             'codex:alternate', recorded 2 times"
         );
 
         // An advance carrying no identity names nothing to act on. It is not an
@@ -2348,6 +2629,203 @@ mod tests {
         );
         nameless.stream = "oneagentgraph-1".into();
         assert!(projection::fold(&[nameless]).refusals.is_empty());
+    }
+
+    /// One chain, two turns, two endings: the recovered turn and the one that
+    /// ran out are two facts, and each is rendered as itself.
+    ///
+    /// The fold keeps them apart *by turn* for exactly this — a record that had
+    /// collapsed them could only ever be rendered as one of the two, and which
+    /// one it picked would decide where a reader went.
+    #[test]
+    fn one_chain_that_recovers_and_then_runs_out_says_both() {
+        let state = projection::fold(&[
+            advanced(Some("agent"), Some(1), "claude-code", "quota"),
+            invocation(
+                oneagentgraph::event::Role::Agent,
+                1,
+                "claude-code:alternate",
+            ),
+            // A second turn that ended the same way. Two records of one fact, so
+            // they are counted rather than repeated — the collapsing the fold
+            // cannot do, because it does not yet know how either ended.
+            advanced(Some("agent"), Some(2), "claude-code", "quota"),
+            invocation(
+                oneagentgraph::event::Role::Agent,
+                2,
+                "claude-code:alternate",
+            ),
+            // And a third that ran out of candidates, which is a different fact
+            // about the same chain and says so on its own line.
+            advanced(Some("agent"), Some(3), "claude-code", "quota"),
+        ]);
+        let records = chain_records(&state, "build");
+        let phrases = records.iter().map(chain_phrase).collect::<Vec<_>>();
+        assert_eq!(
+            phrases,
+            vec![
+                "the agent side fell through 'claude-code' (quota) → served by \
+                 'claude-code:alternate', recorded 2 times"
+                    .to_string(),
+                "the agent side: identity 'claude-code' refused (quota)".to_string(),
+            ]
+        );
+
+        // An invocation of the *other* side, or of another member, never answers
+        // for this one: each numbers its own turns, so pairing across either
+        // would name an identity that served somebody else's chain. A dispatch
+        // runs more than one member, and the double every journey here drives
+        // labels every envelope with the one it runs — so the second member is
+        // stated at this level, where a record can carry the label the producer
+        // stamps on a member of its own.
+        for crossing in [
+            invocation(oneagentgraph::event::Role::Agent, 1, "claude-code"),
+            invocation_for("reviewer", oneagentgraph::event::Role::Judge, 1, "codex-2"),
+        ] {
+            let crossed =
+                projection::fold(&[advanced(Some("judge"), Some(1), "codex", "quota"), crossing]);
+            assert_eq!(
+                chain_records(&crossed, "build")
+                    .iter()
+                    .map(chain_phrase)
+                    .collect::<Vec<_>>(),
+                vec!["the judge side: identity 'codex' refused (quota)".to_string()]
+            );
+        }
+
+        // And the member's *own* invocation still answers for it, so the
+        // isolation above is a boundary rather than a chain nothing can pair.
+        let paired = projection::fold(&[
+            advanced_for("reviewer", Some("judge"), Some(1), "codex", "quota"),
+            invocation_for("reviewer", oneagentgraph::event::Role::Judge, 1, "codex-2"),
+        ]);
+        assert_eq!(
+            chain_records(&paired, "build")
+                .iter()
+                .map(chain_phrase)
+                .collect::<Vec<_>>(),
+            vec!["the judge side fell through 'codex' (quota) → served by 'codex-2'".to_string()]
+        );
+    }
+
+    /// A judge verdict that failed a node is rendered from the settlement's own
+    /// inline copy, so the reason reaches a reader without a file being opened.
+    #[test]
+    fn a_verdict_that_failed_a_node_names_its_criterion_and_its_reason() {
+        let root = scratch("verdict");
+        let settled = |verdicts: serde_json::Value| {
+            let mut envelope = relayed(
+                EventKind("member-settled".into()),
+                Source::Agentgraph,
+                Some("build"),
+                &[("completed", json!(false)), ("verdict", verdicts)],
+            );
+            envelope.stream = "oneagentgraph-1".into();
+            envelope
+        };
+        write_run(
+            &root,
+            "verdict",
+            sys::pid(),
+            &[
+                event(
+                    crate::journal::PipelineKind::RunStarted,
+                    None,
+                    &[("plan", json!(plan()))],
+                ),
+                event(
+                    crate::journal::PipelineKind::NodeDispatched,
+                    Some("build"),
+                    &[],
+                ),
+                settled(json!([
+                    // Passed, so it failed nothing and is not the reason.
+                    {"criterion": "the branch is pushed", "kind": "boolean",
+                     "verdict": {"value": true, "reason": "it is"}},
+                    {"criterion": "the change builds", "kind": "boolean",
+                     "verdict": {"value": false, "reason": "cargo build fails in src/views.rs"}},
+                    // Numeric, which onejudge reports and fails nothing over.
+                    {"criterion": "how readable it is", "kind": "numeric",
+                     "verdict": {"value": 2.0, "reason": "dense"}},
+                    // A record that names neither half. It still says the node
+                    // failed on its judge, which is the fact a provider line
+                    // above it would otherwise be read as — and an empty string
+                    // is a criterion nobody wrote, not one worth a bare pair of
+                    // quotes on a line.
+                    {"criterion": "", "kind": "boolean", "verdict": {"value": false}},
+                    // Not one of the producing library's verdicts at all: it
+                    // names no kind. Dropped whole rather than mined for the
+                    // fields it does carry — a sentence lifted out of a record
+                    // this build cannot read would be attributed to a criterion
+                    // nobody scored.
+                    {"criterion": "the tests pass",
+                     "verdict": {"value": false, "reason": "the suite is red"}},
+                ])),
+                event(
+                    crate::journal::PipelineKind::NodeSettled,
+                    Some("build"),
+                    &[
+                        ("status", json!("failed")),
+                        ("outcome", json!("task-failed")),
+                    ],
+                ),
+            ],
+        );
+
+        let rendered = results(&Survey::of(&root).views[0]);
+        assert!(
+            rendered.contains(
+                "verdict: 'the change builds' failed — cargo build fails in src/views.rs"
+            ),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "verdict: a criterion the record does not name failed — the record carries no \
+                 reason"
+            ),
+            "{rendered}"
+        );
+        for absent in [
+            "the branch is pushed",
+            "how readable it is",
+            "the suite is red",
+        ] {
+            assert!(
+                !rendered.contains(absent),
+                "a verdict that failed nothing, or that this build cannot read, was named as \
+                 the failure:\n{rendered}"
+            );
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Every value relayed from a sibling's record reaches a rendered line
+    /// through the same strip: an identity that served a turn is a stranger's
+    /// string exactly as the one that refused is.
+    #[test]
+    fn a_relayed_value_never_carries_a_control_character_onto_a_line() {
+        let refusal = Refusal {
+            advanced: oneagentgraph::event::FallbackAdvanced {
+                identity: "codex".into(),
+                reason: "quota".into(),
+                role: Some(oneagentgraph::event::Role::Agent),
+                turn: Some(1),
+            },
+            member: MemberLabel::Named("worker".into()),
+            records: std::num::NonZeroU64::MIN,
+        };
+        let phrase = chain_phrase(&ChainRecord {
+            refusal: &refusal,
+            became: Fallthrough::Served("codex\r\nprovider: forged".into()),
+            records: std::num::NonZeroU64::MIN,
+        });
+        assert!(!phrase.contains('\n') && !phrase.contains('\r'), "{phrase}");
+        let phrase = verdict_phrase(&crate::report::FailedVerdict {
+            criterion: Some("it builds".into()),
+            reason: Some("no\nit does not".into()),
+        });
+        assert!(!phrase.contains('\n'), "{phrase}");
     }
 
     #[test]

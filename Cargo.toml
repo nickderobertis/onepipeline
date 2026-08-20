@@ -106,6 +106,13 @@ resolver = "2"
 [workspace.dependencies]
 oneagentgraph = "0.3.0"
 onevcs = "0.8.0"
+# **Not a third sibling this crate composes** — nothing here launches, calls, or
+# spawns onejudge. It is one vocabulary: the verdicts a two-party member settles
+# on, which `oneagentgraph` copies onto the `member-settled` this crate relays.
+# It adds nothing to the dependency graph, because `oneagentgraph` already builds
+# it — and it must resolve to the version *that* pin does. `src/report.rs` is
+# where the build fails if it ever resolves to two, and why.
+onejudge = "0.4"
 # The sibling's own test-support crate, from the **same** revision as the library
 # it implements — here by resolving both from the registry at the releases cut
 # from one commit: `onevcs-testing` v0.2.7 and `onevcs` v0.8.0 are the same tag,
@@ -180,6 +187,8 @@ thiserror = "2"
 # why both are registry releases.
 oneagentgraph = { workspace = true }
 onevcs = { workspace = true }
+# Read-only vocabulary, not a composed sibling — see `[workspace.dependencies]`.
+onejudge = { workspace = true }
 
 # Process liveness is the one host fact this crate cannot get from `std` on the
 # MSRV floor, and every `DRIVER DEAD` / `PARKED` verdict rests on it. Both are
