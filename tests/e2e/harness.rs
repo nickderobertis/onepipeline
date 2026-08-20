@@ -1087,6 +1087,15 @@ impl World {
         read_jsonl(&self.fakes.join("observer-saw.jsonl"))
     }
 
+    /// What a supervised observer member raised, what it was ruled, and what
+    /// ended it — in order.
+    ///
+    /// Written by the member's own judge-side exchange, so a journey reads the
+    /// supervision rather than inferring it from the channel's own files.
+    pub fn observer_supervision(&self) -> Vec<Value> {
+        read_jsonl(&self.fakes.join("observer-supervision.jsonl"))
+    }
+
     /// The question this run's channel hands its manager, read the way a manager
     /// reads one: `onepipeline next`.
     ///

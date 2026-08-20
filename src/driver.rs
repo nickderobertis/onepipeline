@@ -1759,7 +1759,7 @@ fn submit(paths: &RunPaths, envelope: &Reply) -> Result<i32> {
                 }
             }
             lock.release();
-            channel.answer(envelope)?;
+            channel.answer_if_verdict(envelope)?;
             println!("{}", json!({"reply": 0, "state": "applied"}));
             Ok(EXIT_SUCCESS)
         }
@@ -1768,7 +1768,7 @@ fn submit(paths: &RunPaths, envelope: &Reply) -> Result<i32> {
             let deadline = Instant::now() + Duration::from_secs(reply_timeout_seconds());
             while Instant::now() < deadline {
                 if let Some(outcome) = channel.outcome_of(id) {
-                    channel.answer(envelope)?;
+                    channel.answer_if_verdict(envelope)?;
                     if outcome.applied {
                         println!("{}", json!({"reply": id, "state": "applied"}));
                         return Ok(EXIT_SUCCESS);
@@ -1783,7 +1783,12 @@ fn submit(paths: &RunPaths, envelope: &Reply) -> Result<i32> {
             }
 
             // Accepted and durable, but not reconciled within the timeout: they
-            // remain queued, and this is not an instruction to resend.
+            // remain queued, and this is not an instruction to resend. The
+            // verdict half does not wait on that — it answers a question rather
+            // than the graph, and the reader waiting for it is not the reader
+            // waiting for the edits — so it is delivered here as it is on every
+            // other path, and only the edits are reported still queued.
+            channel.answer_if_verdict(envelope)?;
             println!("{}", json!({"reply": id, "state": "queued"}));
             Ok(EXIT_QUEUED)
         }
@@ -1863,8 +1868,11 @@ fn serve(args: &RunArgs) -> Result<i32> {
             ]),
         )?;
 
-        // Wait for whichever reader claims the planner's answer first. A reply
-        // reaches exactly one reader, and at a boundary this is it.
+        // Wait for whichever reader claims the planner's verdict first. A reply
+        // reaches exactly one reader, and at a boundary this is it — and a live
+        // edit arriving while this waits is not one of them: it carries no
+        // ruling, so it goes to the command path and leaves this wait standing
+        // rather than ending the member with an envelope it cannot read.
         let answer = wait_for_reply(&channel)?;
         println!(
             "{}",
@@ -1910,7 +1918,7 @@ fn blocking_by_default() -> bool {
 fn wait_for_reply(channel: &ChannelState) -> Result<Reply> {
     let deadline = Instant::now() + Duration::from_secs(reply_timeout_seconds());
     while Instant::now() < deadline {
-        if let Some(claimed) = channel.claim_replies()?.into_iter().next_back() {
+        if let Some(claimed) = channel.claim_reply()? {
             return Ok(claimed.reply);
         }
         std::thread::sleep(ATTACH_POLL);

@@ -302,7 +302,14 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         // one to produce *nothing* is a scenario this suite needs, so the
         // announcement belongs to the launched graph rather than to every run.
         announce(args, &graph);
-        return fake::observe(dir);
+        let watched = fake::observe(dir);
+        if watched != ExitCode::SUCCESS {
+            return watched;
+        }
+        // The member's other side, where a journey asks for one: a `kind:
+        // onejudge` monitor is supervised, and what supervises it is the command
+        // provider its graph names.
+        return fake::supervise(dir, &graph);
     }
 
     let node = fake::label(args, "onepipeline.node").unwrap_or_else(|| "unknown".into());

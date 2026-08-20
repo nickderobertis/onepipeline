@@ -446,6 +446,241 @@ pub fn observe(dir: &Path) -> std::process::ExitCode {
     std::process::ExitCode::SUCCESS
 }
 
+/// The script naming how many supervision turns the observer member takes.
+///
+/// Absent, this double is the watcher it always was and runs no judge side at
+/// all — which is what every journey that never asked for one keeps getting.
+const SUPERVISE_SCRIPT: &str = "observer.supervise";
+
+const SUPERVISION_RECORD: &str = "observer-supervision.jsonl";
+
+/// Act as the observer member's **judge side**, through the provider its graph
+/// declares.
+///
+/// A `kind: onejudge` member is two sides in one conversation: the monitor takes
+/// a turn, and the side supervising it answers. Where that side is a **command
+/// provider**, the answer is one line of the command's stdout, and it has to be
+/// a supervisor ruling — a provider that answers with anything else has not
+/// supervised the turn, and the member ends on it. That is the boundary the
+/// whole channel hangs off, so this acts it out: the provider the graph names is
+/// run, a frame goes to it, the line that comes back must be a ruling, and a
+/// member handed something else dies saying so, in the words the real one used.
+///
+/// The command is read out of the graph document rather than restated here,
+/// through the sibling's own parser: a graph that named a different provider
+/// would otherwise be supervised by the one this double remembered.
+pub fn supervise(dir: &Path, graph: &str) -> std::process::ExitCode {
+    use std::io::{BufRead, BufReader, Write};
+
+    let Some(turns) = node_script(dir, "observer", "supervise") else {
+        return std::process::ExitCode::SUCCESS;
+    };
+    let Ok(turns) = turns.trim().parse::<u32>() else {
+        fail(&format!(
+            "{SUPERVISE_SCRIPT} holds {turns:?}, which is not a number of turns"
+        ));
+    };
+    let run = match std::env::var(RUN_ID_ENV) {
+        Ok(run) if !run.is_empty() => run,
+        _ => fail(&format!("{RUN_ID_ENV} is unset: no run to supervise")),
+    };
+    let record = dir.join(SUPERVISION_RECORD);
+    // A graph this double cannot supervise through is recorded before it is
+    // reported: the launcher does not relay a graph's stderr, so a journey
+    // asserting that the misconfiguration was *named* has nowhere else to read
+    // it — and "named" is exactly what distinguishes this from the member dying
+    // on whatever an unchecked command resolved to.
+    let (program, arguments) = match judge_command(graph) {
+        Ok(command) => command,
+        Err(why) => {
+            append(
+                &record,
+                &serde_json::json!({"run": run, "misconfigured": why}).to_string(),
+            );
+            fail(&why)
+        }
+    };
+
+    let mut provider = match std::process::Command::new(&program)
+        .args(&arguments)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(provider) => provider,
+        Err(error) => fail(&format!(
+            "cannot run the judge side {program} {arguments:?}: {error}"
+        )),
+    };
+    let mut asking = provider
+        .stdin
+        .take()
+        .expect("the provider's stdin is piped");
+    let mut answering = BufReader::new(
+        provider
+            .stdout
+            .take()
+            .expect("the provider's stdout is piped"),
+    );
+
+    for turn in 1..=turns {
+        let asked = format!("turn {turn}: the run has been quiet — anything to correct?");
+        append(
+            &record,
+            &serde_json::json!({"run": run, "turn": turn, "asked": asked}).to_string(),
+        );
+        let frame =
+            serde_json::json!({"kind": "monitor-question", "message": asked, "blocking": true});
+        if let Err(error) = writeln!(asking, "{frame}").and_then(|()| asking.flush()) {
+            fail(&format!(
+                "cannot raise turn {turn} with the judge side: {error}"
+            ));
+        }
+
+        let mut answer = String::new();
+        match answering.read_line(&mut answer) {
+            Err(error) => fail(&format!("cannot read the judge side's answer: {error}")),
+            Ok(0) => fail(&format!(
+                "the judge side ended without answering turn {turn}"
+            )),
+            Ok(_) => {}
+        }
+        let answer = answer.trim().to_string();
+
+        // The one thing the supervising side may not be handed. A graph edit is
+        // not a ruling about this turn, so the member has not been supervised
+        // and cannot take another: it ends here, saying what it was given.
+        if !is_a_ruling(&answer) {
+            append(
+                &record,
+                &serde_json::json!({"run": run, "turn": turn, "died": answer}).to_string(),
+            );
+            eprintln!(
+                "provider error (supervisor): channel-serve: the planner channel's answer \
+                 for run {run} is not a supervisor ruling: {answer}"
+            );
+            return std::process::ExitCode::FAILURE;
+        }
+        append(
+            &record,
+            &serde_json::json!({"run": run, "turn": turn, "ruling": answer}).to_string(),
+        );
+    }
+
+    // Supervision is over because this member has taken every turn it was
+    // scripted for; the provider goes with it. How it went is part of the
+    // supervision: a judge side that could not be waited on, or that ended
+    // badly, is a member whose conversation did not close cleanly, and a
+    // journey reading only the rulings would call that a clean run.
+    drop(asking);
+    match provider.wait() {
+        Err(error) => fail(&format!("cannot wait for the judge side to end: {error}")),
+        Ok(status) if !status.success() => fail(&format!(
+            "the judge side ended badly after {turns} turn(s): {status}"
+        )),
+        Ok(_) => std::process::ExitCode::SUCCESS,
+    }
+}
+
+/// Whether one answer from the supervising side is a ruling at all.
+///
+/// A **typed** reading rather than a probe for keys: a `reason` that is a number
+/// is not a reason, and a side that accepted it would be a weaker oracle than
+/// the provider it stands in for.
+fn is_a_ruling(answer: &str) -> bool {
+    // llmlint: ignore[boundary_inputs_validated] rejecting unknown fields here would
+    // invert the very routing this double exists to police: an envelope carrying both
+    // halves arrives with `version` and `commands` beside its verdict, and denying those
+    // would make the one shape that *is* a ruling read as not one. The validation this
+    // boundary owes is that each half it does name is the type the wire declares, which
+    // is what the typed read below gives it; the crate under test is what owns the
+    // envelope's own strictness, and it has `deny_unknown_fields` on `Reply`.
+    // llmlint: ignore[invalid_states_unrepresentable] three independent options is the
+    // wire, and the state the rule wants unrepresentable — no half present — is the
+    // exact input this function was written to recognize. A type that could not hold it
+    // could not be parsed into from an answer that had it, and the member would die on a
+    // deserialization error instead of the named refusal. No value of it escapes: what
+    // leaves is the yes-or-no, so nothing downstream can hold a ruling that carries none.
+    #[derive(serde::Deserialize)]
+    struct Halves {
+        completion: Option<bool>,
+        message: Option<String>,
+        reason: Option<String>,
+    }
+
+    serde_json::from_str::<Halves>(answer).is_ok_and(|halves| {
+        halves.completion.is_some() || halves.message.is_some() || halves.reason.is_some()
+    })
+}
+
+/// The program and arguments the graph declares its observer member's judge
+/// side is, resolved for this world — or why the document names none.
+///
+/// `${VAR}` in an argument is the environment the launcher composed — the run id
+/// reaches the provider that way and no other — and `onepipeline` is the build
+/// under test rather than whatever an operator has installed, which is the same
+/// substitution [`ask_manager`] makes.
+fn judge_command(graph: &str) -> std::result::Result<(String, Vec<String>), String> {
+    let (program, arguments) = declared_judge_command(graph)?;
+    let program = match expand(&program) {
+        program if program == "onepipeline" => match std::env::var(CLI_BIN_ENV) {
+            Ok(cli) if !cli.is_empty() => cli,
+            _ => fail(&format!(
+                "{CLI_BIN_ENV} is unset: no build to supervise through"
+            )),
+        },
+        program => program,
+    };
+    Ok((program, arguments.iter().map(|part| expand(part)).collect()))
+}
+
+/// The command one graph document declares a command judge with, or why it
+/// declares none this double can run.
+///
+/// The document is external input like any other, and it is read through
+/// `oneagentgraph`'s own config types **and its own `validate`** — so a graph
+/// this double acts out is one the real CLI would run, and the rules it is held
+/// to, among them that a command judge needs a command, are the sibling's rather
+/// than a second copy kept here. Answers rather than exiting, so the refusal is
+/// the caller's to report at its own boundary and a test can state it.
+fn declared_judge_command(graph: &str) -> std::result::Result<(String, Vec<String>), String> {
+    use oneagentgraph::config::{JudgeSide, Member};
+
+    let text = std::fs::read_to_string(graph)
+        .map_err(|error| format!("cannot read the graph {graph}: {error}"))?;
+    let config: oneagentgraph::config::GraphConfig = serde_norway::from_str(&text)
+        .map_err(|error| format!("{graph} is not an agent graph: {error}"))?;
+    oneagentgraph::config::validate(&config)
+        .map_err(|refusal| format!("{graph} is not a graph oneagentgraph would run: {refusal}"))?;
+    let declared = config
+        .members
+        .values()
+        .find_map(|member| match member {
+            Member::Onejudge(member) => match &member.judge {
+                JudgeSide::Command(command) => Some(command.command.clone()),
+                JudgeSide::Harness(_) => None,
+            },
+            _ => None,
+        })
+        .ok_or_else(|| format!("{graph} declares no command judge to supervise with"))?;
+    let (program, arguments) = declared
+        .split_first()
+        .ok_or_else(|| format!("{graph} declares a command judge with no command to run"))?;
+    Ok((program.clone(), arguments.to_vec()))
+}
+
+/// One `${VAR}` reference in a declared command, from this process's own
+/// environment.
+fn expand(part: &str) -> String {
+    let Some(name) = part
+        .strip_prefix("${")
+        .and_then(|part| part.strip_suffix('}'))
+    else {
+        return part.to_string();
+    };
+    std::env::var(name).unwrap_or_else(|_| fail(&format!("{name} is unset: {part} names nothing")))
+}
+
 /// The launch record of the run this observer was started for.
 ///
 /// Resolved from the same two variables the launcher hands every launched
