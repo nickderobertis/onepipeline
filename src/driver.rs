@@ -24,7 +24,7 @@ use crate::agentgraph;
 use crate::channel::{Author, ChannelState, Command, Reply, Surface, SurfaceKind};
 use crate::cli::{
     AttestArgs, ChannelCommand, Cli, OptionalRunArgs, ReadArgs, ReplyArgs, RunArgs, RunsArgs,
-    StartArgs, StopArgs, SurfaceArgs, TelemetryArgs, TranscriptArgs, DAG_GRAPH_OFF,
+    StartArgs, StopArgs, SurfaceArgs, TelemetryArgs, TranscriptArgs, ValidateArgs, DAG_GRAPH_OFF,
 };
 use crate::concurrency::{self, Liveness, State};
 use crate::edits;
@@ -76,6 +76,7 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
     use crate::cli::Command as Verb;
     match cli.command {
         Verb::Start(args) => start(&args),
+        Verb::Validate(args) => validate(&args),
         Verb::Adopt(args) => adopt(&args),
         Verb::DriveRun(args) => drive_run(&args),
         Verb::Channel(ChannelCommand::Serve(args)) => serve(&args),
@@ -562,6 +563,26 @@ fn start(args: &StartArgs) -> Result<i32> {
     let mut observer = observe(&paths, &mut record, goal, agentgraph::GraphOutput::Relayed)?;
     ledger::write_json(&paths.launch(), &record)?;
     attach(&paths, observer.as_mut(), lock)
+}
+
+/// `onepipeline validate`.
+///
+/// The first two statements of [`start`] and nothing after them, so validity has
+/// one definition rather than two that can drift: a plan this answers `0` for is
+/// one that launch reads and accepts, and a plan it refuses is refused there in
+/// the same words. Deliberately *before* everything `start` does next — the
+/// launch directory, the graph references, the run id, the ownership lock — so
+/// this verb reads the plan file and touches nothing else, and mints nothing a
+/// live run beside it could collide with.
+///
+/// A plan is validated as the `schema_version` it declares, exactly as a launch
+/// validates it: this is that reading asked as a question, not a stricter one.
+/// Silence on stdout is the answer; the exit code carries it, and only a refusal
+/// has anything to say.
+fn validate(args: &ValidateArgs) -> Result<i32> {
+    let plan = Plan::load(&args.plan)?;
+    graph::validate(&plan)?;
+    Ok(EXIT_SUCCESS)
 }
 
 /// Launch the run's observer graph, when it was launched with one.

@@ -2026,6 +2026,7 @@ fn attach_and_detach_are_the_alternatives_the_contract_writes_them_as() {
 fn every_command_the_contract_names_parses() {
     let invocations: &[(&str, &[&str])] = &[
         ("start", &["start", "plan.json"]),
+        ("validate", &["validate", "plan.json"]),
         ("adopt", &["adopt", "run-1"]),
         ("channel serve", &["channel", "serve", "run-1"]),
         ("next", &["next", "run-1"]),
@@ -2080,7 +2081,11 @@ fn the_contract_names_every_command_and_view_this_crate_offers() {
     );
     assert_contract_names(
         "driver verb",
-        &["onepipeline channel serve RUN", "onepipeline adopt RUN"],
+        &[
+            "onepipeline channel serve RUN",
+            "onepipeline adopt RUN",
+            "onepipeline validate PLAN",
+        ],
     );
 
     // The views, as the contract lists them.
