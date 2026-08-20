@@ -2564,3 +2564,109 @@ fn the_readmes_interface_claims_match_the_code_they_describe() {
         );
     }
 }
+
+/// The paragraph of `doc` that opens with `marker`, as one line of words.
+///
+/// Prose in both documents is wrapped, so a claim straddles a line break as
+/// readily as it sits on one; the words are rejoined before anything looks for
+/// a claim in them.
+fn paragraph_opening_with(doc: &str, marker: &str) -> String {
+    let start = doc
+        .find(marker)
+        .unwrap_or_else(|| panic!("no paragraph opens with `{marker}`"));
+    let body = &doc[start..];
+    let end = body.find("\n\n").unwrap_or(body.len());
+    body[..end].split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The README's `validate` paragraph is a second telling of a contract the
+/// crate owns, and this is what reconciles it with the first.
+///
+/// The paragraph restates the verb's side effects, its exit codes, the stream
+/// its refusal goes to, and what that refusal names. `docs/contract.md` states
+/// each of those first and the code implements them, so there are three
+/// tellings and only one authority. Every claim the README makes is paired here
+/// with the contract's own wording for the same claim — the two documents say
+/// it differently, which is why a diff of them is not the gate — and the exit
+/// codes are pinned to the constants the binary exits with. Drop a promise from
+/// either document, or change what the crate exits, and this fails rather than
+/// leaving the README promising something nothing else does.
+#[test]
+fn the_readmes_validate_paragraph_matches_the_contract_and_the_verb() {
+    let raw = std::fs::read_to_string(repo_root().join("README.md")).expect("the README ships");
+    let readme = paragraph_opening_with(&raw, "`onepipeline validate plan.json`");
+    let contract = paragraph_opening_with(CONTRACT, "`onepipeline validate PLAN`");
+
+    let claims: &[(String, &str)] = &[
+        // The exit codes, in the crate's own constants: what the README maps
+        // them to, what the contract maps them to, and what the binary returns.
+        (
+            format!("exits `{EXIT_SUCCESS}` when the plan loads and validates"),
+            "Exit `0` = the plan loads and validates",
+        ),
+        (
+            format!("`{EXIT_REFUSED}` when it could not be read or was refused"),
+            "Exit `2` = the plan could not be read, or validation refused it",
+        ),
+        // The stream the refusal goes to, and what it names once it is there.
+        ("on stderr".to_string(), "**stderr**"),
+        (
+            "naming the node and the field".to_string(),
+            "naming the node and the field",
+        ),
+        (
+            "the refusal `start` would print for that same plan".to_string(),
+            "the wording `start` produces for that same plan",
+        ),
+        // The side effects, each in the two documents' own spellings. The
+        // README says less than the contract — it omits the launch directory —
+        // which is safe; what is not safe is the README promising an effect
+        // away that the contract no longer promises away.
+        ("mints nothing".to_string(), "mints nothing"),
+        ("no run,".to_string(), "no run id,"),
+        ("no session,".to_string(), "no session,"),
+        ("no ledger entry,".to_string(), "no ledger write,"),
+        ("no agent graph".to_string(), "no agent graph"),
+        (
+            "safe to run beside live work".to_string(),
+            "safe to run beside live work",
+        ),
+    ];
+    for (in_readme, in_contract) in claims {
+        assert!(
+            readme.contains(in_readme.as_str()),
+            "the README's validate paragraph no longer claims `{in_readme}`, \
+             which docs/contract.md still promises as `{in_contract}`"
+        );
+        assert!(
+            contract.contains(in_contract),
+            "docs/contract.md no longer promises `{in_contract}`, which the \
+             README's validate paragraph still claims as `{in_readme}`"
+        );
+    }
+
+    // The invocation the README prints, parsed by the real CLI: the verb it
+    // names is a verb this binary offers, the operand it shows is read as the
+    // plan, and there is nothing beside it — a flag here would be a way to be
+    // refused differently from the launch this verb stands for.
+    let printed = raw
+        .split('`')
+        .find(|token| token.starts_with("onepipeline validate "))
+        .expect("the README prints a `validate` invocation");
+    let argv = printed.split_whitespace().collect::<Vec<_>>();
+    let parsed = Cli::try_parse_from(&argv)
+        .unwrap_or_else(|err| panic!("the README's `{printed}` does not parse: {err}"));
+    let Command::Validate(args) = parsed.command else {
+        panic!("the README's `{printed}` is not this crate's validate verb");
+    };
+    assert_eq!(
+        argv.len(),
+        3,
+        "the README prints `{printed}`, which is more than the one operand the verb takes"
+    );
+    assert_eq!(
+        args.plan,
+        Path::new(argv[2]),
+        "the README's validate invocation shows an operand the verb does not read as the plan"
+    );
+}
