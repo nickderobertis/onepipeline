@@ -1037,14 +1037,43 @@ fn adopt(args: &RunArgs) -> Result<i32> {
     let _ = std::fs::copy(paths.launch(), previous);
     ledger::write_json(&paths.launch(), &record)?;
 
+    // What the dead driver was in the middle of. Recorded with the adoption
+    // itself, because the fresh loop below will dispatch these nodes again and
+    // the session each one was working in is the only record of where its
+    // commits are: named here, that branch is in the run's own account of the
+    // adoption rather than only in a process that has exited.
+    let abandoned = view.state.sessions_in_flight();
+    for (node, session) in &abandoned {
+        eprintln!(
+            "onepipeline: '{node}' had a dispatch in flight; its work is on branch \
+             '{}' in onevcs session {}, and the node is pinned there so the run \
+             continues that branch rather than cutting a second one beside it",
+            session.branch(),
+            session.token().0
+        );
+    }
+    let mut adopted = vec![
+        ("adoption", json!(record.adoptions)),
+        ("pid", json!(record.pid)),
+    ];
+    if !abandoned.is_empty() {
+        adopted.push((
+            journal::ADOPTED_ABANDONED,
+            json!(abandoned
+                .iter()
+                .map(|(node, session)| json!({
+                    "node": node,
+                    "session": session.token().0,
+                    "branch": session.branch().as_str(),
+                }))
+                .collect::<Vec<_>>()),
+        ));
+    }
     let mut journal = Journal::open(&paths);
     journal.emit(
         journal::PipelineKind::DriverAdopted,
         journal::labels(&paths.run, None),
-        journal::payload(&[
-            ("adoption", json!(record.adoptions)),
-            ("pid", json!(record.pid)),
-        ]),
+        journal::payload(&adopted),
     )?;
 
     // Relayed: an adoption attaches, so this process stays to read it. The goal

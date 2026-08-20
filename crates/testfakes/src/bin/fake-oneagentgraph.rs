@@ -436,6 +436,14 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         fake::ask_manager(&question);
     }
 
+    // Records on the session's own stream that no producer writes. Scripted here
+    // because a stream is what the dispatch's session is being followed through,
+    // and a record a reader cannot act on arrives the same way every other one
+    // does.
+    if let Some(script) = fake::node_script(dir, &key, "session-records") {
+        session_records(args, &script);
+    }
+
     // A worker that publishes its own branch before it is finished with. This is
     // the incident: an agent that ran `onevcs publish` in its final turn opened
     // a change request the engine's own publication step never ran, and then
@@ -564,24 +572,12 @@ fn refuse_candidates(args: &[String], node: &str, step: Option<&str>, script: &s
 /// derivation `tests/e2e/gate.sh` documents and uses. A `--dir` that is not one
 /// is a misconfigured test rather than a scenario, so it ends the process.
 fn publish_session(args: &[String], title: &str) {
-    let Some(workspace) = fake::flag(args, "--dir") else {
-        fake::fail("publishing a dispatch's session needs its --dir to find the session from");
-    };
-    let worktree = std::path::Path::new(&workspace);
-    if worktree.file_name().and_then(|name| name.to_str()) != Some("worktree") {
-        fake::fail(&format!(
-            "a dispatch scripted to publish ran in {workspace}, which is not a session worktree"
-        ));
-    }
-    let token = worktree
-        .parent()
-        .and_then(|run| run.file_name())
-        .and_then(|token| token.to_str())
-        .unwrap_or_else(|| fake::fail(&format!("no session token above {workspace}")));
+    let worktree = session_worktree(args, "publishing a dispatch's session");
+    let token = session_token(&worktree);
 
     let published = std::process::Command::new("onevcs")
-        .args(["publish", token, "--title", title])
-        .current_dir(worktree)
+        .args(["publish", &token, "--title", title])
+        .current_dir(&worktree)
         .stdin(std::process::Stdio::null())
         .output();
     let published = match published {
@@ -607,6 +603,164 @@ fn publish_session(args: &[String], title: &str) {
             "`onevcs publish {token}` exited {}: {}",
             published.status.code().unwrap_or(-1),
             String::from_utf8_lossy(&published.stderr).trim()
+        ));
+    }
+}
+
+/// The session worktree this dispatch is running in.
+///
+/// `--dir` is this process's external input, and a dispatch that names one which
+/// is not a session worktree is a misconfigured test rather than a scenario, so
+/// it ends the process.
+fn session_worktree(args: &[String], what: &str) -> std::path::PathBuf {
+    let Some(workspace) = fake::flag(args, "--dir") else {
+        fake::fail(&format!("{what} needs its --dir to find the session from"));
+    };
+    let worktree = std::path::PathBuf::from(&workspace);
+    if worktree.file_name().and_then(|name| name.to_str()) != Some("worktree") {
+        fake::fail(&format!(
+            "a dispatch scripted for {what} ran in {workspace}, which is not a session worktree"
+        ));
+    }
+    worktree
+}
+
+/// The session's own token, which is the name of the directory above its
+/// worktree — `$ONEVCS_HOME/<identity>/runs/<token>/worktree`, the same
+/// derivation `tests/e2e/gate.sh` documents and uses.
+fn session_token(worktree: &std::path::Path) -> String {
+    let token = worktree
+        .parent()
+        .and_then(|run| run.file_name())
+        .and_then(|token| token.to_str())
+        .unwrap_or_else(|| fake::fail(&format!("no session token above {}", worktree.display())));
+    // The name is walked out of `--dir`, which is this process's external input,
+    // and it goes on to address a session and to name a file. A directory that is
+    // not a token is a misconfigured test rather than a scenario, and saying so
+    // here beats writing a stream somewhere nobody looks.
+    if token.is_empty()
+        || !token
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        fake::fail(&format!(
+            "the directory above {} is {token:?}, which is no session token",
+            worktree.display()
+        ));
+    }
+    token.to_owned()
+}
+
+/// Write records onto the session's own stream, as a process holding its token.
+///
+/// A session's stream is a file any process holding the token appends to, and a
+/// dispatch is one: it runs *inside* the session's worktree, and the token is
+/// the name of the directory above it. What a reader of the merged store meets
+/// is therefore whatever that file holds, and this is a double writing to it —
+/// the same thing the `<key>.publishes` neighbour does through `onevcs`, one
+/// layer lower down.
+///
+/// It is deliberately not how a `change-opened` is produced: a real command
+/// makes those, so writing one here would prove the fixture rather than the
+/// composition. What is written here is what no command makes — records whose
+/// values a reader cannot act on — for the same reason the `<key>.unreadable`
+/// line above is written by hand: a reader's refusal has no other producer.
+///
+/// Scripted `<key>.session-records`, a JSON array of `{token?, branch?, node?}`.
+/// The values are the journey's; the record around them, and the stream it goes
+/// on, are this dispatch's own session.
+fn session_records(args: &[String], script: &str) {
+    let worktree = session_worktree(args, "writing a session record");
+    let token = session_token(&worktree);
+    let Ok(serde_json::Value::Array(records)) = serde_json::from_str::<serde_json::Value>(script)
+    else {
+        fake::fail("a session-records script holds a JSON array of records");
+    };
+    let home = std::env::var("ONEVCS_HOME")
+        .unwrap_or_else(|_| fake::fail("writing a session record needs ONEVCS_HOME"));
+    let stream = std::path::Path::new(&home)
+        .join("streams")
+        .join(format!("{token}.ndjson"));
+    let mut lines = String::new();
+    for record in records {
+        let serde_json::Value::Object(record) = record else {
+            fake::fail(&format!(
+                "a session-records script holds objects of {{token?, branch?, node?}}, and \
+                 one element is {record}"
+            ));
+        };
+        // Every key it declares and nothing else, each a string or `null`: a typo
+        // would otherwise become a record the journey did not write and did not
+        // mean, and it would assert against that record's refusal rather than the
+        // one it was about. `null` is how a journey says a field is *absent*,
+        // which is a different record from one naming it empty.
+        for (key, value) in &record {
+            if !["token", "branch", "node"].contains(&key.as_str()) {
+                fake::fail(&format!(
+                    "a session-records element names {key:?}, which is no field of \
+                     {{token?, branch?, node?}}"
+                ));
+            }
+            if !value.is_string() && !value.is_null() {
+                fake::fail(&format!(
+                    "a session-records element gives {key:?} as {value}, which is neither \
+                     a string nor null"
+                ));
+            }
+        }
+        let named = |key: &str| record.get(key).and_then(serde_json::Value::as_str);
+        // The session this dispatch is working in, and the shape `onevcs` writes
+        // a record of one in — its own [`Session`], serialized as the payload the
+        // library builds from the same value. What the script names replaces a
+        // field of it; what it names as `null` takes the field out.
+        let session = onevcs::Session {
+            token: onevcs::SessionToken(named("token").unwrap_or(&token).to_owned()),
+            worktree: worktree.clone(),
+            branch: named("branch").unwrap_or("onevcs/scripted").to_owned(),
+            base: "main".to_owned(),
+        };
+        let Ok(serde_json::Value::Object(mut payload)) = serde_json::to_value(&session) else {
+            fake::fail("a onevcs session no longer renders as an event payload");
+        };
+        for key in ["token", "branch"] {
+            if record.get(key).is_some_and(serde_json::Value::is_null) {
+                payload.remove(key);
+            }
+        }
+        let envelope = onevcs::Envelope {
+            v: 1,
+            ts: fake::now(),
+            stream: token.clone(),
+            // A number the session's own writer never uses: `onevcs` numbers a
+            // stream from one, so this cannot move the mark a follow reads on
+            // from and cannot hide a record the session really wrote.
+            seq: 0,
+            source: onevcs::Source::Vcs,
+            kind: onevcs::EventKind::SessionOpened,
+            labels: onevcs::Labels {
+                node: named("node").map(str::to_owned),
+                ..onevcs::Labels::default()
+            },
+            payload,
+            artifacts: Vec::new(),
+        };
+        match serde_json::to_string(&envelope) {
+            Ok(line) => {
+                lines.push_str(&line);
+                lines.push('\n');
+            }
+            Err(error) => fake::fail(&format!("cannot render a session record: {error}")),
+        }
+    }
+    let written = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&stream)
+        .and_then(|mut file| std::io::Write::write_all(&mut file, lines.as_bytes()));
+    if let Err(error) = written {
+        fake::fail(&format!(
+            "cannot write the session stream at {}: {error}",
+            stream.display()
         ));
     }
 }

@@ -1344,7 +1344,7 @@ pub(crate) struct Drained {
     /// could produce a different answer.
     pub reached: Reached,
     /// The `onevcs` session it left open, when its workspace was one.
-    pub session: Option<String>,
+    pub session: Option<onevcs::SessionToken>,
     /// The branch that session has checked out.
     pub branch: Option<String>,
 }
@@ -1521,8 +1521,15 @@ pub(crate) fn drain(
     }
 
     let waited = handle.wait();
+    // Where a session token stops being text and starts addressing a session.
+    // `DispatchOutcome::session` is the contract's own `Option<String>` — the
+    // seam is a wire shape and carries no sibling types — so this is the one
+    // place a run's own token is taken into the type every reader of it uses.
     let (session, branch) = match &waited {
-        Ok(outcome) => (outcome.session.clone(), outcome.branch.clone()),
+        Ok(outcome) => (
+            outcome.session.clone().map(onevcs::SessionToken),
+            outcome.branch.clone(),
+        ),
         Err(_) => (None, None),
     };
     let settlement = match waited {
@@ -1537,7 +1544,7 @@ pub(crate) fn drain(
             detail: asked_at.map(|_| stopped_how(killed, grace)),
             ..Settlement::plain(node, NodeStatus::Cancelled, None)
         },
-        Ok(outcome) => failed_task(node, &outcome, session.as_deref()),
+        Ok(outcome) => failed_task(node, &outcome, session.as_ref()),
         Err(error) => Settlement {
             detail: Some(error.to_string()),
             ..failed(node, "infrastructure-failure")
@@ -1662,7 +1669,11 @@ fn cancelling_surface(step: &Cancelling) -> Surface {
 /// Every unknown degrades to the plain failure this arm always produced: a
 /// dispatch with no session, a stream that cannot be read, and one that records
 /// no change request are all answered exactly as before.
-fn failed_task(node: &str, outcome: &DispatchOutcome, session: Option<&str>) -> Settlement {
+fn failed_task(
+    node: &str,
+    outcome: &DispatchOutcome,
+    session: Option<&onevcs::SessionToken>,
+) -> Settlement {
     let detail = (!outcome.detail.is_empty()).then(|| outcome.detail.clone());
     let Some(url) = session.and_then(crate::vcs::change_opened_in) else {
         return Settlement {

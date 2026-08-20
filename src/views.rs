@@ -1351,6 +1351,19 @@ pub fn results(view: &RunView) -> String {
         {
             out.push_str(&format!(" — preserved on {branch}"));
         }
+        // Where the dispatch an adoption cleared had got to. The node itself is
+        // dispatched again and settles under its own words, and none of them say
+        // that an *earlier* dispatch committed work somewhere: the driver that
+        // was running it exited without settling anything, so this line is the
+        // only place that branch and that session are ever named.
+        if let Some(session) = view.state.abandoned.get(&node.id) {
+            out.push_str(&format!(
+                " — a dispatch was abandoned when the run was adopted; its work is on {} \
+                 (onevcs session {})",
+                session.branch(),
+                session.token().0
+            ));
+        }
         // The one piece of evidence a person actually opens.
         if let Some(url) = view.state.change_urls.get(&node.id) {
             out.push_str(&format!(" — {url}"));
@@ -1526,7 +1539,11 @@ pub(crate) fn nodes_with_agent_records(view: &RunView, only: Option<&str>) -> Ve
 
 /// One control-stripped line, so a relayed value cannot rewrite the rendering
 /// around it.
-fn one_line(text: &str) -> String {
+///
+/// Shared with the settlements this crate *composes* out of a sibling's values —
+/// `crate::lifecycle` names the ref a publication compared against — so the rule
+/// is one rule rather than one per place a sibling's text reaches a line.
+pub(crate) fn one_line(text: &str) -> String {
     text.chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect()

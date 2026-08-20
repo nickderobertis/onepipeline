@@ -2691,3 +2691,229 @@ fn an_adopted_runs_worker_can_ask_its_manager() {
         "build: the approval says nothing about the schema. Which one?"
     );
 }
+
+/// The prefix every branch those records name carries.
+///
+/// One prefix, so the journey can tell what it wrote from what the run did
+/// without knowing which malformation is which — and so a line of `results`
+/// carrying any of them fails the assertion that reads it.
+const FORGED: &str = "onevcs/forged";
+
+/// A branch name carrying what reads as another node's line in `results`.
+///
+/// The forgery is the point: `results` is read line by line, so a value that
+/// carries a newline would put a record about a node nobody dispatched into a
+/// view a manager reads.
+const FORGED_LINE: &str = "onevcs/forged-line\n  audit                    running";
+
+/// The branch a record about a *different* session names.
+const FORGED_ELSEWHERE: &str = "onevcs/forged-elsewhere";
+
+/// What the dispatch puts on its session's own stream: records the merged
+/// store's reader cannot act on, one per refusal it makes.
+///
+/// A session's stream is **a file any process holding the token appends to** —
+/// `src/vcs.rs` says so where it reads a change request off one — and the
+/// dispatch is a process holding the token, so these arrive the way every
+/// session record does. Each is written after the real record, so a reader that
+/// took any of them would take it over the real one and every assertion in the
+/// journey would then be about the wrong session.
+fn unusable_session_records() -> String {
+    json!([
+        {"branch": FORGED_LINE},
+        // The bound read off the reader's own declaration of it: a build that
+        // lowered the bound and left a number here would stop testing anything.
+        {
+            "branch": format!(
+                "{FORGED}-long{}",
+                "g".repeat(onepipeline::event::MAX_PAYLOAD_TEXT_BYTES),
+            ),
+        },
+        // Half a record is worse than none — the branch says where work is and
+        // the token is how the worktree holding it is found — so a branch a
+        // manager could act on under a token nothing can be addressed by is
+        // refused as whole as the others.
+        {"token": "  ", "branch": format!("{FORGED}-token")},
+        {"token": "s-elsewhere", "branch": FORGED_ELSEWHERE},
+        // Named, and named nothing: a value a producer wrote as empty is not the
+        // same record as one that names no field at all, and neither is a
+        // pointer at work.
+        {"token": "", "branch": format!("{FORGED}-empty")},
+        // A token that walks somewhere: both libraries name a file by one, so a
+        // handle carrying a path is no handle.
+        {"token": "../elsewhere", "branch": format!("{FORGED}-path")},
+        {"branch": ""},
+        // `null` is how a record says a field is *absent*, which is a different
+        // record from one naming it empty.
+        {"branch": null},
+    ])
+    .to_string()
+}
+
+/// Adopting a run that had a dispatch in flight, which is what `adopt` is for.
+///
+/// The driver dies mid-dispatch and the work does not: `onevcs` commits the
+/// worktree onto the session's branch before it gates, so the branch holds what
+/// the worker had done and the session is the only thing that knows where.
+/// Adoption used to drop the record and nothing else, which left that branch
+/// unreferenced and unnamed anywhere a manager looks — so the branch is named
+/// where the adoption is recorded and where an operator reads results, and the
+/// node is pinned to it, which makes `onevcs` take that session up rather than
+/// cut a second one on the same work.
+///
+/// The second half is the reader's boundary: the same run's stream carries
+/// records nothing can be acted on, and none of them may take the real one's
+/// place. See [`unusable_session_records`].
+#[test]
+fn adopting_a_run_whose_dispatch_was_in_flight_leaves_that_dispatchs_work_reachable() {
+    let world = World::new("driver-adopt-inflight");
+    // A gate this journey holds, which is how a dispatch is caught in flight
+    // with its work already committed.
+    let go = world.fakes.join("gate.go");
+    let held = crate::harness::gate_script(&world, &["wait-for", &go.to_string_lossy()]);
+    let repo = world.repository(
+        "local-direct",
+        &held.iter().map(String::as_str).collect::<Vec<_>>(),
+    );
+    world.script("service.work", "the worker wrote this\n");
+    // The other half of this journey: the dispatch puts records on its own
+    // session's stream that no producer writes — see
+    // [`unusable_session_records`] — so what the adoption folds is a store that
+    // carries them beside the real one.
+    world.script("service.session-records", &unusable_session_records());
+
+    // No branch pin at all — the measured case. The session names the branch, so
+    // nothing in the plan says where the dispatch's work is.
+    let run = "inflight".to_string();
+    let path = world.plan(
+        &run,
+        &plan_of(&run, vec![crate::harness::lifecycle("service", &[])]),
+    );
+    let mut owner = world
+        .cmd(&["start", &path.to_string_lossy(), "--attach"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the run's first driver starts");
+    world.until("the dispatch to reach its gate", |world| {
+        world
+            .journal(&run)
+            .iter()
+            .any(|event| event["source"] == "vcs" && event["kind"] == "gate-started")
+    });
+    let abandoned = world
+        .events_of(&run, "session-opened")
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| panic!("the dispatch opened no session:\n{}", world.dump()));
+    let token = abandoned["payload"]["token"]
+        .as_str()
+        .expect("the session names its token")
+        .to_owned();
+    let branch = abandoned["payload"]["branch"]
+        .as_str()
+        .expect("the session names its branch")
+        .to_owned();
+
+    owner.kill().expect("the run's first driver is terminated");
+    owner.wait().expect("the run's first driver exits");
+    world.until("the driver to exit", |world| {
+        world.run(&["status", &run]).stdout.contains("DRIVER DEAD")
+    });
+
+    // The gate the dead driver was held at, released so the adoption's own
+    // publication can finish.
+    world.release("gate.go");
+
+    let adopted = world.run(&["adopt", &run]);
+    adopted.exited(0);
+    // The operator who typed `adopt` is told at the moment it happens, because
+    // this is when they can still act on it.
+    adopted
+        .err_has("had a dispatch in flight")
+        .err_has(&branch)
+        .err_has(&token);
+
+    let recorded = world.events_of(&run, "driver-adopted");
+    assert_eq!(recorded.len(), 1, "{recorded:?}");
+    assert_eq!(
+        recorded[0]["payload"]["abandoned"],
+        json!([{"node": "service", "session": token, "branch": branch}]),
+        "the adoption did not name the dispatch it cleared, or named a session \
+         nothing in this stack opened: {}",
+        recorded[0]
+    );
+    let results = world.run(&["results", &run]);
+    results.exited(0).out_has(&branch).out_has(&token);
+    for line in results.stdout.lines() {
+        assert!(
+            !line.contains("audit") && !line.contains(FORGED) && !line.contains("s-elsewhere"),
+            "a record the store was handed put a line of its own into results:\n{}",
+            results.stdout
+        );
+    }
+
+    // The re-dispatch continued that session rather than cutting a second one on
+    // the same work. Both halves are asserted, because either alone passes for
+    // the wrong reason: every session this run ever opened is the one the
+    // abandoned dispatch was working in, and `onevcs` — which is what decides
+    // whether a session is taken up — says it took one up.
+    let recorded_openings = world.events_of(&run, "session-opened");
+    let branch_of = |event: &serde_json::Value| event["payload"]["branch"].clone();
+    let forged = |event: &serde_json::Value| {
+        branch_of(event)
+            .as_str()
+            .is_none_or(|branch| branch.is_empty() || branch.starts_with(FORGED))
+    };
+    // The scripted records reached the merged store the ordinary way — through
+    // the session's own stream and this crate's follow of it — so what the
+    // assertions below are about is a reader that met them and refused them,
+    // rather than a producer path that quietly dropped them on the way.
+    let arrived: std::collections::BTreeSet<String> = recorded_openings
+        .iter()
+        .filter(|event| forged(event))
+        .map(|event| branch_of(event).to_string())
+        .collect();
+    assert_eq!(
+        arrived.len(),
+        8,
+        "the records the dispatch put on its session's stream did not all reach the \
+         merged store — one per refusal, each arriving at least once — so nothing \
+         here is about what a reader does with them: {arrived:?}"
+    );
+    let openings: Vec<serde_json::Value> = recorded_openings
+        .into_iter()
+        .filter(|event| !forged(event))
+        .collect();
+    let tokens: Vec<String> = openings
+        .iter()
+        .map(|event| {
+            event["payload"]["token"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        })
+        .collect();
+    assert!(
+        tokens.len() > 1,
+        "the adopted run's own dispatch opened no session at all: {tokens:?}"
+    );
+    assert!(
+        tokens.iter().all(|opened| *opened == token),
+        "the adopted run cut a session beside the one holding the work: {tokens:?}"
+    );
+    assert!(
+        openings
+            .iter()
+            .any(|event| event["payload"]["reused"] == json!(true)),
+        "the sibling never recorded taking a session up, so the re-dispatch reached \
+         that branch some other way: {openings:?}"
+    );
+    // Which is the only thing an operator cares about: the work the dead driver
+    // left on that branch reached the base.
+    assert_eq!(
+        repo.base_file("service.md").as_deref().map(str::trim),
+        Some("the worker wrote this"),
+        "the abandoned dispatch's work never reached the base"
+    );
+}

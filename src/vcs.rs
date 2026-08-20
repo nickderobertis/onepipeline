@@ -90,7 +90,7 @@ pub fn session_open(request: &SessionRequest) -> Result<Session> {
 /// description of what the branch turned out to hold, so a body is one that was
 /// drafted from the diff or there is none.
 pub fn publish(
-    token: &str,
+    token: &SessionToken,
     policy: Option<MergePolicy>,
     title: Option<&str>,
     body: Option<&str>,
@@ -100,7 +100,7 @@ pub fn publish(
         .transpose()?;
     onevcs::publish(
         &providers(),
-        &SessionToken(token.to_owned()),
+        token,
         &PublishRequest {
             policy,
             title,
@@ -174,15 +174,16 @@ pub fn change_url(outcome: &PublishOutcome) -> Option<String> {
     }
 }
 
-/// The worktree an open session is being worked in.
+/// One read of an open session's own record: the sibling's own value, carrying
+/// the worktree its dispatches work in and the base its branch is measured
+/// against. Read once, because a second read at publication would ask a question
+/// already answered on a path where the answer cannot have changed.
 ///
-/// What the second and later dispatches of one lifecycle node run in. They must
-/// **not** open a session of their own: `onevcs` cuts each session its own clone
-/// from the execution checkout, so a second one carries none of the first's
-/// uncommitted work — and opening it reclaims the first's workspace outright,
-/// because a run root whose branch holds no commit the origin lacks is one the
-/// sibling reads as abandoned. Both are recorded in
-/// `docs/contract-divergences.md`.
+/// Its values are taken as that record states them. A record is `onevcs`'s own
+/// state, written under its occupancy lease when it cut this session; a session's
+/// **stream** is the untrusted one — a log any process holding the token appends
+/// to — and what this crate reads off one is checked where it enters, by
+/// [`DispatchSession::read_from`].
 ///
 /// A read, not a claim: [`onevcs::session`] takes no lease, commits nothing, and
 /// reclaims nothing, so asking where a session is working cannot disturb it —
@@ -190,12 +191,19 @@ pub fn change_url(outcome: &PublishOutcome) -> Option<String> {
 /// incomplete-step marker.
 ///
 /// `None` when the record cannot be read, which leaves the caller to open a
-/// session as it would have.
-pub fn worktree_of(token: &str) -> Option<std::path::PathBuf> {
-    onevcs::session(&providers(), &SessionToken(token.to_owned()))
-        .map(|record| record.session.worktree)
+/// session as it would have. The second and later dispatches of one lifecycle
+/// node run in the worktree it names; they must **not** open a session of their
+/// own, because `onevcs` cuts each session its own clone and opening a second one
+/// reclaims the first's workspace. Both are recorded in
+/// `docs/contract-divergences.md`.
+pub fn working_session(token: &SessionToken) -> Option<Session> {
+    onevcs::session(&providers(), token)
+        .map(|record| record.session)
         .map_err(|error| {
-            eprintln!("onepipeline: cannot read session {token}'s record: {error}");
+            eprintln!(
+                "onepipeline: cannot read session {}'s record: {error}",
+                token.0
+            );
             error
         })
         .ok()
@@ -205,8 +213,8 @@ pub fn worktree_of(token: &str) -> Option<std::path::PathBuf> {
 ///
 /// Closing is best-effort on the failure path: a node that already failed must
 /// not be reported as a different failure because its cleanup also failed.
-pub fn session_close(token: &str) -> Result<Session> {
-    onevcs::close_session(&providers(), &SessionToken(token.to_owned())).map_err(refusal)
+pub fn session_close(token: &SessionToken) -> Result<Session> {
+    onevcs::close_session(&providers(), token).map_err(refusal)
 }
 
 /// The change request one session's work reached, when it reached one.
@@ -234,7 +242,7 @@ pub fn session_close(token: &str) -> Result<Session> {
 /// equally when the stream cannot be read — the caller settles exactly as it
 /// would have, because an unreadable record is not evidence of a change nobody
 /// opened.
-pub fn change_opened_in(token: &str) -> Option<String> {
+pub fn change_opened_in(token: &SessionToken) -> Option<String> {
     let opened = kind_of(onevcs::EventKind::ChangeOpened);
     // The last one wins: a session that opened a change request, closed it, and
     // opened another names the one it ended with.
@@ -283,18 +291,24 @@ pub fn holders_of(repo: &str) -> std::result::Result<Vec<onevcs::SessionHolder>,
 /// happen — the node's own settlement stands — but a silent gap in the merged
 /// store is what makes a later reader think nothing happened, so it is said out
 /// loud.
-fn opened(token: &str, filter: Option<&EventFilter>) -> Option<EventStream> {
+fn opened(token: &SessionToken, filter: Option<&EventFilter>) -> Option<EventStream> {
     let filter = match filter.map(sibling_filter).transpose() {
         Ok(filter) => filter.unwrap_or_default(),
         Err(error) => {
-            eprintln!("onepipeline: cannot follow session {token}'s events: {error}");
+            eprintln!(
+                "onepipeline: cannot follow session {}'s events: {error}",
+                token.0
+            );
             return None;
         }
     };
-    match EventStream::open_filtered(&SessionToken(token.to_owned()), filter) {
+    match EventStream::open_filtered(token, filter) {
         Ok(stream) => Some(stream),
         Err(error) => {
-            eprintln!("onepipeline: cannot read session {token}'s events: {error}");
+            eprintln!(
+                "onepipeline: cannot read session {}'s events: {error}",
+                token.0
+            );
             None
         }
     }
@@ -307,18 +321,21 @@ fn opened(token: &str, filter: Option<&EventFilter>) -> Option<EventStream> {
 /// lost, not events deferred. It is reported for that reason and the follow keeps
 /// reading: the alternative is to stop relaying a live publication over one
 /// record.
-fn next_batch(stream: &mut EventStream, token: &str) -> Vec<Envelope> {
+fn next_batch(stream: &mut EventStream, token: &SessionToken) -> Vec<Envelope> {
     match stream.read() {
         Ok(events) => events.into_iter().map(relayed).collect(),
         Err(error) => {
-            eprintln!("onepipeline: cannot read session {token}'s events: {error}");
+            eprintln!(
+                "onepipeline: cannot read session {}'s events: {error}",
+                token.0
+            );
             Vec::new()
         }
     }
 }
 
 /// A session's own event stream, for relaying into the merged one.
-pub fn events(token: &str, filter: Option<&EventFilter>) -> Vec<Envelope> {
+pub fn events(token: &SessionToken, filter: Option<&EventFilter>) -> Vec<Envelope> {
     let Some(mut stream) = opened(token, filter) else {
         return Vec::new();
     };
@@ -442,20 +459,19 @@ const FOLLOW_POLL: Duration = Duration::from_millis(20);
 /// publication nobody is watching rather than a publication with no record, so
 /// it is said out loud and the caller reads the stream once instead.
 pub fn follow(
-    token: &str,
+    token: &SessionToken,
     filter: Option<&EventFilter>,
     sink: Box<dyn Fn(Envelope) + Send>,
 ) -> Option<Follower> {
     let mut stream = opened(token, filter)?;
-    let session = SessionToken(token.to_owned());
 
     let progress = Arc::new(Progress::default());
     let reached = Arc::clone(&progress);
     let stop = Arc::new(AtomicBool::new(false));
     let stopping = Arc::clone(&stop);
-    let followed = token.to_owned();
+    let followed = token.clone();
     let reader = std::thread::Builder::new()
-        .name(format!("onevcs-{token}-events"))
+        .name(format!("onevcs-{}-events", token.0))
         .spawn(move || loop {
             // Read *before* asking whether the session closed, so a record
             // written between the two is relayed on the next pass rather than
@@ -464,7 +480,7 @@ pub fn follow(
                 reached.reached(envelope.seq);
                 sink(envelope);
             }
-            if stopping.load(Ordering::SeqCst) || settled(&session) {
+            if stopping.load(Ordering::SeqCst) || settled(&followed) {
                 return;
             }
             std::thread::sleep(FOLLOW_POLL);
@@ -476,7 +492,10 @@ pub fn follow(
             progress,
         }),
         Err(error) => {
-            eprintln!("onepipeline: cannot follow session {token}'s events: {error}");
+            eprintln!(
+                "onepipeline: cannot follow session {}'s events: {error}",
+                token.0
+            );
             None
         }
     }
@@ -597,7 +616,10 @@ pub fn session_opened_event(session: &Session, labels: &crate::event::Labels) ->
         stream: format!("onevcs-{}", session.token.0),
         seq: 0,
         source: crate::event::Source::Vcs,
-        kind: crate::event::EventKind("session-opened".into()),
+        // The sibling's own spelling, through its own serializer: this envelope
+        // stands beside the ones `onevcs` writes for the same session, and a
+        // reader that folds one of them has to fold both.
+        kind: kind_of(onevcs::EventKind::SessionOpened),
         labels: labels.clone(),
         payload: crate::journal::payload(&[
             ("token", serde_json::json!(session.token.0)),
@@ -637,6 +659,152 @@ pub fn published_event(published: &Publication, labels: &crate::event::Labels) -
     }
 }
 
+/// Where one node's dispatch is working: the session `onevcs` opened for it.
+///
+/// The token and the branch together, because either alone leaves work
+/// unreachable — the branch says where the commits are and the token says which
+/// worktree and clone still hold them — and both are private, so a value of this
+/// type is one [`read_from`](Self::read_from) has already checked. There is no
+/// other way to make one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DispatchSession {
+    token: SessionToken,
+    branch: BranchName,
+}
+
+/// A branch a stream's record named, and [`usable`] accepted.
+///
+/// Deliberately **not** a claim that git would accept the name: that parser is
+/// git's, and asking it would mean this crate running git, which no path of it
+/// ever has.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchName(String);
+
+impl BranchName {
+    /// A name off a stream's record, where it is one this crate can act on.
+    pub fn checked(value: &str) -> Option<Self> {
+        usable(value).map(Self)
+    }
+
+    /// The name itself, for a caller that needs the string.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for BranchName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl DispatchSession {
+    /// Read a session out of a relayed `session-opened`, where it is one this
+    /// crate can act on.
+    ///
+    /// **The trust boundary for a session record**, which the envelope module
+    /// leaves to the reader seam that parses a stream. Three questions, and only
+    /// the last two are this crate's:
+    ///
+    /// * **Which fields** is [`Session`]'s, so the payload is parsed through the
+    ///   producer's own declaration rather than by key. The fields it does not
+    ///   declare are left alone — `onevcs`'s own record of the same session
+    ///   carries seven more — while a field this crate acts on is required by the
+    ///   type, so a missing or misspelled `branch` drops the record.
+    /// * **Whether the values are usable**: see [`usable`].
+    /// * **Whether the record is about the session that carried it**, which no
+    ///   value inside it can answer. A stream is a log any process holding the
+    ///   token appends to, so a record on one naming a *different* session is a
+    ///   pointer at somebody else's work, arriving where nobody can check it.
+    pub fn read_from(envelope: &Envelope) -> Option<Self> {
+        let session: Session =
+            serde_json::from_value(serde_json::Value::Object(envelope.payload.clone())).ok()?;
+        let token = token_of(&session.token.0)?;
+        if !wrote(&envelope.stream, &token) {
+            return None;
+        }
+        Some(Self {
+            token,
+            branch: BranchName::checked(&session.branch)?,
+        })
+    }
+
+    /// The handle `onevcs` addresses the session by.
+    pub fn token(&self) -> &SessionToken {
+        &self.token
+    }
+
+    /// The branch its worktree has checked out, and therefore the branch the
+    /// dispatch's commits are on.
+    pub fn branch(&self) -> &BranchName {
+        &self.branch
+    }
+}
+
+/// Whether a stream is the one a session writes.
+///
+/// Two spellings, because two producers write a session's opening: `onevcs`
+/// streams a session under its own token, and this crate writes its copy for the
+/// merged store under that token namespaced by the sibling it came from — see
+/// [`session_opened_event`]. Both are that session's, and neither is another's.
+fn wrote(stream: &str, token: &SessionToken) -> bool {
+    stream == token.0 || stream == format!("onevcs-{}", token.0)
+}
+
+/// One session token off a stream's record, where it is one this crate can hand
+/// back.
+///
+/// [`usable`], and one rule more that is about what a token is *for*: it
+/// addresses a session, and both libraries name a file by it, so a value
+/// carrying a path separator — or one that is a directory hop — is no handle
+/// however well it reads. What a token may otherwise be is `onevcs`'s to say,
+/// and it says so by refusing one it does not know.
+fn token_of(value: &str) -> Option<SessionToken> {
+    let value = usable(value)?;
+    if value.contains(['/', '\\']) || value.trim_matches('.').is_empty() {
+        return None;
+    }
+    Some(SessionToken(value))
+}
+
+/// One payload text field, where it is whole and names something.
+///
+/// Three checks, each about what this crate does with the value. It is handed
+/// back to `onevcs` as a session handle and a branch name, and it is rendered
+/// into `results` and onto an operator's terminal:
+///
+/// * **Not empty.** A branch nobody can name is not a pointer at work, and
+///   recording one would put an empty name where a manager reads for one.
+/// * **Whole.** A producer cuts a payload text field at
+///   [`MAX_PAYLOAD_TEXT_BYTES`](crate::event::MAX_PAYLOAD_TEXT_BYTES) and says
+///   so beside it, so a value that long may be a *prefix* — and a truncated
+///   branch name addresses a branch that does not exist. Checked per value
+///   rather than off the payload's own marker, which says only that something in
+///   the record was cut.
+/// * **One word, on one line.** Neither a session token nor a branch name
+///   carries whitespace or a control character, and both are rendered into
+///   line-oriented views where a value carrying a newline forges a line — a
+///   record that appears to be about a node nobody dispatched.
+fn usable(value: &str) -> Option<String> {
+    if value.is_empty() || value.len() >= crate::event::MAX_PAYLOAD_TEXT_BYTES {
+        return None;
+    }
+    if value.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return None;
+    }
+    Some(value.to_owned())
+}
+
+/// Whether an envelope is a session opening, in `onevcs`'s own vocabulary.
+///
+/// Asked through that library's enum rather than against a string of this
+/// crate's, for the reason [`kind_of`] gives: how a kind is spelled is the
+/// sibling's to decide, and a literal here would keep matching after a rename
+/// and silently stop folding anything.
+pub fn is_session_opened(kind: &crate::event::EventKind) -> bool {
+    *kind == kind_of(onevcs::EventKind::SessionOpened)
+}
+
 /// The session a lifecycle node asks for.
 pub fn request_for(node: &crate::plan::Node) -> Option<SessionRequest> {
     Some(SessionRequest {
@@ -654,6 +822,129 @@ pub fn request_for(node: &crate::plan::Node) -> Option<SessionRequest> {
 mod tests {
     use super::*;
     use crate::plan::Node;
+
+    /// The payload of a session opening, as one of the two producers writes it.
+    ///
+    /// This crate's own is built by [`session_opened_event`] rather than spelled
+    /// out, so the fixture cannot say a shape the producer does not.
+    fn ours(token: &str, branch: &str) -> Envelope {
+        session_opened_event(
+            &Session {
+                token: SessionToken(token.to_owned()),
+                worktree: std::path::PathBuf::from("/tmp/worktree"),
+                branch: branch.to_owned(),
+                base: "main".to_owned(),
+            },
+            &crate::event::Labels::default(),
+        )
+    }
+
+    /// What a session record is read for, and what is refused instead of read.
+    ///
+    /// The refusals are the point. This record is the only pointer a manager has
+    /// at work an adoption left behind, so a value that is not whole, or not a
+    /// name, sends them looking for a branch that does not exist — and one
+    /// carrying a newline forges a line in a view that is read line by line.
+    #[test]
+    fn a_session_record_is_read_only_where_every_value_it_names_is_usable() {
+        let read = DispatchSession::read_from(&ours("s-abc", "onevcs/s-abc"))
+            .expect("a whole session record is read");
+        assert_eq!(read.token(), &SessionToken("s-abc".into()));
+        assert_eq!(read.branch().as_str(), "onevcs/s-abc");
+
+        // The sibling's own record of the same session: the four fields this
+        // crate reads, plus everything else `onevcs` knows about it. Those are
+        // kept out of the way rather than refused — it is the producer's account
+        // of the session, and a reader that rejected what it had not heard of
+        // would drop the record this fold exists to read.
+        let mut theirs = ours("s-abc", "onevcs/s-abc");
+        // And on the stream `onevcs` writes it to, which is the session's own
+        // token rather than this crate's namespaced spelling of it.
+        theirs.stream = "s-abc".to_owned();
+        for (key, value) in [
+            ("identity", serde_json::json!("github.com/owner/service")),
+            ("clone", serde_json::json!("/tmp/runs/s-abc/clone")),
+            ("execution_checkout", serde_json::json!("/tmp/service")),
+            ("publication_checkout", serde_json::json!("/tmp/service")),
+            ("reused", serde_json::json!(true)),
+        ] {
+            theirs.payload.insert(key.to_owned(), value);
+        }
+        assert_eq!(
+            DispatchSession::read_from(&theirs).as_ref(),
+            Some(&read),
+            "the sibling's own record of a session it opened was not read"
+        );
+
+        let without = |key: &str| {
+            let mut event = ours("s-abc", "onevcs/s-abc");
+            event.payload.remove(key);
+            event
+        };
+        // A record about a session other than the one whose log carried it: the
+        // stream is whose log it is, and a pointer at somebody else's work
+        // arriving here is one nobody can check.
+        let mut elsewhere = ours("s-elsewhere", "onevcs/s-elsewhere");
+        elsewhere.stream = "onevcs-s-abc".to_owned();
+        for (why, event) in [
+            ("a record naming no branch at all", without("branch")),
+            ("a record naming no token at all", without("token")),
+            ("a record about another session entirely", elsewhere),
+        ] {
+            assert_eq!(
+                DispatchSession::read_from(&event),
+                None,
+                "{why} was read as a session a manager can be sent to"
+            );
+        }
+        for (why, value) in unusable() {
+            assert_eq!(
+                DispatchSession::read_from(&ours("s-abc", &value)),
+                None,
+                "a branch that is {why} was read as one a manager can be sent to"
+            );
+        }
+        // A token is everything a branch is, and a plain name besides: both
+        // libraries name a file by it, and a branch — which may hold a `/` —
+        // this crate only ever hands back.
+        let hops = [
+            ("a directory hop", "..".to_owned()),
+            ("carrying a path separator", "onevcs/../x".to_owned()),
+        ];
+        for (why, value) in unusable().into_iter().chain(hops) {
+            let mut record = ours(&value, "onevcs/s-abc");
+            record.stream = value.clone();
+            assert_eq!(
+                DispatchSession::read_from(&record),
+                None,
+                "a token that is {why} was read as one a session answers to"
+            );
+        }
+    }
+
+    /// Every value neither a branch nor a token may be, and why.
+    ///
+    /// One table, because one check answers for both and for the base a
+    /// publication names beside them: a value that is not whole, or not a name,
+    /// is the same fault wherever this crate reads one.
+    fn unusable() -> Vec<(&'static str, String)> {
+        vec![
+            ("empty", String::new()),
+            (
+                "a line of its own",
+                "onevcs/x\n  audit    running".to_owned(),
+            ),
+            ("carrying a space", "onevcs/ x".to_owned()),
+            ("carrying a control character", "onevcs/x\u{7}".to_owned()),
+            // A value that is *cut* is the one that reads as a name and is not
+            // one: `onevcs` bounds a payload text field and says so beside it, so
+            // a name this long may be a prefix of what the work is actually on.
+            (
+                "as long as the bound a producer cuts text at",
+                "b".repeat(crate::event::MAX_PAYLOAD_TEXT_BYTES),
+            ),
+        ]
+    }
 
     #[test]
     fn a_lifecycle_node_asks_for_the_session_its_fields_describe() {
@@ -844,6 +1135,7 @@ mod tests {
         // and read *once*: the cursor that consumed it does not hand it back
         // when the terminator and the next record arrive.
         let torn = "s-unterminated";
+        let followed = SessionToken(torn.to_owned());
         write(
             torn,
             format!(
@@ -852,9 +1144,9 @@ mod tests {
                 record(torn, 2, "push")
             ),
         );
-        let mut stream = opened(torn, None).expect("the stream opens");
+        let mut stream = opened(&followed, None).expect("the stream opens");
         assert_eq!(
-            seqs(&next_batch(&mut stream, torn)),
+            seqs(&next_batch(&mut stream, &followed)),
             vec![1, 2],
             "a record whose newline was still unwritten was lost"
         );
@@ -868,7 +1160,7 @@ mod tests {
             ),
         );
         assert_eq!(
-            seqs(&next_batch(&mut stream, torn)),
+            seqs(&next_batch(&mut stream, &followed)),
             vec![3],
             "the terminator arriving handed a record back a second time"
         );
@@ -884,7 +1176,7 @@ mod tests {
         let partial = record(cut, 2, "push");
         write(cut, format!("{whole}\n{}", &partial[..20]));
         assert!(
-            events(cut, None).is_empty(),
+            events(&SessionToken(cut.to_owned()), None).is_empty(),
             "the typed reader now hands back the whole records before a torn one; \
              narrow this assertion to the torn record alone"
         );
@@ -892,7 +1184,7 @@ mod tests {
         // And a stream nothing wrote at all is not an empty one: it is refused
         // by name, which is what stops a token nobody opened reading as a
         // session that recorded nothing.
-        assert!(events("s-neverwritten", None).is_empty());
+        assert!(events(&SessionToken("s-neverwritten".into()), None).is_empty());
 
         let _ = std::fs::remove_dir_all(&root);
     }

@@ -94,7 +94,7 @@ pub fn execute(
         }
     }; // llmlint: ignore-end[changed_behavior_has_e2e]
 
-    let mut session: Option<String> = None;
+    let mut session: Option<onevcs::SessionToken> = None;
     // The session's own stream, followed from the moment there is a token to
     // follow, so the publication that comes after the steps is visible while it
     // runs rather than only once it is over.
@@ -103,6 +103,12 @@ pub fn execute(
     // opened one. See where it is read: every dispatch after the first runs
     // *there* rather than opening a session beside it.
     let mut worktree: Option<std::path::PathBuf> = None;
+    // And what a publication of that session measures its branch against, taken
+    // from the same read: asking again at publication would ask the sibling a
+    // question it has already answered, on a path where the answer cannot have
+    // changed and a failure could not happen — a publication that succeeded is a
+    // record that was readable.
+    let mut base: Option<String> = None;
     // Where in the run the session's own envelopes belong. The node, not a
     // step: a session outlives every step that wrote in it, and the publication
     // that follows them belongs to none.
@@ -181,12 +187,14 @@ pub fn execute(
         branch = drained.branch.or(branch);
         if stream.is_none() {
             if let Some(token) = &session {
-                worktree = crate::vcs::worktree_of(token);
+                let opened = crate::vcs::working_session(token);
+                worktree = opened.as_ref().map(|open| open.worktree.clone());
+                base = opened.map(|open| open.base);
                 stream = crate::vcs::follow(token, vcs_filter, relay_into(tx, whose.clone()));
             }
         }
         if drained.settlement.status != NodeStatus::Done {
-            end_session(stream, tx, session.as_deref(), &whose, vcs_filter);
+            end_session(stream, tx, session.as_ref(), &whose, vcs_filter);
             return Settlement {
                 branch,
                 completed_steps: completed,
@@ -213,6 +221,7 @@ pub fn execute(
         launch,
         node,
         worktree.as_deref(),
+        base.as_deref(),
         cancel,
         tx,
         &token,
@@ -227,9 +236,9 @@ pub fn execute(
     clippy::too_many_arguments,
     reason = "publication needs the dispatch context (executor, the run's paths, what its \
               launch decided, the node, cancellation, and the event stream) as well as what \
-              the steps left behind (the session token, its branch, and the worktree they \
-              worked in); the first six are the node's own dispatch identity and bundling \
-              them would only move the same list one indirection away"
+              the steps left behind (the session token, its branch, and the worktree and base \
+              its record named); the first six are the node's own dispatch identity and \
+              bundling them would only move the same list one indirection away"
 )]
 fn publish(
     executor: &dyn Executor,
@@ -237,9 +246,10 @@ fn publish(
     launch: &Launch,
     node: &Node,
     worktree: Option<&std::path::Path>,
+    base: Option<&str>,
     cancel: &crate::executor::CancellationToken,
     tx: &Sender<Message>,
-    token: &str,
+    token: &onevcs::SessionToken,
     branch: Option<String>,
 ) -> Settlement {
     // The plan's own body wins outright and spends no dispatch: a planner who
@@ -274,15 +284,16 @@ fn publish(
         })));
         why
     });
-    // One composition for both endings of a publication that did not happen, so
-    // there is one place the two reasons are put together rather than two that
-    // can come to disagree.
+    // One composition wherever a publication's own words and a drafting failure
+    // are put together, so the places that do it cannot come to disagree about
+    // the order or the punctuation.
+    let with_undrafted = |detail: String| match &undrafted {
+        Some(why) => format!("{detail}. {why}"),
+        None => detail,
+    };
     let publication_failed = |detail: String| Settlement {
         branch: branch.clone(),
-        detail: Some(match &undrafted {
-            Some(why) => format!("{detail}. {why}"),
-            None => detail,
-        }),
+        detail: Some(with_undrafted(detail)),
         ..Settlement::plain(&node.id, NodeStatus::Failed, Some("publication-failed"))
     };
 
@@ -306,10 +317,34 @@ fn publish(
             let _ = tx.send(Message::Event(Box::new(crate::vcs::published_event(
                 &published, &labels,
             ))));
+            // What a `no-changes` compared against. It is the one outcome whose
+            // word says nothing a reader can act on: a node whose worker wrote
+            // nothing and a node whose branch was compared against itself settle
+            // identically, and the second is what a node pinned with a
+            // `base_branch` equal to its `branch` asks for — see
+            // [`crate::plan::Node::base_branch`]. The base is the session's
+            // own, because a node naming none took the identity's default and
+            // this crate never saw it; a session whose record could not be read
+            // has none, and the settlement then says what it always did rather
+            // than naming a ref nothing established.
+            let compared = match published.outcome {
+                // Composed out of two of the sibling's own strings and stripped
+                // of controls on the way, by the same rule every view applies to
+                // a relayed value it renders — see `views::one_line`. A
+                // settlement's detail is read back on one line, and this is where
+                // this crate makes one out of somebody else's.
+                onevcs::PublishOutcome::NothingToPublish => base.map(|base| {
+                    crate::views::one_line(&format!(
+                        "compared against {base}: {} carries nothing it does not",
+                        published.branch
+                    ))
+                }),
+                _ => None,
+            };
             Settlement {
                 // What the node settles on is its publication, exactly as
                 // before; a drafting failure only ever adds words to it.
-                detail: undrafted.clone(),
+                detail: compared.map(&with_undrafted).or_else(|| undrafted.clone()),
                 // The branch the publication says carried the change, where a
                 // dispatch reported none: they are the same branch, and the
                 // sibling is the one that knows it.
@@ -602,7 +637,7 @@ fn stamp(labels: &mut Labels, known: &Labels) {
 fn end_session(
     stream: Option<crate::vcs::Follower>,
     tx: &Sender<Message>,
-    token: Option<&str>,
+    token: Option<&onevcs::SessionToken>,
     node: &Labels,
     filter: Option<&EventFilter>,
 ) {
@@ -623,7 +658,7 @@ fn end_session(
 /// that write to it, which makes that one number the whole of the bookkeeping.
 fn relay_session_events(
     tx: &Sender<Message>,
-    token: Option<&str>,
+    token: Option<&onevcs::SessionToken>,
     node: &Labels,
     followed_through: Option<u64>,
     filter: Option<&EventFilter>,
@@ -653,7 +688,7 @@ fn beyond(envelopes: Vec<Envelope>, followed_through: Option<u64>) -> Vec<Envelo
         .collect()
 }
 
-fn close(token: Option<&str>) {
+fn close(token: Option<&onevcs::SessionToken>) {
     // Best effort: a node that already failed must not be reported as a
     // different failure because its cleanup also failed.
     if let Some(token) = token {

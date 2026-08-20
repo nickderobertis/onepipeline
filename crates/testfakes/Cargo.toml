@@ -1,10 +1,12 @@
 # Test-support only: the programs `onepipeline` and its siblings reach as
 # subprocesses, as real executables a test can drive them against.
 #
-# There is no `onevcs` here. That sibling is reached by *calling* it, so there is
-# no subprocess boundary to substitute at — what stands in instead is `gh`, at
-# `onevcs`'s own `ONEVCS_GH` override, which decides what GitHub does and leaves
-# every git operation real.
+# Nothing here stands in for `onevcs`. That sibling is reached by *calling* it, so
+# there is no subprocess boundary to substitute at — what stands in instead is
+# `gh`, at `onevcs`'s own `ONEVCS_GH` override, which decides what GitHub does and
+# leaves every git operation real. The dependency below is not a substitution: it
+# is how the `oneagentgraph` double writes a record onto a session's stream in
+# that library's own declared shape rather than a copy of it.
 #
 # A separate workspace member rather than extra `[[bin]]`s on the crate itself,
 # because these must never ship in the published artifact. `cargo test` builds
@@ -25,6 +27,10 @@ serde_json = "1"
 # the real CLI's own parser rather than by keeping a second copy of the keys it
 # reserves — a copy is a list that goes stale the round after the sibling adds one.
 oneagentgraph = { workspace = true }
+# The session stream's own envelope, so a double writing a record to one writes
+# the shape `onevcs` declares — a restatement here would keep parsing after that
+# library changed it, and the journey would pass having proved the fixture.
+onevcs = { workspace = true }
 
 # So a double can act out the one dispatch behaviour a rendezvous cannot: a
 # worker that keeps working through the polite ask to stop. The crate under test
