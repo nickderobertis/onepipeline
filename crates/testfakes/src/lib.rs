@@ -583,32 +583,29 @@ pub fn supervise(dir: &Path, graph: &str) -> std::process::ExitCode {
     }
 }
 
-/// The verdict half of an answer, as the side supervising a member reads it.
+/// Whether one answer from the supervising side is a ruling at all.
 ///
 /// A **typed** reading rather than a probe for keys: a `reason` that is a number
-/// is not a reason, and a supervising side that accepted it would be a weaker
-/// oracle than the provider it stands in for. Unknown keys are left alone — an
-/// envelope may carry a version and commands beside its verdict, and that is
-/// still a ruling — but each half it does carry has to be the shape a verdict
-/// spells it in.
-#[derive(serde::Deserialize)]
-struct Ruling {
-    completion: Option<bool>,
-    message: Option<String>,
-    reason: Option<String>,
-}
-
-impl Ruling {
-    /// Whether any half is actually there. An envelope carrying none of them has
-    /// ruled on nothing, whatever else it carries.
-    fn is_a_verdict(&self) -> bool {
-        self.completion.is_some() || self.message.is_some() || self.reason.is_some()
-    }
-}
-
-/// Whether one answer from the supervising side is a ruling at all.
+/// is not a reason, and a side that accepted it would be a weaker oracle than
+/// the provider it stands in for. Unknown keys are left alone — an envelope may
+/// carry a version and commands beside its verdict, and that is still a ruling.
+///
+/// The shape below is the *wire*, where every half is optional and none of them
+/// being there is the very case this answers, so it is deliberately the
+/// permissive one and no value of it outlives this function: what leaves is the
+/// yes-or-no the member acts on, and there is no type here claiming to be a
+/// ruling that carries nothing.
 fn is_a_ruling(answer: &str) -> bool {
-    serde_json::from_str::<Ruling>(answer).is_ok_and(|ruling| ruling.is_a_verdict())
+    #[derive(serde::Deserialize)]
+    struct Halves {
+        completion: Option<bool>,
+        message: Option<String>,
+        reason: Option<String>,
+    }
+
+    serde_json::from_str::<Halves>(answer).is_ok_and(|halves| {
+        halves.completion.is_some() || halves.message.is_some() || halves.reason.is_some()
+    })
 }
 
 /// The program and arguments the graph declares its observer member's judge
