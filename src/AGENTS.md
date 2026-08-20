@@ -74,6 +74,14 @@ other direction.
 Never invent a local stand-in for a sibling type the contract names: record the
 divergence instead.
 
+`onejudge` is a dependency too, and is **not** a third sibling this crate
+composes — nothing here launches, calls, or spawns it. It is one vocabulary: the
+verdicts a two-party member settles on, which `oneagentgraph` copies onto the
+`member-settled` this crate relays. Reading them by field name would be the
+re-declaration above, so `report::failed_verdicts` deserializes into that
+library's own `NamedVerdict`. Its pin must resolve to the one `oneagentgraph`
+carries, and `src/report.rs` fails the build where it does not.
+
 Both are ordinary crates.io dependencies, pinned to a published version. **Keep
 them that way** — a `git`/`rev` source makes the graph unreproducible from the
 registries alone, hides which released version carries a given API, and leaves

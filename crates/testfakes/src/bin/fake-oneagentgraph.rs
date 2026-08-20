@@ -402,12 +402,12 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     }
     emit(
         args,
+        dir,
+        &key,
         &node,
         step.as_deref(),
         &task,
         redirected.as_deref(),
-        dir.join(format!("{key}.clock-stepped")).exists(),
-        dir.join(format!("{key}.duplicate-seq")).exists(),
     );
 
     // A redirection the running turn took changes what it *did*, not only what
@@ -455,9 +455,9 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
 
     // Every candidate this dispatch's identity chains stepped past, published
     // one per candidate exactly as the real CLI publishes them. Scripted
-    // `<key>.refused`, one `ROLE IDENTITY REASON` per line, with `-` for the
-    // role of a single-sided member — which has one side and so nothing to
-    // distinguish.
+    // `<key>.refused`, one `ROLE TURN IDENTITY REASON` per line, with `-` for
+    // the role and the turn of a single-sided member — which has one chain, so
+    // there is neither a side nor a per-side turn to attribute it to.
     if let Some(script) = fake::node_script(dir, &key, "refused") {
         refuse_candidates(args, &node, step.as_deref(), &script);
     }
@@ -485,7 +485,8 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
 /// is that a consumer reads the identity and the side off the real one.
 fn refuse_candidates(args: &[String], node: &str, step: Option<&str>, script: &str) {
     let labels = member_labels(args, node, step);
-    // Above every seq `emit` uses, because these are written after it: a
+    // Above every seq `emit` uses — the turn's own envelopes and one per
+    // invocation it published — because these are written after it: a
     // producer's seq is its own statement of the order it wrote things in.
     for (offset, line) in script
         .lines()
@@ -493,27 +494,31 @@ fn refuse_candidates(args: &[String], node: &str, step: Option<&str>, script: &s
         .enumerate()
     {
         let mut columns = line.split_whitespace();
-        // Exactly three, and the fourth column is checked for: a script this
+        // Exactly four, and the fifth column is checked for: a script this
         // read leniently would emit a candidate the test author did not write,
         // and a double that publishes something other than what its script says
         // is an oracle for nothing.
-        let (Some(role), Some(identity), Some(reason), None) = (
+        let (Some(role), Some(turn), Some(identity), Some(reason), None) = (
+            columns.next(),
             columns.next(),
             columns.next(),
             columns.next(),
             columns.next(),
         ) else {
             fake::fail(&format!(
-                "a `.refused` line reads {line:?}, which is not `ROLE IDENTITY REASON`"
+                "a `.refused` line reads {line:?}, which is not `ROLE TURN IDENTITY REASON`"
             ));
         };
         let advanced = oneagentgraph::event::FallbackAdvanced {
             identity: identity.to_string(),
             reason: reason.to_string(),
-            // `-` is a single-sided member: one side, so no side to name.
-            // Every word but `-` is read through the sibling's **own** `Role`, so
-            // the script's grammar is that library's spelling rather than a copy
-            // of it that keeps parsing after a rename.
+            // `-` is a single-sided member: one chain, so no side to name and no
+            // per-side turn to attribute it to — the real library leaves both
+            // absent there, and a double that filled either in would be an
+            // oracle for a record nothing publishes. Every word but `-` is read
+            // through the sibling's **own** `Role`, so the script's grammar is
+            // that library's spelling rather than a copy of it that keeps
+            // parsing after a rename.
             role: match role {
                 "-" => None,
                 other => Some(
@@ -525,7 +530,14 @@ fn refuse_candidates(args: &[String], node: &str, step: Option<&str>, script: &s
                         }),
                 ),
             },
-            turn: Some(1),
+            turn: match turn {
+                "-" => None,
+                other => Some(other.parse::<u64>().unwrap_or_else(|_| {
+                    fake::fail(&format!(
+                        "a `.refused` line names the turn {other:?}, which is not a turn number"
+                    ))
+                })),
+            },
         };
         // The sibling's **own** envelope, serialized through the sibling's own
         // type: a hand-rolled object here would be an independent copy of a
@@ -537,7 +549,7 @@ fn refuse_candidates(args: &[String], node: &str, step: Option<&str>, script: &s
             v: oneagentgraph::event::ENVELOPE_VERSION,
             ts: fake::now(),
             stream: stream(),
-            seq: 10 + offset as u64,
+            seq: 100 + offset as u64,
             source: oneagentgraph::event::Source::Agentgraph,
             kind: oneagentgraph::event::EventKind::FallbackAdvanced,
             labels: serde_json::from_value(serde_json::Value::Object(labels.clone()))
@@ -1088,14 +1100,16 @@ fn stream() -> String {
 /// something else.
 fn emit(
     args: &[String],
+    dir: &std::path::Path,
+    key: &str,
     node: &str,
     step: Option<&str>,
     task: &str,
     redirected: Option<&str>,
-    stepped_clock: bool,
-    duplicate_seq: bool,
 ) {
     let labels = member_labels(args, node, step);
+    let stepped_clock = dir.join(format!("{key}.clock-stepped")).exists();
+    let duplicate_seq = dir.join(format!("{key}.duplicate-seq")).exists();
     // A producer whose host clock was stepped **backwards** between two records
     // it wrote: its `seq` still runs forward, because a producer knows what
     // order it wrote things in, but its timestamps no longer agree with that.
@@ -1161,9 +1175,12 @@ fn emit(
     }
     // Where this turn's conversation was written down. Published per oneharness
     // invocation, as the real member publishes it, and before the turn it
-    // belongs to completes.
-    publish_oneharness_session(&labels, node);
-    let report = report_of(task);
+    // belongs to completes — one per side per turn, which is what pairs with
+    // the candidates that side's chain stepped past.
+    for (offset, invocation) in served_invocations(dir, key).iter().enumerate() {
+        publish_oneharness_session(&labels, node, offset, invocation);
+    }
+    let report = report_of(task, scripted_verdicts(dir, key));
     envelope(
         3,
         oneagentgraph::event::EventKind::TurnCompleted,
@@ -1242,11 +1259,126 @@ fn emit(
         oneagentgraph::event::EventKind::MemberSettled,
         serde_json::json!({
             "completed": true,
-            "verdict": [],
+            // The report's **own** verdicts, copied onto the settlement exactly
+            // as the real member copies them: a consumer reads what failed a
+            // node's judge off this line, and a double that published an empty
+            // list beside a report that carried verdicts would be an oracle for
+            // a settlement nothing writes.
+            "verdict": report.get("verdicts").cloned()
+                .unwrap_or(serde_json::Value::Array(Vec::new())),
             "completion_reason": "done_when_met",
             "report_path": named.map(|path| path.display().to_string()),
         }),
     );
+}
+
+/// Every oneharness invocation this dispatch's member actually ran.
+///
+/// Scripted `<key>.served`, one `ROLE TURN IDENTITY` per line. With nothing
+/// scripted it is the one invocation an ordinary turn makes — the agent side's
+/// first — which is what every other journey here expects of a dispatch.
+///
+/// The role goes through the sibling's **own** [`Role`], so the script's grammar
+/// is that library's spelling rather than a copy of it that keeps parsing after
+/// a rename, and a line that is not three columns is fatal: a script read
+/// leniently would publish an invocation the test author did not write, and a
+/// double that publishes something other than what its script says is an oracle
+/// for nothing.
+///
+/// [`Role`]: oneagentgraph::event::Role
+fn served_invocations(
+    dir: &std::path::Path,
+    key: &str,
+) -> Vec<(oneagentgraph::event::Role, u64, String)> {
+    let Some(script) = fake::node_script(dir, key, "served") else {
+        return vec![(
+            oneagentgraph::event::Role::Agent,
+            1,
+            "fake-provider/claude-code".to_string(),
+        )];
+    };
+    script
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let mut columns = line.split_whitespace();
+            let (Some(role), Some(turn), Some(identity), None) = (
+                columns.next(),
+                columns.next(),
+                columns.next(),
+                columns.next(),
+            ) else {
+                fake::fail(&format!(
+                    "a `.served` line reads {line:?}, which is not `ROLE TURN IDENTITY`"
+                ));
+            };
+            let role = serde_json::from_value::<oneagentgraph::event::Role>(role.into())
+                .unwrap_or_else(|error| {
+                    fake::fail(&format!(
+                        "a `.served` line names the role {role:?}: {error}"
+                    ))
+                });
+            let Ok(turn) = turn.parse::<u64>() else {
+                fake::fail(&format!(
+                    "a `.served` line names the turn {turn:?}, which is not a turn number"
+                ));
+            };
+            (role, turn, identity.to_string())
+        })
+        .collect()
+}
+
+/// The verdicts this dispatch's member settles with.
+///
+/// Scripted `<key>.verdict`, one `VALUE|CRITERION|REASON` per line, where
+/// `VALUE` is `true` or `false` — a boolean verdict, which is the only kind
+/// onejudge fails a run over. Nothing scripted is a member that was scored
+/// against nothing, which is what every other journey here settles as.
+///
+/// Pipe-separated rather than by whitespace, because a judge's reason is a
+/// sentence and splitting it on spaces would keep only its first word.
+fn scripted_verdicts(dir: &std::path::Path, key: &str) -> Vec<serde_json::Value> {
+    let Some(script) = fake::node_script(dir, key, "verdict") else {
+        return Vec::new();
+    };
+    script
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let mut columns = line.split('|');
+            let (Some(value), Some(criterion), Some(reason), None) = (
+                columns.next(),
+                columns.next(),
+                columns.next(),
+                columns.next(),
+            ) else {
+                fake::fail(&format!(
+                    "a `.verdict` line reads {line:?}, which is not `VALUE|CRITERION|REASON`"
+                ));
+            };
+            let Ok(value) = value.trim().parse::<bool>() else {
+                fake::fail(&format!(
+                    "a `.verdict` line names the value {value:?}, which is not `true` or `false`"
+                ));
+            };
+            // Built through **onejudge's own** `NamedVerdict`, like every other
+            // sibling-owned payload this double writes: a hand-rolled object
+            // here would be an independent copy of a schema that library owns,
+            // and it would keep serializing after the schema moved while the
+            // crate under test went on reading the old one.
+            let named = onejudge::NamedVerdict::new(
+                criterion.trim(),
+                onejudge::JudgeKind::Boolean,
+                onejudge::JudgeVerdict {
+                    value: onejudge::JudgeValue::Bool(value),
+                    reason: reason.trim().to_string(),
+                    usage: None,
+                },
+            );
+            serde_json::to_value(&named)
+                .unwrap_or_else(|error| fake::fail(&format!("a verdict will not write: {error}")))
+        })
+        .collect()
 }
 
 /// Publish where this turn's oneharness invocation wrote its conversation down.
@@ -1267,8 +1399,14 @@ fn emit(
 ///
 /// [`OneharnessSession`]: oneagentgraph::event::OneharnessSession
 /// [`Artifact`]: oneagentgraph::event::Artifact
-fn publish_oneharness_session(labels: &serde_json::Map<String, serde_json::Value>, node: &str) {
-    let record = format!("{}-{}", fake::segment(node), std::process::id());
+fn publish_oneharness_session(
+    labels: &serde_json::Map<String, serde_json::Value>,
+    node: &str,
+    offset: usize,
+    invocation: &(oneagentgraph::event::Role, u64, String),
+) {
+    let (role, turn, identity) = invocation;
+    let record = format!("{}-{}-{offset}", fake::segment(node), std::process::id());
     let store = fake::script_dir().join("history");
     let project = "fake-project";
     let path = store.join(project).join(format!("{record}.jsonl"));
@@ -1290,9 +1428,9 @@ fn publish_oneharness_session(labels: &serde_json::Map<String, serde_json::Value
         fake::fail(&format!("cannot write {}: {error}", path.display()));
     }
     let session = oneagentgraph::event::OneharnessSession {
-        role: oneagentgraph::event::Role::Agent,
-        turn: 1,
-        identity: "fake-provider/claude-code".to_string(),
+        role: *role,
+        turn: *turn,
+        identity: identity.clone(),
         session_id: Some(format!("fake-harness-{record}")),
         history_id: record.clone(),
         history_dir: store.display().to_string(),
@@ -1316,8 +1454,10 @@ fn publish_oneharness_session(labels: &serde_json::Map<String, serde_json::Value
         "ts": fake::now(),
         "stream": stream(),
         // Above the turn's own envelopes and below the candidates a chain
-        // stepped past, so no reader can take it for either.
-        "seq": 6,
+        // stepped past, so no reader can take it for either. One per
+        // invocation, because a producer's seq is its own statement of the
+        // order it wrote things in and two records cannot share one.
+        "seq": 6 + offset as u64,
         "source": "agentgraph",
         "kind": kind.as_str(),
         // No conversation on it: the record *names* one, and a consumer that
@@ -1348,7 +1488,7 @@ fn publish_oneharness_session(labels: &serde_json::Map<String, serde_json::Value
 /// `results[].structured` of the one that ran. That is the channel this stack
 /// reads a drafted change request body out of, so it is what this double
 /// answers a `pr-author` dispatch with.
-fn report_of(task: &str) -> serde_json::Value {
+fn report_of(task: &str, verdicts: Vec<serde_json::Value>) -> serde_json::Value {
     if let Some(answer) = drafted_answer(task, &fake::script_dir()) {
         // A candidate the identity chain stepped past: it ran nothing, so it
         // answered nothing, and a consumer that read the first entry rather than
@@ -1397,7 +1537,7 @@ fn report_of(task: &str) -> serde_json::Value {
                  "input": {"command": "echo the turn ran"}, "index": 0},
             ]},
         ]},
-        "verdicts": [],
+        "verdicts": verdicts,
         "completion_reason": "done_when_met",
         "usage": {
             "input_tokens": 1_200, "output_tokens": 340,
