@@ -325,6 +325,74 @@ pub(crate) fn evidence(paths: &RunPaths, events: &[Envelope]) -> Vec<Evidence> {
         .collect()
 }
 
+/// The payload key a settlement carries its verdicts inline on.
+///
+/// `oneagentgraph` copies the report's own `verdicts` onto every
+/// [`MEMBER_SETTLED`] it publishes, so what failed a node's judge is on the
+/// stream this run already merged — the reason it can be said without any file
+/// being opened, retained or not.
+const VERDICT: &str = "verdict";
+
+/// One judge verdict that **failed** the member it was scored against.
+///
+/// Crate-visible, like everything else here that is not the retention path: what
+/// a view renders out of a settlement is a rendering rather than a promise.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FailedVerdict {
+    /// The criterion that was scored, when the record named one.
+    pub criterion: Option<String>,
+    /// The judge's own justification, when the record carried one.
+    ///
+    /// The single most useful sentence about a node that failed on its judge,
+    /// and until it was rendered it was reachable only by opening the node's
+    /// retained report by hand.
+    pub reason: Option<String>,
+}
+
+/// Every judge verdict that failed one node's dispatches, in settlement order.
+///
+/// **Only a boolean verdict that came back false is one.** That is the whole of
+/// what onejudge fails a run over — a numeric score is reported and gates
+/// nothing — so a consumer that treated a low score as a failure would name a
+/// verdict that failed nothing as the reason a node failed.
+///
+/// Read **structurally**, by field name, exactly as the report document beside
+/// it is and for the reason this module's header gives: these are a sibling's
+/// records, nothing here acts on them, and a stricter read would answer a real
+/// settlement by rendering nothing at all. A field a newer producer spells
+/// differently costs that field rather than the verdict.
+// llmlint: ignore-block[boundary_inputs_validated] the leniency is the decision above,
+// and the same one every other cross-library read here makes: this is a relayed envelope
+// already in the run's own merged store, and what comes out of it is rendered for a
+// person and acted on by nothing.
+pub(crate) fn failed_verdicts(events: &[Envelope], node: &str) -> Vec<FailedVerdict> {
+    events
+        .iter()
+        .filter(|event| event.source == Source::Agentgraph && event.kind.0 == MEMBER_SETTLED)
+        .filter(|event| event.labels.node.as_deref() == Some(node))
+        .filter_map(|event| event.payload.get(VERDICT))
+        .filter_map(Value::as_array)
+        .flatten()
+        .filter(|named| named.pointer("/verdict/value") == Some(&Value::Bool(false)))
+        .map(|named| FailedVerdict {
+            criterion: text_of(named.get("criterion")),
+            reason: text_of(named.pointer("/verdict/reason")),
+        })
+        .collect()
+}
+
+/// One string a sibling's record carried, or `None` for one it did not.
+///
+/// Empty is absent: a criterion nobody wrote and an empty one are the same fact
+/// to a reader, and rendering the empty string would put a bare pair of quotes
+/// where the missing-value phrase belongs.
+fn text_of(value: Option<&Value>) -> Option<String> {
+    value
+        .and_then(Value::as_str)
+        .filter(|text| !text.trim().is_empty())
+        .map(str::to_string)
+}
+
 /// Read this run's own copy of one report, or `None` when it did not keep one.
 ///
 /// The path is [`Evidence::kept`] and nothing else — but "the run owns that

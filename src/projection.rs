@@ -155,6 +155,16 @@ pub struct RunState {
     /// so a fix aimed at the wrong chain changes nothing and the run fails the
     /// same way again.
     pub refusals: BTreeMap<String, Vec<Refusal>>,
+    /// Every oneharness invocation each node's members actually **ran**, in the
+    /// order the store recorded them.
+    ///
+    /// The other half of [`refusals`](Self::refusals), and the only thing that
+    /// tells a chain which recovered from one which ran out: an advance names
+    /// the candidate a chain stepped past, and the invocation published beside
+    /// it names the identity that went on to serve that side's turn. Without it
+    /// every fall-through reads as fatal, and four wrong diagnoses in one day is
+    /// what that costs.
+    pub served: BTreeMap<String, Vec<Served>>,
     /// What each node's dispatch is doing *now*, from the relayed stream.
     ///
     /// The one question no event of this crate's own can answer: a
@@ -332,13 +342,35 @@ pub struct Refusal {
     /// whole failure being fixed — a fix aimed at the wrong side of a
     /// conversation changes nothing.
     pub member: MemberLabel,
-    /// How many records carried this same side, identity, and reason.
+    /// How many records carried this same side, identity, reason, and turn.
     ///
     /// Non-zero because a refusal exists only by having been recorded once.
-    /// Deliberately not a count of *turns*: the producer stamps a turn on each
-    /// advance and this does not read it, so claiming turns would be a
-    /// measurement nothing here made.
+    /// Deliberately not a count of *turns*: one turn's chain can record the same
+    /// candidate more than once, so this counts records and a view that said
+    /// turns would be making a measurement nothing here made.
     pub records: std::num::NonZeroU64,
+}
+
+/// One oneharness invocation a node's member actually **ran**, and the member
+/// it ran for.
+///
+/// The invocation is `oneagentgraph`'s **own** payload type, held whole for the
+/// reason [`Refusal`] holds its advance whole: the side, the turn, and the
+/// composed identity that reproduces the run are that library's contract, and a
+/// second declaration of them here is a second thing to keep true.
+///
+/// Only a two-party member publishes these — a single-sided one has one chain
+/// and attributes nothing per side or per turn — so a node whose records carry
+/// none is a node this crate cannot say either way about, never one whose chains
+/// ran out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Served {
+    /// The invocation exactly as `oneagentgraph` published it.
+    pub session: oneagentgraph::event::OneharnessSession,
+    /// The member whose invocation it was, as the producer labelled the
+    /// envelope — read exactly as [`Refusal::member`] is, so the two pair on
+    /// the same fact rather than on two readings of it.
+    pub member: MemberLabel,
 }
 
 /// The member an envelope named, as far as this build could read it.
@@ -370,6 +402,16 @@ pub enum MemberLabel {
 fn is_fallback_advanced(kind: &crate::event::EventKind) -> bool {
     serde_json::from_value::<oneagentgraph::event::EventKind>(Value::String(kind.0.clone()))
         .is_ok_and(|known| known == oneagentgraph::event::EventKind::FallbackAdvanced)
+}
+
+/// Whether one relayed kind is `oneagentgraph`'s `oneharness-session`.
+///
+/// Read the same way [`is_fallback_advanced`] is, and for the same reason: the
+/// kind is that library's own, so it is recognised by parsing the wire string
+/// back into that library's set rather than by a spelling of it kept here.
+fn is_oneharness_session(kind: &crate::event::EventKind) -> bool {
+    serde_json::from_value::<oneagentgraph::event::EventKind>(Value::String(kind.0.clone()))
+        .is_ok_and(|known| known == oneagentgraph::event::EventKind::OneharnessSession)
 }
 
 /// The kind `oneagentgraph` reports a bounded tool summary as.
@@ -499,6 +541,7 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
         // evidence of where it is doing it.
         fold_activity(state, event);
         fold_refusal(state, event);
+        fold_invocation(state, event);
         fold_session(state, event);
         return;
     }
@@ -981,31 +1024,82 @@ fn fold_refusal(state: &mut RunState, event: &Envelope) {
     // llmlint: ignore-end[changed_behavior_has_e2e]
     let refusal = Refusal {
         advanced,
-        // The label arrives in `extra`, because this crate's own envelope does
-        // not declare `member` — so it is checked here rather than by a schema.
-        // A value that is not a member name is kept apart from a producer that
-        // stamped none: they are different facts about the record.
-        member: match event.labels.extra.get("member") {
-            None => MemberLabel::Unstamped,
-            Some(Value::String(member)) => MemberLabel::Named(member.clone()),
-            Some(_) => MemberLabel::Unreadable,
-        },
+        member: member_label(event),
         records: std::num::NonZeroU64::MIN,
     };
     let recorded = state.refusals.entry(node.to_string()).or_default();
-    // The turn is deliberately not part of what makes two records the same: one
-    // side's chain refusing the same identity the same way is one fact about
-    // this node, however many turns asked it.
+    // The turn **is** part of what makes two records the same, because it is
+    // what pairs an advance with the invocation that went on to run that side's
+    // turn: two turns of one chain can end differently — one recovered, one out
+    // of candidates — and a record that had collapsed them could only be
+    // rendered as one of the two. Collapsing what a *reader* sees is a
+    // rendering, and `src/views.rs` does it there, after each record's ending is
+    // known.
     if let Some(same) = recorded.iter_mut().find(|seen| {
         seen.advanced.identity == refusal.advanced.identity
             && seen.advanced.role == refusal.advanced.role
             && seen.advanced.reason == refusal.advanced.reason
+            && seen.advanced.turn == refusal.advanced.turn
             && seen.member == refusal.member
     }) {
         same.records = same.records.saturating_add(1);
         return;
     }
     recorded.push(refusal);
+}
+
+/// Record one oneharness invocation a node's member actually ran.
+///
+/// The mirror of [`fold_refusal`], and read under the same rules: only
+/// `oneagentgraph` publishes this kind, the envelope has to name the node it
+/// belongs to, and the payload is that library's own declared type rather than
+/// a set of field names read off whatever arrived. An invocation assembled out
+/// of whatever fields happened to be present would name an identity as having
+/// served a turn on no better evidence than that something used the word.
+fn fold_invocation(state: &mut RunState, event: &Envelope) {
+    // llmlint: ignore-block[changed_behavior_has_e2e] the three guards are the three
+    // `fold_refusal` carries, about envelopes no producer in this stack writes: reaching
+    // any of them needs a store a *newer* build — or something wearing a producer's
+    // clothes — wrote. Held by this module's own tests; what a user can reach is driven
+    // in `tests/e2e/views.rs`.
+    if event.source != Source::Agentgraph || !is_oneharness_session(&event.kind) {
+        return;
+    }
+    let Some(node) = event.labels.node.as_deref() else {
+        return;
+    };
+    let Ok(session) = serde_json::from_value::<oneagentgraph::event::OneharnessSession>(
+        Value::Object(event.payload.clone()),
+    ) else {
+        return;
+    };
+    // llmlint: ignore-end[changed_behavior_has_e2e]
+    let served = Served {
+        session,
+        member: member_label(event),
+    };
+    // Appended rather than keyed: the producer publishes one invocation per
+    // side per turn, and the first record of a side and a turn is the one a
+    // reader pairs an advance on that turn with.
+    state
+        .served
+        .entry(node.to_string())
+        .or_default()
+        .push(served);
+}
+
+/// The member an envelope's labels named, as far as this build can read it.
+///
+/// The label arrives in `extra`, because this crate's own envelope does not
+/// declare `member` — so it is checked here rather than by a schema. A value
+/// that is not a member name is kept apart from a producer that stamped none:
+/// they are different facts about the record.
+fn member_label(event: &Envelope) -> MemberLabel {
+    match event.labels.extra.get("member") {
+        None => MemberLabel::Unstamped,
+        Some(Value::String(member)) => MemberLabel::Named(member.clone()),
+        Some(_) => MemberLabel::Unreadable,
+    }
 }
 
 fn plan_of(payload: &serde_json::Map<String, Value>) -> Option<Plan> {
@@ -1902,6 +1996,77 @@ mod tests {
             Some(seen.progress.expect("the activities counted").last_at()),
             millis_of(&activity(3, "Read", "x").ts)
         );
+    }
+
+    /// An invocation is recorded only where the whole of it reads: the
+    /// producing library's own kind, an envelope naming the node it belongs to,
+    /// and that library's own declared payload.
+    ///
+    /// An identity assembled out of whatever fields happened to be present would
+    /// name something as having served a turn on no better evidence than that it
+    /// used the word — which is the invented attribution this whole record
+    /// exists to replace.
+    #[test]
+    fn an_invocation_is_recorded_only_where_the_whole_record_reads() {
+        let published = |member: Option<Value>, node: Option<&str>, payload: Value| {
+            let mut event = pipeline(journal::PipelineKind::NodeDispatched, 1, node, &[]);
+            event.source = Source::Agentgraph;
+            event.kind = crate::event::EventKind("oneharness-session".into());
+            event.payload = match payload {
+                Value::Object(fields) => fields,
+                other => panic!("a payload is not an object: {other:?}"),
+            };
+            if let Some(member) = member {
+                event.labels.extra.insert("member".into(), member);
+            }
+            event
+        };
+        let whole = || {
+            json!({
+                "role": "judge", "turn": 2, "identity": "codex:alternate",
+                "history_id": "record-1", "history_dir": "/store",
+                "history_project": "project", "history_session": "record-1",
+            })
+        };
+
+        // A member the producer stamped, one it did not, and one that is not a
+        // member name: three different facts about the record, kept apart
+        // exactly as an advance's are.
+        let state = fold(&[
+            published(Some(json!("worker")), Some("build"), whole()),
+            published(None, Some("build"), whole()),
+            published(Some(json!(7)), Some("build"), whole()),
+        ]);
+        assert_eq!(
+            state.served["build"]
+                .iter()
+                .map(|served| served.member.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                MemberLabel::Named("worker".into()),
+                MemberLabel::Unstamped,
+                MemberLabel::Unreadable,
+            ]
+        );
+        let first = &state.served["build"][0].session;
+        assert_eq!(first.role, oneagentgraph::event::Role::Judge);
+        assert_eq!(first.turn, 2);
+        assert_eq!(first.identity, "codex:alternate");
+
+        // A kind this build has no reading of, an envelope belonging to no
+        // node, and a payload the producing library's own type refuses.
+        let mut wrong_kind = published(None, Some("build"), whole());
+        wrong_kind.kind = crate::event::EventKind("oneharness-sessions".into());
+        let mut wrong_source = published(None, Some("build"), whole());
+        wrong_source.source = Source::Vcs;
+        assert!(fold(&[
+            wrong_kind,
+            wrong_source,
+            published(None, None, whole()),
+            published(None, Some("build"), json!({"identity": "codex"})),
+        ])
+        .served
+        .is_empty());
     }
 
     /// A tool the producer named nothing for leaves the last thing it *did*
