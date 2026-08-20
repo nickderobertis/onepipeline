@@ -35,6 +35,7 @@ mod lifecycle;
 mod live_edit;
 mod plan;
 mod real_vcs;
+mod session;
 mod session_reuse;
 mod shipped;
 mod surface;

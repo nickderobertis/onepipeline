@@ -74,8 +74,23 @@ resolver = "2"
 #   drafted body is *for*: below it a change request opens with the boilerplate
 #   this crate has no way to replace. 0.4.1 adds a stacked-branch publish above it.
 #
-# One floor is carried by `Cargo.lock` rather than by the requirement below, and
-# deliberately: `onevcs` 0.4.2 takes up the session a stopped run left on a pinned
+# Two floors are carried by `Cargo.lock` rather than by the requirement below,
+# and deliberately.
+#
+# `oneagentgraph` 0.3.3 carries the **session-conversation producer**: a `session`
+# label naming the conversation a member's turns belong to, and the
+# `oneharness-session` event naming the history record one oneharness invocation
+# wrote, with that record as its artifact. Which kinds carry the label is that
+# library's to say — `EventKind::carries_session` — and is not restated here. It
+# is what an operator's conversation view renders an agent's transcript out of,
+# and this crate relays all of it. `^0.3.0` already permits it, so the resolution
+# is the whole of the fix and widening the requirement would buy nothing.
+# `src/agentgraph.rs`'s
+# `the_linked_oneagentgraph_produces_the_session_conversation_this_crate_relays`
+# is what holds the resolution there — below the floor it fails saying the lock
+# is stale — and `tests/e2e/session.rs` drives the relay itself.
+#
+# `onevcs` 0.4.2 takes up the session a stopped run left on a pinned
 # branch instead of cutting a second one on the same name, which is what lets a
 # retry reach work its predecessor stranded. `^0.4.1` already permits it, so the
 # resolution is the whole of the fix and widening the requirement would buy
@@ -96,7 +111,7 @@ onevcs-testing = "0.2.1"
 
 [package]
 name = "onepipeline"
-version = "0.8.2"
+version = "0.8.3"
 edition = "2021"
 rust-version = "1.88"
 description = "Execute a task DAG over oneagentgraph and onevcs, merging their event streams into one."
