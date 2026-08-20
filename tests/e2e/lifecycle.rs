@@ -2516,16 +2516,10 @@ fn a_change_this_crate_cannot_read_the_record_of_settles_as_a_plain_task_failure
 /// `base_branch` equal to `branch` is the only way a plan can *look* like it is
 /// asking to continue an existing branch — `onevcs` honours a pin onto a branch
 /// carrying work its base does not only when the base is that same branch — and
-/// it is not one: the node is then asked at publication what its branch adds to
-/// itself, which is nothing by construction. Four nodes across three runs were
-/// written that way and every one reported it had changed nothing while carrying
-/// the work, with the integration target never told about any of it.
-///
-/// Both halves of what [`onepipeline::plan::Node::base_branch`] documents are
-/// held here: the settlement is `no-changes` whatever the branch carries, and it
-/// now names the ref that was compared, so a reader sees the branch measured
-/// against itself instead of a node that reads exactly like one which genuinely
-/// changed nothing.
+/// it is not one: the node is then asked what its branch adds to itself. Both
+/// halves of what [`onepipeline::plan::Node::base_branch`] documents are held
+/// here: the settlement is `no-changes` whatever the branch carries, and it names
+/// the ref that was compared, so the tautology is readable.
 #[test]
 fn a_node_whose_base_branch_is_its_branch_settles_no_changes_naming_what_it_compared_against() {
     let world = World::new("lifecycle-selfbase");

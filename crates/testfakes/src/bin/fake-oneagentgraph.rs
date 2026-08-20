@@ -615,12 +615,9 @@ fn session_token(worktree: &std::path::Path) -> String {
 /// values a reader cannot act on — for the same reason the `<key>.unreadable`
 /// line above is written by hand: a reader's refusal has no other producer.
 ///
-/// Scripted `<key>.session-records`, holding a JSON array of records with an
-/// optional `token`, `branch`, and `node`. The values are the journey's, because
-/// which malformation it is about is its business; the record around them — and
-/// the stream it goes on, which is this dispatch's own session — is written
-/// here, once. A record naming no `token` is about the session it is written to,
-/// which is what every record on a session's log is.
+/// Scripted `<key>.session-records`, a JSON array of `{token?, branch?, node?}`.
+/// The values are the journey's; the record around them, and the stream it goes
+/// on, are this dispatch's own session.
 fn session_records(args: &[String], script: &str) {
     let worktree = session_worktree(args, "writing a session record");
     let token = session_token(&worktree);
@@ -635,19 +632,17 @@ fn session_records(args: &[String], script: &str) {
         .join(format!("{token}.ndjson"));
     let mut lines = String::new();
     for record in records {
-        // The script is this program's own external input, and an element that
-        // is not the documented record would otherwise become one with null
-        // fields — a journey asserting against a record it did not write.
         let serde_json::Value::Object(record) = record else {
             fake::fail(&format!(
                 "a session-records script holds objects of {{token?, branch?, node?}}, and \
                  one element is {record}"
             ));
         };
-        // Every key it declares and nothing else, each a string: a typo would
-        // otherwise become a record the journey did not write and did not mean,
-        // and it would assert against that record's refusal rather than the one
-        // it was about.
+        // Every key it declares and nothing else, each a string or `null`: a typo
+        // would otherwise become a record the journey did not write and did not
+        // mean, and it would assert against that record's refusal rather than the
+        // one it was about. `null` is how a journey says a field is *absent*,
+        // which is a different record from one naming it empty.
         for (key, value) in &record {
             if !["token", "branch", "node"].contains(&key.as_str()) {
                 fake::fail(&format!(
@@ -655,49 +650,56 @@ fn session_records(args: &[String], script: &str) {
                      {{token?, branch?, node?}}"
                 ));
             }
-            if !value.is_string() {
+            if !value.is_string() && !value.is_null() {
                 fake::fail(&format!(
-                    "a session-records element gives {key:?} as {value}, which is not a \
-                     string"
+                    "a session-records element gives {key:?} as {value}, which is neither \
+                     a string nor null"
                 ));
             }
         }
-        let field = |key: &str| record.get(key).cloned().unwrap_or(serde_json::Value::Null);
-        let mut labels = serde_json::Map::new();
-        if let serde_json::Value::String(node) = field("node") {
-            labels.insert("node".to_owned(), serde_json::json!(node));
-        }
-        // The session this dispatch is working in, unless the script names
-        // another on purpose: a record on a session's log is that session's, and
-        // a journey about one that is not says so rather than getting it by
-        // default.
-        let named = match field("token") {
-            serde_json::Value::Null => serde_json::json!(token),
-            named => named,
+        let named = |key: &str| record.get(key).and_then(serde_json::Value::as_str);
+        // The session this dispatch is working in, and the shape `onevcs` writes
+        // a record of one in — its own [`Session`], serialized as the payload the
+        // library builds from the same value. What the script names replaces a
+        // field of it; what it names as `null` takes the field out.
+        let session = onevcs::Session {
+            token: onevcs::SessionToken(named("token").unwrap_or(&token).to_owned()),
+            worktree: worktree.clone(),
+            branch: named("branch").unwrap_or("onevcs/scripted").to_owned(),
+            base: "main".to_owned(),
         };
-        lines.push_str(
-            &serde_json::json!({
-                "v": 1,
-                "ts": fake::now(),
-                "stream": token,
-                // A number the session's own writer never uses: `onevcs` numbers
-                // a stream from one, so this cannot move the mark a follow reads
-                // on from and cannot hide a record the session really wrote.
-                "seq": 0,
-                "source": "vcs",
-                "kind": "session-opened",
-                "labels": labels,
-                "payload": {
-                    "token": named,
-                    "branch": field("branch"),
-                    "base": "main",
-                    "worktree": worktree.display().to_string(),
-                },
-                "artifacts": [],
-            })
-            .to_string(),
-        );
-        lines.push('\n');
+        let Ok(serde_json::Value::Object(mut payload)) = serde_json::to_value(&session) else {
+            fake::fail("a onevcs session no longer renders as an event payload");
+        };
+        for key in ["token", "branch"] {
+            if record.get(key).is_some_and(serde_json::Value::is_null) {
+                payload.remove(key);
+            }
+        }
+        let envelope = onevcs::Envelope {
+            v: 1,
+            ts: fake::now(),
+            stream: token.clone(),
+            // A number the session's own writer never uses: `onevcs` numbers a
+            // stream from one, so this cannot move the mark a follow reads on
+            // from and cannot hide a record the session really wrote.
+            seq: 0,
+            source: onevcs::Source::Vcs,
+            kind: onevcs::EventKind::SessionOpened,
+            labels: onevcs::Labels {
+                node: named("node").map(str::to_owned),
+                ..onevcs::Labels::default()
+            },
+            payload,
+            artifacts: Vec::new(),
+        };
+        match serde_json::to_string(&envelope) {
+            Ok(line) => {
+                lines.push_str(&line);
+                lines.push('\n');
+            }
+            Err(error) => fake::fail(&format!("cannot render a session record: {error}")),
+        }
     }
     let written = std::fs::OpenOptions::new()
         .create(true)

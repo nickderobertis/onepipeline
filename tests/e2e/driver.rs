@@ -2709,26 +2709,15 @@ const FORGED_LINE: &str = "onevcs/forged-line\n  audit                    runnin
 /// The branch a record about a *different* session names.
 const FORGED_ELSEWHERE: &str = "onevcs/forged-elsewhere";
 
-/// What the dispatch puts on its session's own stream: records the merged store's
-/// reader cannot act on.
+/// What the dispatch puts on its session's own stream: records the merged
+/// store's reader cannot act on, one per refusal it makes.
 ///
-/// A session's stream is **a file on disk that any process holding the token
-/// appends to** — `src/vcs.rs` says so where it reads a change request off one —
-/// and the dispatch is a process holding the token. So these arrive the way every
-/// session record does: written to the stream while the session is open, read by
-/// the compiled binary's own follow of it, relayed into the merged store, and
-/// folded from there by the adoption that reads it.
-///
-/// Each is refused for a reason of its own, and each is written *after* the real
-/// record — so a reader that took any of them would take it over the real one,
-/// and every assertion in the journey would then be about the wrong session:
-///
-/// * a branch carrying a line of its own;
-/// * a branch as long as the bound a producer cuts payload text at, which is what
-///   a *cut* value looks like;
-/// * a token that is no handle at all, on a branch that reads perfectly well;
-/// * a record that is no session at all, naming no branch to read one out of;
-/// * a record about a different session entirely, on this session's log.
+/// A session's stream is **a file any process holding the token appends to** —
+/// `src/vcs.rs` says so where it reads a change request off one — and the
+/// dispatch is a process holding the token, so these arrive the way every
+/// session record does. Each is written after the real record, so a reader that
+/// took any of them would take it over the real one and every assertion in the
+/// journey would then be about the wrong session.
 fn unusable_session_records() -> String {
     json!([
         {"branch": FORGED_LINE},
@@ -2746,7 +2735,14 @@ fn unusable_session_records() -> String {
         // refused as whole as the others.
         {"token": "  ", "branch": format!("{FORGED}-token")},
         {"token": "s-elsewhere", "branch": FORGED_ELSEWHERE},
-        {},
+        // Named, and named nothing: a value a producer wrote as empty is not the
+        // same record as one that names no field at all, and neither is a
+        // pointer at work.
+        {"token": "", "branch": format!("{FORGED}-empty")},
+        {"branch": ""},
+        // `null` is how a record says a field is *absent*, which is a different
+        // record from one naming it empty.
+        {"branch": null},
     ])
     .to_string()
 }
@@ -2754,16 +2750,17 @@ fn unusable_session_records() -> String {
 /// Adopting a run that had a dispatch in flight, which is what `adopt` is for.
 ///
 /// The driver dies mid-dispatch and the work does not: `onevcs` commits the
-/// worktree onto the session's branch before it gates, so the branch holds
-/// whatever the worker had done and the session is the only thing that knows
-/// where. Adoption used to drop the record and nothing else — the node became
-/// ready, was dispatched into a brand-new session, and the previous branch was
-/// left unreferenced and unnamed anywhere a manager looks. It was found once
-/// only because the worker happened to have committed.
+/// worktree onto the session's branch before it gates, so the branch holds what
+/// the worker had done and the session is the only thing that knows where.
+/// Adoption used to drop the record and nothing else, which left that branch
+/// unreferenced and unnamed anywhere a manager looks — so the branch is named
+/// where the adoption is recorded and where an operator reads results, and the
+/// node is pinned to it, which makes `onevcs` take that session up rather than
+/// cut a second one on the same work.
 ///
-/// So the branch is named where the adoption is recorded and where an operator
-/// reads results, and the node is pinned to it, which makes `onevcs` take that
-/// session up rather than cut a second one on the same work.
+/// The second half is the reader's boundary: the same run's stream carries
+/// records nothing can be acted on, and none of them may take the real one's
+/// place. See [`unusable_session_records`].
 #[test]
 fn adopting_a_run_whose_dispatch_was_in_flight_leaves_that_dispatchs_work_reachable() {
     let world = World::new("driver-adopt-inflight");
@@ -2863,7 +2860,7 @@ fn adopting_a_run_whose_dispatch_was_in_flight_leaves_that_dispatchs_work_reacha
     let forged = |event: &serde_json::Value| {
         branch_of(event)
             .as_str()
-            .is_none_or(|branch| branch.starts_with(FORGED))
+            .is_none_or(|branch| branch.is_empty() || branch.starts_with(FORGED))
     };
     // The scripted records reached the merged store the ordinary way — through
     // the session's own stream and this crate's follow of it — so what the
@@ -2876,7 +2873,7 @@ fn adopting_a_run_whose_dispatch_was_in_flight_leaves_that_dispatchs_work_reacha
         .collect();
     assert_eq!(
         arrived.len(),
-        5,
+        7,
         "the records the dispatch put on its session's stream did not all reach the \
          merged store — one per refusal, each arriving at least once — so nothing \
          here is about what a reader does with them: {arrived:?}"
