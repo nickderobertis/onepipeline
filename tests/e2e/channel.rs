@@ -951,7 +951,6 @@ fn every_verdict_half_the_contract_names_rules_a_supervised_member() {
         .run_on(start, "start halves --detach --dag-graph")
         .exited(0);
 
-    // One turn per half, each ruled with that half and nothing else.
     for (turn, verdict) in [
         (1, json!({"completion": false})),
         (2, json!({"message": "keep going"})),
@@ -1285,6 +1284,102 @@ fn a_rejected_commands_only_reply_leaves_the_observers_side_waiting() {
     let _ = serving.wait();
 }
 
+/// Both halves, where the reconciler refuses the edits: the ruling is still
+/// delivered, and only the edits are reported refused.
+///
+/// The two halves answer to two different things — the verdict to a question a
+/// reader is blocked on, the commands to the graph — so the fate of one is not
+/// the fate of the other. A reader held until the reconciler happened to like
+/// the edits riding alongside would be blocked by a refusal that was never about
+/// it, which for an observer member's judge side is the same silence this whole
+/// routing exists to end.
+#[test]
+fn a_rejected_reply_carrying_both_halves_still_delivers_its_verdict() {
+    use std::io::{BufRead, BufReader, Write};
+
+    let world = World::new("channel-reply-both-refused");
+    // The same shape the commands-only refusal is built on: an open turn beside
+    // a node that never dispatches, so a `live` note for the second is accepted
+    // at submission and refused by the reconciler.
+    world.script("slow.turn-open", "");
+    world.script("slow.wait", "hold");
+    let path = world.plan(
+        "bothrefused",
+        &plan_of(
+            "bothrefused",
+            vec![agent("slow", &[]), agent("later", &["slow"])],
+        ),
+    );
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+    world.until("the held node's turn to open", |world| {
+        !world.events_of("bothrefused", "turn-started").is_empty()
+    });
+
+    let mut serving = world
+        .cmd(&["channel", "serve", "bothrefused"])
+        .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "120")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the channel server starts");
+    let mut stdin = serving.stdin.take().expect("stdin is piped");
+    writeln!(
+        stdin,
+        r#"{{"kind":"blocker","message":"slow has been at this a while; go on?","node":"slow"}}"#
+    )
+    .expect("the frame is written");
+    stdin.flush().expect("flushed");
+    world.until("the frame to reach the planner", |world| {
+        !world
+            .events_of("bothrefused", "planner-surface-queued")
+            .is_empty()
+    });
+    world.run(&["next", "bothrefused"]).exited(0);
+
+    world
+        .run_with_stdin(
+            &["reply", "bothrefused"],
+            &json!({
+                "completion": false,
+                "reason": "go on; the note was optional",
+                "version": 1,
+                "commands": [
+                    {"op": "context", "id": "later", "note": "start from the fixture", "deliver": "live"}
+                ]
+            })
+            .to_string(),
+        )
+        .exited(REFUSED)
+        .err_has("no controllable turn in flight");
+
+    assert!(
+        world.events_of("bothrefused", "edit-committed").is_empty(),
+        "a rejected edit reached the graph: {:?}",
+        world.kinds("bothrefused")
+    );
+    let stdout = serving.stdout.take().expect("stdout is piped");
+    let verdict = BufReader::new(stdout)
+        .lines()
+        .next()
+        .expect("the server wrote a line")
+        .expect("the line reads");
+    assert!(
+        verdict.contains("go on; the note was optional"),
+        "the verdict was withheld because the edits beside it were refused: {verdict}"
+    );
+    world
+        .run(&["status", "bothrefused"])
+        .exited(0)
+        .out_lacks("waiting for planner decision");
+
+    drop(stdin);
+    world.release("slow.go");
+    let _ = serving.wait();
+}
+
 /// The same routing where the reply process is the one applying the edit.
 ///
 /// Nothing is driving this run, so `reply` takes the ownership lock and
@@ -1527,13 +1622,11 @@ fn a_verdict_beside_edits_that_are_still_queued_is_delivered_anyway() {
         .exited(QUEUED)
         .out_has("\"queued\"");
 
-    // The edits are still waiting for the reconciler...
     assert!(
         world.events_of(&run, "edit-committed").is_empty(),
         "the edits this journey needs queued were reconciled: {:?}",
         world.kinds(&run)
     );
-    // ...and the ruling reached the reader that was waiting for one.
     let stdout = serving.stdout.take().expect("stdout is piped");
     let verdict = BufReader::new(stdout)
         .lines()
