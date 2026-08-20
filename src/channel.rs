@@ -5,9 +5,7 @@
 //! `ai-orchestrator`'s live-edit protocol exactly, per `docs/contract.md`.
 //!
 //! Which reader takes one follows from **which of those three it is**, and not
-//! from which reader reached the queue first: the verdict half is the pending
-//! surface's, the commands half is the reconciler's, and an envelope carrying
-//! only edits never reaches the reader waiting for a ruling. See [`Reply`].
+//! from which reader reached the queue first: see [`Reply`].
 //!
 //! `ChannelState` is the transport: it queues surfaces and replies, hands each
 //! out once, and records what a submitted command list was answered with. It
@@ -205,13 +203,17 @@ impl Reply {
         self.completion.is_some() || self.message.is_some() || self.reason.is_some()
     }
 
-    /// Whether this envelope is the command path's alone.
+    /// Whether this envelope is the command path's alone — the contract's
+    /// **commands-only** envelope.
     ///
     /// Edits and no verdict: nothing in it answers a question, so nothing in it
     /// belongs on the reply path. This is the discrimination the two readers are
     /// routed by, and it is made from the shape the envelope already declares
-    /// rather than from an address it would have had to remember to carry.
-    pub(crate) fn is_commands_only(&self) -> bool {
+    /// rather than from an address it would have had to remember to carry. An
+    /// envelope carrying neither — no edits and no verdict — is **not** one of
+    /// these: it commands nothing, so the command path has nothing to do for it,
+    /// and it stays on the path a commandless reply has always taken.
+    pub(crate) fn belongs_to_the_command_path(&self) -> bool {
         !self.commands.is_empty() && !self.carries_verdict()
     }
 }
@@ -592,7 +594,9 @@ impl ChannelState {
         let fresh: Vec<QueuedReply> = self
             .replies()
             .into_iter()
-            .filter(|queued| queued.id >= claimed_through && !queued.reply.is_commands_only())
+            .filter(|queued| {
+                queued.id >= claimed_through && !queued.reply.belongs_to_the_command_path()
+            })
             .collect();
         if let Some(last) = fresh.last() {
             crate::ledger::write_json(&cursor_path, &(last.id + 1))?;

@@ -927,12 +927,28 @@ fn a_commands_only_reply_applied_under_the_lock_leaves_the_observers_side_waitin
         "the observer's side ended on a live edit it was never sent"
     );
 
+    // The planner answers — and corrects the graph again in the same envelope,
+    // which under the lock is one process doing both halves: the edit is applied
+    // here and the verdict goes to the reader waiting for one.
     world
         .run_with_stdin(
             &["reply", "underlock"],
-            r#"{"completion":false,"reason":"approve it yourself"}"#,
+            &json!({
+                "completion": false,
+                "reason": "approve it yourself",
+                "version": 1,
+                "commands": [{"op": "drop", "id": "late", "dependents": "detach"}]
+            })
+            .to_string(),
         )
-        .exited(0);
+        .exited(0)
+        .out_has("\"applied\"");
+    assert_eq!(
+        world.events_of("underlock", "edit-committed").len(),
+        2,
+        "the commands half of the answering envelope was not applied: {:?}",
+        world.kinds("underlock")
+    );
     let stdout = serving.stdout.take().expect("stdout is piped");
     let first = BufReader::new(stdout)
         .lines()
@@ -940,8 +956,8 @@ fn a_commands_only_reply_applied_under_the_lock_leaves_the_observers_side_waitin
         .expect("the server wrote a line")
         .expect("the line reads");
     assert!(
-        !first.contains("commands"),
-        "a graph edit applied under the lock was written back as a ruling: {first}"
+        !first.contains("\"op\":\"add\""),
+        "the commands-only edit applied under the lock was written back as a ruling: {first}"
     );
     assert!(
         first.contains("approve it yourself"),
