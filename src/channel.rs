@@ -572,7 +572,7 @@ impl ChannelState {
             .collect()
     }
 
-    /// Claim the verdicts no reader has taken yet.
+    /// Claim the next verdict no reader has taken yet.
     ///
     /// A reply is claimed from the durable queue by whichever reader reaches it
     /// next, each claim advancing the cursor, so one reply reaches exactly one
@@ -583,24 +583,24 @@ impl ChannelState {
     /// is skipped here as well for the run whose queue an older build already
     /// wrote one into — that envelope's reader is the command queue, which holds
     /// its own copy behind its own cursor, so passing over this one takes
-    /// nothing from anybody. Only a claim moves the cursor, and only to just
-    /// past the last verdict actually handed out: a skipped envelope is left
-    /// behind a delivery rather than stepped over on its own account, and a poll
-    /// that takes nothing leaves the cursor exactly where it was.
-    pub fn claim_replies(&self) -> crate::Result<Vec<QueuedReply>> {
+    /// nothing from anybody.
+    ///
+    /// **One claim, one reply**, oldest first: two verdicts written inside one
+    /// reader's poll are two rulings about two questions, and handing over the
+    /// batch would deliver the newer and lose the older. The cursor lands just
+    /// past the reply this claim took — so a skipped envelope is passed over
+    /// behind a delivery rather than on its own account, and a poll that takes
+    /// nothing leaves the cursor exactly where it was.
+    pub fn claim_reply(&self) -> crate::Result<Option<QueuedReply>> {
         let cursor_path = self.paths.channel("replies-cursor.json");
         let claimed_through: u64 = crate::ledger::read_json_opt(&cursor_path).unwrap_or(0);
-        let fresh: Vec<QueuedReply> = self
-            .replies()
-            .into_iter()
-            .filter(|queued| {
-                queued.id >= claimed_through && !queued.reply.carries_edits_without_a_verdict()
-            })
-            .collect();
-        if let Some(last) = fresh.last() {
-            crate::ledger::write_json(&cursor_path, &(last.id + 1))?;
+        let claimed = self.replies().into_iter().find(|queued| {
+            queued.id >= claimed_through && !queued.reply.carries_edits_without_a_verdict()
+        });
+        if let Some(claimed) = &claimed {
+            crate::ledger::write_json(&cursor_path, &(claimed.id + 1))?;
         }
-        Ok(fresh)
+        Ok(claimed)
     }
 
     /// Append one envelope of edits to the durable command queue.

@@ -1913,7 +1913,7 @@ fn blocking_by_default() -> bool {
 fn wait_for_reply(channel: &ChannelState) -> Result<Reply> {
     let deadline = Instant::now() + Duration::from_secs(reply_timeout_seconds());
     while Instant::now() < deadline {
-        if let Some(claimed) = channel.claim_replies()?.into_iter().next_back() {
+        if let Some(claimed) = channel.claim_reply()? {
             return Ok(claimed.reply);
         }
         std::thread::sleep(ATTACH_POLL);

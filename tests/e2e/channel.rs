@@ -1244,6 +1244,77 @@ fn a_commands_only_reply_applied_under_the_lock_leaves_the_observers_side_waitin
     let _ = serving.wait();
 }
 
+/// Two rulings written inside one poll are two rulings, and the reader takes
+/// them one per question.
+///
+/// Acceptance means delivery on this channel: a planner writes when it has
+/// something to say and nothing has to be listening at that moment. So a second
+/// verdict arriving while the first is still unread is not a correction of it —
+/// it is the answer to the next question, and a reader that swept up the batch
+/// and kept the newest would drop a ruling somebody was owed.
+#[test]
+fn two_verdicts_written_at_once_are_delivered_one_per_question() {
+    use std::io::{BufRead, BufReader, Write};
+
+    let world = World::new("channel-two-verdicts");
+    world.script("build.wait", "hold");
+    let run = running(&world, "queuedverdicts", vec![agent("build", &[])]);
+
+    let mut serving = world
+        .cmd(&["channel", "serve", &run])
+        .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "120")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the channel server starts");
+    let mut stdin = serving.stdin.take().expect("stdin is piped");
+    let stdout = serving.stdout.take().expect("stdout is piped");
+    let mut written = BufReader::new(stdout).lines();
+
+    writeln!(stdin, r#"{{"kind":"blocker","message":"first question"}}"#).expect("written");
+    stdin.flush().expect("flushed");
+    world.until("the first question to reach the planner", |world| {
+        !world.events_of(&run, "planner-surface-queued").is_empty()
+    });
+
+    // Both rulings, back to back — the second before the first has been read.
+    for reason in ["answering the first", "answering the second"] {
+        world
+            .run_with_stdin(
+                &["reply", &run],
+                &json!({"completion": false, "reason": reason}).to_string(),
+            )
+            .exited(0);
+    }
+
+    let first = written
+        .next()
+        .expect("the server wrote a line")
+        .expect("the line reads");
+    assert!(
+        first.contains("answering the first"),
+        "the first question was answered with a later ruling, losing the one it was owed: {first}"
+    );
+
+    // The second question is answered out of what is already on the queue: the
+    // ruling nobody had read is still there for the reader that asks next.
+    writeln!(stdin, r#"{{"kind":"blocker","message":"second question"}}"#).expect("written");
+    stdin.flush().expect("flushed");
+    let second = written
+        .next()
+        .expect("the server wrote a second line")
+        .expect("the line reads");
+    assert!(
+        second.contains("answering the second"),
+        "the ruling written while the first question was open never reached anybody: {second}"
+    );
+
+    drop(stdin);
+    world.release("build.go");
+    let _ = serving.wait();
+}
+
 /// A run carried across the upgrade: the live edit an older build already left
 /// on the reply queue is passed over rather than handed out.
 ///
