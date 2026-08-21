@@ -411,6 +411,17 @@ impl World {
             // chose; the environment beats a config-file `bin`, so one value
             // covers every member of every graph a journey writes.
             .env("ONEHARNESS_BIN_CLAUDE_CODE", double("fake-claude"))
+            // The candidate this suite's identity chains are written to fall
+            // *through*, named at the same seam so that it is a fact of the
+            // launch rather than a fact of the developer's machine. The chain a
+            // fall-through journey writes is only a chain if its first candidate
+            // is missing, and the inherited `PATH` still follows the entries
+            // above — so on a host that has `codex` installed, oneharness
+            // resolved it, the chain stepped past nothing, and the journey
+            // failed on a premise the test could not see was false. It also
+            // stopped that host from spending a *real* codex turn, which is what
+            // the `env_remove`s below guard the same launch against.
+            .env("ONEHARNESS_BIN_CODEX", self.uninstalled_harness())
             .env("ONEAGENTGRAPH_STATE_DIR", self.graph_state())
             .env(
                 "ONEPIPELINE_NODE_GRAPH",
@@ -425,6 +436,16 @@ impl World {
             .env_remove("ONEHARNESS_MODELS")
             .env_remove("ONEHARNESS_MODE");
         command
+    }
+
+    /// Where a harness this suite wants **not** installed would be.
+    ///
+    /// Inside the world, and under a directory nothing ever creates: a path that
+    /// does not resolve is what oneharness reads as a candidate it cannot run,
+    /// and one scoped to this world cannot be brought into existence by
+    /// something an operator has on their host.
+    fn uninstalled_harness(&self) -> PathBuf {
+        self.root.join("harnesses-not-installed").join("codex")
     }
 
     /// Run a command against the real `oneagentgraph`.
