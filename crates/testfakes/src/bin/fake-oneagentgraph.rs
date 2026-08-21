@@ -27,6 +27,19 @@ pub const PLANTED: &str = r#"{"transcript":{"messages":[{"role":"assistant",
     "results":[{"harness":"claude-code","status":"ok","text":"planted-and-never-read",
     "structured":{"body":"planted-and-never-read"},"schema_valid":true}]}"#;
 
+/// What a turn of this double says for itself, live on the stream and again in
+/// the report it settles with.
+///
+/// One constant for both, because a real turn says the same thing twice: a
+/// `turn-message` is the words as they are spoken and the retained transcript is
+/// the words kept, and a double whose two halves disagreed would be an oracle
+/// for a conversation nothing has.
+const SAID: &str = "Ran what the task asked for.";
+
+/// The most a scripted turn may be made to say: twice the bound a payload text
+/// field carries, which is past it by any margin a journey needs.
+const SAYABLE: usize = 2 * oneagentgraph::event::MAX_PAYLOAD_TEXT_BYTES;
+
 /// The exit code the real CLI answers an invalid configuration with — its own
 /// constant, so a double cannot answer a refusal with a code the sibling stopped
 /// using.
@@ -41,9 +54,10 @@ fn invalid_config() -> ExitCode {
 /// Both halves come from that library rather than from a copy of its rule here:
 /// [`EventKind::carries_session`] decides *which* kinds carry the label and
 /// [`session_label`] computes the value. The exclusion is the load-bearing half.
-/// A consumer renders every labelled envelope that is not a `turn-activity` or a
-/// `turn-interrupted` as one transcript turn, so a double that stamped a
-/// heartbeat would be an oracle for a transcript nothing produces — and a
+/// A consumer renders every labelled envelope that is not a `turn-activity`, a
+/// `turn-message` or a `turn-interrupted` as one transcript turn, so a double
+/// that stamped a heartbeat would be an oracle for a transcript nothing
+/// produces — and a
 /// hand-written `"{stream}.{member}"` would keep writing the old value the day
 /// that function's sanitising or its length bound moved.
 ///
@@ -885,7 +899,7 @@ fn open_turn(args: &[String], dir: &std::path::Path, key: &str, node: &str, step
                 "v": 1,
                 "ts": fake::now(),
                 "stream": stream(),
-                "seq": 5,
+                "seq": 6,
                 "source": "agentgraph",
                 "kind": kind.as_str(),
                 // A second member of the one graph run is a second
@@ -1122,6 +1136,10 @@ fn emit(
     redirected: Option<&str>,
 ) {
     let labels = member_labels(args, node, step);
+    // When this turn began. Minted before its first envelope, because a turn's
+    // close carries the same instant its opening did and the close is written
+    // after everything in between.
+    let opened = fake::now();
     let stepped_clock = dir.join(format!("{key}.clock-stepped")).exists();
     let duplicate_seq = dir.join(format!("{key}.duplicate-seq")).exists();
     // A producer whose host clock was stepped **backwards** between two records
@@ -1187,6 +1205,49 @@ fn emit(
             }),
         );
     }
+    // The turn's own words, said while it is saying them. A consumer renders
+    // this *into* a transcript and counts it out of the turn total, exactly as
+    // it does an activity — which is the sibling's rule and is asked of that
+    // library above rather than restated here.
+    //
+    // Scripted only in length: `{key}.said-bytes` makes this turn say more than
+    // a payload text field may carry, which is the one case a relay has to cut
+    // rather than pass on whole. Every other journey gets what the report keeps.
+    //
+    // The count is refused above [`SAYABLE`] rather than allocated: the whole
+    // reason to script one is to cross the sibling's own bound, so a larger
+    // number is a typo, and a typo that is honoured is a double that exhausts
+    // the host instead of failing the journey that made it.
+    let said = match fake::node_script(dir, key, "said-bytes") {
+        None => SAID.to_string(),
+        Some(bytes) => match bytes.trim().parse::<usize>() {
+            Ok(bytes) if bytes <= SAYABLE => "s".repeat(bytes),
+            Ok(bytes) => fake::fail(&format!(
+                "{key}.said-bytes asks for {bytes} bytes; nothing past {SAYABLE} says \
+                 anything a payload bound does not already"
+            )),
+            Err(error) => fake::fail(&format!("{key}.said-bytes is not a byte count: {error}")),
+        },
+    };
+    envelope(
+        3,
+        oneagentgraph::event::EventKind::TurnMessage,
+        // Through the sibling's **own** payload type: `truncated` is that
+        // library's statement about its own field, and this double publishes
+        // what it really did — it does not cut, so it does not claim to. What
+        // happens to an over-long text after this is the *relay*'s to decide,
+        // and a double that pre-cut it would answer that question for the code
+        // under test.
+        match serde_json::to_value(oneagentgraph::event::TurnMessage {
+            turn: 1,
+            role: oneagentgraph::event::Party::Assistant.as_str().to_string(),
+            text: said,
+            truncated: false,
+        }) {
+            Ok(payload) => payload,
+            Err(error) => fake::fail(&format!("a turn message is not an object: {error}")),
+        },
+    );
     // Where this turn's conversation was written down. Published per oneharness
     // invocation, as the real member publishes it, and before the turn it
     // belongs to completes — one per side per turn, which is what pairs with
@@ -1196,9 +1257,26 @@ fn emit(
     }
     let report = report_of(task, scripted_verdicts(dir, key));
     envelope(
-        3,
+        4,
         oneagentgraph::event::EventKind::TurnCompleted,
-        serde_json::json!({"usage": report["usage"]}),
+        // Through the sibling's own payload type, so this closes **one** turn
+        // the way that library closes one — the turn and the party its opening
+        // named, over the interval it ran, on that turn's own account. The
+        // usage crosses the same boundary: the report's figures are already in
+        // the spelling the sibling declares, and reading them into its type is
+        // what fails here rather than downstream if either moves.
+        match serde_json::to_value(oneagentgraph::event::TurnCompleted {
+            turn: 1,
+            role: oneagentgraph::event::Party::Assistant.as_str().to_string(),
+            usage: serde_json::from_value(report["usage"].clone()).unwrap_or_else(|error| {
+                fake::fail(&format!("this double's report has no usage: {error}"))
+            }),
+            started_at: opened,
+            finished_at: fake::now(),
+        }) {
+            Ok(payload) => payload,
+            Err(error) => fake::fail(&format!("a turn close is not an object: {error}")),
+        },
     );
     // The report is *stored*, and the settlement says where — the sibling's own
     // contract, and the only reason a turn's tools and words survive the
@@ -1278,7 +1356,7 @@ fn emit(
     // `a_node_that_failed_on_a_judge_verdict_says_why_and_names_no_provider` in
     // `tests/e2e/views.rs` fails.
     envelope(
-        4,
+        5,
         oneagentgraph::event::EventKind::MemberSettled,
         serde_json::json!({
             "completed": true,
@@ -1531,7 +1609,7 @@ fn publish_oneharness_session(
         // stepped past, so no reader can take it for either. One per
         // invocation, because a producer's seq is its own statement of the
         // order it wrote things in and two records cannot share one.
-        "seq": 6 + offset as u64,
+        "seq": 10 + offset as u64,
         "source": "agentgraph",
         "kind": kind.as_str(),
         // No conversation on it: the record *names* one, and a consumer that
@@ -1606,7 +1684,7 @@ fn report_of(task: &str, verdicts: Vec<serde_json::Value>) -> serde_json::Value 
         "schema_version": 7,
         "transcript": {"messages": [
             {"role": "user", "content": task},
-            {"role": "assistant", "content": "Ran what the task asked for.", "events": [
+            {"role": "assistant", "content": SAID, "events": [
                 {"kind": "tool_call", "name": "bash",
                  "input": {"command": "echo the turn ran"}, "index": 0},
             ]},

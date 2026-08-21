@@ -314,7 +314,44 @@ fn tool_call(index: u64, command: &str) {
             }]},
         })
     );
+    observation(index);
 }
+
+/// The observation that answered the call above, as the same wire shape carries
+/// it: a `user` message holding a `tool_result` block, joined back to the call
+/// by `tool_use_id`.
+///
+/// Emitted with every call rather than scripted, because a real turn has no
+/// other way to go: a model that asked for a tool and was told nothing could not
+/// take another step. Streaming only the ask was a double that stopped halfway
+/// through the exchange it stands in for, and a consumer reading its stream saw
+/// every dispatch reach for a tool and none of them ever learn anything.
+///
+/// It carries **no tool name**, which is the shape rather than an omission: a
+/// result answers a call already named, so `oneharness_core` normalizes it to an
+/// event whose `name` is absent and whose `output` is what came back.
+// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the same provider wire shape
+// as `tool_call` above, gated the same way: the real `oneharness_core` normalizes these
+// lines, so a shape it stops reading is `tests/e2e/turns.rs` finding a dispatch that
+// relayed an ask and never an answer.
+fn observation(index: u64) {
+    println!(
+        "{}",
+        serde_json::json!({
+            "type": "user",
+            "message": {"content": [{
+                "type": "tool_result",
+                "tool_use_id": format!("toolu_{index}"),
+                "content": OBSERVED,
+            }]},
+        })
+    );
+}
+
+/// What the tool above returned. Recognisable, and the same every time, so a
+/// journey can assert on the observation a turn was given rather than on the
+/// fact that it was given one.
+const OBSERVED: &str = "the turn ran";
 
 fn assistant_text() {
     println!(

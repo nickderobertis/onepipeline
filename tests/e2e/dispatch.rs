@@ -888,8 +888,17 @@ fn status_says_what_a_live_dispatch_is_doing_and_the_readout_advances() {
     let before = events_reported(&first.stdout, "build");
 
     world.release("turn.go");
-    world.until("the dispatch to report a second turn", |world| {
-        world.events_of("watched", "turn-activity").len() > 1
+    // A second **call**, not a second activity: a turn publishes the observation
+    // that answered a call as well as the call, so counting activities would let
+    // this through on the answer to the first one — with the readout still
+    // saying what the first call said, which is the thing under test.
+    world.until("the dispatch to report a second tool call", |world| {
+        world
+            .events_of("watched", "turn-activity")
+            .iter()
+            .filter(|event| event["payload"]["kind"] == "tool_call")
+            .count()
+            > 1
     });
     let second = world.run(&["status", "watched"]);
     second
@@ -1213,9 +1222,21 @@ fn transcript_renders_a_real_dispatched_turns_tools_and_words() {
 /// attributed, because a reader with two entries in front of them has no other
 /// way to tell which identity said which.
 ///
-/// The chain is real rather than scripted: `codex` is not on the `PATH` this
-/// launch is given and no `ONEHARNESS_BIN_CODEX` names one, so oneharness falls
-/// through it exactly as it would on a host where that harness is not installed.
+/// The chain is real rather than scripted: this launch's `codex` resolves to
+/// nothing, so oneharness falls through it exactly as it would on a host where
+/// that harness is not installed.
+///
+/// **Said by the journey rather than borrowed from the host.** The premise used
+/// to be "`codex` is not on the `PATH` this launch is given" — which
+/// [`World::agentgraph_cmd`] cannot promise, because it *prepends* to the
+/// inherited `PATH` and the operator's own entries stay behind it. On a
+/// developer machine with `codex` installed the chain then ran its first
+/// candidate, stepped past nothing, and this failed with an empty list. So the
+/// launch names its own `ONEHARNESS_BIN_CODEX` — at a path inside this world
+/// that was never created — and oneharness's resolver answers `available:
+/// false` for it on every host alike.
+///
+/// [`World::agentgraph_cmd`]: crate::harness::World::agentgraph_cmd
 #[test]
 fn a_transcript_names_the_harness_that_answered_and_skips_the_ones_it_stepped_past() {
     let world = World::new("real-fallback-transcript");
@@ -1226,16 +1247,18 @@ fn a_transcript_names_the_harness_that_answered_and_skips_the_ones_it_stepped_pa
     )
     .expect("the two-candidate chain is written");
     let path = world.plan("chained", &plan_of("chained", vec![agent("build", &[])]));
-    world
-        .run_on_agentgraph(&[
-            "start",
-            &path.to_string_lossy(),
-            "--attach",
-            "--node-set",
-            "members.worker.oneharness_config=./chain.toml",
-        ])
-        .exited(0)
-        .settled();
+    let mut launch = world.agentgraph_cmd(&[
+        "start",
+        &path.to_string_lossy(),
+        "--attach",
+        "--node-set",
+        "members.worker.oneharness_config=./chain.toml",
+    ]);
+    launch.env(
+        "ONEHARNESS_BIN_CODEX",
+        world.graphs().join("no-codex-on-this-host"),
+    );
+    world.run_on(launch, "start").exited(0).settled();
 
     // The chain really did step past the first candidate, which is what makes
     // the transcript below a claim about a fall-through rather than about a
