@@ -126,6 +126,41 @@ pub fn outcome_of(outcome: &PublishOutcome) -> &'static str {
     }
 }
 
+/// A publication failure a further attempt on the same branch could answer.
+///
+/// A closed set and not a word, because these four *are* the vocabulary: each
+/// one is a settlement the contract publishes, a routing decision this crate
+/// makes, and a case a reader of a preserved failure switches on. Carried as a
+/// string, a fifth spelling would be constructible everywhere one of these is —
+/// in a settlement, in a re-dispatch's reason, in the roll-up a spent budget
+/// writes — and every one of those is a word the contract does not name reaching
+/// an operator as though it did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Preserving {
+    /// A required check the host reports concluded red.
+    ChecksFailed,
+    /// The bound on watching the host elapsed with the change still outstanding.
+    ChecksUnsettled,
+    /// The publishing push was refused by the merge path.
+    PushRejected,
+    /// The base moved under the publication and the bounded resolve-and-requeue
+    /// did not converge.
+    SyncConflict,
+}
+
+impl Preserving {
+    /// The word the node settles on.
+    #[must_use]
+    pub fn outcome(self) -> &'static str {
+        match self {
+            Self::ChecksFailed => "checks-failed",
+            Self::ChecksUnsettled => "checks-unsettled",
+            Self::PushRejected => "push-rejected",
+            Self::SyncConflict => "sync-conflict",
+        }
+    }
+}
+
 /// One publication failure, as this crate settles and routes it.
 ///
 /// The word and the routing are **one** value, because they are one judgement:
@@ -136,10 +171,10 @@ pub fn outcome_of(outcome: &PublishOutcome) -> &'static str {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Failure {
     /// Its fix is *more work on the same branch* — a red check to make green, a
-    /// conflict to resolve, a push a hook refused — and it settles under this
-    /// word. The tree that was rejected is still there, so a worker sent back to
-    /// it meets the thing that rejected it.
-    Preserving(&'static str),
+    /// conflict to resolve, a push a hook refused — and it settles under that
+    /// failure's own word. The tree that was rejected is still there, so a
+    /// worker sent back to it meets the thing that rejected it.
+    Preserving(Preserving),
     /// Nothing a further attempt could answer: a request `onevcs` refused at its
     /// trust boundary, a seam with no implementation, and a gate that ran on the
     /// tree as it stands all answer the same way however many times they are
@@ -159,7 +194,7 @@ impl Failure {
     #[must_use]
     pub fn outcome(self) -> &'static str {
         match self {
-            Self::Preserving(word) => word,
+            Self::Preserving(preserving) => preserving.outcome(),
             Self::Terminal => Self::RESIDUAL,
         }
     }
@@ -174,10 +209,10 @@ impl Failure {
 pub fn failure_of(kind: onevcs::FailureKind) -> Failure {
     use onevcs::FailureKind;
     match kind {
-        FailureKind::ChecksFailed => Failure::Preserving("checks-failed"),
-        FailureKind::ChecksUnsettled => Failure::Preserving("checks-unsettled"),
-        FailureKind::PushRejected => Failure::Preserving("push-rejected"),
-        FailureKind::SyncConflict => Failure::Preserving("sync-conflict"),
+        FailureKind::ChecksFailed => Failure::Preserving(Preserving::ChecksFailed),
+        FailureKind::ChecksUnsettled => Failure::Preserving(Preserving::ChecksUnsettled),
+        FailureKind::PushRejected => Failure::Preserving(Preserving::PushRejected),
+        FailureKind::SyncConflict => Failure::Preserving(Preserving::SyncConflict),
         // The gate is `onevcs`'s own verification of the branch rather than the
         // host's report on a change request: it ran on the tree as it stands and
         // said no, and nothing this crate can do to that tree from here changes
@@ -944,6 +979,20 @@ mod tests {
         onevcs::FailureKind::PushRejected,
     ];
 
+    /// Every failure a further attempt can answer, as the type spells them.
+    ///
+    /// Written out for the same reason [`EVERY_KIND`] is, and standing alone no
+    /// more than it does: [`Preserving::outcome`] matches arm by arm, so a
+    /// variant added there fails *that* to compile, and this list is what makes
+    /// the same addition fail the document's gate below rather than pass it
+    /// silently.
+    const EVERY_PRESERVING: &[Preserving] = &[
+        Preserving::ChecksFailed,
+        Preserving::ChecksUnsettled,
+        Preserving::PushRejected,
+        Preserving::SyncConflict,
+    ];
+
     /// The words this crate settles a failed publication on and the words the
     /// contract names are one vocabulary.
     ///
@@ -977,12 +1026,27 @@ mod tests {
             .expect("the clause ends where the residual is named")
             .0;
         let listed: BTreeSet<&str> = clause.split('`').skip(1).step_by(2).collect();
+        // The vocabulary itself, out of the type that closes it, plus the one
+        // word every failure with nothing to continue settles on.
+        let vocabulary: BTreeSet<&str> = EVERY_PRESERVING
+            .iter()
+            .map(|preserving| preserving.outcome())
+            .chain(std::iter::once(Failure::RESIDUAL))
+            .collect();
         let produced: BTreeSet<&str> = EVERY_KIND
             .iter()
             .map(|kind| failure_of(*kind).outcome())
             .collect();
+        // The routing table and the vocabulary are the same set, in both
+        // directions: a `Preserving` variant no `FailureKind` reaches is a
+        // settlement nothing can produce, and a word `failure_of` produces from
+        // outside the vocabulary is one this gate would otherwise never see.
         assert_eq!(
-            listed, produced,
+            produced, vocabulary,
+            "the words `failure_of` settles on are not the vocabulary `Preserving` closes"
+        );
+        assert_eq!(
+            listed, vocabulary,
             "the contract's publication-failure words are not the ones this crate settles on"
         );
     }
@@ -1038,7 +1102,7 @@ mod tests {
             .iter()
             .filter(|kind| !terminal.contains(kind))
             .map(|kind| match failure_of(*kind) {
-                Failure::Preserving(word) => word,
+                Failure::Preserving(preserving) => preserving.outcome(),
                 Failure::Terminal => panic!("{kind:?} is terminal, so nothing continues it"),
             })
             .collect();

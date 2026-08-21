@@ -81,7 +81,7 @@ pub fn execute(
     // leads the detail as it always has, and a detail carrying three sibling
     // diagnostics in full would carry none of them — every payload text this
     // crate writes is bounded.
-    let mut endings: Vec<&'static str> = Vec::new();
+    let mut endings: Vec<crate::vcs::Preserving> = Vec::new();
     let mut node = std::borrow::Cow::Borrowed(node);
     let mut attempt: u32 = 1;
     loop {
@@ -114,7 +114,7 @@ pub fn execute(
             node: node.id.clone(),
             attempt,
             attempts,
-            reason: format!("{}: {}", preserved.outcome, preserved.reason),
+            reason: format!("{}: {}", preserved.outcome.outcome(), preserved.reason),
         })));
         node = std::borrow::Cow::Owned(continued(&node, &preserved, attempt, attempts, &endings));
     }
@@ -488,9 +488,10 @@ struct Preserved {
     /// reader picking the work up by hand is sent to the branch every attempt
     /// was made on.
     branch: String,
-    /// This crate's word for the failure, out of [`crate::vcs::Failure`] so a
-    /// settlement and a re-dispatch cannot come to call one failure two things.
-    outcome: &'static str,
+    /// Which failure it was, as the closed set of the ones a further attempt
+    /// can answer — so a settlement, a re-dispatch, and the roll-up below cannot
+    /// come to call one failure two things.
+    outcome: crate::vcs::Preserving,
     /// The failure as `onevcs` reported it, already bounded and folded onto one
     /// line: it goes into an envelope payload and into a settlement detail, both
     /// of which are read back a line at a time.
@@ -582,11 +583,11 @@ fn compose(detail: &str, undrafted: Option<&str>) -> String {
 /// each ended with. Without the roll-up a reader sees one failure and cannot tell
 /// it from a node that failed once — which is the difference between "fix this
 /// check" and "this check is never going to pass".
-fn spent(node: &str, preserved: &Preserved, endings: &[&'static str]) -> Settlement {
+fn spent(node: &str, preserved: &Preserved, endings: &[crate::vcs::Preserving]) -> Settlement {
     let each: Vec<String> = endings
         .iter()
         .enumerate()
-        .map(|(index, ending)| format!("{} {ending}", index + 1))
+        .map(|(index, ending)| format!("{} {}", index + 1, ending.outcome()))
         .collect();
     let roll_up = format!(
         "{} publication attempt{} on {}: {}",
@@ -607,7 +608,7 @@ fn spent(node: &str, preserved: &Preserved, endings: &[&'static str]) -> Settlem
         // already holds would publish that tree again unaltered and meet the same
         // refusal — the ending this whole loop exists to avoid, reached by hand
         // instead of automatically.
-        ..Settlement::plain(node, NodeStatus::Failed, Some(preserved.outcome))
+        ..Settlement::plain(node, NodeStatus::Failed, Some(preserved.outcome.outcome()))
     }
 }
 
@@ -630,7 +631,7 @@ fn continued(
     preserved: &Preserved,
     attempt: u32,
     attempts: u32,
-    endings: &[&'static str],
+    endings: &[crate::vcs::Preserving],
 ) -> Node {
     Node {
         branch: Some(preserved.branch.clone()),
@@ -651,7 +652,7 @@ fn diagnosis(
     preserved: &Preserved,
     attempt: u32,
     attempts: u32,
-    endings: &[&'static str],
+    endings: &[crate::vcs::Preserving],
 ) -> String {
     let mut note = format!(
         "The previous attempt's publication failed and its branch was preserved. This is \
@@ -660,13 +661,14 @@ fn diagnosis(
          failure below is about; republishing it unaltered meets the same refusal.\n\n\
          The publication ended `{ending}`, and `onevcs` said:\n\n{reason}\n",
         branch = preserved.branch,
-        ending = preserved.outcome,
+        ending = preserved.outcome.outcome(),
         reason = preserved.reason,
     );
     if endings.len() > 1 {
+        let each: Vec<&str> = endings.iter().map(|ending| ending.outcome()).collect();
         note.push_str(&format!(
             "\nEvery attempt so far ended: {}.\n",
-            endings.join(", ")
+            each.join(", ")
         ));
     }
     if !preserved.evidence.is_empty() {
