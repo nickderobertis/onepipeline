@@ -2295,6 +2295,97 @@ fn both_hook_scripts_answer_the_same_verbs() {
     }
 } // llmlint: ignore-end[tests_mirror_real_usage]
 
+/// The **exit codes** both halves state, held by running this platform's half and
+/// reading what it returns.
+///
+/// The verb list is what two files can be compared on. The codes are not: each
+/// half writes its own `exit`, and both headers declare the same mapping — 0 for a
+/// verb that did what it names, `sysexits.h`'s 64 for a command line the script
+/// does not speak, and 1 for a verb the host would not let it carry out. Nothing
+/// held that mapping. `the_hook_refuses_a_command_line_it_does_not_speak` cannot:
+/// it drives the hook through git, and git relays every non-zero as one declined
+/// push, which is exactly why that test asserts what a caller sees instead.
+///
+/// So this one runs the script **directly**, which is the only place the code is
+/// observable, and each leg of the CI matrix proves its own half — the same split
+/// the two tests above already read across.
+///
+/// 64 and 0 are asserted; 1 is not, and that is a stated limit rather than an
+/// oversight. `broke` fires only when the filesystem refuses a write, and making a
+/// path unwritable is a different operation on each platform and no operation at
+/// all for a privileged user — an assertion that reached it here would pass or
+/// fail on who is running the suite rather than on what the script returns.
+// llmlint: ignore-block[tests_mirror_real_usage] this is a drift gate over the suite's own
+// scaffolding rather than a journey. The hook is the repository's own, run by git at the
+// publishing push, and the journeys that drive it through the binary are `lifecycle.rs`'s
+// and `views.rs`'s. The exit code is the one part of its contract git does not relay, so
+// running the script is the only way to read it.
+#[test]
+fn the_hook_answers_each_verb_with_the_exit_code_both_halves_state() {
+    let world = World::new("hook-exitcodes");
+    // A rendezvous that already exists, so the one accepted case below returns on
+    // its first look rather than blocking. See
+    // [`the_hook_refuses_a_command_line_it_does_not_speak`], which turns on the
+    // same ordering.
+    let go = world.root.join("push.go");
+    std::fs::write(&go, "go").expect("the rendezvous is written");
+    let satisfied = go.to_string_lossy().into_owned();
+
+    for (argv, code, what) in [
+        (vec!["nonsense"], 64, "a verb neither half implements"),
+        (vec!["wait-for"], 64, "wait-for without the path it takes"),
+        (
+            vec!["wait-for", "one", "two"],
+            64,
+            "wait-for with more than the path it takes",
+        ),
+        (
+            vec!["break-streams", "extra"],
+            64,
+            "break-streams with an argument it does not take",
+        ),
+        (
+            vec!["append-future-event", "extra"],
+            64,
+            "append-future-event with an argument it does not take",
+        ),
+        // Both stream verbs reach for `ONEVCS_HOME`, and it is removed below — so
+        // these are the refusal a hook run outside a state root answers with,
+        // which both halves also spell 64.
+        (
+            vec!["break-streams"],
+            64,
+            "break-streams with no state root to act on",
+        ),
+        (
+            vec!["append-future-event"],
+            64,
+            "append-future-event with no state root to reach",
+        ),
+        (
+            vec!["wait-for", &satisfied],
+            0,
+            "a verb it speaks, whose rendezvous is already in place",
+        ),
+    ] {
+        let argv = hook_argv(&world, &argv);
+        let ran = Command::new(&argv[0])
+            .args(&argv[1..])
+            .current_dir(&world.root)
+            .env_remove("ONEVCS_HOME")
+            .output()
+            .expect("the hook script runs");
+        assert_eq!(
+            ran.status.code(),
+            Some(code),
+            "the hook answered {what} with {:?} rather than {code}: {}{}",
+            ran.status.code(),
+            String::from_utf8_lossy(&ran.stdout),
+            String::from_utf8_lossy(&ran.stderr)
+        );
+    }
+} // llmlint: ignore-end[tests_mirror_real_usage]
+
 /// The other half of that contract — what the hook *refuses*, and with what —
 /// held by pushing at a repository that has it installed.
 ///
