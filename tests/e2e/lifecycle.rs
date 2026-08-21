@@ -1872,6 +1872,7 @@ fn refuse_pushed_branches(world: &World, repo: &Repository) {
 /// is made from and therefore the only place a merge-path hook runs. The
 /// directory sits outside the working tree so the hook is never a file the
 /// session has to have committed.
+#[cfg(unix)]
 fn gate_on_a_refusing_pre_push_hook(world: &World, repo: &Repository) {
     std::fs::write(
         world.onevcs_home().join("rules.yml"),
