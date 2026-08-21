@@ -30,16 +30,22 @@
 // each journey starts from. `oneagentgraph` is the double, because what is under test is
 // which session a dispatch runs in rather than what the dispatch writes.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 use serde_json::{json, Value};
 
-use crate::harness::{
-    git, hook_script, lifecycle, onevcs_binary, plan_of, World, GIT_EMAIL, GIT_WHO,
-};
+use crate::harness::{git, lifecycle, onevcs_binary, plan_of, World, GIT_EMAIL, GIT_WHO};
 use onevcs::Session;
 
+// Reached only from the stopped-run journey below, which is `#[cfg(unix)]` for
+// the reason stated there.
+#[cfg(unix)]
+use crate::harness::hook_script;
+#[cfg(unix)]
+use std::path::PathBuf;
+
+#[cfg(unix)]
 const STRANDED: &str = "feature/stranded";
 
 /// Why a run settled the way it did, as the sibling itself said it.
@@ -236,6 +242,9 @@ fn dispatched(world: &World, case: &str, branch: Option<&str>) -> (Value, Value)
 /// slack a loaded machine needs between the stop and the last process leaving.
 /// Generous on purpose — past it the journey fails rather than releasing the
 /// rendezvous into the race it exists to close.
+///
+/// Unix-only with the rest of the stop, for the reason the journey below states.
+#[cfg(unix)]
 const PUBLICATION_STOPS_WITHIN: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Start a run's owner in a **process group of its own**, so the sweep below has
@@ -247,9 +256,6 @@ fn in_a_group_of_its_own(command: &mut Command) {
     use std::os::unix::process::CommandExt;
     command.process_group(0);
 }
-
-#[cfg(windows)]
-fn in_a_group_of_its_own(_command: &mut Command) {}
 
 /// What a process lister wrote, once it has said it succeeded.
 ///
@@ -266,6 +272,9 @@ fn in_a_group_of_its_own(_command: &mut Command) {}
 /// header line or two columns run together must not cost a read the rows it got
 /// right. That is a statement about the *shape* of an answer this host gave;
 /// this is about whether it gave one at all.
+///
+/// Unix-only with both of its callers, for the reason the journey below states.
+#[cfg(unix)]
 fn listed_by(mut lister: Command, what: &str) -> String {
     let listed = lister.output().expect("the host lists its process table");
     assert!(
@@ -384,8 +393,9 @@ fn group_holds_anything(group: i32) -> bool {
 /// journey that released the rendezvous while the hook was between its `sleep`
 /// and its next loop would be back in the race it just closed.
 ///
-/// Unix-only, as the rest is: the Windows arm reaches the same boundary through
-/// `taskkill /T`, which walks descent and needs no group.
+/// Unix-only, and there is no arm beside it: this stop exists because the hook is
+/// two processes below the run, and no other platform can reach it. The journey
+/// below says why, and carries the same gate.
 #[cfg(unix)]
 fn stop_the_publication(world: &World, owner: &mut std::process::Child, rendezvous: &Path) {
     let held = rendezvous.to_string_lossy().into_owned();
@@ -446,115 +456,47 @@ fn holders_of(rendezvous: &str) -> Vec<u32> {
         .collect()
 }
 
-/// The pids whose command line names `rendezvous`, as this platform answers it.
+/// A run stopped mid-publication, and the retry that takes up the session it left
+/// its work in.
 ///
-/// What matches here is the `cmd` running `hook.bat`, and it is worth saying why
-/// that is the *only* row: git for Windows starts a hook with its bundled MSYS2
-/// `sh`, so the tree under the publishing push is `git` → `sh` → `cmd`, and only
-/// the last of the three carries the verb's own argv. `sh`'s names the hook file,
-/// `git`'s names the push. So this finds the one process actually blocked in
-/// `wait-for`, which is what the sweep below has to see leave.
+/// **Unix-only, and what that gives up is worth stating rather than leaving to
+/// the `cfg`.** This is the one journey that has to *stop* a publication while
+/// the repository's own `pre-push` hook is holding it, and the hook is not the
+/// run's child: it is git's, two processes below the owner. Reaching it takes a
+/// teardown that walks descent, and `onevcs` — which bounds the hook-running git
+/// command — says in its own source that it has none off Unix:
 ///
-/// The path is handed over in the environment rather than written into the
-/// command line, for two reasons that both matter: a world's scratch path is
-/// full of characters `-like` would read as wildcards, and a query carrying the
-/// rendezvous in its own argv would find *itself* and never report the hook gone.
-#[cfg(windows)]
-fn holders_of(rendezvous: &str) -> Vec<u32> {
-    let mut lister = Command::new("powershell");
-    lister
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and \
-             $_.CommandLine.Contains($env:ONEPIPELINE_RENDEZVOUS) } | ForEach-Object \
-             { $_.ProcessId }",
-        ])
-        .env("ONEPIPELINE_RENDEZVOUS", rendezvous);
-    listed_by(lister, "powershell Get-CimInstance Win32_Process")
-        .lines()
-        .filter_map(|row| row.trim().parse().ok())
-        .collect()
-}
-
-/// Whether every process `taskkill` could not end was one that had already gone.
+/// ```text
+/// #[cfg(not(unix))]
+/// fn terminate_group(child: &Child) {
+///     // No portable group teardown: the bound still fires and the child is killed
+///     // below, but a hook's own orphaned children survive it.
+///     let _ = child;
+/// }
+/// ```
 ///
-/// `taskkill /T` takes a snapshot of the tree and then terminates what it found,
-/// and `hook.bat`'s wait loop starts a fresh `ping` between the two — so the
-/// snapshot routinely names a process that has left by the time taskkill reaches
-/// it, and taskkill answers non-zero for the whole run over it. Failing the
-/// journey there would be failing it for the healthiest reason it has, so a
-/// process that is *not found* is read as one that left. Every other refusal —
-/// `Access is denied` above all — is still a stop that did not reach, and what
-/// decides the question either way is the sweep afterwards, which asks the host
-/// rather than the tool.
+/// `detach_process_group` is a no-op there too. So on Windows the stop does not
+/// reach the hook; the bound fires and joins reader threads still blocked on
+/// pipes the surviving hook inherited, and the run does not fail — it wedges,
+/// taking the whole `e2e` binary and the `cross (windows-latest)` leg with it,
+/// for hours, with no verdict at the end of it.
 ///
-/// A non-zero status with nothing to explain it is not tolerated: an empty
-/// complaint is not a process that left.
-#[cfg(windows)]
-fn only_already_gone(killed: &std::process::Output) -> bool {
-    let said = format!(
-        "{}{}",
-        String::from_utf8_lossy(&killed.stdout),
-        String::from_utf8_lossy(&killed.stderr)
-    );
-    let refusals: Vec<&str> = said
-        .lines()
-        .filter(|line| line.trim_start().starts_with("ERROR:"))
-        .collect();
-    !refusals.is_empty() && refusals.iter().all(|line| line.contains("not found"))
-}
-
-/// Stop a run **and the whole publication running under it**, and do not return
-/// while any of it is still alive.
+/// What is given up is this journey's Windows coverage and nothing else: a run
+/// stopped mid-publication, the work it strands on its branch, and the retry that
+/// continues the same session. Every other journey that installs this hook
+/// *releases* it rather than stopping it — `lifecycle.rs`'s two, `views.rs`'s
+/// publication bucket, `driver.rs`'s in-flight adoption, and `harness.rs`'s
+/// refusal gate — so all of those still run on every platform. `main` runs this
+/// one on Windows today and passes, because there the held fixture is `onevcs`'s
+/// *gate*: a direct child of the process being stopped, one `CreateProcess`,
+/// reaped by whoever started it. Removing the gate concept is what moved the hold
+/// onto the repository's own hook and put two processes in between.
 ///
-/// The same statement the Unix arm makes, in the spelling this platform has: the
-/// moment is pinned by waiting until the hook is actually holding a push, the
-/// reach is `taskkill /T` — `/F` so a process that would not leave politely still
-/// goes, and `/T` so the `git push` under the owner and the `sh` and `cmd` under
-/// that go with it — and the stop is then checked rather than assumed.
-///
-/// Checking it is not ceremony here. `onevcs` runs a hook-running git command
-/// under a bound whose teardown takes a process *group*, which that crate
-/// implements for Unix and documents as a no-op everywhere else; when it fires it
-/// joins reader threads that are still blocked on pipes the hook inherited. So a
-/// hook this stop failed to reach does not fail the run on this platform — it
-/// wedges it, with no bound left anywhere above it. The sweep below is what turns
-/// that into a journey that fails and says so.
-#[cfg(windows)]
-fn stop_the_publication(world: &World, owner: &mut std::process::Child, rendezvous: &Path) {
-    let held = rendezvous.to_string_lossy().into_owned();
-    world.until("the pre-push hook to take hold of the publication", |_| {
-        !holders_of(&held).is_empty()
-    });
-    let killed = Command::new("taskkill")
-        .args(["/T", "/F", "/PID", &owner.id().to_string()])
-        .output()
-        .expect("taskkill runs");
-    assert!(
-        killed.status.success() || only_already_gone(&killed),
-        "could not end the tree the stopped run is publishing in: {}{}",
-        String::from_utf8_lossy(&killed.stdout),
-        String::from_utf8_lossy(&killed.stderr)
-    );
-    owner.wait().expect("the stopped run's owner exits");
-
-    let deadline = std::time::Instant::now() + PUBLICATION_STOPS_WITHIN;
-    while std::time::Instant::now() < deadline {
-        if holders_of(&held).is_empty() {
-            return;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-    panic!(
-        "the stopped run's publication is still running {PUBLICATION_STOPS_WITHIN:?} after the \
-         tree under it was ended, so releasing the rendezvous below would let the push it was \
-         stopped in the middle of finish after all; {} process(es) still hold {held}",
-        holders_of(&held).len()
-    );
-}
-
+/// The gate comes off when `onevcs` can stop a hook's orphaned children on
+/// Windows — a `terminate_group` that walks descent there rather than documenting
+/// that it cannot. That is that crate's change to make, not this one's, and the
+/// Windows half of the stop belongs with it rather than sitting here unreachable.
+#[cfg(unix)]
 #[test]
 fn a_retry_takes_up_the_session_a_stopped_run_left_its_work_in() {
     let world = World::new("session-reuse-adopt");
