@@ -74,8 +74,81 @@ enum Side {
     Judge,
 }
 
+/// What follows a flag on a `oneharness run` argv.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Takes {
+    /// Nothing: the flag is the whole of it.
+    Nothing,
+    /// A value, which the real CLI refuses to be without.
+    AValue,
+}
+
+/// The flags one onejudge turn renders, and what follows each.
+///
+/// Repeats are legal — `--mock-harness` is repeatable, and onejudge's renderer
+/// emits one per harness id — so this says what an argument *is*, not how many
+/// times it may appear.
+// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] this is a copy of the
+// **CLI**'s grammar, which no crate in this dependency graph declares as data:
+// onejudge renders it in a private function and oneharness parses it in a binary this
+// build does not link. The reconciling gate is `tests/e2e/turns.rs`, which drives the
+// real onejudge against this process — so a flag it starts sending that is not below is
+// a refusal there rather than a double that quietly waves it through.
+const FLAGS: [(&str, Takes); 13] = [
+    ("--compact", Takes::Nothing),
+    ("--events", Takes::Nothing),
+    ("--history", Takes::Nothing),
+    ("--stream", Takes::Nothing),
+    ("--control", Takes::Nothing),
+    ("--system", Takes::AValue),
+    ("--config", Takes::AValue),
+    ("--mock-harness", Takes::AValue),
+    ("--cwd", Takes::AValue),
+    ("--prompt", Takes::AValue),
+    ("--prompt-file", Takes::AValue),
+    ("--history-name", Takes::AValue),
+    ("--session", Takes::AValue),
+];
+
+/// Refuses an argv the real `oneharness run` would not take.
+///
+/// The checks in [`run`] are about a flag onejudge chose the *wrong value* for;
+/// this is about one it should not be sending at all, or a positional after the
+/// verb. Both are the same property, which is the only thing a double is worth:
+/// where the real CLI says no, this one has to. An argument waved through here is
+/// one no journey can catch — onejudge grows a flag oneharness does not take,
+/// every member settles green, and the first thing that ever says otherwise is a
+/// real `oneharness`.
+fn declared(args: &[String]) -> Result<(), String> {
+    // Past the verb, which `main` matched to get here.
+    let mut at = 1;
+    while at < args.len() {
+        let arg = &args[at];
+        let Some((_, takes)) = FLAGS.iter().find(|(name, _)| name == arg) else {
+            return Err(format!("oneharness run takes no argument {arg:?}"));
+        };
+        at += 1;
+        // Refused here rather than left to the read in `run`: an option with
+        // nothing after it is indistinguishable, to every `fake::flag` below, from
+        // one that was never sent — so it would be reported as the flag missing
+        // rather than as the empty one onejudge really sent.
+        if *takes == Takes::AValue {
+            if at == args.len() {
+                return Err(format!(
+                    "oneharness run's {arg} takes a value, and nothing followed it"
+                ));
+            }
+            at += 1;
+        }
+    }
+    Ok(())
+}
+
 /// `oneharness run …` — one turn of one side.
 fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
+    if let Err(refusal) = declared(args) {
+        return fake::refuse(&refusal);
+    }
     // Read **before** anything is refused. onejudge writes the prompt onto this
     // process's stdin after spawning it, so a refusal that exited without draining
     // it reaches the caller as `could not write prompt: Broken pipe` — a transport
@@ -162,6 +235,21 @@ fn prompt(args: &[String]) -> Option<String> {
 
 /// The side that does the work: a tool exchange as it happens, then the report.
 fn agent_turn(prompt: &str, cwd: &str, dir: &std::path::Path) -> ExitCode {
+    match work(prompt, cwd, dir) {
+        Ok(failed) => {
+            if failed {
+                ExitCode::from(1)
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
+        Err(refusal) => fake::refuse(&refusal),
+    }
+}
+
+/// The turn itself, answering whether it ended having *failed* — which is not the
+/// same as this process having refused, and is why the two are separate results.
+fn work(prompt: &str, cwd: &str, dir: &std::path::Path) -> Result<bool, String> {
     // A worker turn that leaves something behind in the worktree it was given.
     // Only when scripted, and only for the worker: a publication needs a diff —
     // `onevcs publish` on a clean tree publishes nothing and says so — and a
@@ -172,9 +260,8 @@ fn agent_turn(prompt: &str, cwd: &str, dir: &std::path::Path) -> ExitCode {
     if !observing {
         if let Some(body) = fake::node_script(dir, "harness", "work") {
             let path = std::path::Path::new(cwd).join(WORK_FILE);
-            if let Err(error) = std::fs::write(&path, format!("{body}\n")) {
-                return fake::refuse(&format!("cannot write {}: {error}", path.display()));
-            }
+            std::fs::write(&path, format!("{body}\n"))
+                .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
             // Recorded where every other thing a double did is recorded: a
             // publication that turns out to have had nothing to publish is
             // asked, first, whether the turn before it wrote anything.
@@ -201,7 +288,7 @@ fn agent_turn(prompt: &str, cwd: &str, dir: &std::path::Path) -> ExitCode {
     for event in &events {
         stream(&RunStreamEnvelope::Event {
             event: event.clone(),
-        });
+        })?;
     }
     // A worker turn that reports again after a hold: what a live readout of a
     // running dispatch is read against. The first event proves the stream
@@ -214,7 +301,7 @@ fn agent_turn(prompt: &str, cwd: &str, dir: &std::path::Path) -> ExitCode {
         for event in &held {
             stream(&RunStreamEnvelope::Event {
                 event: event.clone(),
-            });
+            })?;
         }
         events.extend(held);
         // Held again, so the node is *still in flight* when the second reading
@@ -226,12 +313,8 @@ fn agent_turn(prompt: &str, cwd: &str, dir: &std::path::Path) -> ExitCode {
     let text = if failed { TURN_FAILED } else { ANSWER };
     stream(&RunStreamEnvelope::Result {
         report: report(text, Some(events), failed),
-    });
-    if failed {
-        ExitCode::from(1)
-    } else {
-        ExitCode::SUCCESS
-    }
+    })?;
+    Ok(failed)
 }
 
 /// The side that supervises: one buffered document carrying the answer.
@@ -252,16 +335,21 @@ fn judge_turn(prompt: &str, dir: &std::path::Path) -> ExitCode {
     let answer = if prompt.contains(SUPERVISOR_OPENING) {
         supervision(dir)
     } else if prompt.contains(EVALUATOR_OPENING) {
-        CRITERION_MET.to_string()
+        Ok(CRITERION_MET.to_string())
     } else {
-        return fake::refuse(&format!(
+        Err(format!(
             "the judge side was asked something this double does not answer; it speaks the \
              supervisor decision ({SUPERVISOR_OPENING:?}) and the boolean verdict \
              ({EVALUATOR_OPENING:?}), and nothing else"
-        ));
+        ))
     };
-    print!("{}", document(&report(&answer, None, false)));
-    ExitCode::SUCCESS
+    match answer.and_then(|answer| document(&report(&answer, None, false))) {
+        Ok(document) => {
+            print!("{document}");
+            ExitCode::SUCCESS
+        }
+        Err(refusal) => fake::refuse(&refusal),
+    }
 }
 
 /// The supervisor's decision: send the agent back once when a journey scripted
@@ -276,19 +364,28 @@ fn judge_turn(prompt: &str, dir: &std::path::Path) -> ExitCode {
 /// It is what makes a *conversation* observable at all: a supervisor that
 /// completes on the first ask relays one party's words, and nothing a journey
 /// reads can then tell the two parties' turns apart.
-fn supervision(dir: &std::path::Path) -> String {
+fn supervision(dir: &std::path::Path) -> Result<String, String> {
     let asked_again = dir.join("judge.asked-again");
     match fake::node_script(dir, "judge", "asks-again") {
         Some(instruction) if !asked_again.exists() => {
-            fake::record(dir, "judge-asks-again", &[instruction.clone()]);
-            std::fs::write(&asked_again, &instruction).expect("the supervisor's ask is recorded");
+            fake::record(dir, "judge-asks-again", std::slice::from_ref(&instruction));
+            // Refused rather than unwrapped: a marker this process could not write
+            // is a supervisor that will ask again on every turn, which runs the
+            // conversation to its ceiling and leaves the journey reading a shape
+            // nobody scripted. Better the member dies saying so.
+            std::fs::write(&asked_again, &instruction).map_err(|error| {
+                format!(
+                    "cannot record the supervisor's ask at {}: {error}",
+                    asked_again.display()
+                )
+            })?;
             document(&serde_json::json!({
                 "completion": false,
                 "message": instruction,
                 "reason": "the work is not there yet",
             }))
         }
-        _ => SUPERVISED_COMPLETE.to_string(),
+        _ => Ok(SUPERVISED_COMPLETE.to_string()),
     }
 }
 
@@ -337,10 +434,22 @@ const EVALUATOR_OPENING: &str = "You are a strict, careful evaluator";
 // `SUPERVISOR_OPENING` above, gated the same way.
 const CRITERION_MET: &str = "{\"value\":true,\"reason\":\"the turn did what the task asked\"}";
 
-/// What a turn that reached its task answers with.
+/// What a turn that reached its task answers with, and the same every time so a
+/// journey can read a turn's own words back rather than assert that it had some.
+///
+/// `tests/e2e/dispatch.rs` finds it in a rendered transcript and
+/// `tests/e2e/turns.rs` in a relayed `turn-message`, so a double that changed its
+/// mind about what a turn says fails in both places rather than passing quietly
+/// in either.
 const ANSWER: &str = "Ran what the task asked for.";
 
 /// What a turn that did the work and did not get there answers with.
+///
+/// A failing turn still *answers*: the pair of a non-zero exit and a report whose
+/// result says the run failed is what a caller settles a member on, and a double
+/// that fell silent instead would be the other failure — a producer that died
+/// mid-stream, which onejudge classifies as a broken transport rather than as a
+/// turn that did not get there.
 const TURN_FAILED: &str = "The turn did the work and did not get there.";
 
 /// What the tool below returned. Recognisable, and the same every time, so a
@@ -348,7 +457,6 @@ const TURN_FAILED: &str = "The turn did the work and did not get there.";
 /// that it was given one.
 const OBSERVED: &str = "the turn ran";
 
-/// One tool call, in oneharness's own normalized event shape.
 fn call(index: usize, command: &str) -> ActionEvent {
     ActionEvent {
         kind: "tool_call".into(),
@@ -388,14 +496,22 @@ fn observation(index: usize) -> ActionEvent {
     }
 }
 
-/// One line of the streamed protocol, in oneharness's own envelope.
-fn stream(envelope: &RunStreamEnvelope) {
-    println!("{}", document(envelope));
+fn stream(envelope: &RunStreamEnvelope) -> Result<(), String> {
+    println!("{}", document(envelope)?);
+    Ok(())
 }
 
 /// One document, serialized by the library that declares it.
-fn document<T: serde::Serialize>(value: &T) -> String {
-    serde_json::to_string(value).expect("an oneharness report serializes")
+///
+/// Fallible rather than unwrapped, because what a refusal costs is the whole
+/// difference: a panic here reaches onejudge as a producer that died mid-stream,
+/// which it classifies and reports as the *member* failing. The message says
+/// which document, so the journey reading that member's death is told the double
+/// could not write one rather than left to infer it from a stack trace on a
+/// stderr nobody kept.
+fn document<T: serde::Serialize>(value: &T) -> Result<String, String> {
+    serde_json::to_string(value)
+        .map_err(|error| format!("cannot serialize what this turn answers with: {error}"))
 }
 
 /// The report one turn answers with: `text` is what the side said, and it is what
