@@ -236,20 +236,16 @@ fn prompt(args: &[String]) -> Option<String> {
 /// The side that does the work: a tool exchange as it happens, then the report.
 fn agent_turn(prompt: &str, cwd: &str, dir: &std::path::Path) -> ExitCode {
     match work(prompt, cwd, dir) {
-        Ok(failed) => {
-            if failed {
-                ExitCode::from(1)
-            } else {
-                ExitCode::SUCCESS
-            }
-        }
+        Ok(outcome) => outcome.exit_code(),
         Err(refusal) => fake::refuse(&refusal),
     }
 }
 
-/// The turn itself, answering whether it ended having *failed* — which is not the
-/// same as this process having refused, and is why the two are separate results.
-fn work(prompt: &str, cwd: &str, dir: &std::path::Path) -> Result<bool, String> {
+/// The turn itself, answering with how it *ended* — which is not the same as this
+/// process having refused, and is why the two are separate results: a turn that
+/// did the work and did not get there still streamed and still reported, and a
+/// refusal never started.
+fn work(prompt: &str, cwd: &str, dir: &std::path::Path) -> Result<Outcome, String> {
     // A worker turn that leaves something behind in the worktree it was given.
     // Only when scripted, and only for the worker: a publication needs a diff —
     // `onevcs publish` on a clean tree publishes nothing and says so — and a
@@ -281,8 +277,13 @@ fn work(prompt: &str, cwd: &str, dir: &std::path::Path) -> Result<bool, String> 
     // pair is what a caller reading the graph's settlement sees. Without it the
     // only failing member this suite could produce was one that refused on the
     // way in, which never reaches a settlement at all.
-    let failed = fake::node_script(dir, "harness", "fail").is_some()
-        || (observing && fake::observe(dir) != ExitCode::SUCCESS);
+    let outcome = if fake::node_script(dir, "harness", "fail").is_some()
+        || (observing && fake::observe(dir) != ExitCode::SUCCESS)
+    {
+        Outcome::TurnFailed
+    } else {
+        Outcome::Answered
+    };
 
     let mut events = vec![call(0, "echo the turn ran"), observation(1)];
     for event in &events {
@@ -310,11 +311,10 @@ fn work(prompt: &str, cwd: &str, dir: &std::path::Path) -> Result<bool, String> 
         fake::wait_for(&dir.join("turn.settle"));
     }
 
-    let text = if failed { TURN_FAILED } else { ANSWER };
     stream(&RunStreamEnvelope::Result {
-        report: report(text, Some(events), failed),
+        report: report(outcome.text(), Some(events), outcome),
     })?;
-    Ok(failed)
+    Ok(outcome)
 }
 
 /// The side that supervises: one buffered document carrying the answer.
@@ -343,7 +343,10 @@ fn judge_turn(prompt: &str, dir: &std::path::Path) -> ExitCode {
              ({EVALUATOR_OPENING:?}), and nothing else"
         ))
     };
-    match answer.and_then(|answer| document(&report(&answer, None, false))) {
+    // A judgement is `Answered` whatever it decided: the turn that reached the
+    // decision succeeded, and a supervisor saying the work is not done is not a
+    // harness that failed to run.
+    match answer.and_then(|answer| document(&report(&answer, None, Outcome::Answered))) {
         Ok(document) => {
             print!("{document}");
             ExitCode::SUCCESS
@@ -434,23 +437,74 @@ const EVALUATOR_OPENING: &str = "You are a strict, careful evaluator";
 // `SUPERVISOR_OPENING` above, gated the same way.
 const CRITERION_MET: &str = "{\"value\":true,\"reason\":\"the turn did what the task asked\"}";
 
-/// What a turn that reached its task answers with, and the same every time so a
-/// journey can read a turn's own words back rather than assert that it had some.
+/// How a turn ended.
 ///
-/// `tests/e2e/dispatch.rs` finds it in a rendered transcript and
-/// `tests/e2e/turns.rs` in a relayed `turn-message`, so a double that changed its
-/// mind about what a turn says fails in both places rather than passing quietly
-/// in either.
-const ANSWER: &str = "Ran what the task asked for.";
+/// One value rather than a boolean beside four uses of it: the words the turn
+/// answered with, its result's `status`, the exit code beside it, the `error` that
+/// says what went wrong and this process's own exit status are five spellings of
+/// one fact, and held apart any of them could say something the others do not — a
+/// result reporting success beside a non-zero exit is exactly the pair a caller
+/// settles a member on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Outcome {
+    /// The turn reached what it was asked for.
+    Answered,
+    /// It did not, and says so in the report as well as with a non-zero exit.
+    TurnFailed,
+}
 
-/// What a turn that did the work and did not get there answers with.
-///
-/// A failing turn still *answers*: the pair of a non-zero exit and a report whose
-/// result says the run failed is what a caller settles a member on, and a double
-/// that fell silent instead would be the other failure — a producer that died
-/// mid-stream, which onejudge classifies as a broken transport rather than as a
-/// turn that did not get there.
-const TURN_FAILED: &str = "The turn did the work and did not get there.";
+impl Outcome {
+    /// The visible answer, which is also the turn's last words.
+    ///
+    /// The same every time, so a journey can read a turn's own words back rather
+    /// than assert that it had some: `tests/e2e/dispatch.rs` finds them in a
+    /// rendered transcript and `tests/e2e/turns.rs` in a relayed `turn-message`,
+    /// so a double that changed its mind about what a turn says fails in both
+    /// places rather than passing quietly in either.
+    ///
+    /// A failing turn still *answers*. A double that fell silent instead would be
+    /// the other failure — a producer that died mid-stream, which onejudge
+    /// classifies as a broken transport rather than as a turn that did not get
+    /// there.
+    fn text(self) -> &'static str {
+        match self {
+            Self::Answered => "Ran what the task asked for.",
+            Self::TurnFailed => "The turn did the work and did not get there.",
+        }
+    }
+
+    /// The `status` this turn's result carries.
+    fn status(self) -> Status {
+        match self {
+            Self::Answered => Status::Ok,
+            Self::TurnFailed => Status::Nonzero,
+        }
+    }
+
+    /// The harness's own exit code, which the result reports and this process
+    /// answers with.
+    fn code(self) -> i32 {
+        match self {
+            Self::Answered => 0,
+            Self::TurnFailed => 1,
+        }
+    }
+
+    /// The problem the result names, which is `null` on a turn that had none.
+    fn error(self) -> Option<String> {
+        match self {
+            Self::Answered => None,
+            Self::TurnFailed => Some(self.text().to_string()),
+        }
+    }
+
+    fn exit_code(self) -> ExitCode {
+        match self {
+            Self::Answered => ExitCode::SUCCESS,
+            Self::TurnFailed => ExitCode::from(1),
+        }
+    }
+}
 
 /// What the tool below returned. Recognisable, and the same every time, so a
 /// journey can assert on the observation a turn was given rather than on the fact
@@ -514,13 +568,19 @@ fn document<T: serde::Serialize>(value: &T) -> Result<String, String> {
         .map_err(|error| format!("cannot serialize what this turn answers with: {error}"))
 }
 
-/// The report one turn answers with: `text` is what the side said, and it is what
-/// onejudge reads back as that turn's reply.
+/// The report one turn answers with: `said` is what that side said, and it is what
+/// onejudge reads back as the turn's reply.
+///
+/// Free text rather than [`Outcome::text`] because the two sides do not answer the
+/// same way: the agent's words *are* its outcome, and the supervisor's are a
+/// decision it reached over a turn that succeeded. Everything the outcome does
+/// decide comes off the one value, so no caller can pair a failure with a result
+/// that reports success.
 ///
 /// Every other field is what a real single-candidate run carries. `fallback` is
 /// absent, which is what says this run had one candidate rather than a chain — a
 /// report with a chain and no `ran` is an exhausted chain, and this turn ran.
-fn report(text: &str, events: Option<Vec<ActionEvent>>, failed: bool) -> RunReport {
+fn report(said: &str, events: Option<Vec<ActionEvent>>, outcome: Outcome) -> RunReport {
     RunReport {
         schema_version: SCHEMA_VERSION.into(),
         oneharness_version: "0.0.0-fake".into(),
@@ -548,15 +608,15 @@ fn report(text: &str, events: Option<Vec<ActionEvent>>, failed: bool) -> RunRepo
             harness_id: "claude-code".into(),
             bin: "fake-claude".into(),
             available: true,
-            status: if failed { Status::Nonzero } else { Status::Ok },
+            status: outcome.status(),
             prompt: None,
             model: None,
-            exit_code: Some(i32::from(failed)),
+            exit_code: Some(outcome.code()),
             duration_ms: Some(1),
             telemetry: None,
             command: vec!["fake-claude".into()],
             output_format: OutputFormat::StreamJson,
-            text: Some(text.into()),
+            text: Some(said.into()),
             text_source: Some("json:result".into()),
             usage: Usage {
                 input_tokens: Some(1),
@@ -577,7 +637,7 @@ fn report(text: &str, events: Option<Vec<ActionEvent>>, failed: bool) -> RunRepo
             failure_kind_source: None,
             stdout: String::new(),
             stderr: String::new(),
-            error: failed.then(|| TURN_FAILED.to_string()),
+            error: outcome.error(),
         }],
     }
 }
