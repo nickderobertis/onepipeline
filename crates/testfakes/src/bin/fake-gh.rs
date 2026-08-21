@@ -210,6 +210,29 @@ fn log(args: &[String]) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// One change request this host opened, as `pr create` recorded it.
+///
+/// A typed shape and not a `Value` a reader probes for keys, for the reason
+/// every boundary in this workspace is read as one: a record missing its
+/// `number` read through `as_u64().unwrap_or_default()` is change request `0`,
+/// which addresses nothing and which `pr list` would then quietly leave out of
+/// its answer — and a `pr list` that answers empty is exactly how this host
+/// opens a second change request beside the first. Refusing the record says so
+/// where it is wrong instead.
+///
+/// The fields this host *answers* questions about, and no others: `title` and
+/// `body` are recorded for a journey to read back and nothing here consults
+/// them, so they are ignored rather than made required.
+#[derive(Debug, Clone, serde::Deserialize)]
+struct Opened {
+    /// How the host addresses it, and the last segment of the URL it printed.
+    number: u64,
+    /// The branch it was opened from.
+    head: String,
+    /// The branch it was opened into.
+    base: String,
+}
+
 /// The branch one change request was opened from, as this host recorded it.
 ///
 /// Read back out of what `pr create` wrote rather than taken off the argv: `gh
@@ -219,8 +242,8 @@ fn log(args: &[String]) -> ExitCode {
 fn head_of(dir: &Path, id: &str) -> Option<String> {
     opened_changes(dir)
         .into_iter()
-        .find(|opened| opened["number"].as_u64().map(|n| n.to_string()).as_deref() == Some(id))
-        .and_then(|opened| opened["head"].as_str().map(str::to_owned))
+        .find(|opened| opened.number.to_string() == id)
+        .map(|opened| opened.head)
 }
 
 /// Where this host's state for one change request lives.
@@ -344,15 +367,11 @@ fn list(args: &[String], dir: &Path) -> ExitCode {
     let flag = |name: &str| fake::flag(args, name).unwrap_or_default();
     let open: Vec<serde_json::Value> = opened_changes(dir)
         .into_iter()
-        .filter(|change| change["head"].as_str() == Some(flag("--head").as_str()))
-        .filter(|change| change["base"].as_str() == Some(flag("--base").as_str()))
-        .filter(|change| {
-            change["number"]
-                .as_u64()
-                .is_some_and(|number| recorded(dir, &number.to_string()) == Some(Change::Open))
-        })
+        .filter(|change| change.head == flag("--head"))
+        .filter(|change| change.base == flag("--base"))
+        .filter(|change| recorded(dir, &change.number.to_string()) == Some(Change::Open))
         .map(|change| {
-            let number = change["number"].as_u64().unwrap_or_default();
+            let number = change.number;
             serde_json::json!({
                 "number": number,
                 "url": format!("https://github.com/{}/pull/{number}", flag("--repo")),
@@ -367,10 +386,12 @@ fn list(args: &[String], dir: &Path) -> ExitCode {
 
 /// Every change request this host has opened, in the order it opened them.
 ///
-/// A line that is not JSON is **fatal**, for the reason [`recorded`] gives: this
-/// file is what `pr create` wrote, and a record dropped here is a change request
-/// this host would go on to open a second one beside.
-fn opened_changes(dir: &Path) -> Vec<serde_json::Value> {
+/// A line that is not one of [`Opened`] is **fatal**, for the reason [`recorded`]
+/// gives: this file is what `pr create` wrote, and a record dropped here is a
+/// change request this host would go on to open a second one beside. Syntax and
+/// shape are one refusal, because a well-formed object missing `head` is no more
+/// answerable than a line that is not JSON at all.
+fn opened_changes(dir: &Path) -> Vec<Opened> {
     let path = dir.join("gh").join("opened.jsonl");
     std::fs::read_to_string(&path)
         .unwrap_or_default()
@@ -455,11 +476,8 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
 /// journey would then be asserting against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
-    /// The host has the check and it has not started.
     Queued,
-    /// It is running, so how it ends is the one thing the host cannot yet know.
     Running,
-    /// It finished, this way.
     Settled(Conclusion),
 }
 
@@ -477,16 +495,14 @@ enum Conclusion {
     TimedOut,
 }
 
-/// Whether the host says a check stands between the change and its merge.
+/// Whether branch protection lists the check, so that a merge waits on it.
 ///
 /// Named rather than a `bool`, because it is the field that decides whether a red
 /// check ends a publication, and `Check { .., true }` at a call site says nothing
 /// about which of the two it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Blocks {
-    /// Branch protection lists it, so a merge waits on it.
     Required,
-    /// It runs and reports, and nothing waits on it.
     Advisory,
 }
 
