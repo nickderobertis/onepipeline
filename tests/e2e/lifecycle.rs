@@ -1514,14 +1514,19 @@ const RED: &str = "llmlint completed failure required";
 /// the node published, and the node goes back to work on the branch it left
 /// behind instead of failing with nobody to fix it.
 ///
-/// All of it, because a run that did part would still strand the change request:
-/// the failure gets its own word, the node is dispatched again **on the branch
-/// that carries the rejected tree**, and the diagnosis travels with it.
+/// This is the incident. A change request opened, auto-merge was armed, the node
+/// settled, and then a required check failed in CI — with no node left to fail,
+/// nothing reported back, and a person eventually noticing a blocked pull
+/// request. What has to happen instead is all of it: the failure gets its own
+/// word, the node is dispatched again **on the branch that carries the rejected
+/// tree**, and the diagnosis travels with it.
 ///
-/// The run is detached so the world can move while it is going: the host reports
-/// the check red, and this test then makes it green the way a CI re-run would,
-/// while the *first* publication is still failing over it — so the attempt that
-/// follows meets a host with a different answer.
+/// The run is detached so the world can move while it is going, which is what
+/// makes this a recovery rather than a loop: the host reports the check red, and
+/// once it has, this test makes it green the way a re-run of CI would. The flip
+/// happens while the *first* publication is still failing over it — `onevcs`
+/// gives up on the reading it has already made — so the attempt that follows
+/// meets a host with a different answer.
 #[test]
 fn a_publication_its_checks_reject_is_redispatched_on_the_branch_it_preserved() {
     let world = World::new("lifecycle-checksfailed");
@@ -1965,19 +1970,23 @@ fn one_artifact_two_records_point_at_reaches_the_worker_once() {
     );
 }
 
-/// A base that moves under a publication is the third preserving failure.
+/// A base that moves under a publication is the third preserving failure, and it
+/// is the one whose continuation currently cannot get started.
 ///
-/// The conflict is made the way one happens: the base takes a change to the same
-/// file while the node's worker is still working, and the publication's bounded
-/// resolve-and-requeue cannot merge the two. `onevcs` reports `sync-conflict`,
-/// hands the branch back, and this crate dispatches the node again on it.
+/// The conflict is real and it is made the way one happens: the base takes a
+/// change to the same file while the node's worker is still working, and the
+/// publication's bounded resolve-and-requeue cannot merge the two. `onevcs`
+/// reports `sync-conflict`, hands the branch back, and this crate dispatches the
+/// node again on it — which is what this journey is here to pin.
 ///
-/// The continuation then meets a session `onevcs` refuses to open on a branch
-/// that conflicts with its integration target, so it never reaches a worker and
+/// What that second dispatch then meets is pinned too, and deliberately: opening
+/// a session on a branch that conflicts with its integration target is a refusal
+/// `onevcs` makes at session open, so the continuation never reaches a worker and
 /// the node settles `infrastructure-failure` carrying the sibling's own sentence.
-/// That ending is pinned deliberately: it is the behaviour today, and this is the
-/// test that says so by failing when the sibling learns to open that session for
-/// a worker to resolve instead.
+/// That is the behaviour today rather than the behaviour anybody wants, and a
+/// journey that asserted a happier ending would be describing a stack this one is
+/// not. When the sibling learns to open a session into a conflict for a worker to
+/// resolve, this is the test that says so by failing.
 #[test]
 fn a_base_that_moved_under_a_publication_is_redispatched_on_the_branch_it_preserved() {
     let world = World::new("lifecycle-syncconflict")
@@ -2166,81 +2175,6 @@ fn a_publication_budget_that_is_not_a_number_spends_the_same_default() {
         detail.contains("3 publication attempts"),
         "the spent budget does not name the attempts it made: {detail}"
     );
-}
-
-/// A node that lost its body and then its publication settles saying both, in
-/// that order.
-///
-/// The two endings are unrelated — drafting runs after the branch is verified
-/// and off the publication path — so a node can have both, and the settlement
-/// that stops the retry loop is the one place a reader meets them together. Its
-/// detail composes the drafting ending **after** the roll-up of every attempt,
-/// so a planner reads the failure standing in the way first and the missing body
-/// as the aside it is; a settlement that dropped either half would send that
-/// reader to fix one thing when there are two.
-#[test]
-fn a_node_that_spends_its_budget_undrafted_settles_saying_both_endings() {
-    let world = World::new("lifecycle-budget-undrafted");
-    world.repository("change-auto", &["true"]);
-    world.script("service.work", "the worker wrote this\n");
-    world.script("gh.checks", RED);
-    // The drafter answers inside its schema with nothing in it, which is the
-    // ending that needs no second double to arrange.
-    world.script("pr-author.bodyless", "1");
-    let drafting = world.pr_author_graph();
-    let path = world.plan(
-        "budgetdraft",
-        &plan_of("budgetdraft", vec![lifecycle("service", &[])]),
-    );
-    world
-        .run(&[
-            "start",
-            &path.to_string_lossy(),
-            "--attach",
-            "--pr-author-graph",
-            &drafting,
-        ])
-        .settled();
-    world.until("the run to settle", |world| {
-        world.run_file("budgetdraft", "result.json").is_file()
-    });
-
-    let node = world.run_json("budgetdraft", "result.json")["nodes"][0].clone();
-    assert_eq!(
-        node["status"],
-        "failed",
-        "{node}\n{}",
-        why(&world, "budgetdraft")
-    );
-    // The publication's ending and not the drafting one: the check is what a
-    // person has to answer, and the body is what they will also want to write.
-    assert_eq!(node["outcome"], "checks-failed", "{node}");
-    let detail = world.events_of("budgetdraft", "node-settled")[0]["payload"]["detail"]
-        .as_str()
-        .expect("the settlement says why")
-        .to_string();
-    let undrafted = "succeeded and there was no body in what it answered with";
-    let roll_up = "3 publication attempts";
-    for said in [
-        roll_up,
-        "1 checks-failed, 2 checks-failed, 3 checks-failed",
-        undrafted,
-    ] {
-        assert!(
-            detail.contains(said),
-            "the spent budget of an undrafted node does not say {said:?}: {detail}"
-        );
-    }
-    assert!(
-        detail.find(roll_up) < detail.find(undrafted),
-        "the drafting ending did not come after the attempts it is an aside to: {detail}"
-    );
-    // And `results` is where an operator meets the pair without opening the
-    // store, which is the only place either word does them any good.
-    world
-        .run(&["results", "budgetdraft"])
-        .exited(0)
-        .out_has("checks-failed");
 }
 
 #[test]

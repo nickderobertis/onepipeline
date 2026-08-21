@@ -600,12 +600,15 @@ fn stopped_retrying(
 
 /// The node the next attempt is dispatched as.
 ///
-/// Three changes and no others. **Pinned to the preserved branch**, so the session
-/// `onevcs` opens continues it from its own tip rather than cutting a second one
-/// beside committed work. **No step completed**, so every step runs again against
-/// the tree that was rejected — one that skipped them would republish that tree
-/// unaltered and meet the same refusal. And the **diagnosis** as node context, so
-/// the worker meets the failure rather than having to go and find it.
+/// Three changes and no others. It is **pinned to the preserved branch**, so the
+/// session `onevcs` opens continues that branch from its own tip rather than
+/// cutting a second one beside committed work. It records **no step as
+/// completed**, so every step runs again — against the tree that was rejected,
+/// which is the tree that has to change; a continuation that skipped the steps
+/// the branch already carries would republish it unaltered and meet the same
+/// refusal, which is the one failure this must not have. And it carries the
+/// **diagnosis** as its node context, so the worker meets the failure rather than
+/// having to go and find it.
 ///
 /// The planner's own note does not survive: a note carries exactly one dispatch
 /// and the attempt that just ran was it.
