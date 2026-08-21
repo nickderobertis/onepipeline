@@ -465,13 +465,12 @@ fn publish(
 
 /// How one attempt at a lifecycle node ended.
 ///
-/// Two cases, and the split is the whole of the routing: an attempt that
-/// **settled** is the node's answer and the loop stops on it, and one whose
-/// publication failed leaving the work on its branch is an attempt rather than an
-/// answer. Kept apart as cases rather than as a settlement a caller inspects
-/// afterwards, because the fields a continuation needs — the branch it continues,
-/// the reason, the evidence — exist only on the second and would otherwise be
-/// `Option`s on every settlement this crate makes.
+/// Two cases, and the split is the whole of the routing: a settlement is the
+/// node's answer and the loop stops on it, and a publication that failed leaving
+/// the work on its branch is an attempt rather than an answer. Cases rather than
+/// a settlement a caller inspects afterwards, because everything a continuation
+/// needs exists only on the second and would otherwise be `Option`s on every
+/// settlement this crate makes.
 enum Attempt {
     /// The node settled, whatever the settlement says.
     Settled(Settlement),
@@ -480,14 +479,23 @@ enum Attempt {
 }
 
 /// A publication that failed and handed its branch back.
+///
+/// What the *next* attempt is dispatched with, and what the settlement says if
+/// there is no next attempt — the same four values serve both, because a budget
+/// that runs out has to report exactly the failure it stopped re-dispatching.
 struct Preserved {
-    /// The branch the work is on, which the next attempt continues.
+    /// Both where the next attempt works and what the settlement names, so a
+    /// reader picking the work up by hand is sent to the branch every attempt
+    /// was made on.
     branch: String,
-    /// The word this failure settles on, when the budget runs out on it.
+    /// This crate's word for the failure, out of [`crate::vcs::Failure`] so a
+    /// settlement and a re-dispatch cannot come to call one failure two things.
     outcome: &'static str,
-    /// The failure as `onevcs` reported it.
+    /// The failure as `onevcs` reported it, already bounded and folded onto one
+    /// line: it goes into an envelope payload and into a settlement detail, both
+    /// of which are read back a line at a time.
     reason: String,
-    /// What the publication recorded beside it.
+    /// Every artifact the publication recorded, by id, for the worker to fetch.
     evidence: Vec<crate::vcs::Evidence>,
     /// A drafting ending this attempt also had, carried so the settlement that
     /// spends the budget says it exactly as one that settled straight away does.
@@ -526,30 +534,32 @@ fn failed_publication(
         Attempt::Settled(Settlement {
             branch: branch.clone(),
             detail: Some(compose(&format!("onevcs: {reason}"), undrafted.as_deref())),
-            ..Settlement::plain(node, NodeStatus::Failed, Some(failure.outcome))
+            ..Settlement::plain(node, NodeStatus::Failed, Some(failure.outcome()))
         })
     };
-    match (failure.preserving, handed_back, branch.clone()) {
-        (true, true, Some(branch)) => Attempt::Preserving(Box::new(Preserved {
-            branch,
-            outcome: failure.outcome,
-            reason: engine::bounded(&crate::views::one_line(reason)),
-            evidence: crate::vcs::evidence_in(token),
-            undrafted,
-        })),
-        // llmlint: ignore[changed_behavior_has_e2e] the arm covers two cases and only one
-        // of them is new. The **terminal** one — a failure no further attempt can answer —
-        // is driven end to end by `a_publication_that_its_gate_rejects_settles_the_node_
-        // failed_by_name`, which now also asserts that the node was dispatched exactly
-        // once. The other is a preserving failure whose branch the execution checkout
-        // refused: `onevcs` hands a branch back on every failure it can and reports
-        // `Refused` only when that copy itself failed — a checkout that could not be
-        // written to — which no double here injects and which the gate script deliberately
-        // keeps out of the repository. Reaching it would mean breaking the checkout
-        // mid-publication, which proves the fixture rather than this arm, and what it does
-        // is exactly what the terminal case does.
+    // llmlint: ignore-block[changed_behavior_has_e2e] the second arm covers two cases and
+    // only one of them is new. The **terminal** one — a failure no further attempt can
+    // answer — is driven end to end by `a_publication_that_its_gate_rejects_settles_the_
+    // node_failed_by_name`, which now also asserts that the node was dispatched exactly
+    // once. The other is a preserving failure whose branch the execution checkout refused:
+    // `onevcs` hands a branch back on every failure it can and reports `Refused` only when
+    // that copy itself failed — a checkout that could not be written to — which no double
+    // here injects and which the gate script deliberately keeps out of the repository.
+    // Reaching it would mean breaking the checkout mid-publication, which proves the
+    // fixture rather than this arm, and what it does is exactly what the terminal case
+    // does.
+    match (failure, handed_back, branch.clone()) {
+        (crate::vcs::Failure::Preserving(outcome), true, Some(branch)) => {
+            Attempt::Preserving(Box::new(Preserved {
+                branch,
+                outcome,
+                reason: engine::bounded(&crate::views::one_line(reason)),
+                evidence: crate::vcs::evidence_in(token),
+                undrafted,
+            }))
+        }
         _ => settled(),
-    }
+    } // llmlint: ignore-end[changed_behavior_has_e2e]
 }
 
 /// A publication's own words and a drafting ending, in that order.
@@ -665,7 +675,7 @@ fn diagnosis(
              `onevcs artifact cat ID`:\n",
         );
         for evidence in &preserved.evidence {
-            note.push_str(&format!("- {} — {}\n", evidence.kind, evidence.id));
+            note.push_str(&format!("- {} — {}\n", evidence.kind.0, evidence.id.0));
         }
     }
     note

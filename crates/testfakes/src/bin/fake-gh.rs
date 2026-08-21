@@ -229,8 +229,21 @@ fn state_of(dir: &Path, id: &str) -> PathBuf {
 }
 
 /// What this host knows about a change request, or nothing if it opened none.
+///
+/// A state file that exists and does not read as one of the two states is
+/// **fatal**, not absent: this is the record `pr create` and `pr merge` wrote,
+/// and reporting it as "no pull request found" would send the journey around it
+/// looking for a change request that was opened. Nothing but this program writes
+/// the file, so reaching the refusal means the program is wrong.
 fn recorded(dir: &Path, id: &str) -> Option<Change> {
-    Change::parse(&std::fs::read_to_string(state_of(dir, id)).ok()?)
+    let path = state_of(dir, id);
+    let recorded = std::fs::read_to_string(&path).ok()?;
+    Some(Change::parse(&recorded).unwrap_or_else(|| {
+        fake::fail(&format!(
+            "{} holds {recorded:?}, which is not a state this host records",
+            path.display()
+        ))
+    }))
 }
 
 /// Write down what this host now knows about a change request.
@@ -331,8 +344,8 @@ fn list(args: &[String], dir: &Path) -> ExitCode {
     let flag = |name: &str| fake::flag(args, name).unwrap_or_default();
     let open: Vec<serde_json::Value> = opened_changes(dir)
         .into_iter()
-        .filter(|change| change["head"] == json_of(&flag("--head")))
-        .filter(|change| change["base"] == json_of(&flag("--base")))
+        .filter(|change| change["head"].as_str() == Some(flag("--head").as_str()))
+        .filter(|change| change["base"].as_str() == Some(flag("--base").as_str()))
         .filter(|change| {
             change["number"]
                 .as_u64()
@@ -352,17 +365,25 @@ fn list(args: &[String], dir: &Path) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// One string, as the JSON this host wrote it as.
-fn json_of(value: &str) -> serde_json::Value {
-    serde_json::Value::String(value.to_owned())
-}
-
 /// Every change request this host has opened, in the order it opened them.
+///
+/// A line that is not JSON is **fatal**, for the reason [`recorded`] gives: this
+/// file is what `pr create` wrote, and a record dropped here is a change request
+/// this host would go on to open a second one beside.
 fn opened_changes(dir: &Path) -> Vec<serde_json::Value> {
-    std::fs::read_to_string(dir.join("gh").join("opened.jsonl"))
+    let path = dir.join("gh").join("opened.jsonl");
+    std::fs::read_to_string(&path)
         .unwrap_or_default()
         .lines()
-        .filter_map(|line| serde_json::from_str(line).ok())
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            serde_json::from_str(line).unwrap_or_else(|error| {
+                fake::fail(&format!(
+                    "{} holds a line this host did not write: {error}: {line}",
+                    path.display()
+                ))
+            })
+        })
         .collect()
 }
 
@@ -425,94 +446,160 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// One check this host reports on a change request.
+/// Where a check is, and — once it has finished — how it ended.
 ///
-/// Two states and no third for each field, exactly as [`Change`] has two: a
-/// scripted line this program read loosely would be a host behaviour the journey
-/// that wrote it never asked for, and the assertions around it would be about a
-/// state nobody scripted.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Check {
-    /// The check's name, which is what branch protection lists and what a red
-    /// check's refusal names.
-    name: String,
-    /// The host's own status vocabulary. `completed` is the only one `onevcs`
-    /// reads as settled; the other two are a check still running.
-    status: String,
-    /// How a settled check ended. `None` while it has not.
-    conclusion: Option<String>,
-    /// Whether the host says this check blocks the merge.
-    required: bool,
+/// One value rather than a status beside an optional conclusion, because those
+/// two have exactly one legal pairing each way: a `completed` check has a
+/// conclusion and an unfinished one cannot have. Split, a scripted line could say
+/// `in_progress failure`, which is a host state GitHub never reports and a
+/// journey would then be asserting against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum State {
+    /// The host has the check and it has not started.
+    Queued,
+    /// It is running, so how it ends is the one thing the host cannot yet know.
+    Running,
+    /// It finished, this way.
+    Settled(Conclusion),
 }
 
-/// The statuses this host reports, as GitHub spells them.
-const STATUSES: &[&str] = &["queued", "in_progress", "completed"];
+/// How a settled check ended, as GitHub spells it.
+///
+/// Green and red both: a journey proving a red check has to be able to write a
+/// green one beside it or it has proved only that this host says no.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Conclusion {
+    Success,
+    Skipped,
+    Neutral,
+    Failure,
+    Cancelled,
+    TimedOut,
+}
 
-/// The conclusions this host reports, as GitHub spells them. Green and red both,
-/// because a journey proving a red check has to be able to write a green one
-/// beside it or it has proved only that this host says no.
-const CONCLUSIONS: &[&str] = &[
-    "success",
-    "skipped",
-    "neutral",
-    "failure",
-    "cancelled",
-    "timed_out",
-];
+/// Whether the host says a check stands between the change and its merge.
+///
+/// Named rather than a `bool`, because it is the field that decides whether a red
+/// check ends a publication, and `Check { .., true }` at a call site says nothing
+/// about which of the two it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Blocks {
+    /// Branch protection lists it, so a merge waits on it.
+    Required,
+    /// It runs and reports, and nothing waits on it.
+    Advisory,
+}
+
+impl Conclusion {
+    /// Every conclusion this host reports, for the refusal that lists them.
+    const EVERY: &'static [Self] = &[
+        Self::Success,
+        Self::Skipped,
+        Self::Neutral,
+        Self::Failure,
+        Self::Cancelled,
+        Self::TimedOut,
+    ];
+
+    /// How GitHub spells it, which is what goes on the wire.
+    fn wire(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Skipped => "skipped",
+            Self::Neutral => "neutral",
+            Self::Failure => "failure",
+            Self::Cancelled => "cancelled",
+            Self::TimedOut => "timed_out",
+        }
+    }
+
+    fn parse(word: &str) -> Option<Self> {
+        Self::EVERY.iter().copied().find(|it| it.wire() == word)
+    }
+}
+
+impl State {
+    /// The `status` GitHub reports for this state.
+    fn status(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Running => "in_progress",
+            Self::Settled(_) => "completed",
+        }
+    }
+
+    /// One scripted `STATUS CONCLUSION` pair, or why it is not one.
+    ///
+    /// `-` is the conclusion of a check that has not finished, and it is
+    /// **required** there rather than optional: a line short of a field is a line
+    /// whose author meant something this program would have to guess.
+    fn parse(status: &str, conclusion: &str) -> Result<Self, String> {
+        let concluded = |conclusion: &str| {
+            Conclusion::parse(conclusion).ok_or_else(|| {
+                let every: Vec<&str> = Conclusion::EVERY.iter().map(|it| it.wire()).collect();
+                format!("{conclusion:?} is not a conclusion this host reports; they are {every:?}")
+            })
+        };
+        match (status, conclusion) {
+            ("queued", "-") => Ok(Self::Queued),
+            ("in_progress", "-") => Ok(Self::Running),
+            ("completed", "-") => Err(
+                "a `completed` check concludes something; write its conclusion where the `-` is"
+                    .to_owned(),
+            ),
+            ("completed", concluded_as) => concluded(concluded_as).map(Self::Settled),
+            ("queued" | "in_progress", concluded_as) => Err(format!(
+                "a {status} check has not finished and cannot conclude {concluded_as:?}; write `-`"
+            )),
+            (other, _) => Err(format!(
+                "{other:?} is not a status this host reports; they are \"queued\", \
+                 \"in_progress\", and \"completed\""
+            )),
+        }
+    }
+}
+
+/// One check this host reports on a change request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Check {
+    /// Branch protection lists checks by name, and a red one's refusal names it,
+    /// so this is the whole of how a journey addresses one.
+    name: String,
+    /// Where it is, and how it ended if it has.
+    state: State,
+    /// Whether a merge waits on it.
+    blocks: Blocks,
+}
 
 impl Check {
     /// One scripted line, or the refusal that it is not one.
     ///
-    /// `NAME STATUS CONCLUSION REQUIRED`, four fields always — `-` is the
-    /// conclusion of a check that has not settled. Nothing is defaulted: a line
-    /// this program filled in for its author would answer a journey that was
-    /// never written.
+    /// `NAME STATUS CONCLUSION REQUIRED`, four fields always. Nothing is
+    /// defaulted: a line this program filled in for its author would answer a
+    /// journey that was never written.
     fn parse(line: &str) -> Result<Self, String> {
         let fields: Vec<&str> = line.split_whitespace().collect();
-        let [name, status, conclusion, required] = fields[..] else {
+        let [name, status, conclusion, blocks] = fields[..] else {
             return Err(format!(
                 "a scripted check is `NAME STATUS CONCLUSION REQUIRED`, and {line:?} is not"
             ));
         };
-        if !STATUSES.contains(&status) {
-            return Err(format!(
-                "{status:?} is not a status this host reports; they are {STATUSES:?}"
-            ));
-        }
-        let settled = status == "completed";
-        let conclusion = match (settled, conclusion) {
-            (false, "-") => None,
-            (true, "-") => {
-                return Err(format!(
-                    "check {name:?} is `completed` and concludes nothing; a settled check                      concludes one of {CONCLUSIONS:?}"
-                ))
-            }
-            (false, other) => {
-                return Err(format!(
-                    "check {name:?} is {status:?} and concludes {other:?}; a check that has not                      settled concludes `-`"
-                ))
-            }
-            (true, other) if !CONCLUSIONS.contains(&other) => {
-                return Err(format!(
-                    "{other:?} is not a conclusion this host reports; they are {CONCLUSIONS:?}"
-                ))
-            }
-            (true, other) => Some(other.to_owned()),
-        };
-        let required = match required {
-            "required" => true,
-            "advisory" => false,
+        let state =
+            State::parse(status, conclusion).map_err(|why| format!("check {name:?}: {why}"))?;
+        let blocks = match blocks {
+            "required" => Blocks::Required,
+            "advisory" => Blocks::Advisory,
             other => {
                 return Err(format!(
-                    "check {name:?} is {other:?}, which says nothing about whether it blocks the                      merge; write `required` or `advisory`"
+                    "check {name:?} is {other:?}, which says nothing about whether it blocks the \
+                     merge; write `required` or `advisory`"
                 ))
             }
         };
         Ok(Check {
             name: name.to_owned(),
-            status: status.to_owned(),
-            conclusion,
-            required,
+            state,
+            blocks,
         })
     }
 
@@ -522,9 +609,9 @@ impl Check {
     /// which is what the real rollup does and what `onevcs` reads as "the host
     /// cannot know yet".
     fn rollup_entry(&self) -> serde_json::Value {
-        let mut entry = serde_json::json!({"name": self.name, "status": self.status});
-        if let Some(conclusion) = &self.conclusion {
-            entry["conclusion"] = serde_json::json!(conclusion);
+        let mut entry = serde_json::json!({"name": self.name, "status": self.state.status()});
+        if let State::Settled(conclusion) = self.state {
+            entry["conclusion"] = serde_json::json!(conclusion.wire());
         }
         entry
     }
@@ -584,7 +671,10 @@ fn checks(args: &[String], dir: &Path) -> ExitCode {
     }
     let reported = scripted_checks(dir, &id);
     if required_only {
-        let required: Vec<&Check> = reported.iter().filter(|check| check.required).collect();
+        let required: Vec<&Check> = reported
+            .iter()
+            .filter(|check| check.blocks == Blocks::Required)
+            .collect();
         // A repository with no branch protection declares no required check, and
         // `gh` says so by *failing* — exit 1, nothing on stdout, and a line that
         // opens exactly this way. `onevcs` reads that whole shape as an answer,

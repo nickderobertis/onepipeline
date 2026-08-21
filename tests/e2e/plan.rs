@@ -440,6 +440,24 @@ fn a_plan_the_schema_refuses_never_starts_a_run() {
                 "done_when":"the gate is green"}]}"#,
             "`done_when` is no longer a plan field",
         ),
+        // The second retired field, answered the same way and about itself: a
+        // plan that set it asked for the host's checks to be the merge-path
+        // verification and got a run in which nothing read the field at all, so
+        // the refusal names the policy that asks for one now.
+        (
+            "verifyviaci",
+            r#"{"schema_version":3,"tasks":[{"id":"a","repo":"o/r","title":"feat: x",
+                "persona":"e","task":"t","verify_via_ci":true}]}"#,
+            "`verify_via_ci` is no longer a plan field",
+        ),
+        // And at a version written before it was ever accepted, because a
+        // retired field is not a version's business.
+        (
+            "verifyviaciold",
+            r#"{"schema_version":1,"tasks":[{"id":"a","repo":"o/r",
+                "persona":"e","task":"t","verify_via_ci":false}]}"#,
+            "`verify_via_ci` is no longer a plan field",
+        ),
         // The one version refusal there is: a number this build has never
         // written, told the versions that are read rather than left to guess.
         (

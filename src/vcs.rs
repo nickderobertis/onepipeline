@@ -122,39 +122,50 @@ pub fn outcome_of(outcome: &PublishOutcome) -> &'static str {
         PublishOutcome::ChangeOpen(_) => "change-open",
         PublishOutcome::Queued(_) => "queued",
         PublishOutcome::NothingToPublish => "no-changes",
-        PublishOutcome::Failed { kind, .. } => failure_of(*kind).outcome,
+        PublishOutcome::Failed { kind, .. } => failure_of(*kind).outcome(),
     }
 }
 
 /// One publication failure, as this crate settles and routes it.
 ///
-/// The two answers are decided **together**, in [`failure_of`], because they are
-/// one judgement seen from two sides: a failure this crate can name is one it
-/// knows what to do about, and one it cannot is the residual it can only report.
-/// Split across two functions they would drift into a word that is retried and a
-/// word that is not, for the same failure.
+/// The word and the routing are **one** value, because they are one judgement:
+/// a failure this crate names is exactly a failure it knows what to do about,
+/// and one it cannot name is the residual it can only report. Two fields would
+/// permit the state that judgement rules out — a word of its own that is never
+/// re-dispatched, which reads from every view as a failure that was routed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Failure {
-    /// The word the node settles on.
-    pub outcome: &'static str,
-    /// Whether the failure left work a further dispatch can continue.
+pub enum Failure {
+    /// Its fix is *more work on the same branch* — a red check to make green, a
+    /// conflict to resolve, a push a hook refused — and it settles under this
+    /// word. The tree that was rejected is still there, so a worker sent back to
+    /// it meets the thing that rejected it.
+    Preserving(&'static str),
+    /// Nothing a further attempt could answer: a request `onevcs` refused at its
+    /// trust boundary, a seam with no implementation, and a gate that ran on the
+    /// tree as it stands all answer the same way however many times they are
+    /// asked. It settles under [`Failure::RESIDUAL`].
+    Terminal,
+}
+
+impl Failure {
+    /// The word every failure with nothing to continue settles on.
     ///
-    /// A preserving failure is one whose fix is *more work on the same branch* —
-    /// a red check to make green, a conflict to resolve, a push a hook refused.
-    /// The tree that was rejected is still there, so a worker sent back to it
-    /// meets the thing that rejected it. A terminal failure is not about the work
-    /// at all: a request `onevcs` refused at its trust boundary and a seam with no
-    /// implementation behind it answer the same way however many times they are
-    /// asked, so asking again spends a dispatch to reproduce a diagnosis.
-    pub preserving: bool,
+    /// The one this crate settled *every* publication failure on before any of
+    /// them were told apart, kept for exactly the kinds no continuation follows
+    /// from — so no reader of it has to relearn anything.
+    pub const RESIDUAL: &'static str = "publication-failed";
+
+    /// The word the node settles on.
+    #[must_use]
+    pub fn outcome(self) -> &'static str {
+        match self {
+            Self::Preserving(word) => word,
+            Self::Terminal => Self::RESIDUAL,
+        }
+    }
 }
 
 /// Which failure a publication ended in, in this crate's own words.
-///
-/// Every kind `onevcs` distinguishes gets a word of its own, and
-/// `publication-failed` is the **residual** — the word this crate has always
-/// settled every publication failure on, kept for the kinds no continuation
-/// follows from. Nothing that already had a word changes meaning.
 ///
 /// Arm by arm rather than by a wildcard, deliberately: a kind the sibling adds
 /// is a routing decision this crate has to make, and a wildcard would make it
@@ -162,39 +173,34 @@ pub struct Failure {
 /// it, which is exactly the undifferentiated settlement this exists to end.
 pub fn failure_of(kind: onevcs::FailureKind) -> Failure {
     use onevcs::FailureKind;
-    let (outcome, preserving) = match kind {
-        FailureKind::ChecksFailed => ("checks-failed", true),
-        FailureKind::ChecksUnsettled => ("checks-unsettled", true),
-        FailureKind::PushRejected => ("push-rejected", true),
-        FailureKind::SyncConflict => ("sync-conflict", true),
-        // The gate is `onevcs`'s own verification of the branch, not the host's
-        // report on a change request: it ran on the tree as it stands and said
-        // no, and nothing this crate can do to that tree from here changes what
-        // it will say. It keeps the residual word it has always settled on.
-        FailureKind::Gate | FailureKind::Invalid | FailureKind::NotImplemented => {
-            ("publication-failed", false)
-        }
-    };
-    Failure {
-        outcome,
-        preserving,
+    match kind {
+        FailureKind::ChecksFailed => Failure::Preserving("checks-failed"),
+        FailureKind::ChecksUnsettled => Failure::Preserving("checks-unsettled"),
+        FailureKind::PushRejected => Failure::Preserving("push-rejected"),
+        FailureKind::SyncConflict => Failure::Preserving("sync-conflict"),
+        // The gate is `onevcs`'s own verification of the branch rather than the
+        // host's report on a change request: it ran on the tree as it stands and
+        // said no, and nothing this crate can do to that tree from here changes
+        // what it will say.
+        FailureKind::Gate | FailureKind::Invalid | FailureKind::NotImplemented => Failure::Terminal,
     }
 }
 
-/// One piece of evidence a session's stream recorded, as a reader fetches it.
+/// One piece of evidence a session's publication recorded, as a reader fetches
+/// it.
 ///
-/// The **id and the kind that carried it**, and nothing that was in it: the
-/// artifact is a check's log or a conflict's hunks, which is megabytes of
-/// somebody else's output, and what a diagnosis needs is a pointer to it. The
-/// kind is the `onevcs` event's own wire string, so a note naming one says which
-/// part of the publication produced it without this crate restating that
-/// vocabulary.
+/// A **pointer**, never the bytes: an artifact is a check's log or a conflict's
+/// hunks, which is megabytes of somebody else's output, and what a diagnosis
+/// carries is what to ask for it with. Both halves stay the types the envelope
+/// they were read off carries them as, so nothing between that stream and the
+/// note is a string this crate re-derived.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Evidence {
-    /// The kind of the event the artifact was recorded on.
-    pub kind: String,
-    /// The artifact's id, as `onevcs artifact cat` takes it.
-    pub id: String,
+    /// Which part of the publication produced it — `onevcs`'s own kind, so
+    /// naming one restates no vocabulary this crate does not own.
+    pub kind: crate::event::EventKind,
+    /// What `onevcs artifact cat` takes.
+    pub id: crate::event::ArtifactId,
 }
 
 /// The evidence one session's publication recorded.
@@ -202,9 +208,7 @@ pub struct Evidence {
 /// Read off the session's **own stream** and **unfiltered**, deliberately: this
 /// is not a relay into the merged store but the node's own read of what its
 /// publication left behind, and a launch that narrowed what it *ingests* did not
-/// ask to be unable to diagnose a failure. The stream is the sibling's record,
-/// written under its own lease; the ids are read back through the same
-/// [`crate::event::ArtifactId`] every relayed envelope carries.
+/// ask to be unable to diagnose a failure.
 ///
 /// In stream order and deduplicated, because `onevcs` references one stored
 /// artifact from two events where a `pre-push` gate's verdict *is* the push's own
@@ -214,8 +218,8 @@ pub fn evidence_in(token: &SessionToken) -> Vec<Evidence> {
     for envelope in events(token, None) {
         for artifact in envelope.artifacts {
             let found = Evidence {
-                kind: envelope.kind.0.clone(),
-                id: artifact.id.0,
+                kind: envelope.kind.clone(),
+                id: artifact.id,
             };
             if !evidence.iter().any(|kept| kept.id == found.id) {
                 evidence.push(found);
@@ -956,7 +960,7 @@ mod tests {
         )
         .expect("the contract ships");
         for kind in EVERY_KIND {
-            let word = failure_of(*kind).outcome;
+            let word = failure_of(*kind).outcome();
             assert!(
                 contract.contains(&format!("`{word}`")),
                 "docs/contract.md does not name the `{word}` outcome this crate settles on"
@@ -975,7 +979,7 @@ mod tests {
         let listed: BTreeSet<&str> = clause.split('`').skip(1).step_by(2).collect();
         let produced: BTreeSet<&str> = EVERY_KIND
             .iter()
-            .map(|kind| failure_of(*kind).outcome)
+            .map(|kind| failure_of(*kind).outcome())
             .collect();
         assert_eq!(
             listed, produced,
@@ -999,7 +1003,7 @@ mod tests {
         )
         .expect("the README ships");
         for kind in EVERY_KIND {
-            let word = failure_of(*kind).outcome;
+            let word = failure_of(*kind).outcome();
             assert!(
                 readme.contains(&format!("`{word}`")),
                 "the README does not name the `{word}` outcome this crate settles on"
@@ -1007,36 +1011,50 @@ mod tests {
         }
     }
 
-    /// A word of its own is a routing decision, and the two travel together.
+    /// Which kinds a further attempt can answer, said kind by kind.
     ///
-    /// The four the contract calls preserving are exactly the four that earn a
-    /// word beyond the residual, and the residual is exactly what is terminal.
-    /// Held as one property rather than two lists, because the failure this
-    /// guards against is a kind that gained a word and was never re-dispatched —
-    /// which reads, from every view, like a failure that was routed.
+    /// That a word of its own *is* a routing decision is no longer assertable —
+    /// [`Failure`] makes the two one value, so the inconsistent state has no
+    /// spelling. What still needs saying is which side of the line each kind
+    /// falls on, because that is a judgement about the failure rather than about
+    /// the type: a refused request and an unimplemented seam answer the same way
+    /// however many times they are asked, and a gate that ran on the tree as it
+    /// stands is not the host's report on a change request.
     #[test]
-    fn every_failure_with_a_word_of_its_own_is_one_a_further_attempt_can_answer() {
-        for kind in EVERY_KIND {
-            let failure = failure_of(*kind);
-            assert_eq!(
-                failure.preserving,
-                failure.outcome != "publication-failed",
-                "{kind:?} settles `{}` and is {}preserving",
-                failure.outcome,
-                if failure.preserving { "" } else { "not " }
-            );
-        }
-        // Nothing terminal is retried, said about the two the contract names
-        // rather than only about the residual as a whole.
-        for kind in [
+    fn each_kind_is_on_the_side_of_the_line_the_contract_puts_it() {
+        let terminal = [
             onevcs::FailureKind::Invalid,
             onevcs::FailureKind::NotImplemented,
-        ] {
-            assert!(
-                !failure_of(kind).preserving,
-                "{kind:?} is retried, and a refused request answers the same way every time"
+            onevcs::FailureKind::Gate,
+        ];
+        for kind in terminal {
+            assert_eq!(
+                failure_of(kind),
+                Failure::Terminal,
+                "{kind:?} is retried, and asking again would reproduce the diagnosis"
             );
         }
+        let preserving: BTreeSet<&str> = EVERY_KIND
+            .iter()
+            .filter(|kind| !terminal.contains(kind))
+            .map(|kind| match failure_of(*kind) {
+                Failure::Preserving(word) => word,
+                Failure::Terminal => panic!("{kind:?} is terminal, so nothing continues it"),
+            })
+            .collect();
+        assert_eq!(
+            preserving,
+            BTreeSet::from([
+                "checks-failed",
+                "checks-unsettled",
+                "push-rejected",
+                "sync-conflict"
+            ]),
+            "the failures a further attempt can answer are not the four the contract names"
+        );
+        // And the residual is one word for all of them, which is what keeps it a
+        // residual rather than a fifth name.
+        assert_eq!(Failure::Terminal.outcome(), Failure::RESIDUAL);
     }
 
     /// The payload of a session opening, as one of the two producers writes it.
