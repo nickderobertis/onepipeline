@@ -1514,19 +1514,14 @@ const RED: &str = "llmlint completed failure required";
 /// the node published, and the node goes back to work on the branch it left
 /// behind instead of failing with nobody to fix it.
 ///
-/// This is the incident. A change request opened, auto-merge was armed, the node
-/// settled, and then a required check failed in CI — with no node left to fail,
-/// nothing reported back, and a person eventually noticing a blocked pull
-/// request. What has to happen instead is all of it: the failure gets its own
-/// word, the node is dispatched again **on the branch that carries the rejected
-/// tree**, and the diagnosis travels with it.
+/// All of it, because a run that did part would still strand the change request:
+/// the failure gets its own word, the node is dispatched again **on the branch
+/// that carries the rejected tree**, and the diagnosis travels with it.
 ///
-/// The run is detached so the world can move while it is going, which is what
-/// makes this a recovery rather than a loop: the host reports the check red, and
-/// once it has, this test makes it green the way a re-run of CI would. The flip
-/// happens while the *first* publication is still failing over it — `onevcs`
-/// gives up on the reading it has already made — so the attempt that follows
-/// meets a host with a different answer.
+/// The run is detached so the world can move while it is going: the host reports
+/// the check red, and this test then makes it green the way a CI re-run would,
+/// while the *first* publication is still failing over it — so the attempt that
+/// follows meets a host with a different answer.
 #[test]
 fn a_publication_its_checks_reject_is_redispatched_on_the_branch_it_preserved() {
     let world = World::new("lifecycle-checksfailed");
@@ -1970,23 +1965,19 @@ fn one_artifact_two_records_point_at_reaches_the_worker_once() {
     );
 }
 
-/// A base that moves under a publication is the third preserving failure, and it
-/// is the one whose continuation currently cannot get started.
+/// A base that moves under a publication is the third preserving failure.
 ///
-/// The conflict is real and it is made the way one happens: the base takes a
-/// change to the same file while the node's worker is still working, and the
-/// publication's bounded resolve-and-requeue cannot merge the two. `onevcs`
-/// reports `sync-conflict`, hands the branch back, and this crate dispatches the
-/// node again on it — which is what this journey is here to pin.
+/// The conflict is made the way one happens: the base takes a change to the same
+/// file while the node's worker is still working, and the publication's bounded
+/// resolve-and-requeue cannot merge the two. `onevcs` reports `sync-conflict`,
+/// hands the branch back, and this crate dispatches the node again on it.
 ///
-/// What that second dispatch then meets is pinned too, and deliberately: opening
-/// a session on a branch that conflicts with its integration target is a refusal
-/// `onevcs` makes at session open, so the continuation never reaches a worker and
+/// The continuation then meets a session `onevcs` refuses to open on a branch
+/// that conflicts with its integration target, so it never reaches a worker and
 /// the node settles `infrastructure-failure` carrying the sibling's own sentence.
-/// That is the behaviour today rather than the behaviour anybody wants, and a
-/// journey that asserted a happier ending would be describing a stack this one is
-/// not. When the sibling learns to open a session into a conflict for a worker to
-/// resolve, this is the test that says so by failing.
+/// That ending is pinned deliberately: it is the behaviour today, and this is the
+/// test that says so by failing when the sibling learns to open that session for
+/// a worker to resolve instead.
 #[test]
 fn a_base_that_moved_under_a_publication_is_redispatched_on_the_branch_it_preserved() {
     let world = World::new("lifecycle-syncconflict")

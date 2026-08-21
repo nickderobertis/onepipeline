@@ -92,19 +92,15 @@ pub const PUBLICATION_ATTEMPTS_ENV: &str = "ONEPIPELINE_PUBLICATION_ATTEMPTS";
 
 /// How many times a lifecycle node whose publication keeps failing is dispatched.
 ///
-/// The **whole** budget and not the retries beside it: `1` is the behaviour before
-/// there was a loop at all — publish once, and settle on whatever that said.
+/// The **whole** budget and not the retries beside it: `1` is publish once and
+/// settle on whatever that said.
 ///
-/// Three, because each attempt is a node's entire workstream and the failures it
-/// answers are ones a worker fixes by changing the tree: a red check usually goes
-/// green on the second look at it, and a check that is still red on the third is
-/// one a person has to decide about. A larger budget spends whole dispatches
-/// reproducing the same refusal, which is the loop this bound exists to stop.
+/// Three, because each attempt is a node's entire workstream: a red check usually
+/// goes green on a second look, and one still red on the third is a person's
+/// decision rather than another dispatch spent reproducing the same refusal.
 ///
-/// A [`NonZeroU32`], because a budget of zero is not a smaller budget — it is a
-/// node settled having never been dispatched, which is not a state this loop has.
-/// The same reason a turn budget is one, and the same place the check belongs:
-/// at the boundary the value is read in from, not at the arithmetic downstream.
+/// A [`NonZeroU32`], because zero is not a smaller budget — it is a node settled
+/// having never been dispatched, which is not a state this loop has.
 pub const DEFAULT_PUBLICATION_ATTEMPTS: NonZeroU32 = NonZeroU32::new(3).unwrap();
 
 /// The environment variable setting how long a cancelled dispatch has to stop
