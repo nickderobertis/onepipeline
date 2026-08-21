@@ -556,10 +556,8 @@ fn failed_publication(
 
 /// A publication's own words and a drafting ending, in that order.
 ///
-/// The publication is what settled the node, so it leads; the drafting ending is
-/// true either way and follows. One composition wherever the two are put
-/// together, so the places that do it cannot come to disagree about the order or
-/// the punctuation.
+/// Written once because three settlements compose the pair, and three spellings
+/// of it would come to disagree about the order or the punctuation.
 fn compose(detail: &str, undrafted: Option<&str>) -> String {
     match undrafted {
         Some(why) => format!("{detail}. {why}"),
@@ -569,11 +567,10 @@ fn compose(detail: &str, undrafted: Option<&str>) -> String {
 
 /// The settlement of a node that spent its publication budget.
 ///
-/// It settles under the **last** failure's own word, because that is the failure
-/// standing in the way, and the detail says how many attempts were made and what
-/// each ended with. Without the roll-up a reader sees one failure and cannot tell
-/// it from a node that failed once — which is the difference between "fix this
-/// check" and "this check is never going to pass".
+/// The **last** failure's word, because that is the one standing in the way, over
+/// a roll-up of every attempt: without it a reader sees one failure and cannot
+/// tell it from a node that failed once — which is the difference between "fix
+/// this check" and "this check is never going to pass".
 fn spent(node: &str, preserved: &Preserved, endings: &[crate::vcs::Preserving]) -> Settlement {
     let each: Vec<String> = endings
         .iter()

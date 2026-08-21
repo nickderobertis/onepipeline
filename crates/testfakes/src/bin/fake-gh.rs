@@ -246,7 +246,6 @@ fn head_of(dir: &Path, id: &str) -> Option<String> {
         .map(|opened| opened.head)
 }
 
-/// Where this host's state for one change request lives.
 fn state_of(dir: &Path, id: &str) -> PathBuf {
     dir.join("gh").join(fake::segment(id))
 }
@@ -299,10 +298,8 @@ fn record(dir: &Path, id: &str, state: Change) {
     }
 }
 
-/// The number this host gives the next change request it opens.
-///
-/// Counted from what it has already opened, so a journey that opens two reads
-/// two different change requests rather than one addressed twice.
+/// The next number, derived from the record rather than kept anywhere: nothing
+/// carries a counter between two invocations of a program that exits.
 fn next_number(dir: &Path) -> NonZeroU64 {
     NonZeroU64::MIN.saturating_add(opened_changes(dir).len() as u64)
 }
