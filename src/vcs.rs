@@ -1055,15 +1055,22 @@ mod tests {
     /// operator actually reads — and the first two already hold each other. Left
     /// ungated the README is the one that goes quietly stale: nothing compiles
     /// it, and an operator meeting a settlement it does not list has no way to
-    /// know which of the two is behind. It is a **summary**, so what is held is
-    /// that every word it carries is real and that it names the ones a reader
-    /// has to act on — not that it repeats the document sentence for sentence.
+    /// know which of the two is behind.
+    ///
+    /// Two facts, because the README states two: that every word it carries is
+    /// one this crate settles on, and **which of them are re-dispatched**. The
+    /// second is the one an operator plans around — a word that quietly moved
+    /// across that line would have them waiting for a retry that never comes —
+    /// so the clause naming those is compared as a set with what `Preserving`
+    /// closes rather than searched one word at a time.
     #[test]
     fn the_readmes_publication_failure_summary_is_the_vocabulary_this_crate_settles_on() {
-        let readme = std::fs::read_to_string(
+        let raw = std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md"),
         )
         .expect("the README ships");
+        // Wrapped prose, so match on its words rather than its line breaks.
+        let readme = raw.split_whitespace().collect::<Vec<_>>().join(" ");
         for kind in EVERY_KIND {
             let word = failure_of(*kind).outcome();
             assert!(
@@ -1071,6 +1078,27 @@ mod tests {
                 "the README does not name the `{word}` outcome this crate settles on"
             );
         }
+        let clause = readme
+            .split_once("settle under a word of their own")
+            .expect("the README names the failures that settle under a word of their own")
+            .1
+            .split_once("Each of the four")
+            .expect("that clause ends where the README says what those four share")
+            .0;
+        let listed: BTreeSet<&str> = clause.split('`').skip(1).step_by(2).collect();
+        let routed: BTreeSet<&str> = EVERY_PRESERVING
+            .iter()
+            .map(|preserving| preserving.outcome())
+            .collect();
+        assert_eq!(
+            listed, routed,
+            "the README's re-dispatched failures are not the ones this crate re-dispatches"
+        );
+        assert!(
+            readme.contains(&format!("Everything else settles `{}`", Failure::RESIDUAL)),
+            "the README does not name `{}` as what everything else settles on",
+            Failure::RESIDUAL
+        );
     }
 
     /// Which kinds a further attempt can answer, said kind by kind.

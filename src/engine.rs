@@ -2048,12 +2048,13 @@ mod tests {
     /// sets.
     ///
     /// A knob is a promise: it is set from outside this crate, by a name nothing
-    /// compiles, so the name and the document that carries it need a gate the way
+    /// compiles, so the name and the documents that carry it need a gate the way
     /// the closed set of kinds has one. The default travels with it, because a
-    /// budget whose size the document states wrongly is worse than one it does
-    /// not state at all.
+    /// budget whose size a document states wrongly is worse than one it does not
+    /// state at all — and so does what spending it settles, which is the other
+    /// half an operator plans around.
     #[test]
-    fn the_publication_budget_is_the_one_the_contract_publishes() {
+    fn the_publication_budget_is_the_one_the_contract_and_the_readme_publish() {
         let contract = std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/contract.md"),
         )
@@ -2068,6 +2069,26 @@ mod tests {
             "docs/contract.md does not state the default this build ships"
         );
         assert_eq!(publication_attempts(), DEFAULT_PUBLICATION_ATTEMPTS);
+
+        // The README states the same two facts, in the prose an operator meets
+        // the knob in. Nothing compiles that either, and it is the copy furthest
+        // from this constant.
+        let readme = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md"),
+        )
+        .expect("the README ships");
+        let prose = readme.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            prose.contains(&format!("`{PUBLICATION_ATTEMPTS_ENV}`, three by default")),
+            "the README does not state the {PUBLICATION_ATTEMPTS_ENV} bound and its default"
+        );
+        assert!(
+            prose.contains(&format!(
+                "settles `{}` under the last failure's word",
+                NodeStatus::Failed.as_str()
+            )),
+            "the README does not say what spending the budget settles the node as"
+        );
     }
 
     /// The checked-in shape of a schema-3 run result.
