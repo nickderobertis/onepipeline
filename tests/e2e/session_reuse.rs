@@ -41,7 +41,7 @@ use onevcs::Session;
 // Reached only from the stopped-run journey below, which is `#[cfg(unix)]` for
 // the reason stated there.
 #[cfg(unix)]
-use crate::harness::hook_script;
+use crate::harness::held_hook_script;
 #[cfg(unix)]
 use std::path::PathBuf;
 
@@ -477,7 +477,7 @@ fn a_retry_takes_up_the_session_a_stopped_run_left_its_work_in() {
     // pushes, so by the time the repository's merge path is running the work is on
     // the branch and the session is the only thing that still knows where.
     let go = world.fakes.join("push.go");
-    let held = hook_script(&world, &["wait-for", &go.to_string_lossy()]);
+    let held = held_hook_script(&world, &go);
     let repo = world.repository(
         "local-direct",
         &held.iter().map(String::as_str).collect::<Vec<_>>(),

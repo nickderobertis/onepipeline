@@ -2788,7 +2788,7 @@ fn adopting_a_run_whose_dispatch_was_in_flight_leaves_that_dispatchs_work_reacha
     // A `pre-push` hook this journey holds, which is how a dispatch is caught in
     // flight with its work already committed.
     let go = world.fakes.join("push.go");
-    let held = crate::harness::hook_script(&world, &["wait-for", &go.to_string_lossy()]);
+    let held = crate::harness::held_hook_script(&world, &go);
     let repo = world.repository(
         "local-direct",
         &held.iter().map(String::as_str).collect::<Vec<_>>(),

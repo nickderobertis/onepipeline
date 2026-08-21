@@ -491,8 +491,10 @@ impl World {
     /// gate of its own: `onevcs` names none, and a remote-publishing identity is
     /// verified by the host's required checks instead. `&[]` installs no hook,
     /// which is a repository whose merge path lets every publishing push
-    /// through; a journey that needs verification to refuse, or to hold, states
-    /// the argv here and [`hook_script`] writes the verbs.
+    /// through; a journey that needs verification to *refuse* states the argv
+    /// [`hook_script`] writes here, and one that needs it to *hold* the push
+    /// states [`held_hook_script`]'s — which exists on Unix alone, so a journey
+    /// holding a push is one the compiler makes state where it runs.
     ///
     /// The hook is installed through `core.hooksPath` on the checkout rather
     /// than as tracked content, because a file in the tree would be published by
@@ -2073,8 +2075,74 @@ fn a_double_is_placed_whole_or_not_at_all() {
     let _ = std::fs::remove_dir_all(&dir);
 } // llmlint: ignore-end[tests_mirror_real_usage]
 
-/// The verbs a repository's own `pre-push` hook answers, written into this world
-/// as a script and handed back as the argv that runs it.
+/// A verb the repository's own `pre-push` hook answers **and returns from on its
+/// own**.
+///
+/// A closed set rather than the free argv this used to be handed, and that is the
+/// whole point of the type: the hook's third verb — `wait-for`, which blocks
+/// until the journey holding the push releases it — is [`held_hook_script`], and
+/// that one is Unix-only. There is no way to spell a blocking hook through this
+/// door, so a journey that wants one either states it Unix-only or does not
+/// compile on Windows. See [`held_hook_script`] for why that gate exists.
+pub enum HookVerb {
+    /// Leave a file where the session's stream directory was, so the next read of
+    /// that stream meets a broken store rather than a missing one.
+    BreakStreams,
+    /// Append a line to this session's stream that no build of `onevcs` can read.
+    AppendFutureEvent,
+}
+
+impl HookVerb {
+    /// The word both halves of the hook dispatch on.
+    fn word(&self) -> &'static str {
+        match self {
+            Self::BreakStreams => "break-streams",
+            Self::AppendFutureEvent => "append-future-event",
+        }
+    }
+}
+
+/// A repository's own `pre-push` hook running `verb`, written into this world as
+/// a script and handed back as the argv that runs it.
+///
+/// Available on every platform, because every verb reachable through here runs
+/// and returns on its own: git waits for it, the push it declines or lets through
+/// is over by the time the journey looks, and nothing is left holding a pipe.
+pub fn hook_script(world: &World, verb: &HookVerb) -> Vec<String> {
+    hook_argv(world, &[verb.word()])
+}
+
+/// The same hook, **holding** the publishing push until `rendezvous` exists.
+///
+/// **Unix-only, and the gate is here rather than at each journey on purpose.**
+/// git runs this hook as a child of its own, two processes below whoever owns the
+/// run, and `onevcs` documents that it has no portable group teardown: off Unix
+/// its `terminate_group` is a no-op saying so, and `detach_process_group` with
+/// it. So a journey that abandons a hook still blocked here — by stopping the
+/// run, by killing the driver, or by failing an assertion before it releases the
+/// rendezvous — leaves that hook alive, and the run then does not fail but wedges
+/// on reader threads blocked against pipes the hook still holds. The
+/// `cross (windows-latest)` leg goes with it, for hours, with nothing pointing at
+/// the hook.
+///
+/// Two hand audits of the journeys that install one each missed sites. This is
+/// the same guarantee taken at compile time instead: the blocking capability does
+/// not exist on Windows, so every caller of it must be `#[cfg(unix)]` or the
+/// Windows build of this suite fails with the caller's own file and line. A red
+/// build naming the callers is the intended answer; a green build that hangs is
+/// what it replaces.
+///
+/// The gate comes off — here and at every `#[cfg(unix)]` that names this
+/// function — when `onevcs` can tear down a hook's orphaned children on Windows.
+/// That is that crate's change, and the Windows half of the teardown belongs with
+/// it rather than sitting here unreachable.
+#[cfg(unix)]
+pub fn held_hook_script(world: &World, rendezvous: &Path) -> Vec<String> {
+    hook_argv(world, &["wait-for", &rendezvous.to_string_lossy()])
+}
+
+/// The hook script for this platform, written into this world's own scratch, with
+/// `args` behind it.
 ///
 /// A script rather than a compiled binary, and per platform rather than one
 /// artifact, because the alternative was a workspace member shipping a Rust
@@ -2082,11 +2150,11 @@ fn a_double_is_placed_whole_or_not_at_all() {
 /// [`install_hook`] puts behind the hook git executes, and on Windows nothing can
 /// start a `.bat` directly, so each platform's interpreter leads its own.
 ///
-/// The three verbs are what the lifecycle and telemetry journeys state: a merge
-/// path that blocks until a file appears, one that breaks the sibling's event
-/// stream under it, and one that appends a line no build of that sibling can
-/// read.
-pub fn hook_script(world: &World, args: &[&str]) -> Vec<String> {
+/// Private, and free-form only in here: the two public doors above are what a
+/// journey states a merge path with, and the one caller that needs a command line
+/// neither of them can spell is [`the_hook_refuses_a_command_line_it_does_not_speak`],
+/// which is about the argv the hook *turns down*.
+fn hook_argv(world: &World, args: &[&str]) -> Vec<String> {
     let mut argv = interpreted(&write_hook_script(world));
     argv.extend(args.iter().map(|arg| (*arg).to_owned()));
     argv
@@ -2238,7 +2306,7 @@ fn both_hook_scripts_answer_the_same_verbs() {
 /// Driven through **git**, because that is the only thing that runs a `pre-push`
 /// hook: the repository is the one every journey publishes into, the hook behind
 /// its `core.hooksPath` is written by [`install_hook`] from the argv
-/// [`hook_script`] states, and each case is a real `git push` at a real bare
+/// [`hook_argv`] states, and each case is a real `git push` at a real bare
 /// origin. That also makes this the one test that runs the wrapper `install_hook`
 /// writes rather than the argv inside it — on Windows the wrapper is a POSIX line
 /// git's bundled shell reads before it ever reaches `hook.bat`, and a wrapper that
@@ -2271,10 +2339,7 @@ fn the_hook_refuses_a_command_line_it_does_not_speak() {
     // Installed through the same door a journey uses, so what git runs here is
     // what git runs there. The argv is rewritten per case below; the checkout's
     // `core.hooksPath` already points at the directory holding it.
-    let repo = world.repository(
-        "local-direct",
-        &as_argv(&hook_script(&world, &["nonsense"])),
-    );
+    let repo = world.repository("local-direct", &as_argv(&hook_argv(&world, &["nonsense"])));
     let hook = hooks_dir(&world).join("pre-push");
     let base = || git(&world, &repo.origin, &["rev-parse", "main"]);
     let seed = base();
@@ -2303,7 +2368,7 @@ fn the_hook_refuses_a_command_line_it_does_not_speak() {
             "append-future-event runs in a tree under a session's run root",
         ),
     ] {
-        install_hook(&hook, &as_argv(&hook_script(&world, &argv)));
+        install_hook(&hook, &as_argv(&hook_argv(&world, &argv)));
         let refused = publishing_push(&world, &repo.checkout, &format!("{argv:?}"));
         let said = String::from_utf8_lossy(&refused.stderr).into_owned();
         assert!(
@@ -2325,11 +2390,28 @@ fn the_hook_refuses_a_command_line_it_does_not_speak() {
         );
     }
 
+    // `wait-for`, and yet this case runs on every platform — because the
+    // rendezvous is written *first*, so the verb finds it on its first look and
+    // returns without ever blocking. A hook this test could abandon still waiting
+    // is what [`held_hook_script`]'s Unix-only gate is drawn around, and this one
+    // cannot be; that is why the argv is spelled through [`hook_argv`] rather than
+    // through the gated door.
+    //
+    // The ordering is therefore load-bearing rather than incidental, and it is
+    // asserted rather than left to the reader: move the write below the install,
+    // or drop it, and this refuses here instead of hanging the Windows leg on a
+    // push nothing releases — which is the failure this whole gate exists to end.
     let go = world.root.join("push.go");
     std::fs::write(&go, "go").expect("the rendezvous is written");
+    assert!(
+        go.is_file(),
+        "the rendezvous at {} is not in place before the hook that waits for it is \
+         installed, so the push below would block on a file nothing writes",
+        go.display()
+    );
     install_hook(
         &hook,
-        &as_argv(&hook_script(&world, &["wait-for", &go.to_string_lossy()])),
+        &as_argv(&hook_argv(&world, &["wait-for", &go.to_string_lossy()])),
     );
     let accepted = publishing_push(&world, &repo.checkout, "a verb it speaks");
     assert!(
@@ -2374,7 +2456,7 @@ fn publishing_push(world: &World, checkout: &Path, what: &str) -> std::process::
 }
 
 /// The borrowed argv every installer takes, out of the owned one
-/// [`hook_script`] hands back.
+/// [`hook_argv`] hands back.
 fn as_argv(argv: &[String]) -> Vec<&str> {
     argv.iter().map(String::as_str).collect()
 }

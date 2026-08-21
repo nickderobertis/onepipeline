@@ -12,7 +12,7 @@
 // `dispatch.rs` is where the real binary is driven instead. `harness.rs` carries the same
 // suppression and the full rationale.
 
-use crate::harness::{agent, hook_script, human, plan_of, reaped_pid, Run, World};
+use crate::harness::{agent, human, plan_of, reaped_pid, Run, World};
 
 use crate::harness::lifecycle;
 use onepipeline::event::{Envelope, Source};
@@ -52,11 +52,16 @@ fn driven(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> (String, 
 
 /// How long a held publication phase is kept open, so its bucket is a real
 /// duration on the clock rather than a bucket that merely exists.
+// Reached only from the held-publication journey below, which is `#[cfg(unix)]`
+// because holding a push means a hook no platform off Unix can reap. Its doc
+// comment says why.
+#[cfg(unix)]
 const HELD: std::time::Duration = std::time::Duration::from_millis(400);
 
 /// The floor a held stretch must clear once it has been measured. Below the
 /// hold, because the two records bracketing it are written either side of the
 /// rendezvous rather than exactly on it.
+#[cfg(unix)]
 const FLOOR: u64 = 250;
 
 fn settled(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
@@ -495,13 +500,33 @@ fn telemetry_reports_what_each_party_spent() {
 /// produced, and it is what let this bucket read as measured. The bucket is
 /// still served, and it is still not the agent's; what it is not is a
 /// measurement. Recorded as divergence 16 in `docs/contract-divergences.md`.
+///
+/// **Unix-only, because holding the publication is the whole measurement.** The
+/// bucket is a real span on the clock only if something blocks the publishing
+/// push, and the one thing that can is the repository's own `pre-push` hook —
+/// git's child, two processes below the run. `onevcs` documents no portable group
+/// teardown off Unix: its `terminate_group` is a no-op there and
+/// `detach_process_group` with it, so a run that reaches its bound while this hook
+/// still holds — which is every path through here that does not reach the release
+/// below, an assertion or a `World::until` running out among them — leaves the
+/// hook alive and wedges the leg on reader threads blocked against its pipes.
+/// [`harness::held_hook_script`](crate::harness::held_hook_script) is where that
+/// is stated once, and it does not exist on Windows, so this `cfg` is the
+/// compiler's requirement rather than a judgement call made here.
+///
+/// What is given up is this journey's Windows coverage alone: the eight-way split
+/// of a lifecycle node's time, which is platform-independent arithmetic over
+/// records the sibling writes. Every non-blocking hook journey still runs
+/// everywhere. The gate comes off when `onevcs` can tear down a hook's orphaned
+/// children on Windows.
+#[cfg(unix)]
 #[test]
 fn telemetry_separates_publication_and_lock_time_from_agent_time() {
     let world = World::new("views-publicationtime");
     let go = world.fakes.join("push.go");
     // The publishing push is held open for a measurable span, so its bucket is a
     // real duration on the clock rather than a bucket that merely exists.
-    let hook = hook_script(&world, &["wait-for", &go.to_string_lossy()]);
+    let hook = crate::harness::held_hook_script(&world, &go);
     world.repository(
         "local-direct",
         &hook.iter().map(String::as_str).collect::<Vec<_>>(),

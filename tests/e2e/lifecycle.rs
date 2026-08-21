@@ -23,7 +23,9 @@
 
 use std::path::PathBuf;
 
-use crate::harness::{agent, hook_script, lifecycle, plan_of, Repository, World, REFUSED};
+use crate::harness::{
+    agent, hook_script, lifecycle, plan_of, HookVerb, Repository, World, REFUSED,
+};
 use onevcs::provenance::SUBJECT_LIMIT;
 use serde_json::json;
 
@@ -82,13 +84,24 @@ fn published_locally(world: &World) -> Repository {
 }
 
 /// A `pre-push` hook a repository can be given, for a journey that needs its
-/// merge path to do something other than let the push through.
+/// merge path to do something other than let the push through — and to be done
+/// with it by the time git returns.
 ///
 /// git runs the hook in the tree the publishing push is made from, which sits
 /// under the session's own run root — so the hook can address the stream that
 /// session is writing without this crate telling it one.
-fn merge_path(world: &World, args: &[&str]) -> Vec<String> {
-    hook_script(world, args)
+fn merge_path(world: &World, verb: &HookVerb) -> Vec<String> {
+    hook_script(world, verb)
+}
+
+/// The same hook, **holding** the publishing push until `rendezvous` exists.
+///
+/// Unix-only, and every journey reaching it is too: see
+/// [`harness::held_hook_script`](crate::harness::held_hook_script) for the
+/// `onevcs` limitation that draws the line and for when it comes off.
+#[cfg(unix)]
+fn held_merge_path(world: &World, rendezvous: &std::path::Path) -> Vec<String> {
+    crate::harness::held_hook_script(world, rendezvous)
 }
 
 /// Every `onevcs`-produced event one run recorded, by kind.
@@ -1023,13 +1036,28 @@ fn an_earlier_plan_still_publishes_under_the_subject_the_sibling_derives() {
 /// The **publishing push** is what is held, because it is the one stretch of a
 /// real publication a journey can hold from outside it: git runs the repository's
 /// own `pre-push` hook there, and this one waits for a file.
+///
+/// **Unix-only, because that hold is the journey.** Reading a record *while* the
+/// node is in flight means the node has to still be in flight, and the only thing
+/// that keeps it there is a `pre-push` hook blocked mid-push — git's child, two
+/// processes below the run. `onevcs` documents no portable group teardown off
+/// Unix, so any path through here that does not reach the release below — an
+/// assertion failing, a `World::until` running out — abandons a hook nothing can
+/// reap, and the run wedges on reader threads blocked against its pipes rather
+/// than failing. [`held_merge_path`] does not exist on Windows, so this `cfg` is
+/// what the compiler requires rather than a judgement made here.
+///
+/// What is given up is this journey's Windows coverage alone: mid-publication
+/// readability of the merged store, which is platform-independent. The gate comes
+/// off when `onevcs` can tear down a hook's orphaned children on Windows.
+#[cfg(unix)]
 #[test]
 fn a_publications_own_records_reach_the_journal_while_it_is_still_publishing() {
     let world = World::new("lifecycle-livepublish");
     let go = world.fakes.join("push.go");
     world.repository(
         "local-direct",
-        &merge_path(&world, &["wait-for", &go.to_string_lossy()])
+        &held_merge_path(&world, &go)
             .iter()
             .map(String::as_str)
             .collect::<Vec<_>>(),
@@ -1825,12 +1853,27 @@ fn a_push_the_merge_path_refuses_is_redispatched_carrying_what_the_remote_wrote(
 /// again into a run whose teardown is on its way to reap it, the node would settle
 /// as the cancellation and lose the publication failure, which is the useful half
 /// of what happened.
+///
+/// **Unix-only, and this is the sharpest case of why.** The window is a hook
+/// blocked mid-push, and what lands in it is a *cancel* — so the run's teardown
+/// begins while git's grandchild is still holding the push. `onevcs` documents no
+/// portable group teardown off Unix: its `terminate_group` is a no-op there and
+/// `detach_process_group` with it, so that teardown reaps the child it started and
+/// the hook outlives it, leaving the run wedged on reader threads blocked against
+/// pipes the hook still holds. [`held_merge_path`] does not exist on Windows, so
+/// the compiler requires this `cfg` rather than an audit finding it.
+///
+/// What is given up is this journey's Windows coverage alone: which settlement a
+/// cancelled node reaches, which is this crate's own arithmetic and carries no
+/// platform in it. The gate comes off when `onevcs` can tear down a hook's
+/// orphaned children on Windows.
+#[cfg(unix)]
 #[test]
 fn a_cancel_that_lands_before_the_next_attempt_settles_on_the_publication_failure() {
     let world =
         World::new("lifecycle-cancelledretry").with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "2");
     let go = world.fakes.join("push.go");
-    let held = merge_path(&world, &["wait-for", &go.to_string_lossy()]);
+    let held = held_merge_path(&world, &go);
     let repo = world.repository(
         "change-auto",
         &held.iter().map(String::as_str).collect::<Vec<_>>(),
@@ -2867,7 +2910,7 @@ fn a_session_stream_that_cannot_be_read_is_reported_and_does_not_fail_the_node()
     //
     // A file where the streams directory was, so nothing can recreate it:
     // `EventStream::open` then refuses every session by name.
-    let hook = merge_path(&world, &["break-streams"]);
+    let hook = merge_path(&world, &HookVerb::BreakStreams);
     world.repository(
         "local-direct",
         &hook.iter().map(String::as_str).collect::<Vec<_>>(),
@@ -2917,7 +2960,7 @@ fn a_session_line_this_build_cannot_read_is_reported_and_does_not_fail_the_node(
     // repository's own code can reach it. Everything asserted is through the binary.
     //
     // The hook finds the session by walking up from the tree it is pushing out of.
-    let hook = merge_path(&world, &["append-future-event"]);
+    let hook = merge_path(&world, &HookVerb::AppendFutureEvent);
     world.repository(
         "local-direct",
         &hook.iter().map(String::as_str).collect::<Vec<_>>(),
@@ -3257,7 +3300,7 @@ fn a_change_this_crate_cannot_read_the_record_of_settles_as_a_plain_task_failure
     // the publishing push, which happens before the change request is opened — so the
     // line it appends is on the stream *before* that record, which is what makes the whole
     // read refuse. Everything asserted is through the binary.
-    let hook = merge_path(&world, &["append-future-event"]);
+    let hook = merge_path(&world, &HookVerb::AppendFutureEvent);
     world.repository(
         "change-open",
         &hook.iter().map(String::as_str).collect::<Vec<_>>(),
