@@ -51,7 +51,22 @@ pub struct Launch {
     pub vcs_filter: Option<EventFilter>,
 }
 
-/// Run one lifecycle node to settlement.
+/// Run one lifecycle node to settlement, re-dispatching it while its
+/// publication fails in a way that leaves the work behind.
+///
+/// A publication that ends `checks-failed`, `checks-unsettled`, `push-rejected`,
+/// or `sync-conflict` did not reject the node — it rejected the **tree** the node
+/// produced, and that tree is still on the branch the session handed back. There
+/// is nothing left in the run that would ever look at it again: the node settles
+/// `failed`, its dependents never start, and an operator hand-builds a
+/// replacement node out of the settlement's detail. So the node is asked again
+/// instead, on that same branch, with the diagnosis in its hands.
+///
+/// Bounded, because a check that will never pass would otherwise be answered by
+/// an unbounded series of dispatches, each of them producing the same tree and
+/// paying for the same refusal. The node that spends the budget settles `failed`
+/// saying how many attempts were made and what each one ended with, which is what
+/// tells a reader the difference between a failure and a loop.
 pub fn execute(
     executor: &dyn Executor,
     paths: &RunPaths,
@@ -60,13 +75,67 @@ pub fn execute(
     cancel: &crate::executor::CancellationToken,
     tx: &Sender<Message>,
 ) -> Settlement {
+    let attempts = engine::publication_attempts();
+    // What each attempt's publication ended with, in order, for the settlement
+    // that spends the budget. One word per attempt: the last attempt's own reason
+    // leads the detail as it always has, and a detail carrying three sibling
+    // diagnostics in full would carry none of them — every payload text this
+    // crate writes is bounded.
+    let mut endings: Vec<&'static str> = Vec::new();
+    let mut node = std::borrow::Cow::Borrowed(node);
+    let mut attempt: u32 = 1;
+    loop {
+        let preserved = match attempt_once(executor, paths, launch, &node, cancel, tx) {
+            Attempt::Settled(settlement) => return settlement,
+            Attempt::Preserving(preserved) => preserved,
+        };
+        endings.push(preserved.outcome);
+        // Two reasons to stop, and one settlement for both: the budget is spent,
+        // or the run is being stopped. A cancelled run must not be given another
+        // dispatch — the teardown is on its way to reap it, and the node would
+        // then settle as the cancellation rather than as the publication failure
+        // that is the useful half of what happened.
+        //
+        // llmlint: ignore[changed_behavior_has_e2e] the cancellation half is a
+        // race by construction: it needs a stop that lands in the window between
+        // a publication failing and the next dispatch starting, which no
+        // rendezvous this suite has can hold open — the doubles hold *dispatches*,
+        // and there is no dispatch in flight here. The settlement it produces is
+        // the same one `a_node_that_spends_its_publication_budget_settles_naming_
+        // every_attempt` drives end to end, reached by the other condition.
+        if attempt >= attempts || cancel.is_cancelled() {
+            return spent(&node.id, &preserved, &endings);
+        }
+        attempt += 1;
+        // Announced as another `node-dispatched`, because that is what it is: the
+        // node is being asked again, and a reader counting dispatches sees it
+        // without a kind of its own to learn.
+        let _ = tx.send(Message::Redispatched(Box::new(engine::Redispatch {
+            node: node.id.clone(),
+            attempt,
+            attempts,
+            reason: format!("{}: {}", preserved.outcome, preserved.reason),
+        })));
+        node = std::borrow::Cow::Owned(continued(&node, &preserved, attempt, attempts, &endings));
+    }
+}
+
+/// One attempt at a lifecycle node: its steps, and the publication that follows.
+fn attempt_once(
+    executor: &dyn Executor,
+    paths: &RunPaths,
+    launch: &Launch,
+    node: &Node,
+    cancel: &crate::executor::CancellationToken,
+    tx: &Sender<Message>,
+) -> Attempt {
     let run = paths.run.as_str();
     let vcs_filter = launch.vcs_filter.as_ref();
     let Some(request) = crate::vcs::request_for(node) else {
-        return Settlement {
+        return Attempt::Settled(Settlement {
             detail: Some("a lifecycle node needs a repo".into()),
             ..Settlement::plain(&node.id, NodeStatus::Failed, Some("invalid-node"))
-        };
+        });
     };
 
     // A node that declared no steps has one dispatch and no step, so nothing
@@ -87,10 +156,10 @@ pub fn execute(
     let steps = match dispatchable_steps(node) {
         Ok(steps) => steps,
         Err(reason) => {
-            return Settlement {
+            return Attempt::Settled(Settlement {
                 detail: Some(reason),
                 ..Settlement::plain(&node.id, NodeStatus::Failed, Some("invalid-node"))
-            }
+            })
         }
     }; // llmlint: ignore-end[changed_behavior_has_e2e]
 
@@ -136,11 +205,11 @@ pub fn execute(
             // The session stays open for them and the follow does not: dropping
             // it here ends a process that would otherwise read a stream nobody
             // is waiting for, for as long as the driver lives.
-            return Settlement {
+            return Attempt::Settled(Settlement {
                 branch,
                 completed_steps: completed,
                 ..Settlement::plain(&node.id, NodeStatus::Waiting, None)
-            };
+            });
         }
         if step.expects_no_diff {
             continue;
@@ -195,11 +264,11 @@ pub fn execute(
         }
         if drained.settlement.status != NodeStatus::Done {
             end_session(stream, tx, session.as_ref(), &whose, vcs_filter);
-            return Settlement {
+            return Attempt::Settled(Settlement {
                 branch,
                 completed_steps: completed,
                 ..drained.settlement
-            };
+            });
         }
         if declared_steps {
             completed.push(step.id.clone());
@@ -209,13 +278,13 @@ pub fn execute(
     let Some(token) = session else {
         // Every step declared no diff, so there is nothing to publish and the
         // node settles on the existing no-changes outcome.
-        return Settlement {
+        return Attempt::Settled(Settlement {
             branch,
             ..Settlement::plain(&node.id, NodeStatus::Done, Some("no-changes"))
-        };
+        });
     };
 
-    let settlement = publish(
+    let attempted = publish(
         executor,
         paths,
         launch,
@@ -228,7 +297,7 @@ pub fn execute(
         branch,
     );
     end_session(stream, tx, Some(&token), &whose, vcs_filter);
-    settlement
+    attempted
 }
 
 /// Draft the change request's body, then publish through `onevcs`.
@@ -251,7 +320,7 @@ fn publish(
     tx: &Sender<Message>,
     token: &onevcs::SessionToken,
     branch: Option<String>,
-) -> Settlement {
+) -> Attempt {
     // The plan's own body wins outright and spends no dispatch: a planner who
     // wrote the change request has already done the drafting.
     let (body, undrafted) = match node.body.clone() {
@@ -284,17 +353,21 @@ fn publish(
         })));
         why
     });
-    // One composition wherever a publication's own words and a drafting failure
-    // are put together, so the places that do it cannot come to disagree about
-    // the order or the punctuation.
-    let with_undrafted = |detail: String| match &undrafted {
-        Some(why) => format!("{detail}. {why}"),
-        None => detail,
-    };
-    let publication_failed = |detail: String| Settlement {
-        branch: branch.clone(),
-        detail: Some(with_undrafted(detail)),
-        ..Settlement::plain(&node.id, NodeStatus::Failed, Some("publication-failed"))
+    // Through the one composition, so every place a publication's own words and
+    // a drafting failure are put together agrees about the order and the
+    // punctuation — including the failure paths below, which compose the same
+    // two values from a different function.
+    let with_undrafted = |detail: String| compose(&detail, undrafted.as_deref());
+    // The residual: a publication this crate can say nothing more about than
+    // that it failed. Every failure `onevcs` names a kind for goes through
+    // `failed_publication` below instead, which is where the word and the routing
+    // are decided together.
+    let publication_failed = |detail: String| {
+        Attempt::Settled(Settlement {
+            branch: branch.clone(),
+            detail: Some(with_undrafted(detail)),
+            ..Settlement::plain(&node.id, NodeStatus::Failed, Some("publication-failed"))
+        })
     };
 
     match crate::vcs::publish(
@@ -309,8 +382,21 @@ fn publish(
             // `PublishOutcome::Failed`, and this crate reads its line rather
             // than a second one. The reason is the sibling's own — the gate it
             // ran and what that said — and it is what the node settles with.
-            if let onevcs::PublishOutcome::Failed { reason, .. } = &published.outcome {
-                return publication_failed(format!("onevcs: {reason}"));
+            if let onevcs::PublishOutcome::Failed {
+                kind,
+                reason,
+                retained,
+            } = &published.outcome
+            {
+                return failed_publication(
+                    &node.id,
+                    token,
+                    branch.or_else(|| Some(published.branch.clone())),
+                    *kind,
+                    reason,
+                    retained.as_ref(),
+                    undrafted.clone(),
+                );
             }
             let labels =
                 engine::dispatch_labels(&paths.run, &node.id, None, node.persona.as_deref());
@@ -340,7 +426,7 @@ fn publish(
                 }),
                 _ => None,
             };
-            Settlement {
+            Attempt::Settled(Settlement {
                 // What the node settles on is its publication, exactly as
                 // before; a drafting failure only ever adds words to it.
                 detail: compared.map(&with_undrafted).or_else(|| undrafted.clone()),
@@ -362,7 +448,7 @@ fn publish(
                 // immediately still has to be observed doing it.
                 landing: crate::vcs::landing_of(&published.outcome),
                 ..Settlement::plain(&node.id, NodeStatus::Done, None)
-            }
+            })
         }
         // llmlint: ignore[changed_behavior_has_e2e] this arm is `onevcs` refusing the
         // call outright, which no double can produce: the fake host answers a publish
@@ -375,6 +461,214 @@ fn publish(
         // end to end beside an undrafted body.
         Err(error) => publication_failed(error.to_string()),
     }
+}
+
+/// How one attempt at a lifecycle node ended.
+///
+/// Two cases, and the split is the whole of the routing: an attempt that
+/// **settled** is the node's answer and the loop stops on it, and one whose
+/// publication failed leaving the work on its branch is an attempt rather than an
+/// answer. Kept apart as cases rather than as a settlement a caller inspects
+/// afterwards, because the fields a continuation needs — the branch it continues,
+/// the reason, the evidence — exist only on the second and would otherwise be
+/// `Option`s on every settlement this crate makes.
+enum Attempt {
+    /// The node settled, whatever the settlement says.
+    Settled(Settlement),
+    /// Its publication failed and left work a further attempt can continue.
+    Preserving(Box<Preserved>),
+}
+
+/// A publication that failed and handed its branch back.
+struct Preserved {
+    /// The branch the work is on, which the next attempt continues.
+    branch: String,
+    /// The word this failure settles on, when the budget runs out on it.
+    outcome: &'static str,
+    /// The failure as `onevcs` reported it.
+    reason: String,
+    /// What the publication recorded beside it.
+    evidence: Vec<crate::vcs::Evidence>,
+    /// A drafting ending this attempt also had, carried so the settlement that
+    /// spends the budget says it exactly as one that settled straight away does.
+    undrafted: Option<String>,
+}
+
+/// Settle or continue one failed publication.
+///
+/// Preserving is **two** conditions and not one. The failure has to be a kind a
+/// further attempt could answer — [`crate::vcs::failure_of`] decides that — and
+/// the branch has to still exist outside the session, which is `onevcs`'s
+/// [`Retention`](onevcs::Retention) answer: a session's clone is disposable, so a
+/// branch the execution checkout refused went with it and there is nothing left
+/// to continue. Sending a node back to work on a branch nobody kept would cut a
+/// fresh one from the base and republish an empty tree, reporting a recovery that
+/// recovered nothing.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the failure's own five values — which kind, what it said, what became of the \
+              branch, which branch, and which node — plus the session the evidence is read \
+              off and the drafting ending the settlement carries either way. Bundling them \
+              would name a struct whose only constructor is this call site"
+)]
+fn failed_publication(
+    node: &str,
+    token: &onevcs::SessionToken,
+    branch: Option<String>,
+    kind: onevcs::FailureKind,
+    reason: &str,
+    retained: Option<&onevcs::Retention>,
+    undrafted: Option<String>,
+) -> Attempt {
+    let failure = crate::vcs::failure_of(kind);
+    let handed_back = matches!(retained, Some(onevcs::Retention::HandedBack(_)));
+    let settled = || {
+        Attempt::Settled(Settlement {
+            branch: branch.clone(),
+            detail: Some(compose(&format!("onevcs: {reason}"), undrafted.as_deref())),
+            ..Settlement::plain(node, NodeStatus::Failed, Some(failure.outcome))
+        })
+    };
+    match (failure.preserving, handed_back, branch.clone()) {
+        (true, true, Some(branch)) => Attempt::Preserving(Box::new(Preserved {
+            branch,
+            outcome: failure.outcome,
+            reason: engine::bounded(&crate::views::one_line(reason)),
+            evidence: crate::vcs::evidence_in(token),
+            undrafted,
+        })),
+        // llmlint: ignore[changed_behavior_has_e2e] the arm covers two cases and only one
+        // of them is new. The **terminal** one — a failure no further attempt can answer —
+        // is driven end to end by `a_publication_that_its_gate_rejects_settles_the_node_
+        // failed_by_name`, which now also asserts that the node was dispatched exactly
+        // once. The other is a preserving failure whose branch the execution checkout
+        // refused: `onevcs` hands a branch back on every failure it can and reports
+        // `Refused` only when that copy itself failed — a checkout that could not be
+        // written to — which no double here injects and which the gate script deliberately
+        // keeps out of the repository. Reaching it would mean breaking the checkout
+        // mid-publication, which proves the fixture rather than this arm, and what it does
+        // is exactly what the terminal case does.
+        _ => settled(),
+    }
+}
+
+/// A publication's own words and a drafting ending, in that order.
+///
+/// The publication is what settled the node, so it leads; the drafting ending is
+/// true either way and follows. One composition wherever the two are put
+/// together, so the places that do it cannot come to disagree about the order or
+/// the punctuation.
+fn compose(detail: &str, undrafted: Option<&str>) -> String {
+    match undrafted {
+        Some(why) => format!("{detail}. {why}"),
+        None => detail.to_owned(),
+    }
+}
+
+/// The settlement of a node that spent its publication budget.
+///
+/// It settles under the **last** failure's own word, because that is the failure
+/// standing in the way, and the detail says how many attempts were made and what
+/// each ended with. Without the roll-up a reader sees one failure and cannot tell
+/// it from a node that failed once — which is the difference between "fix this
+/// check" and "this check is never going to pass".
+fn spent(node: &str, preserved: &Preserved, endings: &[&'static str]) -> Settlement {
+    let each: Vec<String> = endings
+        .iter()
+        .enumerate()
+        .map(|(index, ending)| format!("{} {ending}", index + 1))
+        .collect();
+    let roll_up = format!(
+        "{} publication attempt{} on {}: {}",
+        endings.len(),
+        if endings.len() == 1 { "" } else { "s" },
+        preserved.branch,
+        each.join(", ")
+    );
+    Settlement {
+        branch: Some(preserved.branch.clone()),
+        detail: Some(compose(
+            &format!("onevcs: {}. {roll_up}", preserved.reason),
+            preserved.undrafted.as_deref(),
+        )),
+        // **No step** is recorded as completed, and that is the same rule the
+        // re-dispatch was made under seen from the other end. The branch carries
+        // a tree the merge path rejected, so a `retry` that skipped the steps it
+        // already holds would publish that tree again unaltered and meet the same
+        // refusal — the ending this whole loop exists to avoid, reached by hand
+        // instead of automatically.
+        ..Settlement::plain(node, NodeStatus::Failed, Some(preserved.outcome))
+    }
+}
+
+/// The node the next attempt is dispatched as.
+///
+/// Three changes and no others. It is **pinned to the preserved branch**, so the
+/// session `onevcs` opens continues that branch from its own tip rather than
+/// cutting a second one beside committed work. It records **no step as
+/// completed**, so every step runs again — against the tree that was rejected,
+/// which is the tree that has to change; a continuation that skipped the steps
+/// the branch already carries would republish it unaltered and meet the same
+/// refusal, which is the one failure this must not have. And it carries the
+/// **diagnosis** as its node context, so the worker meets the failure rather than
+/// having to go and find it.
+///
+/// The planner's own note does not survive: a note carries exactly one dispatch
+/// and the attempt that just ran was it.
+fn continued(
+    node: &Node,
+    preserved: &Preserved,
+    attempt: u32,
+    attempts: u32,
+    endings: &[&'static str],
+) -> Node {
+    Node {
+        branch: Some(preserved.branch.clone()),
+        resume: None,
+        context: Some(diagnosis(preserved, attempt, attempts, endings)),
+        ..node.clone()
+    }
+}
+
+/// What the next attempt is told about the one before it.
+///
+/// The failure's own reason and a pointer to every artifact its publication
+/// recorded — the check's log, the push's output, the conflict's hunks — by id,
+/// because the artifact is somebody else's megabytes and what a worker needs is
+/// the fetch that gets it. Named as *observed state* by the section it is
+/// rendered into, so a worker cannot read a failure report as a new bar to clear.
+fn diagnosis(
+    preserved: &Preserved,
+    attempt: u32,
+    attempts: u32,
+    endings: &[&'static str],
+) -> String {
+    let mut note = format!(
+        "The previous attempt's publication failed and its branch was preserved. This is \
+         attempt {attempt} of {attempts}, and it continues that same branch — {branch} — so \
+         the tree that was rejected is the tree this dispatch starts from. Change what the \
+         failure below is about; republishing it unaltered meets the same refusal.\n\n\
+         The publication ended `{ending}`, and `onevcs` said:\n\n{reason}\n",
+        branch = preserved.branch,
+        ending = preserved.outcome,
+        reason = preserved.reason,
+    );
+    if endings.len() > 1 {
+        note.push_str(&format!(
+            "\nEvery attempt so far ended: {}.\n",
+            endings.join(", ")
+        ));
+    }
+    if !preserved.evidence.is_empty() {
+        note.push_str(
+            "\nThe publication recorded this evidence, each fetched with \
+             `onevcs artifact cat ID`:\n",
+        );
+        for evidence in &preserved.evidence {
+            note.push_str(&format!("- {} — {}\n", evidence.kind, evidence.id));
+        }
+    }
+    note
 }
 
 /// The task a drafting dispatch is given, ahead of the node's own.

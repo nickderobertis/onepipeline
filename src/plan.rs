@@ -85,8 +85,40 @@ pub(crate) const DONE_WHEN_RETIRED: &str =
      verbatim; a bar broader than one node belongs in the onejudge base config the \
      node-scope graph's worker already points at, under `user.done_when`";
 
+/// The second retired field, and where what it asked for is said now.
+///
+/// `verify_via_ci` was accepted by this schema and read by nothing: no dispatch,
+/// no publication, and no view ever consulted it, so a plan that set it got
+/// exactly the run a plan that omitted it got. It is retired rather than given a
+/// meaning because the thing it asked for is now **observed** rather than
+/// declared — a `change-auto` publication watches the host's own required checks
+/// to their conclusion, and which of them failed is what settles the node
+/// `checks-failed` or `checks-unsettled`. A flag saying "use CI as the
+/// verification" beside a policy that already does would be a second way to ask
+/// for one behaviour, and the one nothing honoured.
+pub(crate) const VERIFY_VIA_CI_RETIRED: &str =
+    "`verify_via_ci` is no longer a plan field, and nothing ever read it. The \
+     host's own required checks are the merge-path verification of a node whose \
+     `merge_policy` is `change-auto`, which watches them to their conclusion; a \
+     check that concludes red settles the node `checks-failed` and a bound that \
+     elapses with one still pending settles it `checks-unsettled`";
+
+/// The retired fields, each with the refusal a document still carrying it earns.
+///
+/// A table rather than a branch per field: every one of them reaches this crate
+/// by the same three routes — a plan file, a reply envelope's `add`, and a
+/// `requeue`'s amendment — and one walk that knows them all is what keeps the
+/// three answering alike.
+const RETIRED_FIELDS: &[(&str, &str)] = &[
+    (DONE_WHEN, DONE_WHEN_RETIRED),
+    (VERIFY_VIA_CI, VERIFY_VIA_CI_RETIRED),
+];
+
 /// The name of that field, as a submitted document still spells it.
 const DONE_WHEN: &str = "done_when";
+
+/// And of the second, for the same reason.
+const VERIFY_VIA_CI: &str = "verify_via_ci";
 
 /// What stands in for a [`Goal`] a plan states none of.
 ///
@@ -179,13 +211,16 @@ impl Plan {
 pub(crate) fn retired_field_refusal(document: &serde_json::Value) -> Option<String> {
     match document {
         serde_json::Value::Object(map) => {
-            if map.contains_key(DONE_WHEN) {
+            if let Some((_, retired)) = RETIRED_FIELDS
+                .iter()
+                .find(|(field, _)| map.contains_key(*field))
+            {
                 let whose = map
                     .get("id")
                     .and_then(serde_json::Value::as_str)
                     .map(|id| format!("'{id}': "))
                     .unwrap_or_default();
-                return Some(format!("{whose}{DONE_WHEN_RETIRED}"));
+                return Some(format!("{whose}{retired}"));
             }
             map.values().find_map(retired_field_refusal)
         }
@@ -373,9 +408,6 @@ pub struct Node {
     /// The registered checkout the per-run clone is cut from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_checkout: Option<String>,
-    /// Treat the remote host's own checks as the merge-path verification.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub verify_via_ci: Option<bool>,
     /// Several agent and human steps run in sequence on one branch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub steps: Option<Vec<Step>>,
@@ -762,6 +794,41 @@ mod tests {
             let message = Plan::load(&path).unwrap_err().to_string();
             assert!(message.contains("'contract':"), "{message}");
             assert!(message.contains(DONE_WHEN_RETIRED), "{message}");
+            assert!(
+                !message.contains("schema_version"),
+                "a version refusal displaced the field's: {message}"
+            );
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The second retired field is answered the same way, and about itself.
+    ///
+    /// A plan that set `verify_via_ci` asked for the host's checks to be the
+    /// merge-path verification, and got a run in which nothing read the field at
+    /// all. `unknown field` would tell its author the field does not exist and
+    /// leave them to guess what asks for it now; this names the policy that does.
+    #[test]
+    fn a_plan_carrying_verify_via_ci_is_answered_about_the_field_at_every_version() {
+        let root = scratch("verifyviaci");
+        for version in PLAN_SCHEMA_VERSIONS_READ {
+            let path = root.join(format!("v{version}.plan.json"));
+            std::fs::write(
+                &path,
+                format!(
+                    r#"{{"schema_version":{version},"tasks":[
+                        {{"id":"service","repo":"owner/service","title":"feat: thing",
+                         "persona":"e","task":"t","verify_via_ci":true}}]}}"#
+                ),
+            )
+            .expect("written");
+            let message = Plan::load(&path).unwrap_err().to_string();
+            assert!(message.contains("'service':"), "{message}");
+            assert!(message.contains(VERIFY_VIA_CI_RETIRED), "{message}");
+            assert!(
+                message.contains("change-auto"),
+                "the refusal does not say what asks for the host's checks now: {message}"
+            );
             assert!(
                 !message.contains("schema_version"),
                 "a version refusal displaced the field's: {message}"

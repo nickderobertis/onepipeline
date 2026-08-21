@@ -105,7 +105,7 @@ resolver = "2"
 # is stale — and `tests/e2e/session.rs` drives the relay itself.
 [workspace.dependencies]
 oneagentgraph = "0.3.0"
-onevcs = "0.8.0"
+onevcs = "0.10.0"
 # **Not a third sibling this crate composes** — nothing here launches, calls, or
 # spawns onejudge. It is one vocabulary: the verdicts a two-party member settles
 # on, which `oneagentgraph` copies onto the `member-settled` this crate relays.
@@ -120,7 +120,7 @@ onejudge = "0.4"
 # is not a version skew but a compile error: `tests/onevcs_seam.rs` — whose whole
 # job is to drive this crate's seam against those providers — would not build,
 # because the two copies' types are different types.
-onevcs-testing = "0.2.7"
+onevcs-testing = "0.3.1"
 
 [package]
 name = "onepipeline"

@@ -82,8 +82,9 @@ fn main() -> ExitCode {
     ) {
         (Some("api"), Some("user")) => user(&args),
         (Some("pr"), Some("create")) => create(&args, &dir),
-        (Some("pr"), Some("list")) => list(&args),
+        (Some("pr"), Some("list")) => list(&args, &dir),
         (Some("pr"), Some("view")) => view(&args, &dir),
+        (Some("pr"), Some("checks")) => checks(&args, &dir),
         (Some("pr"), Some("merge")) => merge(&args, &dir),
         (Some("run"), Some("view")) => log(&args),
         (Some(one), Some(two)) => fake::refuse(&format!("unknown gh command '{one} {two}'")),
@@ -200,8 +201,26 @@ fn log(args: &[String]) -> ExitCode {
     ) {
         return refusal;
     }
-    println!("the host's job log");
+    // Named for the job it is the log of, so a journey reading back the artifact
+    // a check's log was stored as can tell one check's from another's.
+    println!(
+        "the host's job log for job {}",
+        fake::flag(args, "--job").unwrap_or_default()
+    );
     ExitCode::SUCCESS
+}
+
+/// The branch one change request was opened from, as this host recorded it.
+///
+/// Read back out of what `pr create` wrote rather than taken off the argv: `gh
+/// pr checks` is addressed by the change request's number and says nothing about
+/// a branch, so a host that named one from an argument it was handed would be
+/// inventing the very fact it is being asked about.
+fn head_of(dir: &Path, id: &str) -> Option<String> {
+    opened_changes(dir)
+        .into_iter()
+        .find(|opened| opened["number"].as_u64().map(|n| n.to_string()).as_deref() == Some(id))
+        .and_then(|opened| opened["head"].as_str().map(str::to_owned))
 }
 
 /// Where this host's state for one change request lives.
@@ -285,10 +304,15 @@ fn create(args: &[String], dir: &Path) -> ExitCode {
 
 /// `gh pr list --repo R --head H --base B --state open --json …`
 ///
-/// Always empty: a journey here publishes a branch once, so every publication
-/// opens its own change request rather than adopting one. A host that reported
-/// an existing change would make "was one opened?" unanswerable.
-fn list(args: &[String]) -> ExitCode {
+/// Every change request this host still has open from `head` into `base`, which
+/// is the question `onevcs` asks before it opens one. It used to answer empty
+/// always, on the reading that a journey publishes a branch once — and a node
+/// whose publication fails and is dispatched again publishes it twice. Against
+/// the real host the second one finds the first's change request and adopts it,
+/// and `gh pr create` on a branch that already has one **fails**; a host that
+/// answered empty here would have this suite proving a second change request
+/// nobody can open.
+fn list(args: &[String], dir: &Path) -> ExitCode {
     if let Err(refusal) = shaped(
         args,
         "pr list",
@@ -304,8 +328,42 @@ fn list(args: &[String]) -> ExitCode {
     ) {
         return refusal;
     }
-    println!("[]");
+    let flag = |name: &str| fake::flag(args, name).unwrap_or_default();
+    let open: Vec<serde_json::Value> = opened_changes(dir)
+        .into_iter()
+        .filter(|change| change["head"] == json_of(&flag("--head")))
+        .filter(|change| change["base"] == json_of(&flag("--base")))
+        .filter(|change| {
+            change["number"]
+                .as_u64()
+                .is_some_and(|number| recorded(dir, &number.to_string()) == Some(Change::Open))
+        })
+        .map(|change| {
+            let number = change["number"].as_u64().unwrap_or_default();
+            serde_json::json!({
+                "number": number,
+                "url": format!("https://github.com/{}/pull/{number}", flag("--repo")),
+                "state": "OPEN",
+                "headRefOid": HEAD_SHA,
+            })
+        })
+        .collect();
+    println!("{}", serde_json::json!(open));
     ExitCode::SUCCESS
+}
+
+/// One string, as the JSON this host wrote it as.
+fn json_of(value: &str) -> serde_json::Value {
+    serde_json::Value::String(value.to_owned())
+}
+
+/// Every change request this host has opened, in the order it opened them.
+fn opened_changes(dir: &Path) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(dir.join("gh").join("opened.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect()
 }
 
 /// `gh pr view ID --repo R --json …`
@@ -346,6 +404,7 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
         return ExitCode::from(1);
     };
     let merged = state == Change::Merged;
+    let reported = scripted_checks(dir, &id);
     println!(
         "{}",
         serde_json::json!({
@@ -354,11 +413,215 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
             "mergeStateStatus": "CLEAN",
             "headRefOid": HEAD_SHA,
             "mergeCommit": merged.then(|| serde_json::json!({"oid": MERGE_SHA})),
-            // No checks reported. The journeys here gate with a command, which
-            // is the repository's own bar; a host rollup would be a second one
-            // this program decided.
-            "statusCheckRollup": [],
+            // What this host reports about the change request's checks, which is
+            // the scripted part: unscripted it reports none, which is the
+            // repository whose only bar is the `command:` gate its rules name.
+            "statusCheckRollup": reported
+                .iter()
+                .map(Check::rollup_entry)
+                .collect::<Vec<_>>(),
         })
+    );
+    ExitCode::SUCCESS
+}
+
+/// One check this host reports on a change request.
+///
+/// Two states and no third for each field, exactly as [`Change`] has two: a
+/// scripted line this program read loosely would be a host behaviour the journey
+/// that wrote it never asked for, and the assertions around it would be about a
+/// state nobody scripted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Check {
+    /// The check's name, which is what branch protection lists and what a red
+    /// check's refusal names.
+    name: String,
+    /// The host's own status vocabulary. `completed` is the only one `onevcs`
+    /// reads as settled; the other two are a check still running.
+    status: String,
+    /// How a settled check ended. `None` while it has not.
+    conclusion: Option<String>,
+    /// Whether the host says this check blocks the merge.
+    required: bool,
+}
+
+/// The statuses this host reports, as GitHub spells them.
+const STATUSES: &[&str] = &["queued", "in_progress", "completed"];
+
+/// The conclusions this host reports, as GitHub spells them. Green and red both,
+/// because a journey proving a red check has to be able to write a green one
+/// beside it or it has proved only that this host says no.
+const CONCLUSIONS: &[&str] = &[
+    "success",
+    "skipped",
+    "neutral",
+    "failure",
+    "cancelled",
+    "timed_out",
+];
+
+impl Check {
+    /// One scripted line, or the refusal that it is not one.
+    ///
+    /// `NAME STATUS CONCLUSION REQUIRED`, four fields always — `-` is the
+    /// conclusion of a check that has not settled. Nothing is defaulted: a line
+    /// this program filled in for its author would answer a journey that was
+    /// never written.
+    fn parse(line: &str) -> Result<Self, String> {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let [name, status, conclusion, required] = fields[..] else {
+            return Err(format!(
+                "a scripted check is `NAME STATUS CONCLUSION REQUIRED`, and {line:?} is not"
+            ));
+        };
+        if !STATUSES.contains(&status) {
+            return Err(format!(
+                "{status:?} is not a status this host reports; they are {STATUSES:?}"
+            ));
+        }
+        let settled = status == "completed";
+        let conclusion = match (settled, conclusion) {
+            (false, "-") => None,
+            (true, "-") => {
+                return Err(format!(
+                    "check {name:?} is `completed` and concludes nothing; a settled check                      concludes one of {CONCLUSIONS:?}"
+                ))
+            }
+            (false, other) => {
+                return Err(format!(
+                    "check {name:?} is {status:?} and concludes {other:?}; a check that has not                      settled concludes `-`"
+                ))
+            }
+            (true, other) if !CONCLUSIONS.contains(&other) => {
+                return Err(format!(
+                    "{other:?} is not a conclusion this host reports; they are {CONCLUSIONS:?}"
+                ))
+            }
+            (true, other) => Some(other.to_owned()),
+        };
+        let required = match required {
+            "required" => true,
+            "advisory" => false,
+            other => {
+                return Err(format!(
+                    "check {name:?} is {other:?}, which says nothing about whether it blocks the                      merge; write `required` or `advisory`"
+                ))
+            }
+        };
+        Ok(Check {
+            name: name.to_owned(),
+            status: status.to_owned(),
+            conclusion,
+            required,
+        })
+    }
+
+    /// The check as `gh pr view --json statusCheckRollup` reports it.
+    ///
+    /// `conclusion` is **absent** rather than null while a check is running,
+    /// which is what the real rollup does and what `onevcs` reads as "the host
+    /// cannot know yet".
+    fn rollup_entry(&self) -> serde_json::Value {
+        let mut entry = serde_json::json!({"name": self.name, "status": self.status});
+        if let Some(conclusion) = &self.conclusion {
+            entry["conclusion"] = serde_json::json!(conclusion);
+        }
+        entry
+    }
+}
+
+/// What this host reports about one change request's checks.
+///
+/// Scripted `gh.checks`, one check per line, and `gh.checks.<NUMBER>` for a
+/// journey whose change requests are answered differently — which is what a node
+/// that publishes, fails its checks, and publishes again is: two change requests,
+/// on two trees, and a host that reported the same thing about both would make a
+/// recovery indistinguishable from a loop.
+///
+/// A line this program cannot read is **fatal**, not skipped: a journey scripting
+/// a check this host quietly dropped would assert against a rollup nobody wrote.
+fn scripted_checks(dir: &Path, id: &str) -> Vec<Check> {
+    let text = fake::node_script(dir, "gh", &format!("checks.{}", fake::segment(id)))
+        .or_else(|| fake::node_script(dir, "gh", "checks"));
+    let Some(text) = text else {
+        return Vec::new();
+    };
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| Check::parse(line).unwrap_or_else(|why| fake::fail(&why)))
+        .collect()
+}
+
+/// `gh pr checks ID --repo R [--required] --json …`
+///
+/// Two queries and no others, because `onevcs` makes two: which checks block the
+/// merge, and where each check ran. A `--json` selector this host has not been
+/// written an answer to is refused rather than answered with the wrong object.
+fn checks(args: &[String], dir: &Path) -> ExitCode {
+    let required_only = args.iter().any(|arg| arg == "--required");
+    let (fields, bare): (&str, &[&str]) = if required_only {
+        ("name", &["--required"])
+    } else {
+        ("name,link", &[])
+    };
+    if let Err(refusal) = shaped(
+        args,
+        "pr checks",
+        3,
+        &[("--repo", Shape::Named), ("--json", Shape::Exact(fields))],
+        bare,
+    ) {
+        return refusal;
+    }
+    let id = match fake::required(args, 2, "ID") {
+        Ok(id) => id,
+        Err(refusal) => return refusal,
+    };
+    if recorded(dir, &id).is_none() {
+        eprintln!("no pull request found for {id}");
+        return ExitCode::from(1);
+    }
+    let reported = scripted_checks(dir, &id);
+    if required_only {
+        let required: Vec<&Check> = reported.iter().filter(|check| check.required).collect();
+        // A repository with no branch protection declares no required check, and
+        // `gh` says so by *failing* — exit 1, nothing on stdout, and a line that
+        // opens exactly this way. `onevcs` reads that whole shape as an answer,
+        // so a host that reported an empty list instead would leave the one path
+        // every unprotected repository takes untested here.
+        if required.is_empty() {
+            eprintln!(
+                "no required checks reported on the {} branch",
+                head_of(dir, &id).unwrap_or_else(|| "unknown".to_owned())
+            );
+            return ExitCode::from(1);
+        }
+        println!(
+            "{}",
+            serde_json::json!(required
+                .iter()
+                .map(|check| serde_json::json!({"name": check.name}))
+                .collect::<Vec<_>>())
+        );
+        return ExitCode::SUCCESS;
+    }
+    let repo = fake::flag(args, "--repo").unwrap_or_default();
+    println!(
+        "{}",
+        serde_json::json!(reported
+            .iter()
+            .enumerate()
+            .map(|(index, check)| serde_json::json!({
+                "name": check.name,
+                // The details URL, whose last segment is the job id `onevcs`
+                // takes out of it to ask for a log. A link with no `/job/<id>`
+                // is what the real `gh` reports for a check no workflow ran, and
+                // answering one here for every check would make the id this host
+                // is asked for unpredictable.
+                "link": format!("https://github.com/{repo}/actions/runs/1/job/{}", index + 1),
+            }))
+            .collect::<Vec<_>>())
     );
     ExitCode::SUCCESS
 }

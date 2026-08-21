@@ -205,6 +205,14 @@ pub struct World {
     pub project: PathBuf,
     /// The launching session this world's commands run under.
     pub session: String,
+    /// Environment this world's commands carry beyond the defaults below.
+    ///
+    /// Every bound this crate takes is read from the environment of the process
+    /// driving the run, so a journey about one has to be able to move it — and
+    /// a bound nothing ever sets is a knob that has never been proven to be
+    /// read. Applied after the defaults, so a journey overrides rather than
+    /// races them, and empty for every world that names none.
+    pub environment: Vec<(String, String)>,
 }
 
 impl World {
@@ -238,6 +246,7 @@ impl World {
             project: root.join("project"),
             root,
             session: format!("session-{name}"),
+            environment: Vec::new(),
         };
         for dir in [&world.runs, &world.fakes, &world.project] {
             std::fs::create_dir_all(dir).expect("a scratch directory");
@@ -254,7 +263,20 @@ impl World {
             fakes: self.fakes.clone(),
             project: self.project.clone(),
             session: session.to_string(),
+            environment: self.environment.clone(),
         }
+    }
+
+    /// The same world, with one more environment variable on every command it
+    /// runs.
+    ///
+    /// Taken at construction rather than settable afterwards, so a world cannot
+    /// change what it means halfway through a journey: `World::new(..).with_env(..)`
+    /// reads as one statement of what this world is.
+    #[must_use]
+    pub fn with_env(mut self, key: &str, value: &str) -> Self {
+        self.environment.push((key.to_owned(), value.to_owned()));
+        self
     }
 
     /// The `onepipeline` binary, wired to this world.
@@ -279,6 +301,20 @@ impl World {
             // `~/.onevcs` would be a test writing outside its world.
             .env("ONEVCS_HOME", self.onevcs_home())
             .env("ONEVCS_GH", double("fake-gh"))
+            // What a `change-auto` publication waits for the host to answer.
+            // `onevcs` polls its checks and its merge for an hour by default —
+            // a bound written for a repository whose CI is doing the work. Here
+            // the host is a program that answers instantly, so the wait proves
+            // nothing and the bound is only how long a journey about a host that
+            // never answers takes to reach its ending.
+            //
+            // Two seconds is not a race with that host: the watch completes a
+            // whole iteration — ask the checks, then ask whether it merged —
+            // before it ever consults the bound, so a host that has an answer
+            // gives it however slow the machine is. What the bound decides is
+            // only how long a host with *no* answer is waited on.
+            .env("ONEVCS_CHECKS_TIMEOUT_SECONDS", "2")
+            .env("ONEVCS_CHECKS_POLL_SECONDS", "0.05")
             .env("GIT_CONFIG_GLOBAL", self.gitconfig())
             .env("GIT_AUTHOR_NAME", GIT_WHO)
             .env("GIT_AUTHOR_EMAIL", GIT_EMAIL)
@@ -309,6 +345,7 @@ impl World {
             // so a rendezvous nobody releases fails as the timeout it is, with
             // the evidence `until` prints.
             .env(RENDEZVOUS_SECONDS_ENV, "180")
+            .envs(self.environment.iter().map(|(k, v)| (k, v)))
             .stdin(Stdio::null());
         command
     }
