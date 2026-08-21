@@ -233,19 +233,6 @@ struct Opened {
     number: NonZeroU64,
 }
 
-/// The branch one change request was opened from, as this host recorded it.
-///
-/// Read back out of what `pr create` wrote rather than taken off the argv: `gh
-/// pr checks` is addressed by the change request's number and says nothing about
-/// a branch, so a host that named one from an argument it was handed would be
-/// inventing the very fact it is being asked about.
-fn head_of(dir: &Path, id: &str) -> Option<String> {
-    opened_changes(dir)
-        .into_iter()
-        .find(|opened| opened.number.to_string() == id)
-        .map(|opened| opened.head)
-}
-
 fn state_of(dir: &Path, id: &str) -> PathBuf {
     dir.join("gh").join(fake::segment(id))
 }
@@ -429,18 +416,43 @@ fn opened_changes(dir: &Path) -> Vec<Opened> {
 /// The change request an invocation addresses, or the refusal that it addresses
 /// none.
 ///
-/// A number and never zero, because that is what `onevcs` takes out of the URL
-/// this host printed and hands back here. Anything else names no change request
-/// this host opened, and answering one would be inventing a host that numbers
-/// its changes some other way. Both verbs that take an `ID` read it through
-/// here, so neither can be the lenient one.
-fn addressed(args: &[String]) -> Result<(String, NonZeroU64), ExitCode> {
+/// `gh` addresses one by `--repo` **and** a number together, and so does this:
+/// the number alone is a key into a state directory holding every repository a
+/// journey registered, and a host that answered it would answer one
+/// repository's question out of another's change requests. The number is one
+/// and never zero besides — that is what `onevcs` takes out of the URL this host
+/// printed and hands back here, and anything else names nothing it opened.
+///
+/// Every verb that takes an `ID` reads it through here, so none of them can be
+/// the lenient one.
+fn addressed(args: &[String], dir: &Path) -> Result<Opened, ExitCode> {
     let id = fake::required(args, 2, "ID")?;
     let Ok(number) = id.parse::<NonZeroU64>() else {
         eprintln!("{id} is not a pull request number");
         return Err(ExitCode::from(1));
     };
-    Ok((id, number))
+    let repo = fake::flag(args, "--repo").unwrap_or_default();
+    opened_changes(dir)
+        .into_iter()
+        .find(|opened| opened.number == number && opened.repo == repo)
+        .ok_or_else(|| {
+            eprintln!("no pull request found for {id} in {repo}");
+            ExitCode::from(1)
+        })
+}
+
+/// What this host recorded about a change request it opened.
+///
+/// **Fatal** where there is nothing, rather than an answer: `pr create` writes
+/// the record and the state together, so a change request [`addressed`] resolved
+/// and this cannot is a fixture that lost one of the two.
+fn state_of_opened(dir: &Path, opened: &Opened) -> Change {
+    let id = opened.number.to_string();
+    recorded(dir, &id).unwrap_or_else(|| {
+        fake::fail(&format!(
+            "this host opened change request {id} and has no state for it"
+        ))
+    })
 }
 
 /// `gh pr view ID --repo R --json …`
@@ -464,20 +476,17 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
     ) {
         return refusal;
     }
-    let (id, number) = match addressed(args) {
-        Ok(addressed) => addressed,
+    let opened = match addressed(args, dir) {
+        Ok(opened) => opened,
         Err(refusal) => return refusal,
     };
-    let Some(state) = recorded(dir, &id) else {
-        eprintln!("no pull request found for {id}");
-        return ExitCode::from(1);
-    };
-    let merged = state == Change::Merged;
+    let id = opened.number.to_string();
+    let merged = state_of_opened(dir, &opened) == Change::Merged;
     let reported = scripted_checks(dir, &id);
     println!(
         "{}",
         serde_json::json!({
-            "number": number,
+            "number": opened.number,
             "state": if merged { "MERGED" } else { "OPEN" },
             "mergeStateStatus": "CLEAN",
             "headRefOid": HEAD_SHA,
@@ -696,15 +705,11 @@ fn checks(args: &[String], dir: &Path) -> ExitCode {
     ) {
         return refusal;
     }
-    let (id, _) = match addressed(args) {
-        Ok(addressed) => addressed,
+    let opened = match addressed(args, dir) {
+        Ok(opened) => opened,
         Err(refusal) => return refusal,
     };
-    if recorded(dir, &id).is_none() {
-        eprintln!("no pull request found for {id}");
-        return ExitCode::from(1);
-    }
-    let reported = scripted_checks(dir, &id);
+    let reported = scripted_checks(dir, &opened.number.to_string());
     if required_only {
         let required: Vec<&Check> = reported
             .iter()
@@ -716,10 +721,7 @@ fn checks(args: &[String], dir: &Path) -> ExitCode {
         // so a host that reported an empty list instead would leave the one path
         // every unprotected repository takes untested here.
         if required.is_empty() {
-            eprintln!(
-                "no required checks reported on the {} branch",
-                head_of(dir, &id).unwrap_or_else(|| "unknown".to_owned())
-            );
+            eprintln!("no required checks reported on the {} branch", opened.head);
             return ExitCode::from(1);
         }
         println!(
@@ -731,7 +733,7 @@ fn checks(args: &[String], dir: &Path) -> ExitCode {
         );
         return ExitCode::SUCCESS;
     }
-    let repo = fake::flag(args, "--repo").unwrap_or_default();
+    let repo = &opened.repo;
     println!(
         "{}",
         serde_json::json!(reported
@@ -769,16 +771,12 @@ fn merge(args: &[String], dir: &Path) -> ExitCode {
     if let Err(refusal) = shaped(args, "pr merge", 3, &[("--repo", Shape::Named)], bare) {
         return refusal;
     }
-    let id = match fake::required(args, 2, "ID") {
-        Ok(id) => id,
+    let opened = match addressed(args, dir) {
+        Ok(opened) => opened,
         Err(refusal) => return refusal,
     };
-    if recorded(dir, &id).is_none() {
-        eprintln!("no pull request found for {id}");
-        return ExitCode::from(1);
-    }
     if dir.join("gh.merged").exists() {
-        record(dir, &id, Change::Merged);
+        record(dir, &opened.number.to_string(), Change::Merged);
     }
     ExitCode::SUCCESS
 }
