@@ -57,22 +57,15 @@ enum Side {
     Judge,
 }
 
-/// What follows a flag on a `oneharness run` argv.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Takes {
-    /// Nothing: the flag is the whole of it.
     Nothing,
-    /// A value, which the real CLI refuses to be without.
     AValue,
 }
 
-/// How many times one flag may appear.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Occurs {
-    /// Once. A second is a caller that has changed its mind mid-argv, and which
-    /// of the two the real CLI keeps is not something a double may guess at.
     Once,
-    /// As often as the caller has values for it.
     Repeatedly,
 }
 
@@ -115,7 +108,6 @@ const FLAGS: [(&str, Takes, Occurs); 13] = [
 fn declared(args: &[String]) -> Result<(), String> {
     let known = |arg: &String| FLAGS.iter().find(|(name, _, _)| name == arg);
     let mut seen: Vec<&str> = Vec::new();
-    // Past the verb, which `main` matched to get here.
     let mut at = 1;
     while at < args.len() {
         let arg = &args[at];
@@ -228,11 +220,42 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
 /// Nothing else is read, because nothing else changes what this double does — but
 /// the document is *parsed*, so a config the sibling composed that is not TOML is
 /// refused here rather than answered around.
+// llmlint: ignore[boundary_inputs_validated] deliberately **not**
+// `deny_unknown_fields`, and it is the one place in this repository where that would be
+// wrong: this is oneharness's schema rather than this crate's, and every config the
+// suite writes carries keys that are none of this process's business — `run_mode`,
+// `schema_file`, an `[env]` table. Denying them would refuse every real config. The
+// invariant in `AGENTS.md` is about the documents *this crate* owns; a foreign one is
+// read for the field it needs and left alone.
 #[derive(serde::Deserialize)]
 struct Config {
     /// The chain's candidates, in the order it would try them. Absent when the
     /// config names none and leaves the selection to oneharness's own discovery.
     harnesses: Option<Vec<String>>,
+}
+
+/// One harness identity, which is a name.
+///
+/// A type rather than a `String` because the empty one is not an identity and
+/// must not be able to reach a report: `harness` and `harness_id` are how a
+/// consumer selects the same candidate again, and a result naming `""` is a turn
+/// attributed to nothing. Constructed only by [`Identity::named`], so a value of
+/// this type has a name in it by construction.
+struct Identity(String);
+
+impl Identity {
+    /// The identity `raw` names, or the reason it names none.
+    fn named(raw: &str) -> Result<Self, String> {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return Err("an identity chain candidate has no name".to_string());
+        }
+        Ok(Self(raw.to_string()))
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 /// The identity a turn under `config` ran as.
@@ -245,17 +268,17 @@ struct Config {
 /// Read off the config rather than assumed, so a report says which identity took
 /// the turn instead of naming one this file remembered. A chain declared with
 /// nothing in it is refused: it selects no harness, so no turn under it happened.
-fn ran(config: &str) -> Result<String, String> {
+fn ran(config: &str) -> Result<Identity, String> {
     let config: Config = toml::from_str(config)
         .map_err(|error| format!("this is not an oneharness config: {error}"))?;
     match config.harnesses {
-        Some(chain) => chain
-            .into_iter()
-            .next()
-            .ok_or_else(|| "its identity chain names no candidate to run the turn".to_string()),
+        Some(chain) => match chain.first() {
+            Some(head) => Identity::named(head),
+            None => Err("its identity chain names no candidate to run the turn".to_string()),
+        },
         // What oneharness does with a config that names no chain: discover one.
         // There is one harness in this suite, so that is what it discovers.
-        None => Ok(DISCOVERED.to_string()),
+        None => Identity::named(DISCOVERED),
     }
 }
 
@@ -282,8 +305,7 @@ fn prompt(args: &[String]) -> Option<String> {
     (!text.trim().is_empty()).then_some(text)
 }
 
-/// The side that does the work: a tool exchange as it happens, then the report.
-fn agent_turn(prompt: &str, cwd: &str, dir: &std::path::Path, identity: &str) -> ExitCode {
+fn agent_turn(prompt: &str, cwd: &str, dir: &std::path::Path, identity: &Identity) -> ExitCode {
     match work(prompt, cwd, dir, identity) {
         Ok(outcome) => outcome.exit_code(),
         Err(refusal) => fake::refuse(&refusal),
@@ -294,7 +316,12 @@ fn agent_turn(prompt: &str, cwd: &str, dir: &std::path::Path, identity: &str) ->
 /// process having refused, and is why the two are separate results: a turn that
 /// did the work and did not get there still streamed and still reported, and a
 /// refusal never started.
-fn work(prompt: &str, cwd: &str, dir: &std::path::Path, identity: &str) -> Result<Outcome, String> {
+fn work(
+    prompt: &str,
+    cwd: &str,
+    dir: &std::path::Path,
+    identity: &Identity,
+) -> Result<Outcome, String> {
     // A worker turn that leaves something behind in the worktree it was given.
     // Only when scripted, and only for the worker: a publication needs a diff —
     // `onevcs publish` on a clean tree publishes nothing and says so — and a
@@ -372,7 +399,7 @@ fn work(prompt: &str, cwd: &str, dir: &std::path::Path, identity: &str) -> Resul
 /// so the prompt is the only thing that tells them apart. A third is refused
 /// rather than guessed at: onejudge reads each answer strictly, and one given to
 /// the wrong question is a protocol failure it reports as the *member* dying.
-fn judge_turn(prompt: &str, dir: &std::path::Path, identity: &str) -> ExitCode {
+fn judge_turn(prompt: &str, dir: &std::path::Path, identity: &Identity) -> ExitCode {
     let answer = if prompt.contains(SUPERVISOR_OPENING) {
         supervision(dir)
     } else if prompt.contains(EVALUATOR_OPENING) {
@@ -625,7 +652,7 @@ fn report(
     said: &str,
     events: Option<Vec<ActionEvent>>,
     outcome: Outcome,
-    identity: &str,
+    identity: &Identity,
 ) -> RunReport {
     RunReport {
         schema_version: SCHEMA_VERSION.into(),
@@ -649,9 +676,9 @@ fn report(
         config_files: Vec::new(),
         control: None,
         results: vec![RunResult {
-            harness: identity.into(),
+            harness: identity.as_str().into(),
             variant: None,
-            harness_id: identity.into(),
+            harness_id: identity.as_str().into(),
             bin: "fake-claude".into(),
             available: true,
             status: outcome.status(),
