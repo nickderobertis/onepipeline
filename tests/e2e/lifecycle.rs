@@ -1771,6 +1771,111 @@ fn refuse_pushed_branches(world: &World, repo: &Repository) {
     let _ = world;
 }
 
+/// A `pre-push` gate, whose verdict is the publishing push's own output.
+///
+/// `git clone` copies no hooks, so `onevcs` carries the checkout's configured
+/// `core.hooksPath` onto the session's clone — which is where the publishing push
+/// is made from and therefore the only place a merge-path hook runs. The
+/// directory sits outside the working tree so the hook is never a file the
+/// session has to have committed.
+fn gate_on_a_refusing_pre_push_hook(world: &World, repo: &Repository) {
+    std::fs::write(
+        world.onevcs_home().join("rules.yml"),
+        "version: 2\nrules: []\ndefault:\n  publication: change-auto\n  approvals: none\n  \
+         gate:\n    kind: pre-push\n",
+    )
+    .expect("the rules file is written");
+    let hooks = world.root.join("merge-path-hooks");
+    std::fs::create_dir_all(&hooks).expect("the hooks directory");
+    let hook = hooks.join("pre-push");
+    std::fs::write(
+        &hook,
+        "#!/bin/sh\necho \"the merge-path gate says no\" >&2\nexit 1\n",
+    )
+    .expect("the hook is written");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
+            .expect("the hook is executable");
+    }
+    crate::harness::git(
+        world,
+        &repo.checkout,
+        &["config", "core.hooksPath", &hooks.to_string_lossy()],
+    );
+}
+
+/// One stored artifact two records point at is one piece of evidence.
+///
+/// A `pre-push` gate runs no command of its own: its verdict *is* what the
+/// publishing push wrote, so `onevcs` stores that output once and references it
+/// from both the `push` record and the `gate-verdict` beside it. A diagnosis
+/// composed straight off the stream would hand the worker the same
+/// `onevcs artifact cat` twice, which reads as two runs of a gate that ran once
+/// — and sends somebody looking for the difference between them.
+///
+/// Unix-only for the hook bit, which is where a `pre-push` gate lives at all.
+#[cfg(unix)]
+#[test]
+fn one_artifact_two_records_point_at_reaches_the_worker_once() {
+    let world =
+        World::new("lifecycle-evidencetwice").with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "2");
+    let repo = world.repository("change-auto", &["true"]);
+    gate_on_a_refusing_pre_push_hook(&world, &repo);
+    world.script("service.work", "the worker wrote this\n");
+
+    let run = settle(&world, "evidencetwice", vec![lifecycle("service", &[])]);
+    let node = world.run_json(&run, "result.json")["nodes"][0].clone();
+    assert_eq!(
+        node["outcome"],
+        "push-rejected",
+        "{node}\n{}",
+        why(&world, &run)
+    );
+
+    // The fixture really did produce the shape this is about: one artifact id,
+    // on two of the publication's own records.
+    let mut records: Vec<(String, String)> = Vec::new();
+    for event in world.journal(&run) {
+        if event["source"] != "vcs" {
+            continue;
+        }
+        let kind = event["kind"].as_str().unwrap_or_default().to_owned();
+        for artifact in event["artifacts"].as_array().into_iter().flatten() {
+            if let Some(id) = artifact["id"].as_str() {
+                records.push((kind.clone(), id.to_owned()));
+            }
+        }
+    }
+    let shared = records
+        .iter()
+        .find(|(_, id)| records.iter().filter(|(_, other)| other == id).count() > 1)
+        .map(|(_, id)| id.clone())
+        .unwrap_or_else(|| {
+            panic!(
+                "no artifact was recorded twice, so there is nothing to deduplicate: {records:?}"
+            )
+        });
+
+    // And the worker was told to read it once.
+    let tasks = tasks_dispatched_to(&world, &run, "service");
+    assert!(
+        tasks.len() >= 2,
+        "the node was not dispatched again: {tasks:?}"
+    );
+    let second = &tasks[1];
+    assert_eq!(
+        second.matches(shared.as_str()).count(),
+        1,
+        "the re-dispatch names {shared} more than once:\n{second}"
+    );
+    assert!(
+        second.contains("onevcs artifact cat"),
+        "the re-dispatch does not say how to read its evidence:\n{second}"
+    );
+}
+
 /// A base that moves under a publication is the third preserving failure, and it
 /// is the one whose continuation currently cannot get started.
 ///

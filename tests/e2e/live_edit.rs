@@ -498,22 +498,16 @@ fn an_edit_carrying_the_retired_bar_is_refused_by_name_at_both_boundaries() {
 /// A planner who asks a node to verify via CI is told what already watches the
 /// checks.
 ///
-/// The second retired field, through the channel rather than through a plan
-/// file — which is where a planner reaches for it. A `change-auto` publication
-/// that failed its checks routes the failure back as work, and "verify via CI
-/// this time" is the amendment that failure invites; the field it would be
-/// written as was accepted by the old schema and read by nothing, so a run that
-/// took it would look exactly like the run that failed. `add` is the first of
-/// the two ways it arrives, and it never parses into a command at all: the
-/// refusal comes out of the envelope reader, names the node it was found on, and
-/// says what settles a node whose checks conclude red.
+/// The second retired field, on the boundary a planner actually reaches it
+/// through: a publication that failed its checks routes the failure back as
+/// work, and "verify via CI this time" is the amendment that invites. An `add`
+/// carrying it never parses into a command at all, so the envelope reader is
+/// what has to name the field.
 #[test]
 fn an_added_node_asking_to_verify_via_ci_is_refused_by_name_at_the_envelope() {
     let world = World::new("edit-verifyci-add");
-    // Registered, so the node below is one this run could otherwise dispatch and
-    // publish: the retired field is the only thing wrong with it, which is what
-    // makes the refusal about that field rather than about a repository nobody
-    // declared.
+    // Registered, so the retired field is the only thing wrong with the node
+    // below rather than a repository nobody declared.
     world.repository("local-direct", &["true"]);
     let run = live(&world, "ciadd", vec![agent("slow", &[])], &["slow"]);
 
@@ -533,15 +527,12 @@ fn an_added_node_asking_to_verify_via_ci_is_refused_by_name_at_the_envelope() {
     world.release("slow.go");
 }
 
-/// The same field on the other way in: an amendment to a node already in the
-/// graph.
+/// The same field on the other way in, and the likelier one: the node whose
+/// publication failed is already in the graph, so a planner recovering it amends
+/// that node rather than writing a new one.
 ///
 /// A `requeue` parses — the amendment is a free-form mapping merged onto the
-/// node — so nothing upstream refuses it and the reconciler is what has to. It
-/// is the likelier of the two ways here: the node whose publication failed is
-/// already in the graph, so a planner recovering it amends that node rather than
-/// writing a new one, and an amendment answered with the schema's bare `unknown
-/// field` would leave them re-sending it with the field spelled differently.
+/// node — so nothing upstream refuses it and the reconciler is what has to.
 #[test]
 fn a_requeue_amending_a_node_to_verify_via_ci_is_refused_by_name_at_the_reconciler() {
     let world = World::new("edit-verifyci-requeue");

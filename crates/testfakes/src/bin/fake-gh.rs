@@ -213,19 +213,11 @@ fn log(args: &[String]) -> ExitCode {
 
 /// One change request this host opened, as `pr create` recorded it.
 ///
-/// A typed shape and not a `Value` a reader probes for keys, for the reason
-/// every boundary in this workspace is read as one: a record missing its
-/// `number` read through `as_u64().unwrap_or_default()` is change request `0`,
-/// which addresses nothing and which `pr list` would then quietly leave out of
-/// its answer — and a `pr list` that answers empty is exactly how this host
-/// opens a second change request beside the first. Refusing the record says so
-/// where it is wrong instead.
-///
-/// The **same** type writes the record and reads it back, and it accepts no
-/// field beyond these. One shape for both halves of the file cannot drift from
-/// itself, and a line carrying a key nobody wrote is some other program's record
-/// in this host's state directory — read leniently it would be answered as a
-/// change request this host opened.
+/// The same type both writes the record and reads it back, so the file's two
+/// halves cannot drift; anything it does not accept — a missing field, an
+/// unexpected one, a `number` of `0` — is a record this host did not write, and
+/// answering it as a change request is how `pr list` comes to leave one out and
+/// this host to open a second beside it.
 ///
 /// `title` and `body` are the two nothing here consults: they are recorded for a
 /// journey to read back, which is the only place a drafted body is a fact rather
@@ -238,9 +230,6 @@ struct Opened {
     base: String,
     title: String,
     body: String,
-    /// Never zero, which is a change request no host ever opened: a record
-    /// numbered `0` is one `pr view` and `pr checks` can say nothing about, and
-    /// the type refuses it at the file rather than leaving a caller to find out.
     number: NonZeroU64,
 }
 
@@ -397,6 +386,9 @@ fn list(args: &[String], dir: &Path) -> ExitCode {
     let flag = |name: &str| fake::flag(args, name).unwrap_or_default();
     let open: Vec<serde_json::Value> = opened_changes(dir)
         .into_iter()
+        // One state file holds every repository a journey registered, so without
+        // this a branch name is answered out of another repository's changes.
+        .filter(|change| change.repo == flag("--repo"))
         .filter(|change| change.head == flag("--head"))
         .filter(|change| change.base == flag("--base"))
         .filter(|change| recorded(dir, &change.number.to_string()) == Some(Change::Open))
@@ -462,11 +454,8 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
         Ok(id) => id,
         Err(refusal) => return refusal,
     };
-    // A number and never zero, because that is what `onevcs` takes out of the
-    // URL this host printed and hands back here. Anything else — `0` among
-    // them, which this host never numbers a change request — names no change
-    // request it opened, and answering one would be inventing a host that
-    // numbers its changes some other way.
+    // What `onevcs` takes out of the URL this host printed and hands back here.
+    // Anything else — `0` among them — names no change request this host opened.
     let Ok(number) = id.parse::<NonZeroU64>() else {
         eprintln!("{id} is not a pull request number");
         return ExitCode::from(1);
