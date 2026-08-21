@@ -429,6 +429,23 @@ fn opened_changes(dir: &Path) -> Vec<Opened> {
         .collect()
 }
 
+/// The change request an invocation addresses, or the refusal that it addresses
+/// none.
+///
+/// A number and never zero, because that is what `onevcs` takes out of the URL
+/// this host printed and hands back here. Anything else names no change request
+/// this host opened, and answering one would be inventing a host that numbers
+/// its changes some other way. Both verbs that take an `ID` read it through
+/// here, so neither can be the lenient one.
+fn addressed(args: &[String]) -> Result<(String, NonZeroU64), ExitCode> {
+    let id = fake::required(args, 2, "ID")?;
+    let Ok(number) = id.parse::<NonZeroU64>() else {
+        eprintln!("{id} is not a pull request number");
+        return Err(ExitCode::from(1));
+    };
+    Ok((id, number))
+}
+
 /// `gh pr view ID --repo R --json …`
 fn view(args: &[String], dir: &Path) -> ExitCode {
     let fields = match args
@@ -450,15 +467,9 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
     ) {
         return refusal;
     }
-    let id = match fake::required(args, 2, "ID") {
-        Ok(id) => id,
+    let (id, number) = match addressed(args) {
+        Ok(addressed) => addressed,
         Err(refusal) => return refusal,
-    };
-    // What `onevcs` takes out of the URL this host printed and hands back here.
-    // Anything else — `0` among them — names no change request this host opened.
-    let Ok(number) = id.parse::<NonZeroU64>() else {
-        eprintln!("{id} is not a pull request number");
-        return ExitCode::from(1);
     };
     let Some(state) = recorded(dir, &id) else {
         eprintln!("no pull request found for {id}");
@@ -648,11 +659,9 @@ impl Check {
 
 /// What this host reports about one change request's checks.
 ///
-/// Scripted `gh.checks`, one check per line, and `gh.checks.<NUMBER>` for a
-/// journey whose change requests are answered differently — which is what a node
-/// that publishes, fails its checks, and publishes again is: two change requests,
-/// on two trees, and a host that reported the same thing about both would make a
-/// recovery indistinguishable from a loop.
+/// Scripted `gh.checks`, one check per line, with `gh.checks.<NUMBER>` beside it
+/// for a journey that has more than one change request open at once and needs
+/// this host to answer differently about each.
 ///
 /// A line this program cannot read is **fatal**, not skipped: a journey scripting
 /// a check this host quietly dropped would assert against a rollup nobody wrote.
@@ -690,8 +699,8 @@ fn checks(args: &[String], dir: &Path) -> ExitCode {
     ) {
         return refusal;
     }
-    let id = match fake::required(args, 2, "ID") {
-        Ok(id) => id,
+    let (id, _) = match addressed(args) {
+        Ok(addressed) => addressed,
         Err(refusal) => return refusal,
     };
     if recorded(dir, &id).is_none() {
