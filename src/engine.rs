@@ -1725,10 +1725,6 @@ fn cancel_grace_seconds() -> u64 {
         .unwrap_or(DEFAULT_CANCEL_GRACE_SECONDS)
 }
 
-/// How many attempts a dispatch that produced nothing gets.
-///
-/// An unusable value falls back to the default rather than disabling the
-/// recovery it configures.
 /// How many times a dispatch that produced nothing is re-asked.
 ///
 /// A [`NonZeroU32`] for the reason [`publication_attempts`] gives, and the parse
