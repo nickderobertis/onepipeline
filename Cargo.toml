@@ -88,8 +88,8 @@ resolver = "2"
 #   session_reuse.rs` and `tests/e2e/lifecycle.rs` drive the two halves, so a pin
 #   below 0.8.0 fails rather than reads differently.
 #
-# One floor is carried by `Cargo.lock` rather than by the requirement below, and
-# deliberately.
+# Two floors are carried by `Cargo.lock` rather than by the requirement below,
+# and deliberately.
 #
 # `oneagentgraph` 0.3.3 carries the **session-conversation producer**: a `session`
 # label naming the conversation a member's turns belong to, and the
@@ -103,6 +103,20 @@ resolver = "2"
 # `the_linked_oneagentgraph_produces_the_session_conversation_this_crate_relays`
 # is what holds the resolution there — below the floor it fails saying the lock
 # is stale — and `tests/e2e/session.rs` drives the relay itself.
+#
+# `oneagentgraph` 0.3.5 corrects the **shipped role bars** so none of them demands
+# anything a dispatch cannot settle inside its own run, and guards the rest
+# against regrowing one. `engineer` is the role `src/executor.rs` names on
+# `members.worker`, and its bar refused "done" until the behaviour was *proven end
+# to end* — which nothing running inside a dispatch can show now that no gate runs
+# inside the publication and verification is the merge path's, so every
+# implementation node would fail its review. The bar is the *linked library's*
+# file and not anything this crate ships, so the lock is what decides which one a
+# judge is handed. `^0.3.0` already permits it, so again the resolution is the
+# whole of the fix. `src/agentgraph.rs`'s
+# `the_linked_oneagentgraph_holds_the_engineer_bar_to_what_a_dispatch_can_prove`
+# holds it, and asserts what replaced the demand as well as its absence, so a
+# resolution that softened the bar rather than narrowing it fails there too.
 [workspace.dependencies]
 oneagentgraph = "0.3.0"
 onevcs = "0.8.0"
