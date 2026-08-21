@@ -38,6 +38,11 @@ onevcs = { workspace = true }
 # shape **onejudge** declares rather than one hand-rolled here — the same reason
 # the two pins above are taken rather than restated.
 onejudge = { workspace = true }
+# The report a spawned `oneharness run` answers with, in oneharness's own typed
+# shape. It is onejudge that parses it — the `oneharness` double stands at the one
+# process boundary a two-party member still has — so the pin is the copy onejudge
+# links; see `[workspace.dependencies]`.
+oneharness-core = { workspace = true }
 # The graph document's own reader, so the observer double runs the judge-side
 # provider the graph *declares* rather than one it remembered: a graph that named
 # a different provider would otherwise still be supervised by this copy.

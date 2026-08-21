@@ -1552,7 +1552,7 @@ fn the_model_turn_double_refuses_an_argument_the_real_claude_does_not_take() {
 fn the_sibling_still_takes_its_harness_from_the_variable_this_crate_restates() {
     let world = World::new("harness-bin-drift");
     world.write_graphs();
-    write_supervised_node_graph(&world);
+    world.write_supervised_node_graph();
     write_persona(&world, "engineer");
     let mut node = agent("build", &[]);
     node["persona"] = Value::from("./engineer.yaml");
@@ -2254,28 +2254,6 @@ fn turns_dispatched(world: &World, run: &str, node: &str, step: Option<&str>) ->
         .unwrap_or_else(|| panic!("{config} states no turn ceiling: {text}"))
 }
 
-/// A two-party node-scope graph, as the shipped one is, with a base config that
-/// states the default turn ceiling every member starts from.
-///
-/// `12` is that default deliberately: it is the number a node declaring `45` was
-/// silently collapsed to for the whole life of the defect this proves fixed.
-fn write_supervised_node_graph(world: &World) {
-    std::fs::write(
-        world.graphs().join("onejudge.base.yaml"),
-        "system_prompt: Do the work.\nuser:\n  persona: Review it.\n  \
-         done_when: the original task is complete\n  max_turns: 12\n",
-    )
-    .expect("the onejudge base config is written");
-    std::fs::write(
-        world.graphs().join("node-scope.yaml"),
-        "version: 1\nname: node-scope\nmembers:\n  worker:\n    kind: onejudge\n    \
-         base_config: ./onejudge.base.yaml\n    agent:\n      \
-         oneharness_config: ./oneharness.toml\n    judge:\n      \
-         oneharness_config: ./oneharness.toml\n    mode: bypass\n",
-    )
-    .expect("the node-scope graph is written");
-}
-
 /// One persona file, so a two-party member has a delta to resolve.
 fn write_persona(world: &World, name: &str) {
     std::fs::write(
@@ -2302,7 +2280,7 @@ fn write_persona(world: &World, name: &str) {
 fn a_nodes_turn_budget_reaches_its_dispatch_and_outranks_the_run_wide_one() {
     let world = World::new("real-turn-budget");
     world.write_graphs();
-    write_supervised_node_graph(&world);
+    world.write_supervised_node_graph();
     for persona in ["budgeted", "plain"] {
         write_persona(&world, persona);
     }
@@ -2392,7 +2370,7 @@ fn two_party_worktree(world: &World, run: &str) -> String {
 fn a_two_party_member_is_started_in_the_directory_the_graph_was_given() {
     let world = World::new("real-two-party-cwd");
     world.write_graphs();
-    write_supervised_node_graph(&world);
+    world.write_supervised_node_graph();
     write_persona(&world, "engineer");
     world.repository("local-direct", &["true"]);
 
@@ -2443,7 +2421,7 @@ fn a_two_party_member_is_started_in_the_directory_the_graph_was_given() {
 fn a_steps_turn_budget_reaches_that_steps_own_dispatch() {
     let world = World::new("real-step-budget");
     world.write_graphs();
-    write_supervised_node_graph(&world);
+    world.write_supervised_node_graph();
     write_persona(&world, "implementer");
     world.repository("local-direct", &["true"]);
 

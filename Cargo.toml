@@ -122,6 +122,19 @@ onevcs = "0.8.0"
 # it — and it must resolve to the version *that* pin does. `src/report.rs` is
 # where the build fails if it ever resolves to two, and why.
 onejudge = "0.5"
+# **Test-support only**, and named for one reason: `crates/testfakes`'s
+# `oneharness` double writes the report onejudge reads back, and that report is
+# oneharness's own typed contract. Written by hand it would be fifty fields of
+# copied wire shape that goes on parsing after the producer changed it — which is
+# the failure every other pin in this block is taken to avoid.
+#
+# `"0.8"` rather than the newest, because the reader is **onejudge**: it links
+# `oneharness-core` 0.8 while `oneagentgraph` links 0.10, so the graph already
+# carries both and the double has to write the copy its consumer parses. If
+# onejudge's pin moves, this one no longer unifies with it and
+# `tests/e2e/turns.rs` fails on a report shape onejudge cannot read — which names
+# the drift rather than hiding it. Nothing this crate publishes links it.
+oneharness-core = "0.8"
 # The sibling's own test-support crate, from the **same** revision as the library
 # it implements — here by resolving both from the registry at the releases cut
 # from one commit: `onevcs-testing` v0.2.7 and `onevcs` v0.8.0 are the same tag,

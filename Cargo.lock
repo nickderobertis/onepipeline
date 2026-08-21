@@ -958,6 +958,7 @@ version = "0.0.0"
 dependencies = [
  "libc",
  "oneagentgraph",
+ "oneharness-core 0.8.0",
  "onejudge",
  "onevcs",
  "serde",

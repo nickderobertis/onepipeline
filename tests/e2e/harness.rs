@@ -323,16 +323,23 @@ impl World {
     }
 
     /// The `onepipeline` binary with the **real** `oneagentgraph` behind that one
-    /// seam, and only the paid model turn replaced inside it.
+    /// seam, and the stand-in moved below it.
     ///
     /// Only that seam: the host stand-in [`cmd`](World::cmd) wires up stays, so
     /// these journeys need no credential, and they name no lifecycle node —
-    /// what they are about is the dispatch. The double swapped in here is one
-    /// layer further out than the other — `oneagentgraph` resolves the graph,
+    /// what they are about is the dispatch. `oneagentgraph` resolves the graph,
     /// prepares the member, and supervises it for real, and what stands in is
-    /// the harness it spawns, at that library's own documented
-    /// `ONEAGENTGRAPH_ONEHARNESS_BIN` override, which knows nothing about this
-    /// crate.
+    /// below it, at whichever process that library's own documented overrides
+    /// name — neither of which knows anything about this crate.
+    ///
+    /// **Which process depends on the member kind**, and both are set here so a
+    /// journey writing either graph gets the right one without having to know
+    /// that. A single-sided member's turn is an `oneharness_core` library call,
+    /// so the only process under it is the harness, and the stand-in is the paid
+    /// model turn alone. A two-party member's conversation spawns one
+    /// `oneharness` per side per turn — onejudge's spawning seam, which
+    /// `oneagentgraph` puts it on by installing the spawn hook it reaps a paid
+    /// harness through — so the stand-in there is that process, one layer up.
     ///
     /// Removing `ONEPIPELINE_ONEAGENTGRAPH_BIN` is what puts these
     /// journeys on the **default** path, where every verb is a library call —
@@ -362,11 +369,14 @@ impl World {
                         .to_path_buf(),
                 ]),
             )
+            // `oneharness` itself: the executable a two-party member's composed
+            // provider block names, and the one an in-flight redirection is
+            // delivered by. No single-sided turn comes through it.
             .env("ONEAGENTGRAPH_ONEHARNESS_BIN", double("fake-oneharness"))
             // The paid turn, at oneharness's own per-harness binary seam. A
             // single-sided member's turn is an `oneharness_core` library call
             // from `oneagentgraph 0.2.18` on, so `ONEAGENTGRAPH_ONEHARNESS_BIN`
-            // above no longer stands between this suite and a provider — the
+            // above does not stand between that member and a provider — the
             // only process left below the library is the harness its identity
             // chain selects, which is this one. Set here rather than only in the
             // graphs' `oneharness.toml`, because a journey that writes its own
@@ -564,13 +574,56 @@ impl World {
 
     /// Write the graph configs [`agentgraph_cmd`](World::agentgraph_cmd) names.
     ///
-    /// Single-sided `kind: oneharness` members: the two-party kind runs a
-    /// onejudge conversation in `oneagentgraph`'s own process against a provider
-    /// this suite has no offline stand-in for, and the seam under test — a
-    /// dispatch reaching the sibling, being accepted, and streaming back — is the
-    /// same one either way.
+    /// Single-sided `kind: oneharness` members, which is the cheaper of the two
+    /// kinds and the one nearly every journey wants: the seam most of them are
+    /// about — a dispatch reaching the sibling, being accepted, and streaming
+    /// back — is the same either way, and a two-party member pays for a whole
+    /// supervised conversation to reach it.
+    ///
+    /// What a two-party member produces that this one cannot is the conversation
+    /// itself: a second party, its own turns, and each party's words as their own
+    /// envelope. The journeys that need one say so with
+    /// [`write_supervised_node_graph`](World::write_supervised_node_graph).
     pub fn write_graphs(&self) {
         self.write_graphs_with(None, CONSUMER_GRAPH_SCHEMA);
+    }
+
+    /// Replace the node-scope graph with a **two-party** `kind: onejudge` member,
+    /// as the shipped one is, and write the onejudge base config it names.
+    ///
+    /// [`write_graphs`](World::write_graphs) must have run first: this reuses the
+    /// unattributed identity chain it leaves in the graph directory, which is
+    /// what the shipped graph names for both of a two-party member's sides.
+    ///
+    /// Nothing about the conversation is stood in for. `oneagentgraph` merges the
+    /// persona onto this base and drives onejudge's own run driver in process;
+    /// onejudge composes each side's prompt, parses each answer and settles the
+    /// member; and the only substitution is one process down, at the `oneharness`
+    /// each side's turn is spawned as — see `crates/testfakes`'s double for what
+    /// that boundary is and why a two-party member still has one.
+    ///
+    /// `12` is the default turn ceiling deliberately: it is the number a node
+    /// declaring `45` was silently collapsed to for the whole life of the defect
+    /// [`a_nodes_turn_budget_reaches_its_dispatch_and_outranks_the_run_wide_one`]
+    /// proves fixed.
+    ///
+    /// [`a_nodes_turn_budget_reaches_its_dispatch_and_outranks_the_run_wide_one`]:
+    ///     crate::dispatch::a_nodes_turn_budget_reaches_its_dispatch_and_outranks_the_run_wide_one
+    pub fn write_supervised_node_graph(&self) {
+        std::fs::write(
+            self.graphs().join("onejudge.base.yaml"),
+            "system_prompt: Do the work.\nuser:\n  persona: Review it.\n  \
+             done_when: the original task is complete\n  max_turns: 12\n",
+        )
+        .expect("the onejudge base config is written");
+        std::fs::write(
+            self.graphs().join("node-scope.yaml"),
+            "version: 1\nname: node-scope\nmembers:\n  worker:\n    kind: onejudge\n    \
+             base_config: ./onejudge.base.yaml\n    agent:\n      \
+             oneharness_config: ./oneharness.toml\n    judge:\n      \
+             oneharness_config: ./oneharness.toml\n    mode: bypass\n",
+        )
+        .expect("the node-scope graph is written");
     }
 
     /// The same configs at the **runner's own** schema version, with a second
