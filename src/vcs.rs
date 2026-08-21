@@ -3,7 +3,10 @@
 //! Repository identities, sessions, preserved work, and publication stay in that
 //! library. A lifecycle node is this crate opening a session there, running its
 //! dispatches inside the worktree that session hands back, and publishing
-//! through it — never re-deriving a branch name, a merge policy, or a gate.
+//! through it — never re-deriving a branch name or a merge policy, and never
+//! verifying the change itself: what verifies it is the repository's own merge
+//! path, which is the host's required checks for a remote-publishing identity and
+//! the repository's `pre-push` hook at the publishing push for a local one.
 //!
 //! The machine running the dispatch is the one that opens the session, which is
 //! what [`WorkspaceSpec::VcsSession`](crate::executor::WorkspaceSpec::VcsSession)
@@ -213,10 +216,12 @@ pub fn failure_of(kind: onevcs::FailureKind) -> Failure {
         FailureKind::ChecksUnsettled => Failure::Preserving(Preserving::ChecksUnsettled),
         FailureKind::PushRejected => Failure::Preserving(Preserving::PushRejected),
         FailureKind::SyncConflict => Failure::Preserving(Preserving::SyncConflict),
-        // The gate is `onevcs`'s own verification of the branch rather than the
-        // host's report on a change request: it ran on the tree as it stands and
-        // said no, and nothing this crate can do to that tree from here changes
-        // what it will say.
+        // `Gate` is a kind no publication produces any more — `onevcs` 0.11.0
+        // runs no gate — and it is routed rather than dropped because the
+        // sibling still names it: an arm removed here would be a wildcard by
+        // another name the day anything emits it again. Terminal beside the
+        // other two, on the reading the kind was written for: a verdict on the
+        // tree as it stands, which nothing this crate can do from here changes.
         FailureKind::Gate | FailureKind::Invalid | FailureKind::NotImplemented => Failure::Terminal,
     }
 }
@@ -245,9 +250,15 @@ pub struct Evidence {
 /// publication left behind, and a launch that narrowed what it *ingests* did not
 /// ask to be unable to diagnose a failure.
 ///
-/// In stream order and deduplicated, because `onevcs` references one stored
-/// artifact from two events where a `pre-push` gate's verdict *is* the push's own
-/// output — one run, and a note listing it twice would read as two.
+/// In stream order and **deduplicated**, because an artifact is stored once and
+/// referenced from wherever the publication points at it: a note listing one id
+/// twice reads as two runs of whatever produced it, and sends somebody looking
+/// for the difference between them. `onevcs` 0.11.0 happens to reference each
+/// artifact it stores from one record only — the two-record shape was the
+/// `pre-push` gate's, whose verdict *was* the push's own output, and that gate is
+/// gone — so nothing downstream of this crate holds the property. It is kept
+/// because it is a property of the **note**, not of any one version of the
+/// stream behind it.
 pub fn evidence_in(token: &SessionToken) -> Vec<Evidence> {
     let mut evidence: Vec<Evidence> = Vec::new();
     for envelope in events(token, None) {
@@ -586,10 +597,10 @@ const FOLLOW_POLL: Duration = Duration::from_millis(20);
 
 /// A session's own event stream, followed as `onevcs` writes it.
 ///
-/// Read *once at settlement*, a lifecycle node's gate run, push, change
-/// request, check polling, and merge are one opaque blocking call: every record
-/// appears at once, when it is over — and that stretch is the longest
-/// wall-clock segment the node has. This is the same stream read as it grows,
+/// Read *once at settlement*, a lifecycle node's push, change request, check
+/// polling, and merge are one opaque blocking call: every record appears at
+/// once, when it is over — and that stretch is the longest wall-clock segment
+/// the node has. This is the same stream read as it grows,
 /// through [`EventStream`], which hands back only what has been appended since
 /// the last read.
 ///
@@ -1369,8 +1380,8 @@ mod tests {
         assert_eq!(landing_of(&PublishOutcome::NothingToPublish), None);
         assert_eq!(
             landing_of(&PublishOutcome::Failed {
-                kind: onevcs::FailureKind::Gate,
-                reason: "the gate said no".into(),
+                kind: onevcs::FailureKind::PushRejected,
+                reason: "the merge path refused the publishing push".into(),
                 retained: None,
             }),
             None

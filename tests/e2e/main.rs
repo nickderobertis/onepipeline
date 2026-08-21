@@ -14,8 +14,8 @@
 // test, and `dispatch.rs` drives the real binary with only the paid model turn standing
 // in. What it buys the journeys in between is a dispatch outcome stated directly, where
 // the real agent would need a paid turn. The repository side is real everywhere: the
-// lifecycle journeys register a git origin, open sessions, run gates, and publish through
-// the linked `onevcs`. The one thing past it that is substituted is GitHub, at that
+// lifecycle journeys register a git origin, open sessions, and publish through the linked
+// `onevcs` — past whatever the repository's own merge path makes of the push. The one thing past it that is substituted is GitHub, at that
 // library's own `ONEVCS_GH` override. The same rationale, at more length, is in
 // `harness.rs`.
 
