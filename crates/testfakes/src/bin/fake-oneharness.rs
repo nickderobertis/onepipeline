@@ -268,18 +268,28 @@ impl Identity {
 /// Read off the config rather than assumed, so a report says which identity took
 /// the turn instead of naming one this file remembered. A chain declared with
 /// nothing in it is refused: it selects no harness, so no turn under it happened.
+///
+/// **Every** candidate is named, not only the one that ran: a chain is what a
+/// fallback would step through, so a nameless entry anywhere in it is a config
+/// that cannot be resolved — and one waved through because this turn happened not
+/// to reach it is a launch this double called good and a real `oneharness` would
+/// not.
 fn ran(config: &str) -> Result<Identity, String> {
     let config: Config = toml::from_str(config)
         .map_err(|error| format!("this is not an oneharness config: {error}"))?;
-    match config.harnesses {
-        Some(chain) => match chain.first() {
-            Some(head) => Identity::named(head),
-            None => Err("its identity chain names no candidate to run the turn".to_string()),
-        },
+    let Some(chain) = config.harnesses else {
         // What oneharness does with a config that names no chain: discover one.
         // There is one harness in this suite, so that is what it discovers.
-        None => Identity::named(DISCOVERED),
-    }
+        return Identity::named(DISCOVERED);
+    };
+    let mut named = chain
+        .iter()
+        .map(|candidate| Identity::named(candidate))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter();
+    named
+        .next()
+        .ok_or_else(|| "its identity chain names no candidate to run the turn".to_string())
 }
 
 /// The identity oneharness discovers when a config names no chain — the only one
@@ -292,9 +302,13 @@ const DISCOVERED: &str = "claude-code";
 /// transcript that grows with every turn under the OS argument ceiling. `--prompt`
 /// is taken too, because it is the same value by another spelling and a double
 /// that refused it would be refusing a legal `oneharness run`.
+///
+/// Blank is no prompt, whichever spelling it arrived in: a turn with nothing to
+/// answer is a caller that composed one wrongly, and both ways in are held to
+/// that so a journey cannot pass on the argv what it would be refused on stdin.
 fn prompt(args: &[String]) -> Option<String> {
     if let Some(prompt) = fake::flag(args, "--prompt") {
-        return Some(prompt);
+        return (!prompt.trim().is_empty()).then_some(prompt);
     }
     if fake::flag(args, "--prompt-file").as_deref() != Some("-") {
         return None;
