@@ -264,13 +264,14 @@ impl Usage {
 
     /// Read one usage object off a sibling's payload.
     ///
-    /// Two spellings, because the producer has two. `oneagentgraph`'s
-    /// `turn-completed` carries the onejudge report's own usage object —
-    /// `input_tokens`, `cost_usd` — while the type that library *declares* for
-    /// that payload spells the same numbers `tokens_in` and `cost`. Reading both
-    /// means neither build's stream goes silently unaccounted, which for a host
-    /// whose routine failure is quota exhaustion is the whole point of the
-    /// number.
+    /// Two spellings, because the stack has had two. The linked `oneagentgraph`
+    /// declares and emits `input_tokens` and `cost_usd` — the same names the
+    /// onejudge report has always carried — but a build before 0.3.6 spelled the
+    /// same numbers `tokens_in` and `cost` on that payload, and a run's journal
+    /// outlives the build that wrote it: `telemetry` reads a store recorded
+    /// weeks ago as readily as a live one. Reading both means neither stream
+    /// goes silently unaccounted, which for a host whose routine failure is
+    /// quota exhaustion is the whole point of the number.
     fn of(value: &Value) -> Self {
         let count = |names: [&str; 2]| {
             names

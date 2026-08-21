@@ -1913,6 +1913,78 @@ mod tests {
         );
     }
 
+    /// The linked `oneagentgraph` produces the **whole** turn a transcript is
+    /// rendered from, and not an outline of one.
+    ///
+    /// The second floor carried by `Cargo.lock`; what it holds is with the pin.
+    ///
+    /// The **spelling** is this test's own concern, as it is the sibling
+    /// above's: every assertion is written in an item the older resolution also
+    /// has — [`EventKind`]'s deserializer, and the [`TurnActivity`] and
+    /// [`TurnCompleted`] payload types, which existed there with fewer fields
+    /// and `deny_unknown_fields` over them. `turn-started` is the one field set
+    /// that cannot be, because its payload type is new at the floor;
+    /// `tests/e2e/turns.rs` holds that one against a real dispatch instead.
+    ///
+    /// [`EventKind`]: oneagentgraph::event::EventKind
+    /// [`TurnActivity`]: oneagentgraph::event::TurnActivity
+    /// [`TurnCompleted`]: oneagentgraph::event::TurnCompleted
+    #[test]
+    fn the_linked_oneagentgraph_produces_the_whole_turn_this_crate_relays() {
+        /// What every assertion here has to say, because it is the only thing
+        /// that fixes any of them.
+        const MOVE_THE_LOCK: &str = "`Cargo.toml`'s `^0.3.0` has permitted 0.3.6 all along, \
+             so `Cargo.lock` is what is behind and `cargo update -p oneagentgraph` is the \
+             whole of the fix — editing the requirement changes nothing";
+
+        assert!(
+            serde_json::from_value::<oneagentgraph::event::EventKind>(serde_json::Value::String(
+                "turn-message".to_string()
+            ))
+            .is_ok(),
+            "the linked oneagentgraph does not know the `turn-message` kind, so no dispatch \
+             this engine drives relays a word any party said while it was saying it: that kind \
+             ships in 0.3.6 and the resolution predates it. {MOVE_THE_LOCK}"
+        );
+        // The observation half of an activity: a `tool_result` names no tool
+        // because it answers one already named, carries what came back, and
+        // joins to its call by id. Below the floor `name` is a bare `String`
+        // and the other three are unknown fields, so this is refused there.
+        serde_json::from_value::<oneagentgraph::event::TurnActivity>(serde_json::json!({
+            "kind": "tool_result",
+            "name": null,
+            "detail": "",
+            "output": "ok",
+            "tool_call_id": "toolu_1",
+            "index": 1,
+        }))
+        .unwrap_or_else(|error| {
+            panic!(
+                "the linked oneagentgraph has no reading of the observation that answered a \
+                 tool call, so a relayed turn carries what the agent asked for and never what \
+                 came back: {error}. {MOVE_THE_LOCK}"
+            )
+        });
+        // And a turn's close is **one turn's** close: which turn, whose, over
+        // what interval, and what that turn alone consumed. Below the floor the
+        // payload is a lone `usage` whose figures are spelled differently, so
+        // every field named here is unknown there.
+        serde_json::from_value::<oneagentgraph::event::TurnCompleted>(serde_json::json!({
+            "turn": 1,
+            "role": "assistant",
+            "usage": {"input_tokens": 1, "output_tokens": 1, "cost_usd": 0.0},
+            "started_at": "2026-08-21T09:15:02.847Z",
+            "finished_at": "2026-08-21T09:15:04.912Z",
+        }))
+        .unwrap_or_else(|error| {
+            panic!(
+                "the linked oneagentgraph does not close a turn on that turn's own account, so \
+                 a run this engine drives cannot say which turn spent what: {error}. \
+                 {MOVE_THE_LOCK}"
+            )
+        });
+    }
+
     /// An envelope is the same value whichever way it crossed.
     ///
     /// This is the *content* half of the streaming promise: the subprocess path

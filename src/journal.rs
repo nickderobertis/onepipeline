@@ -8,13 +8,14 @@
 //! state. Reading is unlocked and takes no lock a writer needs, which is what
 //! lets every view run beside a live run.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, VecDeque};
 use std::path::Path;
 
 use serde_json::{json, Map, Value};
 
 use crate::error::Result;
-use crate::event::{Envelope, Labels, Source, ENVELOPE_VERSION};
+use crate::event::{Envelope, Labels, Source, ENVELOPE_VERSION, MAX_PAYLOAD_TEXT_BYTES};
 use crate::ledger::{self, RunPaths};
 use crate::sys;
 
@@ -85,9 +86,13 @@ impl Journal {
     /// settlement points at is copied into the run's own storage here, and every
     /// reader afterwards opens that copy instead of following the line. See
     /// [`crate::report::retain`].
+    /// A relayed payload text is also brought **inside this crate's own
+    /// bound** here, because this is the last place it can be: past this call
+    /// the value is a record every reader afterwards serves.
     pub fn relay(&mut self, envelope: &Envelope) -> Result<()> {
-        crate::report::retain(&self.paths, envelope);
-        self.append(envelope)
+        let envelope = within_the_bound(envelope);
+        crate::report::retain(&self.paths, &envelope);
+        self.append(&envelope)
     }
 
     fn append(&self, envelope: &Envelope) -> Result<()> {
@@ -95,6 +100,55 @@ impl Journal {
             .map_err(|e| crate::error::Error::Invalid(format!("event: {e}")))?;
         ledger::append_line(&self.paths.journal(), &line)
     }
+}
+
+/// One relayed envelope, with every payload text field inside
+/// [`MAX_PAYLOAD_TEXT_BYTES`].
+///
+/// The bound is *this crate's* promise about its own envelope rather than a
+/// restatement of a producer's, which is why it is enforced rather than assumed:
+/// both siblings publish text inside the same 4096 bytes, but what arrives on a
+/// pipe this process reads is whatever the thing on the other end wrote, and
+/// every reader past this call already treats a payload text as bounded.
+///
+/// `truncated` is only ever set to `true`: a producer that said `false` and then
+/// handed over an over-long text was wrong about its own payload.
+fn within_the_bound(envelope: &Envelope) -> Cow<'_, Envelope> {
+    if !envelope.payload.values().any(over_the_bound) {
+        return Cow::Borrowed(envelope);
+    }
+    let mut cut = envelope.clone();
+    for value in cut.payload.values_mut() {
+        if over_the_bound(value) {
+            *value = Value::String(head(value.as_str().unwrap_or_default()));
+        }
+    }
+    cut.payload.insert("truncated".to_string(), json!(true));
+    Cow::Owned(cut)
+}
+
+/// Whether one payload value is a text past the bound.
+///
+/// Top-level values only, which is every text field either sibling declares. A
+/// walk into nested objects would rewrite structured evidence — a verdict, a
+/// usage block — under a rule written for a text field.
+fn over_the_bound(value: &Value) -> bool {
+    matches!(value, Value::String(text) if text.len() > MAX_PAYLOAD_TEXT_BYTES)
+}
+
+/// The longest head of `text` that fits the bound and ends on a character
+/// boundary — a byte count cut through a multi-byte character would put bytes
+/// that are not UTF-8 into a record every reader parses as JSON.
+///
+/// The **head**, because a payload text this crate has to cut is one no producer
+/// described: there is no field-by-field rule left to honour, and a turn's
+/// opening words are what a reader meeting a cut value is looking for.
+fn head(text: &str) -> String {
+    let mut end = MAX_PAYLOAD_TEXT_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_string()
 }
 
 /// Labels naming a run, and optionally a node within it.
@@ -542,6 +596,71 @@ mod tests {
     use crate::event::EventKind;
     use std::fs;
     use std::path::PathBuf;
+
+    /// A relayed envelope, for the bound below.
+    fn relayed_with(payload: Map<String, Value>) -> Envelope {
+        Envelope {
+            v: ENVELOPE_VERSION,
+            ts: "2026-08-21T09:15:02.847Z".into(),
+            stream: "node-scope-1787295926454-1867177".into(),
+            seq: 3,
+            source: Source::Agentgraph,
+            kind: EventKind("turn-message".into()),
+            labels: Labels::default(),
+            payload,
+            artifacts: Vec::new(),
+        }
+    }
+
+    /// A payload text cut at the bound stays a **string**.
+    ///
+    /// The half of the bound `tests/e2e/turns.rs` cannot reach: that journey
+    /// scripts an over-long text out of one-byte characters, so the bound lands
+    /// on a boundary by luck. A text whose 4096th byte is in the middle of a
+    /// character is the case that matters — cut there, the record carries bytes
+    /// that are not UTF-8 and every reader afterwards fails to parse the line
+    /// rather than reading a shortened one.
+    #[test]
+    fn a_payload_text_is_cut_on_a_character_boundary_and_never_through_one() {
+        // Three bytes each, so no multiple of three is 4096 and the bound falls
+        // inside a character rather than between two.
+        let said = "☃".repeat(MAX_PAYLOAD_TEXT_BYTES);
+        let envelope = relayed_with(payload(&[("text", json!(said.clone()))]));
+        let cut = within_the_bound(&envelope);
+        let text = cut.payload["text"]
+            .as_str()
+            .expect("the text is still text");
+        assert!(
+            text.len() <= MAX_PAYLOAD_TEXT_BYTES,
+            "a cut text is still past the bound at {} bytes",
+            text.len()
+        );
+        // The largest whole character count that fits: 1365 × 3 = 4095.
+        assert_eq!(text.chars().count(), MAX_PAYLOAD_TEXT_BYTES / 3);
+        assert!(said.starts_with(text), "the cut is not a head of the text");
+        assert_eq!(cut.payload["truncated"], json!(true));
+    }
+
+    /// Everything else a payload carries is left exactly as it arrived.
+    ///
+    /// Both directions, because either one alone would pass for a relay that
+    /// rewrote the whole payload: a text inside the bound keeps its own length
+    /// and picks up no flag, and a value that is not a text is not measured
+    /// against a bound written for one.
+    #[test]
+    fn a_payload_within_the_bound_crosses_untouched() {
+        let inside = "s".repeat(MAX_PAYLOAD_TEXT_BYTES);
+        let envelope = relayed_with(payload(&[
+            ("text", json!(inside)),
+            ("turn", json!(1)),
+            ("usage", json!({"input_tokens": 1})),
+        ]));
+        assert_eq!(
+            within_the_bound(&envelope).payload,
+            envelope.payload,
+            "a payload nothing was over the bound in was rewritten anyway"
+        );
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("onepipeline-journal-{name}-{}", sys::pid()));

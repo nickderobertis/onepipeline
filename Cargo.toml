@@ -88,8 +88,8 @@ resolver = "2"
 #   session_reuse.rs` and `tests/e2e/lifecycle.rs` drive the two halves, so a pin
 #   below 0.8.0 fails rather than reads differently.
 #
-# One floor is carried by `Cargo.lock` rather than by the requirement below, and
-# deliberately.
+# Two floors are carried by `Cargo.lock` rather than by the requirement below,
+# and deliberately.
 #
 # `oneagentgraph` 0.3.3 carries the **session-conversation producer**: a `session`
 # label naming the conversation a member's turns belong to, and the
@@ -103,6 +103,15 @@ resolver = "2"
 # `the_linked_oneagentgraph_produces_the_session_conversation_this_crate_relays`
 # is what holds the resolution there — below the floor it fails saying the lock
 # is stale — and `tests/e2e/session.rs` drives the relay itself.
+#
+# `oneagentgraph` 0.3.6 carries the **whole turn** rather than an outline of one:
+# the `turn-message` kind, a turn's opening and the instruction it answers, the
+# observation that answered a tool call and the id joining the two, and a
+# `turn-completed` that closes one turn on that turn's own account. It is also
+# the release that moves `onejudge` — 0.3.6 requires 0.5, and the pin below must
+# be the version *that* pin resolves to. `src/agentgraph.rs`'s
+# `the_linked_oneagentgraph_produces_the_whole_turn_this_crate_relays` holds the
+# resolution, and `tests/e2e/turns.rs` drives the relay itself.
 [workspace.dependencies]
 oneagentgraph = "0.3.0"
 onevcs = "0.10.0"
@@ -112,7 +121,20 @@ onevcs = "0.10.0"
 # It adds nothing to the dependency graph, because `oneagentgraph` already builds
 # it — and it must resolve to the version *that* pin does. `src/report.rs` is
 # where the build fails if it ever resolves to two, and why.
-onejudge = "0.4"
+onejudge = "0.5"
+# **Test-support only**, and named for one reason: `crates/testfakes`'s
+# `oneharness` double writes the report onejudge reads back, and that report is
+# oneharness's own typed contract. Written by hand it would be fifty fields of
+# copied wire shape that goes on parsing after the producer changed it — which is
+# the failure every other pin in this block is taken to avoid.
+#
+# `"0.8"` rather than the newest, because the reader is **onejudge**: it links
+# `oneharness-core` 0.8 while `oneagentgraph` links 0.10, so the graph already
+# carries both and the double has to write the copy its consumer parses. If
+# onejudge's pin moves, this one no longer unifies with it and
+# `tests/e2e/turns.rs` fails on a report shape onejudge cannot read — which names
+# the drift rather than hiding it. Nothing this crate publishes links it.
+oneharness-core = "0.8"
 # The sibling's own test-support crate, from the **same** revision as the library
 # it implements — here by resolving both from the registry at the releases cut
 # from one commit: `onevcs-testing` v0.2.7 and `onevcs` v0.8.0 are the same tag,
