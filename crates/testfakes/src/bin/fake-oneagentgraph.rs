@@ -855,6 +855,42 @@ fn write_work(args: &[String], name: &str, body: &str) {
 /// the others working. The second member's turn is announced and not recorded,
 /// so an interrupt sent to it answers as one whose turn is over: two members,
 /// two answers, which is what a caller has to carry on from.
+/// What a turn's opening says it was asked, when a journey scripted a length for
+/// it — and nothing at all otherwise, because an opening is asserted on for the
+/// fact that a turn began, and a payload nobody reads is a value nobody has to
+/// keep true.
+///
+/// `{key}.asked-bytes` is the same case `{key}.said-bytes` is, on a different
+/// kind: an instruction longer than a payload text field may carry, published
+/// **whole and unflagged**, because what happens to it after this is the relay's
+/// to decide and a double that pre-cut it would answer that question for the code
+/// under test. Two kinds rather than one, because the bound is a rule about a
+/// payload text and not about one field of one kind.
+fn asked(dir: &std::path::Path, key: &str) -> Option<serde_json::Value> {
+    let bytes = fake::node_script(dir, key, "asked-bytes")?;
+    let instruction = match bytes.trim().parse::<usize>() {
+        Ok(bytes) if bytes <= SAYABLE => "a".repeat(bytes),
+        Ok(bytes) => fake::fail(&format!(
+            "{key}.asked-bytes asks for {bytes} bytes; nothing past {SAYABLE} says \
+             anything a payload bound does not already"
+        )),
+        Err(error) => fake::fail(&format!("{key}.asked-bytes is not a byte count: {error}")),
+    };
+    // Through the sibling's own payload type, as the words a turn says are:
+    // `instruction_truncated` is that library's statement about its own field,
+    // and this double publishes what it really did.
+    match serde_json::to_value(oneagentgraph::event::TurnStarted {
+        turn: 1,
+        role: oneagentgraph::event::Party::Assistant.as_str().to_string(),
+        instruction,
+        instruction_truncated: false,
+        started_at: fake::now(),
+    }) {
+        Ok(payload) => Some(payload),
+        Err(error) => fake::fail(&format!("a turn opening is not an object: {error}")),
+    }
+}
+
 fn open_turn(args: &[String], dir: &std::path::Path, key: &str, node: &str, step: Option<&str>) {
     let labels = member_labels(args, node, step);
     let unplaceable = [
@@ -1173,6 +1209,9 @@ fn emit(
         );
     };
 
+    if let Some(opening) = asked(dir, key) {
+        envelope(1, oneagentgraph::event::EventKind::TurnStarted, opening);
+    }
     envelope(
         2,
         oneagentgraph::event::EventKind::TurnActivity,

@@ -357,12 +357,23 @@ const ANSWERED: &str = "Ran what the task asked for.";
 /// So the producer here is the `oneagentgraph` double — the one place a text past
 /// the bound can be made to arrive — and it flags nothing, so the cut and the
 /// flag on the far side are the relay's own rather than a fixture handed to it.
+///
+/// **Three fields, on three kinds, cut two ways**, because the rule is about a
+/// payload text rather than about one field of one kind: a turn's own words one
+/// byte past the bound, a turn's opening instruction well past it, and the node's
+/// task prose echoed onto an activity — that last built so the bound lands
+/// *inside a character*, where a cut by bytes puts something that is not UTF-8
+/// onto a line every reader parses as JSON.
 #[test]
 fn a_relayed_payload_text_past_the_bound_is_cut_and_flagged_rather_than_served_whole() {
     let world = World::new("relay-bound");
     world.script(
         &format!("{NODE}.said-bytes"),
         &(MAX_PAYLOAD_TEXT_BYTES + 1).to_string(),
+    );
+    world.script(
+        &format!("{NODE}.asked-bytes"),
+        &(MAX_PAYLOAD_TEXT_BYTES * 2).to_string(),
     );
     let mut node = agent(NODE, &[]);
     let task = task_whose_bound_falls_inside_a_character();
@@ -398,6 +409,48 @@ fn a_relayed_payload_text_past_the_bound_is_cut_and_flagged_rather_than_served_w
     // said this and who was speaking.
     assert_eq!(said.turn, 1, "{message}");
     assert_eq!(said.role, Party::Assistant.as_str(), "{message}");
+
+    // The opening's instruction, on a third kind. Well past the bound rather than
+    // one byte over it, because what this adds is that the rule is the *payload
+    // text*'s and not one field of one kind's: a relay that had grown a
+    // per-field rule would leave this one whole.
+    let opened = relayed(&world, "bounded", EventKind::TurnStarted);
+    let [opening] = &opened[..] else {
+        panic!(
+            "the dispatch opened {} turns, not the one it takes",
+            opened.len()
+        );
+    };
+    // Read as the payload rather than through `TurnStarted`, and the reason is
+    // the finding: that type has no `truncated` of its own and denies unknown
+    // fields, so a payload this crate cut is **no longer** one the producer's
+    // type reads. That is what a payload-wide flag costs on a kind whose producer
+    // declares no per-field one, and it is the contract's own rule rather than
+    // this journey's — `src/event.rs` says the payload carries `truncated: true`,
+    // for every kind.
+    assert_eq!(
+        opening["payload"]["instruction"]
+            .as_str()
+            .expect("the opening carries the instruction it was given")
+            .len(),
+        MAX_PAYLOAD_TEXT_BYTES,
+        "a turn's opening instruction past the bound reached the store at its own length: \
+         {opening}"
+    );
+    assert_eq!(
+        opening["payload"]["truncated"],
+        Value::Bool(true),
+        "{opening}"
+    );
+    // The producer's **own** per-field flag is left exactly as the producer left
+    // it — absent, because it omits the flag when it did not cut. It says whether
+    // *that library* cut the value, and a relay answering it for the producer
+    // would be this crate claiming a cut somebody else did not make.
+    assert_eq!(
+        opening["payload"]["instruction_truncated"],
+        Value::Null,
+        "the relay answered a producer's own statement about its own field: {opening}"
+    );
 
     // The task, on the activity. Read as the payload rather than through
     // `TurnActivity`: this double's summary carries scripting fields of its own
