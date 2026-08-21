@@ -2203,23 +2203,16 @@ fn an_abandoned_hold_is_released_anyway() {
     );
 } // llmlint: ignore-end[tests_mirror_real_usage]
 
-/// The same hold, as a bare argv with **no release attached**.
+/// The same hold, as a bare argv with **no release attached** — for a journey
+/// that abandons its hook on purpose and asserts on what the host leaves behind.
 ///
-/// **Unix-only, and that is the whole of the gate.** This is the hold a journey
-/// deliberately *abandons*: one that stops the publication, or kills the driver
-/// above it, and asserts on what the host does with what is left. A release on
-/// [`Drop`] would defeat the journey rather than protect it, so there is none —
-/// which leaves the orphaned hook that only a platform with group teardown can
-/// reap, and off Unix `onevcs` documents that it has none.
+/// **Unix-only:** the abandoned hook is orphaned, and `onevcs` documents no
+/// portable group teardown to reap it. A journey reaching for this off Unix fails
+/// to build rather than hanging the leg. Anything that merely *holds* a push wants
+/// [`held_publication`], which runs everywhere.
 ///
-/// So the capability does not exist there. A journey that reaches for it must be
-/// `#[cfg(unix)]` or the Windows build fails with the caller's own file and line —
-/// the guarantee two hand audits of these journeys each failed to give. Anything
-/// that merely *holds* a push wants [`held_publication`], which cannot be
-/// abandoned and runs everywhere.
-///
-/// The gate comes off — here and at every `#[cfg(unix)]` naming this function —
-/// when `onevcs` can tear down a hook's orphaned children on Windows.
+/// The gate comes off, here and at every `#[cfg(unix)]` naming this function, when
+/// `onevcs` can reap a hook's orphaned children on Windows.
 #[cfg(unix)]
 pub fn abandonable_hook_script(world: &World, rendezvous: &Path) -> Vec<String> {
     hook_argv(world, &["wait-for", &rendezvous.to_string_lossy()])

@@ -418,20 +418,15 @@ fn stop_the_publication(world: &World, owner: &mut std::process::Child, rendezvo
 /// `pre-push` hook, and nothing else, because the path carries the world's own
 /// scratch directory in it.
 ///
-/// The path is the whole of the match, and the hook's *name* is deliberately not
-/// part of it: `harness::install_hook` writes the hook as `exec` over the verb,
-/// so what git leaves running is the verb's own argv — `sh .../hook.sh wait-for
-/// .../push.go` — and the word `pre-push` appears nowhere in it. Matching on the
-/// name as well found nothing, waited out the bound, and failed the journey on a
-/// hook that was holding the push exactly as intended.
+/// The path is the whole of the match, and the hook's *name* is not: `install_hook`
+/// writes the hook as `exec` over the verb, so what git leaves running is the
+/// verb's own argv — `sh .../hook.sh wait-for .../push.go` — with `pre-push`
+/// nowhere in it.
 ///
-/// `-ww` because the path is at the *end* of that argv and the default width is
-/// not the same promise on both platforms: Linux's `procps` writes an unbounded
-/// line once stdout is not a terminal, while the BSD `ps` on macOS still cuts
-/// the row at 79 columns — which is inside a world's scratch path, so the match
-/// below would find nothing, the wait above it would run out its bound, and the
-/// journey would fail on macOS for the second time in a row and for a new
-/// reason. Asking for every column removes the difference.
+/// `-ww` because the path sits at the *end* of that argv and the default width is
+/// not the same promise on both platforms: macOS's BSD `ps` still cuts the row at
+/// 79 columns, inside a world's scratch path, where Linux's `procps` writes an
+/// unbounded line. Asking for every column removes the difference.
 #[cfg(unix)]
 fn holders_of(rendezvous: &str) -> Vec<u32> {
     let mut lister = Command::new("ps");
