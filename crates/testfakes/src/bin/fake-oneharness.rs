@@ -224,9 +224,10 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
 // read for the field it needs and left alone.
 #[derive(serde::Deserialize)]
 struct Config {
-    /// The chain's candidates, in the order it would try them. Absent when the
-    /// config names none and leaves the selection to oneharness's own discovery.
-    harnesses: Option<Vec<String>>,
+    /// The chain the config names, already resolved to the identity it would run
+    /// as. Absent when the config names none and leaves the selection to
+    /// oneharness's own discovery.
+    harnesses: Option<Chain>,
 }
 
 /// One harness identity, which is a name.
@@ -253,32 +254,54 @@ impl Identity {
     }
 }
 
-/// The identity a turn under `config` ran as.
+/// A config's identity chain, as the identity it would run the turn as.
 ///
-/// The **first** candidate: a fallback that stepped past its head reports the
-/// whole chain and which of it ran, and a double claiming to be that would be
-/// inventing a run nobody had. Read off the config rather than assumed, so a
-/// report names the identity the launch selected.
+/// A type with a deserializer of its own rather than a `Vec<String>` field
+/// checked after the fact, and the difference is what a reader of the field has
+/// to carry: as a `Vec<String>` this boundary can still hold a chain naming no
+/// candidate and a candidate with no name, so every use of it is answerable for
+/// two states rejected somewhere else. Read through this, neither is
+/// representable past the parse and [`ran`] is a read.
+///
+/// The **first** candidate is the one kept: a fallback that stepped past its head
+/// reports the whole chain and which of it ran, and a double claiming to be that
+/// would be inventing a run nobody had.
 ///
 /// Every candidate is checked, not only that one — a nameless entry anywhere is a
 /// config that cannot be resolved, and waving one through because this turn did
 /// not reach it is a launch a real `oneharness` would refuse.
+struct Chain(Identity);
+
+impl<'de> serde::Deserialize<'de> for Chain {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        let candidates = Vec::<String>::deserialize(deserializer)?;
+        let mut named = candidates
+            .iter()
+            .map(|candidate| Identity::named(candidate))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(D::Error::custom)?
+            .into_iter();
+        named.next().map(Self).ok_or_else(|| {
+            D::Error::custom("its identity chain names no candidate to run the turn")
+        })
+    }
+}
+
+/// The identity a turn under `config` ran as.
+///
+/// Read off the config rather than assumed, so a report names the identity the
+/// launch selected. Which candidate that is, and what makes a chain resolvable at
+/// all, is [`Chain`]'s — what is left here is the one case a chain cannot answer.
 fn ran(config: &str) -> Result<Identity, String> {
     let config: Config = toml::from_str(config)
-        .map_err(|error| format!("this is not an oneharness config: {error}"))?;
-    let Some(chain) = config.harnesses else {
+        .map_err(|error| format!("this is not a config oneharness could run: {error}"))?;
+    match config.harnesses {
+        Some(chain) => Ok(chain.0),
         // What oneharness does with a config that names no chain: discover one.
         // There is one harness in this suite, so that is what it discovers.
-        return Identity::named(DISCOVERED);
-    };
-    let mut named = chain
-        .iter()
-        .map(|candidate| Identity::named(candidate))
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter();
-    named
-        .next()
-        .ok_or_else(|| "its identity chain names no candidate to run the turn".to_string())
+        None => Identity::named(DISCOVERED),
+    }
 }
 
 /// The identity oneharness discovers when a config names no chain — the only one
