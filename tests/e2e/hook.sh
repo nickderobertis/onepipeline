@@ -93,6 +93,36 @@ session_stream() {
   return 1
 }
 
+# The state root itself, established before anything under it is removed.
+#
+# `ONEVCS_HOME` is this script's external input and `break-streams` removes a
+# tree under it recursively, so *set* is not enough to act on, and neither is a
+# lone `streams` directory: an operator's home, a filesystem root, or a typo that
+# happened to hold one would pass that and have this delete somewhere nobody
+# meant. What identifies the real root is the whole store `onevcs::home` lays
+# out — the registry document beside the locks, sessions, streams, and
+# workspaces directories it keeps everything under — together with the one thing
+# that makes it *this* push's root rather than some other run's: it holds the
+# stream the session making this push is writing, which is the very stream this
+# verb exists to take away. A path that is not all of that is refused, loudly,
+# rather than destroyed — and refused rather than skipped, because a hook that
+# quietly did nothing would leave the journey asserting on a stream nothing ever
+# broke.
+require_state_root() {
+  require_home
+  if [ ! -f "$ONEVCS_HOME/registry.json" ]; then
+    fail "ONEVCS_HOME=$ONEVCS_HOME holds no registry.json, so it is not a state root onevcs wrote; refusing to remove anything under it"
+  fi
+  for held in locks sessions streams workspaces; do
+    if [ ! -d "$ONEVCS_HOME/$held" ]; then
+      fail "ONEVCS_HOME=$ONEVCS_HOME holds no $held directory, so it is not a state root onevcs wrote; refusing to remove anything under it"
+    fi
+  done
+  if ! session_stream >/dev/null; then
+    fail "ONEVCS_HOME=$ONEVCS_HOME holds no stream for any ancestor of $(pwd), so it is not the state root of the session making this push; refusing to remove $ONEVCS_HOME/streams"
+  fi
+}
+
 case "${1-}" in
   wait-for)
     takes "$#" 2 "wait-for takes the path to wait for, and nothing else"
@@ -108,17 +138,7 @@ case "${1-}" in
     ;;
   break-streams)
     takes "$#" 1 "break-streams takes no arguments"
-    require_home
-    # `ONEVCS_HOME` is this script's external input and the next line removes a
-    # tree under it, so being *set* is not enough to act on: a variable holding
-    # a root, a home directory, or a typo would have this delete a `streams`
-    # somewhere nobody meant. What makes it the state root is that `onevcs` has
-    # already written the store this verb exists to break — so the store is what
-    # is checked, and a path that does not hold one is refused rather than
-    # destroyed.
-    if [ ! -d "$ONEVCS_HOME/streams" ]; then
-      fail "ONEVCS_HOME=$ONEVCS_HOME holds no streams directory, so it is not the state root onevcs wrote; there is nothing here to break"
-    fi
+    require_state_root
     rm -rf "$ONEVCS_HOME/streams"
     if ! : >"$ONEVCS_HOME/streams"; then
       broke "cannot leave a file where $ONEVCS_HOME/streams was"
