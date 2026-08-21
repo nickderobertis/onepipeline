@@ -672,6 +672,67 @@ impl World {
         dir
     }
 
+    /// A `PATH` holding **only** what a dispatch resolves by name, and nothing
+    /// else this host happens to have installed.
+    ///
+    /// Between [`empty_path`](Self::empty_path) — where a dispatch is refused
+    /// because it cannot ask when its own process started — and the inherited
+    /// `PATH`, where every program an operator installed is in reach. A journey
+    /// whose premise is that some *particular* program cannot be resolved needs
+    /// this one: it has to name what the launch may find rather than what it may
+    /// not, because the set it may not find is everything on the host and no
+    /// journey can enumerate that.
+    ///
+    /// On Unix that set is `ps`, which `sys::process_start_token` asks when a
+    /// dispatch is registered, delegated to the real one by absolute path.
+    /// Windows asks the process itself, so there is nothing to hold there and
+    /// this is an empty directory.
+    #[cfg(unix)]
+    pub fn path_with_nothing_but_a_working_ps(&self) -> PathBuf {
+        self.path_with_ps("only-ps", &format!("exec {} \"$@\"", real_ps().display()))
+    }
+
+    /// A `PATH` holding only what a dispatch resolves by name — which on Windows
+    /// is nothing, because the start token is read off the process itself.
+    #[cfg(windows)]
+    pub fn path_with_nothing_but_a_working_ps(&self) -> PathBuf {
+        self.empty_path()
+    }
+
+    /// Where `name` resolves on the `PATH` a built command carries, if it does.
+    ///
+    /// For a journey to state its premise as a *checked fact* rather than as a
+    /// comment. A fall-through journey needs a candidate the launch cannot
+    /// resolve, and left to the inherited `PATH` that premise is the host's to
+    /// decide: with `codex` installed, oneharness resolved it, ran it, and the
+    /// chain never advanced — so the journey failed twenty seconds later over an
+    /// empty event list rather than at the premise it had lost.
+    ///
+    /// The command's own `PATH` and not this process's, because that is the one
+    /// deciding. The suffixes are tried on Windows only, where a bare name never
+    /// names a program: what this asks is whether the name is reachable *at all*,
+    /// so it errs towards finding one.
+    pub fn resolved_on(command: &Command, name: &str) -> Option<PathBuf> {
+        let path = command
+            .get_envs()
+            .find(|(key, _)| *key == "PATH")
+            .and_then(|(_, value)| value)
+            .map(std::ffi::OsString::from)
+            .unwrap_or_else(|| std::env::var_os("PATH").unwrap_or_default());
+        let suffixes: &[&str] = if cfg!(windows) {
+            &["", ".exe", ".cmd", ".bat", ".com"]
+        } else {
+            &[""]
+        };
+        std::env::split_paths(&path)
+            .flat_map(|dir| {
+                suffixes
+                    .iter()
+                    .map(move |suffix| dir.join(format!("{name}{suffix}")))
+            })
+            .find(|candidate| candidate.is_file())
+    }
+
     /// A `PATH` whose `ps` runs and **fails**, for the journeys about what a
     /// teardown does when it cannot read the process table.
     ///

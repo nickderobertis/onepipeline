@@ -1213,9 +1213,19 @@ fn transcript_renders_a_real_dispatched_turns_tools_and_words() {
 /// attributed, because a reader with two entries in front of them has no other
 /// way to tell which identity said which.
 ///
-/// The chain is real rather than scripted: `codex` is not on the `PATH` this
-/// launch is given and no `ONEHARNESS_BIN_CODEX` names one, so oneharness falls
-/// through it exactly as it would on a host where that harness is not installed.
+/// The chain is real rather than scripted: `codex` is not resolvable on the
+/// `PATH` this launch is given and no `ONEHARNESS_BIN_CODEX` names one, so
+/// oneharness falls through it exactly as it would on a host where that harness
+/// is not installed.
+///
+/// That premise is **arranged and then checked**, because it is not the host's to
+/// decide. The `PATH` [`World::agentgraph_cmd`] builds leads with the siblings'
+/// directories and keeps the inherited one behind them, so an operator with
+/// `codex` installed handed this launch a first candidate that resolved — and
+/// oneharness ran it, on somebody's bill, and the chain never advanced. So the
+/// launch is given a `PATH` holding nothing but what a dispatch resolves by name,
+/// and [`World::resolved_on`] refuses before a dispatch is spent rather than
+/// leaving an empty event list to be read as a fall-through that did not happen.
 #[test]
 fn a_transcript_names_the_harness_that_answered_and_skips_the_ones_it_stepped_past() {
     let world = World::new("real-fallback-transcript");
@@ -1226,16 +1236,25 @@ fn a_transcript_names_the_harness_that_answered_and_skips_the_ones_it_stepped_pa
     )
     .expect("the two-candidate chain is written");
     let path = world.plan("chained", &plan_of("chained", vec![agent("build", &[])]));
-    world
-        .run_on_agentgraph(&[
-            "start",
-            &path.to_string_lossy(),
-            "--attach",
-            "--node-set",
-            "members.worker.oneharness_config=./chain.toml",
-        ])
-        .exited(0)
-        .settled();
+    let mut command = world.agentgraph_cmd(&[
+        "start",
+        &path.to_string_lossy(),
+        "--attach",
+        "--node-set",
+        "members.worker.oneharness_config=./chain.toml",
+    ]);
+    command.env("PATH", world.path_with_nothing_but_a_working_ps());
+    if let Some(found) = World::resolved_on(&command, "codex") {
+        panic!(
+            "this launch can resolve codex at {}, so its first candidate would run rather than \
+             be stepped past and the fall-through below would never happen",
+            found.display()
+        );
+    }
+    // The second candidate is named by `ONEHARNESS_BIN_CLAUDE_CODE` and not by
+    // the `PATH` above, which is what lets the first be unresolvable without the
+    // chain running out.
+    world.run_on(command, "start --attach").exited(0).settled();
 
     // The chain really did step past the first candidate, which is what makes
     // the transcript below a claim about a fall-through rather than about a
