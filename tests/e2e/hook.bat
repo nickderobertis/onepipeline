@@ -1,11 +1,13 @@
 @echo off
-rem The Windows half of the repository's own `pre-push` hook body. `hook.sh` is
-rem where the verbs, the exit codes, and why each one refuses rather than defaults
-rem are stated; this file answers that same contract in cmd. Two drift gates hold
-rem the halves to each other, because no platform runs both:
-rem `both_hook_scripts_answer_the_same_verbs` compares the verbs they dispatch on,
-rem and `the_hook_answers_each_verb_with_the_exit_code_both_halves_state` runs this
-rem half and asserts what it returns.
+rem The Windows half of the repository's own `pre-push` hook body: the same three
+rem verbs `hook.sh` answers, with the same exit codes — 0 when the verb did what
+rem it names, 64 (EX_USAGE) for a verb or an argument this script does not have —
+rem including an argument the verb does not take, because one this script ignored
+rem is one the caller believed it was steering the hook with — and 1 for a verb
+rem the host would not let it carry out. See
+rem `hook.sh` for what each verb is for and why it refuses rather than defaults;
+rem `both_hook_scripts_answer_the_same_verbs` holds the two halves to each other,
+rem because no platform runs both.
 setlocal enabledelayedexpansion
 
 if "%~1"=="wait-for" goto waitfor
@@ -67,7 +69,9 @@ if errorlevel 1 (
 exit /b 0
 
 rem The state root itself, established before `break-streams` removes a tree
-rem under it. See `hook.sh` for what each check below identifies and why.
+rem under it. A defined `ONEVCS_HOME` holding a `streams` directory is not one: a
+rem profile directory or a typo can be that. Refuses rather than skips. See
+rem `hook.sh` for what each check below identifies and why.
 :requirestateroot
 if not defined ONEVCS_HOME (
   call :fail "ONEVCS_HOME is unset, so there is no session stream to reach; set it to the state root this world gave onevcs, the way World::cmd does"
@@ -119,7 +123,8 @@ echo pre-push: %~1 1>&2
 echo pre-push: the verbs are: wait-for PATH ^| break-streams ^| append-future-event 1>&2
 goto :eof
 
-rem A verb the host would not let this script carry out. See `hook.sh`.
+rem A verb that could not do what it names — the host's fault rather than the
+rem caller's, and neither is a push the merge path accepted. See `hook.sh`.
 :broke
 echo pre-push: %~1 1>&2
 echo pre-push: the host refused the write, not the caller: check that ONEVCS_HOME is on a writable mount and that no other process is holding this session's stream 1>&2
