@@ -22,6 +22,7 @@
 //! policy, not this program's.
 
 use onepipeline_testfakes as fake;
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -220,14 +221,27 @@ fn log(args: &[String]) -> ExitCode {
 /// opens a second change request beside the first. Refusing the record says so
 /// where it is wrong instead.
 ///
-/// The fields this host *answers* questions about, and no others: `title` and
-/// `body` are recorded for a journey to read back and nothing here consults
-/// them, so they are ignored rather than made required.
-#[derive(Debug, Clone, serde::Deserialize)]
+/// The **same** type writes the record and reads it back, and it accepts no
+/// field beyond these. One shape for both halves of the file cannot drift from
+/// itself, and a line carrying a key nobody wrote is some other program's record
+/// in this host's state directory — read leniently it would be answered as a
+/// change request this host opened.
+///
+/// `title` and `body` are the two nothing here consults: they are recorded for a
+/// journey to read back, which is the only place a drafted body is a fact rather
+/// than an argument that was passed.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Opened {
-    number: u64,
+    repo: String,
     head: String,
     base: String,
+    title: String,
+    body: String,
+    /// Never zero, which is a change request no host ever opened: a record
+    /// numbered `0` is one `pr view` and `pr checks` can say nothing about, and
+    /// the type refuses it at the file rather than leaving a caller to find out.
+    number: NonZeroU64,
 }
 
 /// The branch one change request was opened from, as this host recorded it.
@@ -300,8 +314,8 @@ fn record(dir: &Path, id: &str, state: Change) {
 ///
 /// Counted from what it has already opened, so a journey that opens two reads
 /// two different change requests rather than one addressed twice.
-fn next_number(dir: &Path) -> u64 {
-    opened_changes(dir).len() as u64 + 1
+fn next_number(dir: &Path) -> NonZeroU64 {
+    NonZeroU64::MIN.saturating_add(opened_changes(dir).len() as u64)
 }
 
 /// `gh pr create --repo R --head H --base B --title T --body B`
@@ -326,26 +340,32 @@ fn create(args: &[String], dir: &Path) -> ExitCode {
         return refusal;
     }
     let flag = |name: &str| fake::flag(args, name).unwrap_or_default();
-    let number = next_number(dir);
+    let opened = Opened {
+        repo: flag("--repo"),
+        head: flag("--head"),
+        base: flag("--base"),
+        title: flag("--title"),
+        body: flag("--body"),
+        number: next_number(dir),
+    };
     fake::append(
         &dir.join("gh").join("opened.jsonl"),
-        &serde_json::json!({
-            "repo": flag("--repo"),
-            "head": flag("--head"),
-            "base": flag("--base"),
-            "title": flag("--title"),
-            // What a reviewer actually reads. Recorded rather than only
-            // shape-checked: the body is the whole product of a drafting
-            // dispatch, and a journey that could not read it back would be
-            // asserting that *something* was passed.
-            "body": flag("--body"),
-            "number": number,
-        })
-        .to_string(),
+        &serde_json::to_string(&opened)
+            .unwrap_or_else(|error| fake::fail(&format!("the record does not serialise: {error}"))),
     );
-    record(dir, &number.to_string(), Change::Open);
-    println!("https://github.com/{}/pull/{number}", flag("--repo"));
+    record(dir, &opened.number.to_string(), Change::Open);
+    println!("{}", url_of(&opened));
     ExitCode::SUCCESS
+}
+
+/// The URL a change request this host opened is reached at.
+///
+/// Written once because `pr create` prints it and `pr list` reports it, and
+/// `onevcs` takes the change request's number out of its last segment either
+/// way: two spellings of it could disagree about the very number this host is
+/// asked about next.
+fn url_of(opened: &Opened) -> String {
+    format!("https://github.com/{}/pull/{}", opened.repo, opened.number)
 }
 
 /// `gh pr list --repo R --head H --base B --state open --json …`
@@ -381,10 +401,9 @@ fn list(args: &[String], dir: &Path) -> ExitCode {
         .filter(|change| change.base == flag("--base"))
         .filter(|change| recorded(dir, &change.number.to_string()) == Some(Change::Open))
         .map(|change| {
-            let number = change.number;
             serde_json::json!({
-                "number": number,
-                "url": format!("https://github.com/{}/pull/{number}", flag("--repo")),
+                "number": change.number,
+                "url": url_of(&change),
                 "state": "OPEN",
                 "headRefOid": HEAD_SHA,
             })
@@ -443,11 +462,12 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
         Ok(id) => id,
         Err(refusal) => return refusal,
     };
-    // A number, because that is what `onevcs` takes out of the URL this host
-    // printed and hands back here. Anything else names no change request it
-    // opened, and answering one would be inventing a host that numbers its
-    // changes some other way.
-    let Ok(number) = id.parse::<u64>() else {
+    // A number and never zero, because that is what `onevcs` takes out of the
+    // URL this host printed and hands back here. Anything else — `0` among
+    // them, which this host never numbers a change request — names no change
+    // request it opened, and answering one would be inventing a host that
+    // numbers its changes some other way.
+    let Ok(number) = id.parse::<NonZeroU64>() else {
         eprintln!("{id} is not a pull request number");
         return ExitCode::from(1);
     };
