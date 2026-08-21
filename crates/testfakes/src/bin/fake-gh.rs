@@ -591,7 +591,6 @@ impl State {
     }
 }
 
-/// One check this host reports on a change request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Check {
     /// Branch protection lists checks by name, and a red one's refusal names it,
