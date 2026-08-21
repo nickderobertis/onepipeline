@@ -101,6 +101,17 @@ pub const STALL_AFTER_ENV: &str = "ONEPIPELINE_STALL_AFTER_SECONDS";
 /// its own patience, and the journey that proves an out-of-range one is refused.
 pub const RENDEZVOUS_SECONDS_ENV: &str = "ONEPIPELINE_FAKE_RENDEZVOUS_SECONDS";
 
+/// The variable that says how long the repository's own `pre-push` hook waits
+/// for its rendezvous before it refuses the push.
+///
+/// The hook's own bound, and `hook.sh` says why it has one and why it is 300
+/// seconds. Named here because one journey sets it —
+/// [`a_held_push_nothing_releases_expires_rather_than_waiting_out_the_job`],
+/// which cannot wait the default out — and every other journey runs on the
+/// default, so a hold that outlives its journey is refused rather than left
+/// waiting.
+const HOOK_WAIT_SECONDS_ENV: &str = "ONEPIPELINE_FAKE_HOOK_WAIT_SECONDS";
+
 /// How long a launch given a one-second backstop may take before the override
 /// has to be presumed inert.
 ///
@@ -2079,12 +2090,10 @@ fn a_double_is_placed_whole_or_not_at_all() {
 /// A verb the repository's own `pre-push` hook answers **and returns from on its
 /// own**.
 ///
-/// A closed set rather than the free argv this used to be handed, and that is the
-/// whole point of the type: the hook's third verb — `wait-for`, which blocks until
-/// something writes its rendezvous — is not in it, and neither door that spells one
-/// exists off Unix. So this is the whole of the hook API a Windows build sees, and
-/// a journey that wants to hold a publication fails to build there rather than
-/// wedging the leg. See [`held_publication`] for which platform holds, and why.
+/// A closed set rather than the free argv this used to be handed: the hook's third
+/// verb, `wait-for`, blocks until something writes its rendezvous, and a journey
+/// that means to hold a push states [`held_publication`] or
+/// [`abandonable_hook_script`] instead of spelling one.
 pub enum HookVerb {
     /// Leave a file where the session's stream directory was, so the next read of
     /// that stream meets a broken store rather than a missing one.
@@ -2116,32 +2125,21 @@ pub fn hook_script(world: &World, verb: &HookVerb) -> Vec<String> {
 /// A `pre-push` hook **holding** the publishing push, and the release that ends
 /// the hold however the journey ends.
 ///
-/// **Unix-only, with every other way of holding a push.** git runs the hook as a
-/// child of its own, two processes below whoever owns the run, and `onevcs`
-/// documents no portable group teardown off Unix — its `terminate_group` is a
-/// no-op there and `detach_process_group` with it. A hook left waiting outlives
-/// everything that could reap it, and the run does not fail but wedges on reader
-/// threads against pipes it still holds.
-///
-/// [`Drop`] closes *abandonment*: the rendezvous is written on every way out of a
-/// journey — the assertion that failed, the [`World::until`] that ran out, the
-/// panic that unwound past both. It cannot close *deadlock*. A journey that holds
-/// this and then waits for the publication to finish before the scope ends waits
-/// on a hook that is waiting on it, and the release never runs because the scope
-/// never ends. So the gate is on the capability rather than on the release, and a
-/// journey that wants a held push at all must state where it runs.
+/// [`Drop`] covers abandonment — the rendezvous is written on the assertion that
+/// failed, the [`World::until`] that ran out, the panic that unwound past both —
+/// and the ceiling `hook.sh` states covers the deadlock it cannot reach, a
+/// journey that waits for the publication to finish before its own scope ends.
+/// Between them a held push cannot outlive its journey on any platform.
 ///
 /// Declare it *after* the [`World`], so it drops *before* the world removes the
 /// tree the rendezvous lives in. Holding the value is not optional and the
 /// compiler says so: [`argv`](Self::argv) borrows from `self`, so a temporary
 /// cannot reach [`World::repository`].
-#[cfg(unix)]
 pub struct HeldPublication {
     argv: Vec<String>,
     rendezvous: PathBuf,
 }
 
-#[cfg(unix)]
 impl HeldPublication {
     /// The argv [`World::repository`] installs as the repository's own hook.
     pub fn argv(&self) -> Vec<&str> {
@@ -2155,7 +2153,6 @@ impl HeldPublication {
     }
 }
 
-#[cfg(unix)]
 impl Drop for HeldPublication {
     fn drop(&mut self) {
         // Unconditional, and best-effort: a journey that already released writes
@@ -2168,7 +2165,6 @@ impl Drop for HeldPublication {
 
 /// A merge path that holds the publishing push until this journey lets it
 /// through. See [`HeldPublication`].
-#[cfg(unix)]
 pub fn held_publication(world: &World, rendezvous: &Path) -> HeldPublication {
     HeldPublication {
         argv: hook_argv(world, &["wait-for", &rendezvous.to_string_lossy()]),
@@ -2178,16 +2174,19 @@ pub fn held_publication(world: &World, rendezvous: &Path) -> HeldPublication {
 
 /// An abandoned hold still lets the push through.
 ///
-/// This is the whole reason the journeys that hold a publication run on every
+/// This is half of why the journeys that hold a publication run on every
 /// platform: not that they release, but that they cannot fail to. Delete the
 /// [`Drop`] and three of them go back to leaving a hook waiting on a rendezvous
 /// nobody writes, which off Unix nothing reaps — and nothing else in the suite
-/// would say so, because on Unix the run's own group teardown covers for it.
+/// would say so, because on Unix the run's own group teardown covers for it. The
+/// other half is the hook's own ceiling, which bounds even a hold this cannot
+/// reach; `hook.sh` states it, and
+/// [`a_held_push_nothing_releases_expires_rather_than_waiting_out_the_job`]
+/// drives it.
 // llmlint: ignore-block[tests_mirror_real_usage] this holds the suite's own scaffolding,
 // not a journey: the property is what happens when a journey is abandoned, which no
 // journey can assert about itself. The journeys built on it are `lifecycle.rs`'s and
 // `views.rs`'s, and those do drive the binary.
-#[cfg(unix)]
 #[test]
 fn an_abandoned_hold_is_released_anyway() {
     let world = World::new("held-abandoned");
@@ -2213,13 +2212,12 @@ fn an_abandoned_hold_is_released_anyway() {
 /// The same hold, as a bare argv with **no release attached** — for a journey
 /// that abandons its hook on purpose and asserts on what the host leaves behind.
 ///
-/// **Unix-only:** the abandoned hook is orphaned, and `onevcs` documents no
-/// portable group teardown to reap it. A journey reaching for this off Unix fails
-/// to build rather than hanging the leg. Anything that merely *holds* a push wants
-/// [`held_publication`], which runs everywhere.
-///
-/// The gate comes off, here and at every `#[cfg(unix)]` naming this function, when
-/// `onevcs` can reap a hook's orphaned children on Windows.
+/// **Unix-only for what those journeys assert**, not because a hold is unsafe off
+/// Unix: they read the teardown itself — `ps` and process groups in
+/// `session_reuse.rs`, the Unix-only `end_process` in `driver.rs` — and neither
+/// has a Windows spelling. Anything that merely *holds* a push wants
+/// [`held_publication`], which runs everywhere; the release on drop it has would
+/// let the push through before these have read what an abandoned hold leaves.
 #[cfg(unix)]
 pub fn abandonable_hook_script(world: &World, rendezvous: &Path) -> Vec<String> {
     hook_argv(world, &["wait-for", &rendezvous.to_string_lossy()])
@@ -2357,6 +2355,35 @@ fn both_hook_scripts_answer_the_same_verbs() {
         shell,
         ["wait-for", "break-streams", "append-future-event"],
         "the hook scripts no longer dispatch the way this reads them"
+    );
+    // The ceiling `wait-for` gives up at is the other thing two files have to
+    // agree on: a half that waited longer would hang the leg the bound exists to
+    // keep off, and one that waited less would refuse pushes its journeys are
+    // still holding. Read as the default each half writes, because the
+    // environment can move it and neither half may disagree about what it moves.
+    let ceiling = |script: &str, source: &str| -> String {
+        source
+            .lines()
+            .map(str::trim)
+            .filter_map(|line| line.split_once("seconds=").map(|(_, rest)| rest))
+            .map(|rest| {
+                rest.chars()
+                    .take_while(|character| character.is_ascii_digit())
+                    .collect::<String>()
+            })
+            .find(|digits| !digits.is_empty())
+            .unwrap_or_else(|| panic!("{script} states no default ceiling for wait-for"))
+    };
+    assert_eq!(
+        ceiling("hook.sh", include_str!("hook.sh")),
+        ceiling("hook.bat", include_str!("hook.bat")),
+        "the hook scripts give a held push up at different ceilings"
+    );
+    assert_eq!(
+        ceiling("hook.sh", include_str!("hook.sh")),
+        "300",
+        "the ceiling moved: `hook.sh` says why it is 300 seconds, and a journey \
+         that holds a push for longer than that is a journey this suite does not have"
     );
     // The refusal names the verbs, so it is a third statement of the same list
     // and drifts the same way — and it is the one a person reads when the hook
@@ -2511,6 +2538,77 @@ fn the_hook_refuses_a_command_line_it_does_not_speak() {
     );
 }
 
+/// A hold nothing releases gives the push up, rather than waiting out the job it
+/// runs in.
+///
+/// The one thing no other journey reaches: every journey that holds a publication
+/// releases it, on drop if not before, so none of them ever waits the ceiling out.
+///
+/// Driven through **git** for the reason
+/// [`the_hook_refuses_a_command_line_it_does_not_speak`] gives, and asserting what
+/// that leaves a caller: the push declined, the words the hook wrote, and a base
+/// that did not move. The ceiling comes from the environment because no journey
+/// can wait five minutes out.
+#[test]
+fn a_held_push_nothing_releases_expires_rather_than_waiting_out_the_job() {
+    let world = World::new("hook-expiry").with_env(HOOK_WAIT_SECONDS_ENV, "2");
+    // Written by nothing, here or in the world's teardown: the abandonment this
+    // ceiling exists for is a hold whose journey is gone, and a rendezvous that
+    // arrived late would make this a slow release rather than an expiry.
+    let go = world.root.join("push.go");
+    let repo = world.repository(
+        "local-direct",
+        &as_argv(&hook_argv(&world, &["wait-for", &go.to_string_lossy()])),
+    );
+    let base = || git(&world, &repo.origin, &["rev-parse", "main"]);
+    let seed = base();
+
+    let waited = std::time::Instant::now();
+    let refused = publishing_push(&world, &repo.checkout, "a hold nothing releases");
+    let said = String::from_utf8_lossy(&refused.stderr).into_owned();
+
+    assert!(
+        !refused.status.success(),
+        "the repository's merge path let a push through that its hook was still \
+         holding: {said}"
+    );
+    assert!(
+        said.contains(&go.display().to_string()),
+        "the hook gave up without naming the rendezvous nothing wrote, which is the \
+         one thing a person reading this has to know: {said}"
+    );
+    assert!(
+        said.contains("the held push expired"),
+        "the hook refused the push without saying the wait expired, so this reads \
+         like a merge path that turned the change down: {said}"
+    );
+    assert!(
+        said.contains("within the ceiling of 2 seconds"),
+        "the hook gave up at a ceiling other than the one this world gave it, so \
+         what expired is some other bound: {said}"
+    );
+    assert_eq!(
+        base(),
+        seed,
+        "the push landed anyway, so the expiry refused nothing"
+    );
+    // It waited. A ceiling misread as zero would expire every hold before its
+    // journey had looked at anything, and the words above would not say so.
+    // A second rather than the two given, because the hook counts its deadline in
+    // whole seconds and may start a fraction of one into the first.
+    assert!(
+        waited.elapsed() >= std::time::Duration::from_secs(1),
+        "the hook gave up at once instead of holding the push for the ceiling it \
+         was given: {said}"
+    );
+    assert!(
+        !go.is_file(),
+        "something wrote the rendezvous at {}, so the push was released rather \
+         than expired",
+        go.display()
+    );
+}
+
 /// Commit one change and push it, and hand back whatever git made of that —
 /// which is a refusal as often as not, so unlike [`git`] this does not assert.
 ///
@@ -2535,6 +2633,10 @@ fn publishing_push(world: &World, checkout: &Path, what: &str) -> std::process::
         .env("GIT_COMMITTER_NAME", GIT_WHO)
         .env("GIT_COMMITTER_EMAIL", GIT_EMAIL)
         .env("ONEVCS_HOME", world.onevcs_home())
+        // What the world was handed reaches the hook too: git passes its own
+        // environment to the hook it runs, and a journey that stated one for this
+        // world means it wherever this world publishes.
+        .envs(world.environment.iter().map(|(key, value)| (key, value)))
         .output()
         .expect("git runs")
 }

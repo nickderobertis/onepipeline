@@ -52,13 +52,11 @@ fn driven(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> (String, 
 
 /// How long a held publication phase is kept open, so its bucket is a real
 /// duration on the clock rather than a bucket that merely exists.
-#[cfg(unix)]
 const HELD: std::time::Duration = std::time::Duration::from_millis(400);
 
 /// The floor a held stretch must clear once it has been measured. Below the
 /// hold, because the two records bracketing it are written either side of the
 /// rendezvous rather than exactly on it.
-#[cfg(unix)]
 const FLOOR: u64 = 250;
 
 fn settled(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
@@ -497,11 +495,6 @@ fn telemetry_reports_what_each_party_spent() {
 /// produced, and it is what let this bucket read as measured. The bucket is
 /// still served, and it is still not the agent's; what it is not is a
 /// measurement. Recorded as divergence 16 in `docs/contract-divergences.md`.
-/// **Unix-only:** the measurement *is* a held publishing push, and a held push is
-/// [`harness::held_publication`](crate::harness::held_publication) — Unix-only,
-/// for the reason stated there. Windows gives up the eight-way split, which is
-/// platform-independent arithmetic over records the sibling writes.
-#[cfg(unix)]
 #[test]
 fn telemetry_separates_publication_and_lock_time_from_agent_time() {
     let world = World::new("views-publicationtime");

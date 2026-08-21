@@ -2772,13 +2772,16 @@ fn unusable_session_records() -> String {
 /// records nothing can be acted on, and none of them may take the real one's
 /// place. See [`unusable_session_records`].
 ///
-/// **Unix-only:** catching a dispatch in flight means killing the driver while
-/// the hook holds the push, two processes below the pid killed — the shape
+/// **Unix-only for what it asserts on:** catching a dispatch in flight means
+/// killing the driver mid-push with `harness::end_process`, which is `SIGKILL`
+/// and has no Windows spelling here — and what the journey then reads is what
+/// that kill left behind. The hold is
 /// [`harness::abandonable_hook_script`](crate::harness::abandonable_hook_script)
-/// names as unreapable off Unix — and this journey abandons it deliberately, so a
-/// release on drop would defeat what it asserts rather than protect it. Windows gives up this journey alone; `main` ran it there
-/// over `onevcs`'s *gate*, a direct child of the killed process that never
-/// reached a push.
+/// rather than the releasing one for the same reason: a release on drop would let
+/// the push through before the adoption has read the work the killed dispatch
+/// stranded. Windows gives up this journey alone; `main` ran it there over
+/// `onevcs`'s *gate*, a direct child of the killed process that never reached a
+/// push.
 #[cfg(unix)]
 #[test]
 fn adopting_a_run_whose_dispatch_was_in_flight_leaves_that_dispatchs_work_reachable() {

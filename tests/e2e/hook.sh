@@ -15,6 +15,8 @@
 # Verbs, and the exit codes they answer with:
 #
 #   wait-for PATH        block until PATH exists            0
+#                        …or refuse the push once the        1
+#                        ceiling below expires
 #   break-streams        leave a file where the session     0
 #                        stream directory was
 #   append-future-event  append a line no build of          0
@@ -123,16 +125,71 @@ require_state_root() {
   fi
 }
 
+# How long `wait-for` waits for its rendezvous before it refuses the push.
+#
+# **Bounded, and the bound is what makes a held push reachable on every
+# platform.** Unbounded, a hold nobody releases — a journey that panicked past
+# its release, on a host with no portable way to reap the hook git left waiting —
+# takes the whole job with it: the leg burns its budget and answers nothing.
+# Bounded, that same abandonment refuses the push, the journey's assertions about
+# a publication still in flight stop holding, and the leg goes red naming itself.
+# A red journey is the better answer on both counts — it says what is wrong and
+# it costs minutes rather than a runner — which is why this gives up rather than
+# waits, though a ceiling that fired early would settle a publication a journey
+# believes it is still holding.
+#
+# 300 seconds is picked to make that trade-off never arrive in a healthy run: the
+# journeys that hold a publication hold it for well under five seconds, and no
+# job's budget is anywhere near five minutes.
+#
+# The environment carries it so the journey that proves the expiry can reach it
+# without waiting the ceiling out; every other journey runs on the default. It is
+# external input, so it is refused rather than defaulted or clamped when it is not
+# a number of seconds between 1 and an hour: `0` would expire every hold before it
+# began, which is the silent opposite of what a journey asking for one means, and
+# an hour is already far past every hold this suite takes. A leading zero is
+# refused with them because `hook.bat` counts this out with `set /a`, which reads
+# one as octal, and anything longer than the ceiling's own four digits is refused
+# before it is compared as a number at all — arithmetic here is the host's word
+# size and 32-bit over there, so a value nothing turned down would land as a
+# deadline no clock can represent.
+wait_ceiling() {
+  seconds=300
+  if [ -n "${ONEPIPELINE_FAKE_HOOK_WAIT_SECONDS-}" ]; then
+    seconds=$ONEPIPELINE_FAKE_HOOK_WAIT_SECONDS
+  fi
+  refused="ONEPIPELINE_FAKE_HOOK_WAIT_SECONDS holds '$seconds', which is not a number of seconds between 1 and 3600"
+  case "$seconds" in
+    '' | 0* | *[!0-9]* | ?????*)
+      fail "$refused"
+      ;;
+  esac
+  if [ "$seconds" -gt 3600 ]; then
+    fail "$refused"
+  fi
+}
+
+# A `wait-for` whose ceiling ran out, which is a verb that could not do what it
+# names: the push is refused, and the journey holding it fails on the assertions
+# that no longer hold. See `wait_ceiling` for why the wait ends at all.
+expired() {
+  echo "pre-push: nothing wrote $1 within the ceiling of $seconds seconds: the held push expired" >&2
+  echo "pre-push: nothing released this push; ONEPIPELINE_FAKE_HOOK_WAIT_SECONDS carries the ceiling, which is 300 seconds by default" >&2
+  exit 1
+}
+
 case "${1-}" in
   wait-for)
     takes "$#" 2 "wait-for takes the path to wait for, and nothing else"
     if [ -z "$2" ]; then
       fail "wait-for takes the path to wait for"
     fi
-    # Unbounded on purpose: the journey holding this push is what releases it,
-    # and a hook that gave up on its own would settle a publication the test
-    # believes it is still holding.
+    wait_ceiling
+    deadline=$(( $(date +%s) + seconds ))
     until [ -f "$2" ]; do
+      if [ "$(date +%s)" -ge "$deadline" ]; then
+        expired "$2"
+      fi
       sleep 0.05
     done
     ;;

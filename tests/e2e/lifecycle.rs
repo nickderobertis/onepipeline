@@ -95,10 +95,10 @@ fn merge_path(world: &World, verb: &HookVerb) -> Vec<String> {
 }
 
 /// The same hook, **holding** the publishing push until this journey lets it
-/// through — and letting it through however the journey ends, short of a journey
-/// that deadlocks against its own release. Unix-only with every other hold: see
+/// through — and letting it through however the journey ends, a journey that
+/// deadlocks against its own release included, because the hook gives its
+/// rendezvous up at a ceiling of its own. See
 /// [`harness::held_publication`](crate::harness::held_publication).
-#[cfg(unix)]
 fn held_merge_path(world: &World, rendezvous: &std::path::Path) -> crate::harness::HeldPublication {
     crate::harness::held_publication(world, rendezvous)
 }
@@ -1035,10 +1035,6 @@ fn an_earlier_plan_still_publishes_under_the_subject_the_sibling_derives() {
 /// The **publishing push** is what is held, because it is the one stretch of a
 /// real publication a journey can hold from outside it: git runs the repository's
 /// own `pre-push` hook there, and this one waits for a file.
-/// **Unix-only:** what keeps the node in flight to be read *is* the held push, and
-/// [`held_merge_path`] does not exist off Unix. Windows gives up mid-publication
-/// readability of the merged store, which carries no platform in it.
-#[cfg(unix)]
 #[test]
 fn a_publications_own_records_reach_the_journal_while_it_is_still_publishing() {
     let world = World::new("lifecycle-livepublish");
@@ -1836,10 +1832,6 @@ fn a_push_the_merge_path_refuses_is_redispatched_carrying_what_the_remote_wrote(
 /// again into a run whose teardown is on its way to reap it, the node would settle
 /// as the cancellation and lose the publication failure, which is the useful half
 /// of what happened.
-/// **Unix-only:** the window a cancel has to land in is a held publishing push,
-/// and [`held_merge_path`] does not exist off Unix. Windows gives up which
-/// settlement a cancelled node reaches, which is this crate's own arithmetic.
-#[cfg(unix)]
 #[test]
 fn a_cancel_that_lands_before_the_next_attempt_settles_on_the_publication_failure() {
     let world =

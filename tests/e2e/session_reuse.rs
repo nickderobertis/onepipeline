@@ -441,13 +441,17 @@ fn holders_of(rendezvous: &str) -> Vec<u32> {
 /// A run stopped mid-publication, and the retry that takes up the session it left
 /// its work in.
 ///
-/// **Unix-only:** this journey *stops* a publication while the hook holds it, the
-/// shape [`harness::abandonable_hook_script`](crate::harness::abandonable_hook_script)
-/// names as unreapable off Unix — and this journey abandons it deliberately, so a
-/// release on drop would defeat what it asserts rather than protect it. Windows gives up a run stopped mid-publication, the work
-/// it strands, and the retry that continues the session; `main` ran it there over
-/// `onevcs`'s *gate*, a direct child of the stopped process rather than git's
-/// grandchild.
+/// **Unix-only for what it asserts on:** stopping a publication here is a sweep
+/// of the host's own process table and of the groups under the stopped run —
+/// [`process_table`], [`groups_under`], [`holders_of`], all of them `ps` and a
+/// process group — and none of that has a Windows spelling to assert against. The
+/// hold is
+/// [`harness::abandonable_hook_script`](crate::harness::abandonable_hook_script)
+/// rather than the releasing one for the same reason: a release on drop would let
+/// the push through before the sweep has read what the stop left behind. Windows
+/// gives up a run stopped mid-publication, the work it strands, and the retry that
+/// continues the session; `main` ran it there over `onevcs`'s *gate*, a direct
+/// child of the stopped process rather than git's grandchild.
 #[cfg(unix)]
 #[test]
 fn a_retry_takes_up_the_session_a_stopped_run_left_its_work_in() {
