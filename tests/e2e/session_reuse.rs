@@ -251,6 +251,34 @@ fn in_a_group_of_its_own(command: &mut Command) {
 #[cfg(windows)]
 fn in_a_group_of_its_own(_command: &mut Command) {}
 
+/// What a process lister wrote, once it has said it succeeded.
+///
+/// The exit status is checked and not merely the bytes, because of what the two
+/// readers below do with an empty answer: [`holders_of`] reporting nothing is how
+/// the sweep in [`stop_the_publication`] concludes that the publication has
+/// stopped, and [`process_table`] returning nothing is a tree with no branches to
+/// signal. A lister that failed writes nothing to standard output either, so
+/// taking its bytes unasked turns "this host could not answer" into "there is
+/// nothing there" — and the journey then passes at exactly the point it exists to
+/// prove something.
+///
+/// Rows that do not parse are still dropped by the callers, and deliberately: a
+/// header line or two columns run together must not cost a read the rows it got
+/// right. That is a statement about the *shape* of an answer this host gave;
+/// this is about whether it gave one at all.
+fn listed_by(mut lister: Command, what: &str) -> String {
+    let listed = lister.output().expect("the host lists its process table");
+    assert!(
+        listed.status.success(),
+        "{what} answered {:?} rather than listing this host's processes, so nothing below can \
+         tell a publication that has stopped from one this journey cannot see: {}{}",
+        listed.status.code(),
+        String::from_utf8_lossy(&listed.stdout),
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    String::from_utf8_lossy(&listed.stdout).into_owned()
+}
+
 /// The host's own process table, as `(pid, parent, group)`.
 ///
 /// Read from `ps` rather than assumed, and every row that does not parse is
@@ -261,11 +289,9 @@ fn in_a_group_of_its_own(_command: &mut Command) {}
 /// table are the same read.
 #[cfg(unix)]
 fn process_table() -> Vec<(u32, u32, i32)> {
-    let listed = Command::new("ps")
-        .args(["-ww", "-eo", "pid=,ppid=,pgid="])
-        .output()
-        .expect("the host lists its process table");
-    String::from_utf8_lossy(&listed.stdout)
+    let mut lister = Command::new("ps");
+    lister.args(["-ww", "-eo", "pid=,ppid=,pgid="]);
+    listed_by(lister, "ps -eo pid=,ppid=,pgid=")
         .lines()
         .filter_map(|row| {
             let mut column = row.split_whitespace();
@@ -411,11 +437,9 @@ fn stop_the_publication(world: &World, owner: &mut std::process::Child, rendezvo
 /// reason. Asking for every column removes the difference.
 #[cfg(unix)]
 fn holders_of(rendezvous: &str) -> Vec<u32> {
-    let listed = Command::new("ps")
-        .args(["-ww", "-eo", "pid=,args="])
-        .output()
-        .expect("the host lists its process table");
-    String::from_utf8_lossy(&listed.stdout)
+    let mut lister = Command::new("ps");
+    lister.args(["-ww", "-eo", "pid=,args="]);
+    listed_by(lister, "ps -eo pid=,args=")
         .lines()
         .filter(|row| row.contains(rendezvous))
         .filter_map(|row| row.split_whitespace().next()?.parse().ok())
@@ -437,7 +461,8 @@ fn holders_of(rendezvous: &str) -> Vec<u32> {
 /// rendezvous in its own argv would find *itself* and never report the hook gone.
 #[cfg(windows)]
 fn holders_of(rendezvous: &str) -> Vec<u32> {
-    let listed = Command::new("powershell")
+    let mut lister = Command::new("powershell");
+    lister
         .args([
             "-NoProfile",
             "-NonInteractive",
@@ -446,10 +471,8 @@ fn holders_of(rendezvous: &str) -> Vec<u32> {
              $_.CommandLine.Contains($env:ONEPIPELINE_RENDEZVOUS) } | ForEach-Object \
              { $_.ProcessId }",
         ])
-        .env("ONEPIPELINE_RENDEZVOUS", rendezvous)
-        .output()
-        .expect("the host lists its process table");
-    String::from_utf8_lossy(&listed.stdout)
+        .env("ONEPIPELINE_RENDEZVOUS", rendezvous);
+    listed_by(lister, "powershell Get-CimInstance Win32_Process")
         .lines()
         .filter_map(|row| row.trim().parse().ok())
         .collect()
