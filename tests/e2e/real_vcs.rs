@@ -3,9 +3,9 @@
 //! Every lifecycle journey here drives the real repository side — `onevcs` is
 //! linked into the binary under test, not substituted — so what this file adds is
 //! the assertion none of the others make: that the origin's base branch actually
-//! **advanced by the change**, and that a branch the gate rejected did not reach
-//! it. A settlement is this crate's account of a publication; the repository is
-//! the publication.
+//! **advanced by the change**, and that a branch its merge path refused did not
+//! reach it. A settlement is this crate's account of a publication; the repository
+//! is the publication.
 //!
 //! Offline and hermetic: a bare repository on disk is the origin, the identity
 //! publishes `local-direct` so no host is ever asked for anything, and the state
@@ -75,7 +75,7 @@ fn vcs_kinds(world: &World, run: &str) -> Vec<String> {
 #[test]
 fn a_lifecycle_node_publishes_through_the_real_onevcs_and_the_base_advances() {
     let world = World::new("real-vcs-publish");
-    let repo = world.repository("local-direct", &["true"]);
+    let repo = world.repository("local-direct", &[]);
     world.script("service.work", "the worker wrote this\n");
 
     let path = world.plan("landed", &plan_of("landed", vec![node(&repo.checkout)]));
@@ -124,7 +124,7 @@ fn a_lifecycle_node_publishes_through_the_real_onevcs_and_the_base_advances() {
     // it happens and read once more if the follow relayed nothing, so a record
     // that arrives twice is the recovery covering for a follow that worked.
     let kinds = vcs_kinds(&world, "landed");
-    for kind in ["gate-verdict", "push", "merge-completed", "session-closed"] {
+    for kind in ["push", "merge-completed", "session-closed"] {
         let seen = kinds.iter().filter(|seen| *seen == kind).count();
         assert_eq!(
             seen, 1,
@@ -136,12 +136,20 @@ fn a_lifecycle_node_publishes_through_the_real_onevcs_and_the_base_advances() {
     // graph node — the real one stamps its own token and identity and nothing
     // else — so without the enricher a whole real publication lands in the store
     // belonging to nobody.
-    let verdict = &world.events_of("landed", "gate-verdict")[0];
-    assert_eq!(verdict["labels"]["node"], "service", "{verdict}");
-    assert_eq!(verdict["labels"]["run_id"], "landed", "{verdict}");
+    let pushed = &world.events_of("landed", "push")[0];
+    assert_eq!(pushed["labels"]["node"], "service", "{pushed}");
+    assert_eq!(pushed["labels"]["run_id"], "landed", "{pushed}");
     assert!(
-        verdict["labels"]["session"].is_string(),
-        "the sibling's own label was rewritten: {verdict}"
+        pushed["labels"]["session"].is_string(),
+        "the sibling's own label was rewritten: {pushed}"
+    );
+    // And the publishing push is the verdict: nothing in this stack runs a gate
+    // of its own any more, so what verified this change is the repository's own
+    // `pre-push` hook — which this repository leaves to git, and git let the push
+    // through.
+    assert_eq!(
+        pushed["payload"]["accepted"], true,
+        "the merge path's own verdict is not on the push it ruled on: {pushed}"
     );
     world
         .run(&["results", "landed"])
@@ -149,9 +157,16 @@ fn a_lifecycle_node_publishes_through_the_real_onevcs_and_the_base_advances() {
         .out_has("service")
         .out_has("done");
 }
+/// A publication a repository's own merge path refuses.
+///
+/// The other half of the journey above, and the one the whole seam exists for
+/// now that nothing in this stack runs a gate: for a local-publishing identity
+/// the verifier is the repository's own `pre-push` hook, which git runs at the
+/// publishing push. This one refuses, so the push is refused — and `onevcs`
+/// records the refusal on the `push` event it emits either way.
 #[test]
-fn a_real_gate_that_rejects_the_branch_fails_the_node_and_leaves_the_base_alone() {
-    let world = World::new("real-vcs-gate");
+fn a_merge_path_that_refuses_the_publishing_push_fails_the_node_and_leaves_the_base_alone() {
+    let world = World::new("real-vcs-refused");
     let repo = world.repository("local-direct", &["false"]);
     world.script("service.work", "the worker wrote this\n");
 
@@ -177,17 +192,18 @@ fn a_real_gate_that_rejects_the_branch_fails_the_node_and_leaves_the_base_alone(
         why(&world, "refused")
     );
 
-    // The one thing a rejected gate has to be true of: nothing landed.
+    // The one thing a refused publication has to be true of: nothing landed.
     assert_eq!(
         repo.base_commits(&world),
         vec!["chore: seed the repository".to_string()],
-        "a branch the gate rejected still reached the base"
+        "a branch its merge path refused still reached the base"
     );
-    assert!(
-        vcs_kinds(&world, "refused")
-            .iter()
-            .any(|kind| kind == "gate-verdict"),
-        "the gate's verdict never reached the merged store"
+    // And the refusal is readable: a `push` is emitted whatever the outcome, and
+    // `accepted` is what the merge path ruled.
+    let pushed = &world.events_of("refused", "push")[0];
+    assert_eq!(
+        pushed["payload"]["accepted"], false,
+        "the merge path's refusal never reached the merged store: {pushed}"
     );
 }
 
@@ -206,7 +222,7 @@ fn a_real_gate_that_rejects_the_branch_fails_the_node_and_leaves_the_base_alone(
 #[test]
 fn a_launchs_vcs_filter_reaches_the_real_sibling_and_narrows_what_it_relays() {
     let world = World::new("real-vcs-filter");
-    let repo = world.repository("local-direct", &["true"]);
+    let repo = world.repository("local-direct", &[]);
     world.script("service.work", "the worker wrote this\n");
 
     // Read through `monitor --all`, the unfiltered view of the merged store a
@@ -223,7 +239,7 @@ fn a_launchs_vcs_filter_reaches_the_real_sibling_and_narrows_what_it_relays() {
         .run(&["start", &path.to_string_lossy(), "--attach"])
         .settled();
     let ingested = relayed("unfiltered");
-    for kind in ["gate-verdict", "push", "session-closed"] {
+    for kind in ["fetch", "push", "session-closed"] {
         assert!(
             ingested.contains(kind),
             "a launch naming no filters did not ingest {kind}:\n{ingested}"
@@ -242,13 +258,13 @@ fn a_launchs_vcs_filter_reaches_the_real_sibling_and_narrows_what_it_relays() {
             &path.to_string_lossy(),
             "--attach",
             "--filter-vcs",
-            r#"{"exclude": [{"kind": "gate-verdict"}]}"#,
+            r#"{"exclude": [{"kind": "fetch"}]}"#,
         ])
         .settled();
 
     let kinds = relayed("filtered");
     assert!(
-        !kinds.contains("gate-verdict"),
+        !kinds.contains("fetch"),
         "the source filter did not reach `onevcs`:\n{kinds}"
     );
     // Narrowed, not silenced — and the *same* publication happened, so the
@@ -271,20 +287,20 @@ fn a_launchs_vcs_filter_reaches_the_real_sibling_and_narrows_what_it_relays() {
 /// The vcs half of the override rule, and the only place it is observable: a
 /// source filter's effect is what the *real* `onevcs` did not relay, so a
 /// journey with no repository in it could only assert on the ask. The config
-/// here would silence the gate verdict; the flag replaces it with one that
-/// silences the push instead, so admitting the verdict is what proves the flag
-/// won rather than merely being read.
+/// here would silence the fetch; the flag replaces it with one that silences the
+/// push instead, so admitting the fetch is what proves the flag won rather than
+/// merely being read.
 #[test]
 fn a_vcs_filter_flag_replaces_the_one_a_launch_config_supplied() {
     let world = World::new("real-vcs-filter-override");
-    let repo = world.repository("local-direct", &["true"]);
+    let repo = world.repository("local-direct", &[]);
     world.script("service.work", "the worker wrote this\n");
 
     let config = world.root.join("launch.json");
     std::fs::write(
         &config,
         r#"{"schema_version": 1,
-            "filters": {"vcs": {"exclude": [{"kind": "gate-verdict"}]}}}"#,
+            "filters": {"vcs": {"exclude": [{"kind": "fetch"}]}}}"#,
     )
     .expect("the launch config is written");
 
@@ -310,7 +326,7 @@ fn a_vcs_filter_flag_replaces_the_one_a_launch_config_supplied() {
         "the flag's own filter did not reach `onevcs`:\n{relayed}"
     );
     assert!(
-        relayed.contains("gate-verdict"),
+        relayed.contains("fetch"),
         "the config's filter was still applied beside the flag that replaced it:\n{relayed}"
     );
     world

@@ -415,7 +415,7 @@ fn retry_supersedes_a_running_node_and_redirects_its_dependents() {
 #[test]
 fn a_retry_may_name_only_one_branch() {
     let world = World::new("edit-branch");
-    world.repository("local-direct", &["true"]);
+    world.repository("local-direct", &[]);
     let run = live(
         &world,
         "branchy",
@@ -622,7 +622,7 @@ fn drop_requires_a_dependents_fate_and_detach_keeps_them() {
 #[test]
 fn drop_refuses_to_remove_the_last_unresolved_publication_anchor() {
     let world = World::new("edit-anchor");
-    world.repository("local-direct", &["true"]);
+    world.repository("local-direct", &[]);
     // Two lifecycle nodes on one repository: the second is stacked on the
     // first, so the first is what carries both of them to publication.
     let mut stacked = lifecycle("stacked", &["anchor"]);

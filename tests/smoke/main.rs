@@ -243,14 +243,17 @@ impl Drop for Scratch {
 ///
 /// `change-direct`: push the branch, open a pull request on the real GitHub, and
 /// merge it. That is the whole of what this tier exists to prove, and the one
-/// policy that reaches every step of it. The gate is a real command — the
-/// repository holds nothing to verify, and a gate that is not run is a
-/// publication nothing checked.
+/// policy that reaches every step of it.
+///
+/// Version 3, which has no `gate:` in it: nothing in this stack runs a
+/// verification tier of its own any more. What verifies a change published this
+/// way is the host's required checks on the change request — which is the merge
+/// path this tier drives against the real GitHub, and which the scratch
+/// repository declares none of.
 fn rules(home: &Path) {
     std::fs::write(
         home.join("rules.yml"),
-        "version: 2\nrules: []\ndefault:\n  publication: change-direct\n  approvals: none\n  \
-         gate:\n    command: [\"git\", \"--version\"]\n",
+        "version: 3\nrules: []\ndefault:\n  publication: change-direct\n  approvals: none\n",
     )
     .expect("the rules file is written");
 }
@@ -569,13 +572,17 @@ fn a_lifecycle_node_opens_a_real_pull_request_merges_it_and_the_base_advances() 
     // The sibling's own record of the publication reached the merged store, once
     // each and under the node it belongs to.
     let kinds = vcs_kinds(&world, "smoke");
-    for kind in ["gate-verdict", "push", "change-merged", "session-closed"] {
+    for kind in ["push", "change-merged", "session-closed"] {
         let seen = kinds.iter().filter(|seen| *seen == kind).count();
         assert_eq!(
             seen, 1,
             "the publication's {kind} reached the merged store {seen} time(s): {kinds:?}"
         );
     }
-    let verdict = &world.events_of("smoke", "gate-verdict")[0];
-    assert_eq!(verdict["labels"]["node"], "service", "{verdict}");
+    // The publishing push is where the merge path rules on the change, so its
+    // `push` is the verdict this tier reads — and it carries the node it belongs
+    // to, which its producer cannot know.
+    let pushed = &world.events_of("smoke", "push")[0];
+    assert_eq!(pushed["labels"]["node"], "service", "{pushed}");
+    assert_eq!(pushed["payload"]["accepted"], true, "{pushed}");
 }

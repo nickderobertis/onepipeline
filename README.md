@@ -9,8 +9,11 @@ mixing direct agent nodes, repository lifecycle nodes, and explicit human action
 — executes it continuously, dispatching each node the moment its dependencies
 settle, through a pluggable **executor seam**, and keeps a live channel open to
 the planner supervising the run. The
-agents come from `oneagentgraph`; the clones, worktrees, gates, and change
-requests come from `onevcs`. Dependency direction is one-way: neither sibling
+agents come from `oneagentgraph`; the clones, worktrees, publications, and
+change requests come from `onevcs`. Nothing here verifies a change: that is the
+repository's own merge path — the host's required checks where a change
+publishes remotely, and the repository's `pre-push` hook at the publishing push
+where it publishes locally. Dependency direction is one-way: neither sibling
 depends on this crate.
 
 The public types, traits, config schemas, and CLI surface are the approved

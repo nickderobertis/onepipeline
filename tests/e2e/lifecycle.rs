@@ -1,14 +1,15 @@
 //! A lifecycle node is this crate composing a `onevcs` session with the
-//! dispatches that work in it. The branch, the worktree, the gate, and the
-//! publication are all the sibling's; the DAG, the loop, and the pr-author
-//! composition are this one's.
+//! dispatches that work in it. The branch, the worktree, and the publication are
+//! all the sibling's; the DAG, the loop, and the pr-author composition are this
+//! one's. Nothing here verifies a change: the repository's own merge path does
+//! that, at the publishing push.
 //!
 //! Every journey here drives the **real** repository side: `onevcs` is a library
 //! this crate calls, so there is nothing to substitute at a subprocess boundary
 //! and nothing scripts what a publication did. What a journey states instead is
-//! the world that library reads — the repository's rules, the command that gates
-//! it, and, at `onevcs`'s own `ONEVCS_GH` seam, what GitHub does with the change
-//! request it is handed.
+//! the world that library reads — the repository's rules, the `pre-push` hook its
+//! merge path verifies a publishing push with, and, at `onevcs`'s own `ONEVCS_GH`
+//! seam, what GitHub does with the change request it is handed.
 //!
 //! Ported from the lifecycle-node composition halves of `test_lifecycle_e2e`.
 
@@ -22,7 +23,7 @@
 
 use std::path::PathBuf;
 
-use crate::harness::{agent, gate_script, lifecycle, plan_of, Repository, World, REFUSED};
+use crate::harness::{agent, hook_script, lifecycle, plan_of, Repository, World, REFUSED};
 use onevcs::provenance::SUBJECT_LIMIT;
 use serde_json::json;
 
@@ -70,23 +71,24 @@ fn driven(
     (name.to_string(), launched)
 }
 
-/// A repository whose gate passes, publishing straight onto its base.
+/// A repository whose merge path lets a publishing push through, publishing
+/// straight onto its base.
 ///
 /// `local-direct` reaches the base with git alone, so a journey that only needs
-/// *a* publication asks no host for anything.
+/// *a* publication asks no host for anything — and with no `pre-push` hook
+/// installed there is nothing between the push and the base.
 fn published_locally(world: &World) -> Repository {
-    world.repository("local-direct", &["true"])
+    world.repository("local-direct", &[])
 }
 
-/// A command a gate can be given, for a journey that needs the gate to do
-/// something other than pass.
+/// A `pre-push` hook a repository can be given, for a journey that needs its
+/// merge path to do something other than let the push through.
 ///
-/// The gate runs in the session's worktree, which sits at
-/// `$ONEVCS_HOME/<identity>/runs/<token>/worktree` — so the session's own token
-/// is the name of the directory above it, and a gate can address the stream that
+/// git runs the hook in the tree the publishing push is made from, which sits
+/// under the session's own run root — so the hook can address the stream that
 /// session is writing without this crate telling it one.
-fn gate(world: &World, args: &[&str]) -> Vec<String> {
-    gate_script(world, args)
+fn merge_path(world: &World, args: &[&str]) -> Vec<String> {
+    hook_script(world, args)
 }
 
 /// Every `onevcs`-produced event one run recorded, by kind.
@@ -227,12 +229,12 @@ fn a_lifecycle_node_opens_a_session_works_in_it_and_publishes_through_onevcs() {
     let run = settle(&world, "shipped", vec![lifecycle("service", &[])]);
 
     // What the composition did, read off the sibling's own records rather than
-    // off an argument vector: a session was opened, its branch was gated and
-    // pushed, and the session was released. Against a spawned double the
-    // equivalent assertion was "these arguments were passed", which stayed true
-    // of a command that then failed.
+    // off an argument vector: a session was opened, its branch was pushed past
+    // the repository's own merge path, and the session was released. Against a
+    // spawned double the equivalent assertion was "these arguments were passed",
+    // which stayed true of a command that then failed.
     let kinds = vcs_kinds(&world, &run);
-    for kind in ["session-opened", "gate-verdict", "push", "session-closed"] {
+    for kind in ["session-opened", "push", "session-closed"] {
         assert!(
             kinds.iter().any(|seen| seen == kind),
             "the publication recorded no {kind}: {kinds:?}\n{}",
@@ -429,7 +431,7 @@ fn a_session_record_that_cannot_be_read_falls_back_to_opening_a_session() {
     // swept, or a process that died between writing the record and closing the session.
     // It is a fault rather than an operation, and no command produces one — every
     // deletion `onevcs` performs is a run root under `workspaces/`, an integrate or
-    // publish scratch, or a rotated gate log, and `session close` keeps the record
+    // publish scratch, or a rotated merge-path log, and `session close` keeps the record
     // deliberately, because a closed session is still addressable. So there is nothing
     // else to reach it with. It fails loudly rather than silently if the sibling
     // relocates its records, and everything asserted afterwards is through the binary:
@@ -522,14 +524,16 @@ fn a_human_step_holds_the_workstream_rather_than_being_inferred() {
             {"id": "staging-approval", "kind": "human", "task": "Exercise the staged service.", "deps": ["implement"]},
         ],
     });
-    let run = settle(&world, "gatedstream", vec![node]);
+    let run = settle(&world, "heldstream", vec![node]);
 
     let result = world.run_json(&run, "result.json");
     assert_eq!(result["nodes"][0]["status"], "waiting", "{result}");
     // Nothing was published: the workstream is held at its human step, so the
-    // sibling never ran a gate and never pushed.
+    // sibling never queued a publication and never pushed. Not `fetch`, which a
+    // session emits when it opens — this workstream's session did open, and its
+    // first step worked in it.
     let kinds = vcs_kinds(&world, &run);
-    for kind in ["gate-started", "push"] {
+    for kind in ["merge-queued", "push"] {
         assert!(
             !kinds.iter().any(|seen| seen == kind),
             "a workstream published past its human step: {kinds:?}"
@@ -568,7 +572,7 @@ fn a_human_step_holds_the_workstream_rather_than_being_inferred() {
 #[test]
 fn the_pr_author_dispatch_drafts_the_body_the_change_request_opens_with() {
     let world = World::new("lifecycle-pr-author");
-    world.repository("change-open", &["true"]);
+    world.repository("change-open", &[]);
     world.script("service.work", "the worker wrote this\n");
     world.script("pr-author.body", "## What\nRead off the branch's diff.\n");
     let drafting = world.pr_author_graph();
@@ -656,7 +660,7 @@ fn the_pr_author_dispatch_drafts_the_body_the_change_request_opens_with() {
 #[test]
 fn a_node_that_states_its_own_body_publishes_it_and_spends_no_dispatch() {
     let world = World::new("lifecycle-body");
-    world.repository("change-open", &["true"]);
+    world.repository("change-open", &[]);
     world.script("service.work", "the worker wrote this\n");
     let mut node = titled(
         lifecycle("service", &[]),
@@ -735,7 +739,7 @@ fn a_drafting_dispatch_that_ends_badly_leaves_the_publication_untouched() {
         ),
     ] {
         let world = World::new(&format!("lifecycle-draft-{name}"));
-        world.repository("change-open", &["true"]);
+        world.repository("change-open", &[]);
         world.script("service.work", "the worker wrote this\n");
         world.script(scenario, "1");
         let drafting = world.pr_author_graph();
@@ -818,7 +822,7 @@ fn a_drafting_dispatch_that_ends_badly_leaves_the_publication_untouched() {
 #[test]
 fn a_launch_config_names_the_drafting_graph_and_the_flag_overrides_it() {
     let world = World::new("lifecycle-draft-config");
-    world.repository("change-open", &["true"]);
+    world.repository("change-open", &[]);
     world.script("service.work", "the worker wrote this\n");
     let declared = world.pr_author_graph();
     // A second document, so "which graph ran" is a question with two answers.
@@ -912,7 +916,7 @@ fn a_launch_config_names_the_drafting_graph_and_the_flag_overrides_it() {
 #[test]
 fn a_drafted_body_is_read_only_from_the_copy_this_run_retained() {
     let world = World::new("lifecycle-planted-body");
-    world.repository("change-open", &["true"]);
+    world.repository("change-open", &[]);
     world.script("service.work", "the worker wrote this\n");
     // Every settlement in this run names one, which costs the transcript its
     // words and must cost the publication its body.
@@ -1010,22 +1014,22 @@ fn an_earlier_plan_still_publishes_under_the_subject_the_sibling_derives() {
 
 /// Publication, watched while it happens.
 ///
-/// It is the longest wall-clock segment a lifecycle node has — the gate run,
+/// It is the longest wall-clock segment a lifecycle node has — the merge path,
 /// the push, the change request, the check polling, the merge — and read once
 /// at settlement every record of it appears at once, when it is over. The claim
 /// here is the opposite one: a record written *during* the publication is
 /// readable out of the merged store while the node is still in flight.
 ///
-/// The gate is what is held, because the gate is the one stretch of a real
-/// publication a journey can hold from outside it: `onevcs` runs the
-/// repository's own command, and this one waits for a file.
+/// The **publishing push** is what is held, because it is the one stretch of a
+/// real publication a journey can hold from outside it: git runs the repository's
+/// own `pre-push` hook there, and this one waits for a file.
 #[test]
 fn a_publications_own_records_reach_the_journal_while_it_is_still_publishing() {
     let world = World::new("lifecycle-livepublish");
-    let go = world.fakes.join("gate.go");
+    let go = world.fakes.join("push.go");
     world.repository(
         "local-direct",
-        &gate(&world, &["wait-for", &go.to_string_lossy()])
+        &merge_path(&world, &["wait-for", &go.to_string_lossy()])
             .iter()
             .map(String::as_str)
             .collect::<Vec<_>>(),
@@ -1039,11 +1043,11 @@ fn a_publications_own_records_reach_the_journal_while_it_is_still_publishing() {
         .run(&["start", &path.to_string_lossy(), "--detach"])
         .exited(0);
 
-    world.until("the publication to reach its gate", |world| {
+    world.until("the publication to reach its merge path", |world| {
         world
             .run(&["monitor", "watched", "--all"])
             .stdout
-            .contains("gate-started")
+            .contains("merge-queued")
     });
     // Mid-publication, and readable: `monitor` renders the record and `status`
     // still calls the node running. Both are what an operator has open.
@@ -1061,11 +1065,11 @@ fn a_publications_own_records_reach_the_journal_while_it_is_still_publishing() {
     // so every per-node reader would otherwise take a whole publication for work
     // that happened to nobody — and no view renders a relayed envelope's node,
     // so the merged store the contract defines is where that is readable.
-    let started = &world.events_of("watched", "gate-started")[0];
-    assert_eq!(started["labels"]["node"], "service", "{started}");
-    assert_eq!(started["source"], "vcs", "{started}");
+    let queued = &world.events_of("watched", "merge-queued")[0];
+    assert_eq!(queued["labels"]["node"], "service", "{queued}");
+    assert_eq!(queued["source"], "vcs", "{queued}");
 
-    world.release("gate.go");
+    world.release("push.go");
     world.until("the run to settle", |world| {
         world.run_file("watched", "result.json").is_file()
     });
@@ -1076,8 +1080,7 @@ fn a_publications_own_records_reach_the_journal_while_it_is_still_publishing() {
     stream.exited(0);
     for kind in [
         "lock-acquired",
-        "gate-started",
-        "gate-verdict",
+        "merge-queued",
         "push",
         "merge-completed",
         "session-closed",
@@ -1135,7 +1138,7 @@ fn a_record_written_after_the_follow_ended_still_reaches_the_merged_store_once()
     // sibling's, so two is the right answer there and says nothing about relay.
     for kind in [
         "lock-wait",
-        "gate-verdict",
+        "merge-queued",
         "push",
         "merge-completed",
         "session-closed",
@@ -1172,7 +1175,7 @@ fn a_record_written_after_the_follow_ended_still_reaches_the_merged_store_once()
 #[test]
 fn a_drafting_graph_the_launch_directory_cannot_produce_is_refused_before_a_run_starts() {
     let world = World::new("lifecycle-nodrafting");
-    world.repository("local-direct", &["true"]);
+    world.repository("local-direct", &[]);
     let path = world.plan(
         "nodrafting",
         &plan_of("nodrafting", vec![lifecycle("service", &[])]),
@@ -1219,15 +1222,16 @@ fn an_unresolvable_repository_is_refused_before_a_run_starts() {
     assert!(!world.run_file("nosession", "launch.json").exists());
 }
 
-/// A publication its gate rejected, with a drafting dispatch that also failed.
+/// A publication its merge path refused, with a drafting dispatch that also
+/// failed.
 ///
 /// Both endings in one journey because the settlement carries both, in one
 /// order: the publication's own reason is what settled the node, and the
 /// drafting ending follows it because it is true either way. A reader looking
 /// for the drafter must not have to know which of the two failed first.
 #[test]
-fn a_publication_that_its_gate_rejects_settles_the_node_failed_by_name() {
-    let world = World::new("lifecycle-gate");
+fn a_publication_its_merge_path_refuses_settles_the_node_failed_by_name() {
+    let world = World::new("lifecycle-refused");
     world.repository("local-direct", &["false"]);
     world.script("service.work", "the worker wrote this\n");
     world.script("service.pr-author.fail", "1");
@@ -1292,13 +1296,13 @@ fn a_publication_that_its_gate_rejects_settles_the_node_failed_by_name() {
 /// The plan file states the title and
 /// [`SUBJECT_LIMIT`](onevcs::provenance::SUBJECT_LIMIT) bounds it, so the launch
 /// refuses it — naming the node, the length, and the limit — rather than the
-/// publication refusing it after the node's whole dispatch and its gate. Each
+/// publication refusing it after the node's whole dispatch. Each
 /// title that is legal publishes on the same repository, because a bound is only
 /// proven by the side of it that commits.
 #[test]
 fn a_title_the_sibling_will_not_commit_under_is_refused_before_any_dispatch() {
     let world = World::new("lifecycle-longtitle");
-    let repo = world.repository("local-direct", &["true"]);
+    let repo = world.repository("local-direct", &[]);
     world.script("service.work", "the worker wrote this\n");
     // A plausible planner title, padded to exactly the length this journey is
     // about: nothing else about it is wrong.
@@ -1474,7 +1478,7 @@ fn a_node_whose_publication_failed_continues_the_branch_it_preserved() {
 fn a_published_node_reports_where_a_human_reads_the_change_it_opened() {
     let world = World::new("lifecycle-evidence");
     // A change request left open for review, which is what `change-open` means.
-    world.repository("change-open", &["true"]);
+    world.repository("change-open", &[]);
     world.script("service.work", "the worker wrote this\n");
     let run = settle(&world, "evidence", vec![lifecycle("service", &[])]);
 
@@ -1596,7 +1600,7 @@ fn a_publication_that_had_nothing_to_publish_says_so_rather_than_claiming_it_lan
 #[test]
 fn a_change_the_host_merged_settles_the_node_on_the_merge_rather_than_the_request() {
     let world = World::new("lifecycle-merged");
-    world.repository("change-direct", &["true"]);
+    world.repository("change-direct", &[]);
     // The host lands the change it was handed.
     world.script("gh.merged", "");
     world.script("service.work", "the worker wrote this\n");
@@ -1641,30 +1645,55 @@ fn a_change_the_host_merged_settles_the_node_on_the_merge_rather_than_the_reques
     );
 }
 
+/// A `change-auto` change the host never lands fails the node rather than being
+/// reported as work that finished.
+///
+/// `change-auto` arms the host's own auto-merge and then **watches the change
+/// request through to the merge**: `onevcs` 0.11.0 no longer reports one as
+/// complete while it is merely queued, because a change reported done and never
+/// landed is what a planner closes work on. So a host that never lands it ends
+/// the publication on the sibling's own bound, and the node settles failed with
+/// what was still outstanding named.
+///
+/// The bound is the sibling's `ONEVCS_CHECKS_TIMEOUT_SECONDS`, which
+/// [`World::cmd`] sets small — behind the host stand-in there is nothing to wait
+/// for.
 #[test]
-fn a_change_the_host_is_holding_settles_the_node_as_queued() {
-    let world = World::new("lifecycle-queued");
+fn a_change_auto_the_host_never_lands_fails_the_node_rather_than_reporting_it_done() {
+    let world = World::new("lifecycle-unlanded-auto");
     // `change-auto` asks the host to land it once its checks pass, and this host
     // has not landed it.
-    world.repository("change-auto", &["true"]);
+    world.repository("change-auto", &[]);
     world.script("service.work", "the worker wrote this\n");
-    let run = settle(&world, "queued", vec![lifecycle("service", &[])]);
+    let run = settle(&world, "neverlanded", vec![lifecycle("service", &[])]);
 
-    // The host has it and will land it once its checks pass. The node is done —
-    // there is nothing more for the run to do with it — and it says so as queued
-    // rather than as merged, which would claim the base already carries it.
     let node = world.run_json(&run, "result.json")["nodes"][0].clone();
-    assert_eq!(node["status"], "done", "{node}\n{}", why(&world, &run));
-    assert_eq!(node["outcome"], "queued", "{node}");
+    assert_eq!(node["status"], "failed", "{node}\n{}", why(&world, &run));
+    assert_eq!(node["outcome"], "publication-failed", "{node}");
+    // Nothing landed, so no landing is claimed either way.
+    assert_eq!(node["landing"], json!(null), "{node}");
+    let results = world.run(&["results", &run]);
+    results.exited(0).out_has("publication-failed");
+    // And the reason is the sibling's own, naming what never settled — a
+    // publication that gave up is not the same failure as one a check refused,
+    // and a planner deciding whether to re-run has to be able to tell them apart.
+    let settled = world.events_of(&run, "node-settled");
+    let detail = settled[0]["payload"]["detail"]
+        .as_str()
+        .expect("the settlement says why");
     assert!(
-        node["change_url"]
+        detail.contains("onevcs:") && detail.contains("merged"),
+        "the settlement does not say what the publication was still waiting for: {detail}"
+    );
+    // The change request the publication opened is still where a person reads
+    // it, on the sibling's own record of opening it.
+    let opened = &world.events_of(&run, "change-opened")[0];
+    assert!(
+        opened["payload"]["url"]
             .as_str()
             .is_some_and(|url| url.contains("/pull/")),
-        "a queued change named nowhere to read it: {node}"
+        "{opened}"
     );
-    // Done, and not landed. The host has accepted it and the base does not carry
-    // it yet, so the settlement says both things rather than only the first.
-    assert_eq!(node["landing"], "unlanded", "{node}");
 }
 
 /// The document a consumer reads carries the landing, at a stated version, and
@@ -1677,11 +1706,12 @@ fn a_change_the_host_is_holding_settles_the_node_as_queued() {
 /// changed in it.
 ///
 /// All three of the landing's cases are read here. The first run carries two: a
-/// change the host is holding, and a plain agent node that published nothing and
-/// therefore carries **no `landing` key at all**. The third — a change observed
-/// on its base — is the second half, under the same policy once the host lands
-/// what it is handed, because a version that round-trips one value and drops the
-/// other is the defect a golden exists to catch.
+/// `change-open` change a person still owns, and a plain agent node that
+/// published nothing and therefore carries **no `landing` key at all**. The
+/// third — a change observed on its base — is the second half, under the policy
+/// that asks the host to land it and then waits for the merge, because a version
+/// that round-trips one value and drops the other is the defect a golden exists
+/// to catch.
 ///
 /// Each half gets its own world: the rendezvous holding a run's driver is
 /// per-world, and two halves sharing one would have the second launch wait on the
@@ -1698,9 +1728,11 @@ fn the_run_result_a_consumer_reads_states_its_version_and_carries_the_landing() 
             .clone()
     };
 
-    // The host is holding the change it was handed.
+    // The change is open and a person owns it, which is the policy a run settles
+    // on without waiting: `change-auto` watches its own merge through now, so a
+    // host that holds one ends that publication rather than leaving it unlanded.
     let world = World::new("lifecycle-result-contract");
-    world.repository("change-auto", &["true"]);
+    world.repository("change-open", &[]);
     world.script("service.work", "the worker wrote this\n");
     let (open, launched) = driven(
         &world,
@@ -1731,9 +1763,9 @@ fn the_run_result_a_consumer_reads_states_its_version_and_carries_the_landing() 
         node(&recorded, "build")
     );
 
-    // The same policy, and this time the host lands what it is handed.
+    // And this time the host lands what it is handed.
     let world = World::new("lifecycle-result-contract-landed");
-    world.repository("change-auto", &["true"]);
+    world.repository("change-auto", &[]);
     world.script("gh.merged", "");
     world.script("service.work", "the worker wrote this\n");
     let (landed, launched) = driven(&world, "readapi", vec![lifecycle("service", &[])]);
@@ -1747,35 +1779,39 @@ fn the_run_result_a_consumer_reads_states_its_version_and_carries_the_landing() 
     );
 }
 
-/// A settled node and a landed node are different facts, and one publication
-/// policy produces both.
+/// A settled node and a landed node are different facts, and what tells them
+/// apart is what the **host** did rather than that the node finished.
 ///
-/// The identity is `change-auto` for **both** halves — it asks the host to land
-/// the change once its checks pass — so nothing about the ask distinguishes
-/// them. What distinguishes them is the host: in the first half it holds the
-/// change, and in the second it lands it. Both nodes settle `done`, because
-/// publishing is the whole of what the round asked of them, and only one of them
-/// put anything on `main`.
+/// Both halves settle `done`, because publishing is the whole of what was asked
+/// of them, and only one of them put anything on `main`. The first hands the
+/// change to a person and ends there; the second asks the host to land it and is
+/// answered.
 ///
 /// Everything a planner reads is checked, because closing work on a settled node
 /// is a decision made from any of them: the ledger record, the round result the
 /// read API serves, and every view that renders a node's status.
 ///
-/// Nothing waits for the merge. The unlanded half settles and the round ends with
-/// the change still open, because a change request a person owns is not something
-/// a run may block or poll on.
+/// The unlanded half is `change-open` and not `change-auto`, deliberately: a
+/// change request a person owns is not something a run may block or poll on, and
+/// `change-auto` is now exactly the policy that *does* wait — `onevcs` 0.11.0
+/// watches an armed auto-merge through to its end rather than reporting a queued
+/// change as done. The node override rather than a second world, so the two
+/// halves stay side by side in one `runs` listing, which is the last assertion
+/// here.
 #[test]
-fn a_settled_node_and_a_landed_node_are_told_apart_by_what_the_host_did_not_by_the_policy() {
+fn a_settled_node_and_a_landed_node_are_told_apart_by_what_the_host_did() {
     let world = World::new("lifecycle-landing");
-    // Asks the host to land it once its checks pass. One policy, both answers.
-    world.repository("change-auto", &["true"]);
+    // Asks the host to land it once its checks pass; the first half overrides it.
+    world.repository("change-auto", &[]);
 
-    // The host is holding the change and has not landed it.
+    // The change is opened for a person, and nobody has merged it.
     world.script("service.work", "the change nobody merged\n");
     // Named for the scenario and not for the answer: a run id is printed on every
     // view line, so `heldopen` cannot satisfy an assertion looking for the word
     // this journey is about.
-    let open = settle(&world, "heldopen", vec![lifecycle("service", &[])]);
+    let mut held = lifecycle("service", &[]);
+    held["merge_policy"] = json!("change-open");
+    let open = settle(&world, "heldopen", vec![held]);
 
     // The sibling's own record of the publication says it too, so a reader
     // watching the merged stream sees where the change got to at the moment it
@@ -1832,7 +1868,7 @@ fn a_settled_node_and_a_landed_node_are_told_apart_by_what_the_host_did_not_by_t
         .exited(0)
         .out_has("unlanded");
 
-    // The same policy, and this time the host lands what it is handed.
+    // And this time the host is asked to land it, and does.
     world.script("gh.merged", "");
     world.script("service.work", "the change the host merged\n");
     let landed = settle(&world, "hostmerged", vec![lifecycle("service", &[])]);
@@ -1874,8 +1910,7 @@ fn a_settled_node_and_a_landed_node_are_told_apart_by_what_the_host_did_not_by_t
     );
 
     // And side by side, which is how `runs` presents them: the two runs did the
-    // same work under the same policy, and only one of them still owes somebody
-    // a merge.
+    // same work, and only one of them still owes somebody a merge.
     let listed = world.run(&["runs"]);
     listed.exited(0);
     let row = |run: &str| {
@@ -2012,7 +2047,7 @@ fn a_step_dispatches_under_its_own_agent_graph_before_its_nodes() {
 #[test]
 fn a_lifecycle_node_carries_the_pins_the_plan_states_into_its_session() {
     let world = World::new("lifecycle-pins");
-    let repo = world.repository("change-auto", &["true"]);
+    let repo = world.repository("change-auto", &[]);
     // A second checkout of the same identity, and a second base branch on the
     // origin: a pin naming either is only a pin if there is something for it to
     // name.
@@ -2032,6 +2067,10 @@ fn a_lifecycle_node_carries_the_pins_the_plan_states_into_its_session() {
     world.register(&primary, Some("https://github.com/owner/service.git"));
 
     world.script("service.work", "the worker wrote this\n");
+    // The host lands what it is handed: `change-auto` watches its own merge
+    // through, and this journey is about the pins rather than about what a host
+    // that never answers does.
+    world.script("gh.merged", "");
     let mut node = lifecycle("service", &[]);
     node["branch"] = json!("feature/pinned");
     node["base_branch"] = json!("release");
@@ -2073,23 +2112,23 @@ fn a_lifecycle_node_carries_the_pins_the_plan_states_into_its_session() {
 #[test]
 fn a_session_stream_that_cannot_be_read_is_reported_and_does_not_fail_the_node() {
     let world = World::new("lifecycle-noevents");
-    // llmlint: ignore-block[tests_mirror_real_usage] the gate *is* the product's own
-    // extension point — a repository's rules file names a command and `onevcs` runs it on
-    // the merge path — so what this states is a repository whose own gate breaks the state
+    // llmlint: ignore-block[tests_mirror_real_usage] the repository's own merge path *is*
+    // the product's own extension point — git runs its `pre-push` hook at the publishing
+    // push — so what this states is a repository whose own verification breaks the state
     // root under it, which is operator-supplied code doing what operator-supplied code
     // can. No command breaks a stream: every deletion `onevcs` performs is a run root, an
-    // integrate or publish scratch, or a rotated gate log, and none touches `streams/`.
-    // Nor can it be arranged before the run — a stream directory already broken fails
-    // `Stream::open` inside `session open`, which is a session that never opened and a
-    // different journey. So the gate is the point inside a run where the repository's own
-    // code can reach it. Everything asserted is through the binary.
+    // integrate or publish scratch, or a rotated merge-path log, and none touches
+    // `streams/`. Nor can it be arranged before the run — a stream directory already
+    // broken fails `Stream::open` inside `session open`, which is a session that never
+    // opened and a different journey. So the hook is the point inside a run where the
+    // repository's own code can reach it. Everything asserted is through the binary.
     //
     // A file where the streams directory was, so nothing can recreate it:
     // `EventStream::open` then refuses every session by name.
-    let gate = gate(&world, &["break-streams"]);
+    let hook = merge_path(&world, &["break-streams"]);
     world.repository(
         "local-direct",
-        &gate.iter().map(String::as_str).collect::<Vec<_>>(),
+        &hook.iter().map(String::as_str).collect::<Vec<_>>(),
     );
     // llmlint: ignore-end[tests_mirror_real_usage]
     world.script("service.work", "the worker wrote this\n");
@@ -2103,14 +2142,14 @@ fn a_session_stream_that_cannot_be_read_is_reported_and_does_not_fail_the_node()
     let run = run.0;
     let result = world.run_json(&run, "result.json");
     assert_eq!(result["state"], "complete", "{result}");
-    // `gate-verdict` is the first record the session writes after the gate has
-    // taken its own stream away, so its absence from the store is the
-    // unreadable stream rather than a publication that did not happen.
+    // `push` is the first record the session writes after the hook has taken its
+    // own stream away, so its absence from the store is the unreadable stream
+    // rather than a publication that did not happen.
     assert!(
         !world
             .journal(&run)
             .iter()
-            .any(|event| event["kind"] == "gate-verdict"),
+            .any(|event| event["kind"] == "push"),
         "the unreadable stream still contributed events"
     );
 }
@@ -2127,19 +2166,19 @@ fn a_session_stream_that_cannot_be_read_is_reported_and_does_not_fail_the_node()
 fn a_session_line_this_build_cannot_read_is_reported_and_does_not_fail_the_node() {
     let world = World::new("lifecycle-futureline");
     // llmlint: ignore-block[tests_mirror_real_usage] the same extension point as the
-    // journey above, and the same reason: a repository's gate is a command an operator
-    // wrote, and a stream carrying a record this build cannot read is what an
+    // journey above, and the same reason: a repository's `pre-push` hook is code an
+    // operator wrote, and a stream carrying a record this build cannot read is what an
     // `ONEVCS_HOME` shared with another build of `onevcs` leaves behind. No command
     // writes one — `Stream::emit` is the only writer and it appends whole envelopes, so a
     // surface that could would be the defect — and the stream exists only once the
-    // session has opened, which makes the gate the point inside a run where the
+    // session has opened, which makes the hook the point inside a run where the
     // repository's own code can reach it. Everything asserted is through the binary.
     //
-    // The token is the name of the directory above the worktree the gate runs in.
-    let gate = gate(&world, &["append-future-event"]);
+    // The hook finds the session by walking up from the tree it is pushing out of.
+    let hook = merge_path(&world, &["append-future-event"]);
     world.repository(
         "local-direct",
-        &gate.iter().map(String::as_str).collect::<Vec<_>>(),
+        &hook.iter().map(String::as_str).collect::<Vec<_>>(),
     );
     // llmlint: ignore-end[tests_mirror_real_usage]
     world.script("service.work", "the worker wrote this\n");
@@ -2295,7 +2334,7 @@ fn a_dispatch_that_failed_after_opening_a_change_settles_carrying_that_change() 
     let world = World::new("lifecycle-failed-open");
     // A policy that opens a change request and leaves it open, which is what the
     // worker's own publication reaches.
-    world.repository("change-open", &["true"]);
+    world.repository("change-open", &[]);
     world.script("service.work", "the work its judge would not pass\n");
     world.script(
         "service.publishes",
@@ -2356,7 +2395,7 @@ fn a_dispatch_that_failed_after_opening_a_change_settles_carrying_that_change() 
 #[test]
 fn a_dispatch_that_failed_with_nothing_published_settles_as_a_plain_task_failure() {
     let world = World::new("lifecycle-failed-plain");
-    world.repository("change-open", &["true"]);
+    world.repository("change-open", &[]);
     world.script("service.work", "the work its judge would not pass\n");
     world.script("service.fail", "1");
     let run = settle(&world, "failedplain", vec![lifecycle("service", &[])]);
@@ -2400,9 +2439,11 @@ fn a_dispatch_that_failed_with_nothing_published_settles_as_a_plain_task_failure
 #[test]
 fn a_change_that_merged_after_settlement_is_reported_as_of_settlement_not_as_now() {
     let world = World::new("lifecycle-landing-stale");
-    // The host is asked to land it and is holding it, so the node settles with
-    // its change unlanded — the state the incident started from.
-    let repository = world.repository("change-auto", &["true"]);
+    // The change is opened for a person and nobody has merged it, so the node
+    // settles with its change unlanded — the state the incident started from.
+    // `change-open` rather than `change-auto`, which now watches an armed
+    // auto-merge through to its end instead of settling on a queued one.
+    let repository = world.repository("change-open", &[]);
     world.script("service.work", "the change that merged later\n");
     let run = settle(&world, "mergedlater", vec![lifecycle("service", &[])]);
 
@@ -2470,16 +2511,16 @@ fn a_change_that_merged_after_settlement_is_reported_as_of_settlement_not_as_now
 fn a_change_this_crate_cannot_read_the_record_of_settles_as_a_plain_task_failure() {
     let world = World::new("lifecycle-failed-unreadable");
     // llmlint: ignore-block[tests_mirror_real_usage] the same extension point the two
-    // journeys above use, and the same reason: a repository's gate is a command an
+    // journeys above use, and the same reason: a repository's `pre-push` hook is code an
     // operator wrote, `Stream::emit` is the only writer of a stream and it appends whole
-    // envelopes, and the stream exists only once the session has opened. The gate runs on
-    // the publication path, so the line it appends is on the stream *before* the change
-    // request is opened — which is what makes the whole read refuse. Everything asserted
-    // is through the binary.
-    let gate = gate(&world, &["append-future-event"]);
+    // envelopes, and the stream exists only once the session has opened. The hook runs at
+    // the publishing push, which happens before the change request is opened — so the
+    // line it appends is on the stream *before* that record, which is what makes the whole
+    // read refuse. Everything asserted is through the binary.
+    let hook = merge_path(&world, &["append-future-event"]);
     world.repository(
         "change-open",
-        &gate.iter().map(String::as_str).collect::<Vec<_>>(),
+        &hook.iter().map(String::as_str).collect::<Vec<_>>(),
     );
     // llmlint: ignore-end[tests_mirror_real_usage]
     world.script("service.work", "the work its judge would not pass\n");
@@ -2525,7 +2566,7 @@ fn a_change_this_crate_cannot_read_the_record_of_settles_as_a_plain_task_failure
 #[test]
 fn a_node_whose_base_branch_is_its_branch_is_refused_and_told_what_continues_a_branch() {
     let world = World::new("lifecycle-selfbase");
-    let repo = world.repository("change-direct", &["true"]);
+    let repo = world.repository("change-direct", &[]);
     // The preserved branch a planner is trying to continue: it carries work the
     // repository's integration target does not, which is the whole reason to
     // point a node at it.

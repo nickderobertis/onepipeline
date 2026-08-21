@@ -36,7 +36,7 @@ use std::process::{Command, Stdio};
 use serde_json::{json, Value};
 
 use crate::harness::{
-    gate_script, git, lifecycle, onevcs_binary, plan_of, World, GIT_EMAIL, GIT_WHO,
+    git, hook_script, lifecycle, onevcs_binary, plan_of, World, GIT_EMAIL, GIT_WHO,
 };
 use onevcs::Session;
 
@@ -232,12 +232,12 @@ fn dispatched(world: &World, case: &str, branch: Option<&str>) -> (Value, Value)
 #[test]
 fn a_retry_takes_up_the_session_a_stopped_run_left_its_work_in() {
     let world = World::new("session-reuse-adopt");
-    // A gate the journey holds, which is how a run is stopped *mid-publication*:
-    // `onevcs` commits the worktree onto the branch before it gates, so by the
-    // time the gate is running the work is on the branch and the session is the
-    // only thing that still knows where.
-    let go = world.fakes.join("gate.go");
-    let held = gate_script(&world, &["wait-for", &go.to_string_lossy()]);
+    // A `pre-push` hook the journey holds, which is how a run is stopped
+    // *mid-publication*: `onevcs` commits the worktree onto the branch before it
+    // pushes, so by the time the repository's merge path is running the work is on
+    // the branch and the session is the only thing that still knows where.
+    let go = world.fakes.join("push.go");
+    let held = hook_script(&world, &["wait-for", &go.to_string_lossy()]);
     let repo = world.repository(
         "local-direct",
         &held.iter().map(String::as_str).collect::<Vec<_>>(),
@@ -255,11 +255,11 @@ fn a_retry_takes_up_the_session_a_stopped_run_left_its_work_in() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("the stopped run's owner starts");
-    world.until("the publication to reach its gate", |world| {
+    world.until("the publication to reach its merge path", |world| {
         world
             .journal("stopped")
             .iter()
-            .any(|event| event["source"] == "vcs" && event["kind"] == "gate-started")
+            .any(|event| event["source"] == "vcs" && event["kind"] == "merge-queued")
     });
     let stranded = opened(&world, "stopped");
     let stranded = stranded["payload"]["token"]
@@ -292,7 +292,7 @@ fn a_retry_takes_up_the_session_a_stopped_run_left_its_work_in() {
         "the stopped run left nothing on {STRANDED} for its retry to inherit"
     );
 
-    world.release("gate.go");
+    world.release("push.go");
     world.script("continuation.work", "and then the worker wrote this\n");
     let mut retry = lifecycle("continuation", &[]);
     retry["branch"] = json!(STRANDED);
@@ -370,7 +370,7 @@ fn a_retry_takes_up_the_session_a_stopped_run_left_its_work_in() {
 #[test]
 fn every_other_shape_cuts_a_fresh_session_onto_its_branch_or_from_the_base() {
     let world = World::new("session-reuse-fallbacks");
-    let repo = world.repository("local-direct", &["true"]);
+    let repo = world.repository("local-direct", &[]);
 
     // A session nothing ever came back for, opened before the first run below so
     // that run's own opening reclaims it — a real reclamation by the sibling

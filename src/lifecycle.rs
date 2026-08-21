@@ -3,9 +3,10 @@
 //!
 //! A lifecycle node names a `repo`, so its work happens on an isolated branch
 //! and is published through that repository's registered policy. This module is
-//! the composition and nothing more — the branch, the worktree, the merge-path
-//! gate, and the publication are all `onevcs`'s, and the dispatch inside them is
-//! `oneagentgraph`'s.
+//! the composition and nothing more — the branch, the worktree, and the
+//! publication are all `onevcs`'s, and the dispatch inside them is
+//! `oneagentgraph`'s. Nothing here verifies the change: that is the repository's
+//! own merge path, at the publishing push.
 //!
 //! Several `steps` share one branch and run **serially in topological order**,
 //! because concurrent writers cannot safely share a worktree.
@@ -307,8 +308,9 @@ fn publish(
             // A publication that did not land is an ending of the publication,
             // not a refused request: `onevcs` draws that line itself, in
             // `PublishOutcome::Failed`, and this crate reads its line rather
-            // than a second one. The reason is the sibling's own — the gate it
-            // ran and what that said — and it is what the node settles with.
+            // than a second one. The reason is the sibling's own — what turned
+            // the publication down, and what it said — and it is what the node
+            // settles with.
             if let onevcs::PublishOutcome::Failed { reason, .. } = &published.outcome {
                 return publication_failed(format!("onevcs: {reason}"));
             }
@@ -371,7 +373,7 @@ fn publish(
         // `a_title_the_sibling_will_not_commit_under_is_refused_before_any_dispatch`.
         // What the arm does with a drafting failure is not its own composition either:
         // it is the same `publication_failed` the outcome arm above takes, which
-        // `a_publication_that_its_gate_rejects_settles_the_node_failed_by_name` drives
+        // `a_publication_its_merge_path_refuses_settles_the_node_failed_by_name` drives
         // end to end beside an undrafted body.
         Err(error) => publication_failed(error.to_string()),
     }
@@ -614,8 +616,8 @@ fn relay_into(tx: &Sender<Message>, node: Labels) -> Box<dyn Fn(Envelope) + Send
 ///
 /// `onevcs` stamps what it knows, and a session does not know it is a graph
 /// node: the crate that opened it does. Without this a whole publication —
-/// gate, push, change request, merge — lands in the merged store belonging to
-/// no node, so every per-node view reads it as work that happened to nobody.
+/// push, change request, merge — lands in the merged store belonging to no node,
+/// so every per-node view reads it as work that happened to nobody.
 ///
 /// An enricher, so it never rewrites: a key the producer stamped stands.
 fn stamp(labels: &mut Labels, known: &Labels) {
@@ -649,10 +651,11 @@ fn end_session(
 
 /// Fold the part of the session's stream nothing has relayed into the merged one.
 ///
-/// `onevcs` records the gate, the commits, and the publication against the
-/// session; without this the merged store would carry a lifecycle node's
-/// settlement with none of the evidence behind it. `followed_through` is the
-/// highest `seq` the follow already relayed, so a record arrives **once**: the
+/// `onevcs` records the commits and the publication against the session, the
+/// merge path's own verdict on the `push` among them; without this the merged
+/// store would carry a lifecycle node's settlement with none of the evidence
+/// behind it. `followed_through` is the highest `seq` the follow already
+/// relayed, so a record arrives **once**: the
 /// stream is numbered monotonically and resumes its series across the processes
 /// that write to it, which makes that one number the whole of the bookkeeping.
 fn relay_session_events(

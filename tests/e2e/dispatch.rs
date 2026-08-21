@@ -144,7 +144,7 @@ fn relative_default_graphs_dispatch_from_the_launch_directory() {
 fn relative_node_and_step_graph_overrides_dispatch_from_the_launch_directory() {
     let world = World::new("real-relative-plan-overrides");
     world.write_graphs();
-    world.repository("local-direct", &["true"]);
+    world.repository("local-direct", &[]);
     for (source, target) in [
         ("node-scope.yaml", "node-override.yaml"),
         ("node-scope.yaml", "step-override.yaml"),
@@ -226,7 +226,7 @@ fn relative_node_and_step_graph_overrides_dispatch_from_the_launch_directory() {
 #[test]
 fn a_lifecycle_nodes_two_graphs_are_the_ones_its_launch_resolved() {
     let world = World::new("lifecycle-recorded-default-graph");
-    world.repository("local-direct", &["true"]);
+    world.repository("local-direct", &[]);
     world.script("driver.wait", "hold");
     world.script("service.work", "the worker wrote this\n");
     let launch_graph = crate::harness::repo_file("graphs/node-scope.yaml");
@@ -362,7 +362,7 @@ fn an_unreadable_relative_node_graph_names_its_launch_base() {
 fn unreadable_relative_plan_graphs_name_their_path_and_launch_base() {
     let world = World::new("relative-plan-graph-errors");
     world.write_graphs();
-    world.repository("local-direct", &["true"]);
+    world.repository("local-direct", &[]);
     let cases = [
         (
             "missing-node-override",
@@ -421,7 +421,7 @@ fn broken_launch_records_refuse_the_adoption_before_direct_or_lifecycle_dispatch
         .err_has("launch.json");
 
     let lifecycle_world = World::new("missing-launch-lifecycle");
-    lifecycle_world.repository("local-direct", &["true"]);
+    lifecycle_world.repository("local-direct", &[]);
     let mut service = crate::harness::lifecycle("service", &["approve"]);
     service["deps"] = json!(["approve"]);
     ready_and_undriven(&lifecycle_world, "missing-lifecycle", service);
@@ -929,7 +929,7 @@ fn a_drafted_body_reaches_the_change_request_through_the_real_siblings() {
     world.write_graphs();
     // A change request left open for review: a body is prose on one, and a
     // direct merge opens none.
-    world.repository("change-open", &["true"]);
+    world.repository("change-open", &[]);
     world.script("harness.work", "the worker wrote this");
     let drafted = "## What\nRead off the branch's own diff.\n\n## Why\nSo a reviewer knows.";
     world.script("harness.body", drafted);
@@ -999,7 +999,7 @@ fn a_drafted_body_reaches_the_change_request_through_the_real_siblings() {
 fn a_validated_answer_carrying_no_body_publishes_the_change_request_without_one() {
     let world = World::new("blank-pr-author");
     world.write_graphs();
-    world.repository("change-open", &["true"]);
+    world.repository("change-open", &[]);
     world.script("harness.work", "the worker wrote this");
     // Spacing only, which is what a turn that answered the schema and said
     // nothing looks like: the schema requires the key, not prose under it.
@@ -1083,7 +1083,7 @@ fn a_validated_answer_carrying_no_body_publishes_the_change_request_without_one(
 fn a_drafting_graph_the_runner_refuses_still_publishes_the_change_request() {
     let world = World::new("real-pr-author-refused");
     world.write_graphs();
-    world.repository("change-open", &["true"]);
+    world.repository("change-open", &[]);
     world.script("harness.work", "the worker wrote this");
     // A readable file that is not a graph the runner will run: it names a member
     // kind that does not exist, which `oneagentgraph` refuses in its own words.
@@ -2371,7 +2371,7 @@ fn a_two_party_member_is_started_in_the_directory_the_graph_was_given() {
     world.write_graphs();
     write_supervised_node_graph(&world);
     write_persona(&world, "engineer");
-    world.repository("local-direct", &["true"]);
+    world.repository("local-direct", &[]);
 
     let node = json!({
         "id": "service",
@@ -2422,7 +2422,7 @@ fn a_steps_turn_budget_reaches_that_steps_own_dispatch() {
     world.write_graphs();
     write_supervised_node_graph(&world);
     write_persona(&world, "implementer");
-    world.repository("local-direct", &["true"]);
+    world.repository("local-direct", &[]);
 
     let node = json!({
         "id": "service",

@@ -87,6 +87,24 @@ resolver = "2"
 #   place; `src/plan.rs` documents both fields against that. `tests/e2e/
 #   session_reuse.rs` and `tests/e2e/lifecycle.rs` drive the two halves, so a pin
 #   below 0.8.0 fails rather than reads differently.
+# - `onevcs` 0.11.0 removes the **gate** — the tier that library ran itself, the
+#   `gate:` key a rules file named it in, and the `gate-started` and
+#   `gate-verdict` records it wrote — and leaves the repository's own merge path
+#   as the only verifier: the host's required checks where a change publishes
+#   remotely, and the repository's `pre-push` hook at the publishing push where it
+#   publishes locally. A `push` carries `accepted`, which is that path's verdict.
+#   Rules schema 3 is the shape with no `gate:` in it; 1 and 2 still load and drop
+#   one. It is a **requirement** and not a lock floor for the same reason 0.8.0
+#   was: `^0.8.0` excludes it, because pre-1.0 the minor is the breaking position.
+#   `tests/e2e/real_vcs.rs` drives both verdicts against a real origin — a
+#   publishing push a `pre-push` hook lets through and one it refuses — and
+#   `tests/e2e/harness.rs` writes the version-3 rules and installs the hook
+#   through `core.hooksPath`, which `onevcs` carries into the clone a session
+#   cuts. Below 0.11.0 the suite fails on the rules version rather than reading
+#   differently. Nothing this crate names went away with it: `FailureKind::Gate`
+#   and the contract's `gate` WALL bucket are both kept, the first because the
+#   cross-library failure vocabulary is fixed and the second because a bucket
+#   nothing measures is served absent — `src/telemetry.rs` documents that.
 #
 # Two floors are carried by `Cargo.lock` rather than by the requirement below,
 # and deliberately.
@@ -119,7 +137,7 @@ resolver = "2"
 # resolution that softened the bar rather than narrowing it fails there too.
 [workspace.dependencies]
 oneagentgraph = "0.3.0"
-onevcs = "0.8.0"
+onevcs = "0.11.0"
 # **Not a third sibling this crate composes** — nothing here launches, calls, or
 # spawns onejudge. It is one vocabulary: the verdicts a two-party member settles
 # on, which `oneagentgraph` copies onto the `member-settled` this crate relays.
@@ -129,12 +147,12 @@ onevcs = "0.8.0"
 onejudge = "0.4"
 # The sibling's own test-support crate, from the **same** revision as the library
 # it implements — here by resolving both from the registry at the releases cut
-# from one commit: `onevcs-testing` v0.2.7 and `onevcs` v0.8.0 are the same tag,
-# and v0.2.7 requires `onevcs = "0.8.0"`, so the build has one copy. Two copies
+# from one commit: `onevcs-testing` v0.4.0 and `onevcs` v0.11.0 are the same tag,
+# and v0.4.0 requires `onevcs = "0.11.0"`, so the build has one copy. Two copies
 # is not a version skew but a compile error: `tests/onevcs_seam.rs` — whose whole
 # job is to drive this crate's seam against those providers — would not build,
 # because the two copies' types are different types.
-onevcs-testing = "0.2.7"
+onevcs-testing = "0.4.0"
 
 [package]
 name = "onepipeline"
