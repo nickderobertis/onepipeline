@@ -24,7 +24,7 @@
 use std::path::PathBuf;
 
 use crate::harness::{
-    agent, hook_script, lifecycle, plan_of, HookVerb, Repository, World, REFUSED,
+    agent, hook_script, lifecycle, plan_of, HeldPublication, HookVerb, Repository, World, REFUSED,
 };
 use onevcs::provenance::SUBJECT_LIMIT;
 use serde_json::json;
@@ -94,14 +94,12 @@ fn merge_path(world: &World, verb: &HookVerb) -> Vec<String> {
     hook_script(world, verb)
 }
 
-/// The same hook, **holding** the publishing push until `rendezvous` exists.
-///
-/// Unix-only, and every journey reaching it is too: see
-/// [`harness::held_hook_script`](crate::harness::held_hook_script) for the
-/// `onevcs` limitation that draws the line and for when it comes off.
-#[cfg(unix)]
-fn held_merge_path(world: &World, rendezvous: &std::path::Path) -> Vec<String> {
-    crate::harness::held_hook_script(world, rendezvous)
+/// The same hook, **holding** the publishing push until this journey lets it
+/// through — and letting it through however the journey ends, which is what makes
+/// a held push safe on a platform that cannot reap an abandoned one. See
+/// [`HeldPublication`].
+fn held_merge_path(world: &World, rendezvous: &std::path::Path) -> HeldPublication {
+    crate::harness::held_publication(world, rendezvous)
 }
 
 /// Every `onevcs`-produced event one run recorded, by kind.
@@ -1036,22 +1034,12 @@ fn an_earlier_plan_still_publishes_under_the_subject_the_sibling_derives() {
 /// The **publishing push** is what is held, because it is the one stretch of a
 /// real publication a journey can hold from outside it: git runs the repository's
 /// own `pre-push` hook there, and this one waits for a file.
-///
-/// **Unix-only:** what keeps the node in flight to be read *is* the held push,
-/// and [`held_merge_path`] does not exist off Unix. Windows gives up
-/// mid-publication readability of the merged store, which is platform-independent.
-#[cfg(unix)]
 #[test]
 fn a_publications_own_records_reach_the_journal_while_it_is_still_publishing() {
     let world = World::new("lifecycle-livepublish");
     let go = world.fakes.join("push.go");
-    world.repository(
-        "local-direct",
-        &held_merge_path(&world, &go)
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>(),
-    );
+    let held = held_merge_path(&world, &go);
+    world.repository("local-direct", &held.argv());
     world.script("service.work", "the worker wrote this\n");
     let path = world.plan(
         "watched",
@@ -1087,7 +1075,7 @@ fn a_publications_own_records_reach_the_journal_while_it_is_still_publishing() {
     assert_eq!(queued["labels"]["node"], "service", "{queued}");
     assert_eq!(queued["source"], "vcs", "{queued}");
 
-    world.release("push.go");
+    held.release();
     world.until("the run to settle", |world| {
         world.run_file("watched", "result.json").is_file()
     });
@@ -1843,22 +1831,13 @@ fn a_push_the_merge_path_refuses_is_redispatched_carrying_what_the_remote_wrote(
 /// again into a run whose teardown is on its way to reap it, the node would settle
 /// as the cancellation and lose the publication failure, which is the useful half
 /// of what happened.
-///
-/// **Unix-only, and the sharpest case of why:** the cancel starts the run's
-/// teardown while the hook still holds the push — the one shape
-/// [`held_merge_path`] names as unreapable off Unix. Windows gives up which
-/// settlement a cancelled node reaches, which is this crate's own arithmetic.
-#[cfg(unix)]
 #[test]
 fn a_cancel_that_lands_before_the_next_attempt_settles_on_the_publication_failure() {
     let world =
         World::new("lifecycle-cancelledretry").with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "2");
     let go = world.fakes.join("push.go");
     let held = held_merge_path(&world, &go);
-    let repo = world.repository(
-        "change-auto",
-        &held.iter().map(String::as_str).collect::<Vec<_>>(),
-    );
+    let repo = world.repository("change-auto", &held.argv());
     world.script("service.work", "the worker wrote this\n");
     refuse_pushed_branches(&world, &repo);
 
@@ -1891,7 +1870,7 @@ fn a_cancel_that_lands_before_the_next_attempt_settles_on_the_publication_failur
     world.until("the cancel to be committed", |world| {
         !world.events_of(&run, "edit-committed").is_empty()
     });
-    world.release("push.go");
+    held.release();
 
     world.until("the run to settle", |world| {
         world.run_file(&run, "result.json").is_file()

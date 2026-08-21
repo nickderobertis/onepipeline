@@ -52,16 +52,11 @@ fn driven(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> (String, 
 
 /// How long a held publication phase is kept open, so its bucket is a real
 /// duration on the clock rather than a bucket that merely exists.
-// Reached only from the held-publication journey below, which is `#[cfg(unix)]`
-// because holding a push means a hook no platform off Unix can reap. Its doc
-// comment says why.
-#[cfg(unix)]
 const HELD: std::time::Duration = std::time::Duration::from_millis(400);
 
 /// The floor a held stretch must clear once it has been measured. Below the
 /// hold, because the two records bracketing it are written either side of the
 /// rendezvous rather than exactly on it.
-#[cfg(unix)]
 const FLOOR: u64 = 250;
 
 fn settled(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
@@ -500,23 +495,15 @@ fn telemetry_reports_what_each_party_spent() {
 /// produced, and it is what let this bucket read as measured. The bucket is
 /// still served, and it is still not the agent's; what it is not is a
 /// measurement. Recorded as divergence 16 in `docs/contract-divergences.md`.
-///
-/// **Unix-only:** the measurement *is* a held publishing push, and
-/// [`harness::held_hook_script`](crate::harness::held_hook_script) — which states
-/// why one cannot be reaped off Unix, and when that ends — does not exist there.
-/// Windows gives up the eight-way split, which carries no platform in it.
-#[cfg(unix)]
 #[test]
 fn telemetry_separates_publication_and_lock_time_from_agent_time() {
     let world = World::new("views-publicationtime");
     let go = world.fakes.join("push.go");
     // The publishing push is held open for a measurable span, so its bucket is a
-    // real duration on the clock rather than a bucket that merely exists.
-    let hook = crate::harness::held_hook_script(&world, &go);
-    world.repository(
-        "local-direct",
-        &hook.iter().map(String::as_str).collect::<Vec<_>>(),
-    );
+    // real duration on the clock rather than a bucket that merely exists. Declared
+    // after the world, so its release runs before the world takes the tree away.
+    let held = crate::harness::held_publication(&world, &go);
+    world.repository("local-direct", &held.argv());
     world.script("service.work", "the worker wrote this\n");
     let path = world.plan("held", &plan_of("held", vec![lifecycle("service", &[])]));
     world
@@ -530,7 +517,7 @@ fn telemetry_separates_publication_and_lock_time_from_agent_time() {
     world.until("the merge path to last a measurable stretch", |_| {
         since.elapsed() >= HELD
     });
-    world.release("push.go");
+    held.release();
     world.until("the run to settle", |world| {
         world.run_file("held", "result.json").is_file()
     });

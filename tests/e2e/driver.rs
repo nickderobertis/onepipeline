@@ -2774,8 +2774,9 @@ fn unusable_session_records() -> String {
 ///
 /// **Unix-only:** catching a dispatch in flight means killing the driver while
 /// the hook holds the push, two processes below the pid killed — the shape
-/// [`harness::held_hook_script`](crate::harness::held_hook_script) names as
-/// unreapable off Unix. Windows gives up this journey alone; `main` ran it there
+/// [`harness::abandonable_hook_script`](crate::harness::abandonable_hook_script)
+/// names as unreapable off Unix — and this journey abandons it deliberately, so a
+/// release on drop would defeat what it asserts rather than protect it. Windows gives up this journey alone; `main` ran it there
 /// over `onevcs`'s *gate*, a direct child of the killed process that never
 /// reached a push.
 #[cfg(unix)]
@@ -2785,7 +2786,7 @@ fn adopting_a_run_whose_dispatch_was_in_flight_leaves_that_dispatchs_work_reacha
     // A `pre-push` hook this journey holds, which is how a dispatch is caught in
     // flight with its work already committed.
     let go = world.fakes.join("push.go");
-    let held = crate::harness::held_hook_script(&world, &go);
+    let held = crate::harness::abandonable_hook_script(&world, &go);
     let repo = world.repository(
         "local-direct",
         &held.iter().map(String::as_str).collect::<Vec<_>>(),

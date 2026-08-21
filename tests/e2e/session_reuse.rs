@@ -41,7 +41,7 @@ use onevcs::Session;
 // Reached only from the stopped-run journey below, which is `#[cfg(unix)]` for
 // the reason stated there.
 #[cfg(unix)]
-use crate::harness::held_hook_script;
+use crate::harness::abandonable_hook_script;
 #[cfg(unix)]
 use std::path::PathBuf;
 
@@ -447,8 +447,9 @@ fn holders_of(rendezvous: &str) -> Vec<u32> {
 /// its work in.
 ///
 /// **Unix-only:** this journey *stops* a publication while the hook holds it, the
-/// shape [`harness::held_hook_script`](crate::harness::held_hook_script) names as
-/// unreapable off Unix. Windows gives up a run stopped mid-publication, the work
+/// shape [`harness::abandonable_hook_script`](crate::harness::abandonable_hook_script)
+/// names as unreapable off Unix — and this journey abandons it deliberately, so a
+/// release on drop would defeat what it asserts rather than protect it. Windows gives up a run stopped mid-publication, the work
 /// it strands, and the retry that continues the session; `main` ran it there over
 /// `onevcs`'s *gate*, a direct child of the stopped process rather than git's
 /// grandchild.
@@ -461,7 +462,7 @@ fn a_retry_takes_up_the_session_a_stopped_run_left_its_work_in() {
     // pushes, so by the time the repository's merge path is running the work is on
     // the branch and the session is the only thing that still knows where.
     let go = world.fakes.join("push.go");
-    let held = held_hook_script(&world, &go);
+    let held = abandonable_hook_script(&world, &go);
     let repo = world.repository(
         "local-direct",
         &held.iter().map(String::as_str).collect::<Vec<_>>(),

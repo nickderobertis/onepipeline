@@ -493,8 +493,9 @@ impl World {
     /// which is a repository whose merge path lets every publishing push
     /// through; a journey that needs verification to *refuse* states the argv
     /// [`hook_script`] writes here, and one that needs it to *hold* the push
-    /// states [`held_hook_script`]'s — which exists on Unix alone, so a journey
-    /// holding a push is one the compiler makes state where it runs.
+    /// states [`held_publication`]'s, which is let through however that journey
+    /// ends. A journey that means to *abandon* a hold reaches for
+    /// [`abandonable_hook_script`], which exists on Unix alone.
     ///
     /// The hook is installed through `core.hooksPath` on the checkout rather
     /// than as tracked content, because a file in the tree would be published by
@@ -2080,10 +2081,9 @@ fn a_double_is_placed_whole_or_not_at_all() {
 ///
 /// A closed set rather than the free argv this used to be handed, and that is the
 /// whole point of the type: the hook's third verb — `wait-for`, which blocks
-/// until the journey holding the push releases it — is [`held_hook_script`], and
-/// that one is Unix-only. There is no way to spell a blocking hook through this
-/// door, so a journey that wants one either states it Unix-only or does not
-/// compile on Windows. See [`held_hook_script`] for why that gate exists.
+/// until something writes its rendezvous — is [`held_publication`], which attaches
+/// the release that ends it. Nothing here can spell a hold, so a journey wanting
+/// one goes through a door that cannot leave it waiting.
 pub enum HookVerb {
     /// Leave a file where the session's stream directory was, so the next read of
     /// that stream meets a broken store rather than a missing one.
@@ -2112,32 +2112,116 @@ pub fn hook_script(world: &World, verb: &HookVerb) -> Vec<String> {
     hook_argv(world, &[verb.word()])
 }
 
-/// The same hook, **holding** the publishing push until `rendezvous` exists.
+/// A `pre-push` hook **holding** the publishing push, and the release that ends
+/// the hold however the journey ends.
 ///
-/// **Unix-only, and the gate is here rather than at each journey on purpose.**
-/// git runs this hook as a child of its own, two processes below whoever owns the
-/// run, and `onevcs` documents that it has no portable group teardown: off Unix
-/// its `terminate_group` is a no-op saying so, and `detach_process_group` with
-/// it. So a journey that abandons a hook still blocked here — by stopping the
-/// run, by killing the driver, or by failing an assertion before it releases the
-/// rendezvous — leaves that hook alive, and the run then does not fail but wedges
-/// on reader threads blocked against pipes the hook still holds. The
-/// `cross (windows-latest)` leg goes with it, for hours, with nothing pointing at
-/// the hook.
+/// What wedges a Windows leg is not a held push but an *abandoned* one. git runs
+/// the hook as a child of its own, two processes below whoever owns the run, and
+/// `onevcs` documents no portable group teardown off Unix — its `terminate_group`
+/// is a no-op there and `detach_process_group` with it. So a hook left blocked
+/// outlives everything that could reap it, and the run does not fail but wedges on
+/// reader threads against pipes the hook still holds.
 ///
-/// Two hand audits of the journeys that install one each missed sites. This is
-/// the same guarantee taken at compile time instead: the blocking capability does
-/// not exist on Windows, so every caller of it must be `#[cfg(unix)]` or the
-/// Windows build of this suite fails with the caller's own file and line. A red
-/// build naming the callers is the intended answer; a green build that hangs is
-/// what it replaces.
+/// This closes that by construction rather than by platform: [`Drop`] writes the
+/// rendezvous, so the push is let through on **every** way out of a journey — the
+/// assertion that failed, the [`World::until`] that ran out, the panic that
+/// unwound past both. There is no path that leaves the hook waiting, so there is
+/// nothing for a platform that cannot reap one to be caught by, and a journey
+/// built on this runs everywhere.
 ///
-/// The gate comes off — here and at every `#[cfg(unix)]` that names this
-/// function — when `onevcs` can tear down a hook's orphaned children on Windows.
-/// That is that crate's change, and the Windows half of the teardown belongs with
-/// it rather than sitting here unreachable.
+/// Declare it *after* the [`World`], so it drops *before* the world removes the
+/// tree the rendezvous lives in. Holding the value is not optional and the
+/// compiler says so: [`argv`](Self::argv) borrows from `self`, so a temporary
+/// cannot reach [`World::repository`].
+pub struct HeldPublication {
+    argv: Vec<String>,
+    rendezvous: PathBuf,
+}
+
+impl HeldPublication {
+    /// The argv [`World::repository`] installs as the repository's own hook.
+    pub fn argv(&self) -> Vec<&str> {
+        self.argv.iter().map(String::as_str).collect()
+    }
+
+    /// Let the held push through, now, because this journey has seen what it
+    /// needed to while the publication was still running.
+    pub fn release(&self) {
+        std::fs::write(&self.rendezvous, "go").expect("the held publication is released");
+    }
+}
+
+impl Drop for HeldPublication {
+    fn drop(&mut self) {
+        // Unconditional, and best-effort: a journey that already released writes
+        // the same bytes twice, and one that panicked before releasing is exactly
+        // the case this exists for. Failure here means the world's tree is already
+        // gone, which means so is the hook.
+        let _ = std::fs::write(&self.rendezvous, "go");
+    }
+}
+
+/// A merge path that holds the publishing push until this journey lets it
+/// through. See [`HeldPublication`].
+pub fn held_publication(world: &World, rendezvous: &Path) -> HeldPublication {
+    HeldPublication {
+        argv: hook_argv(world, &["wait-for", &rendezvous.to_string_lossy()]),
+        rendezvous: rendezvous.to_path_buf(),
+    }
+}
+
+/// An abandoned hold still lets the push through.
+///
+/// This is the whole reason the journeys that hold a publication run on every
+/// platform: not that they release, but that they cannot fail to. Delete the
+/// [`Drop`] and three of them go back to leaving a hook waiting on a rendezvous
+/// nobody writes, which off Unix nothing reaps — and nothing else in the suite
+/// would say so, because on Unix the run's own group teardown covers for it.
+// llmlint: ignore-block[tests_mirror_real_usage] this holds the suite's own scaffolding,
+// not a journey: the property is what happens when a journey is abandoned, which no
+// journey can assert about itself. The journeys built on it are `lifecycle.rs`'s and
+// `views.rs`'s, and those do drive the binary.
+#[test]
+fn an_abandoned_hold_is_released_anyway() {
+    let world = World::new("held-abandoned");
+    let go = world.fakes.join("push.go");
+    let abandoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _held = held_publication(&world, &go);
+        assert!(
+            !go.exists(),
+            "the rendezvous was written while the push was supposed to be held"
+        );
+        panic!("a journey that ends before it releases");
+    }));
+
+    assert!(abandoned.is_err(), "the abandonment did not happen");
+    assert!(
+        go.is_file(),
+        "an abandoned hold left {} unwritten, so the hook waiting on it outlives the \
+         journey — which is what wedges a platform that cannot reap one",
+        go.display()
+    );
+} // llmlint: ignore-end[tests_mirror_real_usage]
+
+/// The same hold, as a bare argv with **no release attached**.
+///
+/// **Unix-only, and that is the whole of the gate.** This is the hold a journey
+/// deliberately *abandons*: one that stops the publication, or kills the driver
+/// above it, and asserts on what the host does with what is left. A release on
+/// [`Drop`] would defeat the journey rather than protect it, so there is none —
+/// which leaves the orphaned hook that only a platform with group teardown can
+/// reap, and off Unix `onevcs` documents that it has none.
+///
+/// So the capability does not exist there. A journey that reaches for it must be
+/// `#[cfg(unix)]` or the Windows build fails with the caller's own file and line —
+/// the guarantee two hand audits of these journeys each failed to give. Anything
+/// that merely *holds* a push wants [`held_publication`], which cannot be
+/// abandoned and runs everywhere.
+///
+/// The gate comes off — here and at every `#[cfg(unix)]` naming this function —
+/// when `onevcs` can tear down a hook's orphaned children on Windows.
 #[cfg(unix)]
-pub fn held_hook_script(world: &World, rendezvous: &Path) -> Vec<String> {
+pub fn abandonable_hook_script(world: &World, rendezvous: &Path) -> Vec<String> {
     hook_argv(world, &["wait-for", &rendezvous.to_string_lossy()])
 }
 
@@ -2393,8 +2477,8 @@ fn the_hook_refuses_a_command_line_it_does_not_speak() {
     // `wait-for`, and yet this case runs on every platform — because the
     // rendezvous is written *first*, so the verb finds it on its first look and
     // returns without ever blocking. A hook this test could abandon still waiting
-    // is what [`held_hook_script`]'s Unix-only gate is drawn around, and this one
-    // cannot be; that is why the argv is spelled through [`hook_argv`] rather than
+    // is what [`abandonable_hook_script`]'s Unix-only gate is drawn around, and this
+    // one cannot be; that is why the argv is spelled through [`hook_argv`] rather than
     // through the gated door.
     //
     // The ordering is therefore load-bearing rather than incidental, and it is
