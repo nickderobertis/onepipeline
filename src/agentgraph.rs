@@ -1913,6 +1913,66 @@ mod tests {
         );
     }
 
+    /// The linked `oneagentgraph` holds the `engineer` bar to what a dispatch
+    /// can settle inside its own run.
+    ///
+    /// `engineer` is the role [`crate::executor`] names on `members.worker` for
+    /// an ordinary implementation node, so the bar its judge reviews against is
+    /// the linked library's file rather than anything this crate ships. Until
+    /// 0.3.5 that bar refused "done" until the behaviour was *proven end to
+    /// end* — a demand no dispatch can meet now that no gate runs inside the
+    /// publication and verification is the merge path's, so every node would
+    /// fail its review. The floor is carried by `Cargo.lock`: `^0.3.0` has
+    /// permitted 0.3.5 all along, so the resolution is the whole of the fix.
+    ///
+    /// Read through [`merge`] rather than off the YAML, because the merged
+    /// config is what a judge is handed; a bar that arrived some other way is
+    /// not the one under review. Both halves are asserted — that the demand is
+    /// gone, and that what replaced it still reviews the change the member
+    /// produced — so a resolution that softened the bar rather than narrowing
+    /// it fails here too.
+    ///
+    /// [`merge`]: oneagentgraph::persona::merge
+    #[test]
+    fn the_linked_oneagentgraph_holds_the_engineer_bar_to_what_a_dispatch_can_prove() {
+        let document = oneagentgraph::persona::shipped("engineer")
+            .expect("the linked oneagentgraph ships the role this crate dispatches under");
+        let persona = oneagentgraph::persona::Persona::parse(document, "engineer")
+            .expect("the shipped engineer role loads");
+        // An empty base, so what the merge leaves under `user:` is the shipped
+        // role's own bar rather than an operator's layered under it.
+        let effective = oneagentgraph::persona::merge("{}\n", "an empty base config", &persona)
+            .expect("the shipped engineer role layers onto a base config");
+        // A bar is a wrapped block scalar, so match on its words and not its
+        // line breaks.
+        let stance = effective["user"]["persona"]
+            .as_str()
+            .expect("the engineer role hands its judge a stance")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        assert!(
+            !stance.contains("proven end to end"),
+            "the linked oneagentgraph's `engineer` bar still refuses to accept work until it is \
+             proven end to end, which no dispatch can satisfy from inside its own run: the \
+             correction ships in 0.3.5, `Cargo.toml`'s `^0.3.0` has permitted that release all \
+             along, so `Cargo.lock` is stale and `cargo update -p oneagentgraph` is the whole of \
+             the fix — editing the requirement changes nothing:\n{stance}"
+        );
+        for demand in [
+            "the task's acceptance criteria are met",
+            "proven at the level this run can reach",
+            "no regression is introduced in what it touched",
+        ] {
+            assert!(
+                stance.contains(demand),
+                "the linked oneagentgraph's `engineer` bar no longer demands {demand:?}, so \
+                 narrowing what it may ask for has softened what it must:\n{stance}"
+            );
+        }
+    }
+
     /// An envelope is the same value whichever way it crossed.
     ///
     /// This is the *content* half of the streaming promise: the subprocess path

@@ -2753,7 +2753,7 @@ fn unusable_session_records() -> String {
 /// Adopting a run that had a dispatch in flight, which is what `adopt` is for.
 ///
 /// The driver dies mid-dispatch and the work does not: `onevcs` commits the
-/// worktree onto the session's branch before it gates, so the branch holds what
+/// worktree onto the session's branch before it pushes, so the branch holds what
 /// the worker had done and the session is the only thing that knows where.
 /// Adoption used to drop the record and nothing else, which left that branch
 /// unreferenced and unnamed anywhere a manager looks — so the branch is named
@@ -2767,10 +2767,10 @@ fn unusable_session_records() -> String {
 #[test]
 fn adopting_a_run_whose_dispatch_was_in_flight_leaves_that_dispatchs_work_reachable() {
     let world = World::new("driver-adopt-inflight");
-    // A gate this journey holds, which is how a dispatch is caught in flight
-    // with its work already committed.
-    let go = world.fakes.join("gate.go");
-    let held = crate::harness::gate_script(&world, &["wait-for", &go.to_string_lossy()]);
+    // A `pre-push` hook this journey holds, which is how a dispatch is caught in
+    // flight with its work already committed.
+    let go = world.fakes.join("push.go");
+    let held = crate::harness::hook_script(&world, &["wait-for", &go.to_string_lossy()]);
     let repo = world.repository(
         "local-direct",
         &held.iter().map(String::as_str).collect::<Vec<_>>(),
@@ -2795,11 +2795,11 @@ fn adopting_a_run_whose_dispatch_was_in_flight_leaves_that_dispatchs_work_reacha
         .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("the run's first driver starts");
-    world.until("the dispatch to reach its gate", |world| {
+    world.until("the dispatch to reach its merge path", |world| {
         world
             .journal(&run)
             .iter()
-            .any(|event| event["source"] == "vcs" && event["kind"] == "gate-started")
+            .any(|event| event["source"] == "vcs" && event["kind"] == "merge-queued")
     });
     let abandoned = world
         .events_of(&run, "session-opened")
@@ -2821,9 +2821,9 @@ fn adopting_a_run_whose_dispatch_was_in_flight_leaves_that_dispatchs_work_reacha
         world.run(&["status", &run]).stdout.contains("DRIVER DEAD")
     });
 
-    // The gate the dead driver was held at, released so the adoption's own
+    // The merge path the dead driver was held at, released so the adoption's own
     // publication can finish.
-    world.release("gate.go");
+    world.release("push.go");
 
     let adopted = world.run(&["adopt", &run]);
     adopted.exited(0);

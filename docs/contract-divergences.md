@@ -417,9 +417,9 @@ the identity's turn, or keep the marker and make the elapsed the reported
 duration.**
 
 The contract's eight-way breakdown separates the time a publication spends
-waiting for an identity's merge queue from the time its gate runs and from the
-agent's. `onevcs` emits `lock-wait` **after** `queue::turn` has returned, with
-the seconds it waited in the payload, and emits `lock-acquired` immediately
+waiting for an identity's merge queue from the rest of that publication and from
+the agent's. `onevcs` emits `lock-wait` **after** `queue::turn` has returned,
+with the seconds it waited in the payload, and emits `lock-acquired` immediately
 after — so the interval between the two markers is the cost of writing two
 records however long the wait was, and `telemetry`'s `lock_wait` bucket reads
 0ms or 1ms on every real run. The wall time lands in whichever bucket precedes
@@ -433,8 +433,9 @@ kept the bucket looking measured.
 own `elapsed` payload rather than from the interval between two markers. It
 changes how `telemetry::of_run` folds phases and the sums the checked-in golden
 holds, which is a change of its own.
-`telemetry_separates_gate_and_lock_time_from_agent_time` holds the gate half to a
-real held stretch, asserts the elapsed is on the record, and bounds the bucket
+`telemetry_separates_publication_and_lock_time_from_agent_time` holds the other
+half to a real held stretch — the publishing push, held at the repository's own
+`pre-push` hook — asserts the elapsed is on the record, and bounds the bucket
 below what it calls a measurable stretch — so it fails, naming the wait, if the
 bucket ever spans one again. It does **not** assert an exact number: the two
 markers carry real millisecond timestamps, so under coverage instrumentation

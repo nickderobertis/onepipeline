@@ -6,9 +6,9 @@
 //! rather than spawning it, so there is no subprocess boundary to stand in at —
 //! every journey below drives the real repository side, over a real bare-
 //! repository origin on disk, and what a journey states instead is the world that
-//! library reads: the repository's rules, its gate command, and — at `onevcs`'s
-//! own `ONEVCS_GH` override — what GitHub does with the change request it is
-//! handed.
+//! library reads: the repository's rules, the `pre-push` hook its merge path
+//! verifies a publishing push with, and — at `onevcs`'s own `ONEVCS_GH` override
+//! — what GitHub does with the change request it is handed.
 //!
 //! Nothing *inside* `onepipeline` is substituted either: it is driven as a
 //! compiled subprocess.
@@ -474,10 +474,22 @@ impl World {
     ///
     /// `publication` is the policy — `local-direct` reaches the base with git
     /// alone and asks no host for anything; a `change-*` policy opens a change
-    /// request through [`ONEVCS_GH`](World::cmd)'s stand-in. `gate` is the
-    /// command that verifies the branch, which is where a journey states a gate
-    /// that rejects or one that holds.
-    pub fn repository(&self, publication: &str, gate: &[&str]) -> Repository {
+    /// request through [`ONEVCS_GH`](World::cmd)'s stand-in.
+    ///
+    /// `pre_push` is the repository's **own `pre-push` hook**, which is what
+    /// verifies a local-publishing change now that nothing in this stack runs a
+    /// gate of its own: `onevcs` names none, and a remote-publishing identity is
+    /// verified by the host's required checks instead. `&[]` installs no hook,
+    /// which is a repository whose merge path lets every publishing push
+    /// through; a journey that needs verification to refuse, or to hold, states
+    /// the argv here and [`hook_script`] writes the verbs.
+    ///
+    /// The hook is installed through `core.hooksPath` on the checkout rather
+    /// than as tracked content, because a file in the tree would be published by
+    /// the very journeys that install it. `onevcs` carries that setting into the
+    /// clone a session cuts — `git clone` copies no repository-local config — so
+    /// the hook git runs at the publishing push is this one.
+    pub fn repository(&self, publication: &str, pre_push: &[&str]) -> Repository {
         let origin = self.root.join("origin.git");
         let checkout = self.root.join("service");
         let home = self.onevcs_home();
@@ -500,15 +512,28 @@ impl World {
         );
         git(self, &checkout, &["push", "-u", "origin", "main"]);
 
+        // Version 3, which is the shape with no `gate:` in it at all: what
+        // verifies a change is the repository's own merge path, so the rules file
+        // says only how the change is published and whether it needs approving.
         std::fs::write(
             home.join("rules.yml"),
             format!(
-                "version: 2\nrules: []\ndefault:\n  publication: {publication}\n  approvals: \
-                 none\n  gate:\n    command: {}\n",
-                serde_json::json!(gate)
+                "version: 3\nrules: []\ndefault:\n  publication: {publication}\n  approvals: \
+                 none\n"
             ),
         )
         .expect("the rules file is written");
+
+        if !pre_push.is_empty() {
+            let hooks = self.root.join("hooks");
+            std::fs::create_dir_all(&hooks).expect("a hooks directory");
+            install_hook(&hooks.join("pre-push"), pre_push);
+            git(
+                self,
+                &checkout,
+                &["config", "core.hooksPath", &hooks.to_string_lossy()],
+            );
+        }
 
         // A hosted origin, so the identity resolves to a host slug and a
         // `change-*` policy has somewhere to open a change request. It names the
@@ -565,13 +590,18 @@ impl World {
     /// [`agentgraph_cmd`](World::agentgraph_cmd)'s callers must.
     ///
     /// The host stand-in [`cmd`](World::cmd) wires up is **removed** here, and
-    /// that removal is the whole difference. Left in place it would point the
-    /// one credentialled journey in this repository at a program that answers
-    /// every `gh` call out of a scratch directory — a smoke that passes without
-    /// having talked to GitHub, which is the defect that tier exists to remove.
+    /// so are the check-polling bounds it shortens. Left in place, the first
+    /// would point the one credentialled journey in this repository at a program
+    /// that answers every `gh` call out of a scratch directory — a smoke that
+    /// passes without having talked to GitHub, which is the defect that tier
+    /// exists to remove. The second would hold a real host to a two-second
+    /// answer: behind the stand-in there is nothing to wait for, and against
+    /// GitHub there is, so this tier waits on the sibling's own defaults.
     pub fn real_cmd(&self, args: &[&str]) -> Command {
         let mut command = self.agentgraph_cmd(args);
         command.env_remove("ONEVCS_GH");
+        command.env_remove("ONEVCS_CHECKS_POLL_SECONDS");
+        command.env_remove("ONEVCS_CHECKS_TIMEOUT_SECONDS");
         command
     }
 
@@ -689,6 +719,67 @@ impl World {
         let dir = self.root.join("empty-path");
         std::fs::create_dir_all(&dir).expect("a directory with nothing in it");
         dir
+    }
+
+    /// A `PATH` holding **only** what a dispatch resolves by name, and nothing
+    /// else this host happens to have installed.
+    ///
+    /// Between [`empty_path`](Self::empty_path) — where a dispatch is refused
+    /// because it cannot ask when its own process started — and the inherited
+    /// `PATH`, where every program an operator installed is in reach. A journey
+    /// whose premise is that some *particular* program cannot be resolved needs
+    /// this one: it has to name what the launch may find rather than what it may
+    /// not, because the set it may not find is everything on the host and no
+    /// journey can enumerate that.
+    ///
+    /// On Unix that set is `ps`, which `sys::process_start_token` asks when a
+    /// dispatch is registered, delegated to the real one by absolute path.
+    /// Windows asks the process itself, so there is nothing to hold there and
+    /// this is an empty directory.
+    #[cfg(unix)]
+    pub fn path_with_nothing_but_a_working_ps(&self) -> PathBuf {
+        self.path_with_ps("only-ps", &format!("exec {} \"$@\"", real_ps().display()))
+    }
+
+    /// A `PATH` holding only what a dispatch resolves by name — which on Windows
+    /// is nothing, because the start token is read off the process itself.
+    #[cfg(windows)]
+    pub fn path_with_nothing_but_a_working_ps(&self) -> PathBuf {
+        self.empty_path()
+    }
+
+    /// Where `name` resolves on the `PATH` a built command carries, if it does.
+    ///
+    /// For a journey to state its premise as a *checked fact* rather than as a
+    /// comment. A fall-through journey needs a candidate the launch cannot
+    /// resolve, and left to the inherited `PATH` that premise is the host's to
+    /// decide: with `codex` installed, oneharness resolved it, ran it, and the
+    /// chain never advanced — so the journey failed twenty seconds later over an
+    /// empty event list rather than at the premise it had lost.
+    ///
+    /// The command's own `PATH` and not this process's, because that is the one
+    /// deciding. The suffixes are tried on Windows only, where a bare name never
+    /// names a program: what this asks is whether the name is reachable *at all*,
+    /// so it errs towards finding one.
+    pub fn resolved_on(command: &Command, name: &str) -> Option<PathBuf> {
+        let path = command
+            .get_envs()
+            .find(|(key, _)| *key == "PATH")
+            .and_then(|(_, value)| value)
+            .map(std::ffi::OsString::from)
+            .unwrap_or_else(|| std::env::var_os("PATH").unwrap_or_default());
+        let suffixes: &[&str] = if cfg!(windows) {
+            &["", ".exe", ".cmd", ".bat", ".com"]
+        } else {
+            &[""]
+        };
+        std::env::split_paths(&path)
+            .flat_map(|dir| {
+                suffixes
+                    .iter()
+                    .map(move |suffix| dir.join(format!("{name}{suffix}")))
+            })
+            .find(|candidate| candidate.is_file())
     }
 
     /// A `PATH` whose `ps` runs and **fails**, for the journeys about what a
@@ -1940,40 +2031,67 @@ fn a_double_is_placed_whole_or_not_at_all() {
     let _ = std::fs::remove_dir_all(&dir);
 } // llmlint: ignore-end[tests_mirror_real_usage]
 
-/// A repository gate command, written into this world as a script.
+/// The verbs a repository's own `pre-push` hook answers, written into this world
+/// as a script and handed back as the argv that runs it.
 ///
 /// A script rather than a compiled binary, and per platform rather than one
 /// artifact, because the alternative was a workspace member shipping a Rust
-/// program to stand in for three shell one-liners. `onevcs` runs the gate as
-/// `Command::new(argv[0])`, which on Windows cannot start a `.bat` directly, so
-/// each platform's interpreter leads its own argv.
+/// program to stand in for three shell one-liners. The argv is what
+/// [`install_hook`] puts behind the hook git executes, and on Windows nothing can
+/// start a `.bat` directly, so each platform's interpreter leads its own.
 ///
-/// The three verbs are what the lifecycle and telemetry journeys state: a gate
-/// that blocks until a file appears, one that breaks the sibling's event stream
-/// under it, and one that appends a line no build of that sibling can read.
-pub fn gate_script(world: &World, args: &[&str]) -> Vec<String> {
-    let mut argv = interpreted(&write_gate_script(world));
+/// The three verbs are what the lifecycle and telemetry journeys state: a merge
+/// path that blocks until a file appears, one that breaks the sibling's event
+/// stream under it, and one that appends a line no build of that sibling can
+/// read.
+pub fn hook_script(world: &World, args: &[&str]) -> Vec<String> {
+    let mut argv = interpreted(&write_hook_script(world));
     argv.extend(args.iter().map(|arg| (*arg).to_owned()));
     argv
 }
 
-/// The two halves of the gate answer the same verbs.
+/// Write `argv` at `path` as an executable `pre-push` hook.
+///
+/// git runs a hook as a program of its own, so the argv a journey states is
+/// wrapped rather than written out: one POSIX line that hands the process over to
+/// it, which is what git for Windows runs its hooks with too. `exec` rather than a
+/// call, so what git waits on — and what its refusal reports — is the verb itself
+/// and never a shell that outlived it.
+///
+/// Every word is single-quoted, because a world's scratch directory carries the
+/// journey's own name and nothing promises that a path is one shell word.
+fn install_hook(path: &Path, argv: &[&str]) {
+    let quoted: Vec<String> = argv
+        .iter()
+        .map(|word| format!("'{}'", word.replace('\'', r"'\''")))
+        .collect();
+    std::fs::write(path, format!("#!/bin/sh\nexec {}\n", quoted.join(" ")))
+        .expect("the pre-push hook is written");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+            .expect("the pre-push hook is executable");
+    }
+}
+
+/// The two halves of the hook answer the same verbs.
 ///
 /// One contract in two languages, because no platform runs both — so a verb
 /// added to one and not the other is a journey that passes here and hangs on the
-/// Windows leg, a fortnight later, with nothing pointing at the gate. Held by
+/// Windows leg, a fortnight later, with nothing pointing at the hook. Held by
 /// reading the scripts rather than by generating one from the other: a generator
 /// would need a third source, and what actually has to agree is the verb each
 /// half dispatches on.
 // llmlint: ignore-block[tests_mirror_real_usage] this is a drift gate over the suite's own
 // scaffolding, not a journey: what it holds is that two files stay in step, and neither
 // file is reachable from any interface a user of this crate has. There is nothing to drive
-// through the binary here — the gate is a command `onevcs` runs on the operator's behalf,
-// and the journeys that exercise it are `lifecycle.rs`'s and `views.rs`'s, which do drive
-// the binary. Reading the two scripts is the only way to compare them, because no platform
-// executes both.
+// through the binary here — the hook is the repository's own, which git runs at the
+// publishing push, and the journeys that exercise it are `lifecycle.rs`'s and `views.rs`'s,
+// which do drive the binary. Reading the two scripts is the only way to compare them,
+// because no platform executes both.
 #[test]
-fn both_gate_scripts_answer_the_same_verbs() {
+fn both_hook_scripts_answer_the_same_verbs() {
     let verb = |candidate: &str| {
         !candidate.is_empty()
             && candidate
@@ -1983,14 +2101,14 @@ fn both_gate_scripts_answer_the_same_verbs() {
     // `sh`'s `case` arms, which are the only lines ending in a bare `)` whose
     // whole body is a verb — `*)` and every expression that happens to close a
     // parenthesis are filtered out by the alphabet.
-    let shell: Vec<&str> = include_str!("gate.sh")
+    let shell: Vec<&str> = include_str!("hook.sh")
         .lines()
         .map(str::trim)
         .filter_map(|line| line.strip_suffix(')'))
         .filter(|candidate| verb(candidate))
         .collect();
     // `cmd`'s dispatch, which is one `if "%~1"=="VERB" goto …` per verb.
-    let batch: Vec<&str> = include_str!("gate.bat")
+    let batch: Vec<&str> = include_str!("hook.bat")
         .lines()
         .map(str::trim)
         .filter_map(|line| line.strip_prefix("if \"%~1\"==\""))
@@ -1999,7 +2117,7 @@ fn both_gate_scripts_answer_the_same_verbs() {
         .collect();
     assert_eq!(
         shell, batch,
-        "the gate scripts have drifted: one platform answers verbs the other does not"
+        "the hook scripts have drifted: one platform answers verbs the other does not"
     );
     // The extraction is only a drift gate while it still finds anything: a
     // rewrite that changed either dispatch's shape would otherwise compare two
@@ -2007,15 +2125,15 @@ fn both_gate_scripts_answer_the_same_verbs() {
     assert_eq!(
         shell,
         ["wait-for", "break-streams", "append-future-event"],
-        "the gate scripts no longer dispatch the way this reads them"
+        "the hook scripts no longer dispatch the way this reads them"
     );
     // The refusal names the verbs, so it is a third statement of the same list
-    // and drifts the same way — and it is the one a person reads when the gate
+    // and drifts the same way — and it is the one a person reads when the hook
     // has just refused them, so a verb missing from it is worse than a verb
     // missing from a comment.
     for (script, source) in [
-        ("gate.sh", include_str!("gate.sh")),
-        ("gate.bat", include_str!("gate.bat")),
+        ("hook.sh", include_str!("hook.sh")),
+        ("hook.bat", include_str!("hook.bat")),
     ] {
         let usage = source
             .lines()
@@ -2030,7 +2148,7 @@ fn both_gate_scripts_answer_the_same_verbs() {
     }
 } // llmlint: ignore-end[tests_mirror_real_usage]
 
-/// The other half of that contract — what the gate *refuses*, and with what —
+/// The other half of that contract — what the hook *refuses*, and with what —
 /// held by running this platform's own script.
 ///
 /// The verb list is the part two files can be compared on; the exit code and
@@ -2038,50 +2156,50 @@ fn both_gate_scripts_answer_the_same_verbs() {
 /// halves. So each platform's leg proves its own: read together across the CI
 /// matrix, the two tests are the whole drift gate.
 ///
-/// Run the way `onevcs` runs a gate — `Command::new(argv[0])` with the rest as
-/// arguments — because a refusal that only holds when invoked some other way is
-/// not the one a publication would meet. Only the refusing command lines are
-/// driven: each of them exits before the verb does anything, so this needs no
-/// session and leaves nothing behind.
+/// Run the way the installed hook runs it — `Command::new(argv[0])` with the
+/// rest as arguments — because a refusal that only holds when invoked some other
+/// way is not the one a publishing push would meet. Only the refusing command
+/// lines are driven: each of them exits before the verb does anything, so this
+/// needs no session and leaves nothing behind.
 ///
 /// The state root is handed over even though nothing here reaches it, and that
 /// is the point: without it every one of these would refuse for the *missing*
 /// root, and the test would pass against a script that had lost its argument
 /// checks entirely.
 #[test]
-fn the_gate_refuses_a_command_line_it_does_not_speak() {
-    let world = World::new("gate-refusals");
+fn the_hook_refuses_a_command_line_it_does_not_speak() {
+    let world = World::new("hook-refusals");
     for argv in [
         vec!["nonsense"],
         vec!["wait-for"],
         vec!["wait-for", "one", "two"],
         vec!["break-streams", "extra"],
         vec!["append-future-event", "extra"],
-        // Not a session worktree, which is the layout the token is read out of.
+        // Not under a session's run root, which is where the stream is found.
         vec!["append-future-event"],
     ] {
-        let command = gate_script(&world, &argv);
+        let command = hook_script(&world, &argv);
         let refused = Command::new(&command[0])
             .args(&command[1..])
             .current_dir(&world.root)
             .env("ONEVCS_HOME", world.onevcs_home())
             .output()
-            .expect("the gate runs");
+            .expect("the hook runs");
         let said = String::from_utf8_lossy(&refused.stderr).into_owned();
         assert_eq!(
             refused.status.code(),
             Some(64),
-            "the gate answered {argv:?} with {:?}, not the usage refusal: {said}",
+            "the hook answered {argv:?} with {:?}, not the usage refusal: {said}",
             refused.status.code()
         );
         assert!(
             said.contains("the verbs are:"),
-            "the gate refused {argv:?} without naming the verbs it does speak: {said}"
+            "the hook refused {argv:?} without naming the verbs it does speak: {said}"
         );
     }
 }
 
-/// The interpreter that leads a gate script's argv on this platform.
+/// The interpreter that leads a hook script's argv on this platform.
 #[cfg(windows)]
 fn interpreted(script: &Path) -> Vec<String> {
     vec![
@@ -2091,13 +2209,13 @@ fn interpreted(script: &Path) -> Vec<String> {
     ]
 }
 
-/// The interpreter that leads a gate script's argv on this platform.
+/// The interpreter that leads a hook script's argv on this platform.
 #[cfg(not(windows))]
 fn interpreted(script: &Path) -> Vec<String> {
     vec!["sh".to_owned(), script.to_string_lossy().into_owned()]
 }
 
-/// The gate script for this platform, written into the world's own scratch.
+/// The hook script for this platform, written into the world's own scratch.
 ///
 /// Written with **CRLF**, and that is a correctness requirement rather than a
 /// convention. `cmd.exe` does not read a batch file line by line: it seeks by
@@ -2111,18 +2229,18 @@ fn interpreted(script: &Path) -> Vec<String> {
 /// from the repository's line-ending policy for a file no editor on this side
 /// ever opens.
 #[cfg(windows)]
-fn write_gate_script(world: &World) -> PathBuf {
-    let path = world.root.join("gate.bat");
-    std::fs::write(&path, include_str!("gate.bat").replace('\n', "\r\n"))
-        .expect("the gate script is written");
+fn write_hook_script(world: &World) -> PathBuf {
+    let path = world.root.join("hook.bat");
+    std::fs::write(&path, include_str!("hook.bat").replace('\n', "\r\n"))
+        .expect("the hook script is written");
     path
 }
 
-/// The gate script for this platform, written into the world's own scratch.
+/// The hook script for this platform, written into the world's own scratch.
 #[cfg(not(windows))]
-fn write_gate_script(world: &World) -> PathBuf {
-    let path = world.root.join("gate.sh");
-    std::fs::write(&path, include_str!("gate.sh")).expect("the gate script is written");
+fn write_hook_script(world: &World) -> PathBuf {
+    let path = world.root.join("hook.sh");
+    std::fs::write(&path, include_str!("hook.sh")).expect("the hook script is written");
     path
 }
 

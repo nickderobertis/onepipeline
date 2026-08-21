@@ -10,8 +10,8 @@
 //! per-dispatch durations: nodes overlap, so a sum of durations exceeds the
 //! elapsed time and the answer stops meaning anything. Where two nodes are doing
 //! different things across one millisecond, the millisecond is named by the
-//! **more specific** of the two — which is what keeps gate time and lock waiting
-//! separable from agent time instead of buried in it.
+//! **more specific** of the two — which is what keeps publication time and lock
+//! waiting separable from agent time instead of buried in it.
 //!
 //! A bucket or a party nothing in the stack measures is served **absent**. A
 //! zero reads as a measurement, and an unmeasured span reported as zero is the
@@ -138,6 +138,13 @@ pub enum BucketName {
     /// Wall time an LLM-lint pass was running.
     Llmlint,
     /// Wall time a repository's own verification gate was running.
+    ///
+    /// **Served absent by every run this build produces.** Nothing in the stack
+    /// runs a gate any more: `onevcs` names none, and what verifies a change is
+    /// the repository's own merge path — the host's required checks, or the
+    /// `pre-push` hook git runs at the publishing push, whose wall time is the
+    /// publication's. The bucket is kept because the contract fixes the eight,
+    /// and it is still filled from a store an older `onevcs` wrote.
     Gate,
     /// Wall time a publication was in progress — the push, the change request,
     /// the checks, and the merge.
@@ -301,6 +308,9 @@ enum Phase {
     /// Blocked on the identity's lock.
     LockWait,
     /// The repository's own verification gate is running.
+    ///
+    /// Reachable only from a store an older `onevcs` wrote: no release since the
+    /// merge path became the only verifier emits the kinds below.
     Gate,
     /// Pushing, opening the change, waiting on its checks, merging.
     Publication,
@@ -318,8 +328,10 @@ impl Phase {
             | "recovery-attested" => Some(Self::Setup),
             "lock-wait" => Some(Self::LockWait),
             "gate-started" => Some(Self::Gate),
-            // The verdict is the gate ending, and what follows a passed gate is
-            // the publication it gates.
+            // The verdict is the gate ending, and what followed a passed gate was
+            // the publication it gated. Both kinds are read for a store an older
+            // `onevcs` wrote; no release since the merge path became the only
+            // verifier emits either.
             "gate-verdict" | "push" | "change-opened" | "change-check" | "merge-queued"
             | "change-merged" | "merge-completed" | "sync-conflict" => Some(Self::Publication),
             _ => None,
@@ -402,6 +414,7 @@ pub fn of_run(paths: &RunPaths, events: &[Envelope]) -> RunTelemetry {
     let mut phases: BTreeMap<String, Phase> = BTreeMap::new();
     let mut judging: BTreeSet<String> = BTreeSet::new();
     let mut judge_measured = false;
+    let mut gate_measured = false;
     let mut previous = first;
 
     for (ms, event) in &stamps {
@@ -438,6 +451,7 @@ pub fn of_run(paths: &RunPaths, events: &[Envelope]) -> RunTelemetry {
                 }
                 kind => {
                     if let Some(phase) = Phase::of(kind) {
+                        gate_measured |= phase == Phase::Gate;
                         phases.insert(whose, phase);
                     }
                 }
@@ -485,6 +499,13 @@ pub fn of_run(paths: &RunPaths, events: &[Envelope]) -> RunTelemetry {
         // producer stamped one. Absent, the judge's time is inside `agent` and
         // saying `0` here would claim it was not spent.
         BucketName::Judge if !judge_measured => None,
+        // Nothing in this stack runs a gate: what verifies a change is the
+        // repository's own merge path, whose wall time is the publication's. So
+        // a run this build produces measures no gate at all, and a `0` would
+        // claim a tier ran and cost nothing rather than that none ran. A store
+        // an older `onevcs` wrote still carries the records, and there the
+        // bucket is a measurement again.
+        BucketName::Gate if !gate_measured => None,
         _ => Some(totals.get(&name).copied().unwrap_or(0)),
     };
     let mut buckets: Vec<Bucket> = BucketName::ALL
@@ -521,8 +542,8 @@ pub fn of_run(paths: &RunPaths, events: &[Envelope]) -> RunTelemetry {
 /// What the run is doing across one span, given everything open across it.
 ///
 /// One bucket per millisecond, and the most specific open state names it: a
-/// gate running while another node's agent works is *gate* time, which is what
-/// makes gate and lock waiting answerable at all.
+/// publication running while another node's agent works is *publication* time,
+/// which is what makes a publication and a lock wait answerable at all.
 fn now(
     phases: &BTreeMap<String, Phase>,
     judging: &BTreeSet<String>,
@@ -828,8 +849,16 @@ mod tests {
         assert_eq!(telemetry.settled_done, 1);
     }
 
-    /// The split the whole eight-way breakdown exists for: a gate run and a
-    /// lock wait are answerable *apart from* the agent time they sit inside.
+    /// The split the whole eight-way breakdown exists for: a stretch of a
+    /// publication and a lock wait are answerable *apart from* the agent time
+    /// they sit inside.
+    ///
+    /// Driven over the kinds an **older** `onevcs` wrote, because they are the
+    /// only ones that reach the `gate` bucket: no release since the repository's
+    /// merge path became the only verifier emits a `gate-started`. A store an
+    /// operator already has still carries them, and reading one must still add
+    /// up — `telemetry_separates_publication_and_lock_time_from_agent_time` in
+    /// `tests/e2e/views.rs` is the same split over a run this build produces.
     #[test]
     fn gate_time_and_lock_waiting_are_separable_from_agent_time() {
         let events = vec![
@@ -843,7 +872,8 @@ mod tests {
             // The session is opened before the turn runs in it.
             session(10, "session-opened", Some("service")),
             turn(20, "turn-started", Some("service"), &[]),
-            // Then the publication: a lock wait, a gate, and the change.
+            // Then the publication: a lock wait, a gate that build ran, and the
+            // change.
             session(50, "lock-wait", Some("service")),
             session(60, "lock-acquired", Some("service")),
             session(70, "gate-started", Some("service")),
@@ -864,7 +894,7 @@ mod tests {
             telemetry.buckets
         );
         // The workspace before the turn ran in it, and again between the lock
-        // and the gate.
+        // and the gate that build ran.
         assert_eq!(bucket_of(&telemetry, BucketName::Setup), Some(20_000));
         // The turn itself, and the stretch after the session closed with the
         // node still in flight.
