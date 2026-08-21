@@ -2692,11 +2692,15 @@ fn an_adopted_runs_worker_can_ask_its_manager() {
     );
 }
 
+// Reached only from the in-flight adoption journey below, which is `#[cfg(unix)]`
+// for the reason stated there.
+
 /// The prefix every branch those records name carries.
 ///
 /// One prefix, so the journey can tell what it wrote from what the run did
 /// without knowing which malformation is which — and so a line of `results`
 /// carrying any of them fails the assertion that reads it.
+#[cfg(unix)]
 const FORGED: &str = "onevcs/forged";
 
 /// A branch name carrying what reads as another node's line in `results`.
@@ -2704,9 +2708,11 @@ const FORGED: &str = "onevcs/forged";
 /// The forgery is the point: `results` is read line by line, so a value that
 /// carries a newline would put a record about a node nobody dispatched into a
 /// view a manager reads.
+#[cfg(unix)]
 const FORGED_LINE: &str = "onevcs/forged-line\n  audit                    running";
 
 /// The branch a record about a *different* session names.
+#[cfg(unix)]
 const FORGED_ELSEWHERE: &str = "onevcs/forged-elsewhere";
 
 /// What the dispatch puts on its session's own stream: records the merged
@@ -2718,6 +2724,7 @@ const FORGED_ELSEWHERE: &str = "onevcs/forged-elsewhere";
 /// session record does. Each is written after the real record, so a reader that
 /// took any of them would take it over the real one and every assertion in the
 /// journey would then be about the wrong session.
+#[cfg(unix)]
 fn unusable_session_records() -> String {
     json!([
         {"branch": FORGED_LINE},
@@ -2764,6 +2771,17 @@ fn unusable_session_records() -> String {
 /// The second half is the reader's boundary: the same run's stream carries
 /// records nothing can be acted on, and none of them may take the real one's
 /// place. See [`unusable_session_records`].
+///
+/// **Unix-only, because catching a dispatch in flight means killing the driver
+/// while the repository's own `pre-push` hook holds the publishing push.** That
+/// leaves the hook, and the `git push` above it, running two processes below the
+/// pid killed; `onevcs` documents no portable group teardown off Unix, so
+/// nothing there reaps them and the release below lets that tree finish rather
+/// than collecting it. What is given up is this journey's Windows coverage
+/// alone — `main` runs it there over `onevcs`'s *gate*, a direct child of the
+/// killed process that never reaches a push. The gate comes off when `onevcs`
+/// can tear down a hook's orphaned children on Windows.
+#[cfg(unix)]
 #[test]
 fn adopting_a_run_whose_dispatch_was_in_flight_leaves_that_dispatchs_work_reachable() {
     let world = World::new("driver-adopt-inflight");
