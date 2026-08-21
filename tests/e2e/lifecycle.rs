@@ -1747,6 +1747,100 @@ fn a_push_the_merge_path_refuses_is_redispatched_carrying_what_the_remote_wrote(
     );
 }
 
+/// A run cancelled between a preserving failure and the attempt that would
+/// answer it settles on the failure, not on the cancellation.
+///
+/// The window is held open rather than raced for: the repository's gate blocks
+/// until this test releases it, so the cancel lands while the publication is
+/// still running and everything after the release — the push, its refusal, the
+/// preserving classification — happens unconditionally. Dispatched again into a
+/// run whose teardown is on its way to reap it, the node would settle as the
+/// cancellation and lose the publication failure, which is the useful half of
+/// what happened.
+#[test]
+fn a_cancel_that_lands_before_the_next_attempt_settles_on_the_publication_failure() {
+    let world =
+        World::new("lifecycle-cancelledretry").with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "2");
+    let go = world.fakes.join("gate.go");
+    let held = gate_script(&world, &["wait-for", &go.to_string_lossy()]);
+    let repo = world.repository(
+        "change-auto",
+        &held.iter().map(String::as_str).collect::<Vec<_>>(),
+    );
+    world.script("service.work", "the worker wrote this\n");
+    refuse_pushed_branches(&world, &repo);
+
+    let path = world.plan(
+        "cancelledretry",
+        &plan_of("cancelledretry", vec![lifecycle("service", &[])]),
+    );
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+    let run = "cancelledretry".to_string();
+
+    world.until("the publication to reach its gate", |world| {
+        world
+            .journal(&run)
+            .iter()
+            .any(|event| event["source"] == "vcs" && event["kind"] == "gate-started")
+    });
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({"version": 1, "commands": [{"op": "cancel", "id": "service"}]}).to_string(),
+        )
+        .exited(0);
+    world.until("the cancel to be committed", |world| {
+        !world.events_of(&run, "edit-committed").is_empty()
+    });
+    std::fs::write(&go, "go").expect("the gate is released");
+
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+    // The settlement the loop reached is the publication's, under its own word:
+    // that is what an operator has to act on, and it is the half a node
+    // dispatched again into a cancelled run would have lost.
+    let settled = &world.events_of(&run, "node-settled")[0]["payload"];
+    assert_eq!(
+        settled["status"],
+        "failed",
+        "{settled}\n{}",
+        why(&world, &run)
+    );
+    assert_eq!(settled["outcome"], "push-rejected", "{settled}");
+    let detail = settled["detail"]
+        .as_str()
+        .expect("the settlement says why")
+        .to_string();
+    assert!(
+        detail.contains("1 publication attempt on"),
+        "the settlement does not name the one attempt that was made: {detail}"
+    );
+    // And no second attempt, though the budget had one left.
+    assert_eq!(
+        dispatches_of(&world, &run, "service").len(),
+        1,
+        "a cancelled run was dispatched again\n{}",
+        why(&world, &run)
+    );
+
+    // The run's own document reports it `parked`, because that is what the
+    // cancel made it and a parked node is one a planner can requeue. The failure
+    // is not lost to that: the outcome beside it is the publication's.
+    let node = world.run_json(&run, "result.json")["nodes"][0].clone();
+    assert_eq!(node["status"], "parked", "{node}\n{}", why(&world, &run));
+    assert_eq!(node["outcome"], "push-rejected", "{node}");
+    // And the work is on the branch the one attempt was made on, which is what
+    // a requeue would continue.
+    let branch = node["branch"].as_str().expect("the node names its branch");
+    assert!(
+        repo.has_branch(&world, branch),
+        "the branch the cancelled attempt was made on was not handed back"
+    );
+}
+
 /// Make the bare origin refuse every branch a publication pushes.
 ///
 /// A real `pre-receive` hook, installed after the seed push so the base branch is
@@ -2312,6 +2406,62 @@ fn a_change_auto_publication_the_host_never_lands_settles_checks_unsettled() {
     assert!(
         repo.has_branch(&world, branch),
         "the branch the unlanded change is on was not handed back"
+    );
+}
+
+/// And the same ending is preserving, which is only visible where the budget
+/// leaves room for the attempt that proves it.
+///
+/// The journey above states the ending under a budget of one, so nothing there
+/// distinguishes `checks-unsettled` from a failure that settles where it stands.
+/// This one gives it two: the host still never lands anything, so the second
+/// attempt meets the same bound — and that it *ran at all*, on the branch the
+/// first attempt handed back, is the whole of what "preserving" means here.
+#[test]
+fn a_change_the_host_never_lands_is_redispatched_on_the_branch_it_preserved() {
+    let world =
+        World::new("lifecycle-unsettledagain").with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "2");
+    let repo = world.repository("change-auto", &["true"]);
+    world.script("service.work", "the worker wrote this\n");
+    // No `gh.merged`, on either attempt: this host takes the change and holds it.
+    let run = settle(&world, "unsettledagain", vec![lifecycle("service", &[])]);
+
+    let node = world.run_json(&run, "result.json")["nodes"][0].clone();
+    assert_eq!(node["status"], "failed", "{node}\n{}", why(&world, &run));
+    assert_eq!(node["outcome"], "checks-unsettled", "{node}");
+
+    let dispatched = dispatches_of(&world, &run, "service");
+    assert_eq!(
+        dispatched.len(),
+        2,
+        "an unsettled change was not re-dispatched on its preserved branch\n{}",
+        why(&world, &run)
+    );
+    assert!(
+        dispatched[1]["payload"]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.starts_with("checks-unsettled:")),
+        "the re-dispatch does not name the failure it answers: {}",
+        dispatched[1]
+    );
+
+    // One branch, continued: the second attempt met the change the host was
+    // already holding rather than a fresh one cut beside it.
+    let branch = node["branch"].as_str().expect("the node names its branch");
+    let branches: Vec<String> = world
+        .journal(&run)
+        .iter()
+        .filter(|event| event["source"] == "vcs" && event["kind"] == "session-opened")
+        .filter(|event| event["payload"]["clone"].is_string())
+        .filter_map(|event| event["payload"]["branch"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        branches.iter().all(|opened| opened == branch),
+        "the attempts did not share one branch: {branches:?}"
+    );
+    assert!(
+        repo.has_branch(&world, branch),
+        "the branch both attempts were made on was not handed back"
     );
 }
 

@@ -95,14 +95,6 @@ pub fn execute(
         // dispatch — the teardown is on its way to reap it, and the node would
         // then settle as the cancellation rather than as the publication failure
         // that is the useful half of what happened.
-        //
-        // llmlint: ignore[changed_behavior_has_e2e] the cancellation half is a
-        // race by construction: it needs a stop that lands in the window between
-        // a publication failing and the next dispatch starting, which no
-        // rendezvous this suite has can hold open — the doubles hold *dispatches*,
-        // and there is no dispatch in flight here. The settlement it produces is
-        // the same one `a_node_that_spends_its_publication_budget_settles_naming_
-        // every_attempt` drives end to end, reached by the other condition.
         if attempt >= attempts.get() || cancel.is_cancelled() {
             return spent(&node.id, &preserved, &endings);
         }
