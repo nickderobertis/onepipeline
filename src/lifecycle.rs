@@ -77,7 +77,7 @@ pub fn execute(
 ) -> Settlement {
     let attempts = engine::publication_attempts();
     // What each attempt's publication ended with, in order, for the settlement
-    // that spends the budget. One word per attempt: the last attempt's own reason
+    // that stops the loop. One word per attempt: the last attempt's own reason
     // leads the detail as it always has, and a detail carrying three sibling
     // diagnostics in full would carry none of them — every payload text this
     // crate writes is bounded.
@@ -96,7 +96,7 @@ pub fn execute(
         // then settle as the cancellation rather than as the publication failure
         // that is the useful half of what happened.
         if attempt >= attempts || cancel.is_cancelled() {
-            return spent(&node.id, &preserved, &endings);
+            return stopped_retrying(&node.id, &preserved, &endings);
         }
         attempt = attempt.saturating_add(1);
         // Another `node-dispatched` rather than a kind of its own, so a reader
@@ -556,13 +556,20 @@ fn compose(detail: &str, undrafted: Option<&str>) -> String {
     }
 }
 
-/// The settlement of a node that spent its publication budget.
+/// The settlement of a node that will not be dispatched again — because its
+/// publication budget is spent, or because the run is being cancelled before it
+/// could be. Both endings settle as the publication failure, so both are written
+/// here.
 ///
 /// The **last** failure's word, because that is the one standing in the way, over
 /// a roll-up of every attempt: without it a reader sees one failure and cannot
 /// tell it from a node that failed once — which is the difference between "fix
 /// this check" and "this check is never going to pass".
-fn spent(node: &str, preserved: &Preserved, endings: &[crate::vcs::Preserving]) -> Settlement {
+fn stopped_retrying(
+    node: &str,
+    preserved: &Preserved,
+    endings: &[crate::vcs::Preserving],
+) -> Settlement {
     let each: Vec<String> = endings
         .iter()
         .enumerate()
