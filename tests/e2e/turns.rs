@@ -335,23 +335,17 @@ const ANSWERED: &str = "Ran what the task asked for.";
 /// A relayed payload text past this crate's own published bound is cut and said
 /// to be cut, rather than served whole.
 ///
-/// The bound is [`MAX_PAYLOAD_TEXT_BYTES`], and both siblings publish text inside
-/// it, so on a stack whose three pieces agree this never fires. It is held anyway
-/// because it is *this crate's* promise about its own envelope rather than a
-/// restatement of a producer's: what arrives on a pipe this process reads is
-/// whatever the thing on the other end wrote, and every reader downstream of the
-/// store already treats a payload text as bounded.
+/// [`MAX_PAYLOAD_TEXT_BYTES`] is *this crate's* promise about its own envelope
+/// rather than a restatement of a producer's: both siblings publish inside it, so
+/// on a stack whose pieces agree this never fires — but what arrives on a pipe
+/// this process reads is whatever the thing on the other end wrote.
 ///
-/// So the producer here is the `oneagentgraph` double — the one place a text past
-/// the bound can be made to arrive — and it flags nothing, so the cut and the
-/// flag on the far side are the relay's own rather than a fixture handed to it.
+/// So the producer here is the `oneagentgraph` double, the one place a text past
+/// the bound can be made to arrive, and it flags nothing: the cut and the flag are
+/// the relay's own rather than a fixture handed to it.
 ///
-/// **Three fields, on three kinds, cut two ways**, because the rule is about a
-/// payload text rather than about one field of one kind: a turn's own words one
-/// byte past the bound, a turn's opening instruction well past it, and the node's
-/// task prose echoed onto an activity — that last built so the bound lands
-/// *inside a character*, where a cut by bytes puts something that is not UTF-8
-/// onto a line every reader parses as JSON.
+/// Three fields on three kinds, because the rule is about a payload text and not
+/// one field of one kind.
 #[test]
 fn a_relayed_payload_text_past_the_bound_is_cut_and_flagged_rather_than_served_whole() {
     let world = World::new("relay-bound");

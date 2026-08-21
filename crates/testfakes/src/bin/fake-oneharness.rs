@@ -91,15 +91,13 @@ const FLAGS: [(&str, Takes, Occurs); 13] = [
 
 /// Refuses an argv the real `oneharness run` would not take.
 ///
-/// This is the only thing a double is worth: where the real CLI says no, this one
-/// has to. An argument waved through here is one no journey can catch — onejudge
-/// grows a flag oneharness does not take, every member settles green, and the
-/// first thing that ever says otherwise is a real `oneharness`.
+/// This is the only thing a double is worth: an argument waved through here is
+/// one no journey can catch — onejudge grows a flag oneharness does not take,
+/// every member settles green, and the first thing to say otherwise is a real
+/// `oneharness`.
 ///
-/// Every refusal below is one `fake::flag` could not report: it answers with the
-/// **first** occurrence and cannot tell a flag sent empty from one never sent, so
-/// a repeat, a missing value, or a following flag eaten as a value would all
-/// reach [`run`] as something other than what onejudge really sent.
+/// The refusals are the ones `fake::flag` cannot report: it answers with the
+/// first occurrence and cannot tell a flag sent empty from one never sent.
 fn declared(args: &[String]) -> Result<(), String> {
     let known = |arg: &String| FLAGS.iter().find(|(name, _, _)| name == arg);
     let mut seen: Vec<&str> = Vec::new();
@@ -254,22 +252,12 @@ impl Identity {
     }
 }
 
-/// A config's identity chain, as the identity it would run the turn as.
-///
-/// A type with a deserializer of its own rather than a `Vec<String>` field
-/// checked after the fact, and the difference is what a reader of the field has
-/// to carry: as a `Vec<String>` this boundary can still hold a chain naming no
-/// candidate and a candidate with no name, so every use of it is answerable for
-/// two states rejected somewhere else. Read through this, neither is
-/// representable past the parse and [`ran`] is a read.
-///
-/// The **first** candidate is the one kept: a fallback that stepped past its head
-/// reports the whole chain and which of it ran, and a double claiming to be that
-/// would be inventing a run nobody had.
+/// A config's identity chain, as the identity it would run the turn as: the
+/// first candidate, which is the one a run that stepped past nothing reports.
 ///
 /// Every candidate is checked, not only that one — a nameless entry anywhere is a
-/// config that cannot be resolved, and waving one through because this turn did
-/// not reach it is a launch a real `oneharness` would refuse.
+/// config a real `oneharness` would refuse, and this turn not reaching it is no
+/// reason to wave it through.
 struct Chain(Identity);
 
 impl<'de> serde::Deserialize<'de> for Chain {
@@ -449,18 +437,13 @@ fn judge_turn(prompt: &str, dir: &std::path::Path, identity: &Identity) -> ExitC
     }
 }
 
-/// The supervisor's decision: send the agent back once when a journey scripted
-/// an instruction for it to send, and otherwise call the work done.
+/// The supervisor's decision: send the agent back once when a journey scripted an
+/// instruction for it to send, and otherwise call the work done.
 ///
-/// **Once**, and the marker file is how: each turn of the conversation is its own
-/// process, so a double with no memory beyond the script directory would send the
-/// agent back on every ask and the conversation would only ever end at its turn
-/// ceiling. The marker is written before the instruction is handed over, so a
-/// second ask reads it whether or not the turn it asked for got anywhere.
-///
-/// It is what makes a *conversation* observable at all: a supervisor that
-/// completes on the first ask relays one party's words, and nothing a journey
-/// reads can then tell the two parties' turns apart.
+/// **Once**, and the marker file is how: each turn is its own process, so without
+/// it the conversation would only ever end at its turn ceiling. Written before
+/// the instruction is handed over, so a second ask reads it whether or not the
+/// turn it asked for got anywhere.
 fn supervision(dir: &std::path::Path) -> Result<String, String> {
     let asked_again = dir.join("judge.asked-again");
     match fake::node_script(dir, "judge", "asks-again") {
@@ -533,12 +516,10 @@ const CRITERION_MET: &str = "{\"value\":true,\"reason\":\"the turn did what the 
 
 /// How a turn ended.
 ///
-/// One value rather than a boolean beside four uses of it: the words the turn
-/// answered with, its result's `status`, the exit code beside it, the `error` that
-/// says what went wrong and this process's own exit status are five spellings of
-/// one fact, and held apart any of them could say something the others do not — a
-/// result reporting success beside a non-zero exit is exactly the pair a caller
-/// settles a member on.
+/// One value rather than a boolean beside four uses of it: held apart, the words,
+/// the `status`, the exit code, the `error` and this process's own exit could each
+/// say something the others do not — and a result reporting success beside a
+/// non-zero exit is exactly the pair a caller settles a member on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Outcome {
     /// The turn reached what it was asked for.
@@ -662,18 +643,16 @@ fn document<T: serde::Serialize>(value: &T) -> Result<String, String> {
         .map_err(|error| format!("cannot serialize what this turn answers with: {error}"))
 }
 
-/// The report one turn answers with: `said` is what that side said, and it is what
-/// onejudge reads back as the turn's reply.
+/// The report one turn answers with, where `said` is what onejudge reads back as
+/// the turn's reply.
 ///
 /// Free text rather than [`Outcome::text`] because the two sides do not answer the
 /// same way: the agent's words *are* its outcome, and the supervisor's are a
-/// decision it reached over a turn that succeeded. Everything the outcome does
-/// decide comes off the one value, so no caller can pair a failure with a result
-/// that reports success.
+/// decision it reached over a turn that succeeded.
 ///
-/// Every other field is what a real single-candidate run carries. `fallback` is
-/// absent, which is what says this run had one candidate rather than a chain — a
-/// report with a chain and no `ran` is an exhausted chain, and this turn ran.
+/// `fallback` is absent, which is what says this run had one candidate rather than
+/// a chain — a report with a chain and no `ran` is an exhausted chain, and this
+/// turn ran.
 fn report(
     said: &str,
     events: Option<Vec<ActionEvent>>,

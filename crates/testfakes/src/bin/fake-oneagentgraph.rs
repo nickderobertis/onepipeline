@@ -855,17 +855,12 @@ fn write_work(args: &[String], name: &str, body: &str) {
 /// the others working. The second member's turn is announced and not recorded,
 /// so an interrupt sent to it answers as one whose turn is over: two members,
 /// two answers, which is what a caller has to carry on from.
-/// What a turn's opening says it was asked, when a journey scripted a length for
-/// it — and nothing at all otherwise, because an opening is asserted on for the
-/// fact that a turn began, and a payload nobody reads is a value nobody has to
-/// keep true.
+/// What a turn's opening says it was asked, when `{key}.asked-bytes` scripted a
+/// length for it — and nothing otherwise.
 ///
-/// `{key}.asked-bytes` is the same case `{key}.said-bytes` is, on a different
-/// kind: an instruction longer than a payload text field may carry, published
-/// **whole and unflagged**, because what happens to it after this is the relay's
-/// to decide and a double that pre-cut it would answer that question for the code
-/// under test. Two kinds rather than one, because the bound is a rule about a
-/// payload text and not about one field of one kind.
+/// Published **whole and unflagged** however long: what happens to an over-long
+/// text after this is the relay's to decide, and a double that pre-cut it would
+/// answer that question for the code under test.
 fn asked(dir: &std::path::Path, key: &str) -> Option<serde_json::Value> {
     let bytes = fake::node_script(dir, key, "asked-bytes")?;
     let instruction = match bytes.trim().parse::<usize>() {
@@ -1244,10 +1239,9 @@ fn emit(
             }),
         );
     }
-    // The turn's own words. Scripted only in length, by `{key}.said-bytes`, and
-    // refused above [`SAYABLE`] rather than allocated: the reason to script one is
-    // to cross the payload bound, so a larger number is a typo, and one honoured
-    // is a double that exhausts the host instead of failing the journey.
+    // The turn's own words, scripted only in length. Refused above [`SAYABLE`]
+    // rather than allocated: a number that large is a typo, and honouring one
+    // exhausts the host instead of failing the journey.
     let said = match fake::node_script(dir, key, "said-bytes") {
         None => SAID.to_string(),
         Some(bytes) => match bytes.trim().parse::<usize>() {
