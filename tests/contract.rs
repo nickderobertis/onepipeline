@@ -697,7 +697,6 @@ fn every_node_shape() -> Value {
                 "branch": "feat/thing",
                 "title": "feat: thing",
                 "execution_checkout": "isolated",
-                "verify_via_ci": true,
                 "parked": true,
                 "resume": {
                     "branch": "feat/thing",

@@ -1285,6 +1285,18 @@ fn a_publication_that_its_gate_rejects_settles_the_node_failed_by_name() {
     assert_eq!(undrafted.len(), 1, "{undrafted:?}");
     assert_eq!(undrafted[0]["payload"]["ending"], "dispatch-failed");
     assert_eq!(undrafted[0]["labels"]["node"], "service");
+
+    // The terminal half. The gate is the repository's own verification of the
+    // tree as it stands, and nothing this crate can do from here changes what it
+    // will say — so the node settles on the residual word and is **not** asked
+    // again. A second dispatch here would spend a whole workstream reproducing a
+    // verdict that is already in hand.
+    assert_eq!(
+        dispatches_of(&world, &run, "service").len(),
+        1,
+        "a failure no further attempt can answer was retried anyway\n{}",
+        why(&world, &run)
+    );
 }
 
 /// A title the sibling will not commit under never reaches a dispatch.
@@ -1470,6 +1482,702 @@ fn a_node_whose_publication_failed_continues_the_branch_it_preserved() {
     );
 }
 
+/// A re-dispatch is another `node-dispatched`, so counting these in order is how
+/// a journey tells one attempt from several.
+fn dispatches_of(world: &World, run: &str, node: &str) -> Vec<serde_json::Value> {
+    world
+        .events_of(run, "node-dispatched")
+        .into_iter()
+        .filter(|event| event["labels"]["node"] == node)
+        .collect()
+}
+
+/// The task prose each of one node's dispatches was given, in order.
+///
+/// Read off the `turn-activity` the dispatch's own worker emitted, which echoes
+/// the prose it received — so this is what the agent was actually handed rather
+/// than what this crate believes it composed.
+fn tasks_dispatched_to(world: &World, run: &str, node: &str) -> Vec<String> {
+    world
+        .journal(run)
+        .iter()
+        .filter(|event| event["labels"]["node"] == node && event["kind"] == "turn-activity")
+        .filter_map(|event| event["payload"]["task"].as_str().map(str::to_string))
+        .collect()
+}
+
+/// A required check the host reports as red, which is what CI failing looks like
+/// to a change request the host was asked to land.
+const RED: &str = "llmlint completed failure required";
+
+/// The journey the whole change exists for: the host's checks reject a change
+/// the node published, and the node goes back to work on the branch it left
+/// behind instead of failing with nobody to fix it.
+///
+/// This is the incident. A change request opened, auto-merge was armed, the node
+/// settled, and then a required check failed in CI — with no node left to fail,
+/// nothing reported back, and a person eventually noticing a blocked pull
+/// request. What has to happen instead is all of it: the failure gets its own
+/// word, the node is dispatched again **on the branch that carries the rejected
+/// tree**, and the diagnosis travels with it.
+///
+/// The run is detached so the world can move while it is going, which is what
+/// makes this a recovery rather than a loop: the host reports the check red, and
+/// once it has, this test makes it green the way a re-run of CI would. The flip
+/// happens while the *first* publication is still failing over it — `onevcs`
+/// gives up on the reading it has already made — so the attempt that follows
+/// meets a host with a different answer.
+#[test]
+fn a_publication_its_checks_reject_is_redispatched_on_the_branch_it_preserved() {
+    let world = World::new("lifecycle-checksfailed");
+    // `change-auto` is the policy that watches the host's own checks to their
+    // conclusion, which is where a red one is observed at all.
+    let repo = world.repository("change-auto", &["true"]);
+    world.script("service.work", "the worker wrote this\n");
+    world.script("gh.checks", RED);
+
+    let path = world.plan(
+        "checksfailed",
+        &plan_of("checksfailed", vec![lifecycle("service", &[])]),
+    );
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+    let run = "checksfailed".to_string();
+
+    // The host has reported the check red, which is the reading the publication
+    // is failing on. Everything after this is a world that has moved on.
+    world.until("the host to report its check red", |world| {
+        world
+            .events_of(&run, "change-check")
+            .iter()
+            .any(|event| event["payload"]["conclusion"] == "failure")
+    });
+    // CI ran again and this time nothing blocks the merge, so the host lands what
+    // it was handed. A publication already in flight does not see this: it has
+    // its answer.
+    std::fs::remove_file(world.fakes.join("gh.checks")).expect("the red check is cleared");
+    world.script("gh.merged", "");
+
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+    let result = world.run_json(&run, "result.json");
+    let node = result["nodes"][0].clone();
+    // It recovered: a later attempt published and the host landed it. A node that
+    // had settled on the first failure could never have reached this.
+    assert_eq!(node["status"], "done", "{result}\n{}", why(&world, &run));
+    assert_eq!(node["outcome"], "merged", "{result}");
+    assert_eq!(node["landing"], "landed", "{result}");
+
+    // It was dispatched again, and the second dispatch says why it happened: a
+    // reader counting them sees the recovery without a kind of its own to learn.
+    //
+    // A floor rather than an exact count, deliberately. What flips the host is
+    // this test rather than the run, so how many attempts were made before the
+    // run observed the change is the machine's business — an exact count here
+    // would be an assertion about scheduling. That the budget is a *bound* is
+    // `a_node_that_spends_its_publication_budget_settles_naming_every_attempt`,
+    // where nothing flips and the count is exact.
+    let dispatched = dispatches_of(&world, &run, "service");
+    assert!(
+        dispatched.len() >= 2,
+        "the node was never dispatched again: {dispatched:?}\n{}",
+        why(&world, &run)
+    );
+    let again = &dispatched[1];
+    assert_eq!(again["payload"]["attempt"], 2, "{again}");
+    assert_eq!(again["payload"]["attempts"], 3, "{again}");
+    let reason = again["payload"]["reason"]
+        .as_str()
+        .expect("the re-dispatch says what the last attempt ended with");
+    assert!(
+        reason.starts_with("checks-failed:"),
+        "the re-dispatch does not name the failure it answers: {reason}"
+    );
+    assert!(
+        reason.contains("llmlint"),
+        "the re-dispatch does not name the check that failed: {reason}"
+    );
+
+    // The diagnosis reached the worker, in the prose it was dispatched with.
+    let tasks = tasks_dispatched_to(&world, &run, "service");
+    assert!(tasks.len() >= 2, "{tasks:?}");
+    assert!(
+        !tasks[0].contains("## Planner context"),
+        "the first attempt was told about a failure that had not happened: {}",
+        tasks[0]
+    );
+    let second = &tasks[1];
+    for said in [
+        "## Planner context",
+        "checks-failed",
+        "llmlint",
+        "onevcs artifact cat",
+    ] {
+        assert!(
+            second.contains(said),
+            "the re-dispatch was not told {said:?}:\n{second}"
+        );
+    }
+    // And the evidence it points at is an artifact this publication really
+    // recorded, rather than an id composed here.
+    let recorded: Vec<String> = world
+        .journal(&run)
+        .iter()
+        .filter(|event| event["source"] == "vcs")
+        .filter_map(|event| event["artifacts"].as_array().cloned())
+        .flatten()
+        .filter_map(|artifact| artifact["id"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        recorded.iter().any(|id| second.contains(id)),
+        "the re-dispatch names no artifact the publication recorded; it recorded \
+         {recorded:?}:\n{second}"
+    );
+
+    // One branch, continued. Every session this node opened worked on it, so the
+    // attempt that recovered met the tree the host had rejected rather than a
+    // fresh one cut beside it.
+    let branch = node["branch"].as_str().expect("the node names its branch");
+    let branches: Vec<String> = world
+        .journal(&run)
+        .iter()
+        .filter(|event| event["source"] == "vcs" && event["kind"] == "session-opened")
+        .filter(|event| event["payload"]["clone"].is_string())
+        .filter_map(|event| event["payload"]["branch"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        branches.len() >= 2 && branches.iter().all(|opened| opened == branch),
+        "the re-dispatch cut a second branch beside the committed work: {branches:?}"
+    );
+    // And **one** change request, adopted rather than opened again: the branch
+    // already had one, which is what the host answers when it is asked.
+    let opened = world.changes_opened();
+    assert_eq!(
+        opened.len(),
+        1,
+        "the re-dispatch opened a second change request for one branch: {opened:?}"
+    );
+    assert_eq!(opened[0]["head"], json!(branch), "{:?}", opened[0]);
+    // The branch is still in the checkout the failed attempt handed it back to,
+    // which is where the attempt that recovered found it.
+    assert!(
+        repo.has_branch(&world, branch),
+        "the branch the attempts shared was not handed back to the checkout"
+    );
+}
+
+/// A publishing push the merge path refuses is the second preserving failure, and
+/// it is preserving for a different reason: nothing was published at all.
+///
+/// The `pre-receive` hook below is the repository's own — a real one, on the real
+/// bare origin, refusing the branch the way a hook that finds a secret or a
+/// forbidden path does. `onevcs` reports it as `push-rejected`, the branch is
+/// handed back because it is the only record of the work, and the node is
+/// dispatched again on it carrying what the remote wrote.
+///
+/// Two attempts rather than three, because what this proves is the routing and
+/// the evidence rather than the size of the budget.
+#[test]
+fn a_push_the_merge_path_refuses_is_redispatched_carrying_what_the_remote_wrote() {
+    let world =
+        World::new("lifecycle-pushrejected").with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "2");
+    let repo = world.repository("change-auto", &["true"]);
+    world.script("service.work", "the worker wrote this\n");
+    refuse_pushed_branches(&world, &repo);
+
+    let run = settle(&world, "pushrejected", vec![lifecycle("service", &[])]);
+    let result = world.run_json(&run, "result.json");
+    let node = result["nodes"][0].clone();
+    assert_eq!(node["status"], "failed", "{result}\n{}", why(&world, &run));
+    assert_eq!(node["outcome"], "push-rejected", "{result}");
+    // Nothing was published, so there is nothing to have landed and no change
+    // request to point anybody at.
+    assert_eq!(node["landing"], json!(null), "{result}");
+    assert!(node["change_url"].is_null(), "{result}");
+
+    let dispatched = dispatches_of(&world, &run, "service");
+    assert_eq!(
+        dispatched.len(),
+        2,
+        "the node was not dispatched again on its preserved branch\n{}",
+        why(&world, &run)
+    );
+    assert!(
+        dispatched[1]["payload"]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.starts_with("push-rejected:")),
+        "{}",
+        dispatched[1]
+    );
+
+    // What the remote wrote is the whole diagnosis of a refused push, and it
+    // travels as the artifact the `push` record carried rather than inline.
+    let pushes = world.events_of(&run, "push");
+    let artifacts: Vec<String> = pushes
+        .iter()
+        .filter_map(|event| event["artifacts"].as_array().cloned())
+        .flatten()
+        .filter_map(|artifact| artifact["id"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        !artifacts.is_empty(),
+        "the refused push recorded nothing to diagnose it with: {pushes:?}"
+    );
+    let second = &tasks_dispatched_to(&world, &run, "service")[1];
+    assert!(
+        artifacts.iter().any(|id| second.contains(id)),
+        "the re-dispatch names none of the push's evidence ({artifacts:?}):\n{second}"
+    );
+    // Git's own per-ref summary leads, because that is what `onevcs` reports and
+    // what tells a worker the push never landed; the hook's own words are in the
+    // artifact above, where a whole run of a repository's verification belongs.
+    assert!(
+        second.contains("pre-receive hook declined"),
+        "the re-dispatch was not told what git said about the ref:\n{second}"
+    );
+
+    // And the work survived the refusal: the branch is in the checkout, which is
+    // the only place it exists once the session's clone is gone.
+    let branch = node["branch"].as_str().expect("the node names its branch");
+    assert!(
+        repo.has_branch(&world, branch),
+        "the branch a refused push left behind was not handed back"
+    );
+}
+
+/// A run cancelled between a preserving failure and the attempt that would
+/// answer it settles on the failure, not on the cancellation.
+///
+/// The window is held open rather than raced for: the repository's gate blocks
+/// until this test releases it, so the cancel lands while the publication is
+/// still running and everything after the release — the push, its refusal, the
+/// preserving classification — happens unconditionally. Dispatched again into a
+/// run whose teardown is on its way to reap it, the node would settle as the
+/// cancellation and lose the publication failure, which is the useful half of
+/// what happened.
+#[test]
+fn a_cancel_that_lands_before_the_next_attempt_settles_on_the_publication_failure() {
+    let world =
+        World::new("lifecycle-cancelledretry").with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "2");
+    let go = world.fakes.join("gate.go");
+    let held = gate_script(&world, &["wait-for", &go.to_string_lossy()]);
+    let repo = world.repository(
+        "change-auto",
+        &held.iter().map(String::as_str).collect::<Vec<_>>(),
+    );
+    world.script("service.work", "the worker wrote this\n");
+    refuse_pushed_branches(&world, &repo);
+
+    let path = world.plan(
+        "cancelledretry",
+        &plan_of("cancelledretry", vec![lifecycle("service", &[])]),
+    );
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+    let run = "cancelledretry".to_string();
+
+    world.until("the publication to reach its gate", |world| {
+        world
+            .journal(&run)
+            .iter()
+            .any(|event| event["source"] == "vcs" && event["kind"] == "gate-started")
+    });
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({"version": 1, "commands": [{"op": "cancel", "id": "service"}]}).to_string(),
+        )
+        .exited(0);
+    world.until("the cancel to be committed", |world| {
+        !world.events_of(&run, "edit-committed").is_empty()
+    });
+    std::fs::write(&go, "go").expect("the gate is released");
+
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+    // The settlement the loop reached is the publication's, under its own word:
+    // that is what an operator has to act on, and it is the half a node
+    // dispatched again into a cancelled run would have lost.
+    let settled = &world.events_of(&run, "node-settled")[0]["payload"];
+    assert_eq!(
+        settled["status"],
+        "failed",
+        "{settled}\n{}",
+        why(&world, &run)
+    );
+    assert_eq!(settled["outcome"], "push-rejected", "{settled}");
+    let detail = settled["detail"]
+        .as_str()
+        .expect("the settlement says why")
+        .to_string();
+    assert!(
+        detail.contains("1 publication attempt on"),
+        "the settlement does not name the one attempt that was made: {detail}"
+    );
+    // And no second attempt, though the budget had one left.
+    assert_eq!(
+        dispatches_of(&world, &run, "service").len(),
+        1,
+        "a cancelled run was dispatched again\n{}",
+        why(&world, &run)
+    );
+
+    // The run's own document reports it `parked`, because that is what the
+    // cancel made it and a parked node is one a planner can requeue. The failure
+    // is not lost to that: the outcome beside it is the publication's.
+    let node = world.run_json(&run, "result.json")["nodes"][0].clone();
+    assert_eq!(node["status"], "parked", "{node}\n{}", why(&world, &run));
+    assert_eq!(node["outcome"], "push-rejected", "{node}");
+    // And the work is on the branch the one attempt was made on, which is what
+    // a requeue would continue.
+    let branch = node["branch"].as_str().expect("the node names its branch");
+    assert!(
+        repo.has_branch(&world, branch),
+        "the branch the cancelled attempt was made on was not handed back"
+    );
+}
+
+/// Make the bare origin refuse every branch a publication pushes.
+///
+/// A real `pre-receive` hook, installed after the seed push so the base branch is
+/// already there: what a repository's own hook does on the merge path is the
+/// thing `push-rejected` is about, and scripting the refusal anywhere else would
+/// be this suite deciding what git said.
+fn refuse_pushed_branches(world: &World, repo: &Repository) {
+    let hook = repo.origin.join("hooks").join("pre-receive");
+    std::fs::create_dir_all(hook.parent().expect("hooks has a directory"))
+        .expect("the hooks directory");
+    std::fs::write(
+        &hook,
+        "#!/bin/sh\necho \"this origin does not take onevcs branches\" >&2\nexit 1\n",
+    )
+    .expect("the hook is written");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
+            .expect("the hook is executable");
+    }
+    let _ = world;
+}
+
+/// A `pre-push` gate, whose verdict is the publishing push's own output.
+///
+/// `git clone` copies no hooks, so `onevcs` carries the checkout's configured
+/// `core.hooksPath` onto the session's clone — which is where the publishing push
+/// is made from and therefore the only place a merge-path hook runs. The
+/// directory sits outside the working tree so the hook is never a file the
+/// session has to have committed.
+#[cfg(unix)]
+fn gate_on_a_refusing_pre_push_hook(world: &World, repo: &Repository) {
+    std::fs::write(
+        world.onevcs_home().join("rules.yml"),
+        "version: 2\nrules: []\ndefault:\n  publication: change-auto\n  approvals: none\n  \
+         gate:\n    kind: pre-push\n",
+    )
+    .expect("the rules file is written");
+    let hooks = world.root.join("merge-path-hooks");
+    std::fs::create_dir_all(&hooks).expect("the hooks directory");
+    let hook = hooks.join("pre-push");
+    std::fs::write(
+        &hook,
+        "#!/bin/sh\necho \"the merge-path gate says no\" >&2\nexit 1\n",
+    )
+    .expect("the hook is written");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
+            .expect("the hook is executable");
+    }
+    crate::harness::git(
+        world,
+        &repo.checkout,
+        &["config", "core.hooksPath", &hooks.to_string_lossy()],
+    );
+}
+
+/// One stored artifact two records point at is one piece of evidence.
+///
+/// A `pre-push` gate runs no command of its own: its verdict *is* what the
+/// publishing push wrote, so `onevcs` stores that output once and references it
+/// from both the `push` record and the `gate-verdict` beside it. A diagnosis
+/// composed straight off the stream would hand the worker the same
+/// `onevcs artifact cat` twice, which reads as two runs of a gate that ran once
+/// — and sends somebody looking for the difference between them.
+///
+/// Unix-only for the hook bit, which is where a `pre-push` gate lives at all.
+#[cfg(unix)]
+#[test]
+fn one_artifact_two_records_point_at_reaches_the_worker_once() {
+    let world =
+        World::new("lifecycle-evidencetwice").with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "2");
+    let repo = world.repository("change-auto", &["true"]);
+    gate_on_a_refusing_pre_push_hook(&world, &repo);
+    world.script("service.work", "the worker wrote this\n");
+
+    let run = settle(&world, "evidencetwice", vec![lifecycle("service", &[])]);
+    let node = world.run_json(&run, "result.json")["nodes"][0].clone();
+    assert_eq!(
+        node["outcome"],
+        "push-rejected",
+        "{node}\n{}",
+        why(&world, &run)
+    );
+
+    // The fixture really did produce the shape this is about: one artifact id,
+    // on two of the publication's own records.
+    let mut records: Vec<(String, String)> = Vec::new();
+    for event in world.journal(&run) {
+        if event["source"] != "vcs" {
+            continue;
+        }
+        let kind = event["kind"].as_str().unwrap_or_default().to_owned();
+        for artifact in event["artifacts"].as_array().into_iter().flatten() {
+            if let Some(id) = artifact["id"].as_str() {
+                records.push((kind.clone(), id.to_owned()));
+            }
+        }
+    }
+    let shared = records
+        .iter()
+        .find(|(_, id)| records.iter().filter(|(_, other)| other == id).count() > 1)
+        .map(|(_, id)| id.clone())
+        .unwrap_or_else(|| {
+            panic!(
+                "no artifact was recorded twice, so there is nothing to deduplicate: {records:?}"
+            )
+        });
+
+    // And the worker was told to read it once.
+    let tasks = tasks_dispatched_to(&world, &run, "service");
+    assert!(
+        tasks.len() >= 2,
+        "the node was not dispatched again: {tasks:?}"
+    );
+    let second = &tasks[1];
+    assert_eq!(
+        second.matches(shared.as_str()).count(),
+        1,
+        "the re-dispatch names {shared} more than once:\n{second}"
+    );
+    assert!(
+        second.contains("onevcs artifact cat"),
+        "the re-dispatch does not say how to read its evidence:\n{second}"
+    );
+}
+
+/// A base that moves under a publication is the third preserving failure, and it
+/// is the one whose continuation currently cannot get started.
+///
+/// The conflict is real and it is made the way one happens: the base takes a
+/// change to the same file while the node's worker is still working, and the
+/// publication's bounded resolve-and-requeue cannot merge the two. `onevcs`
+/// reports `sync-conflict`, hands the branch back, and this crate dispatches the
+/// node again on it — which is what this journey is here to pin.
+///
+/// What that second dispatch then meets is pinned too, and deliberately: opening
+/// a session on a branch that conflicts with its integration target is a refusal
+/// `onevcs` makes at session open, so the continuation never reaches a worker and
+/// the node settles `infrastructure-failure` carrying the sibling's own sentence.
+/// That is the behaviour today rather than the behaviour anybody wants, and a
+/// journey that asserted a happier ending would be describing a stack this one is
+/// not. When the sibling learns to open a session into a conflict for a worker to
+/// resolve, this is the test that says so by failing.
+#[test]
+fn a_base_that_moved_under_a_publication_is_redispatched_on_the_branch_it_preserved() {
+    let world = World::new("lifecycle-syncconflict")
+        .with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "2")
+        // The continuation's session refuses to open, which is a dispatch that
+        // produced nothing — and the *dispatch* boundary re-asks one of those
+        // three times over. That retry is not what this journey is about, and
+        // three of it would make the count below say nothing about the loop that
+        // is.
+        .with_env("ONEPIPELINE_BOUNDARY_ATTEMPTS", "1");
+    let repo = world.repository("local-direct", &["true"]);
+    // The worker holds until this test releases it, which is the window the base
+    // moves in. What it writes is the file the base is about to take a different
+    // version of.
+    world.script("service.work", "the worker wrote this\n");
+    world.script("service.wait", "");
+
+    let path = world.plan(
+        "syncconflict",
+        &plan_of("syncconflict", vec![lifecycle("service", &[])]),
+    );
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+    let run = "syncconflict".to_string();
+
+    // The **session** rather than the dispatch: the branch is cut when the
+    // session opens, and a base that moved before that is a base the branch was
+    // cut from — which is no conflict at all, and a journey that waited on the
+    // dispatch would prove that instead about half the time. This crate's own
+    // `session-opened` and not the sibling's, because the sibling's arrives on
+    // the session stream this run only starts following once the dispatch has
+    // drained — and the dispatch is what is being held here.
+    world.until("the node's session to cut its branch", |world| {
+        !world.events_of(&run, "session-opened").is_empty()
+    });
+    // Somebody else lands a change to the same file, while the node's worker is
+    // still holding. The publication that follows syncs the base into the branch
+    // before it verifies anything, and these two versions of one file do not
+    // merge.
+    let work = repo.checkout.join("service.md");
+    std::fs::write(&work, "somebody else wrote this instead\n").expect("the base change");
+    crate::harness::git(&world, &repo.checkout, &["add", "-A"]);
+    crate::harness::git(
+        &world,
+        &repo.checkout,
+        &["commit", "-m", "feat: take the file another way"],
+    );
+    crate::harness::git(&world, &repo.checkout, &["push", "origin", "main"]);
+    world.release("service.go");
+
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+    let result = world.run_json(&run, "result.json");
+    let node = result["nodes"][0].clone();
+    assert_eq!(node["status"], "failed", "{result}\n{}", why(&world, &run));
+
+    // The routing, which is what this crate owns: the conflict was named, and
+    // the node was asked again on the branch that carries the work.
+    let dispatched = dispatches_of(&world, &run, "service");
+    assert_eq!(
+        dispatched.len(),
+        2,
+        "a base that moved settled the node instead of sending it back to the branch\n{}",
+        why(&world, &run)
+    );
+    let reason = dispatched[1]["payload"]["reason"]
+        .as_str()
+        .expect("the re-dispatch says what the last attempt ended with");
+    assert!(
+        reason.starts_with("sync-conflict:"),
+        "the re-dispatch does not name the failure it answers: {reason}"
+    );
+    // The branch is in the checkout, which is the whole reason the failure is
+    // one a further attempt could answer at all.
+    let branch = node["branch"].as_str().expect("the node names its branch");
+    assert!(
+        repo.has_branch(&world, branch),
+        "the branch the conflict was on was not handed back"
+    );
+    // And the sibling recorded the conflict, with the hunks beside it.
+    let conflicts = world.events_of(&run, "sync-conflict");
+    assert!(
+        !conflicts.is_empty(),
+        "the conflict reached no record a reader can find it in\n{}",
+        why(&world, &run)
+    );
+}
+
+/// A node that publishes into a host whose required check stays red.
+///
+/// Every change request this host is handed and not just the first: the check is
+/// red and stays red, which is the loop the budget exists to bound.
+fn publishing_into_checks_that_stay_red(world: &World, name: &str) -> (String, Repository) {
+    let repo = world.repository("change-auto", &["true"]);
+    world.script("service.work", "the worker wrote this\n");
+    world.script("gh.checks", RED);
+    let run = settle(world, name, vec![lifecycle("service", &[])]);
+    (run, repo)
+}
+
+/// A check that is never going to pass is a worse failure than the one it
+/// replaces, so the loop is bounded and says so when it stops.
+///
+/// The budget is set to `0` here, which is not a budget: read literally it would
+/// settle this node having never dispatched it at all. An unusable value falls
+/// back to the default instead — the same direction every other bound this crate
+/// reads falls in, because a knob that *disabled* the recovery it configures is
+/// the one setting nobody means. So three attempts is what a `0` gets, and three
+/// is what this journey counts.
+#[test]
+fn a_node_that_spends_its_publication_budget_settles_naming_every_attempt() {
+    let world = World::new("lifecycle-budget").with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "0");
+    let (run, repo) = publishing_into_checks_that_stay_red(&world, "budget");
+    let result = world.run_json(&run, "result.json");
+    let node = result["nodes"][0].clone();
+    assert_eq!(node["status"], "failed", "{result}\n{}", why(&world, &run));
+    assert_eq!(node["outcome"], "checks-failed", "{result}");
+    assert_eq!(
+        dispatches_of(&world, &run, "service").len(),
+        3,
+        "the node was not dispatched exactly three times\n{}",
+        why(&world, &run)
+    );
+
+    let detail = world.events_of(&run, "node-settled")[0]["payload"]["detail"]
+        .as_str()
+        .expect("the settlement says why")
+        .to_string();
+    let branch = node["branch"].as_str().expect("the node names its branch");
+    for said in [
+        "3 publication attempts",
+        "1 checks-failed, 2 checks-failed, 3 checks-failed",
+        branch,
+        "llmlint",
+    ] {
+        assert!(
+            detail.contains(said),
+            "the spent budget does not say {said:?}: {detail}"
+        );
+    }
+    // `results` is where an operator reads it, so the word reaches them without
+    // opening the store.
+    world
+        .run(&["results", &run])
+        .exited(0)
+        .out_has("checks-failed");
+    // And the work is still there to pick up by hand: the branch a person
+    // retries from is the one every attempt was made on.
+    assert!(
+        repo.has_branch(&world, branch),
+        "the branch {branch} every attempt was made on was not handed back"
+    );
+}
+
+/// The other way an operator gets that bound wrong: a value that is not a number
+/// at all.
+///
+/// `0` above is a number this crate refuses and this is a parse that never
+/// produces one, so they reach the fallback down two different paths — and an
+/// operator who wrote `three` where a digit goes must not silently get a
+/// different run from one who wrote `0`. Its own journey rather than a second
+/// case inside the one above, because what is held is that the whole run is the
+/// same run.
+#[test]
+fn a_publication_budget_that_is_not_a_number_spends_the_same_default() {
+    let world =
+        World::new("lifecycle-budgetword").with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "three");
+    let (run, _repo) = publishing_into_checks_that_stay_red(&world, "budgetword");
+
+    let node = world.run_json(&run, "result.json")["nodes"][0].clone();
+    assert_eq!(node["status"], "failed", "{node}\n{}", why(&world, &run));
+    assert_eq!(node["outcome"], "checks-failed", "{node}");
+    assert_eq!(
+        dispatches_of(&world, &run, "service").len(),
+        3,
+        "a budget that is not a number was not the default three\n{}",
+        why(&world, &run)
+    );
+    let detail = world.events_of(&run, "node-settled")[0]["payload"]["detail"]
+        .as_str()
+        .expect("the settlement says why")
+        .to_string();
+    assert!(
+        detail.contains("3 publication attempts"),
+        "the spent budget does not name the attempts it made: {detail}"
+    );
+}
+
 #[test]
 fn a_published_node_reports_where_a_human_reads_the_change_it_opened() {
     let world = World::new("lifecycle-evidence");
@@ -1641,30 +2349,119 @@ fn a_change_the_host_merged_settles_the_node_on_the_merge_rather_than_the_reques
     );
 }
 
+/// A `change-auto` change the host never lands is the second silent failure this
+/// change exists to end, and the bound on waiting for it is the one that ends it.
+///
+/// `change-auto` asks the host to land the change once its checks pass, and
+/// `onevcs` watches until it does. A host that never does is a change nobody is
+/// going to merge, and the watch stopping on its own bound used to be exactly the
+/// place a run went quiet: the node settled on a snapshot and nothing looked
+/// again. It settles `checks-unsettled` instead — its own word, naming the bound
+/// and what the host had said — and the branch is preserved, so the node is
+/// re-dispatched on it like any other preserving failure.
+///
+/// The budget is set to one here, so what this journey is about is the **ending**
+/// rather than the loop — and setting it proves the bound is read from where it
+/// is documented to be read.
 #[test]
-fn a_change_the_host_is_holding_settles_the_node_as_queued() {
-    let world = World::new("lifecycle-queued");
-    // `change-auto` asks the host to land it once its checks pass, and this host
-    // has not landed it.
-    world.repository("change-auto", &["true"]);
+fn a_change_auto_publication_the_host_never_lands_settles_checks_unsettled() {
+    // Spelled as the operator spells it, which is how every other bound this
+    // suite moves is spelled: the name is the surface, and `src/engine.rs`'s own
+    // test holds it to the contract that publishes it.
+    let world = World::new("lifecycle-unsettled").with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "1");
+    let repo = world.repository("change-auto", &["true"]);
     world.script("service.work", "the worker wrote this\n");
-    let run = settle(&world, "queued", vec![lifecycle("service", &[])]);
+    // No `gh.merged`: this host takes the change and never lands it.
+    let run = settle(&world, "unsettled", vec![lifecycle("service", &[])]);
 
-    // The host has it and will land it once its checks pass. The node is done —
-    // there is nothing more for the run to do with it — and it says so as queued
-    // rather than as merged, which would claim the base already carries it.
     let node = world.run_json(&run, "result.json")["nodes"][0].clone();
-    assert_eq!(node["status"], "done", "{node}\n{}", why(&world, &run));
-    assert_eq!(node["outcome"], "queued", "{node}");
-    assert!(
-        node["change_url"]
-            .as_str()
-            .is_some_and(|url| url.contains("/pull/")),
-        "a queued change named nowhere to read it: {node}"
+    assert_eq!(node["status"], "failed", "{node}\n{}", why(&world, &run));
+    assert_eq!(node["outcome"], "checks-unsettled", "{node}");
+    // It claims no landing: the change did not reach the base and nothing here
+    // observed it doing so.
+    assert_eq!(node["landing"], json!(null), "{node}");
+
+    // One attempt, because that is the budget this run was given — the bound is
+    // a number something reads, not a constant nothing can move.
+    assert_eq!(
+        dispatches_of(&world, &run, "service").len(),
+        1,
+        "a budget of one was not honoured\n{}",
+        why(&world, &run)
     );
-    // Done, and not landed. The host has accepted it and the base does not carry
-    // it yet, so the settlement says both things rather than only the first.
-    assert_eq!(node["landing"], "unlanded", "{node}");
+    let detail = world.events_of(&run, "node-settled")[0]["payload"]["detail"]
+        .as_str()
+        .expect("the settlement says why")
+        .to_string();
+    for said in ["1 publication attempt on", "1 checks-unsettled"] {
+        assert!(
+            detail.contains(said),
+            "the settlement does not say {said:?}: {detail}"
+        );
+    }
+    // And the work is where a person picks it up: on the branch the attempt was
+    // made on, which the change request they have to decide about points at.
+    let branch = node["branch"].as_str().expect("the node names its branch");
+    assert!(
+        repo.has_branch(&world, branch),
+        "the branch the unlanded change is on was not handed back"
+    );
+}
+
+/// And the same ending is preserving, which is only visible where the budget
+/// leaves room for the attempt that proves it.
+///
+/// The journey above states the ending under a budget of one, so nothing there
+/// distinguishes `checks-unsettled` from a failure that settles where it stands.
+/// This one gives it two: the host still never lands anything, so the second
+/// attempt meets the same bound — and that it *ran at all*, on the branch the
+/// first attempt handed back, is the whole of what "preserving" means here.
+#[test]
+fn a_change_the_host_never_lands_is_redispatched_on_the_branch_it_preserved() {
+    let world =
+        World::new("lifecycle-unsettledagain").with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "2");
+    let repo = world.repository("change-auto", &["true"]);
+    world.script("service.work", "the worker wrote this\n");
+    // No `gh.merged`, on either attempt: this host takes the change and holds it.
+    let run = settle(&world, "unsettledagain", vec![lifecycle("service", &[])]);
+
+    let node = world.run_json(&run, "result.json")["nodes"][0].clone();
+    assert_eq!(node["status"], "failed", "{node}\n{}", why(&world, &run));
+    assert_eq!(node["outcome"], "checks-unsettled", "{node}");
+
+    let dispatched = dispatches_of(&world, &run, "service");
+    assert_eq!(
+        dispatched.len(),
+        2,
+        "an unsettled change was not re-dispatched on its preserved branch\n{}",
+        why(&world, &run)
+    );
+    assert!(
+        dispatched[1]["payload"]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.starts_with("checks-unsettled:")),
+        "the re-dispatch does not name the failure it answers: {}",
+        dispatched[1]
+    );
+
+    // One branch, continued: the second attempt met the change the host was
+    // already holding rather than a fresh one cut beside it.
+    let branch = node["branch"].as_str().expect("the node names its branch");
+    let branches: Vec<String> = world
+        .journal(&run)
+        .iter()
+        .filter(|event| event["source"] == "vcs" && event["kind"] == "session-opened")
+        .filter(|event| event["payload"]["clone"].is_string())
+        .filter_map(|event| event["payload"]["branch"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        branches.iter().all(|opened| opened == branch),
+        "the attempts did not share one branch: {branches:?}"
+    );
+    assert!(
+        repo.has_branch(&world, branch),
+        "the branch both attempts were made on was not handed back"
+    );
 }
 
 /// The document a consumer reads carries the landing, at a stated version, and
@@ -1698,9 +2495,11 @@ fn the_run_result_a_consumer_reads_states_its_version_and_carries_the_landing() 
             .clone()
     };
 
-    // The host is holding the change it was handed.
+    // A change request left open for somebody to decide about, which is the
+    // publication that settles `done` with its change unlanded: `change-open` is
+    // the one policy that does not watch the host, because a person does.
     let world = World::new("lifecycle-result-contract");
-    world.repository("change-auto", &["true"]);
+    world.repository("change-open", &["true"]);
     world.script("service.work", "the worker wrote this\n");
     let (open, launched) = driven(
         &world,
@@ -1747,35 +2546,43 @@ fn the_run_result_a_consumer_reads_states_its_version_and_carries_the_landing() 
     );
 }
 
-/// A settled node and a landed node are different facts, and one publication
-/// policy produces both.
+/// A settled node and a landed node are different facts, and a node settles
+/// `done` either way.
 ///
-/// The identity is `change-auto` for **both** halves — it asks the host to land
-/// the change once its checks pass — so nothing about the ask distinguishes
-/// them. What distinguishes them is the host: in the first half it holds the
-/// change, and in the second it lands it. Both nodes settle `done`, because
-/// publishing is the whole of what the round asked of them, and only one of them
-/// put anything on `main`.
+/// Both halves publish and both settle `done` — publishing is the whole of what
+/// the plan asked of them — and only one of them put anything on `main`. What
+/// tells them apart is **what the host did**, read off the publication's own
+/// answer and never off the policy that asked for it.
+///
+/// The two policies are the two shapes a change request can be handed over in.
+/// `change-open` leaves it for a person, so the node settles with it unlanded and
+/// nothing waits: a change request somebody owns is not something a run may block
+/// or poll on. `change-auto` asks the host to land it, and *is* watched to its
+/// end — so the second half settles only once the host has actually merged, which
+/// is the observation `landed` rests on.
 ///
 /// Everything a planner reads is checked, because closing work on a settled node
 /// is a decision made from any of them: the ledger record, the round result the
 /// read API serves, and every view that renders a node's status.
-///
-/// Nothing waits for the merge. The unlanded half settles and the round ends with
-/// the change still open, because a change request a person owns is not something
-/// a run may block or poll on.
 #[test]
 fn a_settled_node_and_a_landed_node_are_told_apart_by_what_the_host_did_not_by_the_policy() {
     let world = World::new("lifecycle-landing");
-    // Asks the host to land it once its checks pass. One policy, both answers.
+    // The repository asks the host to land its changes; the first node below
+    // narrows that to `change-open` for itself, which is a person's decision and
+    // nothing this run waits on.
     world.repository("change-auto", &["true"]);
 
-    // The host is holding the change and has not landed it.
+    // The change request is open and nobody has merged it.
     world.script("service.work", "the change nobody merged\n");
     // Named for the scenario and not for the answer: a run id is printed on every
     // view line, so `heldopen` cannot satisfy an assertion looking for the word
     // this journey is about.
-    let open = settle(&world, "heldopen", vec![lifecycle("service", &[])]);
+    let held = {
+        let mut node = lifecycle("service", &[]);
+        node["merge_policy"] = json!("change-open");
+        node
+    };
+    let open = settle(&world, "heldopen", vec![held]);
 
     // The sibling's own record of the publication says it too, so a reader
     // watching the merged stream sees where the change got to at the moment it
@@ -2032,6 +2839,10 @@ fn a_lifecycle_node_carries_the_pins_the_plan_states_into_its_session() {
     world.register(&primary, Some("https://github.com/owner/service.git"));
 
     world.script("service.work", "the worker wrote this\n");
+    // `change-auto` is watched to its end, so this host lands what it is handed
+    // rather than leaving the publication waiting out its bound: what this
+    // journey is about is the pins reaching the session, not what CI said.
+    world.script("gh.merged", "");
     let mut node = lifecycle("service", &[]);
     node["branch"] = json!("feature/pinned");
     node["base_branch"] = json!("release");
@@ -2400,9 +3211,9 @@ fn a_dispatch_that_failed_with_nothing_published_settles_as_a_plain_task_failure
 #[test]
 fn a_change_that_merged_after_settlement_is_reported_as_of_settlement_not_as_now() {
     let world = World::new("lifecycle-landing-stale");
-    // The host is asked to land it and is holding it, so the node settles with
-    // its change unlanded — the state the incident started from.
-    let repository = world.repository("change-auto", &["true"]);
+    // A change request left for a person to merge, so the node settles with its
+    // change unlanded — the state the incident started from.
+    let repository = world.repository("change-open", &["true"]);
     world.script("service.work", "the change that merged later\n");
     let run = settle(&world, "mergedlater", vec![lifecycle("service", &[])]);
 

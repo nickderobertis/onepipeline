@@ -495,6 +495,84 @@ fn an_edit_carrying_the_retired_bar_is_refused_by_name_at_both_boundaries() {
     world.release("slow.go");
 }
 
+/// A planner who asks a node to verify via CI is told what already watches the
+/// checks.
+///
+/// The second retired field, on the boundary a planner actually reaches it
+/// through: a publication that failed its checks routes the failure back as
+/// work, and "verify via CI this time" is the amendment that invites. An `add`
+/// carrying it never parses into a command at all, so the envelope reader is
+/// what has to name the field.
+#[test]
+fn an_added_node_asking_to_verify_via_ci_is_refused_by_name_at_the_envelope() {
+    let world = World::new("edit-verifyci-add");
+    // Registered, so the retired field is the only thing wrong with the node
+    // below rather than a repository nobody declared.
+    world.repository("local-direct", &["true"]);
+    let run = live(&world, "ciadd", vec![agent("slow", &[])], &["slow"]);
+
+    let mut node = lifecycle("extra", &[]);
+    node["verify_via_ci"] = json!(true);
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([{"op": "add", "node": node}])),
+        )
+        .exited(REFUSED)
+        .err_has("'extra': `verify_via_ci` is no longer a plan field")
+        .err_has("`merge_policy` is `change-auto`")
+        .err_has("`checks-failed`")
+        .err_lacks("unknown field");
+
+    world.release("slow.go");
+}
+
+/// The same field on the other way in, and the likelier one: the node whose
+/// publication failed is already in the graph, so a planner recovering it amends
+/// that node rather than writing a new one.
+///
+/// A `requeue` parses — the amendment is a free-form mapping merged onto the
+/// node — so nothing upstream refuses it and the reconciler is what has to.
+#[test]
+fn a_requeue_amending_a_node_to_verify_via_ci_is_refused_by_name_at_the_reconciler() {
+    let world = World::new("edit-verifyci-requeue");
+    world.repository("local-direct", &["true"]);
+    let run = live(
+        &world,
+        "cirequeue",
+        vec![agent("slow", &[]), lifecycle("publish", &["slow"])],
+        &["slow"],
+    );
+
+    // Parked first, because a requeue is what returns a parked node to the
+    // frontier: against a node nothing has cancelled it is refused with `is not
+    // parked`, and the amendment would never be looked at.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([{"op": "cancel", "id": "publish"}])),
+        )
+        .exited(0);
+    world.until("the park to commit", |world| {
+        committed(world, &run).contains(&"cancel".to_string())
+    });
+
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(
+                json!([{"op": "requeue", "id": "publish", "amend": {"verify_via_ci": true}}]),
+            ),
+        )
+        .exited(REFUSED)
+        .err_has("requeue: node 'publish': `verify_via_ci` is no longer a plan field")
+        .err_has("`merge_policy` is `change-auto`")
+        .err_has("`checks-unsettled`")
+        .err_lacks("unknown field");
+
+    world.release("slow.go");
+}
+
 /// A title `onevcs` will not commit under is refused wherever it enters.
 ///
 /// The plan file is one way in and the channel is the other — and the channel

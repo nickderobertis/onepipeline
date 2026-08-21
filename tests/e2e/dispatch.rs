@@ -1213,9 +1213,13 @@ fn transcript_renders_a_real_dispatched_turns_tools_and_words() {
 /// attributed, because a reader with two entries in front of them has no other
 /// way to tell which identity said which.
 ///
-/// The chain is real rather than scripted: `codex` is not on the `PATH` this
-/// launch is given and no `ONEHARNESS_BIN_CODEX` names one, so oneharness falls
-/// through it exactly as it would on a host where that harness is not installed.
+/// The chain is real rather than scripted: this launch's `ONEHARNESS_BIN_CODEX`
+/// names a path that does not exist, so oneharness falls through that candidate
+/// exactly as it would on a host where the harness is not installed. Named
+/// rather than left to the `PATH`, because the `PATH` a launch inherits is the
+/// developer's: on a host that has `codex`, the first candidate answered, the
+/// chain stepped past nothing, and this journey failed reporting the fall-through
+/// it was written to observe as missing.
 #[test]
 fn a_transcript_names_the_harness_that_answered_and_skips_the_ones_it_stepped_past() {
     let world = World::new("real-fallback-transcript");
