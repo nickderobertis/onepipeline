@@ -1725,16 +1725,13 @@ fn cancel_grace_seconds() -> u64 {
         .unwrap_or(DEFAULT_CANCEL_GRACE_SECONDS)
 }
 
-/// How many attempts a dispatch that produced nothing gets.
-///
-/// An unusable value falls back to the default rather than disabling the
-/// recovery it configures.
 /// How many times a dispatch that produced nothing is re-asked.
 ///
-/// A [`NonZeroU32`] for the reason [`publication_attempts`] gives, and the parse
-/// *is* the `> 0` filter this used to apply afterwards.
-/// [`DEFAULT_BOUNDARY_ATTEMPTS`] stays the published `u32` it has always been, so
-/// the conversion happens here and once.
+/// An unusable value falls back to the default rather than disabling the
+/// recovery it configures — a [`NonZeroU32`] for the reason
+/// [`publication_attempts`] gives, and the parse *is* the `> 0` filter this used
+/// to apply afterwards. [`DEFAULT_BOUNDARY_ATTEMPTS`] stays the published `u32`
+/// it has always been, so the conversion happens here and once.
 fn boundary_attempts() -> NonZeroU32 {
     std::env::var(BOUNDARY_ATTEMPTS_ENV)
         .ok()
