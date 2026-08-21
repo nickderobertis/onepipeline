@@ -251,6 +251,23 @@ fn state_of(dir: &Path, id: &str) -> PathBuf {
     dir.join("gh").join(fake::segment(id))
 }
 
+/// A file this host wrote, or nothing if it has not written it yet.
+///
+/// **Not present** and **not readable** are two different facts and only the
+/// first is an answer. A file that is not there is a change request this host
+/// has not opened, which every caller below has something true to say about; an
+/// `EACCES` or a short read is a broken fixture, and answering it as absence
+/// makes this host invent state — a change request reported missing, or a
+/// numbering that restarts at 1 and addresses somebody else's. So only
+/// `NotFound` becomes `None`, and every other error is fatal where it happened.
+fn read_if_present(path: &Path) -> Option<String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Some(text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => fake::fail(&format!("{} could not be read: {error}", path.display())),
+    }
+}
+
 /// What this host knows about a change request, or nothing if it opened none.
 ///
 /// A state file that exists and does not read as one of the two states is
@@ -260,7 +277,7 @@ fn state_of(dir: &Path, id: &str) -> PathBuf {
 /// the file, so reaching the refusal means the program is wrong.
 fn recorded(dir: &Path, id: &str) -> Option<Change> {
     let path = state_of(dir, id);
-    let recorded = std::fs::read_to_string(&path).ok()?;
+    let recorded = read_if_present(&path)?;
     Some(Change::parse(&recorded).unwrap_or_else(|| {
         fake::fail(&format!(
             "{} holds {recorded:?}, which is not a state this host records",
@@ -287,11 +304,7 @@ fn record(dir: &Path, id: &str, state: Change) {
 /// Counted from what it has already opened, so a journey that opens two reads
 /// two different change requests rather than one addressed twice.
 fn next_number(dir: &Path) -> u64 {
-    let opened = dir.join("gh").join("opened.jsonl");
-    std::fs::read_to_string(&opened)
-        .map(|text| text.lines().filter(|line| !line.trim().is_empty()).count() as u64)
-        .unwrap_or(0)
-        + 1
+    opened_changes(dir).len() as u64 + 1
 }
 
 /// `gh pr create --repo R --head H --base B --title T --body B`
@@ -393,7 +406,7 @@ fn list(args: &[String], dir: &Path) -> ExitCode {
 /// answerable than a line that is not JSON at all.
 fn opened_changes(dir: &Path) -> Vec<Opened> {
     let path = dir.join("gh").join("opened.jsonl");
-    std::fs::read_to_string(&path)
+    read_if_present(&path)
         .unwrap_or_default()
         .lines()
         .filter(|line| !line.trim().is_empty())

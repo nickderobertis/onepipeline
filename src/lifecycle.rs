@@ -120,7 +120,6 @@ pub fn execute(
     }
 }
 
-/// One attempt at a lifecycle node: its steps, and the publication that follows.
 fn attempt_once(
     executor: &dyn Executor,
     paths: &RunPaths,
