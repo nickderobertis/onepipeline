@@ -103,7 +103,7 @@ pub fn execute(
         // and there is no dispatch in flight here. The settlement it produces is
         // the same one `a_node_that_spends_its_publication_budget_settles_naming_
         // every_attempt` drives end to end, reached by the other condition.
-        if attempt >= attempts || cancel.is_cancelled() {
+        if attempt >= attempts.get() || cancel.is_cancelled() {
             return spent(&node.id, &preserved, &endings);
         }
         attempt += 1;
@@ -113,7 +113,7 @@ pub fn execute(
         let _ = tx.send(Message::Redispatched(Box::new(engine::Redispatch {
             node: node.id.clone(),
             attempt,
-            attempts,
+            attempts: attempts.get(),
             reason: format!("{}: {}", preserved.outcome.outcome(), preserved.reason),
         })));
         node = std::borrow::Cow::Owned(continued(&node, &preserved, attempt, attempts, &endings));
@@ -472,9 +472,7 @@ fn publish(
 /// needs exists only on the second and would otherwise be `Option`s on every
 /// settlement this crate makes.
 enum Attempt {
-    /// The node settled, whatever the settlement says.
     Settled(Settlement),
-    /// Its publication failed and left work a further attempt can continue.
     Preserving(Box<Preserved>),
 }
 
@@ -630,7 +628,7 @@ fn continued(
     node: &Node,
     preserved: &Preserved,
     attempt: u32,
-    attempts: u32,
+    attempts: std::num::NonZeroU32,
     endings: &[crate::vcs::Preserving],
 ) -> Node {
     Node {
@@ -651,7 +649,7 @@ fn continued(
 fn diagnosis(
     preserved: &Preserved,
     attempt: u32,
-    attempts: u32,
+    attempts: std::num::NonZeroU32,
     endings: &[crate::vcs::Preserving],
 ) -> String {
     let mut note = format!(

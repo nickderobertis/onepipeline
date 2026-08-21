@@ -15,6 +15,7 @@
 //! would interleave with this loop and corrupt the ledger.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::num::NonZeroU32;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
@@ -99,7 +100,12 @@ pub const PUBLICATION_ATTEMPTS_ENV: &str = "ONEPIPELINE_PUBLICATION_ATTEMPTS";
 /// green on the second look at it, and a check that is still red on the third is
 /// one a person has to decide about. A larger budget spends whole dispatches
 /// reproducing the same refusal, which is the loop this bound exists to stop.
-pub const DEFAULT_PUBLICATION_ATTEMPTS: u32 = 3;
+///
+/// A [`NonZeroU32`], because a budget of zero is not a smaller budget — it is a
+/// node settled having never been dispatched, which is not a state this loop has.
+/// The same reason a turn budget is one, and the same place the check belongs:
+/// at the boundary the value is read in from, not at the arithmetic downstream.
+pub const DEFAULT_PUBLICATION_ATTEMPTS: NonZeroU32 = NonZeroU32::new(3).unwrap();
 
 /// The environment variable setting how long a cancelled dispatch has to stop
 /// itself before it is torn down.
@@ -1733,12 +1739,13 @@ fn boundary_attempts() -> u32 {
 ///
 /// An unusable value falls back to the default rather than disabling the loop it
 /// configures — and `0` most of all, which read literally would settle a node
-/// having never dispatched it.
-pub(crate) fn publication_attempts() -> u32 {
+/// having never dispatched it. That is what the [`NonZeroU32`] parse is: the
+/// trust boundary this value crosses, so nothing downstream carries a budget it
+/// has to re-check.
+pub(crate) fn publication_attempts() -> NonZeroU32 {
     std::env::var(PUBLICATION_ATTEMPTS_ENV)
         .ok()
         .and_then(|value| value.parse().ok())
-        .filter(|attempts| *attempts > 0)
         .unwrap_or(DEFAULT_PUBLICATION_ATTEMPTS)
 }
 
@@ -2055,7 +2062,7 @@ mod tests {
             contract.contains(&format!("`{PUBLICATION_ATTEMPTS_ENV}`")),
             "docs/contract.md does not name the {PUBLICATION_ATTEMPTS_ENV} bound"
         );
-        assert_eq!(DEFAULT_PUBLICATION_ATTEMPTS, 3);
+        assert_eq!(DEFAULT_PUBLICATION_ATTEMPTS.get(), 3);
         assert!(
             contract.contains("and three by default"),
             "docs/contract.md does not state the default this build ships"
