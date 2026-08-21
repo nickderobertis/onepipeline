@@ -535,7 +535,7 @@ impl World {
         .expect("the rules file is written");
 
         if !pre_push.is_empty() {
-            let hooks = self.root.join("hooks");
+            let hooks = hooks_dir(self);
             std::fs::create_dir_all(&hooks).expect("a hooks directory");
             install_hook(&hooks.join("pre-push"), pre_push);
             git(
@@ -2097,6 +2097,15 @@ const VERBATIM_ARGUMENTS: &str =
 #[cfg(not(windows))]
 const VERBATIM_ARGUMENTS: &str = "";
 
+/// Where a world keeps the repository's own hooks, which is what its checkout's
+/// `core.hooksPath` names.
+///
+/// One statement of it, so the journey that installs a hook and the drift gate
+/// that rewrites one are naming the same directory rather than agreeing by hand.
+fn hooks_dir(world: &World) -> PathBuf {
+    world.root.join("hooks")
+}
+
 /// Write `argv` at `path` as an executable `pre-push` hook.
 ///
 /// git runs a hook as a program of its own, so the argv a journey states is
@@ -2220,54 +2229,163 @@ fn both_hook_scripts_answer_the_same_verbs() {
 } // llmlint: ignore-end[tests_mirror_real_usage]
 
 /// The other half of that contract — what the hook *refuses*, and with what —
-/// held by running this platform's own script.
+/// held by pushing at a repository that has it installed.
 ///
-/// The verb list is the part two files can be compared on; the exit code and
-/// the refusal message are the part only running proves, and no host runs both
+/// The verb list is the part two files can be compared on; what a refusal
+/// actually costs a caller is the part only a push proves, and no host runs both
 /// halves. So each platform's leg proves its own: read together across the CI
 /// matrix, the two tests are the whole drift gate.
 ///
-/// Run the way the installed hook runs it — `Command::new(argv[0])` with the
-/// rest as arguments — because a refusal that only holds when invoked some other
-/// way is not the one a publishing push would meet. Only the refusing command
-/// lines are driven: each of them exits before the verb does anything, so this
-/// needs no session and leaves nothing behind.
+/// Driven through **git**, because that is the only thing that runs a `pre-push`
+/// hook: the repository is the one every journey publishes into, the hook behind
+/// its `core.hooksPath` is written by [`install_hook`] from the argv
+/// [`hook_script`] states, and each case is a real `git push` at a real bare
+/// origin. That also makes this the one test that runs the wrapper `install_hook`
+/// writes rather than the argv inside it — on Windows the wrapper is a POSIX line
+/// git's bundled shell reads before it ever reaches `hook.bat`, and a wrapper that
+/// lost the verb's arguments there would leave every push in a hook that never
+/// returns.
 ///
-/// The state root is handed over even though nothing here reaches it, and that
-/// is the point: without it every one of these would refuse for the *missing*
-/// root, and the test would pass against a script that had lost its argument
-/// checks entirely.
+/// What is asserted is what git makes observable, and the exit code is not part
+/// of it: git relays a hook's *words* to the caller and its own verdict to the
+/// shell, so every non-zero the script can answer with arrives as one declined
+/// push. `sysexits.h`'s 64 and a host that refused a write are still separate
+/// exits in both halves — `hook.sh` says why — but nothing downstream of git can
+/// tell them apart, so a test asserting the difference here would be asserting
+/// against an interface no caller has. What a caller does have is these three,
+/// and each of them is load-bearing: the push is **refused**, the base does
+/// **not** move, and the hook's own complaint reaches them — the last checked as
+/// the words both halves write, because the two disagree over how much of the
+/// usage line a missing argument earns and neither wording is wrong.
+///
+/// The last push is the control. Six refusals prove nothing on their own — a hook
+/// that turned every push down would pass all of them — so a command line the
+/// script *does* speak follows, and the base moves.
+///
+/// The state root is handed over even though only the last case reaches it, and
+/// that is the point: without it that one would refuse for the *missing* root
+/// rather than for the tree git is running the hook in, and the complaint
+/// asserted on below would be one this test never meant to provoke.
 #[test]
 fn the_hook_refuses_a_command_line_it_does_not_speak() {
     let world = World::new("hook-refusals");
-    for argv in [
-        vec!["nonsense"],
-        vec!["wait-for"],
-        vec!["wait-for", "one", "two"],
-        vec!["break-streams", "extra"],
-        vec!["append-future-event", "extra"],
+    // Installed through the same door a journey uses, so what git runs here is
+    // what git runs there. The argv is rewritten per case below; the checkout's
+    // `core.hooksPath` already points at the directory holding it.
+    let repo = world.repository(
+        "local-direct",
+        &as_argv(&hook_script(&world, &["nonsense"])),
+    );
+    let hook = hooks_dir(&world).join("pre-push");
+    let base = || git(&world, &repo.origin, &["rev-parse", "main"]);
+    let seed = base();
+
+    for (argv, complaint) in [
+        (vec!["nonsense"], "unknown command 'nonsense'"),
+        // Both halves refuse this, and they word it differently — one counts the
+        // arguments before it looks at them and says so, the other misses the
+        // path first. The part they share is the part a caller needs.
+        (vec!["wait-for"], "wait-for takes the path to wait for"),
+        (
+            vec!["wait-for", "one", "two"],
+            "wait-for takes the path to wait for, and nothing else",
+        ),
+        (
+            vec!["break-streams", "extra"],
+            "break-streams takes no arguments",
+        ),
+        (
+            vec!["append-future-event", "extra"],
+            "append-future-event takes no arguments",
+        ),
         // Not under a session's run root, which is where the stream is found.
-        vec!["append-future-event"],
+        (
+            vec!["append-future-event"],
+            "append-future-event runs in a tree under a session's run root",
+        ),
     ] {
-        let command = hook_script(&world, &argv);
-        let refused = Command::new(&command[0])
-            .args(&command[1..])
-            .current_dir(&world.root)
-            .env("ONEVCS_HOME", world.onevcs_home())
-            .output()
-            .expect("the hook runs");
+        install_hook(&hook, &as_argv(&hook_script(&world, &argv)));
+        let refused = publishing_push(&world, &repo.checkout, &format!("{argv:?}"));
         let said = String::from_utf8_lossy(&refused.stderr).into_owned();
-        assert_eq!(
-            refused.status.code(),
-            Some(64),
-            "the hook answered {argv:?} with {:?}, not the usage refusal: {said}",
-            refused.status.code()
+        assert!(
+            !refused.status.success(),
+            "the repository's merge path let {argv:?} through: {said}"
+        );
+        assert!(
+            said.contains(complaint),
+            "the hook refused {argv:?} without saying {complaint:?}: {said}"
         );
         assert!(
             said.contains("the verbs are:"),
             "the hook refused {argv:?} without naming the verbs it does speak: {said}"
         );
+        assert_eq!(
+            base(),
+            seed,
+            "a push the repository's merge path turned down over {argv:?} landed anyway"
+        );
     }
+
+    let go = world.root.join("push.go");
+    std::fs::write(&go, "go").expect("the rendezvous is written");
+    install_hook(
+        &hook,
+        &as_argv(&hook_script(&world, &["wait-for", &go.to_string_lossy()])),
+    );
+    let accepted = publishing_push(&world, &repo.checkout, "a verb it speaks");
+    assert!(
+        accepted.status.success(),
+        "the repository's merge path turned down a command line its hook speaks: {}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+    assert_ne!(
+        base(),
+        seed,
+        "the base did not move for a push nothing refused, so the six above were \
+         refused by something other than the hook"
+    );
+}
+
+/// Commit one change and push it, and hand back whatever git made of that —
+/// which is a refusal as often as not, so unlike [`git`] this does not assert.
+///
+/// A commit of its own per push because git runs no `pre-push` hook for a push
+/// with nothing in it: without one the second case onwards would be
+/// `Everything up-to-date`, the hook would never run, and every assertion after
+/// it would be reading the first case's answer.
+///
+/// The state root travels on the push rather than on this process, because the
+/// hook is git's child and inherits it from there.
+fn publishing_push(world: &World, checkout: &Path, what: &str) -> std::process::Output {
+    let file = checkout.join(format!("{}.md", slug_of(what)));
+    std::fs::write(&file, format!("{what}\n")).expect("the change is written");
+    git(world, checkout, &["add", "-A"]);
+    git(world, checkout, &["commit", "-m", &format!("feat: {what}")]);
+    Command::new("git")
+        .args(["push", "origin", "main"])
+        .current_dir(checkout)
+        .env("GIT_CONFIG_GLOBAL", world.gitconfig())
+        .env("GIT_AUTHOR_NAME", GIT_WHO)
+        .env("GIT_AUTHOR_EMAIL", GIT_EMAIL)
+        .env("GIT_COMMITTER_NAME", GIT_WHO)
+        .env("GIT_COMMITTER_EMAIL", GIT_EMAIL)
+        .env("ONEVCS_HOME", world.onevcs_home())
+        .output()
+        .expect("git runs")
+}
+
+/// The borrowed argv every installer takes, out of the owned one
+/// [`hook_script`] hands back.
+fn as_argv(argv: &[String]) -> Vec<&str> {
+    argv.iter().map(String::as_str).collect()
+}
+
+/// A filename for a case named by its own argv, which is full of characters a
+/// path is not.
+fn slug_of(what: &str) -> String {
+    what.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
 }
 
 /// The interpreter that leads a hook script's argv on this platform.
