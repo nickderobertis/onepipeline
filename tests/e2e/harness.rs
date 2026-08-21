@@ -774,14 +774,14 @@ impl World {
     /// Windows asks the process itself, so there is nothing to hold there and
     /// this is an empty directory.
     #[cfg(unix)]
-    pub fn path_with_nothing_but_a_working_ps(&self) -> PathBuf {
+    pub fn path_with_only_what_a_dispatch_resolves(&self) -> PathBuf {
         self.path_with_ps("only-ps", &format!("exec {} \"$@\"", real_ps().display()))
     }
 
     /// A `PATH` holding only what a dispatch resolves by name — which on Windows
     /// is nothing, because the start token is read off the process itself.
     #[cfg(windows)]
-    pub fn path_with_nothing_but_a_working_ps(&self) -> PathBuf {
+    pub fn path_with_only_what_a_dispatch_resolves(&self) -> PathBuf {
         self.empty_path()
     }
 
@@ -2124,20 +2124,14 @@ fn hooks_dir(world: &World) -> PathBuf {
 ///
 /// On Windows that POSIX line is read by the MSYS2 `sh` git for Windows bundles,
 /// and it is [`interpreted`] that puts `cmd /C` in front of the verb — so the
-/// shell is starting a *native* program, and the MSYS2 runtime rewrites arguments
-/// that look like POSIX paths on the way across that boundary. `/C` is exactly
-/// that shape, and rewritten it stops being cmd's switch: cmd then takes the verb
-/// for a command line to read rather than a batch file to run, `wait-for` never
-/// starts, and the push is left in a hook that never returns. Nothing bounds that
-/// on this platform — `onevcs` runs a hook-running git command under a
-/// ninety-minute bound whose teardown is a process *group*, which is `#[cfg(unix)]`
-/// in that crate and a documented no-op here, and the reader threads it joins
-/// afterwards are blocked on pipes the surviving hook inherited — so the run does
-/// not fail, it wedges, and takes the whole `e2e` binary with it. The conversion
-/// is switched off for the one `exec` below rather than worked around by
-/// respelling `/C`: both names are read, because `MSYS_NO_PATHCONV` is git for
-/// Windows' own spelling of the MSYS2 knob and neither release promises the other.
-/// Empty on Unix, where the line is what it always was.
+/// shell starts a *native* program, and the MSYS2 runtime rewrites arguments
+/// shaped like POSIX paths on the way across that boundary. `/C` is exactly that
+/// shape, and rewritten it stops being cmd's switch: cmd reads the verb as a
+/// command line rather than running it as a batch file, and the push is left in a
+/// hook that never returns. So [`VERBATIM_ARGUMENTS`] switches the conversion off
+/// for the one `exec` below, under both names, because `MSYS_NO_PATHCONV` is git
+/// for Windows' own spelling of the MSYS2 knob and neither release promises the
+/// other. Empty on Unix, where the line is what it always was.
 fn install_hook(path: &Path, argv: &[&str]) {
     let quoted: Vec<String> = argv
         .iter()

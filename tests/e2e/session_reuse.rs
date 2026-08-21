@@ -365,37 +365,24 @@ fn group_holds_anything(group: i32) -> bool {
 /// Stop a run **and the whole publication running under it**, and do not return
 /// while any of it is still alive.
 ///
-/// A publication is a tree, not a process: the binary starts a worker, the
-/// worker calls `onevcs`, `onevcs` runs `git push`, and git runs the
-/// repository's own `pre-push` hook — which this journey installed and is still
-/// holding on a rendezvous. [`std::process::Child::kill`] signals the one pid it
-/// was given, so everything below the owner outlives it, and releasing the
-/// rendezvous afterwards lets the stopped run's push go through after all. The
-/// base then carries the stopped node's publication beside the retry's, which is
-/// the opposite of what the last assertion in the journey below reads. Linux
-/// reaps the orphans before the release often enough to pass anyway; macOS does
-/// not, which is the `cross (macos-latest)` flake this replaced.
+/// A publication is a tree, not a process — the owner starts a worker, the worker
+/// calls `onevcs`, `onevcs` runs `git push`, and git runs the `pre-push` hook
+/// this journey is holding — so [`std::process::Child::kill`], which signals the
+/// one pid it was given, leaves the push alive to land once the rendezvous is
+/// released. Three things make this stop mean what the journey says instead.
 ///
-/// Two things make the stop mean what the journey says it does.
+/// The **moment**: it waits until the hook is actually holding a push.
+/// `merge-queued` is published before the push it precedes, so stopping on that
+/// alone can land anywhere in the publication, with the hook yet to come.
 ///
-/// The **moment** is pinned first: the sweep waits until the hook is actually
-/// holding a push before it signals anything. `merge-queued` is published before
-/// the push it precedes, so stopping on that alone lands anywhere in the
-/// publication — some runs were killed while `git worktree add` was still
-/// running, with the push, and the hook, yet to come. A tree read at that point
-/// does not name them.
+/// The **reach**: every group the tree is spread across, not the owner's alone,
+/// because `onevcs` detaches git into a group of its own. See [`groups_under`].
 ///
-/// The **reach** is the other: every group the tree is spread across is
-/// signalled, not the owner's alone, because `onevcs` detaches git into a group
-/// of its own. See [`groups_under`].
+/// The **check**: signal delivery is asynchronous, so returning before the last
+/// process has left would put the release back in the race this closes.
 ///
-/// Then it is checked rather than assumed — delivery is asynchronous, and a
-/// journey that released the rendezvous while the hook was between its `sleep`
-/// and its next loop would be back in the race it just closed.
-///
-/// Unix-only, and there is no arm beside it: this stop exists because the hook is
-/// two processes below the run, and no other platform can reach it. The journey
-/// below says why, and carries the same gate.
+/// Unix-only, and there is no arm beside it — the journey below says why, and
+/// carries the same gate.
 #[cfg(unix)]
 fn stop_the_publication(world: &World, owner: &mut std::process::Child, rendezvous: &Path) {
     let held = rendezvous.to_string_lossy().into_owned();
@@ -459,43 +446,28 @@ fn holders_of(rendezvous: &str) -> Vec<u32> {
 /// A run stopped mid-publication, and the retry that takes up the session it left
 /// its work in.
 ///
-/// **Unix-only, and what that gives up is worth stating rather than leaving to
-/// the `cfg`.** This is the one journey that has to *stop* a publication while
-/// the repository's own `pre-push` hook is holding it, and the hook is not the
-/// run's child: it is git's, two processes below the owner. Reaching it takes a
-/// teardown that walks descent, and `onevcs` — which bounds the hook-running git
-/// command — says in its own source that it has none off Unix:
-///
-/// ```text
-/// #[cfg(not(unix))]
-/// fn terminate_group(child: &Child) {
-///     // No portable group teardown: the bound still fires and the child is killed
-///     // below, but a hook's own orphaned children survive it.
-///     let _ = child;
-/// }
-/// ```
-///
-/// `detach_process_group` is a no-op there too. So on Windows the stop does not
-/// reach the hook; the bound fires and joins reader threads still blocked on
-/// pipes the surviving hook inherited, and the run does not fail — it wedges,
-/// taking the whole `e2e` binary and the `cross (windows-latest)` leg with it,
-/// for hours, with no verdict at the end of it.
+/// **Unix-only, and what that gives up belongs here rather than in the `cfg`.**
+/// This is the only journey that has to *stop* a publication while the
+/// repository's own `pre-push` hook holds it, and that hook is git's child, two
+/// processes below the owner. `onevcs` documents that it has no portable group
+/// teardown: off Unix its `terminate_group` is a no-op that says so, and
+/// `detach_process_group` with it, so the bound kills the child it started and
+/// the hook's orphaned children survive. The run then does not fail — it wedges,
+/// on reader threads blocked against pipes that hook still holds, and takes the
+/// `cross (windows-latest)` leg with it.
 ///
 /// What is given up is this journey's Windows coverage and nothing else: a run
 /// stopped mid-publication, the work it strands on its branch, and the retry that
-/// continues the same session. Every other journey that installs this hook
-/// *releases* it rather than stopping it — `lifecycle.rs`'s two, `views.rs`'s
-/// publication bucket, `driver.rs`'s in-flight adoption, and `harness.rs`'s
-/// refusal gate — so all of those still run on every platform. `main` runs this
-/// one on Windows today and passes, because there the held fixture is `onevcs`'s
-/// *gate*: a direct child of the process being stopped, one `CreateProcess`,
-/// reaped by whoever started it. Removing the gate concept is what moved the hold
-/// onto the repository's own hook and put two processes in between.
+/// continues the same session. Every other journey installing this hook
+/// *releases* it rather than stopping it, and all of them still run everywhere.
+/// `main` runs this one on Windows and passes because the fixture it holds there
+/// is `onevcs`'s *gate* — a direct child of the process being stopped, reaped by
+/// whoever started it. Verification moving onto the repository's own hook is what
+/// put two processes in between.
 ///
 /// The gate comes off when `onevcs` can stop a hook's orphaned children on
-/// Windows — a `terminate_group` that walks descent there rather than documenting
-/// that it cannot. That is that crate's change to make, not this one's, and the
-/// Windows half of the stop belongs with it rather than sitting here unreachable.
+/// Windows. That is that crate's change, and the Windows half of the stop belongs
+/// with it rather than sitting here unreachable.
 #[cfg(unix)]
 #[test]
 fn a_retry_takes_up_the_session_a_stopped_run_left_its_work_in() {

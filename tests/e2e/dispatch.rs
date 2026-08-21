@@ -1261,7 +1261,7 @@ fn a_transcript_names_the_harness_that_answered_and_skips_the_ones_it_stepped_pa
         "ONEHARNESS_BIN_CODEX",
         world.graphs().join("no-codex-on-this-host"),
     );
-    launch.env("PATH", world.path_with_nothing_but_a_working_ps());
+    launch.env("PATH", world.path_with_only_what_a_dispatch_resolves());
     if let Some(found) = World::resolved_on(&launch, "codex") {
         panic!(
             "this launch can resolve codex at {}, so its first candidate would run rather than \
