@@ -83,62 +83,93 @@ enum Takes {
     AValue,
 }
 
-/// The flags one onejudge turn renders, and what follows each.
-///
-/// Repeats are legal — `--mock-harness` is repeatable, and onejudge's renderer
-/// emits one per harness id — so this says what an argument *is*, not how many
-/// times it may appear.
+/// How many times one flag may appear.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Occurs {
+    /// Once. A second is a caller that has changed its mind mid-argv, and which
+    /// of the two the real CLI keeps is not something a double may guess at.
+    Once,
+    /// As often as the caller has values for it.
+    Repeatedly,
+}
+
+/// The flags one onejudge turn renders, what follows each, and how often it may.
 // llmlint: ignore[contracts_have_one_source_or_a_drift_gate] this is a copy of the
 // **CLI**'s grammar, which no crate in this dependency graph declares as data:
 // onejudge renders it in a private function and oneharness parses it in a binary this
 // build does not link. The reconciling gate is `tests/e2e/turns.rs`, which drives the
 // real onejudge against this process — so a flag it starts sending that is not below is
 // a refusal there rather than a double that quietly waves it through.
-const FLAGS: [(&str, Takes); 13] = [
-    ("--compact", Takes::Nothing),
-    ("--events", Takes::Nothing),
-    ("--history", Takes::Nothing),
-    ("--stream", Takes::Nothing),
-    ("--control", Takes::Nothing),
-    ("--system", Takes::AValue),
-    ("--config", Takes::AValue),
-    ("--mock-harness", Takes::AValue),
-    ("--cwd", Takes::AValue),
-    ("--prompt", Takes::AValue),
-    ("--prompt-file", Takes::AValue),
-    ("--history-name", Takes::AValue),
-    ("--session", Takes::AValue),
+const FLAGS: [(&str, Takes, Occurs); 13] = [
+    ("--compact", Takes::Nothing, Occurs::Once),
+    ("--events", Takes::Nothing, Occurs::Once),
+    ("--history", Takes::Nothing, Occurs::Once),
+    ("--stream", Takes::Nothing, Occurs::Once),
+    ("--control", Takes::Nothing, Occurs::Once),
+    ("--system", Takes::AValue, Occurs::Once),
+    ("--config", Takes::AValue, Occurs::Once),
+    // The one repeatable flag: onejudge's renderer emits one per harness id whose
+    // provider process oneharness is to replace with its own responder.
+    ("--mock-harness", Takes::AValue, Occurs::Repeatedly),
+    ("--cwd", Takes::AValue, Occurs::Once),
+    ("--prompt", Takes::AValue, Occurs::Once),
+    ("--prompt-file", Takes::AValue, Occurs::Once),
+    ("--history-name", Takes::AValue, Occurs::Once),
+    ("--session", Takes::AValue, Occurs::Once),
 ];
 
 /// Refuses an argv the real `oneharness run` would not take.
 ///
 /// The checks in [`run`] are about a flag onejudge chose the *wrong value* for;
-/// this is about one it should not be sending at all, or a positional after the
-/// verb. Both are the same property, which is the only thing a double is worth:
-/// where the real CLI says no, this one has to. An argument waved through here is
-/// one no journey can catch — onejudge grows a flag oneharness does not take,
-/// every member settles green, and the first thing that ever says otherwise is a
-/// real `oneharness`.
+/// this is about one it should not be sending at all. Both are the same property,
+/// which is the only thing a double is worth: where the real CLI says no, this
+/// one has to. An argument waved through here is one no journey can catch —
+/// onejudge grows a flag oneharness does not take, every member settles green,
+/// and the first thing that ever says otherwise is a real `oneharness`.
+///
+/// Three ways an argv is refused, and each is a different mistake:
+///
+/// * an argument that is not a flag this verb takes, which covers a positional
+///   after the verb as well as an unknown option;
+/// * a second occurrence of a flag that may appear once. Every reader below is
+///   `fake::flag`, which answers with the **first**, so a second is a value this
+///   process would silently ignore — and which of the two a real `oneharness`
+///   keeps is not something a double may guess at;
+/// * a value-taking flag with nothing after it, or with the next *flag* after it.
+///   Both are the flag arriving empty, and left alone both read to `fake::flag`
+///   as the flag never having been sent — so the refusal would name the wrong
+///   thing, or the following flag would be eaten as this one's value.
 fn declared(args: &[String]) -> Result<(), String> {
+    let known = |arg: &String| FLAGS.iter().find(|(name, _, _)| name == arg);
+    let mut seen: Vec<&str> = Vec::new();
     // Past the verb, which `main` matched to get here.
     let mut at = 1;
     while at < args.len() {
         let arg = &args[at];
-        let Some((_, takes)) = FLAGS.iter().find(|(name, _)| name == arg) else {
+        let Some((name, takes, occurs)) = known(arg) else {
             return Err(format!("oneharness run takes no argument {arg:?}"));
         };
+        if *occurs == Occurs::Once && seen.contains(name) {
+            return Err(format!(
+                "oneharness run was given {arg} more than once, and it takes one"
+            ));
+        }
+        seen.push(name);
         at += 1;
-        // Refused here rather than left to the read in `run`: an option with
-        // nothing after it is indistinguishable, to every `fake::flag` below, from
-        // one that was never sent — so it would be reported as the flag missing
-        // rather than as the empty one onejudge really sent.
         if *takes == Takes::AValue {
-            if at == args.len() {
-                return Err(format!(
-                    "oneharness run's {arg} takes a value, and nothing followed it"
-                ));
+            match args.get(at) {
+                None => {
+                    return Err(format!(
+                        "oneharness run's {arg} takes a value, and nothing followed it"
+                    ))
+                }
+                Some(next) if known(next).is_some() => {
+                    return Err(format!(
+                        "oneharness run's {arg} takes a value, and {next} followed it"
+                    ))
+                }
+                Some(_) => at += 1,
             }
-            at += 1;
         }
     }
     Ok(())
