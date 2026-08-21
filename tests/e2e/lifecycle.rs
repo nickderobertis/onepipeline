@@ -1983,6 +1983,18 @@ fn a_base_that_moved_under_a_publication_is_redispatched_on_the_branch_it_preser
     );
 }
 
+/// A node that publishes into a host whose required check stays red.
+///
+/// Every change request this host is handed and not just the first: the check is
+/// red and stays red, which is the loop the budget exists to bound.
+fn publishing_into_checks_that_stay_red(world: &World, name: &str) -> (String, Repository) {
+    let repo = world.repository("change-auto", &["true"]);
+    world.script("service.work", "the worker wrote this\n");
+    world.script("gh.checks", RED);
+    let run = settle(world, name, vec![lifecycle("service", &[])]);
+    (run, repo)
+}
+
 /// A check that is never going to pass is a worse failure than the one it
 /// replaces, so the loop is bounded and says so when it stops.
 ///
@@ -1995,13 +2007,7 @@ fn a_base_that_moved_under_a_publication_is_redispatched_on_the_branch_it_preser
 #[test]
 fn a_node_that_spends_its_publication_budget_settles_naming_every_attempt() {
     let world = World::new("lifecycle-budget").with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "0");
-    let repo = world.repository("change-auto", &["true"]);
-    world.script("service.work", "the worker wrote this\n");
-    // Every change request this host is handed, not just the first: the check is
-    // red and stays red, which is the loop this bound exists to stop.
-    world.script("gh.checks", RED);
-
-    let run = settle(&world, "budget", vec![lifecycle("service", &[])]);
+    let (run, repo) = publishing_into_checks_that_stay_red(&world, "budget");
     let result = world.run_json(&run, "result.json");
     let node = result["nodes"][0].clone();
     assert_eq!(node["status"], "failed", "{result}\n{}", why(&world, &run));
@@ -2042,6 +2048,40 @@ fn a_node_that_spends_its_publication_budget_settles_naming_every_attempt() {
     assert!(
         repo.has_branch(&world, branch),
         "the branch {branch} every attempt was made on was not handed back"
+    );
+}
+
+/// The other way an operator gets that bound wrong: a value that is not a number
+/// at all.
+///
+/// `0` above is a number this crate refuses and this is a parse that never
+/// produces one, so they reach the fallback down two different paths — and an
+/// operator who wrote `three` where a digit goes must not silently get a
+/// different run from one who wrote `0`. Its own journey rather than a second
+/// case inside the one above, because what is held is that the whole run is the
+/// same run.
+#[test]
+fn a_publication_budget_that_is_not_a_number_spends_the_same_default() {
+    let world =
+        World::new("lifecycle-budgetword").with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "three");
+    let (run, _repo) = publishing_into_checks_that_stay_red(&world, "budgetword");
+
+    let node = world.run_json(&run, "result.json")["nodes"][0].clone();
+    assert_eq!(node["status"], "failed", "{node}\n{}", why(&world, &run));
+    assert_eq!(node["outcome"], "checks-failed", "{node}");
+    assert_eq!(
+        dispatches_of(&world, &run, "service").len(),
+        3,
+        "a budget that is not a number was not the default three\n{}",
+        why(&world, &run)
+    );
+    let detail = world.events_of(&run, "node-settled")[0]["payload"]["detail"]
+        .as_str()
+        .expect("the settlement says why")
+        .to_string();
+    assert!(
+        detail.contains("3 publication attempts"),
+        "the spent budget does not name the attempts it made: {detail}"
     );
 }
 
