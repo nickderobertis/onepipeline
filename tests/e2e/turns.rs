@@ -1,32 +1,20 @@
 //! The turn a dispatch relays, field for field.
 //!
-//! `oneagentgraph` publishes a member's turn as it happens — the opening and what
-//! it was asked, each tool call **and the observation that answered it**, each
-//! party's own words, and the turn's own close and account — and this crate
-//! relays all of it into the run's merged store. What these journeys hold is the
-//! relay: that every field the producer declares arrives with its name and its
-//! meaning intact, and that nothing was invented beside it.
-//!
-//! Worth journeys of its own, and for the reason `session.rs` states about the
-//! `session` label: the fields are read back through the *producer's own* payload
-//! types, which deny unknown fields, so a relay that had renamed one, dropped one,
-//! or added one of its own fails here. A shape restated in this file would go on
+//! What these journeys hold is the relay: that every field the producer declares
+//! arrives with its name and its meaning intact, and that nothing was invented
+//! beside it. The fields are read back through the *producer's own* payload
+//! types, which deny unknown fields, so a shape restated in this file would go on
 //! passing the day that library moved.
 //!
-//! The first two drive the real sibling, through [`World::run_on_agentgraph`],
-//! and differ only in the member kind — which is what decides how far down the
-//! stand-in sits, and is why the two-party one is worth its cost: `turn-message`
-//! is published by a two-party member alone, because a reply is only somebody's
-//! *words* when there is a second party to receive them.
-//!
-//! [`World::run_on_agentgraph`]: crate::harness::World::run_on_agentgraph
+//! The first two drive the real sibling and differ only in the member kind, which
+//! is what decides how far down the stand-in sits. The two-party one earns its
+//! cost: `turn-message` is published by a two-party member alone, because a reply
+//! is only somebody's *words* when there is a second party to receive them.
 
 // llmlint: ignore-file[e2e_not_mocked] the rationale is `harness.rs`'s; what is specific
-// here is that nothing between the producer and the assertion is substituted — the graph,
-// the member, the conversation engine and the relay are all the real ones, and the
-// stand-in is below the producer at the boundary each journey above names — and every
-// field is read back through the producing library's own `deny_unknown_fields` payload
-// type rather than by name.
+// here is that nothing between the producer and the assertion is substituted, and that
+// every field is read back through the producing library's own `deny_unknown_fields`
+// payload type rather than by name.
 
 use crate::harness::{agent, plan_of, World};
 use oneagentgraph::event::{

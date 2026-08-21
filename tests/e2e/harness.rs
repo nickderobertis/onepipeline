@@ -574,15 +574,10 @@ impl World {
 
     /// Write the graph configs [`agentgraph_cmd`](World::agentgraph_cmd) names.
     ///
-    /// Single-sided `kind: oneharness` members, which is the cheaper of the two
-    /// kinds and the one nearly every journey wants: the seam most of them are
-    /// about — a dispatch reaching the sibling, being accepted, and streaming
-    /// back — is the same either way, and a two-party member pays for a whole
-    /// supervised conversation to reach it.
-    ///
-    /// What a two-party member produces that this one cannot is the conversation
-    /// itself: a second party, its own turns, and each party's words as their own
-    /// envelope. The journeys that need one say so with
+    /// Single-sided `kind: oneharness` members, because the seam nearly every
+    /// journey is about is the same either way and a two-party member pays for a
+    /// whole supervised conversation to reach it. The journeys that need that
+    /// conversation say so with
     /// [`write_supervised_node_graph`](World::write_supervised_node_graph).
     pub fn write_graphs(&self) {
         self.write_graphs_with(None, CONSUMER_GRAPH_SCHEMA);
@@ -592,23 +587,12 @@ impl World {
     /// as the shipped one is, and write the onejudge base config it names.
     ///
     /// [`write_graphs`](World::write_graphs) must have run first: this reuses the
-    /// unattributed identity chain it leaves in the graph directory, which is
-    /// what the shipped graph names for both of a two-party member's sides.
-    ///
-    /// Nothing about the conversation is stood in for. `oneagentgraph` merges the
-    /// persona onto this base and drives onejudge's own run driver in process;
-    /// onejudge composes each side's prompt, parses each answer and settles the
-    /// member; and the only substitution is one process down, at the `oneharness`
-    /// each side's turn is spawned as — see `crates/testfakes`'s double for what
-    /// that boundary is and why a two-party member still has one.
+    /// unattributed identity chain it leaves in the graph directory, which is what
+    /// the shipped graph names for both of a two-party member's sides.
     ///
     /// `12` is the default turn ceiling deliberately: it is the number a node
     /// declaring `45` was silently collapsed to for the whole life of the defect
-    /// [`a_nodes_turn_budget_reaches_its_dispatch_and_outranks_the_run_wide_one`]
-    /// proves fixed.
-    ///
-    /// [`a_nodes_turn_budget_reaches_its_dispatch_and_outranks_the_run_wide_one`]:
-    ///     crate::dispatch::a_nodes_turn_budget_reaches_its_dispatch_and_outranks_the_run_wide_one
+    /// `dispatch.rs`'s turn-budget journey proves fixed.
     pub fn write_supervised_node_graph(&self) {
         std::fs::write(
             self.graphs().join("onejudge.base.yaml"),

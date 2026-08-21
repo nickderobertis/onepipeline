@@ -44,16 +44,12 @@ fn main() -> ExitCode {
 
 /// Which side of a two-party member's conversation this turn is.
 ///
-/// Decided by `--events`, which is the flag onejudge's own turn description sets
-/// on the agent side and only there: the agent's turn is the one whose tool
-/// activity a caller wants normalized, and a judgement call has none. Deciding it
-/// from the *prompt* would be a double reading the conversation instead of the
-/// argv it was invoked with.
+/// Decided by `--events`, which onejudge sets on the agent side and only there.
+/// Deciding it from the *prompt* would be a double reading the conversation
+/// instead of the argv it was invoked with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Side {
-    /// The side that does the work, streaming as it goes.
     Agent,
-    /// The side that supervises it, answering in one buffered document.
     Judge,
 }
 
@@ -69,7 +65,6 @@ enum Occurs {
     Repeatedly,
 }
 
-/// The flags one onejudge turn renders, what follows each, and how often it may.
 // llmlint: ignore[contracts_have_one_source_or_a_drift_gate] this is a copy of the
 // **CLI**'s grammar, which no crate in this dependency graph declares as data:
 // onejudge renders it in a private function and oneharness parses it in a binary this
@@ -260,20 +255,14 @@ impl Identity {
 
 /// The identity a turn under `config` ran as.
 ///
-/// The **first** candidate, because every chain this suite writes is one that
-/// runs: a fallback that stepped past its head is a different report — one
-/// carrying the whole chain and which of it ran — and a double claiming to be
-/// that would be inventing a run nobody had.
+/// The **first** candidate: a fallback that stepped past its head reports the
+/// whole chain and which of it ran, and a double claiming to be that would be
+/// inventing a run nobody had. Read off the config rather than assumed, so a
+/// report names the identity the launch selected.
 ///
-/// Read off the config rather than assumed, so a report says which identity took
-/// the turn instead of naming one this file remembered. A chain declared with
-/// nothing in it is refused: it selects no harness, so no turn under it happened.
-///
-/// **Every** candidate is named, not only the one that ran: a chain is what a
-/// fallback would step through, so a nameless entry anywhere in it is a config
-/// that cannot be resolved — and one waved through because this turn happened not
-/// to reach it is a launch this double called good and a real `oneharness` would
-/// not.
+/// Every candidate is checked, not only that one — a nameless entry anywhere is a
+/// config that cannot be resolved, and waving one through because this turn did
+/// not reach it is a launch a real `oneharness` would refuse.
 fn ran(config: &str) -> Result<Identity, String> {
     let config: Config = toml::from_str(config)
         .map_err(|error| format!("this is not an oneharness config: {error}"))?;

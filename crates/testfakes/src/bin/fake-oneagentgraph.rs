@@ -1244,19 +1244,10 @@ fn emit(
             }),
         );
     }
-    // The turn's own words, said while it is saying them. A consumer renders
-    // this *into* a transcript and counts it out of the turn total, exactly as
-    // it does an activity — which is the sibling's rule and is asked of that
-    // library above rather than restated here.
-    //
-    // Scripted only in length: `{key}.said-bytes` makes this turn say more than
-    // a payload text field may carry, which is the one case a relay has to cut
-    // rather than pass on whole. Every other journey gets what the report keeps.
-    //
-    // The count is refused above [`SAYABLE`] rather than allocated: the whole
-    // reason to script one is to cross the sibling's own bound, so a larger
-    // number is a typo, and a typo that is honoured is a double that exhausts
-    // the host instead of failing the journey that made it.
+    // The turn's own words. Scripted only in length, by `{key}.said-bytes`, and
+    // refused above [`SAYABLE`] rather than allocated: the reason to script one is
+    // to cross the payload bound, so a larger number is a typo, and one honoured
+    // is a double that exhausts the host instead of failing the journey.
     let said = match fake::node_script(dir, key, "said-bytes") {
         None => SAID.to_string(),
         Some(bytes) => match bytes.trim().parse::<usize>() {
