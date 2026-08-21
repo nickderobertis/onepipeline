@@ -2087,6 +2087,16 @@ pub fn hook_script(world: &World, args: &[&str]) -> Vec<String> {
     argv
 }
 
+/// What the hook's POSIX line has to say before it hands the process over, so
+/// that the verb's argv arrives as it was written. See [`install_hook`].
+#[cfg(windows)]
+const VERBATIM_ARGUMENTS: &str =
+    "MSYS2_ARG_CONV_EXCL='*'\nMSYS_NO_PATHCONV=1\nexport MSYS2_ARG_CONV_EXCL MSYS_NO_PATHCONV\n";
+
+/// Nothing: no runtime stands between this shell and the verb it starts.
+#[cfg(not(windows))]
+const VERBATIM_ARGUMENTS: &str = "";
+
 /// Write `argv` at `path` as an executable `pre-push` hook.
 ///
 /// git runs a hook as a program of its own, so the argv a journey states is
@@ -2097,13 +2107,37 @@ pub fn hook_script(world: &World, args: &[&str]) -> Vec<String> {
 ///
 /// Every word is single-quoted, because a world's scratch directory carries the
 /// journey's own name and nothing promises that a path is one shell word.
+///
+/// On Windows that POSIX line is read by the MSYS2 `sh` git for Windows bundles,
+/// and it is [`interpreted`] that puts `cmd /C` in front of the verb — so the
+/// shell is starting a *native* program, and the MSYS2 runtime rewrites arguments
+/// that look like POSIX paths on the way across that boundary. `/C` is exactly
+/// that shape, and rewritten it stops being cmd's switch: cmd then takes the verb
+/// for a command line to read rather than a batch file to run, `wait-for` never
+/// starts, and the push is left in a hook that never returns. Nothing bounds that
+/// on this platform — `onevcs` runs a hook-running git command under a
+/// ninety-minute bound whose teardown is a process *group*, which is `#[cfg(unix)]`
+/// in that crate and a documented no-op here, and the reader threads it joins
+/// afterwards are blocked on pipes the surviving hook inherited — so the run does
+/// not fail, it wedges, and takes the whole `e2e` binary with it. The conversion
+/// is switched off for the one `exec` below rather than worked around by
+/// respelling `/C`: both names are read, because `MSYS_NO_PATHCONV` is git for
+/// Windows' own spelling of the MSYS2 knob and neither release promises the other.
+/// Empty on Unix, where the line is what it always was.
 fn install_hook(path: &Path, argv: &[&str]) {
     let quoted: Vec<String> = argv
         .iter()
         .map(|word| format!("'{}'", word.replace('\'', r"'\''")))
         .collect();
-    std::fs::write(path, format!("#!/bin/sh\nexec {}\n", quoted.join(" ")))
-        .expect("the pre-push hook is written");
+    std::fs::write(
+        path,
+        format!(
+            "#!/bin/sh\n{}exec {}\n",
+            VERBATIM_ARGUMENTS,
+            quoted.join(" ")
+        ),
+    )
+    .expect("the pre-push hook is written");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
