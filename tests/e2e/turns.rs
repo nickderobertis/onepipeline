@@ -1,35 +1,23 @@
 //! The turn a dispatch relays, field for field.
 //!
-//! `oneagentgraph` publishes a member's turn as it happens — the turn opening
-//! and what it was asked, each tool call **and the observation that answered
-//! it**, each party's own words, and the turn's own close and account — and this
-//! crate relays all of it into the run's merged store. What these journeys hold
-//! is the relay: that every field the producer declares arrives with its name
-//! and its meaning intact, and that nothing was invented beside it.
+//! `oneagentgraph` publishes a member's turn as it happens — the opening and what
+//! it was asked, each tool call **and the observation that answered it**, each
+//! party's own words, and the turn's own close and account — and this crate
+//! relays all of it into the run's merged store. What these journeys hold is the
+//! relay: that every field the producer declares arrives with its name and its
+//! meaning intact, and that nothing was invented beside it.
 //!
 //! Worth journeys of its own, and for the reason `session.rs` states about the
-//! `session` label: the fields are read back through the *producer's own*
-//! payload types, which deny unknown fields, so a relay that had renamed one,
-//! dropped one, or added one of its own fails here. A shape restated in this
-//! file would go on passing the day that library moved.
+//! `session` label: the fields are read back through the *producer's own* payload
+//! types, which deny unknown fields, so a relay that had renamed one, dropped one,
+//! or added one of its own fails here. A shape restated in this file would go on
+//! passing the day that library moved.
 //!
-//! **The first two drive the real sibling**, through
-//! [`World::run_on_agentgraph`], and they differ only in which member kind the
-//! graph declares — which is what decides how far down the stand-in sits:
-//!
-//! * a **single-sided** member's turn is an `oneharness_core` library call inside
-//!   `oneagentgraph`'s own process, so the only stand-in is the paid model turn
-//!   and the envelopes below are ones the real normalizer built out of a real
-//!   provider stream;
-//! * a **two-party** member's conversation is onejudge's own run driver, also in
-//!   that process, and it spawns one `oneharness` per side per turn — because
-//!   `oneagentgraph` installs the spawn hook it needs to reap a paid harness
-//!   nothing else can reach. So the stand-in there is that process, one layer
-//!   above the model, and everything that decides, composes, parses and publishes
-//!   a turn is still the real thing.
-//!
-//! Either way what is asserted on is what the producer really published, and the
-//! relay carrying it is the real relay.
+//! The first two drive the real sibling, through [`World::run_on_agentgraph`],
+//! and differ only in the member kind — which is what decides how far down the
+//! stand-in sits, and is why the two-party one is worth its cost: `turn-message`
+//! is published by a two-party member alone, because a reply is only somebody's
+//! *words* when there is a second party to receive them.
 //!
 //! [`World::run_on_agentgraph`]: crate::harness::World::run_on_agentgraph
 
@@ -359,26 +347,16 @@ const ANSWERED: &str = "Ran what the task asked for.";
 /// A relayed payload text past this crate's own published bound is cut and said
 /// to be cut, rather than served whole.
 ///
-/// The bound is [`MAX_PAYLOAD_TEXT_BYTES`], and both siblings publish text
-/// inside it, so on a stack whose three pieces agree this never fires. It is
-/// held anyway because it is *this crate's* promise about its own envelope
-/// rather than a restatement of a producer's: what arrives on a pipe this
-/// process reads is whatever the thing on the other end wrote, and every reader
-/// downstream of the store — a branch name, a rendered line, an operator's
-/// terminal — already treats a payload text as bounded.
+/// The bound is [`MAX_PAYLOAD_TEXT_BYTES`], and both siblings publish text inside
+/// it, so on a stack whose three pieces agree this never fires. It is held anyway
+/// because it is *this crate's* promise about its own envelope rather than a
+/// restatement of a producer's: what arrives on a pipe this process reads is
+/// whatever the thing on the other end wrote, and every reader downstream of the
+/// store already treats a payload text as bounded.
 ///
-/// **Two fields, on two kinds, cut two ways**, because the rule is about a
-/// payload text rather than about one field of one kind:
-///
-/// * a turn's own words, one byte past the bound — the smallest over-long value
-///   there is, so a relay cutting a byte early or late fails here;
-/// * the node's task prose, echoed onto the turn's activity, built so the bound
-///   lands **inside a character**. Cut there by bytes, the record carries
-///   something that is not UTF-8 and no reader parses the line at all.
-///
-/// The producer is the `oneagentgraph` double, which publishes what it really
-/// did and flags nothing: the cut and the flag on the far side are the relay's
-/// own rather than a fixture handed to it.
+/// So the producer here is the `oneagentgraph` double — the one place a text past
+/// the bound can be made to arrive — and it flags nothing, so the cut and the
+/// flag on the far side are the relay's own rather than a fixture handed to it.
 #[test]
 fn a_relayed_payload_text_past_the_bound_is_cut_and_flagged_rather_than_served_whole() {
     let world = World::new("relay-bound");

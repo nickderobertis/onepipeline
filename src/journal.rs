@@ -109,16 +109,10 @@ impl Journal {
 /// restatement of a producer's, which is why it is enforced rather than assumed:
 /// both siblings publish text inside the same 4096 bytes, but what arrives on a
 /// pipe this process reads is whatever the thing on the other end wrote, and
-/// every reader past this call — `src/vcs.rs`'s `usable`, a rendered line, an
-/// operator's terminal — already treats a payload text as bounded.
+/// every reader past this call already treats a payload text as bounded.
 ///
-/// `truncated: true` goes on beside the cut value, because that is what
-/// [`MAX_PAYLOAD_TEXT_BYTES`] says happens. Only ever `true`: a producer that
-/// said `false` and then handed over an over-long text was wrong about its own
-/// payload.
-///
-/// Borrowed unless something is actually over the bound: a run relays thousands
-/// of envelopes and the common one is untouched.
+/// `truncated` is only ever set to `true`: a producer that said `false` and then
+/// handed over an over-long text was wrong about its own payload.
 fn within_the_bound(envelope: &Envelope) -> Cow<'_, Envelope> {
     if !envelope.payload.values().any(over_the_bound) {
         return Cow::Borrowed(envelope);

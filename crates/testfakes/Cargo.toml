@@ -43,6 +43,12 @@ onejudge = { workspace = true }
 # process boundary a two-party member still has — so the pin is the copy onejudge
 # links; see `[workspace.dependencies]`.
 oneharness-core = { workspace = true }
+# The identity chain an `oneharness` config declares is TOML, and the `oneharness`
+# double reads it rather than assuming what it will find: a config the sibling
+# composed that does not parse, or that names a chain with nothing in it, is a
+# launch prepared wrongly, and a double that answered anyway would settle a member
+# on it. Already in the graph — `oneharness-core` builds it.
+toml = "1"
 # The graph document's own reader, so the observer double runs the judge-side
 # provider the graph *declares* rather than one it remembered: a graph that named
 # a different provider would otherwise still be supervised by this copy.

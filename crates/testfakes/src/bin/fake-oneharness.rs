@@ -1,39 +1,22 @@
 //! A real `oneharness` executable, at `ONEAGENTGRAPH_ONEHARNESS_BIN`.
 //!
-//! **A single-sided member's turn does not come through here.** From
-//! `oneagentgraph 0.2.18` that turn is an `oneharness_core` library call inside
-//! the sibling's own process, and the only process left below it is the harness
-//! the member's identity chain selected — which is `fake-claude`, at
-//! oneharness's own `ONEHARNESS_BIN_CLAUDE_CODE`.
+//! Only a **two-party (`kind: onejudge`) member** comes through here. A
+//! single-sided member's turn is an `oneharness_core` library call in the
+//! sibling's own process, and the only process under it is `fake-claude`.
 //!
-//! What still names *this* one is a **two-party (`kind: onejudge`) member**.
-//! `oneagentgraph` drives onejudge's own run driver in process and hands it a
-//! spawn hook — so that it can reap a paid harness nothing else can reach — and
-//! installing a hook is what puts onejudge on its spawning seam. So every turn of
-//! a two-party conversation, on both sides, is one `oneharness run` process, and
-//! this is that process.
+//! The non-obvious part is why a two-party member still spawns anything:
+//! `oneagentgraph` hands onejudge a spawn hook — the seam it reaps a paid harness
+//! through — and installing one is what puts onejudge on its spawning seam. So
+//! every turn of the conversation, on both sides, is one `oneharness run`, and
+//! this is that process. Nothing above it is stood in for: onejudge decides each
+//! turn, composes both prompts, parses both answers and settles the member.
 //!
-//! # The surface, and why it is two
-//!
-//! onejudge renders one turn as `run --compact [--events] --history [--system S]
-//! [--config C] [--cwd D] --prompt-file - [--stream] [--history-name N]
-//! [--session S]`, with the prompt on **stdin**. The two sides differ by what
-//! they ask for, and this double answers each in the shape onejudge reads back:
-//!
-//! * the **agent** side asks for `--events --stream`, and gets the NDJSON
-//!   streamed protocol — a `{"type":"event",…}` line the instant each tool event
-//!   is observed, then one terminal `{"type":"result","report":{…}}`;
-//! * the **judge** side asks for neither, and gets the bare report document on
-//!   stdout, which is what a buffered `oneharness run` writes.
-//!
-//! Both reports are `oneharness_core`'s own [`RunReport`], built here and
-//! serialized by that library — not a copy of its wire shape, which would go on
-//! parsing after the producer changed it. The pin is the copy **onejudge** links;
-//! see the workspace manifest.
-//!
-//! What this double is *not* is a stand-in for the conversation. onejudge decides
-//! every turn, composes both prompts, parses both answers and settles the member;
-//! `oneagentgraph` publishes each observation as an envelope. All of that is real.
+//! The two sides take one argv and answer differently, which is what [`Side`]
+//! decides: the agent side streams (`--events --stream`, NDJSON events then a
+//! terminal result line) and the judge side answers in one buffered report.
+//! Both reports are `oneharness_core`'s own [`RunReport`], serialized by the
+//! library that declares it rather than copied — at the copy **onejudge** links,
+//! which is the pin the workspace manifest explains.
 
 use oneharness_core::domain::events::ActionEvent;
 use oneharness_core::domain::mode::PermissionMode;
@@ -120,25 +103,15 @@ const FLAGS: [(&str, Takes, Occurs); 13] = [
 
 /// Refuses an argv the real `oneharness run` would not take.
 ///
-/// The checks in [`run`] are about a flag onejudge chose the *wrong value* for;
-/// this is about one it should not be sending at all. Both are the same property,
-/// which is the only thing a double is worth: where the real CLI says no, this
-/// one has to. An argument waved through here is one no journey can catch —
-/// onejudge grows a flag oneharness does not take, every member settles green,
-/// and the first thing that ever says otherwise is a real `oneharness`.
+/// This is the only thing a double is worth: where the real CLI says no, this one
+/// has to. An argument waved through here is one no journey can catch — onejudge
+/// grows a flag oneharness does not take, every member settles green, and the
+/// first thing that ever says otherwise is a real `oneharness`.
 ///
-/// Three ways an argv is refused, and each is a different mistake:
-///
-/// * an argument that is not a flag this verb takes, which covers a positional
-///   after the verb as well as an unknown option;
-/// * a second occurrence of a flag that may appear once. Every reader below is
-///   `fake::flag`, which answers with the **first**, so a second is a value this
-///   process would silently ignore — and which of the two a real `oneharness`
-///   keeps is not something a double may guess at;
-/// * a value-taking flag with nothing after it, or with the next *flag* after it.
-///   Both are the flag arriving empty, and left alone both read to `fake::flag`
-///   as the flag never having been sent — so the refusal would name the wrong
-///   thing, or the following flag would be eaten as this one's value.
+/// Every refusal below is one `fake::flag` could not report: it answers with the
+/// **first** occurrence and cannot tell a flag sent empty from one never sent, so
+/// a repeat, a missing value, or a following flag eaten as a value would all
+/// reach [`run`] as something other than what onejudge really sent.
 fn declared(args: &[String]) -> Result<(), String> {
     let known = |arg: &String| FLAGS.iter().find(|(name, _, _)| name == arg);
     let mut seen: Vec<&str> = Vec::new();
@@ -221,6 +194,10 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         Ok(text) => text,
         Err(error) => return fake::refuse(&format!("cannot read --config {config}: {error}")),
     };
+    let identity = match ran(&config_text) {
+        Ok(identity) => identity,
+        Err(refusal) => return fake::refuse(&format!("--config {config}: {refusal}")),
+    };
     fake::record(dir, "oneharness-config", &[prompt.clone(), config_text]);
     // The worktree, which is the agent side's whole working context — a turn that
     // wrote its work anywhere else would leave a publication with nothing to
@@ -238,12 +215,53 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
 
     match side {
         Side::Agent => match cwd {
-            Some(cwd) => agent_turn(&prompt, &cwd, dir),
+            Some(cwd) => agent_turn(&prompt, &cwd, dir, &identity),
             None => fake::refuse("oneharness run requires --cwd for the side that does the work"),
         },
-        Side::Judge => judge_turn(&prompt, dir),
+        Side::Judge => judge_turn(&prompt, dir, &identity),
     }
 }
+
+/// An `oneharness` config as this process needs to read it: which identity a turn
+/// run under it would be taken by.
+///
+/// Nothing else is read, because nothing else changes what this double does — but
+/// the document is *parsed*, so a config the sibling composed that is not TOML is
+/// refused here rather than answered around.
+#[derive(serde::Deserialize)]
+struct Config {
+    /// The chain's candidates, in the order it would try them. Absent when the
+    /// config names none and leaves the selection to oneharness's own discovery.
+    harnesses: Option<Vec<String>>,
+}
+
+/// The identity a turn under `config` ran as.
+///
+/// The **first** candidate, because every chain this suite writes is one that
+/// runs: a fallback that stepped past its head is a different report — one
+/// carrying the whole chain and which of it ran — and a double claiming to be
+/// that would be inventing a run nobody had.
+///
+/// Read off the config rather than assumed, so a report says which identity took
+/// the turn instead of naming one this file remembered. A chain declared with
+/// nothing in it is refused: it selects no harness, so no turn under it happened.
+fn ran(config: &str) -> Result<String, String> {
+    let config: Config = toml::from_str(config)
+        .map_err(|error| format!("this is not an oneharness config: {error}"))?;
+    match config.harnesses {
+        Some(chain) => chain
+            .into_iter()
+            .next()
+            .ok_or_else(|| "its identity chain names no candidate to run the turn".to_string()),
+        // What oneharness does with a config that names no chain: discover one.
+        // There is one harness in this suite, so that is what it discovers.
+        None => Ok(DISCOVERED.to_string()),
+    }
+}
+
+/// The identity oneharness discovers when a config names no chain — the only one
+/// this suite provides a binary for, at `ONEHARNESS_BIN_CLAUDE_CODE`.
+const DISCOVERED: &str = "claude-code";
 
 /// The prompt this turn was given.
 ///
@@ -265,8 +283,8 @@ fn prompt(args: &[String]) -> Option<String> {
 }
 
 /// The side that does the work: a tool exchange as it happens, then the report.
-fn agent_turn(prompt: &str, cwd: &str, dir: &std::path::Path) -> ExitCode {
-    match work(prompt, cwd, dir) {
+fn agent_turn(prompt: &str, cwd: &str, dir: &std::path::Path, identity: &str) -> ExitCode {
+    match work(prompt, cwd, dir, identity) {
         Ok(outcome) => outcome.exit_code(),
         Err(refusal) => fake::refuse(&refusal),
     }
@@ -276,7 +294,7 @@ fn agent_turn(prompt: &str, cwd: &str, dir: &std::path::Path) -> ExitCode {
 /// process having refused, and is why the two are separate results: a turn that
 /// did the work and did not get there still streamed and still reported, and a
 /// refusal never started.
-fn work(prompt: &str, cwd: &str, dir: &std::path::Path) -> Result<Outcome, String> {
+fn work(prompt: &str, cwd: &str, dir: &std::path::Path, identity: &str) -> Result<Outcome, String> {
     // A worker turn that leaves something behind in the worktree it was given.
     // Only when scripted, and only for the worker: a publication needs a diff —
     // `onevcs publish` on a clean tree publishes nothing and says so — and a
@@ -343,26 +361,18 @@ fn work(prompt: &str, cwd: &str, dir: &std::path::Path) -> Result<Outcome, Strin
     }
 
     stream(&RunStreamEnvelope::Result {
-        report: report(outcome.text(), Some(events), outcome),
+        report: report(outcome.text(), Some(events), outcome, identity),
     })?;
     Ok(outcome)
 }
 
 /// The side that supervises: one buffered document carrying the answer.
 ///
-/// Two questions reach it over one conversation, and they are told apart by the
-/// prompt onejudge composed, because that is the only thing that distinguishes
-/// them — both arrive as the same argv. Anything else is refused rather than
-/// answered: a double that returned its supervisor decision to an evaluator would
-/// be a protocol failure onejudge reports as the *member* dying.
-///
-/// Both answers are affirmative, which is what keeps a two-party journey to one
-/// agent turn. A supervisor that asked for more would be a second paid turn and a
-/// second of everything downstream reads; a `done_when` scored false would settle
-/// the member as incomplete. A journey that wants either has no way to say so
-/// through this double, which is a limit worth stating rather than a shape worth
-/// guessing at.
-fn judge_turn(prompt: &str, dir: &std::path::Path) -> ExitCode {
+/// Two questions reach it over one conversation and both arrive as the same argv,
+/// so the prompt is the only thing that tells them apart. A third is refused
+/// rather than guessed at: onejudge reads each answer strictly, and one given to
+/// the wrong question is a protocol failure it reports as the *member* dying.
+fn judge_turn(prompt: &str, dir: &std::path::Path, identity: &str) -> ExitCode {
     let answer = if prompt.contains(SUPERVISOR_OPENING) {
         supervision(dir)
     } else if prompt.contains(EVALUATOR_OPENING) {
@@ -377,7 +387,7 @@ fn judge_turn(prompt: &str, dir: &std::path::Path) -> ExitCode {
     // A judgement is `Answered` whatever it decided: the turn that reached the
     // decision succeeded, and a supervisor saying the work is not done is not a
     // harness that failed to run.
-    match answer.and_then(|answer| document(&report(&answer, None, Outcome::Answered))) {
+    match answer.and_then(|answer| document(&report(&answer, None, Outcome::Answered, identity))) {
         Ok(document) => {
             print!("{document}");
             ExitCode::SUCCESS
@@ -611,7 +621,12 @@ fn document<T: serde::Serialize>(value: &T) -> Result<String, String> {
 /// Every other field is what a real single-candidate run carries. `fallback` is
 /// absent, which is what says this run had one candidate rather than a chain — a
 /// report with a chain and no `ran` is an exhausted chain, and this turn ran.
-fn report(said: &str, events: Option<Vec<ActionEvent>>, outcome: Outcome) -> RunReport {
+fn report(
+    said: &str,
+    events: Option<Vec<ActionEvent>>,
+    outcome: Outcome,
+    identity: &str,
+) -> RunReport {
     RunReport {
         schema_version: SCHEMA_VERSION.into(),
         oneharness_version: "0.0.0-fake".into(),
@@ -634,9 +649,9 @@ fn report(said: &str, events: Option<Vec<ActionEvent>>, outcome: Outcome) -> Run
         config_files: Vec::new(),
         control: None,
         results: vec![RunResult {
-            harness: "claude-code".into(),
+            harness: identity.into(),
             variant: None,
-            harness_id: "claude-code".into(),
+            harness_id: identity.into(),
             bin: "fake-claude".into(),
             available: true,
             status: outcome.status(),
