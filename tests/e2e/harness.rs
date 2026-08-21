@@ -798,6 +798,11 @@ impl World {
     /// deciding. The suffixes are tried on Windows only, where a bare name never
     /// names a program: what this asks is whether the name is reachable *at all*,
     /// so it errs towards finding one.
+    ///
+    /// A candidate has to be one the host would actually *start*, which on Unix is
+    /// the executable bit and not mere presence — a `codex` on the `PATH` without
+    /// it is a file `execvp` skips, so reporting it as resolved would fail the
+    /// journey below for a premise it still had.
     pub fn resolved_on(command: &Command, name: &str) -> Option<PathBuf> {
         let path = command
             .get_envs()
@@ -816,7 +821,7 @@ impl World {
                     .iter()
                     .map(move |suffix| dir.join(format!("{name}{suffix}")))
             })
-            .find(|candidate| candidate.is_file())
+            .find(|candidate| runnable(candidate))
     }
 
     /// A `PATH` whose `ps` runs and **fails**, for the journeys about what a
@@ -2431,6 +2436,25 @@ fn write_hook_script(world: &World) -> PathBuf {
     let path = world.root.join("hook.sh");
     std::fs::write(&path, include_str!("hook.sh")).expect("the hook script is written");
     path
+}
+
+/// Whether the host would start this file if a `PATH` lookup landed on it.
+///
+/// The executable bit is what `execvp` asks on Unix, so it is what is asked here.
+/// Windows carries no such bit and decides by extension instead, which
+/// [`World::resolved_on`] has already applied by the time this is reached.
+#[cfg(unix)]
+fn runnable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+/// Whether the host would start this file if a `PATH` lookup landed on it.
+#[cfg(not(unix))]
+fn runnable(path: &Path) -> bool {
+    path.is_file()
 }
 
 /// A file shipped in the repository.
