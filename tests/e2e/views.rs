@@ -501,24 +501,10 @@ fn telemetry_reports_what_each_party_spent() {
 /// still served, and it is still not the agent's; what it is not is a
 /// measurement. Recorded as divergence 16 in `docs/contract-divergences.md`.
 ///
-/// **Unix-only, because holding the publication is the whole measurement.** The
-/// bucket is a real span on the clock only if something blocks the publishing
-/// push, and the one thing that can is the repository's own `pre-push` hook —
-/// git's child, two processes below the run. `onevcs` documents no portable group
-/// teardown off Unix: its `terminate_group` is a no-op there and
-/// `detach_process_group` with it, so a run that reaches its bound while this hook
-/// still holds — which is every path through here that does not reach the release
-/// below, an assertion or a `World::until` running out among them — leaves the
-/// hook alive and wedges the leg on reader threads blocked against its pipes.
-/// [`harness::held_hook_script`](crate::harness::held_hook_script) is where that
-/// is stated once, and it does not exist on Windows, so this `cfg` is the
-/// compiler's requirement rather than a judgement call made here.
-///
-/// What is given up is this journey's Windows coverage alone: the eight-way split
-/// of a lifecycle node's time, which is platform-independent arithmetic over
-/// records the sibling writes. Every non-blocking hook journey still runs
-/// everywhere. The gate comes off when `onevcs` can tear down a hook's orphaned
-/// children on Windows.
+/// **Unix-only:** the measurement *is* a held publishing push, and
+/// [`harness::held_hook_script`](crate::harness::held_hook_script) — which states
+/// why one cannot be reaped off Unix, and when that ends — does not exist there.
+/// Windows gives up the eight-way split, which carries no platform in it.
 #[cfg(unix)]
 #[test]
 fn telemetry_separates_publication_and_lock_time_from_agent_time() {

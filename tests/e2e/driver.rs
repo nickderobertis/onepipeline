@@ -2772,15 +2772,12 @@ fn unusable_session_records() -> String {
 /// records nothing can be acted on, and none of them may take the real one's
 /// place. See [`unusable_session_records`].
 ///
-/// **Unix-only, because catching a dispatch in flight means killing the driver
-/// while the repository's own `pre-push` hook holds the publishing push.** That
-/// leaves the hook, and the `git push` above it, running two processes below the
-/// pid killed; `onevcs` documents no portable group teardown off Unix, so
-/// nothing there reaps them and the release below lets that tree finish rather
-/// than collecting it. What is given up is this journey's Windows coverage
-/// alone — `main` runs it there over `onevcs`'s *gate*, a direct child of the
-/// killed process that never reaches a push. The gate comes off when `onevcs`
-/// can tear down a hook's orphaned children on Windows.
+/// **Unix-only:** catching a dispatch in flight means killing the driver while
+/// the hook holds the push, two processes below the pid killed — the shape
+/// [`harness::held_hook_script`](crate::harness::held_hook_script) names as
+/// unreapable off Unix. Windows gives up this journey alone; `main` ran it there
+/// over `onevcs`'s *gate*, a direct child of the killed process that never
+/// reached a push.
 #[cfg(unix)]
 #[test]
 fn adopting_a_run_whose_dispatch_was_in_flight_leaves_that_dispatchs_work_reachable() {

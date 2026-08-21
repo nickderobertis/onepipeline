@@ -1037,19 +1037,9 @@ fn an_earlier_plan_still_publishes_under_the_subject_the_sibling_derives() {
 /// real publication a journey can hold from outside it: git runs the repository's
 /// own `pre-push` hook there, and this one waits for a file.
 ///
-/// **Unix-only, because that hold is the journey.** Reading a record *while* the
-/// node is in flight means the node has to still be in flight, and the only thing
-/// that keeps it there is a `pre-push` hook blocked mid-push — git's child, two
-/// processes below the run. `onevcs` documents no portable group teardown off
-/// Unix, so any path through here that does not reach the release below — an
-/// assertion failing, a `World::until` running out — abandons a hook nothing can
-/// reap, and the run wedges on reader threads blocked against its pipes rather
-/// than failing. [`held_merge_path`] does not exist on Windows, so this `cfg` is
-/// what the compiler requires rather than a judgement made here.
-///
-/// What is given up is this journey's Windows coverage alone: mid-publication
-/// readability of the merged store, which is platform-independent. The gate comes
-/// off when `onevcs` can tear down a hook's orphaned children on Windows.
+/// **Unix-only:** what keeps the node in flight to be read *is* the held push,
+/// and [`held_merge_path`] does not exist off Unix. Windows gives up
+/// mid-publication readability of the merged store, which is platform-independent.
 #[cfg(unix)]
 #[test]
 fn a_publications_own_records_reach_the_journal_while_it_is_still_publishing() {
@@ -1854,19 +1844,10 @@ fn a_push_the_merge_path_refuses_is_redispatched_carrying_what_the_remote_wrote(
 /// as the cancellation and lose the publication failure, which is the useful half
 /// of what happened.
 ///
-/// **Unix-only, and this is the sharpest case of why.** The window is a hook
-/// blocked mid-push, and what lands in it is a *cancel* — so the run's teardown
-/// begins while git's grandchild is still holding the push. `onevcs` documents no
-/// portable group teardown off Unix: its `terminate_group` is a no-op there and
-/// `detach_process_group` with it, so that teardown reaps the child it started and
-/// the hook outlives it, leaving the run wedged on reader threads blocked against
-/// pipes the hook still holds. [`held_merge_path`] does not exist on Windows, so
-/// the compiler requires this `cfg` rather than an audit finding it.
-///
-/// What is given up is this journey's Windows coverage alone: which settlement a
-/// cancelled node reaches, which is this crate's own arithmetic and carries no
-/// platform in it. The gate comes off when `onevcs` can tear down a hook's
-/// orphaned children on Windows.
+/// **Unix-only, and the sharpest case of why:** the cancel starts the run's
+/// teardown while the hook still holds the push — the one shape
+/// [`held_merge_path`] names as unreapable off Unix. Windows gives up which
+/// settlement a cancelled node reaches, which is this crate's own arithmetic.
 #[cfg(unix)]
 #[test]
 fn a_cancel_that_lands_before_the_next_attempt_settles_on_the_publication_failure() {

@@ -446,28 +446,12 @@ fn holders_of(rendezvous: &str) -> Vec<u32> {
 /// A run stopped mid-publication, and the retry that takes up the session it left
 /// its work in.
 ///
-/// **Unix-only, and what that gives up belongs here rather than in the `cfg`.**
-/// This is the only journey that has to *stop* a publication while the
-/// repository's own `pre-push` hook holds it, and that hook is git's child, two
-/// processes below the owner. `onevcs` documents that it has no portable group
-/// teardown: off Unix its `terminate_group` is a no-op that says so, and
-/// `detach_process_group` with it, so the bound kills the child it started and
-/// the hook's orphaned children survive. The run then does not fail — it wedges,
-/// on reader threads blocked against pipes that hook still holds, and takes the
-/// `cross (windows-latest)` leg with it.
-///
-/// What is given up is this journey's Windows coverage and nothing else: a run
-/// stopped mid-publication, the work it strands on its branch, and the retry that
-/// continues the same session. Every other journey installing this hook
-/// *releases* it rather than stopping it, and all of them still run everywhere.
-/// `main` runs this one on Windows and passes because the fixture it holds there
-/// is `onevcs`'s *gate* — a direct child of the process being stopped, reaped by
-/// whoever started it. Verification moving onto the repository's own hook is what
-/// put two processes in between.
-///
-/// The gate comes off when `onevcs` can stop a hook's orphaned children on
-/// Windows. That is that crate's change, and the Windows half of the stop belongs
-/// with it rather than sitting here unreachable.
+/// **Unix-only:** this journey *stops* a publication while the hook holds it, the
+/// shape [`harness::held_hook_script`](crate::harness::held_hook_script) names as
+/// unreapable off Unix. Windows gives up a run stopped mid-publication, the work
+/// it strands, and the retry that continues the session; `main` ran it there over
+/// `onevcs`'s *gate*, a direct child of the stopped process rather than git's
+/// grandchild.
 #[cfg(unix)]
 #[test]
 fn a_retry_takes_up_the_session_a_stopped_run_left_its_work_in() {
