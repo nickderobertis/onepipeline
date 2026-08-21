@@ -424,10 +424,12 @@ impl CancelPhase {
 pub(crate) struct Redispatch {
     /// The node being asked again.
     pub node: String,
-    /// Which attempt this is, counting from one.
-    pub attempt: u32,
-    /// How many attempts the budget allows.
-    pub attempts: u32,
+    /// Which attempt this is, counting from one — so never zero, which is an
+    /// attempt nobody made.
+    pub attempt: NonZeroU32,
+    /// How many the budget allows, which is never zero either: a budget of zero
+    /// would settle the node having never dispatched it.
+    pub attempts: NonZeroU32,
     /// A bounded reason, as the failing attempt reported it.
     pub reason: String,
 }
@@ -1394,7 +1396,7 @@ pub(crate) fn attempt(
         branch: None,
     };
 
-    for attempt in 1..=attempts {
+    for attempt in 1..=attempts.get() {
         let drained = match executor.dispatch(request()) {
             Ok(mut handle) => drain(handle.as_mut(), tx, node, cancel),
             Err(error) => Drained {
@@ -1420,7 +1422,7 @@ pub(crate) fn attempt(
             return drained;
         }
         last = drained;
-        if attempt == attempts {
+        if attempt == attempts.get() {
             // The budget was spent without the agent producing anything.
             // Reported apart from an ordinary task failure because retrying
             // this one unchanged spends the next budget the same way — and
@@ -1441,7 +1443,7 @@ pub(crate) fn attempt(
         // attempt gave up.
         let _ = tx.send(Message::Redispatched(Box::new(Redispatch {
             node: node.to_string(),
-            attempt: attempt + 1,
+            attempt: NonZeroU32::MIN.saturating_add(attempt),
             attempts,
             reason: last.settlement.detail.clone().unwrap_or_default(),
         })));
@@ -1727,12 +1729,18 @@ fn cancel_grace_seconds() -> u64 {
 ///
 /// An unusable value falls back to the default rather than disabling the
 /// recovery it configures.
-fn boundary_attempts() -> u32 {
+/// How many times a dispatch that produced nothing is re-asked.
+///
+/// A [`NonZeroU32`] for the reason [`publication_attempts`] gives, and the parse
+/// *is* the `> 0` filter this used to apply afterwards.
+/// [`DEFAULT_BOUNDARY_ATTEMPTS`] stays the published `u32` it has always been, so
+/// the conversion happens here and once.
+fn boundary_attempts() -> NonZeroU32 {
     std::env::var(BOUNDARY_ATTEMPTS_ENV)
         .ok()
         .and_then(|value| value.parse().ok())
-        .filter(|attempts| *attempts > 0)
-        .unwrap_or(DEFAULT_BOUNDARY_ATTEMPTS)
+        .or_else(|| NonZeroU32::new(DEFAULT_BOUNDARY_ATTEMPTS))
+        .unwrap_or(NonZeroU32::MIN)
 }
 
 /// How many times a lifecycle node whose publication keeps failing is dispatched.

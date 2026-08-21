@@ -2105,9 +2105,7 @@ fn a_node_that_spends_its_publication_budget_settles_naming_every_attempt() {
     let result = world.run_json(&run, "result.json");
     let node = result["nodes"][0].clone();
     assert_eq!(node["status"], "failed", "{result}\n{}", why(&world, &run));
-    // Under the last failure's own word, which is what stands in the way.
     assert_eq!(node["outcome"], "checks-failed", "{result}");
-    // Three dispatches and no fourth: the budget is a bound, not a suggestion.
     assert_eq!(
         dispatches_of(&world, &run, "service").len(),
         3,

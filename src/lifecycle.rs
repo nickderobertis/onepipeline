@@ -83,7 +83,7 @@ pub fn execute(
     // crate writes is bounded.
     let mut endings: Vec<crate::vcs::Preserving> = Vec::new();
     let mut node = std::borrow::Cow::Borrowed(node);
-    let mut attempt: u32 = 1;
+    let mut attempt = std::num::NonZeroU32::MIN;
     loop {
         let preserved = match attempt_once(executor, paths, launch, &node, cancel, tx) {
             Attempt::Settled(settlement) => return settlement,
@@ -95,17 +95,16 @@ pub fn execute(
         // dispatch — the teardown is on its way to reap it, and the node would
         // then settle as the cancellation rather than as the publication failure
         // that is the useful half of what happened.
-        if attempt >= attempts.get() || cancel.is_cancelled() {
+        if attempt >= attempts || cancel.is_cancelled() {
             return spent(&node.id, &preserved, &endings);
         }
-        attempt += 1;
-        // Announced as another `node-dispatched`, because that is what it is: the
-        // node is being asked again, and a reader counting dispatches sees it
-        // without a kind of its own to learn.
+        attempt = attempt.saturating_add(1);
+        // Another `node-dispatched` rather than a kind of its own, so a reader
+        // counting dispatches sees the retry without a second word to learn.
         let _ = tx.send(Message::Redispatched(Box::new(engine::Redispatch {
             node: node.id.clone(),
             attempt,
-            attempts: attempts.get(),
+            attempts,
             reason: format!("{}: {}", preserved.outcome.outcome(), preserved.reason),
         })));
         node = std::borrow::Cow::Owned(continued(&node, &preserved, attempt, attempts, &endings));
@@ -609,7 +608,7 @@ fn spent(node: &str, preserved: &Preserved, endings: &[crate::vcs::Preserving]) 
 fn continued(
     node: &Node,
     preserved: &Preserved,
-    attempt: u32,
+    attempt: std::num::NonZeroU32,
     attempts: std::num::NonZeroU32,
     endings: &[crate::vcs::Preserving],
 ) -> Node {
@@ -630,7 +629,7 @@ fn continued(
 /// rendered into, so a worker cannot read a failure report as a new bar to clear.
 fn diagnosis(
     preserved: &Preserved,
-    attempt: u32,
+    attempt: std::num::NonZeroU32,
     attempts: std::num::NonZeroU32,
     endings: &[crate::vcs::Preserving],
 ) -> String {
