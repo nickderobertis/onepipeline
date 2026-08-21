@@ -229,6 +229,217 @@ fn dispatched(world: &World, case: &str, branch: Option<&str>) -> (Value, Value)
     (world.run_json(case, "result.json"), opened(world, case))
 }
 
+/// How long the publication under a stopped run is given to leave.
+///
+/// `SIGKILL` is undeniable, so this is not a wait for the work to wind down; it
+/// is only the slack a loaded machine needs between the signal and the last
+/// process leaving. Generous on purpose — past it the journey fails rather than
+/// releasing the rendezvous into the race it exists to close.
+#[cfg(unix)]
+const PUBLICATION_STOPS_WITHIN: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Start a run's owner in a **process group of its own**, so the sweep below has
+/// a handle on everything it starts that does not also name this test runner.
+///
+/// [`process_group`]: std::os::unix::process::CommandExt::process_group
+#[cfg(unix)]
+fn in_a_group_of_its_own(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    command.process_group(0);
+}
+
+#[cfg(windows)]
+fn in_a_group_of_its_own(_command: &mut Command) {}
+
+/// The host's own process table, as `(pid, parent, group)`.
+///
+/// Read from `ps` rather than assumed, and every row that does not parse is
+/// dropped rather than failing the read: a platform that prefixes a header or
+/// runs two columns together must not cost this journey the rows it got right.
+///
+/// `-ww` for the reason [`holders_of`] gives, and here too so both reads of the
+/// table are the same read.
+#[cfg(unix)]
+fn process_table() -> Vec<(u32, u32, i32)> {
+    let listed = Command::new("ps")
+        .args(["-ww", "-eo", "pid=,ppid=,pgid="])
+        .output()
+        .expect("the host lists its process table");
+    String::from_utf8_lossy(&listed.stdout)
+        .lines()
+        .filter_map(|row| {
+            let mut column = row.split_whitespace();
+            Some((
+                column.next()?.parse().ok()?,
+                column.next()?.parse().ok()?,
+                column.next()?.parse().ok()?,
+            ))
+        })
+        .collect()
+}
+
+/// Every process group the tree under `root` is spread across, `root`'s own
+/// included.
+///
+/// Groups rather than pids, because of what is being reached for: `onevcs`
+/// starts the publishing `git` with `process_group(0)` — deliberately, so one
+/// handle covers a transport it restarts whenever the connection drops — and the
+/// `pre-push` hook git runs is inside *that* group. A signal to the owner's
+/// group alone reaches neither, which is the whole of the defect this fixes.
+///
+/// Read **before** anything is signalled: an orphan is reparented the moment its
+/// parent goes, and the descent that finds it is broken along with it.
+#[cfg(unix)]
+fn groups_under(root: u32) -> Vec<i32> {
+    let table = process_table();
+    let mut tree = vec![root];
+    // The table is unordered, so a child can be listed before its parent; sweep
+    // until a pass adds nothing rather than trusting one walk of it.
+    loop {
+        let grown: Vec<u32> = table
+            .iter()
+            .filter(|(pid, parent, _)| tree.contains(parent) && !tree.contains(pid))
+            .map(|(pid, _, _)| *pid)
+            .collect();
+        if grown.is_empty() {
+            break;
+        }
+        tree.extend(grown);
+    }
+    let mut groups: Vec<i32> = table
+        .iter()
+        .filter(|(pid, _, _)| tree.contains(pid))
+        .map(|(_, _, group)| *group)
+        .collect();
+    groups.sort_unstable();
+    groups.dedup();
+    groups
+}
+
+/// Whether a process group still holds anything this process may signal.
+///
+/// Signal `0` sends nothing and asks only that question, so `ESRCH` back from it
+/// is the kernel saying the group is empty.
+#[cfg(unix)]
+fn group_holds_anything(group: i32) -> bool {
+    // SAFETY: `killpg` takes a group id and a signal and reports failure in its
+    // return value; nothing is borrowed, and signal 0 sends nothing at all.
+    unsafe { libc::killpg(group, 0) == 0 }
+}
+
+/// Stop a run **and the whole publication running under it**, and do not return
+/// while any of it is still alive.
+///
+/// A publication is a tree, not a process: the binary starts a worker, the
+/// worker calls `onevcs`, `onevcs` runs `git push`, and git runs the
+/// repository's own `pre-push` hook — which this journey installed and is still
+/// holding on a rendezvous. [`std::process::Child::kill`] signals the one pid it
+/// was given, so everything below the owner outlives it, and releasing the
+/// rendezvous afterwards lets the stopped run's push go through after all. The
+/// base then carries the stopped node's publication beside the retry's, which is
+/// the opposite of what the last assertion in the journey below reads. Linux
+/// reaps the orphans before the release often enough to pass anyway; macOS does
+/// not, which is the `cross (macos-latest)` flake this replaced.
+///
+/// Two things make the stop mean what the journey says it does.
+///
+/// The **moment** is pinned first: the sweep waits until the hook is actually
+/// holding a push before it signals anything. `merge-queued` is published before
+/// the push it precedes, so stopping on that alone lands anywhere in the
+/// publication — some runs were killed while `git worktree add` was still
+/// running, with the push, and the hook, yet to come. A tree read at that point
+/// does not name them.
+///
+/// The **reach** is the other: every group the tree is spread across is
+/// signalled, not the owner's alone, because `onevcs` detaches git into a group
+/// of its own. See [`groups_under`].
+///
+/// Then it is checked rather than assumed — delivery is asynchronous, and a
+/// journey that released the rendezvous while the hook was between its `sleep`
+/// and its next loop would be back in the race it just closed.
+///
+/// Unix-only, as the rest is: the Windows arm reaches the same boundary through
+/// `taskkill /T`, which walks descent and needs no group.
+#[cfg(unix)]
+fn stop_the_publication(world: &World, owner: &mut std::process::Child, rendezvous: &Path) {
+    let held = rendezvous.to_string_lossy().into_owned();
+    world.until("the pre-push hook to take hold of the publication", |_| {
+        !holders_of(&held).is_empty()
+    });
+    let groups = groups_under(owner.id());
+    for group in &groups {
+        // SAFETY: as in `group_holds_anything`. Every group here belongs to a
+        // process descended from this journey's own owner, which was put in a
+        // group of its own precisely so that this set cannot reach the runner.
+        unsafe { libc::killpg(*group, libc::SIGKILL) };
+    }
+    owner.wait().expect("the stopped run's owner exits");
+
+    let deadline = std::time::Instant::now() + PUBLICATION_STOPS_WITHIN;
+    while std::time::Instant::now() < deadline {
+        if !groups.iter().copied().any(group_holds_anything) && holders_of(&held).is_empty() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!(
+        "the stopped run's publication is still running {PUBLICATION_STOPS_WITHIN:?} after \
+         every process group under it was signalled, so releasing the rendezvous below would \
+         let the push it was stopped in the middle of finish after all; the groups were \
+         {groups:?} and {} process(es) still hold {held}",
+        holders_of(&held).len()
+    );
+}
+
+/// The pids whose command line names `rendezvous` — this world's blocked
+/// `pre-push` hook, and nothing else, because the path carries the world's own
+/// scratch directory in it.
+///
+/// The path is the whole of the match, and the hook's *name* is deliberately not
+/// part of it: `harness::install_hook` writes the hook as `exec` over the verb,
+/// so what git leaves running is the verb's own argv — `sh .../hook.sh wait-for
+/// .../push.go` — and the word `pre-push` appears nowhere in it. Matching on the
+/// name as well found nothing, waited out the bound, and failed the journey on a
+/// hook that was holding the push exactly as intended.
+///
+/// `-ww` because the path is at the *end* of that argv and the default width is
+/// not the same promise on both platforms: Linux's `procps` writes an unbounded
+/// line once stdout is not a terminal, while the BSD `ps` on macOS still cuts
+/// the row at 79 columns — which is inside a world's scratch path, so the match
+/// below would find nothing, the wait above it would run out its bound, and the
+/// journey would fail on macOS for the second time in a row and for a new
+/// reason. Asking for every column removes the difference.
+#[cfg(unix)]
+fn holders_of(rendezvous: &str) -> Vec<u32> {
+    let listed = Command::new("ps")
+        .args(["-ww", "-eo", "pid=,args="])
+        .output()
+        .expect("the host lists its process table");
+    String::from_utf8_lossy(&listed.stdout)
+        .lines()
+        .filter(|row| row.contains(rendezvous))
+        .filter_map(|row| row.split_whitespace().next()?.parse().ok())
+        .collect()
+}
+
+#[cfg(windows)]
+fn stop_the_publication(_world: &World, owner: &mut std::process::Child, _rendezvous: &Path) {
+    // `taskkill /T` is the descent walk this platform has, and the one
+    // `onepipeline`'s own teardown takes: `/F` so a process that would not leave
+    // politely still goes, and `/T` so the `git push` under the owner and the
+    // `pre-push` hook under that go with it.
+    let killed = Command::new("taskkill")
+        .args(["/T", "/F", "/PID", &owner.id().to_string()])
+        .output()
+        .expect("taskkill runs");
+    assert!(
+        killed.status.success(),
+        "could not end the tree the stopped run is publishing in: {}",
+        String::from_utf8_lossy(&killed.stderr)
+    );
+    owner.wait().expect("the stopped run's owner exits");
+}
+
 #[test]
 fn a_retry_takes_up_the_session_a_stopped_run_left_its_work_in() {
     let world = World::new("session-reuse-adopt");
@@ -249,12 +460,10 @@ fn a_retry_takes_up_the_session_a_stopped_run_left_its_work_in() {
     let mut stopped = lifecycle("service", &[]);
     stopped["branch"] = json!(STRANDED);
     let path = world.plan("stopped", &plan_of("stopped", vec![stopped]));
-    let mut owner = world
-        .cmd(&["start", &path.to_string_lossy(), "--attach"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("the stopped run's owner starts");
+    let mut launch = world.cmd(&["start", &path.to_string_lossy(), "--attach"]);
+    launch.stdout(Stdio::piped()).stderr(Stdio::piped());
+    in_a_group_of_its_own(&mut launch);
+    let mut owner = launch.spawn().expect("the stopped run's owner starts");
     world.until("the publication to reach its merge path", |world| {
         world
             .journal("stopped")
@@ -276,8 +485,7 @@ fn a_retry_takes_up_the_session_a_stopped_run_left_its_work_in() {
             .as_str()
             .expect("the sibling named the clone it cut"),
     );
-    owner.kill().expect("the stopped run's owner is terminated");
-    owner.wait().expect("the stopped run's owner exits");
+    stop_the_publication(&world, &mut owner, &go);
 
     // What it left, which is the whole reason a retry used to be refused: a branch
     // carrying a commit its base does not.
