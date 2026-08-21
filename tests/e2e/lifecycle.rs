@@ -1482,10 +1482,8 @@ fn a_node_whose_publication_failed_continues_the_branch_it_preserved() {
     );
 }
 
-/// Every `node-dispatched` one run recorded against one node, in order.
-///
-/// A re-dispatch is another one of these, so counting them is how a journey
-/// tells one attempt from several.
+/// A re-dispatch is another `node-dispatched`, so counting these in order is how
+/// a journey tells one attempt from several.
 fn dispatches_of(world: &World, run: &str, node: &str) -> Vec<serde_json::Value> {
     world
         .events_of(run, "node-dispatched")

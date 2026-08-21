@@ -1026,8 +1026,6 @@ mod tests {
             .expect("the clause ends where the residual is named")
             .0;
         let listed: BTreeSet<&str> = clause.split('`').skip(1).step_by(2).collect();
-        // The vocabulary itself, out of the type that closes it, plus the one
-        // word every failure with nothing to continue settles on.
         let vocabulary: BTreeSet<&str> = EVERY_PRESERVING
             .iter()
             .map(|preserving| preserving.outcome())

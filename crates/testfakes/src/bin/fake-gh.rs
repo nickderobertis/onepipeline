@@ -225,11 +225,8 @@ fn log(args: &[String]) -> ExitCode {
 /// them, so they are ignored rather than made required.
 #[derive(Debug, Clone, serde::Deserialize)]
 struct Opened {
-    /// How the host addresses it, and the last segment of the URL it printed.
     number: u64,
-    /// The branch it was opened from.
     head: String,
-    /// The branch it was opened into.
     base: String,
 }
 
@@ -520,7 +517,6 @@ enum Blocks {
 }
 
 impl Conclusion {
-    /// Every conclusion this host reports, for the refusal that lists them.
     const EVERY: &'static [Self] = &[
         Self::Success,
         Self::Skipped,
@@ -530,7 +526,6 @@ impl Conclusion {
         Self::TimedOut,
     ];
 
-    /// How GitHub spells it, which is what goes on the wire.
     fn wire(self) -> &'static str {
         match self {
             Self::Success => "success",
@@ -548,7 +543,6 @@ impl Conclusion {
 }
 
 impl State {
-    /// The `status` GitHub reports for this state.
     fn status(self) -> &'static str {
         match self {
             Self::Queued => "queued",
@@ -594,9 +588,7 @@ struct Check {
     /// Branch protection lists checks by name, and a red one's refusal names it,
     /// so this is the whole of how a journey addresses one.
     name: String,
-    /// Where it is, and how it ended if it has.
     state: State,
-    /// Whether a merge waits on it.
     blocks: Blocks,
 }
 

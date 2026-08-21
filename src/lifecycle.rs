@@ -481,22 +481,16 @@ enum Attempt {
 /// there is no next attempt — the same four values serve both, because a budget
 /// that runs out has to report exactly the failure it stopped re-dispatching.
 struct Preserved {
-    /// Both where the next attempt works and what the settlement names, so a
-    /// reader picking the work up by hand is sent to the branch every attempt
-    /// was made on.
     branch: String,
-    /// Which failure it was, as the closed set of the ones a further attempt
-    /// can answer — so a settlement, a re-dispatch, and the roll-up below cannot
-    /// come to call one failure two things.
     outcome: crate::vcs::Preserving,
-    /// The failure as `onevcs` reported it, already bounded and folded onto one
-    /// line: it goes into an envelope payload and into a settlement detail, both
-    /// of which are read back a line at a time.
+    /// Already bounded and folded onto one line, because it reaches a reader
+    /// through an envelope payload and a settlement detail, both of which are
+    /// read back a line at a time.
     reason: String,
-    /// Every artifact the publication recorded, by id, for the worker to fetch.
     evidence: Vec<crate::vcs::Evidence>,
-    /// A drafting ending this attempt also had, carried so the settlement that
-    /// spends the budget says it exactly as one that settled straight away does.
+    /// A drafting ending this attempt also had, carried so that the settlement
+    /// a spent budget writes says it exactly as one that settled straight away
+    /// does.
     undrafted: Option<String>,
 }
 

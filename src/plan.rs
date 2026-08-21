@@ -114,10 +114,8 @@ const RETIRED_FIELDS: &[(&str, &str)] = &[
     (VERIFY_VIA_CI, VERIFY_VIA_CI_RETIRED),
 ];
 
-/// The name of that field, as a submitted document still spells it.
 const DONE_WHEN: &str = "done_when";
 
-/// And of the second, for the same reason.
 const VERIFY_VIA_CI: &str = "verify_via_ci";
 
 /// What stands in for a [`Goal`] a plan states none of.

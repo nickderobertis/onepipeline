@@ -2067,9 +2067,6 @@ mod tests {
             contract.contains("and three by default"),
             "docs/contract.md does not state the default this build ships"
         );
-        // The value is read from that name, and an unusable one falls back
-        // rather than disabling the loop — `0` most of all, which read literally
-        // would settle a node having never dispatched it.
         assert_eq!(publication_attempts(), DEFAULT_PUBLICATION_ATTEMPTS);
     }
 
