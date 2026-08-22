@@ -154,6 +154,12 @@ class Workspace {
       "LLMLINT_DIFF_BASE_SHA",
       "NX_SKIP_NX_CACHE",
       "NX_DISABLE_NX_CACHE",
+      // Whether Nx colours its output decides which shape the recipe has to read
+      // a verdict's provenance out of, so each journey states its own answer
+      // rather than inheriting one — this suite itself runs inside an Nx task,
+      // which exports `FORCE_COLOR` to everything it starts.
+      "FORCE_COLOR",
+      "NO_COLOR",
     ]) {
       delete this.env[inherited];
     }
@@ -242,11 +248,32 @@ describe("the judged tier's computation cache", () => {
     assert.equal(second.status, 0, report(second));
     assert.deepEqual(ws.judgeRuns(), [`--diff --diff-base ${base}`], "the judge was asked twice");
     // The restored run says what the fresh one said: the report is the record.
-    for (const result of [first, second]) assert.match(result.stdout, new RegExp(PASS_VERDICT));
+    for (const result of [first, second])
+      assert.match(result.stdout, new RegExp(PASS_VERDICT), report(result));
     // "Green" is a claim about one base commit, so the provenance line names it:
     // a gate run and a CI run resolving different bases answer different questions.
-    assert.match(first.stderr, new RegExp(`${CACHE_MISS} ${base}`));
-    assert.match(second.stderr, new RegExp(`${CACHE_HIT} ${base}`));
+    assert.match(first.stderr, new RegExp(`${CACHE_MISS} ${base}`), report(first));
+    assert.match(second.stderr, new RegExp(`${CACHE_HIT} ${base}`), report(second));
+  });
+
+  it("reports a replay as a replay when Nx colours its output", (t) => {
+    // Colour is not cosmetic to this tier: Nx wraps the cache annotation, and the
+    // words inside it, in escape sequences whenever it thinks the terminal takes
+    // colour — which includes every run nested inside another Nx task, such as
+    // this suite. Reading the provenance off the coloured shape without allowing
+    // for that reported every replay as a fresh judgement.
+    const ws = workspace(t);
+    const base = ws.head();
+    const coloured = { env: { FORCE_COLOR: "true" } };
+
+    const first = ws.lint(base, coloured);
+    const second = ws.lint(base, coloured);
+
+    assert.equal(first.status, 0, report(first));
+    assert.equal(second.status, 0, report(second));
+    assert.equal(ws.judgeRuns().length, 1, report(second));
+    assert.match(first.stderr, new RegExp(CACHE_MISS), report(first));
+    assert.match(second.stderr, new RegExp(CACHE_HIT), report(second));
   });
 
   it("judges again when the workspace changes", (t) => {
@@ -258,8 +285,8 @@ describe("the judged tier's computation cache", () => {
     const second = ws.lint(base);
 
     assert.equal(second.status, 0, report(second));
-    assert.equal(ws.judgeRuns().length, 2);
-    assert.match(second.stderr, new RegExp(CACHE_MISS));
+    assert.equal(ws.judgeRuns().length, 2, "the judge was asked a different number of times");
+    assert.match(second.stderr, new RegExp(CACHE_MISS), report(second));
   });
 
   it("judges again when the base commit advances, then replays per base", (t) => {
@@ -274,9 +301,9 @@ describe("the judged tier's computation cache", () => {
     const moved = ws.lint(advanced);
     const repeated = ws.lint(advanced);
 
-    assert.equal(ws.judgeRuns().length, 2);
-    assert.match(moved.stderr, new RegExp(CACHE_MISS));
-    assert.match(repeated.stderr, new RegExp(CACHE_HIT));
+    assert.equal(ws.judgeRuns().length, 2, "the judge was asked a different number of times");
+    assert.match(moved.stderr, new RegExp(CACHE_MISS), report(moved));
+    assert.match(repeated.stderr, new RegExp(CACHE_HIT), report(repeated));
   });
 
   it("judges again when a rule pinned outside the tree changes", (t) => {
@@ -290,8 +317,8 @@ describe("the judged tier's computation cache", () => {
     const second = ws.lint(base);
 
     assert.equal(second.status, 0, report(second));
-    assert.equal(ws.judgeRuns().length, 2);
-    assert.match(second.stderr, new RegExp(CACHE_MISS));
+    assert.equal(ws.judgeRuns().length, 2, "the judge was asked a different number of times");
+    assert.match(second.stderr, new RegExp(CACHE_MISS), report(second));
   });
 
   it("judges again when the installed llmlint version changes", (t) => {
@@ -302,8 +329,8 @@ describe("the judged tier's computation cache", () => {
     const second = ws.lint(base, { env: { FAKE_LLMLINT_VERSION: "0.5.0" } });
 
     assert.equal(second.status, 0, report(second));
-    assert.equal(ws.judgeRuns().length, 2);
-    assert.match(second.stderr, new RegExp(CACHE_MISS));
+    assert.equal(ws.judgeRuns().length, 2, "the judge was asked a different number of times");
+    assert.match(second.stderr, new RegExp(CACHE_MISS), report(second));
   });
 
   it("keys on the judge configuration the target runs with, not the caller's", (t) => {
@@ -318,8 +345,8 @@ describe("the judged tier's computation cache", () => {
 
     assert.equal(first.status, 0, report(first));
     assert.equal(second.status, 0, report(second));
-    assert.equal(ws.judgeRuns().length, 1);
-    assert.match(second.stderr, new RegExp(CACHE_HIT));
+    assert.equal(ws.judgeRuns().length, 1, "the judge was asked a different number of times");
+    assert.match(second.stderr, new RegExp(CACHE_HIT), report(second));
   });
 
   it("resolves both ends of the key past an unrelated llmlint on the caller's PATH", (t) => {
@@ -340,8 +367,8 @@ describe("the judged tier's computation cache", () => {
 
     assert.equal(first.status, 0, report(first));
     assert.equal(second.status, 0, report(second));
-    assert.equal(ws.judgeRuns().length, 1);
-    assert.match(second.stderr, new RegExp(CACHE_HIT));
+    assert.equal(ws.judgeRuns().length, 1, "the judge was asked a different number of times");
+    assert.match(second.stderr, new RegExp(CACHE_HIT), report(second));
     assert.equal(firstDigest.status, 0, report(firstDigest));
     assert.equal(secondDigest.status, 0, report(secondDigest));
     assert.notEqual(firstDigest.stdout.trim(), "");
@@ -361,8 +388,8 @@ describe("the judged tier's computation cache", () => {
     const second = ws.lint(base, ambient);
 
     assert.equal(second.status, 0, report(second));
-    assert.equal(ws.judgeRuns().length, 2);
-    assert.match(second.stderr, new RegExp(CACHE_MISS));
+    assert.equal(ws.judgeRuns().length, 2, "the judge was asked a different number of times");
+    assert.match(second.stderr, new RegExp(CACHE_MISS), report(second));
   });
 
   it("refuses to judge, or to replay, when the fingerprint cannot be produced", (t) => {
@@ -378,7 +405,7 @@ describe("the judged tier's computation cache", () => {
     assert.doesNotMatch(broken.stderr, new RegExp(CACHE_HIT));
     assert.match(broken.stderr, /'llmlint config' failed/);
     assert.match(broken.stderr, /refusing to judge without the judge-configuration fingerprint/);
-    assert.equal(ws.judgeRuns().length, 1);
+    assert.equal(ws.judgeRuns().length, 1, "the judge was asked a different number of times");
   });
 
   it("fails the tier and judges again when the judge reports findings", (t) => {
@@ -388,12 +415,12 @@ describe("the judged tier's computation cache", () => {
     const first = ws.lint(base, { env: { FAKE_LLMLINT_EXIT: "1" } });
     const second = ws.lint(base, { env: { FAKE_LLMLINT_EXIT: "1" } });
 
-    assert.equal(ws.judgeRuns().length, 2);
+    assert.equal(ws.judgeRuns().length, 2, "the judge was asked a different number of times");
     for (const result of [first, second]) {
       assert.notEqual(result.status, 0, report(result));
       assert.match(report(result), new RegExp(FINDING));
       assert.match(report(result), new RegExp(FAIL_VERDICT));
-      assert.match(result.stderr, new RegExp(CACHE_MISS));
+      assert.match(result.stderr, new RegExp(CACHE_MISS), report(result));
     }
   });
 
@@ -404,10 +431,10 @@ describe("the judged tier's computation cache", () => {
     const first = ws.lint(base, { env: { FAKE_LLMLINT_EXIT: "2" } });
     const second = ws.lint(base, { env: { FAKE_LLMLINT_EXIT: "2" } });
 
-    assert.equal(ws.judgeRuns().length, 2);
+    assert.equal(ws.judgeRuns().length, 2, "the judge was asked a different number of times");
     for (const result of [first, second]) {
       assert.notEqual(result.status, 0, report(result));
-      assert.match(result.stderr, new RegExp(CACHE_MISS));
+      assert.match(result.stderr, new RegExp(CACHE_MISS), report(result));
     }
   });
 
@@ -425,9 +452,9 @@ describe("the judged tier's computation cache", () => {
     assert.notEqual(red.status, 0, report(red));
     assert.equal(green.status, 0, report(green));
     assert.equal(settled.status, 0, report(settled));
-    assert.equal(ws.judgeRuns().length, 2);
-    assert.match(green.stderr, new RegExp(CACHE_MISS));
-    assert.match(settled.stderr, new RegExp(CACHE_HIT));
+    assert.equal(ws.judgeRuns().length, 2, "the judge was asked a different number of times");
+    assert.match(green.stderr, new RegExp(CACHE_MISS), report(green));
+    assert.match(settled.stderr, new RegExp(CACHE_HIT), report(settled));
   });
 
   it("re-judges per invocation with --skip-nx-cache, and ignores an ambient global skip", (t) => {
@@ -449,15 +476,19 @@ describe("the judged tier's computation cache", () => {
     assert.equal(forced.status, 0, report(forced));
     assert.equal(ambient.status, 0, report(ambient));
     assert.equal(ws.judgeRuns().length, 2, "the ambient skip re-rolled the judge");
-    assert.match(forced.stderr, new RegExp(CACHE_MISS));
+    assert.match(forced.stderr, new RegExp(CACHE_MISS), report(forced));
     assert.match(forced.stdout, /forced/);
-    assert.match(ambient.stderr, new RegExp(CACHE_HIT));
+    assert.match(ambient.stderr, new RegExp(CACHE_HIT), report(ambient));
     // Under this Nx the lever neither reads nor writes: the run after it replays
     // the entry the forced roll left in place, not the forced roll's own report.
     assert.doesNotMatch(ambient.stdout, /forced/);
     for (const result of [forced, ambient]) {
       assert.match(result.stderr, /ignoring the ambient global Nx cache skip/);
-      assert.match(result.stderr, new RegExp(`just lint-llm-diff ${base} --skip-nx-cache`));
+      assert.match(
+        result.stderr,
+        new RegExp(`just lint-llm-diff ${base} --skip-nx-cache`),
+        report(result),
+      );
     }
   });
 
@@ -468,7 +499,7 @@ describe("the judged tier's computation cache", () => {
 
     assert.notEqual(result.status, 0, report(result));
     assert.match(result.stderr, /'no-such-ref' does not resolve to a commit/);
-    assert.equal(ws.judgeRuns().length, 0);
+    assert.equal(ws.judgeRuns().length, 0, "the judge was asked a different number of times");
   });
 });
 

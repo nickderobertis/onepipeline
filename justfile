@@ -265,9 +265,13 @@ lint-llm-validate *args:
 # the summary line it prints, only when it replayed a task instead of running it.
 # Both are matched because only the first is safe at any size — Nx replays a hit as
 # one burst, so a replay larger than a pipe buffer can arrive truncated and its
-# summary never does. `npm/test/llmlint-cache.test.mjs` asserts both wordings, so
-# an Nx upgrade that renames them fails the suite rather than quietly reporting
-# every run as freshly judged.
+# summary never does. Colour is stripped before matching, because it is not
+# cosmetic here: Nx wraps those lines — and the words inside them — in escapes
+# whenever it thinks the terminal takes colour, which includes every run nested
+# inside another Nx task, and an unstripped match then reports each replay as a
+# fresh judgement. `npm/test/llmlint-cache.test.mjs` drives both the plain and the
+# coloured shape, so an Nx upgrade that renames either wording fails the suite
+# rather than quietly reporting every run as freshly judged.
 # The blocking `llmlint` PR check; `just gate` runs it before you push.
 # llmlint scoped to the files this branch changed since it forked from main.
 lint-llm-diff base="origin/main" *nx_args:
@@ -288,7 +292,9 @@ lint-llm-diff base="origin/main" *nx_args:
       LLMLINT_DIFF_BASE_SHA="$base_sha" ONEPIPELINE_NX_SHOW_OUTPUT=1 \
         bash scripts/nx.sh run onepipeline:lint-llm-diff {{nx_args}} >"$report" 2>&1 || status=$?; \
       cat "$report"; \
-      if grep -qE '^Nx read the output from the cache instead of running the command|^> nx run onepipeline:lint-llm-diff +\[(local cache|remote cache|existing outputs match the cache)' "$report"; then \
+      escape=$(printf '\033'); \
+      if sed "s/${escape}\[[0-9;]*[a-zA-Z]//g" "$report" \
+         | grep -qE '^Nx read the output from the cache instead of running the command|^> nx run onepipeline:lint-llm-diff +\[(local cache|remote cache|existing outputs match the cache)'; then \
         echo "lint-llm-diff: replayed the recorded verdict for base $base_sha (Nx cache hit)" >&2; \
       else \
         echo "lint-llm-diff: judged this diff against base $base_sha (Nx cache miss)" >&2; \
