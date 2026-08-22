@@ -169,6 +169,31 @@ wait_ceiling() {
   fi
 }
 
+# The clock the ceiling below is counted against, left in `reading` the way
+# `wait_ceiling` leaves `seconds`.
+#
+# `date` is the host, like the `rm` and the append the other verbs make of it, so
+# a reading it refuses goes through `broke` rather than onward. Its *content* is
+# checked too, and for the same reason `wait_ceiling` checks the value the
+# environment carries: a `date` that answered something other than a count of
+# seconds would reach the arithmetic below and arrive as a shell error once per
+# poll, on a wait that then had nothing left to end it — which is the shape of
+# the very defect this bounded wait exists to prevent.
+#
+# Read in the caller's own shell rather than inside the arithmetic, so the `exit`
+# `broke` makes ends the hook rather than a subshell: the trap `require_home`
+# names.
+now_seconds() {
+  if ! reading=$(date +%s); then
+    reading=
+  fi
+  case "$reading" in
+    '' | *[!0-9]*)
+      broke "date +%s answered '$reading' rather than a count of seconds, so this wait has no clock to end on: check that a working date is on the PATH of the shell git runs hooks with"
+      ;;
+  esac
+}
+
 # A `wait-for` whose ceiling ran out, which is a verb that could not do what it
 # names: the push is refused, and the journey holding it fails on the assertions
 # that no longer hold. See `wait_ceiling` for why the wait ends at all.
@@ -185,22 +210,11 @@ case "${1-}" in
       fail "wait-for takes the path to wait for"
     fi
     wait_ceiling
-    # The clock the ceiling is counted against, read through `broke` like every
-    # other call this script makes of the host: a `date` that answers nothing
-    # leaves the wait below with no deadline to end on, and unguarded that
-    # arrives as a shell arithmetic error and a hook that waits forever. Read in
-    # the caller's own shell rather than inside the arithmetic, so the `exit`
-    # `broke` makes ends the hook and not a subshell — the trap `require_home`
-    # names.
-    if ! started=$(date +%s); then
-      broke "date +%s answered nothing, so this wait has no clock to end on: check that a working date is on the PATH of the shell git runs hooks with"
-    fi
-    deadline=$(( started + seconds ))
+    now_seconds
+    deadline=$(( reading + seconds ))
     until [ -f "$2" ]; do
-      if ! now=$(date +%s); then
-        broke "date +%s answered nothing part-way through the wait, so the ceiling cannot be checked: check that a working date is on the PATH of the shell git runs hooks with"
-      fi
-      if [ "$now" -ge "$deadline" ]; then
+      now_seconds
+      if [ "$reading" -ge "$deadline" ]; then
         expired "$2"
       fi
       # A `sleep` the host refuses is the one failure here that is not worth a
