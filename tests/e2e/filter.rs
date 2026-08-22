@@ -15,7 +15,7 @@
 
 use std::io::Write;
 
-use crate::harness::{agent, plan_of, World, REFUSED};
+use crate::harness::{agent, ended, plan_of, World, REFUSED};
 
 /// Run one node to settlement, and answer with the run's id.
 ///
@@ -322,7 +322,7 @@ fn a_profile_shapes_the_view_without_touching_the_store_or_the_channel() {
     );
 
     drop(serving.stdin.take());
-    let _ = serving.wait();
+    ended(serving);
 }
 
 /// Every way of naming a profile shapes `next`'s event view, and none of them
@@ -398,7 +398,7 @@ fn every_spelling_of_a_profile_shapes_the_view_and_still_delivers_a_blocking_sur
         );
 
         drop(serving.stdin.take());
-        let _ = serving.wait();
+        ended(serving);
     }
 }
 
@@ -603,7 +603,7 @@ fn a_next_that_refuses_its_filter_leaves_the_surface_unclaimed() {
     );
 
     drop(serving.stdin.take());
-    let _ = serving.wait();
+    ended(serving);
 }
 
 /// A launch config declares the whole `filters:` block, and it is the same block

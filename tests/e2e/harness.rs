@@ -1433,6 +1433,30 @@ impl World {
     }
 }
 
+/// Wait for a child this journey spawned with piped streams to end, draining
+/// them as it goes.
+///
+/// `Child::wait` on a child whose `stdout` or `stderr` is a pipe nothing is
+/// reading is not bounded by that child at all: it is bounded by the OS pipe
+/// buffer. The child blocks writing once the buffer is full, the waiter blocks
+/// waiting for a child that will never exit, and neither ever moves again.
+///
+/// The size of that buffer is the whole reason this is a harness function rather
+/// than a call spelled at each site. Rust's standard library creates its
+/// anonymous pipes with an 8192-byte buffer on Windows and inherits the kernel's
+/// 65536 on Linux and macOS, so a server that writes 16 KiB passes on both
+/// platforms this suite is developed on and deadlocks on the third — silently,
+/// with no test named, which is exactly the failure the `cross (windows-latest)`
+/// leg cannot afford to produce again. `wait_with_output` reads both streams
+/// while it waits, so what bounds the wait is the child's own exit and nothing
+/// else.
+///
+/// What it wrote is discarded: every caller here has already read what it needed
+/// off a stream it took, or is ending a server whose output it never claimed.
+pub fn ended(child: std::process::Child) {
+    child.wait_with_output().expect("the child ends");
+}
+
 /// Poll until `ready` holds, reporting whether it did before the deadline.
 ///
 /// Every wait in this suite is on work another process or thread is doing, so
@@ -1879,6 +1903,17 @@ fn held_dir() -> PathBuf {
 
 /// Build one package's binaries into the target directory this test's own binary
 /// came out of, and return the per-process directory they are held in.
+///
+/// The one wait in this harness that is deliberately left unbounded. Every test
+/// process needing a double runs this, so several of them queue on cargo's lock
+/// over the shared target directory and cargo says so — `Blocking waiting for
+/// file lock on build directory` — and then waits as long as it takes. A
+/// deadline here would end whichever process drew the short straw, on a host
+/// that was working the whole time, and it would do it more often the more
+/// parallel the runner is. What bounds it instead is the runner: `slow-timeout`
+/// in `.config/nextest.toml` names the test that is waiting and then ends it, so
+/// a lock nothing is going to release reads as one named test rather than as a
+/// suite that stopped.
 fn build(selection: &[&str]) -> PathBuf {
     let debug = binary()
         .parent()
