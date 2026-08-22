@@ -123,12 +123,10 @@ jobs:
       - name: Quality gate (cross-platform legs)
         timeout-minutes: 20
         run: just check-cross
-      # What the step above could not say for itself. A leg that stops without a
-      # verdict stops holding something — a test process, or a child of one that
-      # outlived it — and on Windows there are no process groups to make that
-      # visible afterwards, so it is read here while it is still true. Never the
-      # reason the leg is red: it runs only when there is already something to
-      # explain, and its own failure is not one.
+      # A leg that stops without a verdict stops holding something — a test
+      # process, or a child of one that outlived it — and on Windows there are no
+      # process groups to make that visible afterwards, so it is read here while
+      # it is still true.
       - name: What was still running when it stopped
         if: failure() || cancelled()
         continue-on-error: true
