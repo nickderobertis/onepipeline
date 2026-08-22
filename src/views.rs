@@ -3213,12 +3213,10 @@ mod tests {
         let view = RunView::open(&RunPaths::under(&root, "demo")).expect("the run reads");
         let rendered = transcript(&view, None);
 
-        // The ask, as it always rendered.
         assert!(
             rendered.contains("tool_call Bash  gh issue view 28"),
             "{rendered}"
         );
-        // The answer, which used to be a blank column.
         assert!(
             rendered.contains("**Accepted fix.** Four parts:"),
             "the recorded output is not on the line that answered for it:\n{rendered}"
@@ -3288,8 +3286,6 @@ mod tests {
             rendered.contains("// the second, because every family below it is the"),
             "the report's longest observation is not rendered at all:\n{rendered}"
         );
-        // Bounded, and the bound is stated on the line rather than left as a
-        // reader's guess about where a tool's output stopped.
         assert!(
             rendered.contains("… [4096 of 4350 characters]"),
             "an unbounded output was printed whole, or cut without saying \
@@ -3352,8 +3348,6 @@ mod tests {
             rendered.lines().any(|line| line.trim() == "tool_result"),
             "{rendered}"
         );
-        // And nothing is invented to fill it: no ceiling note, no truncation
-        // note, on a line that had nothing to leave out.
         assert!(!rendered.contains('…'), "{rendered}");
         std::fs::remove_dir_all(&root).ok();
     }

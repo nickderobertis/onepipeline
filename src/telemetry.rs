@@ -1153,8 +1153,6 @@ mod tests {
             "the parts overcount the whole: {:?}",
             telemetry.buckets
         );
-        // Taken off the longest span rather than clamped out of the shortest,
-        // and `scheduling` is still the measured zero it was.
         assert_eq!(bucket_of(&telemetry, BucketName::Agent), Some(90_000));
         assert_eq!(bucket_of(&telemetry, BucketName::Scheduling), Some(0));
     }
@@ -1199,9 +1197,6 @@ mod tests {
             "{buckets:?}"
         );
         assert_eq!(buckets[0].ms, Some(9_098_048 - 13), "{buckets:?}");
-        // Every other bucket is what it measured, including the two zeroes: an
-        // overcount is charged to the longest span alone while that span can
-        // carry it.
         assert_eq!(buckets[1].ms, Some(1_229), "{buckets:?}");
         assert_eq!(buckets[5].ms, Some(0), "{buckets:?}");
     }

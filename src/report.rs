@@ -667,10 +667,7 @@ impl Turn {
 /// One tool call a turn made, or the observation that answered it.
 ///
 /// Both halves, because a report carries both and a reader shown only the asks
-/// is reading half a turn: a `tool_call` event carries the `input` it acted on
-/// and no output, and the `tool_result` that answers it carries the `output` and
-/// no input. Neither field is where the other one is, so a reader that knew only
-/// `input` rendered every observation a turn made as a blank.
+/// is reading half a turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Tool {
     /// `tool_call` or `tool_result`, as the report names it.
@@ -698,11 +695,9 @@ const TOOL_RESULT: &str = "tool_result";
 /// A tool event's own text: what a call acted on, or what the result answering
 /// it returned.
 ///
-/// One or the other and never both, because the two are different events. A
-/// pair of strings on one line could hold both at once, which is a state no
-/// producer emits and which left the renderer choosing between them — and it
-/// chose the half a result does not carry, so every observation a turn made
-/// rendered blank.
+/// One or the other and never both. A pair of strings could hold both at once —
+/// a state no producer emits, and one that leaves a renderer choosing between
+/// them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ToolText {
     /// What a call acted on, rendered compactly. Empty where the producer
