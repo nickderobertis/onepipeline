@@ -677,25 +677,70 @@ pub(crate) struct Tool {
     pub kind: String,
     /// The tool, where the harness named one.
     pub name: String,
-    /// What it acted on, rendered compactly.
-    pub detail: String,
-    /// What it returned. Empty on a call, which has not been answered yet.
-    pub output: String,
-    /// What the producer said about having already cut that output short before
-    /// this run ever saw it — a fact about the text, which a reader has no
-    /// second source for.
-    pub output_truncated: Truncation,
+    /// The one text this half of the exchange carries.
+    pub text: ToolText,
 }
 
 impl Tool {
     fn of(event: &Value) -> Self {
+        let kind = string(event, "kind");
         Self {
-            kind: string(event, "kind"),
             name: string(event, "name"),
-            detail: compact(event.get("input")),
-            output: compact(event.get("output")),
-            output_truncated: Truncation::of(event.get("output_truncated")),
+            text: ToolText::of(&kind, |key| event.get(key)),
+            kind,
         }
+    }
+}
+
+/// The kind a producer gives the half of an exchange that carries an output.
+const TOOL_RESULT: &str = "tool_result";
+
+/// A tool event's own text: what a call acted on, or what the result answering
+/// it returned.
+///
+/// One or the other and never both, because the two are different events. A
+/// pair of strings on one line could hold both at once, which is a state no
+/// producer emits and which left the renderer choosing between them — and it
+/// chose the half a result does not carry, so every observation a turn made
+/// rendered blank.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ToolText {
+    /// What a call acted on, rendered compactly. Empty where the producer
+    /// stated nothing.
+    Acted(String),
+    /// What a result returned.
+    Returned {
+        /// The text, rendered compactly.
+        output: String,
+        /// What the producer said about having already cut it short before this
+        /// run ever saw it — a fact about the text, which a reader has no second
+        /// source for.
+        truncated: Truncation,
+    },
+}
+
+impl ToolText {
+    /// The text an event of this `kind` carries, read out of the payload by
+    /// `field`.
+    ///
+    /// The **kind** decides, rather than whichever key happens to be populated:
+    /// a result stating an empty output is stating that the tool returned
+    /// nothing, which is a different fact from a call's input and not a reason
+    /// to go looking for one.
+    ///
+    /// Derived here for both sources — the journal's `turn-activity` payload and
+    /// a retained report's event — because they agree on every key but one: a
+    /// relayed summary spells a call's input `detail` where a report spells it
+    /// `input`. That divergence is read in this one place, so the two sources
+    /// cannot come to disagree about what a tool did.
+    pub(crate) fn of<'a>(kind: &str, field: impl Fn(&str) -> Option<&'a Value>) -> Self {
+        if kind == TOOL_RESULT {
+            return Self::Returned {
+                output: compact(field("output")),
+                truncated: Truncation::of(field("output_truncated")),
+            };
+        }
+        Self::Acted(compact(field("input").or_else(|| field("detail"))))
     }
 }
 
@@ -732,18 +777,13 @@ impl Truncation {
     }
 }
 
-/// One of a tool event's two texts, as a string to render.
+/// One of a tool event's texts, as a string to render.
 ///
-/// A harness writes either as raw text or as the structured value it really is,
-/// and both are the same fact to a reader. A value that is neither is rendered
-/// as what it is rather than dropped: reading only the string case is how a
-/// tool's own answer became a blank column in the first place.
-///
-/// Crate-visible, and read by [`views::transcript`](crate::views::transcript)
-/// for the journal's `turn-activity` payload as well: the two sources spell
-/// these fields the same way, and two readings of one field is how they come to
-/// disagree.
-pub(crate) fn compact(value: Option<&Value>) -> String {
+/// A harness writes it either as raw text or as the structured value it really
+/// is, and both are the same fact to a reader. A value that is neither is
+/// rendered as what it is rather than dropped: reading only the string case is
+/// how a tool's own answer became a blank column in the first place.
+fn compact(value: Option<&Value>) -> String {
     match value {
         None | Some(Value::Null) => String::new(),
         Some(Value::String(text)) => text.clone(),
@@ -947,7 +987,11 @@ mod tests {
         assert!(turns[0].tools.is_empty());
         assert_eq!(turns[1].text, "Ran the gate.");
         assert_eq!(turns[1].tools[0].name, "bash");
-        assert!(turns[1].tools[0].detail.contains("just check"));
+        assert!(
+            matches!(&turns[1].tools[0].text, ToolText::Acted(detail) if detail.contains("just check")),
+            "{:?}",
+            turns[1].tools[0]
+        );
         // A result names no tool, and is not given one.
         assert_eq!(turns[1].tools[1].kind, "tool_result");
         assert!(turns[1].tools[1].name.is_empty());
@@ -979,7 +1023,11 @@ mod tests {
         assert_eq!(turns[0].role, "claude-code");
         assert_eq!(turns[0].text, "Ran the gate.");
         assert_eq!(turns[0].tools[0].name, "bash");
-        assert!(turns[0].tools[0].detail.contains("just check"));
+        assert!(
+            matches!(&turns[0].tools[0].text, ToolText::Acted(detail) if detail.contains("just check")),
+            "{:?}",
+            turns[0].tools[0]
+        );
     }
 
     #[test]

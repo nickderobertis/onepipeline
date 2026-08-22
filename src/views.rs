@@ -56,7 +56,7 @@ use crate::graph::{self, Landing, NodeStatus};
 use crate::journal::PipelineKind;
 use crate::ledger::{self, LaunchRecord, LockRecord};
 use crate::projection::{self, MemberLabel, Refusal, RunState, Served};
-use crate::report::Truncation;
+use crate::report::{ToolText, Truncation};
 use crate::sys;
 
 /// A run root a view refused, and the reason it gave.
@@ -1643,19 +1643,11 @@ pub fn transcript(view: &RunView, only: Option<&str>) -> String {
                     "    {} {}  {}\n",
                     one_line(field("kind")),
                     one_line(field("name")),
-                    // A result's text is under `output`, not `detail` — which is
-                    // empty on every one of them, and used to be the whole third
-                    // column. Both texts are read through the same
-                    // [`crate::report::compact`] a retained report's are, so a
-                    // harness that answers with the structure it really had is
-                    // rendered here and not silently dropped: two readings of one
-                    // field is how the two sources come to disagree about what a
-                    // tool returned.
-                    tool_text(
-                        &crate::report::compact(event.payload.get("detail")),
-                        &crate::report::compact(event.payload.get("output")),
-                        crate::report::Truncation::of(event.payload.get("output_truncated")),
-                    )
+                    // Read out of the payload the same way a retained report's
+                    // event is: a result's text is under `output` and it carries
+                    // no `detail` at all, so a third column read out of `detail`
+                    // was blank on every observation a turn made.
+                    tool_text(&ToolText::of(field("kind"), |key| event.payload.get(key)))
                 )),
                 _ => {}
             }
@@ -1694,7 +1686,7 @@ pub fn transcript(view: &RunView, only: Option<&str>) -> String {
                         "      {} {}  {}\n",
                         one_line(&tool.kind),
                         one_line(&tool.name),
-                        tool_text(&tool.detail, &tool.output, tool.output_truncated)
+                        tool_text(&tool.text)
                     ));
                 }
             }
@@ -1748,10 +1740,10 @@ const MAX_TOOL_OUTPUT_CHARS: usize = crate::event::MAX_PAYLOAD_TEXT_BYTES;
 /// The third column of a tool's line: what a call acted on, or what a result
 /// returned.
 ///
-/// An output where there is one, because a `tool_result` carries its text under
+/// Whichever half the event is, because a `tool_result` carries its text under
 /// `output` and carries no `detail` at all — reading only the latter rendered
 /// every observation a turn made as a blank column, which is a run's own
-/// evidence hidden by its reader. Both texts are a stranger's, so both go
+/// evidence hidden by its reader. Either text is a stranger's, so either goes
 /// through the same control-character strip every other borrowed value on these
 /// views does.
 ///
@@ -1759,10 +1751,16 @@ const MAX_TOOL_OUTPUT_CHARS: usize = crate::event::MAX_PAYLOAD_TEXT_BYTES;
 /// had already cut short says so, and one this view cuts says how much of it a
 /// reader is looking at — a truncated output rendered as though it were whole is
 /// how a reader concludes a tool returned nothing further, which is the reading
-/// this verb exists to correct.
-fn tool_text(detail: &str, output: &str, output_truncated: Truncation) -> String {
+/// this verb exists to correct. A result that returned nothing renders as the
+/// empty column it is, and says nothing about what it left out, because it left
+/// nothing out.
+fn tool_text(text: &ToolText) -> String {
+    let (output, truncated) = match text {
+        ToolText::Acted(detail) => return one_line(detail),
+        ToolText::Returned { output, truncated } => (output, *truncated),
+    };
     if output.is_empty() {
-        return one_line(detail);
+        return String::new();
     }
     let stripped = one_line(output);
     let whole = stripped.chars().count();
@@ -1771,7 +1769,7 @@ fn tool_text(detail: &str, output: &str, output_truncated: Truncation) -> String
     if whole > MAX_TOOL_OUTPUT_CHARS {
         notes.push(format!("{MAX_TOOL_OUTPUT_CHARS} of {whole} characters"));
     }
-    match output_truncated {
+    match truncated {
         Truncation::Whole => {}
         Truncation::Cut => notes.push("already cut short by the producer".to_string()),
         // Not silence, and not `false`: a flag this build cannot read leaves
@@ -3365,7 +3363,10 @@ mod tests {
     /// view's own.
     #[test]
     fn a_control_character_in_an_output_is_stripped_like_every_other_value() {
-        let rendered = tool_text("", "first\r\nsecond\u{1b}[2K", Truncation::Whole);
+        let rendered = tool_text(&ToolText::Returned {
+            output: "first\r\nsecond\u{1b}[2K".to_string(),
+            truncated: Truncation::Whole,
+        });
         assert_eq!(rendered, "first  second [2K");
     }
 
@@ -3379,7 +3380,10 @@ mod tests {
     #[test]
     fn a_truncation_flag_this_build_cannot_read_is_said_rather_than_assumed() {
         let text = |flag: Option<serde_json::Value>| {
-            tool_text("", "what it returned", Truncation::of(flag.as_ref()))
+            tool_text(&ToolText::Returned {
+                output: "what it returned".to_string(),
+                truncated: Truncation::of(flag.as_ref()),
+            })
         };
         assert_eq!(text(None), "what it returned");
         assert_eq!(text(Some(json!(false))), "what it returned");
