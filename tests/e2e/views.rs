@@ -479,16 +479,22 @@ fn telemetry_reports_what_each_party_spent() {
 ///
 /// The **publication** is held here, at the one point a journey can hold it from
 /// outside: git runs the repository's own `pre-push` hook at the publishing push,
-/// and this one waits for a file. That is also where the `gate` bucket went —
-/// nothing in the stack measures a gate now, so the bucket is served absent, and
-/// the stretch itself is the publication waiting on its merge path.
+/// and this one waits for a file. That is also where the `gate` bucket went. No
+/// library this crate composes runs a verification tier of its own any more — the
+/// repository's merge path is the verifier — so nothing measures a gate, and the
+/// bucket is served absent, which is what the contract says of a bucket nothing in
+/// the stack measures. The stretch itself is not lost: it is the publication
+/// waiting on its merge path, which is what it now is.
 ///
-/// The lock wait cannot be held, and not for want of trying: the sibling emits
-/// `lock-wait` *after* it has waited and `lock-acquired` immediately after, so the
+/// The lock wait cannot be held, and not for want of trying:
+/// the sibling emits `lock-wait` *after* it has waited, carrying the elapsed
+/// seconds in its payload, and then emits `lock-acquired` immediately — so the
 /// interval this crate measures between the two is the cost of writing two
-/// records, however long the wait was. The bucket is still served and still not
-/// the agent's; what it is not is a measurement. Divergence 16 in
-/// `docs/contract-divergences.md`.
+/// records, however long the wait was. The `onevcs` double emitted the marker
+/// and *then* blocked, which is a shape no release of that library has ever
+/// produced, and it is what let this bucket read as measured. The bucket is
+/// still served, and it is still not the agent's; what it is not is a
+/// measurement. Recorded as divergence 16 in `docs/contract-divergences.md`.
 #[test]
 fn telemetry_separates_publication_and_lock_time_from_agent_time() {
     let world = World::new("views-publicationtime");

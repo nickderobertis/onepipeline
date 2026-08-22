@@ -79,7 +79,9 @@ jobs:
   # Prove the artifact builds and its tests pass on macOS and Windows (without
   # the coverage threshold, which is enforced on Linux).
   #
-  # Bounded, and diagnostic when it is not green.
+  # Bounded, and diagnostic when it is not green — run 32538759791's
+  # `cross (windows-latest)` leg was neither, and produced no test name in 237
+  # minutes.
   #
   # `NEXTEST_PROFILE` is the line that selects the reporting: `just check-cross`
   # reaches the suite through `just test-quick`, which names no profile, so the
@@ -89,9 +91,10 @@ jobs:
   #
   # Two limits, because they buy different things. The step's is what bounds the
   # hang, and it is the step's rather than only the job's so that a timeout leaves
-  # the job alive for the step below to say what was still running. Each is set
-  # over twice the runtime a green leg takes, so only a wedged one meets it, and
-  # the job limit is half of what nickderobertis/onepipeline#99 asks for.
+  # the job alive for the step below to say what was still running. That step
+  # takes 5m49s-8m00s on `main` and the whole job 8m13s-12m38s, so each limit is
+  # over twice its worst. The job limit is half of what
+  # nickderobertis/onepipeline#99 asks for.
   cross:
     needs: changes
     if: needs.changes.outputs.crate == 'true'

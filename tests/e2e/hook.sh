@@ -127,23 +127,32 @@ require_state_root() {
 
 # How long `wait-for` waits for its rendezvous before it refuses the push.
 #
-# Bounded, because an abandoned hold is otherwise unreachable: where there is no
-# portable way to reap the hook git left waiting, it takes the whole job with it
-# and answers nothing. Bounded, that same abandonment refuses the push and the
-# journey goes red naming itself — the better answer, though a ceiling that fired
-# early would settle a publication a journey believes it is still holding. 300
-# seconds keeps that trade-off out of a healthy run: the journeys that hold a
-# publication hold it for well under five seconds.
+# **Bounded, and the bound is what makes a held push reachable on every
+# platform.** Unbounded, a hold nobody releases — a journey that panicked past
+# its release, on a host with no portable way to reap the hook git left waiting —
+# takes the whole job with it: the leg burns its budget and answers nothing.
+# Bounded, that same abandonment refuses the push, the journey's assertions about
+# a publication still in flight stop holding, and the leg goes red naming itself.
+# A red journey is the better answer on both counts — it says what is wrong and
+# it costs minutes rather than a runner — which is why this gives up rather than
+# waits, though a ceiling that fired early would settle a publication a journey
+# believes it is still holding.
+#
+# 300 seconds is picked to make that trade-off never arrive in a healthy run: the
+# journeys that hold a publication hold it for well under five seconds, and no
+# job's budget is anywhere near five minutes.
 #
 # The environment carries it so the journey that proves the expiry can reach it
 # without waiting the ceiling out; every other journey runs on the default. It is
 # external input, so it is refused rather than defaulted or clamped when it is not
 # a number of seconds between 1 and an hour: `0` would expire every hold before it
-# began, which is the silent opposite of what a journey asking for one means. A
-# leading zero is refused with them because `hook.bat` counts this out with
-# `set /a`, which reads one as octal, and anything longer than the ceiling's own
-# four digits is refused before it is compared as a number at all — arithmetic here
-# is the host's word size and 32-bit over there.
+# began, which is the silent opposite of what a journey asking for one means, and
+# an hour is already far past every hold this suite takes. A leading zero is
+# refused with them because `hook.bat` counts this out with `set /a`, which reads
+# one as octal, and anything longer than the ceiling's own four digits is refused
+# before it is compared as a number at all — arithmetic here is the host's word
+# size and 32-bit over there, so a value nothing turned down would land as a
+# deadline no clock can represent.
 wait_ceiling() {
   seconds=300
   if [ -n "${ONEPIPELINE_FAKE_HOOK_WAIT_SECONDS-}" ]; then

@@ -498,17 +498,21 @@ impl World {
     /// request through [`ONEVCS_GH`](World::cmd)'s stand-in.
     ///
     /// `pre_push` is the repository's **own `pre-push` hook**, which is what
-    /// verifies a local-publishing change. `&[]` installs none, which is a merge
-    /// path that lets every publishing push through; a journey that needs one to
-    /// *refuse*, to *hold* the push, or to be *abandoned* mid-hold states the argv
-    /// [`hook_script`], [`held_publication`], or [`abandonable_hook_script`]
-    /// writes.
+    /// verifies a local-publishing change now that nothing in this stack runs a
+    /// gate of its own: `onevcs` names none, and a remote-publishing identity is
+    /// verified by the host's required checks instead. `&[]` installs no hook,
+    /// which is a repository whose merge path lets every publishing push
+    /// through; a journey that needs verification to *refuse* states the argv
+    /// [`hook_script`] writes here, and one that needs it to *hold* the push
+    /// states [`held_publication`]'s, which is let through however that journey
+    /// ends. A journey that means to *abandon* a hold reaches for
+    /// [`abandonable_hook_script`], which exists on Unix alone.
     ///
-    /// Installed through `core.hooksPath` on the checkout rather than as tracked
-    /// content, because a file in the tree would be published by the very journeys
-    /// that install it. `onevcs` carries that setting into the clone a session
-    /// cuts — `git clone` copies no repository-local config — so the hook git runs
-    /// at the publishing push is this one.
+    /// The hook is installed through `core.hooksPath` on the checkout rather
+    /// than as tracked content, because a file in the tree would be published by
+    /// the very journeys that install it. `onevcs` carries that setting into the
+    /// clone a session cuts — `git clone` copies no repository-local config — so
+    /// the hook git runs at the publishing push is this one.
     pub fn repository(&self, publication: &str, pre_push: &[&str]) -> Repository {
         let origin = self.root.join("origin.git");
         let checkout = self.root.join("service");
@@ -1436,13 +1440,16 @@ impl World {
 /// reading is not bounded by that child at all: it is bounded by the OS pipe
 /// buffer. The child blocks writing once the buffer is full, the waiter blocks
 /// waiting for a child that will never exit, and neither ever moves again.
-/// `wait_with_output` reads both streams while it waits, so what bounds the wait
-/// is the child's own exit and nothing else.
 ///
-/// A harness function rather than a call spelled at each site because that buffer
-/// is 8192 bytes on Windows and the kernel's 65536 on Linux and macOS: a server
-/// that writes 16 KiB passes on both platforms this suite is developed on and
-/// deadlocks, naming no test, on the third.
+/// The size of that buffer is the whole reason this is a harness function rather
+/// than a call spelled at each site. Rust's standard library creates its
+/// anonymous pipes with an 8192-byte buffer on Windows and inherits the kernel's
+/// 65536 on Linux and macOS, so a server that writes 16 KiB passes on both
+/// platforms this suite is developed on and deadlocks on the third — silently,
+/// with no test named, which is exactly the failure the `cross (windows-latest)`
+/// leg cannot afford to produce again. `wait_with_output` reads both streams
+/// while it waits, so what bounds the wait is the child's own exit and nothing
+/// else.
 ///
 /// What it wrote is discarded: every caller here has already read what it needed
 /// off a stream it took, or is ending a server whose output it never claimed.
@@ -2155,12 +2162,14 @@ pub fn hook_script(world: &World, verb: &ReturningHookVerb) -> Vec<String> {
 ///
 /// [`Drop`] covers abandonment — the rendezvous is written on the assertion that
 /// failed, the [`World::until`] that ran out, the panic that unwound past both —
-/// and the ceiling `hook.sh` states covers the one deadlock it cannot reach, a
+/// and the ceiling `hook.sh` states covers the deadlock it cannot reach, a
 /// journey that waits for the publication to finish before its own scope ends.
 /// Between them a held push cannot outlive its journey on any platform.
 ///
 /// Declare it *after* the [`World`], so it drops *before* the world removes the
-/// tree the rendezvous lives in.
+/// tree the rendezvous lives in. Holding the value is not optional and the
+/// compiler says so: [`argv`](Self::argv) borrows from `self`, so a temporary
+/// cannot reach [`World::repository`].
 pub struct HeldPublication {
     argv: Vec<String>,
     rendezvous: PathBuf,
@@ -2252,13 +2261,16 @@ pub fn abandonable_hook_script(world: &World, rendezvous: &Path) -> Vec<String> 
 /// The hook script for this platform, written into this world's own scratch, with
 /// `args` behind it.
 ///
-/// The argv is what [`install_hook`] puts behind the hook git executes. One script
-/// per platform because on Windows nothing can start a `.bat` directly, so each
-/// platform's interpreter leads its own.
+/// A script rather than a compiled binary, and per platform rather than one
+/// artifact, because the alternative was a workspace member shipping a Rust
+/// program to stand in for three shell one-liners. The argv is what
+/// [`install_hook`] puts behind the hook git executes, and on Windows nothing can
+/// start a `.bat` directly, so each platform's interpreter leads its own.
 ///
-/// Private: the two public doors above are what a journey states a merge path
-/// with, and free-form argv is wanted only by the journey about a command line the
-/// hook *turns down*.
+/// Private, and free-form only in here: the two public doors above are what a
+/// journey states a merge path with, and the one caller that needs a command line
+/// neither of them can spell is [`the_hook_refuses_a_command_line_it_does_not_speak`],
+/// which is about the argv the hook *turns down*.
 fn hook_argv(world: &World, args: &[&str]) -> Vec<String> {
     let mut argv = interpreted(&write_hook_script(world));
     argv.extend(args.iter().map(|arg| (*arg).to_owned()));
@@ -2295,14 +2307,16 @@ fn hooks_dir(world: &World) -> PathBuf {
 /// Every word is single-quoted, because a world's scratch directory carries the
 /// journey's own name and nothing promises that a path is one shell word.
 ///
-/// On Windows that line is read by the MSYS2 `sh` git for Windows bundles, and
-/// [`interpreted`] puts `cmd /C` in front of the verb — a *native* program, so the
-/// MSYS2 runtime rewrites arguments shaped like POSIX paths on the way across.
-/// `/C` is exactly that shape, and rewritten it stops being cmd's switch, leaving
-/// the push in a hook that never returns. [`VERBATIM_ARGUMENTS`] switches the
-/// conversion off for the one `exec` below, under both names, because
-/// `MSYS_NO_PATHCONV` is git for Windows' own spelling of the MSYS2 knob and
-/// neither release promises the other. Empty on Unix.
+/// On Windows that POSIX line is read by the MSYS2 `sh` git for Windows bundles,
+/// and it is [`interpreted`] that puts `cmd /C` in front of the verb — so the
+/// shell starts a *native* program, and the MSYS2 runtime rewrites arguments
+/// shaped like POSIX paths on the way across that boundary. `/C` is exactly that
+/// shape, and rewritten it stops being cmd's switch: cmd reads the verb as a
+/// command line rather than running it as a batch file, and the push is left in a
+/// hook that never returns. So [`VERBATIM_ARGUMENTS`] switches the conversion off
+/// for the one `exec` below, under both names, because `MSYS_NO_PATHCONV` is git
+/// for Windows' own spelling of the MSYS2 knob and neither release promises the
+/// other. Empty on Unix, where the line is what it always was.
 fn install_hook(path: &Path, argv: &[&str]) {
     let quoted: Vec<String> = argv
         .iter()
@@ -2436,24 +2450,35 @@ fn both_hook_scripts_answer_the_same_verbs() {
 /// matrix, the two tests are the whole drift gate.
 ///
 /// Driven through **git**, because that is the only thing that runs a `pre-push`
-/// hook — which also makes this the one test that runs the wrapper
-/// [`install_hook`] writes rather than the argv inside it. On Windows that wrapper
-/// is a POSIX line git's bundled shell reads before it ever reaches `hook.bat`,
-/// and one that lost the verb's arguments there would leave every push in a hook
-/// that never returns.
+/// hook: the repository is the one every journey publishes into, the hook behind
+/// its `core.hooksPath` is written by [`install_hook`] from the argv
+/// [`hook_argv`] states, and each case is a real `git push` at a real bare
+/// origin. That also makes this the one test that runs the wrapper `install_hook`
+/// writes rather than the argv inside it — on Windows the wrapper is a POSIX line
+/// git's bundled shell reads before it ever reaches `hook.bat`, and a wrapper that
+/// lost the verb's arguments there would leave every push in a hook that never
+/// returns.
 ///
-/// The exit code is not asserted: git relays a hook's *words* to the caller and
-/// its own verdict to the shell, so every non-zero the script can answer with
-/// arrives as one declined push, and a test telling them apart would be asserting
-/// against an interface no caller has. What a caller does have is the refusal, a
-/// base that does **not** move, and the hook's own complaint — the last checked as
+/// What is asserted is what git makes observable, and the exit code is not part
+/// of it: git relays a hook's *words* to the caller and its own verdict to the
+/// shell, so every non-zero the script can answer with arrives as one declined
+/// push. `sysexits.h`'s 64 and a host that refused a write are still separate
+/// exits in both halves — `hook.sh` says why — but nothing downstream of git can
+/// tell them apart, so a test asserting the difference here would be asserting
+/// against an interface no caller has. What a caller does have is these three,
+/// and each of them is load-bearing: the push is **refused**, the base does
+/// **not** move, and the hook's own complaint reaches them — the last checked as
 /// the words both halves write, because the two disagree over how much of the
 /// usage line a missing argument earns and neither wording is wrong.
 ///
-/// A command line the script *does* speak follows as the control, because six
-/// refusals prove nothing on their own. The state root is handed over for the last
-/// case, which without it would refuse for the *missing* root rather than for the
-/// tree git is running the hook in.
+/// The last push is the control. Six refusals prove nothing on their own — a hook
+/// that turned every push down would pass all of them — so a command line the
+/// script *does* speak follows, and the base moves.
+///
+/// The state root is handed over even though only the last case reaches it, and
+/// that is the point: without it that one would refuse for the *missing* root
+/// rather than for the tree git is running the hook in, and the complaint
+/// asserted on below would be one this test never meant to provoke.
 #[test]
 fn the_hook_refuses_a_command_line_it_does_not_speak() {
     let world = World::new("hook-refusals");

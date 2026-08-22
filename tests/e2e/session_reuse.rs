@@ -259,11 +259,19 @@ fn in_a_group_of_its_own(command: &mut Command) {
 
 /// What a process lister wrote, once it has said it succeeded.
 ///
-/// The exit status is checked and not merely the bytes: a lister that failed
-/// writes nothing to standard output either, so taking its bytes unasked turns
-/// "this host could not answer" into "there is nothing there" — and both readers
-/// below take an empty answer for a publication that has stopped, so the journey
-/// would pass at exactly the point it exists to prove something.
+/// The exit status is checked and not merely the bytes, because of what the two
+/// readers below do with an empty answer: [`holders_of`] reporting nothing is how
+/// the sweep in [`stop_the_publication`] concludes that the publication has
+/// stopped, and [`process_table`] returning nothing is a tree with no branches to
+/// signal. A lister that failed writes nothing to standard output either, so
+/// taking its bytes unasked turns "this host could not answer" into "there is
+/// nothing there" — and the journey then passes at exactly the point it exists to
+/// prove something.
+///
+/// Rows that do not parse are still dropped by the callers, and deliberately: a
+/// header line or two columns run together must not cost a read the rows it got
+/// right. That is a statement about the *shape* of an answer this host gave;
+/// this is about whether it gave one at all.
 ///
 /// Unix-only with both of its callers, for the reason the journey below states.
 #[cfg(unix)]
