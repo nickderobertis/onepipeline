@@ -88,17 +88,13 @@ resolver = "2"
 #   session_reuse.rs` and `tests/e2e/lifecycle.rs` drive the two halves, so a pin
 #   below 0.8.0 fails rather than reads differently.
 # - `onevcs` 0.11.0 removes the **gate** — the tier that library ran itself, the
-#   `gate:` key a rules file named it in, and the `gate-started` and
-#   `gate-verdict` records it wrote — and leaves the repository's own merge path
-#   as the only verifier: the host's required checks where a change publishes
-#   remotely, and the repository's `pre-push` hook at the publishing push where it
+#   `gate:` key a rules file named it in, and the records it wrote — and leaves
+#   the repository's own merge path as the only verifier: required checks where a
+#   change publishes remotely, the `pre-push` hook at the publishing push where it
 #   publishes locally. A `push` carries `accepted`, which is that path's verdict.
 #   Rules schema 3 is the shape with no `gate:` in it; 1 and 2 still load and drop
-#   one. It is a **requirement** and not a lock floor for the same reason 0.8.0
-#   was: `^0.10.0` excludes it, because pre-1.0 the minor is the breaking
-#   position. `tests/e2e/real_vcs.rs` drives both verdicts against a real origin
-#   and `tests/e2e/harness.rs` writes the version-3 rules, so a pin below 0.11.0
-#   fails rather than reads differently.
+#   one. A **requirement** and not a lock floor for the same reason 0.8.0 was:
+#   `^0.10.0` excludes it, because pre-1.0 the minor is the breaking position.
 #
 # Two floors are carried by `Cargo.lock` rather than by the requirement below,
 # and deliberately.

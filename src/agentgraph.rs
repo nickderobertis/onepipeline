@@ -1988,21 +1988,16 @@ mod tests {
     /// The linked `oneagentgraph` holds the `engineer` bar to what a dispatch
     /// can settle inside its own run.
     ///
-    /// `engineer` is the role [`crate::executor`] names on `members.worker` for
-    /// an ordinary implementation node, so the bar its judge reviews against is
-    /// the linked library's file rather than anything this crate ships. Until
-    /// 0.3.5 that bar refused "done" until the behaviour was *proven end to
-    /// end* — a demand no dispatch can meet now that no gate runs inside the
-    /// publication and verification is the merge path's, so every node would
-    /// fail its review. The floor is carried by `Cargo.lock`: `^0.3.0` has
-    /// permitted 0.3.5 all along, so the resolution is the whole of the fix.
+    /// `engineer` is the role [`crate::executor`] names on `members.worker`, so
+    /// the bar its judge reviews against is the linked library's file rather than
+    /// anything this crate ships. Until 0.3.5 that bar refused "done" until the
+    /// behaviour was *proven end to end* — a demand no dispatch can meet now that
+    /// verification is the merge path's, so every node would fail its review.
+    /// `^0.3.0` has permitted 0.3.5 all along, so `Cargo.lock` carries the floor.
     ///
-    /// Read through [`merge`] rather than off the YAML, because the merged
-    /// config is what a judge is handed; a bar that arrived some other way is
-    /// not the one under review. Both halves are asserted — that the demand is
-    /// gone, and that what replaced it still reviews the change the member
-    /// produced — so a resolution that softened the bar rather than narrowing
-    /// it fails here too.
+    /// Read through [`merge`] rather than off the YAML, because the merged config
+    /// is what a judge is handed; a bar that arrived some other way is not the one
+    /// under review.
     ///
     /// [`merge`]: oneagentgraph::persona::merge
     #[test]
