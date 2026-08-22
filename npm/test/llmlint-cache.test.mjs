@@ -72,7 +72,7 @@ if [[ \${FAKE_LLMLINT_EXIT:-0} != 0 ]]; then
   echo "${FAIL_VERDICT}"
   exit "$FAKE_LLMLINT_EXIT"
 fi
-echo "${PASS_VERDICT}"
+echo "${PASS_VERDICT}\${FAKE_LLMLINT_NOTE:+ ($FAKE_LLMLINT_NOTE)}"
 `;
 
 /// An `llmlint` that can report a version and nothing else, for the journeys about
@@ -438,14 +438,23 @@ describe("the judged tier's computation cache", () => {
     const base = ws.head();
     ws.lint(base);
 
-    const forced = ws.lint(base, { args: ["--skip-nx-cache"], env: { NX_SKIP_NX_CACHE: "true" } });
+    // The forced run is made to say something the stored one does not, so the run
+    // that follows it says which entry answered.
+    const forced = ws.lint(base, {
+      args: ["--skip-nx-cache"],
+      env: { NX_SKIP_NX_CACHE: "true", FAKE_LLMLINT_NOTE: "forced" },
+    });
     const ambient = ws.lint(base, { env: { NX_DISABLE_NX_CACHE: "true" } });
 
     assert.equal(forced.status, 0, report(forced));
     assert.equal(ambient.status, 0, report(ambient));
     assert.equal(ws.judgeRuns().length, 2, "the ambient skip re-rolled the judge");
     assert.match(forced.stderr, new RegExp(CACHE_MISS));
+    assert.match(forced.stdout, /forced/);
     assert.match(ambient.stderr, new RegExp(CACHE_HIT));
+    // Under this Nx the lever neither reads nor writes: the run after it replays
+    // the entry the forced roll left in place, not the forced roll's own report.
+    assert.doesNotMatch(ambient.stdout, /forced/);
     for (const result of [forced, ambient]) {
       assert.match(result.stderr, /ignoring the ambient global Nx cache skip/);
       assert.match(result.stderr, new RegExp(`just lint-llm-diff ${base} --skip-nx-cache`));
