@@ -50,6 +50,11 @@ status-level = "slow"
 [profile.ci]
 status-level = "pass"
 
+# Declared on `default` and inherited by `ci`, so the cap above is in force on the
+# cross-platform legs too — where oversubscription costs the most. That is asked
+# of the runner rather than assumed: `cargo nextest show-config test-groups
+# --profile ci` reports `group: e2e (max threads = 4)` over the same 357 tests as
+# the same command without `--profile`.
 [[profile.default.overrides]]
 filter = 'binary(e2e)'
 test-group = 'e2e'

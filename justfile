@@ -138,8 +138,14 @@ _crate-lint:
 # How much a run reports as it goes is `.config/nextest.toml`'s to say, not a flag
 # repeated on three recipes: `status-level` lives in the profile there, so the CI
 # legs can raise it — by naming the `ci` profile — without a second spelling of
-# the suite here. `smoke-real` below still states its own, because `--no-capture`
-# and `all` are what that journey *is*.
+# the suite here. Do not put one back: a `--status-level` on the command line
+# beats the profile, and `fail` — what these recipes used to pass — ranks below
+# `slow`, so it mutes both halves of the diagnostic at once, the per-test trail
+# and the `SLOW` line a hang produces, while `.config/nextest.toml` still appears
+# to ask for them. That flag is what bought 237 silent minutes out of run
+# 32538759791's Windows leg, and `NEXTEST_PROFILE` does not protect against it.
+# `smoke-real` below still states its own, because `--no-capture` and `all` are
+# what that journey *is* — and `all` outranks the profile rather than muting it.
 
 # The offline tier: every binary but `smoke`, which needs a GitHub credential
 # and a scratch repository and is run by `just smoke-real` alone. Excluded by
