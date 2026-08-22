@@ -2839,7 +2839,15 @@ fn a_blocking_finding_is_read_before_the_narration_queued_ahead_of_it() {
     for update in &narration {
         let next = world.run(&["next", &run]);
         next.exited(0);
-        assert_eq!(next.json()["surface"]["message"], update.as_str());
+        let narrated = next.json()["surface"].clone();
+        assert_eq!(narrated["message"], update.as_str());
+        // Typed at the verb rather than raised through the envelope, and
+        // recorded as what it is: the kind the caller asked for, and advice as
+        // its source — not the pacemaker's, which is the only other thing
+        // `surface` can queue.
+        assert_eq!(narrated["kind"], "finding");
+        assert_eq!(narrated["source"], "proposal");
+        assert_eq!(narrated["blocking"], json!(false));
         world
             .run(&["status", &run])
             .exited(0)
