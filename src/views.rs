@@ -1642,7 +1642,18 @@ pub fn transcript(view: &RunView, only: Option<&str>) -> String {
                     "    {} {}  {}\n",
                     one_line(field("kind")),
                     one_line(field("name")),
-                    one_line(field("detail"))
+                    // A result's text is under `output`, not `detail` — which is
+                    // empty on every one of them, and used to be the whole third
+                    // column.
+                    tool_text(
+                        field("detail"),
+                        field("output"),
+                        event
+                            .payload
+                            .get("output_truncated")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(false),
+                    )
                 )),
                 _ => {}
             }
@@ -1681,7 +1692,7 @@ pub fn transcript(view: &RunView, only: Option<&str>) -> String {
                         "      {} {}  {}\n",
                         one_line(&tool.kind),
                         one_line(&tool.name),
-                        one_line(&tool.detail)
+                        tool_text(&tool.detail, &tool.output, tool.output_truncated)
                     ));
                 }
             }
@@ -1713,6 +1724,53 @@ pub(crate) fn nodes_with_agent_records(view: &RunView, only: Option<&str>) -> Ve
     nodes.sort_unstable();
     nodes.dedup();
     nodes
+}
+
+/// How much of a tool's own output one transcript line prints.
+///
+/// Explicit rather than incidental, because the two sources this verb reads are
+/// bounded differently. A `turn-activity` summary reaches the store already cut
+/// to about this length by the producer that emitted it; a retained report's is
+/// the harness's raw bytes with nothing bounding them at all — reports on this
+/// host carry single outputs past sixty kilobytes — and one of those splatted
+/// whole into a terminal is the rendering this ceiling exists to prevent. Set at
+/// the producers' own so the view never cuts what the run's journal kept, and
+/// what it does cut it counts out loud.
+const MAX_TOOL_OUTPUT_CHARS: usize = 4096;
+
+/// The third column of a tool's line: what a call acted on, or what a result
+/// returned.
+///
+/// An output where there is one, because a `tool_result` carries its text under
+/// `output` and carries no `detail` at all — reading only the latter rendered
+/// every observation a turn made as a blank column, which is a run's own
+/// evidence hidden by its reader. Both texts are a stranger's, so both go
+/// through the same control-character strip every other borrowed value on these
+/// views does.
+///
+/// **What is not printed is said rather than dropped.** An output the producer
+/// had already cut short says so, and one this view cuts says how much of it a
+/// reader is looking at — a truncated output rendered as though it were whole is
+/// how a reader concludes a tool returned nothing further, which is the reading
+/// this verb exists to correct.
+fn tool_text(detail: &str, output: &str, output_truncated: bool) -> String {
+    if output.is_empty() {
+        return one_line(detail);
+    }
+    let stripped = one_line(output);
+    let whole = stripped.chars().count();
+    let mut text: String = stripped.chars().take(MAX_TOOL_OUTPUT_CHARS).collect();
+    let mut notes: Vec<String> = Vec::new();
+    if whole > MAX_TOOL_OUTPUT_CHARS {
+        notes.push(format!("{MAX_TOOL_OUTPUT_CHARS} of {whole} characters"));
+    }
+    if output_truncated {
+        notes.push("already cut short by the producer".to_string());
+    }
+    if !notes.is_empty() {
+        text.push_str(&format!(" … [{}]", notes.join("; ")));
+    }
+    text
 }
 
 /// One control-stripped line, so a relayed value cannot rewrite the rendering
@@ -3104,6 +3162,143 @@ mod tests {
         // Scoped to a node that dispatched nothing, there is nothing to render.
         assert!(transcript(&view, Some("elsewhere")).contains("no dispatch"));
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Two records off a run this crate drove on 2026-08-22, verbatim: a
+    /// `tool_call` and the `tool_result` that answered it.
+    ///
+    /// Recorded rather than composed here, because the payload under test is a
+    /// producer's shape and not this crate's. A fixture written beside the
+    /// renderer proves the renderer agrees with the fixture — which is exactly
+    /// what the defect below had, since a `tool_result` carries its text under
+    /// `output` and carries no `detail` at all.
+    const RECORDED_ACTIVITY: &str = include_str!("../tests/recorded/turn-activity.jsonl");
+    /// The `member-settled` a real dispatch relayed, and the report this run
+    /// kept its own copy of. Same run, same seq: the reader derives the copy's
+    /// name from the settlement.
+    const RECORDED_SETTLEMENT: &str = include_str!("../tests/recorded/member-settled.json");
+    const RECORDED_REPORT: &str = include_str!("../tests/recorded/settled-report.json");
+
+    /// The evidence a run recorded, read back off the verb an operator is sent
+    /// to when a settlement's evidence looks missing.
+    ///
+    /// The third column used to be `detail` for every activity, and a
+    /// `tool_result`'s `detail` is the empty string — so every observation a
+    /// dispatch made rendered blank while its own journal carried the whole
+    /// text. A node was failed for want of a measurement its journal held.
+    #[test]
+    fn a_recorded_tool_results_own_output_is_what_the_transcript_renders() {
+        let root = scratch("transcript-recorded-journal");
+        let mut events = vec![event(
+            crate::journal::PipelineKind::RunStarted,
+            None,
+            &[("plan", json!(plan()))],
+        )];
+        events.extend(RECORDED_ACTIVITY.lines().map(|line| {
+            serde_json::from_str::<Envelope>(line).expect("a recorded envelope reads back")
+        }));
+        write_run(&root, "demo", sys::pid(), &events);
+        let view = RunView::open(&RunPaths::under(&root, "demo")).expect("the run reads");
+        let rendered = transcript(&view, None);
+
+        // The ask, as it always rendered.
+        assert!(
+            rendered.contains("tool_call Bash  gh issue view 28"),
+            "{rendered}"
+        );
+        // The answer, which used to be a blank column.
+        assert!(
+            rendered.contains("**Accepted fix.** Four parts:"),
+            "the recorded output is not on the line that answered for it:\n{rendered}"
+        );
+        // Not a prefix of it: the end of what the producer recorded is there
+        // too, so a reader is not looking at a silently shortened output.
+        assert!(
+            rendered.contains("the gate then passed without it."),
+            "the recorded output was cut before its end:\n{rendered}"
+        );
+        // And the producer had already cut it short, which the line says rather
+        // than leaving a reader to conclude the tool returned nothing further.
+        assert!(
+            rendered.contains("… [already cut short by the producer]"),
+            "an output the producer marked truncated is rendered as a whole \
+             one:\n{rendered}"
+        );
+        assert!(
+            !rendered
+                .lines()
+                .any(|line| line.trim_end() == "tool_result"),
+            "an observation still renders as an empty column:\n{rendered}"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The same evidence out of the other source this verb reads: the report a
+    /// settled member left behind, which is what a reader gets once the dispatch
+    /// is over.
+    ///
+    /// A retained report's outputs are the harness's raw bytes and nothing
+    /// bounds them, so this is also where the view's own ceiling is proven: the
+    /// one output past it is cut, and the line counts out loud how much of it a
+    /// reader is looking at.
+    #[test]
+    fn a_recorded_reports_tool_output_is_rendered_and_bounded() {
+        let root = scratch("transcript-recorded-report");
+        let settled: Envelope =
+            serde_json::from_str(RECORDED_SETTLEMENT.trim()).expect("a recorded settlement");
+        let paths = RunPaths::under(&root, "demo");
+        paths.create().expect("the run directory");
+        std::fs::create_dir_all(paths.reports_dir()).expect("the run's report storage");
+        std::fs::write(
+            paths.report_for(&settled.stream, settled.seq),
+            RECORDED_REPORT,
+        )
+        .expect("this run's own copy of the report");
+        write_run(
+            &root,
+            "demo",
+            sys::pid(),
+            &[
+                event(
+                    crate::journal::PipelineKind::RunStarted,
+                    None,
+                    &[("plan", json!(plan()))],
+                ),
+                settled,
+            ],
+        );
+        let view = RunView::open(&RunPaths::under(&root, "demo")).expect("the run reads");
+        let rendered = transcript(&view, None);
+
+        assert!(
+            rendered.contains("tool_result   ///"),
+            "the report's first observation renders as an empty column:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("// the second, because every family below it is the"),
+            "the report's longest observation is not rendered at all:\n{rendered}"
+        );
+        // Bounded, and the bound is stated on the line rather than left as a
+        // reader's guess about where a tool's output stopped.
+        assert!(
+            rendered.contains("… [4096 of 4350 characters]"),
+            "an unbounded output was printed whole, or cut without saying \
+             so:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("Verdict::Reclaim(lease) => reclaim(&mut report"),
+            "the ceiling printed the tail of an output past it:\n{rendered}"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A stranger's output cannot rewrite the line it is printed on, and the
+    /// note about what was left out cannot be forged into looking like the
+    /// view's own.
+    #[test]
+    fn a_control_character_in_an_output_is_stripped_like_every_other_value() {
+        let rendered = tool_text("", "first\r\nsecond\u{1b}[2K", false);
+        assert_eq!(rendered, "first  second [2K");
     }
 
     /// A settlement whose report this run kept no copy of is said to be

@@ -664,7 +664,13 @@ impl Turn {
     }
 }
 
-/// One tool call a turn made.
+/// One tool call a turn made, or the observation that answered it.
+///
+/// Both halves, because a report carries both and a reader shown only the asks
+/// is reading half a turn: a `tool_call` event carries the `input` it acted on
+/// and no output, and the `tool_result` that answers it carries the `output` and
+/// no input. Neither field is where the other one is, so a reader that knew only
+/// `input` rendered every observation a turn made as a blank.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Tool {
     /// `tool_call` or `tool_result`, as the report names it.
@@ -673,6 +679,12 @@ pub(crate) struct Tool {
     pub name: String,
     /// What it acted on, rendered compactly.
     pub detail: String,
+    /// What it returned, where the event carries one.
+    pub output: String,
+    /// Whether the producer had already cut that output short before this run
+    /// ever saw it — a fact about the text, which a reader has no second source
+    /// for.
+    pub output_truncated: bool,
 }
 
 impl Tool {
@@ -680,12 +692,27 @@ impl Tool {
         Self {
             kind: string(event, "kind"),
             name: string(event, "name"),
-            detail: match event.get("input") {
-                None | Some(Value::Null) => String::new(),
-                Some(Value::String(text)) => text.clone(),
-                Some(input) => input.to_string(),
-            },
+            detail: compact(event.get("input")),
+            output: compact(event.get("output")),
+            // Read leniently like everything else here: a producer that states
+            // nothing states that it cut nothing.
+            output_truncated: event
+                .get("output_truncated")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
         }
+    }
+}
+
+/// One of a tool event's two texts, as a string to render.
+///
+/// A harness writes either as raw text or as the structured value it really is,
+/// and both are the same fact to a reader.
+fn compact(value: Option<&Value>) -> String {
+    match value {
+        None | Some(Value::Null) => String::new(),
+        Some(Value::String(text)) => text.clone(),
+        Some(other) => other.to_string(),
     }
 }
 

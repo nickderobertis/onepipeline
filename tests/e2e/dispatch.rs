@@ -1196,6 +1196,30 @@ fn transcript_renders_a_real_dispatched_turns_tools_and_words() {
     // ...and the words, out of the report that member settled with.
     transcript.out_has("report ");
     transcript.out_has("Ran what the task asked for.");
+    // Both sources carry what the tool **returned**, which is the half a reader
+    // was never shown: a `tool_result` states its text under `output` and states
+    // no `detail` at all, so a third column read out of `detail` rendered every
+    // observation a dispatch made as a blank. Split at the report line, because
+    // the two sources render the same exchange and only the indent tells them
+    // apart.
+    let (from_the_store, from_the_report) = transcript
+        .stdout
+        .split_once("\n  report ")
+        .expect("the transcript renders the store's summaries and then the report");
+    assert!(
+        from_the_store
+            .lines()
+            .any(|line| line == "    tool_result   the turn ran"),
+        "what the tool returned is a blank column in the store's own summaries:\n{}",
+        transcript.stdout
+    );
+    assert!(
+        from_the_report
+            .lines()
+            .any(|line| line == "      tool_result   the turn ran"),
+        "what the tool returned is a blank column in the retained report:\n{}",
+        transcript.stdout
+    );
     assert!(
         !transcript.stdout.contains("unreadable from this host"),
         "the retained report was named and not read:\n{}",
