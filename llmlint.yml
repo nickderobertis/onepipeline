@@ -23,3 +23,33 @@ plugins:
   - "https://raw.githubusercontent.com/nickderobertis/dero-skills/main/skills/bootstrap/create-repo/assets/llmlint/languages/rust.llmlint.yml@1"
   - "https://raw.githubusercontent.com/nickderobertis/dero-skills/main/skills/bootstrap/create-repo/assets/llmlint/ci.llmlint.yml@1"
   - "https://raw.githubusercontent.com/nickderobertis/dero-skills/main/skills/bootstrap/create-repo/assets/llmlint/monorepo.llmlint.yml@1"
+# Two plugin rules, each narrowed by one path, for a reason that is about that
+# path and nothing else. Narrowed here rather than answered with an
+# `ignore-file` directive in the file: a directive hides every future firing of
+# the rule on that file, and in `Cargo.lock`'s case would not survive being
+# written at all, because cargo regenerates that file and keeps no comment in
+# it. Both rules go on judging every other file in the tree.
+rules:
+  # A resolution in the lock file moves a linked library's own behaviour rather
+  # than this crate's: what `oneagentgraph` asks of a dispatch is its shipped
+  # persona text, which only a real agent dispatch exercises and no journey in
+  # this suite makes. What this repository can hold over that bar it does hold —
+  # `src/agentgraph.rs`'s
+  # `the_linked_oneagentgraph_holds_the_engineer_bar_to_what_a_dispatch_can_prove`
+  # reads the bar out of the linked build and asserts on both halves of it.
+  - name: changed_behavior_has_e2e
+    override: true
+    files:
+      exclude:
+        - "Cargo.lock"
+  # The `pre-push` fixture has no untrusted side: its argv is written word by
+  # word in Rust by `harness::hook_argv` and quoted into the wrapper by
+  # `harness::install_hook`, and ONEPIPELINE_FAKE_HOOK_WAIT_SECONDS is set by the
+  # one journey that proves the ceiling. The crate's own trust boundaries — plan
+  # files, executor-rules files, reply envelopes — are elsewhere, and this rule
+  # still judges every one of them.
+  - name: boundary_inputs_validated
+    override: true
+    files:
+      exclude:
+        - "tests/e2e/hook.bat"
