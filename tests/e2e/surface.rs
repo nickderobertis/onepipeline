@@ -160,15 +160,15 @@ fn a_missing_required_argument_is_a_usage_error() {
     }
 }
 
-/// The message body is no longer a required argument, so a `surface` that names
+/// The message body is no longer a required argument, so a `surface` carrying
 /// none is not a usage error — but it is not a surface either.
 ///
-/// The harness hands every child a null stdin, which is exactly the caller clap
-/// used to catch: nothing on `--message`, nothing on a file, nothing on the pipe.
-/// It is refused, and the refusal names all three places it looked, so the
-/// argument that used to be impossible to forget still is.
+/// Every way in gets the same answer, and the answer names where the command
+/// looked: the harness hands each child a null stdin, which is exactly the
+/// caller clap used to catch. A body that cannot be read at all is refused too,
+/// naming the path, rather than queuing an empty surface over a typo.
 #[test]
-fn a_surface_with_no_message_anywhere_is_refused_and_says_where_it_looked() {
+fn a_surface_with_nothing_to_say_is_refused_whichever_way_it_was_asked() {
     let world = World::new("surface-nobody");
     let plan = world.plan(
         "quiet",
@@ -178,12 +178,43 @@ fn a_surface_with_no_message_anywhere_is_refused_and_says_where_it_looked() {
         .run(&["start", &plan.to_string_lossy(), "--detach"])
         .exited(0);
 
+    let blank = world.root.join("blank.txt");
+    std::fs::write(&blank, "  \n\t\n").expect("the blank body is written");
+    let blank = blank.to_string_lossy().into_owned();
+    let missing = world.root.join("gone.txt").to_string_lossy().into_owned();
+
+    // Each empty source is named back, so a caller learns which of the three it
+    // was that carried nothing rather than being told the message is missing.
+    for (args, whence) in [
+        (vec!["surface", "quiet", "--kind", "check-in"], "stdin"),
+        (
+            vec!["surface", "quiet", "--kind", "check-in", "--message", "  "],
+            "`--message`",
+        ),
+        (
+            vec!["surface", "quiet", &blank, "--kind", "check-in"],
+            "the file",
+        ),
+    ] {
+        world
+            .run(&args)
+            .exited(REFUSED)
+            .err_has(whence)
+            .err_has("stdin")
+            .err_has("--message");
+    }
+
+    // A body nothing can read is a different failure and gets a different
+    // answer: the path, and what the filesystem said about it.
     world
-        .run(&["surface", "quiet", "--kind", "check-in"])
+        .run(&["surface", "quiet", &missing, "--kind", "check-in"])
         .exited(REFUSED)
-        .err_has("stdin")
-        .err_has("file")
-        .err_has("--message");
+        .err_has("gone.txt");
+
+    // Nothing was queued by any of the four.
+    let read = world.run(&["next", "quiet"]);
+    read.exited(0);
+    assert_eq!(read.json()["surface"], serde_json::Value::Null);
 }
 
 /// The two body forms are alternatives, not a precedence rule to memorise.

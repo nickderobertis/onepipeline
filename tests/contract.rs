@@ -1178,22 +1178,24 @@ fn op_of(command: &Edit) -> &'static str {
     }
 }
 
-/// The `kind` a [`SurfaceKind`] serializes as.
+/// Every surface kind this build carries, in its wire spelling.
 ///
-/// Exhaustive for the same reason [`op_of`] is: `SurfaceKind` is the closed set
-/// of things a surface can be asking about, so a third variant stops this suite
-/// compiling until the contract or the divergence record names it.
-fn kind_of(kind: SurfaceKind) -> &'static str {
-    match kind {
-        SurfaceKind::CheckIn => "check-in",
-        SurfaceKind::Finding => "finding",
-        // `SurfaceKind` is `#[non_exhaustive]`, so this arm is required from
-        // outside the crate even with every variant above it named. It is the
-        // one thing this suite cannot prove, and the assertion below — that the
-        // set is exactly the contract's plus the divergence record's — is what
-        // covers it.
-        other => panic!("a surface kind nothing here names: {other:?}"),
-    }
+/// Enumerated rather than listed: `SurfaceKind` is `#[non_exhaustive]`, so no
+/// match written out here can be exhaustive, and a hardcoded array would miss
+/// exactly the variant somebody added without writing it down. `ValueEnum` is
+/// what `--kind` already parses against, so this *is* the set a caller can spell
+/// and the set the queue can hold.
+fn every_surface_kind() -> BTreeSet<String> {
+    <SurfaceKind as clap::ValueEnum>::value_variants()
+        .iter()
+        .map(|kind| {
+            serde_json::to_value(kind)
+                .expect("a surface kind serializes")
+                .as_str()
+                .expect("as a string")
+                .to_string()
+        })
+        .collect()
 }
 
 /// The ops the contract lists, in the order it lists them.
@@ -1400,12 +1402,9 @@ fn what_this_build_carries_beyond_the_contract_is_what_the_divergence_record_nam
         }
     }
 
-    // The kind set is the contract's one plus the entry's, and nothing else.
-    // `kind_of` is what proves the enum carries no third the build could be
-    // emitting, and this is what proves the two lists together account for it.
-    let declared: BTreeSet<String> = std::iter::once("check-in".to_string())
-        .chain(kinds.iter().cloned())
-        .collect();
+    // The kind set is the contract's one plus the entry's, and nothing else —
+    // held against the variants themselves, so a kind added without a line in
+    // either document fails here rather than shipping unwritten-down.
     for kind in &kinds {
         assert!(
             !CONTRACT.contains(&format!("--kind {kind}")),
@@ -1413,15 +1412,20 @@ fn what_this_build_carries_beyond_the_contract_is_what_the_divergence_record_nam
         );
         let parsed: SurfaceKind = serde_json::from_value(json!(kind))
             .unwrap_or_else(|e| panic!("`{kind}` is a kind this build parses: {e}"));
-        assert_eq!(kind_of(parsed), kind, "`{kind}` round-trips unchanged");
-    }
-    for kind in [SurfaceKind::CheckIn, SurfaceKind::Finding] {
-        assert!(
-            declared.contains(kind_of(kind)),
-            "this build carries the `{}` surface kind and nothing writes it down",
-            kind_of(kind)
+        assert_eq!(
+            serde_json::to_value(parsed).expect("serializes"),
+            json!(kind),
+            "`{kind}` round-trips unchanged"
         );
     }
+    let declared: BTreeSet<String> = std::iter::once("check-in".to_string())
+        .chain(kinds.iter().cloned())
+        .collect();
+    assert_eq!(
+        every_surface_kind(),
+        declared,
+        "the surface kinds this build carries are not the contract's plus entry 39's"
+    );
 }
 
 #[test]

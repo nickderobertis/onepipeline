@@ -2857,15 +2857,16 @@ fn a_blocking_finding_is_read_before_the_narration_queued_ahead_of_it() {
     world.release("build.go");
 }
 
-/// A finding is validated like every other op: refused with a reason, never
-/// queued about nothing.
+/// A finding is validated like every other op — and the node it names is
+/// optional, so the two answers a name can get are both here beside the
+/// unnamed case that skips the question.
 ///
 /// The node matters most when the finding is blocking, because the subtree it
 /// holds is derived from the node it names — so a name the graph does not carry
 /// would hold nothing back while still reading, in every planner view, as a
 /// decision the run is waiting on.
 #[test]
-fn a_finding_the_graph_cannot_place_is_refused_rather_than_queued() {
+fn a_finding_is_placed_by_the_node_it_names_or_refused_by_it() {
     let world = World::new("channel-finding-refused");
     world.script("build.wait", "hold");
     let run = running(&world, "unplaceable", vec![agent("build", &[])]);
@@ -2892,6 +2893,30 @@ fn a_finding_the_graph_cannot_place_is_refused_rather_than_queued() {
     let empty = world.run(&["next", &run]);
     empty.exited(0);
     assert_eq!(empty.json()["status"], "running");
+
+    // And a finding about the run rather than about any one node names none, so
+    // there is no question for the graph to answer. It is queued with nothing to
+    // place it against, which is what a whole-run observation is.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            r#"{"version":1,"author":"monitor","commands":[{"op":"finding",
+               "message":"nothing in this plan covers the migration the goal asks for"}]}"#,
+        )
+        .exited(0);
+    world.until("the unplaced finding to reach the planner", |world| {
+        !world.events_of(&run, "planner-surface-queued").is_empty()
+    });
+    let read = world.run(&["next", &run]);
+    read.exited(0);
+    let surface = read.json()["surface"].clone();
+    assert_eq!(
+        surface["message"],
+        "nothing in this plan covers the migration the goal asks for"
+    );
+    assert_eq!(surface["kind"], "finding");
+    assert_eq!(surface["blocking"], json!(false));
+    assert_eq!(surface["workstream"], serde_json::Value::Null);
     world.release("build.go");
 }
 

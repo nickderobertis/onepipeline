@@ -96,6 +96,17 @@ pub enum Operation {
         /// Why.
         reason: String,
     },
+    // llmlint: ignore-block[invalid_states_unrepresentable] all three fields are the
+    // shapes the rest of this file and the wire already carry, and a second vocabulary
+    // for any of them would be the drift `src/AGENTS.md` forbids rather than an
+    // invariant. The node reference is a `String` exactly as every other `Operation`'s
+    // is, and it is narrowed where it is *judged* — `compile_finding` refuses one the
+    // graph does not have, which is the only place that question has an answer. The
+    // message is a `String` because the protocol's field is, and its non-emptiness is
+    // judged at the same boundary as the node; a newtype would move a refusal the
+    // reconciler owns into a constructor nothing external calls. `blocking` is the
+    // envelope's own boolean, spelled as `Surface::blocking` and the observer frame's
+    // already spell it.
     /// A finding was raised to the planner, without touching the graph.
     FindingRaised {
         /// The node it is about, when it named one.
@@ -106,6 +117,7 @@ pub enum Operation {
         /// Whether the planner's answer holds the node's subtree back.
         blocking: bool,
     },
+    // llmlint: ignore-end[invalid_states_unrepresentable]
     /// A planner note reached a node.
     ContextAdded {
         /// The node.
@@ -633,8 +645,6 @@ fn compile_requeue(
     }])
 }
 
-/// Compile an `attest`, whose accepted settlements are open divergence 36's —
-/// argued and sourced there, not here.
 /// Validate one finding: it changes nothing, so all there is to judge is
 /// whether it says something about a node this graph has.
 ///
@@ -670,6 +680,8 @@ fn compile_finding(
     }])
 }
 
+/// Compile an `attest`, whose accepted settlements are open divergence 36's —
+/// argued and sourced there, not here.
 fn compile_attest(frontier: &Frontier, reference: &str) -> Result<Vec<Operation>> {
     // Before the settlement check, because an attestation folds the node to
     // `done`: asked the other way round, a second one is answered with the
