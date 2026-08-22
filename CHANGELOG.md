@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.1](https://github.com/nickderobertis/onepipeline/compare/v0.12.0...v0.12.1) - 2026-08-22
+
+### Fixed
+
+- make the transcript carry tool outputs and the telemetry buckets balance ([#102](https://github.com/nickderobertis/onepipeline/pull/102))
+
 ## [0.12.0](https://github.com/nickderobertis/onepipeline/compare/v0.11.0...v0.12.0) - 2026-08-22
 
 ### Added
