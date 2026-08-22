@@ -432,6 +432,116 @@ fn telemetry_buckets_sum_exactly_to_the_wall_clock() {
         .out_has("not measured");
 }
 
+/// The other direction, which never balanced: measured buckets that add up to
+/// **more** than the wall clock, with nothing left in `scheduling` to give back.
+///
+/// A store is three producers' records merged — each stream in its own `seq`,
+/// the streams interleaved by `ts` — and those stamps are wall clocks from
+/// different processes and, for a relayed one, different machines. So the walk
+/// over a store meets stretches it charges twice: a stamp that goes backwards
+/// zeroes the span across it, and the next one forward re-charges ground already
+/// counted, while the wall clock stays first-to-last as read. The old rule put
+/// the whole residue in `scheduling`, which cannot give back what it never had:
+/// a real run on 2026-08-22 emitted eight buckets summing thirteen milliseconds
+/// past its own `wall_ms` with `scheduling` at zero, and a consumer holding the
+/// document to the promise it makes had to refuse it.
+///
+/// The store is the one this run wrote, down to its records, streams and
+/// sequences. What is arranged is the **clock**: a doubled dispatch settles
+/// inside a millisecond, so it cannot skew one on its own, and the run's own
+/// stamps are re-stated as an opening, a hundred seconds of work whose clock
+/// slips back and forward across it, and a settlement a second after that.
+#[test]
+fn telemetry_balances_a_store_that_overcounts_past_an_empty_scheduling_bucket() {
+    /// When the run opened, and what every record before its dispatch carries.
+    const OPENED: &str = "2026-08-22T00:00:00.000Z";
+    /// A hundred seconds later: the dispatch's own records slip between this and
+    /// [`OPENED`], which is the sawtooth a merged store's several clocks make.
+    const WORKING: &str = "2026-08-22T00:01:40.000Z";
+    /// A second after that, and the last stamp the store carries.
+    const SETTLED: &str = "2026-08-22T00:01:41.000Z";
+
+    let world = World::new("views-telemetry-skew");
+    let run = settled(&world, "skewed", vec![agent("build", &[])]);
+
+    // llmlint: ignore-block[tests_mirror_real_usage] the records, the streams, the
+    // sequences and the reader are all real; only the clock is arranged, because
+    // clock skew is the one thing a journey cannot ask a producer for.
+    let journal = world.run_file(&run, "events.jsonl");
+    let mut records: Vec<Envelope> = std::fs::read_to_string(&journal)
+        .expect("the journal reads")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("a record reads back as an envelope"))
+        .collect();
+    let (mut dispatched, mut over, mut ahead) = (false, false, false);
+    for record in &mut records {
+        over |= record.kind.0 == "node-settled";
+        record.ts = if over {
+            SETTLED.to_string()
+        } else if dispatched && record.source == Source::Agentgraph {
+            ahead = !ahead;
+            if ahead { WORKING } else { OPENED }.to_string()
+        } else {
+            OPENED.to_string()
+        };
+        dispatched |= record.kind.0 == "node-dispatched";
+    }
+    let skewed: String = records
+        .iter()
+        .map(|record| {
+            format!(
+                "{}\n",
+                serde_json::to_string(record).expect("the envelope serialises")
+            )
+        })
+        .collect();
+    std::fs::write(&journal, skewed).expect("the store is written back");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    let document = world.run(&["telemetry", &run]).json();
+    let wall = document["wall_ms"].as_u64().expect("a wall clock");
+    let scheduling = document["buckets"]
+        .as_array()
+        .expect("buckets")
+        .iter()
+        .find(|bucket| bucket["name"] == "scheduling")
+        .and_then(|bucket| bucket["ms"].as_u64())
+        .expect("a measured scheduling bucket");
+    // The premise, checked rather than assumed: this store's dispatch is charged
+    // more than the whole run's wall clock, and `scheduling` holds nothing to
+    // take the difference out of. That is the document that used to ship with
+    // parts longer than its whole.
+    assert_eq!(wall, 101_000, "{document}");
+    assert_eq!(scheduling, 0, "{document}");
+    assert!(
+        document["buckets"]
+            .as_array()
+            .expect("buckets")
+            .iter()
+            .any(|bucket| bucket["name"] == "agent" && bucket["ms"].as_u64() > Some(0)),
+        "the dispatch is charged nothing, so nothing overcounted: {document}"
+    );
+    assert_eq!(
+        measured(&document),
+        wall,
+        "the buckets do not sum to WALL: {document}"
+    );
+    // Absent stays absent: an overcount comes off what was measured and is never
+    // charged to a bucket nothing measured.
+    for absent in ["judge", "llmlint", "gate"] {
+        let bucket = document["buckets"]
+            .as_array()
+            .expect("buckets")
+            .iter()
+            .find(|bucket| bucket["name"] == absent)
+            .expect("the bucket is still named");
+        assert!(
+            bucket.get("ms").is_none(),
+            "{absent} reported a span nothing measured: {bucket}"
+        );
+    }
+}
+
 /// The number a run is budgeted against, on a host whose routine failure mode
 /// is quota exhaustion across five identities.
 #[test]
