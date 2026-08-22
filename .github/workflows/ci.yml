@@ -76,6 +76,13 @@ jobs:
       - name: Committed generated files are up to date
         run: git diff --exit-code -- Cargo.lock package-lock.json
 
+  # llmlint: ignore-block[comments_earn_their_place] run 32538759791 and the `main`
+  # timings below are why this job has the shape it has. The leg that burned 237
+  # minutes naming no test is what the two limits and the per-test reporting were
+  # added to end, and the sampled ranges are what say 20 and 30 are over twice a
+  # green leg's worst rather than numbers somebody picked. Neither is recoverable
+  # from the keys beneath them, and without them a reader cannot tell a bound that
+  # was measured from one that was guessed.
   # Prove the artifact builds and its tests pass on macOS and Windows (without
   # the coverage threshold, which is enforced on Linux).
   #
@@ -95,6 +102,7 @@ jobs:
   # takes 5m49s-8m00s on `main` and the whole job 8m13s-12m38s, so each limit is
   # over twice its worst. The job limit is half of what
   # nickderobertis/onepipeline#99 asks for.
+  # llmlint: ignore-end[comments_earn_their_place]
   cross:
     needs: changes
     if: needs.changes.outputs.crate == 'true'

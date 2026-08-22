@@ -11,6 +11,13 @@
 e2e = { max-threads = 4 }
 
 [profile.default]
+# llmlint: ignore-block[comments_earn_their_place] the run number, test count, and
+# elapsed time below are not history: they are the measurement that sets both bounds
+# on the line beneath them. `period` has to sit above what a test here costs and
+# under `waited()`'s deadline, and `terminate-after` above that whole suite and the
+# hook's ceiling — so a reader who cannot see what a run of this suite actually
+# costs cannot tell a bound that was measured from one somebody liked, and the next
+# person to move either has nothing to move it against.
 # A test that blocks names itself, and is then ended. Without this it produces no
 # output and no failure — it simply stops, and only the CI job's own limit ends it.
 #
@@ -25,6 +32,7 @@ e2e = { max-threads = 4 }
 # nothing wrote, rather than being cut off by the runner, which can only name the
 # test.
 slow-timeout = { period = "60s", terminate-after = 6 }
+# llmlint: ignore-end[comments_earn_their_place]
 # `fail` — what the recipes used to pass on the command line — suppresses the
 # `SLOW` lines above along with the passes, which would leave a hanging test
 # unnamed until the runner ended it. `slow` is the same silence about successes
