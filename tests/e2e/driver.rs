@@ -2212,6 +2212,10 @@ fn a_dispatch_this_run_cannot_record_is_refused_and_does_not_run() {
 
     // The registry cannot be written: a file where its directory has to be, which
     // no host will create a directory under.
+    //
+    // This is also why this journey is the one the world's teardown cannot end —
+    // `stop` refuses a run whose registry it cannot read, so the driver below
+    // outlives the test. See `harness::World::stop_the_runs_it_can`.
     let registry = world.run_file(&run, "dispatches");
     std::fs::remove_dir_all(&registry).expect("the registry is taken away");
     std::fs::write(&registry, "not a directory").expect("something in the way");

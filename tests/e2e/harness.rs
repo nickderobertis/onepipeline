@@ -1481,8 +1481,50 @@ fn waited(mut ready: impl FnMut() -> bool) -> bool {
 /// [`as_session`](World::as_session) makes a real case.
 static LIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+impl World {
+    /// Stop the runs this world started that can be stopped, before it goes.
+    ///
+    /// A detached launch retains a driver on purpose — the process that returns
+    /// from `start --detach` is not the one driving the run — so a journey that
+    /// asserts what it came for and ends mid-run leaves that driver, and the
+    /// processes under it, with no test left to own them. On Windows a child
+    /// inherits every inheritable handle its parent holds, and one of those is
+    /// the pipe `cargo nextest` reads this test's output from: the test exits,
+    /// the pipe never reaches EOF, and the test is reported `LEAK`.
+    ///
+    /// Through the binary's own `stop`, which walks the run's descendants and
+    /// waits until they are gone, rather than a second teardown here that would
+    /// walk the tree differently. `--force` because a world seen through
+    /// [`as_session`](World::as_session) is ending a run another session's label
+    /// owns.
+    ///
+    /// What it cannot stop it leaves, which is why it promises only the runs it
+    /// can: `stop` refuses a run whose dispatch registry it cannot read, and
+    /// `driver::a_dispatch_this_run_cannot_record_is_refused_and_does_not_run`
+    /// takes that registry away on purpose.
+    fn stop_the_runs_it_can(&self) {
+        let Ok(entries) = std::fs::read_dir(&self.runs) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            // A directory with no launch record is not a run anything is
+            // driving — a plan that was refused before it started, or a run
+            // whose record a journey removed to see what the views make of it.
+            if !entry.path().join("launch.json").is_file() {
+                continue;
+            }
+            let run = entry.file_name();
+            let Some(run) = run.to_str() else {
+                continue;
+            };
+            let _ = self.cmd(&["stop", run, "--force"]).output();
+        }
+    }
+}
+
 impl Drop for World {
     fn drop(&mut self) {
+        self.stop_the_runs_it_can();
         let _ = std::fs::remove_dir_all(&self.root);
         // The links this process made, released with the last world that could
         // still have spawned through them, so a suite leaves nothing in the
@@ -1494,6 +1536,105 @@ impl Drop for World {
         }
     }
 }
+
+/// A world whose journey ends mid-run leaves a live driver, and the teardown
+/// ends it rather than walking away from it.
+///
+/// The evidence is the binary's own: `teardown: signalled` is `stop` saying it
+/// listed a tree, signalled every process in it, and then watched them go —
+/// which `nothing-to-stop` would not, and which is the difference between a run
+/// this suite ended and one it merely outlived.
+///
+/// Started detached, because that is the launch that retains a process: an
+/// attached one drives in the command the journey is already waiting on.
+// llmlint: ignore-block[tests_mirror_real_usage] the subject is this suite's own
+// scaffolding: what a *journey* does at its end is nothing, which is the point — the
+// teardown runs from `Drop` and no journey can assert about its own. The verb it runs is
+// the one an operator runs, and `driver.rs` drives it as a journey there.
+#[test]
+fn a_worlds_teardown_ends_a_run_that_is_still_working() {
+    let world = World::new("teardown-signals");
+    let run = "teardownsignals";
+    world.script("build.wait", "hold");
+    let plan = world.plan(run, &plan_of(run, vec![agent("build", &[])]));
+    world
+        .run(&["start", &plan.to_string_lossy(), "--detach"])
+        .exited(0);
+    world.until("the run to dispatch something", |world| {
+        !world.events_of(run, "node-dispatched").is_empty()
+    });
+
+    world.stop_the_runs_it_can();
+
+    let stopped = world.events_of(run, "run-stopped");
+    assert_eq!(
+        stopped.len(),
+        1,
+        "the teardown left the run's driver running and recorded nothing: {}",
+        world.dump()
+    );
+    assert_eq!(
+        stopped[0]["payload"]["teardown"],
+        serde_json::json!("signalled"),
+        "the teardown found no live tree where the run was still holding a dispatch: {}",
+        stopped[0]
+    );
+} // llmlint: ignore-end[tests_mirror_real_usage]
+
+/// And the process really is gone once the world is, which is what a test
+/// process may not leave behind.
+///
+/// Unix-only for the same reason the other teardown-reading journeys in this
+/// suite are — see [`abandonable_hook_script`]: what it asserts is read off the
+/// host's own process table, through `kill -0`, and this suite has no Windows
+/// spelling of that. What runs everywhere is the teardown itself, and the
+/// journey above states its outcome in the binary's own words.
+// llmlint: ignore-block[tests_mirror_real_usage] as above: a journey cannot assert what
+// is true after itself, and being dropped is the only way this property is ever reached.
+#[cfg(unix)]
+#[test]
+fn a_world_that_is_dropped_while_its_run_is_working_leaves_no_driver_behind() {
+    let driver = {
+        let world = World::new("teardown-drops");
+        let run = "teardowndrops";
+        world.script("build.wait", "hold");
+        let plan = world.plan(run, &plan_of(run, vec![agent("build", &[])]));
+        world
+            .run(&["start", &plan.to_string_lossy(), "--detach"])
+            .exited(0);
+        world.until("the run to dispatch something", |world| {
+            !world.events_of(run, "node-dispatched").is_empty()
+        });
+        let driver = world.run_json(run, "launch.json")["pid"]
+            .as_u64()
+            .expect("the launch record names the driver that claimed the run");
+        assert!(
+            still_running(driver),
+            "the driver was already gone, so this proves nothing about the teardown"
+        );
+        driver
+    };
+
+    assert!(
+        !still_running(driver),
+        "driver pid {driver} outlived the world that started it — on Windows it holds \
+         the runner's own output pipe, which is what a leaky test is"
+    );
+}
+
+/// Whether a pid on this host is still a running process.
+///
+/// `kill -0` delivers nothing and fails once there is no such process, which is
+/// the same existence check [`end_process`] waits on.
+#[cfg(unix)]
+fn still_running(pid: u64) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stderr(Stdio::null())
+        .status()
+        .expect("this host answers about a process it owns")
+        .success()
+} // llmlint: ignore-end[tests_mirror_real_usage]
 
 /// A repository `onevcs` knows about, and what its base branch carries.
 pub struct Repository {
