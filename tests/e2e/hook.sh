@@ -113,15 +113,15 @@ session_stream() {
 require_state_root() {
   require_home
   if [ ! -f "$ONEVCS_HOME/registry.json" ]; then
-    fail "ONEVCS_HOME=$ONEVCS_HOME holds no registry.json, so it is not a state root onevcs wrote; refusing to remove anything under it"
+    fail "ONEVCS_HOME=$ONEVCS_HOME holds no registry.json, so it is not a state root onevcs wrote; refusing to remove anything under it. Point ONEVCS_HOME at the state root this world gave onevcs, the way World::cmd does"
   fi
   for held in locks sessions streams workspaces; do
     if [ ! -d "$ONEVCS_HOME/$held" ]; then
-      fail "ONEVCS_HOME=$ONEVCS_HOME holds no $held directory, so it is not a state root onevcs wrote; refusing to remove anything under it"
+      fail "ONEVCS_HOME=$ONEVCS_HOME holds no $held directory, so it is not a state root onevcs wrote; refusing to remove anything under it. Point ONEVCS_HOME at the state root this world gave onevcs, the way World::cmd does"
     fi
   done
   if ! session_stream >/dev/null; then
-    fail "ONEVCS_HOME=$ONEVCS_HOME holds no stream for any ancestor of $(pwd), so it is not the state root of the session making this push; refusing to remove $ONEVCS_HOME/streams"
+    fail "ONEVCS_HOME=$ONEVCS_HOME holds no stream for any ancestor of $(pwd), so it is not the state root of the session making this push; refusing to remove $ONEVCS_HOME/streams. Run this verb from the session's own tree, under the ONEVCS_HOME that session was given"
   fi
 }
 
@@ -158,7 +158,7 @@ wait_ceiling() {
   if [ -n "${ONEPIPELINE_FAKE_HOOK_WAIT_SECONDS-}" ]; then
     seconds=$ONEPIPELINE_FAKE_HOOK_WAIT_SECONDS
   fi
-  refused="ONEPIPELINE_FAKE_HOOK_WAIT_SECONDS holds '$seconds', which is not a number of seconds between 1 and 3600"
+  refused="ONEPIPELINE_FAKE_HOOK_WAIT_SECONDS holds '$seconds', which is not a number of seconds between 1 and 3600. Unset it to wait the 300-second default, or set it to a whole number in that range with no leading zero"
   case "$seconds" in
     '' | 0* | *[!0-9]* | ?????*)
       fail "$refused"
@@ -174,7 +174,7 @@ wait_ceiling() {
 # that no longer hold. See `wait_ceiling` for why the wait ends at all.
 expired() {
   echo "pre-push: nothing wrote $1 within the ceiling of $seconds seconds: the held push expired" >&2
-  echo "pre-push: nothing released this push; ONEPIPELINE_FAKE_HOOK_WAIT_SECONDS carries the ceiling, which is 300 seconds by default" >&2
+  echo "pre-push: nothing released this push; write that path to let it through, or raise ONEPIPELINE_FAKE_HOOK_WAIT_SECONDS, which carries the ceiling and is 300 seconds by default" >&2
   exit 1
 }
 

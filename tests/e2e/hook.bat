@@ -97,7 +97,7 @@ if not "!seconds:~4!"=="" goto ceilingrefused
 if !seconds! GTR 3600 goto ceilingrefused
 exit /b 0
 :ceilingrefused
-call :fail "ONEPIPELINE_FAKE_HOOK_WAIT_SECONDS holds '!seconds!', which is not a number of seconds between 1 and 3600"
+call :fail "ONEPIPELINE_FAKE_HOOK_WAIT_SECONDS holds '!seconds!', which is not a number of seconds between 1 and 3600. Unset it to wait the 300-second default, or set it to a whole number in that range with no leading zero"
 exit /b 64
 
 rem A `wait-for` whose ceiling ran out, which is a verb that could not do what it
@@ -106,7 +106,7 @@ rem assertions that no longer hold. Worded as `hook.sh` words it, because the
 rem journey that proves the expiry runs on whichever platform it finds itself on.
 :expired
 echo pre-push: nothing wrote %~1 within the ceiling of !seconds! seconds: the held push expired 1>&2
-echo pre-push: nothing released this push; ONEPIPELINE_FAKE_HOOK_WAIT_SECONDS carries the ceiling, which is 300 seconds by default 1>&2
+echo pre-push: nothing released this push; write that path to let it through, or raise ONEPIPELINE_FAKE_HOOK_WAIT_SECONDS, which carries the ceiling and is 300 seconds by default 1>&2
 goto :eof
 
 rem The state root itself, established before `break-streams` removes a tree
@@ -119,18 +119,18 @@ if not defined ONEVCS_HOME (
   exit /b 64
 )
 if not exist "%ONEVCS_HOME%\registry.json" (
-  call :fail "ONEVCS_HOME=%ONEVCS_HOME% holds no registry.json, so it is not a state root onevcs wrote; refusing to remove anything under it"
+  call :fail "ONEVCS_HOME=%ONEVCS_HOME% holds no registry.json, so it is not a state root onevcs wrote; refusing to remove anything under it. Point ONEVCS_HOME at the state root this world gave onevcs, the way World::cmd does"
   exit /b 64
 )
 for %%h in (locks sessions streams workspaces) do (
   if not exist "%ONEVCS_HOME%\%%h\" (
-    call :fail "ONEVCS_HOME=%ONEVCS_HOME% holds no %%h directory, so it is not a state root onevcs wrote; refusing to remove anything under it"
+    call :fail "ONEVCS_HOME=%ONEVCS_HOME% holds no %%h directory, so it is not a state root onevcs wrote; refusing to remove anything under it. Point ONEVCS_HOME at the state root this world gave onevcs, the way World::cmd does"
     exit /b 64
   )
 )
 call :sessionstream
 if errorlevel 1 (
-  call :fail "ONEVCS_HOME=%ONEVCS_HOME% holds no stream for any ancestor of %CD%, so it is not the state root of the session making this push; refusing to remove %ONEVCS_HOME%\streams"
+  call :fail "ONEVCS_HOME=%ONEVCS_HOME% holds no stream for any ancestor of %CD%, so it is not the state root of the session making this push; refusing to remove %ONEVCS_HOME%\streams. Run this verb from the session's own tree, under the ONEVCS_HOME that session was given"
   exit /b 64
 )
 exit /b 0
