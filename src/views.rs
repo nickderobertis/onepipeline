@@ -1645,10 +1645,15 @@ pub fn transcript(view: &RunView, only: Option<&str>) -> String {
                     one_line(field("name")),
                     // A result's text is under `output`, not `detail` — which is
                     // empty on every one of them, and used to be the whole third
-                    // column.
+                    // column. Both texts are read through the same
+                    // [`crate::report::compact`] a retained report's are, so a
+                    // harness that answers with the structure it really had is
+                    // rendered here and not silently dropped: two readings of one
+                    // field is how the two sources come to disagree about what a
+                    // tool returned.
                     tool_text(
-                        field("detail"),
-                        field("output"),
+                        &crate::report::compact(event.payload.get("detail")),
+                        &crate::report::compact(event.payload.get("output")),
                         crate::report::Truncation::of(event.payload.get("output_truncated")),
                     )
                 )),

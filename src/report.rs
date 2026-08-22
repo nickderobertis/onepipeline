@@ -735,8 +735,15 @@ impl Truncation {
 /// One of a tool event's two texts, as a string to render.
 ///
 /// A harness writes either as raw text or as the structured value it really is,
-/// and both are the same fact to a reader.
-fn compact(value: Option<&Value>) -> String {
+/// and both are the same fact to a reader. A value that is neither is rendered
+/// as what it is rather than dropped: reading only the string case is how a
+/// tool's own answer became a blank column in the first place.
+///
+/// Crate-visible, and read by [`views::transcript`](crate::views::transcript)
+/// for the journal's `turn-activity` payload as well: the two sources spell
+/// these fields the same way, and two readings of one field is how they come to
+/// disagree.
+pub(crate) fn compact(value: Option<&Value>) -> String {
     match value {
         None | Some(Value::Null) => String::new(),
         Some(Value::String(text)) => text.clone(),
