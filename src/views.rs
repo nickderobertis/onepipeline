@@ -3230,9 +3230,7 @@ mod tests {
              one:\n{rendered}"
         );
         assert!(
-            !rendered
-                .lines()
-                .any(|line| line.trim_end() == "tool_result"),
+            !rendered.lines().any(|line| line.trim() == "tool_result"),
             "an observation still renders as an empty column:\n{rendered}"
         );
         std::fs::remove_dir_all(&root).ok();
@@ -3294,6 +3292,62 @@ mod tests {
             !rendered.contains("Verdict::Reclaim(lease) => reclaim(&mut report"),
             "the ceiling printed the tail of an output past it:\n{rendered}"
         );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A `tool_result` a producer recorded with **no output at all**, which is a
+    /// shape the store really carries — two of the 525 results one run relayed.
+    ///
+    /// It renders with an empty third column, and that is the honest answer: the
+    /// payload holds no text under any key, so there is nothing to show. Pinned
+    /// because the blank line it produces looks exactly like the defect this
+    /// renderer was fixed for, and the two have opposite fixes — one is the
+    /// reader looking under the wrong key, this one is a producer that recorded
+    /// nothing. A reader meeting it should not go looking for text that was
+    /// never there, and nobody should invent any.
+    const RECORDED_WITHOUT_OUTPUT: &str =
+        include_str!("../tests/recorded/turn-activity-no-output.json");
+
+    #[test]
+    fn a_recorded_result_carrying_no_output_renders_empty_because_it_is_empty() {
+        let root = scratch("transcript-recorded-outputless");
+        let recorded: Envelope =
+            serde_json::from_str(RECORDED_WITHOUT_OUTPUT.trim()).expect("a recorded envelope");
+        // The premise, checked against the record rather than assumed: nothing in
+        // this payload carries text, under the key the renderer reads or any
+        // other.
+        assert_eq!(recorded.payload.get("output"), None, "{recorded:?}");
+        assert_eq!(
+            recorded
+                .payload
+                .get("detail")
+                .and_then(serde_json::Value::as_str),
+            Some(""),
+            "{recorded:?}"
+        );
+
+        write_run(
+            &root,
+            "demo",
+            sys::pid(),
+            &[
+                event(
+                    crate::journal::PipelineKind::RunStarted,
+                    None,
+                    &[("plan", json!(plan()))],
+                ),
+                recorded,
+            ],
+        );
+        let view = RunView::open(&RunPaths::under(&root, "demo")).expect("the run reads");
+        let rendered = transcript(&view, None);
+        assert!(
+            rendered.lines().any(|line| line.trim() == "tool_result"),
+            "{rendered}"
+        );
+        // And nothing is invented to fill it: no ceiling note, no truncation
+        // note, on a line that had nothing to leave out.
+        assert!(!rendered.contains('…'), "{rendered}");
         std::fs::remove_dir_all(&root).ok();
     }
 
