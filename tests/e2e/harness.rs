@@ -1543,13 +1543,10 @@ impl Drop for World {
     }
 }
 
-/// A world whose journey ends mid-run leaves a live driver, and the teardown
-/// ends it rather than walking away from it.
-///
-/// The evidence is the binary's own: `teardown: signalled` is `stop` saying it
-/// listed a tree, signalled every process in it, and then watched them go —
-/// which `nothing-to-stop` would not, and which is the difference between a run
-/// this suite ended and one it merely outlived.
+/// `teardown: signalled` is the binary's own evidence: `stop` saying it listed a
+/// tree, signalled every process in it, and then watched them go — which
+/// `nothing-to-stop` would not, and which is the difference between a run this
+/// suite ended and one it merely outlived.
 ///
 /// Started detached, because that is the launch that retains a process: an
 /// attached one drives in the command the journey is already waiting on.
@@ -1587,9 +1584,6 @@ fn a_worlds_teardown_ends_a_run_that_is_still_working() {
     );
 } // llmlint: ignore-end[tests_mirror_real_usage]
 
-/// And the process really is gone once the world is, which is what a test
-/// process may not leave behind.
-///
 /// Unix-only for the same reason the other teardown-reading journeys in this
 /// suite are — see [`abandonable_hook_script`]: what it asserts is read off the
 /// host's own process table, through `kill -0`, and this suite has no Windows
@@ -1628,8 +1622,6 @@ fn a_world_that_is_dropped_while_its_run_is_working_leaves_no_driver_behind() {
     );
 }
 
-/// Whether a pid on this host is still a running process.
-///
 /// `kill -0` delivers nothing and fails once there is no such process, which is
 /// the same existence check [`end_process`] waits on.
 #[cfg(unix)]
