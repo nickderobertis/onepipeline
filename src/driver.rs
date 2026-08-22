@@ -1564,18 +1564,10 @@ fn next(args: &ReadArgs) -> Result<i32> {
     Ok(EXIT_SUCCESS)
 }
 
-/// The surface's text: `--message`, the named file, or stdin.
+/// The surface's text: `--message`, the named file, or stdin, in that order.
 ///
-/// Stdin is the default because the caller here is usually an agent surfacing
-/// prose it wrote, and prose in a command-line argument is read by a shell
-/// before this process sees a byte of it — backticks inside double quotes are
-/// command substitution, and a message that happened to contain one had that
-/// command run and its output spliced into the message. A body arriving on a
-/// pipe or out of a file is bytes, whatever it says.
-///
-/// The body is trimmed at its ends, exactly as `reply` trims the envelope it
-/// reads, so `echo` and a heredoc do not queue a trailing newline. Nothing
-/// inside it is touched.
+/// Trimmed at its ends as `reply` trims the envelope it reads, so `echo` and a
+/// heredoc do not queue a trailing newline; nothing inside it is touched.
 fn surface_message(args: &SurfaceArgs) -> Result<String> {
     let (body, whence) = match (&args.message, &args.file) {
         (Some(message), _) => (message.clone(), "`--message`"),

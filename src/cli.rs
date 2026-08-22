@@ -230,14 +230,9 @@ pub struct ReplyArgs {
 /// `onepipeline surface`.
 ///
 /// The message body arrives the way [`ReplyArgs`]'s envelope does — from a file,
-/// or from stdin when no file is named. That is not ergonomics: a caller here is
-/// usually an agent surfacing prose it wrote, and prose on a command line is
-/// read by the shell before this process ever sees it, where backticks inside a
-/// double-quoted argument are command substitution and the message runs. A body
-/// on a pipe is bytes.
-///
-/// `--message` still works for the callers that spell it, and is refused beside
-/// a file so nobody has to guess which of the two was used.
+/// or from stdin when none is named — so agent-authored prose never has to pass
+/// through a shell. Divergence 38 records why. `--message` still works, and is
+/// refused beside a file.
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
 pub struct SurfaceArgs {
     /// The run id.

@@ -211,7 +211,6 @@ fn a_surface_with_nothing_to_say_is_refused_whichever_way_it_was_asked() {
         .exited(REFUSED)
         .err_has("gone.txt");
 
-    // Nothing was queued by any of the four.
     let read = world.run(&["next", "quiet"]);
     read.exited(0);
     assert_eq!(read.json()["surface"], serde_json::Value::Null);

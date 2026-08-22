@@ -96,17 +96,10 @@ pub enum Operation {
         /// Why.
         reason: String,
     },
-    // llmlint: ignore-block[invalid_states_unrepresentable] all three fields are the
-    // shapes the rest of this file and the wire already carry, and a second vocabulary
-    // for any of them would be the drift `src/AGENTS.md` forbids rather than an
-    // invariant. The node reference is a `String` exactly as every other `Operation`'s
-    // is, and it is narrowed where it is *judged* — `compile_finding` refuses one the
-    // graph does not have, which is the only place that question has an answer. The
-    // message is a `String` because the protocol's field is, and its non-emptiness is
-    // judged at the same boundary as the node; a newtype would move a refusal the
-    // reconciler owns into a constructor nothing external calls. `blocking` is the
-    // envelope's own boolean, spelled as `Surface::blocking` and the observer frame's
-    // already spell it.
+    // llmlint: ignore-block[invalid_states_unrepresentable] all three fields are spelled
+    // as the wire and every neighbouring variant already spell them, and both narrowable
+    // ones are narrowed where they are judged: `compile_finding` refuses a node the graph
+    // does not have and a message that is blank.
     /// A finding was raised to the planner, without touching the graph.
     FindingRaised {
         /// The node it is about, when it named one.

@@ -2720,16 +2720,12 @@ fn a_monitor_edit_applied_with_nothing_driving_is_still_surfaced_to_the_planner(
     assert_eq!(surfaced["payload"]["source"], "monitor", "{surfaced}");
 }
 
-/// The whole point of the body path: a message the shell would have eaten
-/// reaches the queue byte for byte.
+/// A message the shell would have eaten reaches the queue byte for byte, by
+/// both body paths.
 ///
-/// The prose driven here is the shape that cost about 25 minutes of CPU on a
-/// shared host — backticks, `$(...)`, a semicolon and a pipe — composed by an
-/// agent that had no idea it was writing shell. Every journey here builds argv
-/// directly, so what this proves is the half this crate owns: the body path
-/// carries the prose unaltered, through the real verb and back out of the real
-/// reader. The half it *removes* belongs to the caller — prose on a pipe or in a
-/// file is never on a command line for a shell to read first.
+/// Every journey here builds argv directly, so what this proves is the half this
+/// crate owns: the body arrives unaltered through the real verb and out of the
+/// real reader. Divergence 38 records the half it removes.
 #[test]
 fn a_message_full_of_shell_metacharacters_reaches_the_queue_unchanged() {
     let world = World::new("channel-metachars");
@@ -2739,7 +2735,6 @@ fn a_message_full_of_shell_metacharacters_reaches_the_queue_unchanged() {
     let body = "the gate ran `just check` and $(cat /etc/hostname) came back; \
                 the log said a | b && c > d, with 'quotes' \"of both kinds\" and a $HOME";
 
-    // On stdin, which is what a caller holding the prose in memory reaches for.
     world
         .run_with_stdin(&["surface", &run, "--kind", "check-in"], body)
         .exited(0)
@@ -2748,8 +2743,7 @@ fn a_message_full_of_shell_metacharacters_reaches_the_queue_unchanged() {
     read.exited(0);
     assert_eq!(read.json()["surface"]["message"], body);
 
-    // And out of a file, which is what a caller that already wrote it down
-    // reaches for. Same bytes on the same queue, trailing newline and all.
+    // The file form is handed a trailing newline the queue must not keep.
     let path = world.root.join("body.txt");
     std::fs::write(&path, format!("{body}\n")).expect("the body is written");
     let path = path.to_string_lossy().into_owned();
@@ -2855,7 +2849,6 @@ fn a_blocking_finding_is_read_before_the_narration_queued_ahead_of_it() {
             .out_lacks("waiting for planner reply");
     }
 
-    // Only a reply releases it.
     world
         .run_with_stdin(&["reply", &run], r#"{"completion":false,"message":"main"}"#)
         .exited(0);
@@ -2896,7 +2889,6 @@ fn a_finding_is_placed_by_the_node_it_names_or_refused_by_it() {
         .exited(REFUSED)
         .err_has("empty message");
 
-    // Nothing durable was written on either refusal.
     assert!(world.events_of(&run, "planner-surface-queued").is_empty());
     let empty = world.run(&["next", &run]);
     empty.exited(0);
