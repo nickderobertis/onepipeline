@@ -1092,9 +1092,7 @@ fn a_transcript_prints_a_tools_output_structured_stripped_bounded_and_labelled()
         "a control character in a tool's output reached the rendered line:\n{}",
         transcript.stdout
     );
-    // Structured, and rendered as the structure it is.
     transcript.out_has(r#"tool_result   {"exit":0,"stdout":"structured, not text"}"#);
-    // Bounded, and counted out loud rather than cut in silence.
     transcript.out_has("… [4096 of 5020 characters]");
     transcript.out_lacks("the tail nobody sees");
     // And a flag that is neither answer is reported as neither, rather than
