@@ -1502,6 +1502,12 @@ impl World {
     /// can: `stop` refuses a run whose dispatch registry it cannot read, and
     /// `driver::a_dispatch_this_run_cannot_record_is_refused_and_does_not_run`
     /// takes that registry away on purpose.
+    ///
+    /// The `LEAK` count `cross (windows-latest)` reports is this teardown's tail
+    /// rather than a defect in the journeys it names. `sys::platform_stop`
+    /// confirms the whole tree on Unix, off the process table; on Windows it
+    /// confirms only the roots the run's records name, because `process_table`
+    /// and `descended_from` are `#[cfg(unix)]`.
     fn stop_the_runs_it_can(&self) {
         let Ok(entries) = std::fs::read_dir(&self.runs) else {
             return;
