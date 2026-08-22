@@ -24,7 +24,7 @@
 use std::path::PathBuf;
 
 use crate::harness::{
-    agent, hook_script, lifecycle, plan_of, HookVerb, Repository, World, REFUSED,
+    agent, hook_script, lifecycle, plan_of, Repository, ReturningHookVerb, World, REFUSED,
 };
 use onevcs::provenance::SUBJECT_LIMIT;
 use serde_json::json;
@@ -90,7 +90,7 @@ fn published_locally(world: &World) -> Repository {
 /// git runs the hook in the tree the publishing push is made from, which sits
 /// under the session's own run root — so the hook can address the stream that
 /// session is writing without this crate telling it one.
-fn merge_path(world: &World, verb: &HookVerb) -> Vec<String> {
+fn merge_path(world: &World, verb: &ReturningHookVerb) -> Vec<String> {
     hook_script(world, verb)
 }
 
@@ -2871,7 +2871,7 @@ fn a_session_stream_that_cannot_be_read_is_reported_and_does_not_fail_the_node()
     //
     // A file where the streams directory was, so nothing can recreate it:
     // `EventStream::open` then refuses every session by name.
-    let hook = merge_path(&world, &HookVerb::BreakStreams);
+    let hook = merge_path(&world, &ReturningHookVerb::BreakStreams);
     world.repository(
         "local-direct",
         &hook.iter().map(String::as_str).collect::<Vec<_>>(),
@@ -2921,7 +2921,7 @@ fn a_session_line_this_build_cannot_read_is_reported_and_does_not_fail_the_node(
     // repository's own code can reach it. Everything asserted is through the binary.
     //
     // The hook finds the session by walking up from the tree it is pushing out of.
-    let hook = merge_path(&world, &HookVerb::AppendFutureEvent);
+    let hook = merge_path(&world, &ReturningHookVerb::AppendFutureEvent);
     world.repository(
         "local-direct",
         &hook.iter().map(String::as_str).collect::<Vec<_>>(),
@@ -3261,7 +3261,7 @@ fn a_change_this_crate_cannot_read_the_record_of_settles_as_a_plain_task_failure
     // the publishing push, which happens before the change request is opened — so the
     // line it appends is on the stream *before* that record, which is what makes the whole
     // read refuse. Everything asserted is through the binary.
-    let hook = merge_path(&world, &HookVerb::AppendFutureEvent);
+    let hook = merge_path(&world, &ReturningHookVerb::AppendFutureEvent);
     world.repository(
         "change-open",
         &hook.iter().map(String::as_str).collect::<Vec<_>>(),

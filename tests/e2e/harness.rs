@@ -1440,16 +1440,13 @@ impl World {
 /// reading is not bounded by that child at all: it is bounded by the OS pipe
 /// buffer. The child blocks writing once the buffer is full, the waiter blocks
 /// waiting for a child that will never exit, and neither ever moves again.
+/// `wait_with_output` reads both streams while it waits, so what bounds the wait
+/// is the child's own exit and nothing else.
 ///
-/// The size of that buffer is the whole reason this is a harness function rather
-/// than a call spelled at each site. Rust's standard library creates its
-/// anonymous pipes with an 8192-byte buffer on Windows and inherits the kernel's
-/// 65536 on Linux and macOS, so a server that writes 16 KiB passes on both
-/// platforms this suite is developed on and deadlocks on the third — silently,
-/// with no test named, which is exactly the failure the `cross (windows-latest)`
-/// leg cannot afford to produce again. `wait_with_output` reads both streams
-/// while it waits, so what bounds the wait is the child's own exit and nothing
-/// else.
+/// A harness function rather than a call spelled at each site because that buffer
+/// is 8192 bytes on Windows and the kernel's 65536 on Linux and macOS: a server
+/// that writes 16 KiB passes on both platforms this suite is developed on and
+/// deadlocks, naming no test, on the third.
 ///
 /// What it wrote is discarded: every caller here has already read what it needed
 /// off a stream it took, or is ending a server whose output it never claimed.
@@ -2129,7 +2126,7 @@ fn a_double_is_placed_whole_or_not_at_all() {
 /// verb, `wait-for`, blocks until something writes its rendezvous, and a journey
 /// that means to hold a push states [`held_publication`] or
 /// [`abandonable_hook_script`] instead of spelling one.
-pub enum HookVerb {
+pub enum ReturningHookVerb {
     /// Leave a file where the session's stream directory was, so the next read of
     /// that stream meets a broken store rather than a missing one.
     BreakStreams,
@@ -2137,7 +2134,7 @@ pub enum HookVerb {
     AppendFutureEvent,
 }
 
-impl HookVerb {
+impl ReturningHookVerb {
     /// The word both halves of the hook dispatch on.
     fn word(&self) -> &'static str {
         match self {
@@ -2153,7 +2150,7 @@ impl HookVerb {
 /// Available on every platform, because every verb reachable through here runs
 /// and returns on its own: git waits for it, the push it declines or lets through
 /// is over by the time the journey looks, and nothing is left holding a pipe.
-pub fn hook_script(world: &World, verb: &HookVerb) -> Vec<String> {
+pub fn hook_script(world: &World, verb: &ReturningHookVerb) -> Vec<String> {
     hook_argv(world, &[verb.word()])
 }
 
@@ -2162,14 +2159,12 @@ pub fn hook_script(world: &World, verb: &HookVerb) -> Vec<String> {
 ///
 /// [`Drop`] covers abandonment — the rendezvous is written on the assertion that
 /// failed, the [`World::until`] that ran out, the panic that unwound past both —
-/// and the ceiling `hook.sh` states covers the deadlock it cannot reach, a
+/// and the ceiling `hook.sh` states covers the one deadlock it cannot reach, a
 /// journey that waits for the publication to finish before its own scope ends.
 /// Between them a held push cannot outlive its journey on any platform.
 ///
 /// Declare it *after* the [`World`], so it drops *before* the world removes the
-/// tree the rendezvous lives in. Holding the value is not optional and the
-/// compiler says so: [`argv`](Self::argv) borrows from `self`, so a temporary
-/// cannot reach [`World::repository`].
+/// tree the rendezvous lives in.
 pub struct HeldPublication {
     argv: Vec<String>,
     rendezvous: PathBuf,
@@ -2261,16 +2256,13 @@ pub fn abandonable_hook_script(world: &World, rendezvous: &Path) -> Vec<String> 
 /// The hook script for this platform, written into this world's own scratch, with
 /// `args` behind it.
 ///
-/// A script rather than a compiled binary, and per platform rather than one
-/// artifact, because the alternative was a workspace member shipping a Rust
-/// program to stand in for three shell one-liners. The argv is what
-/// [`install_hook`] puts behind the hook git executes, and on Windows nothing can
-/// start a `.bat` directly, so each platform's interpreter leads its own.
+/// The argv is what [`install_hook`] puts behind the hook git executes. One script
+/// per platform because on Windows nothing can start a `.bat` directly, so each
+/// platform's interpreter leads its own.
 ///
-/// Private, and free-form only in here: the two public doors above are what a
-/// journey states a merge path with, and the one caller that needs a command line
-/// neither of them can spell is [`the_hook_refuses_a_command_line_it_does_not_speak`],
-/// which is about the argv the hook *turns down*.
+/// Private: the two public doors above are what a journey states a merge path
+/// with, and free-form argv is wanted only by the journey about a command line the
+/// hook *turns down*.
 fn hook_argv(world: &World, args: &[&str]) -> Vec<String> {
     let mut argv = interpreted(&write_hook_script(world));
     argv.extend(args.iter().map(|arg| (*arg).to_owned()));
