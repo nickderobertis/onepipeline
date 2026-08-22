@@ -157,6 +157,13 @@ for %%i in ("!dir!") do set "candidate=%%~nxi"
 set "stream=%ONEVCS_HOME%\streams\!candidate!.ndjson"
 if exist "!stream!" exit /b 0
 for %%i in ("!dir!") do set "parent=%%~dpi"
+rem The drive root is the top of the walk, and it is recognised *before* the
+rem separator is stripped off it, because stripped it stops being a root: cmd
+rem resolves a bare `C:` against that drive's own current directory, which is the
+rem tree this walk started in, so the turn after would climb back up the same
+rem ancestors and this loop would spin forever rather than answer. `hook.sh` gets
+rem this from `dirname`, whose `/` is its own parent.
+if "!parent:~1!"==":\" goto streammissing
 if "!parent:~-1!"=="\" set "parent=!parent:~0,-1!"
 if "!parent!"=="!dir!" goto streammissing
 set "dir=!parent!"
