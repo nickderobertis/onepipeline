@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0](https://github.com/nickderobertis/onepipeline/compare/v0.10.1...v0.11.0) - 2026-08-22
+
+### Added
+
+- [**breaking**] let each repository's own merge path verify the change, on the onevcs release with no gate ([#98](https://github.com/nickderobertis/onepipeline/pull/98))
+
 ## [0.10.1](https://github.com/nickderobertis/onepipeline/compare/v0.10.0...v0.10.1) - 2026-08-21
 
 ### Fixed
