@@ -185,12 +185,29 @@ case "${1-}" in
       fail "wait-for takes the path to wait for"
     fi
     wait_ceiling
-    deadline=$(( $(date +%s) + seconds ))
+    # The clock the ceiling is counted against, read through `broke` like every
+    # other call this script makes of the host: a `date` that answers nothing
+    # leaves the wait below with no deadline to end on, and unguarded that
+    # arrives as a shell arithmetic error and a hook that waits forever. Read in
+    # the caller's own shell rather than inside the arithmetic, so the `exit`
+    # `broke` makes ends the hook and not a subshell — the trap `require_home`
+    # names.
+    if ! started=$(date +%s); then
+      broke "date +%s answered nothing, so this wait has no clock to end on: check that a working date is on the PATH of the shell git runs hooks with"
+    fi
+    deadline=$(( started + seconds ))
     until [ -f "$2" ]; do
-      if [ "$(date +%s)" -ge "$deadline" ]; then
+      if ! now=$(date +%s); then
+        broke "date +%s answered nothing part-way through the wait, so the ceiling cannot be checked: check that a working date is on the PATH of the shell git runs hooks with"
+      fi
+      if [ "$now" -ge "$deadline" ]; then
         expired "$2"
       fi
-      sleep 0.05
+      # A `sleep` the host refuses is the one failure here that is not worth a
+      # word: the deadline above still ends this loop, so what is lost is the
+      # pause between polls and not the answer. Silenced rather than reported
+      # because it would be reported twenty times a second.
+      sleep 0.05 2>/dev/null || :
     done
     ;;
   break-streams)
