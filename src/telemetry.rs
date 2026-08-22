@@ -17,6 +17,7 @@
 //! zero reads as a measurement, and an unmeasured span reported as zero is the
 //! answer that makes a run look cheaper than it was.
 
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
 use oneagentgraph::event::Role;
@@ -564,24 +565,65 @@ fn now(
     BucketName::Scheduling
 }
 
-/// Make the measured buckets add up to the wall clock, exactly.
+/// Make the measured buckets add up to the wall clock, in **both** directions.
 ///
-/// Enforced rather than asserted: a clock that moved backwards between two
-/// events leaves a residue, and it lands in `scheduling` so the parts still add
-/// up to the whole.
+/// Enforced rather than asserted, and both directions happen. The store is
+/// three producers' records merged and their clocks are not one clock, so the
+/// walk over it both under- and overcounts: a stamp that moves backwards
+/// between two records leaves a span nothing charged, and a stamp *past* the
+/// last record the merge put at the end leaves spans charged beyond the wall
+/// clock they are measured against.
+///
+/// An **undercount** lands in `scheduling`: the residue is time the run cannot
+/// be shown to have been doing anything nameable across. An **overcount** is
+/// taken back off the measured buckets, largest first, until it is gone — the
+/// residue is a clock artifact spread over whichever spans were mismeasured,
+/// and the largest bucket is the one it distorts least. It always fits, because
+/// the buckets are what overcounted. An unmeasured bucket is left unmeasured
+/// either way: a `0` there would claim a measurement nothing took.
+///
+/// The one case that is not exact is a caller that passes no `scheduling`
+/// bucket at all — an undercount then has nowhere to go and the parts are left
+/// short of the whole. Nothing here does that, because what reaches it is
+/// [`BucketName::ALL`], so every document this crate emits sums exactly.
 fn balance(buckets: &mut [Bucket], wall_ms: u64) {
     let counted: u64 = buckets.iter().filter_map(|bucket| bucket.ms).sum();
-    let Some(residue) = buckets
-        .iter_mut()
-        .find(|bucket| bucket.name == BucketName::Scheduling)
-    else {
-        return;
-    };
-    let ms = residue.ms.unwrap_or(0);
-    residue.ms = Some(match wall_ms.checked_sub(counted) {
-        Some(under) => ms.saturating_add(under),
-        None => ms.saturating_sub(counted - wall_ms),
-    });
+    match counted.cmp(&wall_ms) {
+        Ordering::Equal => {}
+        Ordering::Less => {
+            if let Some(residue) = buckets
+                .iter_mut()
+                .find(|bucket| bucket.name == BucketName::Scheduling)
+            {
+                residue.ms = Some(residue.ms.unwrap_or(0).saturating_add(wall_ms - counted));
+            }
+        }
+        Ordering::Greater => drain(buckets, counted - wall_ms),
+    }
+}
+
+/// Take `excess` milliseconds back off the measured buckets, largest first.
+///
+/// Largest first, and never below zero: an overcount is a clock artifact of
+/// unknown origin, and charging it to the longest span is what keeps it from
+/// rewriting a short one — thirteen milliseconds off nine thousand seconds of
+/// agent time says the same thing about that run, where the same thirteen off a
+/// one-second gate would not. Ties keep [`BucketName::ALL`]'s order, so one
+/// store always balances the same way.
+fn drain(buckets: &mut [Bucket], mut excess: u64) {
+    let mut largest_first: Vec<usize> = (0..buckets.len())
+        .filter(|index| buckets[*index].ms.is_some())
+        .collect();
+    largest_first.sort_by_key(|index| std::cmp::Reverse(buckets[*index].ms));
+    for index in largest_first {
+        if excess == 0 {
+            return;
+        }
+        let ms = buckets[index].ms.unwrap_or(0);
+        let taken = ms.min(excess);
+        buckets[index].ms = Some(ms - taken);
+        excess -= taken;
+    }
 }
 
 /// What each party spent, from the evidence the run's own store carries.
@@ -1077,6 +1119,142 @@ mod tests {
             "{:?}",
             telemetry.buckets
         );
+    }
+
+    /// The direction the balance never held: measured buckets that add up to
+    /// **more** than the wall clock, with `scheduling` already at zero.
+    ///
+    /// A run's records come from three producers whose clocks are not one clock,
+    /// and the merge orders them by arrival rather than by stamp — so a
+    /// settlement can reach the store stamped *before* a turn that is already in
+    /// it. The walk charges the forward spans and the wall clock is
+    /// first-to-last as read, which leaves the parts longer than the whole. The
+    /// old rule put the whole residue in `scheduling`, and a bucket already at
+    /// zero cannot give any of it back: this run shipped a document whose parts
+    /// were ten seconds past its own wall clock, which is the real one measured
+    /// on 2026-08-22 at thirteen milliseconds.
+    #[test]
+    fn buckets_that_overcount_a_zero_scheduling_run_still_sum_to_wall() {
+        let telemetry = of_run(
+            &paths(),
+            &[
+                started(),
+                // The same instant, so nothing is charged to `scheduling` before
+                // the dispatch and the bucket that has to absorb the residue is
+                // measured at zero.
+                at(0, journal::PipelineKind::NodeDispatched, Some("build"), &[]),
+                turn(100, "turn-started", Some("build"), &[]),
+                at(
+                    90,
+                    journal::PipelineKind::NodeSettled,
+                    Some("build"),
+                    &[("status", json!("done"))],
+                ),
+            ],
+        );
+        assert_eq!(telemetry.wall_ms, 90_000);
+        assert_eq!(
+            summed(&telemetry),
+            telemetry.wall_ms,
+            "the parts overcount the whole: {:?}",
+            telemetry.buckets
+        );
+        // Taken off the longest span rather than clamped out of the shortest,
+        // and `scheduling` is still the measured zero it was.
+        assert_eq!(bucket_of(&telemetry, BucketName::Agent), Some(90_000));
+        assert_eq!(bucket_of(&telemetry, BucketName::Scheduling), Some(0));
+    }
+
+    /// The document that was actually emitted, balanced.
+    ///
+    /// The numbers are the real ones off a run this crate recorded on
+    /// 2026-08-22 — buckets summing to 9,191,060 against a `wall_ms` of
+    /// 9,191,047, thirteen milliseconds over, with `scheduling` at zero. Pinned
+    /// rather than paraphrased: this is the shape that shipped, and a consumer
+    /// holding the eight buckets to their own wall clock refused it.
+    #[test]
+    fn the_document_measured_thirteen_milliseconds_over_balances_on_its_longest_span() {
+        let mut buckets = vec![
+            Bucket {
+                name: BucketName::Agent,
+                ms: Some(9_098_048),
+            },
+            Bucket {
+                name: BucketName::Gate,
+                ms: Some(1_229),
+            },
+            Bucket {
+                name: BucketName::PublicationWait,
+                ms: Some(7_975),
+            },
+            Bucket {
+                name: BucketName::LockWait,
+                ms: Some(0),
+            },
+            Bucket {
+                name: BucketName::Setup,
+                ms: Some(83_808),
+            },
+            Bucket {
+                name: BucketName::Scheduling,
+                ms: Some(0),
+            },
+        ];
+        balance(&mut buckets, 9_191_047);
+        assert_eq!(
+            buckets.iter().filter_map(|bucket| bucket.ms).sum::<u64>(),
+            9_191_047,
+            "{buckets:?}"
+        );
+        assert_eq!(buckets[0].ms, Some(9_098_048 - 13), "{buckets:?}");
+        // Every other bucket is what it measured, including the two zeroes: an
+        // overcount is charged to the longest span alone while that span can
+        // carry it.
+        assert_eq!(buckets[1].ms, Some(1_229), "{buckets:?}");
+        assert_eq!(buckets[5].ms, Some(0), "{buckets:?}");
+    }
+
+    /// An overcount larger than any one bucket comes off all of them, and an
+    /// unmeasured bucket stays unmeasured rather than being charged a span
+    /// nothing measured.
+    #[test]
+    fn an_overcount_past_the_longest_span_is_taken_off_the_rest_in_turn() {
+        let mut buckets = vec![
+            Bucket {
+                name: BucketName::Agent,
+                ms: Some(40),
+            },
+            Bucket {
+                name: BucketName::Judge,
+                ms: None,
+            },
+            Bucket {
+                name: BucketName::Setup,
+                ms: Some(30),
+            },
+            Bucket {
+                name: BucketName::Scheduling,
+                ms: Some(0),
+            },
+        ];
+        balance(&mut buckets, 10);
+        assert_eq!(buckets[0].ms, Some(0), "{buckets:?}");
+        assert_eq!(buckets[1].ms, None, "{buckets:?}");
+        assert_eq!(buckets[2].ms, Some(10), "{buckets:?}");
+        assert_eq!(buckets[3].ms, Some(0), "{buckets:?}");
+    }
+
+    /// The one case the doc comment says is not exact, held to what it says: an
+    /// undercount with no `scheduling` bucket to put it in leaves the parts
+    /// short of the whole rather than inventing a home for it.
+    #[test]
+    fn an_undercount_with_no_scheduling_bucket_is_left_where_it_is() {
+        let mut buckets = vec![Bucket {
+            name: BucketName::Agent,
+            ms: Some(10),
+        }];
+        balance(&mut buckets, 25);
+        assert_eq!(buckets[0].ms, Some(10), "{buckets:?}");
     }
 
     #[test]

@@ -2719,3 +2719,239 @@ fn a_monitor_edit_applied_with_nothing_driving_is_still_surfaced_to_the_planner(
     assert_eq!(surfaced["payload"]["blocking"], json!(false), "{surfaced}");
     assert_eq!(surfaced["payload"]["source"], "monitor", "{surfaced}");
 }
+
+/// A message the shell would have eaten reaches the queue byte for byte, by
+/// both body paths.
+///
+/// Every journey here builds argv directly, so what this proves is the half this
+/// crate owns: the body arrives unaltered through the real verb and out of the
+/// real reader. Divergence 38 records the half it removes.
+#[test]
+fn a_message_full_of_shell_metacharacters_reaches_the_queue_unchanged() {
+    let world = World::new("channel-metachars");
+    world.script("build.wait", "hold");
+    let run = running(&world, "verbatim", vec![agent("build", &[])]);
+
+    let body = "the gate ran `just check` and $(cat /etc/hostname) came back; \
+                the log said a | b && c > d, with 'quotes' \"of both kinds\" and a $HOME";
+
+    world
+        .run_with_stdin(&["surface", &run, "--kind", "check-in"], body)
+        .exited(0)
+        .out_has("\"queued\"");
+    let read = world.run(&["next", &run]);
+    read.exited(0);
+    assert_eq!(read.json()["surface"]["message"], body);
+
+    // The file form is handed a trailing newline the queue must not keep.
+    let path = world.root.join("body.txt");
+    std::fs::write(&path, format!("{body}\n")).expect("the body is written");
+    let path = path.to_string_lossy().into_owned();
+    world
+        .run(&["surface", &run, &path, "--kind", "check-in"])
+        .exited(0);
+    let again = world.run(&["next", &run]);
+    again.exited(0);
+    assert_eq!(again.json()["surface"]["message"], body);
+
+    world.release("build.go");
+}
+
+/// A watcher says something through the envelope it already writes its edits in,
+/// and the question it stopped to ask is read **before** the narration queued
+/// ahead of it.
+///
+/// Both halves of the failure this is about, in one run: a monitor that surfaced
+/// on every turn it took buried a blocking question behind fourteen restatements
+/// of an intent to look, and the planner read it fifteen minutes late with the
+/// whole frontier stopped behind it. So a finding is now a deliberate op — a turn
+/// with nothing to report writes no command and queues nothing — and a blocking
+/// surface is handed out first whatever it was queued behind.
+#[test]
+fn a_blocking_finding_is_read_before_the_narration_queued_ahead_of_it() {
+    let world = World::new("channel-finding");
+    world.script("build.wait", "hold");
+    let run = running(
+        &world,
+        "ranked",
+        vec![agent("build", &[]), agent("after", &["build"])],
+    );
+
+    // The pile a question used to be read out from behind.
+    let narration: Vec<String> = (0..3).map(|n| format!("looking at {n}")).collect();
+    for update in &narration {
+        world
+            .run_with_stdin(&["surface", &run, "--kind", "finding"], update)
+            .exited(0);
+    }
+
+    // The monitor's question, raised through `commands` — the same envelope its
+    // edits ride, which is what lets a turn with nothing to report say nothing.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            r#"{"version":1,"author":"monitor","commands":[{"op":"finding",
+               "message":"which base should build target?","blocking":true,"id":"build"}]}"#,
+        )
+        .exited(0);
+    world.until("the finding to reach the planner's queue", |world| {
+        world
+            .events_of(&run, "planner-surface-queued")
+            .iter()
+            .any(|event| event["payload"]["blocking"] == json!(true))
+    });
+
+    // Blocking first. Three narrations were queued ahead of it and the reader
+    // takes the question anyway, because it is the only one holding a subtree.
+    let read = world.run(&["next", &run]);
+    read.exited(0);
+    let surface = read.json()["surface"].clone();
+    assert_eq!(surface["message"], "which base should build target?");
+    assert_eq!(surface["blocking"], json!(true));
+    assert_eq!(surface["kind"], "finding");
+    assert_eq!(surface["workstream"], "build");
+    // Raised by the watcher, and recorded as the watcher's: a journal reader
+    // tells a monitor's finding from a worker's proposal.
+    assert_eq!(surface["source"], "monitor");
+
+    // One thing said once. Every other monitor op additionally raises a "monitor
+    // applied an edit" surface, and a finding is the op that has already spoken.
+    assert!(
+        world
+            .events_of(&run, "planner-surface-queued")
+            .iter()
+            .all(|event| event["payload"]["kind"] != json!("monitor-edit")),
+        "the finding was also reported as an edit the monitor made"
+    );
+
+    // The run is genuinely waiting on a decision, which is what holds `after`
+    // back — and it stays waiting while the narration behind it is read, because
+    // reading a report is not answering a question.
+    assert!(!world.events_of(&run, "decision-pending").is_empty());
+    let held = "waiting for planner decision: finding — which base should build target?";
+    world.run(&["status", &run]).exited(0).out_has(held);
+    for update in &narration {
+        let next = world.run(&["next", &run]);
+        next.exited(0);
+        let narrated = next.json()["surface"].clone();
+        assert_eq!(narrated["message"], update.as_str());
+        // Typed at the verb rather than raised through the envelope, and
+        // recorded as what it is: the kind the caller asked for, and advice as
+        // its source — not the pacemaker's, which is the only other thing
+        // `surface` can queue.
+        assert_eq!(narrated["kind"], "finding");
+        assert_eq!(narrated["source"], "proposal");
+        assert_eq!(narrated["blocking"], json!(false));
+        world
+            .run(&["status", &run])
+            .exited(0)
+            .out_has(held)
+            .out_lacks("waiting for planner reply");
+    }
+
+    world
+        .run_with_stdin(&["reply", &run], r#"{"completion":false,"message":"main"}"#)
+        .exited(0);
+    world.until("the decision to clear", |world| {
+        !world.events_of(&run, "decision-cleared").is_empty()
+    });
+    world.release("build.go");
+}
+
+/// A finding is validated like every other op — and the node it names is
+/// optional, so the two answers a name can get are both here beside the
+/// unnamed case that skips the question.
+///
+/// The node matters most when the finding is blocking, because the subtree it
+/// holds is derived from the node it names — so a name the graph does not carry
+/// would hold nothing back while still reading, in every planner view, as a
+/// decision the run is waiting on.
+#[test]
+fn a_finding_is_placed_by_the_node_it_names_or_refused_by_it() {
+    let world = World::new("channel-finding-refused");
+    world.script("build.wait", "hold");
+    let run = running(&world, "unplaceable", vec![agent("build", &[])]);
+
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            r#"{"version":1,"author":"monitor","commands":[{"op":"finding",
+               "message":"the base moved","blocking":true,"id":"ghost"}]}"#,
+        )
+        .exited(REFUSED)
+        .err_has("ghost")
+        .err_has("build");
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            r#"{"version":1,"author":"monitor","commands":[{"op":"finding","message":"   "}]}"#,
+        )
+        .exited(REFUSED)
+        .err_has("empty message");
+
+    assert!(world.events_of(&run, "planner-surface-queued").is_empty());
+    let empty = world.run(&["next", &run]);
+    empty.exited(0);
+    assert_eq!(empty.json()["status"], "running");
+
+    // And a finding about the run rather than about any one node names none, so
+    // there is no question for the graph to answer. It is queued with nothing to
+    // place it against, which is what a whole-run observation is.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            r#"{"version":1,"author":"monitor","commands":[{"op":"finding",
+               "message":"nothing in this plan covers the migration the goal asks for"}]}"#,
+        )
+        .exited(0);
+    world.until("the unplaced finding to reach the planner", |world| {
+        !world.events_of(&run, "planner-surface-queued").is_empty()
+    });
+    let read = world.run(&["next", &run]);
+    read.exited(0);
+    let surface = read.json()["surface"].clone();
+    assert_eq!(
+        surface["message"],
+        "nothing in this plan covers the migration the goal asks for"
+    );
+    assert_eq!(surface["kind"], "finding");
+    assert_eq!(surface["blocking"], json!(false));
+    assert_eq!(surface["workstream"], serde_json::Value::Null);
+    world.release("build.go");
+}
+
+/// A finding raised while nothing is driving the run reaches the planner all the
+/// same, applied by the `reply` that carried it.
+///
+/// Which side applies an edit is an accident of whether a driver happened to be
+/// alive, and both sides raise what the op compiled to — otherwise a watcher's
+/// finding would be silently swallowed by exactly the runs a planner is most
+/// likely to be away from.
+#[test]
+fn a_finding_raised_while_nothing_drives_the_run_still_reaches_the_planner() {
+    let world = World::new("channel-finding-undriven");
+    let path = world.plan("parked", &plan_of("parked", vec![human("approve", &[])]));
+    world
+        .run(&["start", &path.to_string_lossy(), "--attach"])
+        .exited(0);
+
+    world
+        .run_with_stdin(
+            &["reply", "parked"],
+            r#"{"version":1,"commands":[{"op":"finding","message":"the approval has been waiting a while","id":"approve"}]}"#,
+        )
+        .exited(0)
+        .out_has("\"applied\"");
+
+    let read = world.run(&["next", "parked"]);
+    read.exited(0);
+    let surface = read.json()["surface"].clone();
+    assert_eq!(surface["message"], "the approval has been waiting a while");
+    assert_eq!(surface["kind"], "finding");
+    assert_eq!(surface["workstream"], "approve");
+    // The planner's own, so the record keeps it apart from a watcher's, and
+    // non-blocking by default: an observation holds nothing back unless it says
+    // so.
+    assert_eq!(surface["source"], "proposal");
+    assert_eq!(surface["blocking"], json!(false));
+}

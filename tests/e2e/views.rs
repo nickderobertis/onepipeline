@@ -432,6 +432,116 @@ fn telemetry_buckets_sum_exactly_to_the_wall_clock() {
         .out_has("not measured");
 }
 
+/// The other direction, which never balanced: measured buckets that add up to
+/// **more** than the wall clock, with nothing left in `scheduling` to give back.
+///
+/// A store is three producers' records merged — each stream in its own `seq`,
+/// the streams interleaved by `ts` — and those stamps are wall clocks from
+/// different processes and, for a relayed one, different machines. So the walk
+/// over a store meets stretches it charges twice: a stamp that goes backwards
+/// zeroes the span across it, and the next one forward re-charges ground already
+/// counted, while the wall clock stays first-to-last as read. The old rule put
+/// the whole residue in `scheduling`, which cannot give back what it never had:
+/// a real run on 2026-08-22 emitted eight buckets summing thirteen milliseconds
+/// past its own `wall_ms` with `scheduling` at zero, and a consumer holding the
+/// document to the promise it makes had to refuse it.
+///
+/// The store is the one this run wrote, down to its records, streams and
+/// sequences. What is arranged is the **clock**: a doubled dispatch settles
+/// inside a millisecond, so it cannot skew one on its own, and the run's own
+/// stamps are re-stated as an opening, a hundred seconds of work whose clock
+/// slips back and forward across it, and a settlement a second after that.
+#[test]
+fn telemetry_balances_a_store_that_overcounts_past_an_empty_scheduling_bucket() {
+    /// When the run opened, and what every record before its dispatch carries.
+    const OPENED: &str = "2026-08-22T00:00:00.000Z";
+    /// A hundred seconds later: the dispatch's own records slip between this and
+    /// [`OPENED`], which is the sawtooth a merged store's several clocks make.
+    const WORKING: &str = "2026-08-22T00:01:40.000Z";
+    /// A second after that, and the last stamp the store carries.
+    const SETTLED: &str = "2026-08-22T00:01:41.000Z";
+
+    let world = World::new("views-telemetry-skew");
+    let run = settled(&world, "skewed", vec![agent("build", &[])]);
+
+    // llmlint: ignore-block[tests_mirror_real_usage] the records, the streams, the
+    // sequences and the reader are all real; only the clock is arranged, because
+    // clock skew is the one thing a journey cannot ask a producer for.
+    let journal = world.run_file(&run, "events.jsonl");
+    let mut records: Vec<Envelope> = std::fs::read_to_string(&journal)
+        .expect("the journal reads")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("a record reads back as an envelope"))
+        .collect();
+    let (mut dispatched, mut over, mut ahead) = (false, false, false);
+    for record in &mut records {
+        over |= record.kind.0 == "node-settled";
+        record.ts = if over {
+            SETTLED.to_string()
+        } else if dispatched && record.source == Source::Agentgraph {
+            ahead = !ahead;
+            if ahead { WORKING } else { OPENED }.to_string()
+        } else {
+            OPENED.to_string()
+        };
+        dispatched |= record.kind.0 == "node-dispatched";
+    }
+    let skewed: String = records
+        .iter()
+        .map(|record| {
+            format!(
+                "{}\n",
+                serde_json::to_string(record).expect("the envelope serialises")
+            )
+        })
+        .collect();
+    std::fs::write(&journal, skewed).expect("the store is written back");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    let document = world.run(&["telemetry", &run]).json();
+    let wall = document["wall_ms"].as_u64().expect("a wall clock");
+    let scheduling = document["buckets"]
+        .as_array()
+        .expect("buckets")
+        .iter()
+        .find(|bucket| bucket["name"] == "scheduling")
+        .and_then(|bucket| bucket["ms"].as_u64())
+        .expect("a measured scheduling bucket");
+    // The premise, checked rather than assumed: this store's dispatch is charged
+    // more than the whole run's wall clock, and `scheduling` holds nothing to
+    // take the difference out of. That is the document that used to ship with
+    // parts longer than its whole.
+    assert_eq!(wall, 101_000, "{document}");
+    assert_eq!(scheduling, 0, "{document}");
+    assert!(
+        document["buckets"]
+            .as_array()
+            .expect("buckets")
+            .iter()
+            .any(|bucket| bucket["name"] == "agent" && bucket["ms"].as_u64() > Some(0)),
+        "the dispatch is charged nothing, so nothing overcounted: {document}"
+    );
+    assert_eq!(
+        measured(&document),
+        wall,
+        "the buckets do not sum to WALL: {document}"
+    );
+    // Absent stays absent: an overcount comes off what was measured and is never
+    // charged to a bucket nothing measured.
+    for absent in ["judge", "llmlint", "gate"] {
+        let bucket = document["buckets"]
+            .as_array()
+            .expect("buckets")
+            .iter()
+            .find(|bucket| bucket["name"] == absent)
+            .expect("the bucket is still named");
+        assert!(
+            bucket.get("ms").is_none(),
+            "{absent} reported a span nothing measured: {bucket}"
+        );
+    }
+}
+
 /// The number a run is budgeted against, on a host whose routine failure mode
 /// is quota exhaustion across five identities.
 #[test]
@@ -887,6 +997,108 @@ fn a_retained_report_carrying_no_transcript_says_so() {
         .exited(0)
         .out_has("report ")
         .out_has("it carries no transcript");
+}
+
+/// What a tool returned, through the verb, in the three shapes an output
+/// reaches a reader in: a structured one, one carrying control characters, and
+/// one longer than the line will print.
+///
+/// The rendering used to be a blank column for all three — a `tool_result`
+/// states its text under `output` and states no `detail`, and `detail` was the
+/// whole column — so this drives the compiled binary over a store that carries
+/// each of them and reads the line back.
+///
+/// The two sources answer at different times and are bounded differently, so
+/// both are here: the run's own journal, whose payload texts this crate cut and
+/// marked at ingest, and the retained report, whose outputs are a harness's raw
+/// bytes with nothing bounding them at all. It is the report path that proves
+/// the view's own ceiling, because it is the only one that can exceed it.
+#[test]
+fn a_transcript_prints_a_tools_output_structured_stripped_bounded_and_labelled() {
+    let world = World::new("views-outputs");
+    let run = settled(&world, "outputs", vec![agent("build", &[])]);
+
+    // llmlint: ignore-block[tests_mirror_real_usage] the run, its settlement and the
+    // reader are real; what is planted is a producer's *content* — outputs in shapes
+    // a scripted double settles too quickly to produce, and which a journey cannot
+    // ask a real harness for on demand.
+    let settlement = world
+        .journal(&run)
+        .into_iter()
+        .filter_map(|event| serde_json::from_value::<Envelope>(event).ok())
+        .find(|event| event.source == Source::Agentgraph && event.kind.0 == "member-settled")
+        .expect("the settled run recorded a settlement");
+
+    // The journal half: an output the producer had already cut short, carrying a
+    // control character a rendered line must not be able to obey.
+    let mut relayed = world
+        .journal(&run)
+        .into_iter()
+        .filter_map(|event| serde_json::from_value::<Envelope>(event).ok())
+        .find(|event| event.kind.0 == "turn-activity")
+        .expect("the dispatch relayed its activity");
+    relayed.seq += 1_000;
+    relayed.payload = serde_json::json!({
+        "kind": "tool_result",
+        "output": "cleared\u{1b}[2K the line",
+        "output_truncated": true,
+        "index": 9,
+    })
+    .as_object()
+    .expect("a payload")
+    .clone();
+    let journal = world.run_file(&run, "events.jsonl");
+    let mut store = std::fs::read_to_string(&journal).expect("the journal reads");
+    store.push_str(&format!(
+        "{}\n",
+        serde_json::to_string(&relayed).expect("the envelope serialises")
+    ));
+    std::fs::write(&journal, store).expect("the store is appended to");
+
+    // The report half: this run's own copy, at the name the reader derives from
+    // the settlement rather than the path the producer named.
+    let kept = onepipeline::views::RunPaths::under(&world.runs, &run)
+        .report_for(&settlement.stream, settlement.seq);
+    std::fs::write(
+        &kept,
+        serde_json::json!({
+            "schema_version": 7,
+            "transcript": {"messages": [{"role": "assistant", "content": "read it back", "events": [
+                // A harness that answers with the structure it really had rather
+                // than with text.
+                {"kind": "tool_result", "index": 0,
+                 "output": {"exit": 0, "stdout": "structured, not text"}},
+                // And one past what a line prints, which only this path can be.
+                {"kind": "tool_result", "index": 1,
+                 "output": format!("{}the tail nobody sees", "y".repeat(5_000))},
+                // A producer that stated its truncation flag as something this
+                // build cannot read as either answer.
+                {"kind": "tool_result", "index": 2, "output": "a flag nobody can read",
+                 "output_truncated": "sometimes"},
+            ]}]},
+        })
+        .to_string(),
+    )
+    .expect("this run's own copy of the report");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    let transcript = world.run(&["transcript", &run, "build"]);
+    transcript.exited(0);
+    // Stripped, and said: the escape is a space on the rendered line, and the
+    // output the producer had already cut is not offered as a whole one.
+    transcript.out_has("tool_result   cleared [2K the line … [already cut short by the producer]");
+    assert!(
+        !transcript.stdout.contains('\u{1b}'),
+        "a control character in a tool's output reached the rendered line:\n{}",
+        transcript.stdout
+    );
+    transcript.out_has(r#"tool_result   {"exit":0,"stdout":"structured, not text"}"#);
+    transcript.out_has("… [4096 of 5020 characters]");
+    transcript.out_lacks("the tail nobody sees");
+    // And a flag that is neither answer is reported as neither, rather than
+    // read as the one that claims the output is whole.
+    transcript
+        .out_has(r#"a flag nobody can read … [the producer's truncation flag is unreadable]"#);
 }
 
 /// A dispatch that has recorded something without naming a tool claims the
