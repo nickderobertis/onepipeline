@@ -4,6 +4,7 @@ rem where the contract both halves answer is written down — the verbs, the exi
 rem codes, and why each one refuses rather than defaults — and
 rem `both_hook_scripts_answer_the_same_verbs` holds the two in step, because no
 rem platform runs both. What is written down here is what cmd makes different.
+rem llmlint: ignore-file[boundary_inputs_validated] nothing external reaches this script: its argv is written word by word in Rust by `harness::hook_argv` and quoted into the wrapper by `harness::install_hook`, and ONEPIPELINE_FAKE_HOOK_WAIT_SECONDS is set by the one journey that proves the ceiling. That variable is read through the quoted `set` form, which is what keeps a metacharacter in it from being read as cmd syntax, and then refused by the `findstr` pattern below before any arithmetic sees it. `%~1` has no expansion cmd makes safer, and reaching for one would leave `both_hook_scripts_answer_the_same_verbs` unable to read the verbs out of this file.
 setlocal enabledelayedexpansion
 
 if "%~1"=="wait-for" goto waitfor
