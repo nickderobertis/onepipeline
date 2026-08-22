@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# Fingerprint the llmlint judge configuration for Nx's cache key.
+#
+# Declared as the `lint-llm-diff` target's `runtime` input, so a recorded verdict
+# is invalidated by anything that changes what the judge would ask — including the
+# two things no tracked file records: the *installed* llmlint version, and the
+# resolved content of a plugin pinned in `llmlint.yml` but fetched from outside
+# this repository. `llmlint config` prints the effective merged config — this
+# repository's `llmlint.yml` plus every plugin's resolved rules — so one hash
+# covers all of them.
+#
+# `just lint-llm-diff` runs this itself before handing the tier to Nx, and refuses
+# when it fails. That is not belt and braces: Nx scores a runtime input that exits
+# non-zero as *no contribution* rather than as an error, so a fingerprint that
+# cannot be produced would silently shrink the key to the tree and the base commit
+# and replay a verdict the judge configuration has since moved on from.
+#
+# Two host details are kept out, so the digest describes the judge configuration
+# rather than the machine it was resolved on. The checkout path is folded to a
+# placeholder, so two checkouts of this repository agree. `LLMLINT_ONEHARNESS_BIN`
+# is cleared for the config call, so what is hashed is the harness binding this
+# checkout declares — `llmlint.yml` pins none, so it renders as `null` — rather
+# than whichever wrapper the calling environment happens to export. That value
+# names where the harness binary lives, not what the judge is asked, and reading
+# it would give one judged diff a different key per dispatch, which is the split
+# verdict this cache exists to end. The judged run still honours it: a host that
+# has to reach its harness through a wrapper keeps doing so.
+#
+# Run it by hand to see the current judge fingerprint — the answer to "why did the
+# cache miss when nothing in the tree changed?".
+set -euo pipefail
+
+root="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)" || {
+  echo "llmlint fingerprint: could not locate the repository from this script; reinstall the checkout and retry" >&2
+  exit 1
+}
+# shellcheck source=scripts/llmlint-runtime-env.sh
+. "$root/scripts/llmlint-runtime-env.sh" || {
+  echo "llmlint fingerprint: could not load the shared runtime environment; restore scripts/llmlint-runtime-env.sh and retry" >&2
+  exit 1
+}
+# Resolve llmlint the way `scripts/llmlint-judge.sh` resolves it, so the key
+# describes the judge configuration the judged run would actually use.
+llmlint_runtime_env
+
+version="$(llmlint --version)" || {
+  echo "llmlint fingerprint: 'llmlint --version' failed; run 'just setup-llmlint' and retry" >&2
+  exit 1
+}
+cd "$root" || {
+  echo "llmlint fingerprint: could not enter '$root'; repair its permissions and retry" >&2
+  exit 1
+}
+config="$(env -u LLMLINT_ONEHARNESS_BIN llmlint config)" || {
+  echo "llmlint fingerprint: 'llmlint config' failed; repair llmlint.yml or its plugin pins and retry" >&2
+  exit 1
+}
+config="${config//"$root"/\{root\}}"
+
+# `sha256sum` on Linux, `shasum` where coreutils is not the default — the tier is
+# reachable from `just gate` on every platform a contributor develops on.
+if command -v sha256sum >/dev/null 2>&1; then
+  digest="$(printf '%s\n%s\n' "$version" "$config" | sha256sum)"
+elif command -v shasum >/dev/null 2>&1; then
+  digest="$(printf '%s\n%s\n' "$version" "$config" | shasum -a 256)"
+else
+  echo "llmlint fingerprint: no sha256 tool found; install coreutils (sha256sum) or perl (shasum) and retry" >&2
+  exit 1
+fi
+printf '%s\n' "${digest%% *}"
