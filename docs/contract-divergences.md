@@ -11,11 +11,13 @@ the contract**, and `docs/contract.md` was amended to carry each ruling. They st
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–22, 33 and 35–37 are open**. Each states what the code does today and the
-proposal it is waiting on — every one of them a question for a *producer* rather
-than for this crate, because `oneagentgraph` and `onevcs` are independent tools
-that expose general integration hooks only and nothing in them may know about
-this one. An open entry is recorded here and never resolved from this repository.
+Entries **10–22, 33 and 35–39 are open**. Each states what the code does today and
+the proposal it is waiting on. Most are questions for a *producer* rather than for
+this crate, because `oneagentgraph` and `onevcs` are independent tools that expose
+general integration hooks only and nothing in them may know about this one; the
+rest — 36 to 39 — are for the planner who owns the contract, and name the sentence
+in it they would change. An open entry is recorded here and never resolved from
+this repository.
 
 ## 1. `ResolvedGraphRef` is not a type `oneagentgraph` exports — RESOLVED
 
@@ -1204,3 +1206,117 @@ the refused spelling through the real repository side, and one in
 `tests/e2e/session_reuse.rs` that drives the spelling it points a planner at.
 Nothing about the plan schema is widened here — what a node may say is the
 contract's, and the semantics the pin runs into are `onevcs`'s.
+
+## 38. `surface` can only be handed its message on the command line — OPEN
+
+**Proposal (for the planner who owns the contract): state the surface verb as
+`surface RUN --kind check-in [FILE]`, with the message read from `FILE`, or from
+stdin when none is named — the shape `reply RUN [FILE]` already has one line
+earlier in the same paragraph — and keep `--message TEXT` as the inline form.**
+
+The contract spells one way in: `surface RUN --kind check-in --message TEXT`.
+That puts arbitrary agent-authored prose in a command-line argument, and a
+command line is read by a shell before this process sees a byte of it. An agent
+composing such a call with its message in double quotes had its own prose
+executed — backticks inside double quotes are command substitution, so bash ran
+the quoted command and spliced its stdout into the message. It cost about 25
+minutes of CPU on a shared host for work nobody asked for, and left no audit
+trail at all: the only trace was the message text mutating into command output.
+
+Quoting discipline is not the fix. A rule an agent has to apply to prose it wrote
+itself fails silently the first time it is broken, and the failure is invisible
+in exactly the record that would show it. The class goes away when the body
+arrives as bytes, which is what the sibling verb in the same file already does:
+`reply RUN [FILE]`, "omitted, it is read from stdin".
+
+**What this crate does today.** `surface` takes its message from whichever of the
+three carried it — `--message TEXT`, a `FILE` positional, or stdin when neither
+names one — and `--message` and `FILE` are refused together, so nobody has to
+guess which was used. The body is trimmed at its ends exactly as `reply` trims
+the envelope it reads, and everything inside it, metacharacters included, reaches
+the queued surface unchanged. An empty body is refused, naming where the command
+looked, so the argument that used to be required is still impossible to forget by
+accident. `tests/e2e/channel.rs` drives a message full of backticks, `$(...)`,
+semicolons and pipes through the stdin and file forms and asserts the queue holds
+it byte for byte.
+
+## 39. A watcher has no op for saying something, and no kind to say it under — OPEN
+
+**Proposal (for the planner who owns the contract): add `finding` to the reply
+envelope's op list and to the `monitor` allowlist, and add `finding` to the
+surface kinds `surface --kind` accepts.**
+
+The contract gives an observing member a structured envelope for *edits* and
+nothing for *observations*, so a monitor emits what it saw as raw turn text — and
+every turn it takes therefore produces a surface, including a turn that only
+states an intent to look. Measured: one run queued **28 planner surfaces, of
+which 24 were content-free preambles**, fourteen of them variants of a single
+sentence. Buried among them was a blocking question from a worker that had
+finished every measurement it could and needed three contract rulings; it sat
+unread for 15 minutes with the whole frontier stopped behind it. The degradation
+is not only the reading: "N planner update(s) waiting" is the one line this
+host's operating rules say may never be filtered, and it carries no information
+when 86% of N is throat-clearing.
+
+A member-level response schema would fix the shape and cost the streaming — and
+the monitor is the one member with no per-turn deadline, because it watches for
+the life of the run. So the fix is an op in the envelope the member already
+writes: raising a surface becomes a deliberate act, and a turn with nothing to
+report emits nothing at all.
+
+The op goes **inside `commands`**, beside the existing operations, and not beside
+them as a new top-level field. The reader on the other side of this seam accepts
+exactly `version`, `author`, `completion`, `message`, `reason`, and `commands`
+and is closed to unknown fields, so a findings operation spelled as a tenth
+top-level key would be refused whole — taking the verdict and the graph edits in
+the same envelope down with it.
+
+**What this crate does today is the block below, and the block is the source.**
+`tests/contract.rs` parses it out of this file and holds it against the types:
+every op named here must be one this build accepts and the contract's own list
+does not, must round-trip as written, and must be allowed for exactly the authors
+named; every surface kind named here must be one `SurfaceKind` carries and the
+contract does not. Both directions, so a build that grows an op or a kind this
+entry does not name fails as loudly as one that drops one it does.
+
+```json
+{
+  "ops": [
+    {
+      "op": "finding",
+      "message": "`build` is verifying against a base that moved under it",
+      "blocking": true,
+      "id": "build"
+    }
+  ],
+  "monitor_may_issue": ["finding"],
+  "surface_kinds": ["finding"]
+}
+```
+
+`message` is required and an empty one is refused; `blocking` defaults to `false`,
+so an observation holds nothing back unless it says otherwise; `id` is optional
+and, given, must name a node the graph has — a blocking finding about work nobody
+is doing would hold no subtree while still reading, in every planner view, as a
+decision the run is waiting on. An accepted `finding` compiles to no graph
+mutation, and the surface it raises is the only thing the planner sees for it:
+the "monitor applied an edit" surface every other monitor op additionally raises
+is suppressed for this one, because reporting it twice is the multiplication the
+op exists to end.
+
+Adding to `SurfaceKind` is the schema change it looks like. The set is
+`#[non_exhaustive]`, so no consumer matches it exhaustively and the addition
+cannot break one at compile time; what a consumer *can* pin is a release, so the
+kind arrives with a **minor** version bump, cut by `release-plz` from the `feat`
+commit that introduces it. Nothing in this repository writes a version by hand.
+
+**Beside it, and not a divergence: the order surfaces are read in.** The contract
+fixes which surfaces exist and that a blocking one is delivered under every
+profile; it says nothing about the order a reader takes them in, and this build
+now hands out **a blocking surface first**, arrival order within each class. A
+blocking surface holds back the subtree that depends on it and produces no other
+signal until somebody reads it, and nothing else in the queue does either of
+those things — so narration loses nothing by being read second, while a question
+behind it is a stopped frontier. Reading narration while a blocking surface is
+pending no longer clears that pending state either: a report is not an answer,
+and only a reply releases the subtree a decision is holding.

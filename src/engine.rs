@@ -975,6 +975,15 @@ fn reconcile_edits(
                                 journal::labels(&paths.run, Some(node)),
                                 journal::payload(&[("ref", json!(node))]),
                             )?,
+                            edits::Operation::FindingRaised {
+                                node,
+                                message,
+                                blocking,
+                            } => raise(
+                                paths,
+                                journal,
+                                finding_surface(author, node.clone(), message, *blocking),
+                            )?,
                             _ => {}
                         }
                     }
@@ -982,7 +991,9 @@ fn reconcile_edits(
                     // was applied on the monitor's own judgement, so the planner
                     // learns of it without being asked to approve it first.
                     if author == crate::channel::Author::Monitor {
-                        raise(paths, journal, monitor_edit(command))?;
+                        if let Some(surface) = monitor_edit(command) {
+                            raise(paths, journal, surface)?;
+                        }
                     }
                     *state = projection::fold(&journal::read(&paths.journal()));
                 }
@@ -1862,8 +1873,16 @@ fn settle(paths: &RunPaths, journal: &mut Journal, settlement: &Settlement) -> R
 /// would pause the run over a decision that has already been made. Raised by
 /// whichever side applied it — the loop, or a `reply` that found nothing
 /// driving the run — because which one that was is not the planner's concern.
-pub(crate) fn monitor_edit(command: &Command) -> Surface {
-    Surface {
+///
+/// `None` for a `finding`, which is the one op that has *already* said its piece
+/// to the planner: it compiles to the surface the planner reads, so reporting it
+/// a second time as an edit the monitor made would put two entries on the queue
+/// for one thing said once — the multiplication this op exists to end.
+pub(crate) fn monitor_edit(command: &Command) -> Option<Surface> {
+    if matches!(command, Command::Finding { .. }) {
+        return None;
+    }
+    Some(Surface {
         id: 0,
         kind: "monitor-edit".into(),
         message: format!(
@@ -1874,6 +1893,34 @@ pub(crate) fn monitor_edit(command: &Command) -> Surface {
         blocking: false,
         queued_at: sys::now_millis(),
         workstream: crate::channel::target_of(command),
+    })
+}
+
+/// The surface one accepted `finding` op raises.
+///
+/// Its source is the envelope's author, so the journal keeps a watcher's finding
+/// and a worker's proposal apart — the same reason [`source`] separates a
+/// pacemaker update from advice.
+///
+/// [`source`]: crate::channel::source
+pub(crate) fn finding_surface(
+    author: crate::channel::Author,
+    node: Option<String>,
+    message: &str,
+    blocking: bool,
+) -> Surface {
+    Surface {
+        id: 0,
+        kind: crate::channel::SurfaceKind::Finding.as_str().into(),
+        message: message.to_string(),
+        source: match author {
+            crate::channel::Author::Monitor => crate::channel::source::MONITOR,
+            crate::channel::Author::Planner => crate::channel::source::PROPOSAL,
+        }
+        .into(),
+        blocking,
+        queued_at: sys::now_millis(),
+        workstream: node,
     }
 }
 

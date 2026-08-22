@@ -145,7 +145,6 @@ fn a_command_outside_the_surface_is_a_usage_error() {
 fn a_missing_required_argument_is_a_usage_error() {
     for args in [
         vec!["attest", "run-1"],
-        vec!["surface", "run-1", "--kind", "check-in"],
         vec!["channel"],
         // The interval is seconds, so a non-numeric value is rejected before
         // anything is launched rather than silently defaulted.
@@ -159,6 +158,50 @@ fn a_missing_required_argument_is_a_usage_error() {
             args.join(" ")
         );
     }
+}
+
+/// The message body is no longer a required argument, so a `surface` that names
+/// none is not a usage error — but it is not a surface either.
+///
+/// The harness hands every child a null stdin, which is exactly the caller clap
+/// used to catch: nothing on `--message`, nothing on a file, nothing on the pipe.
+/// It is refused, and the refusal names all three places it looked, so the
+/// argument that used to be impossible to forget still is.
+#[test]
+fn a_surface_with_no_message_anywhere_is_refused_and_says_where_it_looked() {
+    let world = World::new("surface-nobody");
+    let plan = world.plan(
+        "quiet",
+        &crate::harness::plan_of("quiet", vec![crate::harness::agent("build", &[])]),
+    );
+    world
+        .run(&["start", &plan.to_string_lossy(), "--detach"])
+        .exited(0);
+
+    world
+        .run(&["surface", "quiet", "--kind", "check-in"])
+        .exited(REFUSED)
+        .err_has("stdin")
+        .err_has("file")
+        .err_has("--message");
+}
+
+/// The two body forms are alternatives, not a precedence rule to memorise.
+#[test]
+fn a_message_argument_and_a_message_file_cannot_both_be_given() {
+    let output = onepipeline()
+        .args([
+            "surface",
+            "run-1",
+            "body.txt",
+            "--kind",
+            "check-in",
+            "--message",
+            "inline",
+        ])
+        .output()
+        .expect("it runs");
+    assert_eq!(output.status.code(), Some(USAGE_ERROR));
 }
 
 #[test]

@@ -228,16 +228,31 @@ pub struct ReplyArgs {
 }
 
 /// `onepipeline surface`.
+///
+/// The message body arrives the way [`ReplyArgs`]'s envelope does — from a file,
+/// or from stdin when no file is named. That is not ergonomics: a caller here is
+/// usually an agent surfacing prose it wrote, and prose on a command line is
+/// read by the shell before this process ever sees it, where backticks inside a
+/// double-quoted argument are command substitution and the message runs. A body
+/// on a pipe is bytes.
+///
+/// `--message` still works for the callers that spell it, and is refused beside
+/// a file so nobody has to guess which of the two was used.
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
 pub struct SurfaceArgs {
     /// The run id.
     pub run: String,
+    /// The file the surface's text is read from. Omitted, it is read from
+    /// stdin — unless `--message` carried it.
+    #[arg(conflicts_with = "message")]
+    pub file: Option<PathBuf>,
     /// What the surface is asking about.
     #[arg(long, value_enum)]
     pub kind: SurfaceKind,
-    /// The surface's text.
+    /// The surface's text, inline. Prefer the file or the stdin form: whatever
+    /// is written here is read by a shell first.
     #[arg(long, value_name = "TEXT")]
-    pub message: String,
+    pub message: Option<String>,
 }
 
 /// `onepipeline attest`.

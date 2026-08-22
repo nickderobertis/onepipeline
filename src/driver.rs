@@ -1564,19 +1564,67 @@ fn next(args: &ReadArgs) -> Result<i32> {
     Ok(EXIT_SUCCESS)
 }
 
+/// The surface's text: `--message`, the named file, or stdin.
+///
+/// Stdin is the default because the caller here is usually an agent surfacing
+/// prose it wrote, and prose in a command-line argument is read by a shell
+/// before this process sees a byte of it — backticks inside double quotes are
+/// command substitution, and a message that happened to contain one had that
+/// command run and its output spliced into the message. A body arriving on a
+/// pipe or out of a file is bytes, whatever it says.
+///
+/// The body is trimmed at its ends, exactly as `reply` trims the envelope it
+/// reads, so `echo` and a heredoc do not queue a trailing newline. Nothing
+/// inside it is touched.
+fn surface_message(args: &SurfaceArgs) -> Result<String> {
+    let (body, whence) = match (&args.message, &args.file) {
+        (Some(message), _) => (message.clone(), "`--message`"),
+        (None, Some(path)) => (
+            std::fs::read_to_string(path).map_err(|e| Error::Ledger {
+                path: path.clone(),
+                source: e,
+            })?,
+            "the file",
+        ),
+        (None, None) => {
+            let mut buffer = String::new();
+            std::io::stdin()
+                .read_to_string_compat(&mut buffer)
+                .map_err(|e| Error::Refused(format!("cannot read the message from stdin: {e}")))?;
+            (buffer, "stdin")
+        }
+    };
+    let body = body.trim();
+    if body.is_empty() {
+        return Err(Error::Refused(format!(
+            "a surface carries what it has to say and {whence} carried nothing; \
+             give the message on stdin, as a file argument, or with `--message TEXT`"
+        )));
+    }
+    Ok(body.to_string())
+}
+
 /// `onepipeline surface`.
 fn surface(args: &SurfaceArgs) -> Result<i32> {
     let paths = resolve(&args.run)?;
-    let kind = match args.kind {
+    // Read the body before anything is queued, so an unreadable file or an empty
+    // stdin refuses the command rather than queuing a surface with nothing in it.
+    let message = surface_message(args)?;
+    // What it is about, and what raised it, are two facts: a check-in is the
+    // pacemaker's own, and a finding typed here is advice like any other.
+    let source = match args.kind {
         SurfaceKind::CheckIn => crate::channel::source::CHECK_IN,
+        SurfaceKind::Finding => crate::channel::source::PROPOSAL,
     };
     let queued = ChannelState::new(&paths).push(Surface {
         id: 0,
-        kind: kind.to_string(),
-        message: args.message.clone(),
-        source: kind.to_string(),
-        // A pacemaker update is a report, not a request: it never holds any
-        // subtree back waiting for a decision.
+        kind: args.kind.as_str().to_string(),
+        message,
+        source: source.to_string(),
+        // Neither is a request: a pacemaker update and a finding typed at this
+        // verb are reports, and never hold a subtree back waiting for a
+        // decision. A finding that means to stop one says so through the
+        // envelope's `finding` op, which carries `blocking`.
         blocking: false,
         queued_at: sys::now_millis(),
         workstream: None,
@@ -1747,6 +1795,20 @@ fn submit(paths: &RunPaths, envelope: &Reply) -> Result<i32> {
                             journal::labels(&paths.run, Some(node)),
                             journal::payload(&[("ref", json!(node))]),
                         )?,
+                        edits::Operation::FindingRaised {
+                            node,
+                            message,
+                            blocking,
+                        } => engine::raise(
+                            paths,
+                            &mut journal,
+                            engine::finding_surface(
+                                envelope.author,
+                                node.clone(),
+                                message,
+                                *blocking,
+                            ),
+                        )?,
                         _ => {}
                     }
                 }
@@ -1755,7 +1817,9 @@ fn submit(paths: &RunPaths, envelope: &Reply) -> Result<i32> {
                 // whether anything was driving the run, and the planner owns the
                 // graph either way.
                 if envelope.author == Author::Monitor {
-                    engine::raise(paths, &mut journal, engine::monitor_edit(command))?;
+                    if let Some(raised) = engine::monitor_edit(command) {
+                        engine::raise(paths, &mut journal, raised)?;
+                    }
                 }
             }
             lock.release();

@@ -96,6 +96,16 @@ pub enum Operation {
         /// Why.
         reason: String,
     },
+    /// A finding was raised to the planner, without touching the graph.
+    FindingRaised {
+        /// The node it is about, when it named one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        node: Option<String>,
+        /// The finding's text.
+        message: String,
+        /// Whether the planner's answer holds the node's subtree back.
+        blocking: bool,
+    },
     /// A planner note reached a node.
     ContextAdded {
         /// The node.
@@ -207,7 +217,10 @@ pub fn compile_with(
     // mutation cannot leave the caller's graph in a state nothing submitted.
     let mut candidate = graph.clone();
     let operations = compile_into(&mut candidate, frontier, command, delivery)?;
-    if !matches!(command, Command::Complete { .. } | Command::Attest { .. }) {
+    if !matches!(
+        command,
+        Command::Complete { .. } | Command::Attest { .. } | Command::Finding { .. }
+    ) {
         // The resulting graph must still satisfy the normal plan schema.
         let plan = candidate.to_plan(&crate::plan::Plan {
             schema_version: crate::plan::PLAN_SCHEMA_VERSION,
@@ -240,6 +253,11 @@ fn compile_into(
             reason: reason.clone(),
         }]),
         Command::Context { id, note, .. } => compile_context(graph, frontier, id, note, delivery),
+        Command::Finding {
+            message,
+            blocking,
+            id,
+        } => compile_finding(graph, id.as_deref(), message, *blocking),
     }
 }
 
@@ -617,6 +635,41 @@ fn compile_requeue(
 
 /// Compile an `attest`, whose accepted settlements are open divergence 36's —
 /// argued and sourced there, not here.
+/// Validate one finding: it changes nothing, so all there is to judge is
+/// whether it says something about a node this graph has.
+///
+/// A finding naming a node the graph does not carry is refused rather than
+/// queued about nothing. That matters most when it is blocking: the subtree it
+/// would hold is derived from the node it names, so a name nothing matches holds
+/// nothing back while still reading, to every planner view, as a decision the
+/// run is waiting on.
+fn compile_finding(
+    graph: &Graph,
+    id: Option<&str>,
+    message: &str,
+    blocking: bool,
+) -> Result<Vec<Operation>> {
+    if message.trim().is_empty() {
+        return Err(refuse(
+            "a finding carries what was found: this one has an empty message",
+        ));
+    }
+    if let Some(node) = id {
+        if !graph.contains(node) {
+            return Err(refuse(format!(
+                "cannot raise a finding about node '{node}', which this run does not have; \
+                 it has: {}",
+                graph.ids().cloned().collect::<Vec<_>>().join(", ")
+            )));
+        }
+    }
+    Ok(vec![Operation::FindingRaised {
+        node: id.map(str::to_string),
+        message: message.to_string(),
+        blocking,
+    }])
+}
+
 fn compile_attest(frontier: &Frontier, reference: &str) -> Result<Vec<Operation>> {
     // Before the settlement check, because an attestation folds the node to
     // `done`: asked the other way round, a second one is answered with the
@@ -740,10 +793,12 @@ pub fn apply(graph: &mut Graph, operation: &Operation) {
             }
         }
         Operation::ContextAdded { .. } => {}
-        // Neither mutates the graph: an attestation settles a node and a
-        // completion request is journalled for audit, both folded elsewhere.
+        // None mutates the graph: an attestation settles a node, a completion
+        // request is journalled for audit, and a finding went to the planner's
+        // queue, all folded elsewhere.
         Operation::HumanAttested { .. }
         | Operation::CompletionRequested { .. }
+        | Operation::FindingRaised { .. }
         | Operation::RetryRequested { .. } => {}
     }
 }
