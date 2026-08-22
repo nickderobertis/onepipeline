@@ -679,7 +679,7 @@ pub(crate) struct Tool {
     pub name: String,
     /// What it acted on, rendered compactly.
     pub detail: String,
-    /// What it returned, where the event carries one.
+    /// What it returned. Empty on a call, which has not been answered yet.
     pub output: String,
     /// What the producer said about having already cut that output short before
     /// this run ever saw it — a fact about the text, which a reader has no
@@ -716,10 +716,9 @@ pub(crate) enum Truncation {
     /// The producer said nothing, or said `false`. A producer that states
     /// nothing states that it cut nothing.
     Whole,
-    /// The producer said it had already cut this output short.
     Cut,
     /// The producer stated something this build cannot read as either.
-    Unstated,
+    Unreadable,
 }
 
 impl Truncation {
@@ -728,7 +727,7 @@ impl Truncation {
             None | Some(Value::Null) => Self::Whole,
             Some(Value::Bool(true)) => Self::Cut,
             Some(Value::Bool(false)) => Self::Whole,
-            Some(_) => Self::Unstated,
+            Some(_) => Self::Unreadable,
         }
     }
 }

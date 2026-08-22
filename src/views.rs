@@ -1772,7 +1772,7 @@ fn tool_text(detail: &str, output: &str, output_truncated: Truncation) -> String
         // Not silence, and not `false`: a flag this build cannot read leaves
         // whether the output is whole unanswered, and a line that said nothing
         // would be answering it.
-        Truncation::Unstated => {
+        Truncation::Unreadable => {
             notes.push("the producer's truncation flag is unreadable".to_string());
         }
     }
