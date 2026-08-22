@@ -1729,14 +1729,19 @@ pub(crate) fn nodes_with_agent_records(view: &RunView, only: Option<&str>) -> Ve
 /// How much of a tool's own output one transcript line prints.
 ///
 /// Explicit rather than incidental, because the two sources this verb reads are
-/// bounded differently. A `turn-activity` summary reaches the store already cut
-/// to about this length by the producer that emitted it; a retained report's is
-/// the harness's raw bytes with nothing bounding them at all — reports on this
-/// host carry single outputs past sixty kilobytes — and one of those splatted
-/// whole into a terminal is the rendering this ceiling exists to prevent. Set at
-/// the producers' own so the view never cuts what the run's journal kept, and
-/// what it does cut it counts out loud.
-const MAX_TOOL_OUTPUT_CHARS: usize = 4096;
+/// bounded differently. A `turn-activity` summary is inside
+/// [`MAX_PAYLOAD_TEXT_BYTES`](crate::event::MAX_PAYLOAD_TEXT_BYTES) by the time
+/// it is in the store — this crate's own promise about its own envelope, cut and
+/// marked at ingest — while a retained report's output is the harness's raw
+/// bytes with nothing bounding them at all: reports on this host carry single
+/// outputs past sixty kilobytes, and one of those splatted whole into a terminal
+/// is the rendering this ceiling exists to prevent.
+///
+/// So it is that same bound, read as a **character** ceiling against a byte one:
+/// a text inside 4096 bytes is inside 4096 characters, which is what makes this
+/// unable to cut anything the run's own journal kept. What it does cut on the
+/// report path it counts out loud.
+const MAX_TOOL_OUTPUT_CHARS: usize = crate::event::MAX_PAYLOAD_TEXT_BYTES;
 
 /// The third column of a tool's line: what a call acted on, or what a result
 /// returned.

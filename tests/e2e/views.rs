@@ -999,6 +999,102 @@ fn a_retained_report_carrying_no_transcript_says_so() {
         .out_has("it carries no transcript");
 }
 
+/// What a tool returned, through the verb, in the three shapes an output
+/// reaches a reader in: a structured one, one carrying control characters, and
+/// one longer than the line will print.
+///
+/// The rendering used to be a blank column for all three — a `tool_result`
+/// states its text under `output` and states no `detail`, and `detail` was the
+/// whole column — so this drives the compiled binary over a store that carries
+/// each of them and reads the line back.
+///
+/// The two sources answer at different times and are bounded differently, so
+/// both are here: the run's own journal, whose payload texts this crate cut and
+/// marked at ingest, and the retained report, whose outputs are a harness's raw
+/// bytes with nothing bounding them at all. It is the report path that proves
+/// the view's own ceiling, because it is the only one that can exceed it.
+#[test]
+fn a_transcript_prints_a_tools_output_structured_stripped_bounded_and_labelled() {
+    let world = World::new("views-outputs");
+    let run = settled(&world, "outputs", vec![agent("build", &[])]);
+
+    // llmlint: ignore-block[tests_mirror_real_usage] the run, its settlement and the
+    // reader are real; what is planted is a producer's *content* — outputs in shapes
+    // a scripted double settles too quickly to produce, and which a journey cannot
+    // ask a real harness for on demand.
+    let settlement = world
+        .journal(&run)
+        .into_iter()
+        .filter_map(|event| serde_json::from_value::<Envelope>(event).ok())
+        .find(|event| event.source == Source::Agentgraph && event.kind.0 == "member-settled")
+        .expect("the settled run recorded a settlement");
+
+    // The journal half: an output the producer had already cut short, carrying a
+    // control character a rendered line must not be able to obey.
+    let mut relayed = world
+        .journal(&run)
+        .into_iter()
+        .filter_map(|event| serde_json::from_value::<Envelope>(event).ok())
+        .find(|event| event.kind.0 == "turn-activity")
+        .expect("the dispatch relayed its activity");
+    relayed.seq += 1_000;
+    relayed.payload = serde_json::json!({
+        "kind": "tool_result",
+        "output": "cleared\u{1b}[2K the line",
+        "output_truncated": true,
+        "index": 9,
+    })
+    .as_object()
+    .expect("a payload")
+    .clone();
+    let journal = world.run_file(&run, "events.jsonl");
+    let mut store = std::fs::read_to_string(&journal).expect("the journal reads");
+    store.push_str(&format!(
+        "{}\n",
+        serde_json::to_string(&relayed).expect("the envelope serialises")
+    ));
+    std::fs::write(&journal, store).expect("the store is appended to");
+
+    // The report half: this run's own copy, at the name the reader derives from
+    // the settlement rather than the path the producer named.
+    let kept = onepipeline::views::RunPaths::under(&world.runs, &run)
+        .report_for(&settlement.stream, settlement.seq);
+    std::fs::write(
+        &kept,
+        serde_json::json!({
+            "schema_version": 7,
+            "transcript": {"messages": [{"role": "assistant", "content": "read it back", "events": [
+                // A harness that answers with the structure it really had rather
+                // than with text.
+                {"kind": "tool_result", "index": 0,
+                 "output": {"exit": 0, "stdout": "structured, not text"}},
+                // And one past what a line prints, which only this path can be.
+                {"kind": "tool_result", "index": 1,
+                 "output": format!("{}the tail nobody sees", "y".repeat(5_000))},
+            ]}]},
+        })
+        .to_string(),
+    )
+    .expect("this run's own copy of the report");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    let transcript = world.run(&["transcript", &run, "build"]);
+    transcript.exited(0);
+    // Stripped, and said: the escape is a space on the rendered line, and the
+    // output the producer had already cut is not offered as a whole one.
+    transcript.out_has("tool_result   cleared [2K the line … [already cut short by the producer]");
+    assert!(
+        !transcript.stdout.contains('\u{1b}'),
+        "a control character in a tool's output reached the rendered line:\n{}",
+        transcript.stdout
+    );
+    // Structured, and rendered as the structure it is.
+    transcript.out_has(r#"tool_result   {"exit":0,"stdout":"structured, not text"}"#);
+    // Bounded, and counted out loud rather than cut in silence.
+    transcript.out_has("… [4096 of 5020 characters]");
+    transcript.out_lacks("the tail nobody sees");
+}
+
 /// A dispatch that has recorded something without naming a tool claims the
 /// count and the age, and nothing more.
 ///
