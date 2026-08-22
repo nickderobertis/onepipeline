@@ -145,7 +145,6 @@ fn a_command_outside_the_surface_is_a_usage_error() {
 fn a_missing_required_argument_is_a_usage_error() {
     for args in [
         vec!["attest", "run-1"],
-        vec!["surface", "run-1", "--kind", "check-in"],
         vec!["channel"],
         // The interval is seconds, so a non-numeric value is rejected before
         // anything is launched rather than silently defaulted.
@@ -159,6 +158,126 @@ fn a_missing_required_argument_is_a_usage_error() {
             args.join(" ")
         );
     }
+}
+
+/// The message body is no longer a required argument, so a `surface` carrying
+/// none is not a usage error — but it is not a surface either.
+///
+/// Every way in gets the same answer, and the answer names where the command
+/// looked: the harness hands each child a null stdin, which is exactly the
+/// caller clap used to catch. A body that cannot be read at all is refused too,
+/// naming the path, rather than queuing an empty surface over a typo.
+#[test]
+fn a_surface_with_nothing_to_say_is_refused_whichever_way_it_was_asked() {
+    let world = World::new("surface-nobody");
+    let plan = world.plan(
+        "quiet",
+        &crate::harness::plan_of("quiet", vec![crate::harness::agent("build", &[])]),
+    );
+    world
+        .run(&["start", &plan.to_string_lossy(), "--detach"])
+        .exited(0);
+
+    let blank = world.root.join("blank.txt");
+    std::fs::write(&blank, "  \n\t\n").expect("the blank body is written");
+    let blank = blank.to_string_lossy().into_owned();
+    let missing = world.root.join("gone.txt").to_string_lossy().into_owned();
+
+    // Each empty source is named back, so a caller learns which of the three it
+    // was that carried nothing rather than being told the message is missing.
+    for (args, whence) in [
+        (vec!["surface", "quiet", "--kind", "check-in"], "stdin"),
+        (
+            vec!["surface", "quiet", "--kind", "check-in", "--message", "  "],
+            "`--message`",
+        ),
+        (
+            vec!["surface", "quiet", &blank, "--kind", "check-in"],
+            "the file",
+        ),
+    ] {
+        world
+            .run(&args)
+            .exited(REFUSED)
+            .err_has(whence)
+            .err_has("stdin")
+            .err_has("--message");
+    }
+
+    // A body nothing can read is a different failure and gets a different
+    // answer: the path, and what the filesystem said about it.
+    world
+        .run(&["surface", "quiet", &missing, "--kind", "check-in"])
+        .exited(REFUSED)
+        .err_has("gone.txt");
+
+    let read = world.run(&["next", "quiet"]);
+    read.exited(0);
+    assert_eq!(read.json()["surface"], serde_json::Value::Null);
+}
+
+/// A body stdin cannot even be read as text is refused, not queued as whatever
+/// survived.
+///
+/// The body path exists to carry bytes nobody inspected, so the one thing it may
+/// not do is guess at bytes that are not a message at all — and this is the
+/// branch a caller reaches by piping a binary file at the verb by mistake.
+#[test]
+fn a_stdin_body_that_is_not_text_is_refused_rather_than_salvaged() {
+    use std::io::Write;
+
+    let world = World::new("surface-notext");
+    let plan = world.plan(
+        "garbled",
+        &crate::harness::plan_of("garbled", vec![crate::harness::agent("build", &[])]),
+    );
+    world
+        .run(&["start", &plan.to_string_lossy(), "--detach"])
+        .exited(0);
+
+    let mut child = world
+        .cmd(&["surface", "garbled", "--kind", "check-in"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the binary starts");
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin is piped")
+        .write_all(&[0xff, 0xfe, 0x00, 0x9f])
+        .expect("the bytes are written");
+    let output = child.wait_with_output().expect("the binary runs");
+
+    assert_eq!(output.status.code(), Some(REFUSED));
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        said.contains("stdin"),
+        "the refusal does not say what it could not read: {said}"
+    );
+
+    let read = world.run(&["next", "garbled"]);
+    read.exited(0);
+    assert_eq!(read.json()["surface"], serde_json::Value::Null);
+}
+
+/// The two body forms are alternatives, not a precedence rule to memorise.
+#[test]
+fn a_message_argument_and_a_message_file_cannot_both_be_given() {
+    let output = onepipeline()
+        .args([
+            "surface",
+            "run-1",
+            "body.txt",
+            "--kind",
+            "check-in",
+            "--message",
+            "inline",
+        ])
+        .output()
+        .expect("it runs");
+    assert_eq!(output.status.code(), Some(USAGE_ERROR));
 }
 
 #[test]

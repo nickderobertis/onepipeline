@@ -228,16 +228,26 @@ pub struct ReplyArgs {
 }
 
 /// `onepipeline surface`.
+///
+/// The message body arrives the way [`ReplyArgs`]'s envelope does — from a file,
+/// or from stdin when none is named — so agent-authored prose never has to pass
+/// through a shell. Divergence 38 records why. `--message` still works, and is
+/// refused beside a file.
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
 pub struct SurfaceArgs {
     /// The run id.
     pub run: String,
+    /// The file the surface's text is read from. Omitted, it is read from
+    /// stdin — unless `--message` carried it.
+    #[arg(conflicts_with = "message")]
+    pub file: Option<PathBuf>,
     /// What the surface is asking about.
     #[arg(long, value_enum)]
     pub kind: SurfaceKind,
-    /// The surface's text.
+    /// The surface's text, inline. Prefer the file or the stdin form: whatever
+    /// is written here is read by a shell first.
     #[arg(long, value_name = "TEXT")]
-    pub message: String,
+    pub message: Option<String>,
 }
 
 /// `onepipeline attest`.
