@@ -664,7 +664,13 @@ impl Turn {
     }
 }
 
-/// One tool call a turn made.
+/// One tool call a turn made, or the observation that answered it.
+///
+/// Both halves, because a report carries both and a reader shown only the asks
+/// is reading half a turn: a `tool_call` event carries the `input` it acted on
+/// and no output, and the `tool_result` that answers it carries the `output` and
+/// no input. Neither field is where the other one is, so a reader that knew only
+/// `input` rendered every observation a turn made as a blank.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Tool {
     /// `tool_call` or `tool_result`, as the report names it.
@@ -673,6 +679,12 @@ pub(crate) struct Tool {
     pub name: String,
     /// What it acted on, rendered compactly.
     pub detail: String,
+    /// What it returned. Empty on a call, which has not been answered yet.
+    pub output: String,
+    /// What the producer said about having already cut that output short before
+    /// this run ever saw it — a fact about the text, which a reader has no
+    /// second source for.
+    pub output_truncated: Truncation,
 }
 
 impl Tool {
@@ -680,12 +692,55 @@ impl Tool {
         Self {
             kind: string(event, "kind"),
             name: string(event, "name"),
-            detail: match event.get("input") {
-                None | Some(Value::Null) => String::new(),
-                Some(Value::String(text)) => text.clone(),
-                Some(input) => input.to_string(),
-            },
+            detail: compact(event.get("input")),
+            output: compact(event.get("output")),
+            output_truncated: Truncation::of(event.get("output_truncated")),
         }
+    }
+}
+
+/// What a producer said about whether an output reached this run whole.
+///
+/// Three readings rather than a boolean, because the third one is real and the
+/// two answers it used to fall into are both wrong. A flag this build cannot
+/// read is not a statement that nothing was cut — reading it as one claims a
+/// completeness nobody asserted, which is the reading this whole view was
+/// corrected for — and it is not grounds to refuse a real, retained, readable
+/// report either. So it is carried as its own answer and rendered as one.
+///
+/// Derived in one place for both sources: the journal's `turn-activity` payload
+/// and a retained report's event spell this field the same way, and two readings
+/// of one field is how they come to disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Truncation {
+    /// The producer said nothing, or said `false`. A producer that states
+    /// nothing states that it cut nothing.
+    Whole,
+    Cut,
+    /// The producer stated something this build cannot read as either.
+    Unreadable,
+}
+
+impl Truncation {
+    pub(crate) fn of(value: Option<&Value>) -> Self {
+        match value {
+            None | Some(Value::Null) => Self::Whole,
+            Some(Value::Bool(true)) => Self::Cut,
+            Some(Value::Bool(false)) => Self::Whole,
+            Some(_) => Self::Unreadable,
+        }
+    }
+}
+
+/// One of a tool event's two texts, as a string to render.
+///
+/// A harness writes either as raw text or as the structured value it really is,
+/// and both are the same fact to a reader.
+fn compact(value: Option<&Value>) -> String {
+    match value {
+        None | Some(Value::Null) => String::new(),
+        Some(Value::String(text)) => text.clone(),
+        Some(other) => other.to_string(),
     }
 }
 
