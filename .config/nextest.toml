@@ -11,27 +11,19 @@
 e2e = { max-threads = 4 }
 
 [profile.default]
-# A test that blocks names itself, and is then ended.
+# A test that blocks names itself, and is then ended. Without this it produces no
+# output and no failure — it simply stops, and only the CI job's own limit ends it.
 #
-# Without this a blocked test produces no output and no failure — it simply
-# stops, and the only thing that ever ends it is the CI job's own limit. That is
-# not a hypothetical: the `cross (windows-latest)` leg of run 32538759791 printed
-# `Starting 703 tests across 6 binaries` and then nothing for 237 minutes, and
-# bought not one test name for it.
+# `period` sits between what a test here costs (the macOS leg of run 32538759791
+# was 731 tests in 270.422s) and the 120-second deadline `waited()` in
+# `tests/e2e/harness.rs` gives every poll, so the first `SLOW` line lands while
+# the stuck journey's own deadline is still running.
 #
-# `period` is 60s because that is far above what any test here costs — the whole
-# macOS suite in that same run was `731 tests run` in 270.422s — and below the
-# longest bound a single journey carries inside itself, `waited()`'s 120 seconds
-# in `tests/e2e/harness.rs`. So the first `SLOW` line lands while the stuck
-# journey's own deadline is still running, and repeats every period after that:
-# the log names the test long before anything gives up on it.
-#
-# `terminate-after` is 6 of those periods — 360 seconds — which is deliberately
-# *above* the 300-second ceiling the repository's own `pre-push` hook waits under
-# (`tests/e2e/hook.sh`, `tests/e2e/hook.bat`). A held push must always reach its
-# own refusal, which names the rendezvous nothing wrote, rather than be cut off
-# by the runner, which can only name the test. It is also above the whole macOS
-# suite's 270 seconds, so no single test can reach it by being slow.
+# `terminate-after` is 6 periods — 360s — above both that whole suite and the
+# 300-second ceiling the `pre-push` hook waits under (`tests/e2e/hook.sh`,
+# `hook.bat`), so a held push reaches its own refusal, which names the rendezvous
+# nothing wrote, rather than being cut off by the runner, which can only name the
+# test.
 slow-timeout = { period = "60s", terminate-after = 6 }
 # `fail` — what the recipes used to pass on the command line — suppresses the
 # `SLOW` lines above along with the passes, which would leave a hanging test
@@ -50,11 +42,9 @@ status-level = "slow"
 [profile.ci]
 status-level = "pass"
 
-# Declared on `default` and inherited by `ci`, so the cap above is in force on the
-# cross-platform legs too — where oversubscription costs the most. That is asked
-# of the runner rather than assumed: `cargo nextest show-config test-groups
-# --profile ci` reports `group: e2e (max threads = 4)` over the same 357 tests as
-# the same command without `--profile`.
+# Declared on `default` and inherited by `ci`, so the cap holds on the
+# cross-platform legs too. Asked of the runner rather than assumed: `cargo nextest
+# show-config test-groups --profile ci` reports `group: e2e (max threads = 4)`.
 [[profile.default.overrides]]
 filter = 'binary(e2e)'
 test-group = 'e2e'

@@ -135,17 +135,12 @@ _crate-format:
 _crate-lint:
     @cargo clippy --all-targets --locked --quiet -- -D warnings
 
-# How much a run reports as it goes is `.config/nextest.toml`'s to say, not a flag
-# repeated on three recipes: `status-level` lives in the profile there, so the CI
-# legs can raise it — by naming the `ci` profile — without a second spelling of
-# the suite here. Do not put one back: a `--status-level` on the command line
-# beats the profile, and `fail` — what these recipes used to pass — ranks below
-# `slow`, so it mutes both halves of the diagnostic at once, the per-test trail
-# and the `SLOW` line a hang produces, while `.config/nextest.toml` still appears
-# to ask for them. That flag is what bought 237 silent minutes out of run
-# 32538759791's Windows leg, and `NEXTEST_PROFILE` does not protect against it.
-# `smoke-real` below still states its own, because `--no-capture` and `all` are
-# what that journey *is* — and `all` outranks the profile rather than muting it.
+# How much a run reports as it goes is `.config/nextest.toml`'s to say. Do not put
+# a `--status-level` back on these recipes: a flag beats the profile, and `fail` —
+# what they used to pass — ranks below `slow`, so it mutes the `SLOW` line a hang
+# produces along with the passes, while the profile still appears to ask for it.
+# `NEXTEST_PROFILE` is no protection. `smoke-real` states its own because
+# `--no-capture` and `all` are what that journey *is*; `all` mutes nothing.
 
 # The offline tier: every binary but `smoke`, which needs a GitHub credential
 # and a scratch repository and is run by `just smoke-real` alone. Excluded by

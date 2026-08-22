@@ -79,26 +79,22 @@ jobs:
   # Prove the artifact builds and its tests pass on macOS and Windows (without
   # the coverage threshold, which is enforced on Linux).
   #
-  # Bounded, and diagnostic when it is not green. Run 32538759791's
-  # `cross (windows-latest)` leg printed `Starting 703 tests across 6 binaries`
-  # and then produced nothing for 237 minutes: GitHub's default limit is 360, and
-  # the leg reported no test as it passed, so that run and a 3-second one had
-  # byte-identical logs up to the last line.
+  # Bounded, and diagnostic when it is not green — run 32538759791's
+  # `cross (windows-latest)` leg was neither, and produced no test name in 237
+  # minutes.
   #
   # `NEXTEST_PROFILE` is the line that selects the reporting: `just check-cross`
   # reaches the suite through `just test-quick`, which names no profile, so the
   # environment is what picks one and `.config/nextest.toml`'s `ci` profile is
-  # what reports a line per test. That is the half that would have diagnosed the
-  # run above — whatever cuts the leg short, the last line names where it got to.
+  # what reports a line per test. Whatever cuts the leg short, the last line then
+  # names where it got to.
   #
-  # Two limits, because they buy different things. The step's is the one that
-  # bounds the hang: a step that times out leaves the job running, so the step
-  # after it still gets to say what was alive, which a job-level limit alone would
-  # kill along with everything else. That step takes 5m49s-8m00s on `main`, so 20
-  # is over twice its worst; the whole job takes 8m13s-12m38s, so 30 leaves the
-  # diagnostic room to run and still ends a wedged leg inside the hour.
-  #
-  # The job limit is half of what nickderobertis/onepipeline#99 asks for.
+  # Two limits, because they buy different things. The step's is what bounds the
+  # hang, and it is the step's rather than only the job's so that a timeout leaves
+  # the job alive for the step below to say what was still running. That step
+  # takes 5m49s-8m00s on `main` and the whole job 8m13s-12m38s, so each limit is
+  # over twice its worst. The job limit is half of what
+  # nickderobertis/onepipeline#99 asks for.
   cross:
     needs: changes
     if: needs.changes.outputs.crate == 'true'
