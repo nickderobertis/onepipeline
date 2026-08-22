@@ -72,7 +72,7 @@ if not defined ONEVCS_HOME (
 )
 call :sessionstream
 if errorlevel 1 (
-  call :fail "append-future-event runs in a tree under a session's run root; no ancestor of %CD% names a stream under %ONEVCS_HOME%\streams"
+  call :fail "append-future-event runs in a tree under a session's run root; no ancestor of %CD% names a stream under %ONEVCS_HOME%\streams. Run this verb from the session's own tree, under the ONEVCS_HOME that session was given"
   exit /b 64
 )
 echo {"from":"a newer onevcs"}>>"!stream!"

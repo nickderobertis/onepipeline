@@ -207,7 +207,7 @@ case "${1-}" in
     takes "$#" 1 "append-future-event takes no arguments"
     require_home
     if ! stream=$(session_stream); then
-      fail "append-future-event runs in a tree under a session's run root; no ancestor of $(pwd) names a stream under $ONEVCS_HOME/streams"
+      fail "append-future-event runs in a tree under a session's run root; no ancestor of $(pwd) names a stream under $ONEVCS_HOME/streams. Run this verb from the session's own tree, under the ONEVCS_HOME that session was given"
     fi
     if ! printf '%s\n' '{"from":"a newer onevcs"}' >>"$stream"; then
       broke "cannot append to $stream"
