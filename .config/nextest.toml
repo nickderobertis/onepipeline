@@ -14,13 +14,12 @@ e2e = { max-threads = 4 }
 # A test that blocks names itself, and is then ended. Without this it produces no
 # output and no failure — it simply stops, and only the CI job's own limit ends it.
 #
-# `period` sits between what a test here costs (the macOS leg of run 32538759791
-# was 731 tests in 270.422s) and the 120-second deadline `waited()` in
-# `tests/e2e/harness.rs` gives every poll, so the first `SLOW` line lands while
-# the stuck journey's own deadline is still running.
+# `period` sits between what a test here costs and the 120-second deadline
+# `waited()` in `tests/e2e/harness.rs` gives every poll, so the first `SLOW` line
+# lands while the stuck journey's own deadline is still running.
 #
-# `terminate-after` is 6 periods — 360s — above both that whole suite and the
-# 300-second ceiling the `pre-push` hook waits under (`tests/e2e/hook.sh`,
+# `terminate-after` is 6 periods — 360s — above both a whole run of this suite
+# and the 300-second ceiling the `pre-push` hook waits under (`tests/e2e/hook.sh`,
 # `hook.bat`), so a held push reaches its own refusal, which names the rendezvous
 # nothing wrote, rather than being cut off by the runner, which can only name the
 # test.
