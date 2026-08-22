@@ -11,7 +11,7 @@
 // model turns to produce, and `dispatch.rs` is where the real `oneagentgraph` binary is
 // driven instead. `harness.rs` carries the same suppression and the full rationale.
 
-use crate::harness::{agent, human, plan_of, World, NOTHING_DRIVING, QUEUED, REFUSED};
+use crate::harness::{agent, ended, human, plan_of, World, NOTHING_DRIVING, QUEUED, REFUSED};
 use serde_json::json;
 
 /// Start a run detached and wait until it is executing.
@@ -338,7 +338,7 @@ fn the_unread_line_names_the_kinds_waiting_so_a_question_is_not_buried() {
         .write_all(frames.as_bytes())
         .expect("the frames write");
     drop(stdin);
-    serving.wait().expect("the channel server ends");
+    ended(serving);
 
     world.until("every frame to reach the planner", |world| {
         world.events_of(&run, "planner-surface-queued").len() == 10
@@ -768,7 +768,7 @@ fn the_channel_server_relays_an_observer_frame_and_writes_back_the_verdict() {
 
     drop(stdin);
     world.release("build.go");
-    let _ = serving.wait();
+    ended(serving);
 }
 
 /// The whole seam, through a **real observer member and its judge side**: a live
@@ -1178,7 +1178,7 @@ fn a_commands_only_reply_reaches_the_command_path_while_the_observers_side_waits
 
     drop(stdin);
     world.release("build.go");
-    let _ = serving.wait();
+    ended(serving);
 }
 
 /// A live edit the **reconciler** rejects is the command path's too.
@@ -1279,7 +1279,7 @@ fn a_rejected_commands_only_reply_leaves_the_observers_side_waiting() {
 
     drop(stdin);
     world.release("slow.go");
-    let _ = serving.wait();
+    ended(serving);
 }
 
 /// Both halves, where the reconciler refuses the edits: the ruling is still
@@ -1375,7 +1375,7 @@ fn a_rejected_reply_carrying_both_halves_still_delivers_its_verdict() {
 
     drop(stdin);
     world.release("slow.go");
-    let _ = serving.wait();
+    ended(serving);
 }
 
 /// An envelope refused before it is routed is refused **whole**: neither half
@@ -1493,7 +1493,7 @@ fn a_reply_refused_before_routing_delivers_neither_half() {
 
     drop(stdin);
     world.release("build.go");
-    let _ = serving.wait();
+    ended(serving);
 }
 
 /// The same routing where the reply process is the one applying the edit.
@@ -1602,7 +1602,7 @@ fn a_commands_only_reply_applied_under_the_lock_leaves_the_observers_side_waitin
     );
 
     drop(stdin);
-    let _ = serving.wait();
+    ended(serving);
 }
 
 /// Two rulings written inside one poll are two rulings, and the reader takes
@@ -1674,7 +1674,7 @@ fn two_verdicts_written_at_once_are_delivered_one_per_question() {
 
     drop(stdin);
     world.release("build.go");
-    let _ = serving.wait();
+    ended(serving);
 }
 
 /// Edits still queued when the wait runs out do not hold the verdict beside
@@ -1757,7 +1757,7 @@ fn a_verdict_beside_edits_that_are_still_queued_is_delivered_anyway() {
 
     drop(stdin);
     world.release("build.go");
-    let _ = serving.wait();
+    ended(serving);
 }
 
 /// A run carried across the upgrade: the live edit an older build already left
@@ -1854,7 +1854,7 @@ fn a_live_edit_an_older_build_left_on_the_reply_queue_is_passed_over() {
 
     drop(stdin);
     world.release("build.go");
-    let _ = serving.wait();
+    ended(serving);
 }
 
 /// An envelope carrying both halves is delivered to both readers.
@@ -1925,7 +1925,7 @@ fn a_reply_carrying_both_halves_reaches_both_readers() {
 
     drop(stdin);
     world.release("build.go");
-    let _ = serving.wait();
+    ended(serving);
 }
 
 /// Both readers on the queue at once: neither loses a message and neither is
@@ -2017,7 +2017,7 @@ fn the_two_readers_contend_for_the_channel_without_losing_or_repeating_a_reply()
 
     drop(stdin);
     world.release("build.go");
-    let _ = serving.wait();
+    ended(serving);
 }
 
 #[test]
@@ -2524,7 +2524,7 @@ fn a_blocking_surface_holds_the_subtree_of_the_node_it_names_until_it_is_answere
 
     drop(stdin);
     world.release("keep.go");
-    let _ = serving.wait();
+    ended(serving);
 }
 
 /// A blocking surface that names no node holds no subtree — and is still what
@@ -2586,7 +2586,7 @@ fn a_blocking_surface_naming_no_node_pauses_nothing_and_still_awaits_the_planner
     assert_eq!(pending[0]["payload"]["unblocks"], json!([]));
 
     drop(stdin);
-    let _ = serving.wait();
+    ended(serving);
 }
 
 /// A frame naming a node the run does not have is refused, not queued.

@@ -76,8 +76,33 @@ jobs:
       - name: Committed generated files are up to date
         run: git diff --exit-code -- Cargo.lock package-lock.json
 
+  # llmlint: ignore-block[comments_earn_their_place] run 32538759791 and the `main`
+  # timings below are why this job has the shape it has. The leg that burned 237
+  # minutes naming no test is what the two limits and the per-test reporting were
+  # added to end, and the sampled ranges are what say 20 and 30 are over twice a
+  # green leg's worst rather than numbers somebody picked. Neither is recoverable
+  # from the keys beneath them, and without them a reader cannot tell a bound that
+  # was measured from one that was guessed.
   # Prove the artifact builds and its tests pass on macOS and Windows (without
   # the coverage threshold, which is enforced on Linux).
+  #
+  # Bounded, and diagnostic when it is not green — run 32538759791's
+  # `cross (windows-latest)` leg was neither, and produced no test name in 237
+  # minutes.
+  #
+  # `NEXTEST_PROFILE` is the line that selects the reporting: `just check-cross`
+  # reaches the suite through `just test-quick`, which names no profile, so the
+  # environment is what picks one and `.config/nextest.toml`'s `ci` profile is
+  # what reports a line per test. Whatever cuts the leg short, the last line then
+  # names where it got to.
+  #
+  # Two limits, because they buy different things. The step's is what bounds the
+  # hang, and it is the step's rather than only the job's so that a timeout leaves
+  # the job alive for the step below to say what was still running. That step
+  # takes 5m49s-8m00s on `main` and the whole job 8m13s-12m38s, so each limit is
+  # over twice its worst. The job limit is half of what
+  # nickderobertis/onepipeline#99 asks for.
+  # llmlint: ignore-end[comments_earn_their_place]
   cross:
     needs: changes
     if: needs.changes.outputs.crate == 'true'
@@ -86,6 +111,9 @@ jobs:
       matrix:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      NEXTEST_PROFILE: ci
     defaults:
       run:
         shell: bash
@@ -101,7 +129,23 @@ jobs:
       - name: Bootstrap
         run: just bootstrap
       - name: Quality gate (cross-platform legs)
+        timeout-minutes: 20
         run: just check-cross
+      # A leg that stops without a verdict stops holding something — a test
+      # process, or a child of one that outlived it — and on Windows there are no
+      # process groups to make that visible afterwards, so it is read here while
+      # it is still true.
+      - name: What was still running when it stopped
+        if: failure() || cancelled()
+        continue-on-error: true
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            powershell -NoProfile -Command \
+              "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,CommandLine | Format-Table -AutoSize -Wrap" \
+              || tasklist /v
+          else
+            ps -ef
+          fi
 
   # The declared MSRV is a promise to consumers, so prove it rather than document
   # it: a floor that only lives in Cargo.toml drifts the first time a dependency

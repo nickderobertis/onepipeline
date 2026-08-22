@@ -25,9 +25,9 @@
 //! guarded by the run's ownership lock; everything else reads.
 //!
 //! Composition is by subprocess. The agents come from `oneagentgraph` and the
-//! clones, gates, and change requests from `onevcs`, each reached through its
-//! own CLI — so a build of either that still refuses will make the dispatches
-//! this crate starts refuse too.
+//! clones, publications, and change requests from `onevcs`, each reached
+//! through its own CLI — so a build of either that still refuses will make the
+//! dispatches this crate starts refuse too.
 //!
 //! Where the contract could not be compiled exactly as written, the code
 //! compiles against what does exist and the divergence is recorded in

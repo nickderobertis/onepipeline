@@ -13,7 +13,7 @@ use crate::harness::{plan_of, World};
 #[test]
 fn live_holders_refuse_unless_acknowledged_and_stale_holders_do_not_refuse() {
     let world = World::new("concurrent");
-    let _repository = world.repository("local-direct", &["true"]);
+    let _repository = world.repository("local-direct", &[]);
     world.script("build.wait", "hold");
 
     let lifecycle = || {

@@ -135,6 +135,13 @@ _crate-format:
 _crate-lint:
     @cargo clippy --all-targets --locked --quiet -- -D warnings
 
+# How much a run reports as it goes is `.config/nextest.toml`'s to say. Do not put
+# a `--status-level` back on these recipes: a flag beats the profile, and `fail` —
+# what they used to pass — ranks below `slow`, so it mutes the `SLOW` line a hang
+# produces along with the passes, while the profile still appears to ask for it.
+# `NEXTEST_PROFILE` is no protection. `smoke-real` states its own because
+# `--no-capture` and `all` are what that journey *is*; `all` mutes nothing.
+
 # The offline tier: every binary but `smoke`, which needs a GitHub credential
 # and a scratch repository and is run by `just smoke-real` alone. Excluded by
 # name rather than by `#[ignore]`, so the journey is never a skipped test.
@@ -145,14 +152,14 @@ offline-tiers := "not binary(smoke)"
 # The crate's offline suite (unit + contract + e2e) with coverage enforced.
 _crate-test:
     @cargo llvm-cov nextest --locked --fail-under-lines 95 \
-      -E '{{offline-tiers}}' --status-level fail --final-status-level fail \
+      -E '{{offline-tiers}}' --final-status-level fail \
       || { echo "tests failed, or coverage fell below 95% — cover the lines the table above counts as missed" >&2; exit 1; }
 
 # Coverage instrumentation is measured on Linux only, so the cross-platform CI
 # legs run the same suite through this instead of `test`.
 # The offline suite without coverage instrumentation.
 test-quick:
-    @cargo nextest run --locked -E '{{offline-tiers}}' --status-level fail
+    @cargo nextest run --locked -E '{{offline-tiers}}'
 
 # The one journey that is not offline: the real `onevcs`, real git against a real
 # remote, and the real GitHub API opening and merging a pull request on a scratch
@@ -171,7 +178,7 @@ smoke-real:
 # Drives the compiled binary — never an in-process `main()`.
 # The end-to-end binary journeys in isolation (also run by `test`/`check`).
 test-e2e:
-    @cargo nextest run --locked -E 'binary(e2e)' --status-level fail
+    @cargo nextest run --locked -E 'binary(e2e)'
 
 # Build the crate's docs with warnings denied.
 _crate-doc:

@@ -12,7 +12,7 @@
 // `dispatch.rs` is where the real binary is driven instead. `harness.rs` carries the same
 // suppression and the full rationale.
 
-use crate::harness::{agent, gate_script, human, plan_of, reaped_pid, Run, World};
+use crate::harness::{agent, human, plan_of, reaped_pid, Run, World};
 
 use crate::harness::lifecycle;
 use onepipeline::event::{Envelope, Source};
@@ -73,7 +73,7 @@ fn settled(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
 #[test]
 fn monitor_renders_all_three_streams_under_their_own_typed_ids() {
     let world = World::new("views-monitor");
-    world.repository("local-direct", &["true"]);
+    world.repository("local-direct", &[]);
     world.script("service.work", "the worker wrote this\n");
     let run = settled(&world, "watched", vec![lifecycle("service", &[])]);
 
@@ -275,7 +275,7 @@ fn an_observer_this_host_cannot_ask_about_is_never_reported_dead() {
 #[test]
 fn goals_says_what_each_run_is_for_and_which_identities_it_holds() {
     let world = World::new("views-goals");
-    world.repository("local-direct", &["true"]);
+    world.repository("local-direct", &[]);
     let run = settled(&world, "purposeful", vec![lifecycle("service", &[])]);
 
     let goals = world.run(&["goals"]);
@@ -384,8 +384,12 @@ fn telemetry_buckets_sum_exactly_to_the_wall_clock() {
     assert_eq!(document["dispatches"], 2);
     assert_eq!(document["settled_done"], 2);
 
-    // Eight buckets, and the two nothing in this stack measures are served
-    // absent rather than as a zero that reads as measured.
+    // Eight buckets, and the three nothing in this stack measures are served
+    // absent rather than as a zero that reads as measured. `gate` is one of them
+    // now: no library this crate composes runs a verification tier of its own, so
+    // there is no such stretch to charge — what verifies a change is the
+    // repository's own merge path, and the wall time that costs is the
+    // publication's.
     let named: Vec<&str> = document["buckets"]
         .as_array()
         .expect("buckets")
@@ -406,7 +410,7 @@ fn telemetry_buckets_sum_exactly_to_the_wall_clock() {
         ],
         "{document}"
     );
-    for absent in ["judge", "llmlint"] {
+    for absent in ["judge", "llmlint", "gate"] {
         let bucket = document["buckets"]
             .as_array()
             .expect("buckets")
@@ -469,13 +473,20 @@ fn telemetry_reports_what_each_party_spent() {
         .out_has("usage total");
 }
 
-/// A gate run and a lock wait are the two stretches an operator most needs
+/// A publication and a lock wait are the two stretches an operator most needs
 /// answered apart from the agent's — and a lifecycle node spends real time in
 /// both.
 ///
-/// The **gate** is held here, because it is the one a journey can hold from
-/// outside the publication: `onevcs` runs the repository's own command, and this
-/// one waits for a file. The lock wait cannot be, and not for want of a hold:
+/// The **publication** is held here, at the one point a journey can hold it from
+/// outside: git runs the repository's own `pre-push` hook at the publishing push,
+/// and this one waits for a file. That is also where the `gate` bucket went. No
+/// library this crate composes runs a verification tier of its own any more — the
+/// repository's merge path is the verifier — so nothing measures a gate, and the
+/// bucket is served absent, which is what the contract says of a bucket nothing in
+/// the stack measures. The stretch itself is not lost: it is the publication
+/// waiting on its merge path, which is what it now is.
+///
+/// The lock wait cannot be held, and not for want of trying:
 /// the sibling emits `lock-wait` *after* it has waited, carrying the elapsed
 /// seconds in its payload, and then emits `lock-acquired` immediately — so the
 /// interval this crate measures between the two is the cost of writing two
@@ -485,35 +496,33 @@ fn telemetry_reports_what_each_party_spent() {
 /// still served, and it is still not the agent's; what it is not is a
 /// measurement. Recorded as divergence 16 in `docs/contract-divergences.md`.
 #[test]
-fn telemetry_separates_gate_and_lock_time_from_agent_time() {
-    let world = World::new("views-gatetime");
-    let go = world.fakes.join("gate.go");
-    // The gate is held open for a measurable span, so its bucket is a real
-    // duration on the clock rather than a bucket that merely exists.
-    let gate = gate_script(&world, &["wait-for", &go.to_string_lossy()]);
-    world.repository(
-        "local-direct",
-        &gate.iter().map(String::as_str).collect::<Vec<_>>(),
-    );
+fn telemetry_separates_publication_and_lock_time_from_agent_time() {
+    let world = World::new("views-publicationtime");
+    let go = world.fakes.join("push.go");
+    // The publishing push is held open for a measurable span, so its bucket is a
+    // real duration on the clock rather than a bucket that merely exists. Declared
+    // after the world, so its release runs before the world takes the tree away.
+    let held = crate::harness::held_publication(&world, &go);
+    world.repository("local-direct", &held.argv());
     world.script("service.work", "the worker wrote this\n");
-    let path = world.plan("gated", &plan_of("gated", vec![lifecycle("service", &[])]));
+    let path = world.plan("held", &plan_of("held", vec![lifecycle("service", &[])]));
     world
         .run(&["start", &path.to_string_lossy(), "--detach"])
         .exited(0);
 
-    world.until("the gate to start", |world| {
-        !world.events_of("gated", "gate-started").is_empty()
+    world.until("the publication to reach its merge path", |world| {
+        !world.events_of("held", "merge-queued").is_empty()
     });
     let since = std::time::Instant::now();
-    world.until("the gate to last a measurable stretch", |_| {
+    world.until("the merge path to last a measurable stretch", |_| {
         since.elapsed() >= HELD
     });
-    world.release("gate.go");
+    held.release();
     world.until("the run to settle", |world| {
-        world.run_file("gated", "result.json").is_file()
+        world.run_file("held", "result.json").is_file()
     });
 
-    let document = world.run(&["telemetry", "gated"]).json();
+    let document = world.run(&["telemetry", "held"]).json();
     let span = |name: &str| {
         document["buckets"]
             .as_array()
@@ -526,21 +535,37 @@ fn telemetry_separates_gate_and_lock_time_from_agent_time() {
     };
     // The held stretch is its own bucket, and it is not inside the agent's: the
     // whole point of the eight-way split.
-    let gate = span("gate").unwrap_or_else(|| panic!("gate is unmeasured: {document}"));
+    let publication = span("publication_wait")
+        .unwrap_or_else(|| panic!("publication_wait is unmeasured: {document}"));
     assert!(
-        gate >= FLOOR,
-        "gate measured {gate}ms of a stretch held for {}ms: {document}",
+        publication >= FLOOR,
+        "publication_wait measured {publication}ms of a stretch held for {}ms: {document}",
         HELD.as_millis()
     );
     assert!(
         span("agent").is_some(),
         "the agent bucket is unmeasured: {document}"
     );
+    // And the bucket that used to hold it is served with no measurement on it:
+    // this run published through a real merge path and no gate ran, because
+    // nothing in the stack runs one. A number here would be a stretch nothing
+    // spent.
+    let bucket = document["buckets"]
+        .as_array()
+        .expect("buckets")
+        .iter()
+        .find(|bucket| bucket["name"] == "gate")
+        .unwrap_or_else(|| panic!("the gate bucket is not served at all: {document}"));
+    assert!(
+        bucket.get("ms").is_none(),
+        "a run whose verification was its repository's own merge path charged a gate: \
+         {document}"
+    );
     // And the wait the sibling did do is on its own record, as the number a
     // reader would need to charge it: this is the datum the bucket below is
     // missing, and it is deterministic — the payload either carries the elapsed
     // seconds or it does not.
-    let waited = &world.events_of("gated", "lock-wait")[0];
+    let waited = &world.events_of("held", "lock-wait")[0];
     assert!(
         waited["payload"]["elapsed"].is_number(),
         "the sibling recorded no elapsed lock wait to charge: {waited}"
@@ -563,12 +588,10 @@ fn telemetry_separates_gate_and_lock_time_from_agent_time() {
          appends — if the wait is genuinely charged now, hold this journey to the wait: \
          {document}"
     );
-    for name in ["publication_wait", "setup"] {
-        assert!(
-            span(name).is_some(),
-            "{name} is unmeasured for a run that published: {document}"
-        );
-    }
+    assert!(
+        span("setup").is_some(),
+        "setup is unmeasured for a run that published: {document}"
+    );
     assert_eq!(
         measured(&document),
         document["wall_ms"].as_u64().expect("a wall clock"),
@@ -875,7 +898,7 @@ fn a_retained_report_carrying_no_transcript_says_so() {
 #[test]
 fn a_dispatch_that_has_named_no_tool_reports_its_count_rather_than_a_guess() {
     let world = World::new("views-nameless");
-    world.repository("local-direct", &["true"]);
+    world.repository("local-direct", &[]);
     world.script("service.wait", "hold");
     let path = world.plan(
         "nameless",
@@ -1969,7 +1992,7 @@ fn a_view_of_a_run_with_no_events_still_renders() {
 #[test]
 fn a_ready_node_waiting_on_a_held_workspace_is_told_apart_from_one_merely_queued() {
     let world = World::new("views-ready-held");
-    world.repository("local-direct", &["true"]);
+    world.repository("local-direct", &[]);
     world.script("service.wait", "hold");
     // One at a time, so the second lifecycle node stays ready while the first
     // holds the repository's workspace open.
@@ -2069,7 +2092,7 @@ fn idle_repository(world: &World, alias: &str) {
 #[test]
 fn a_workspace_this_host_cannot_ask_about_is_reported_rather_than_read_as_free() {
     let world = World::new("views-unknown-repo");
-    world.repository("local-direct", &["true"]);
+    world.repository("local-direct", &[]);
     world.script("service.wait", "hold");
     let mut plan = plan_of(
         "unknownrepo",
@@ -2118,7 +2141,7 @@ fn a_workspace_this_host_cannot_ask_about_is_reported_rather_than_read_as_free()
 #[test]
 fn a_ready_node_whose_repositorys_only_session_has_closed_reads_as_queued() {
     let world = World::new("views-ready-closed");
-    world.repository("local-direct", &["true"]);
+    world.repository("local-direct", &[]);
     world.script("service.work", "the worker wrote this\n");
     // One whole lifecycle first, so the repository has a session record and that
     // session is closed.

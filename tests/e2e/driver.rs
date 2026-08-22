@@ -2692,11 +2692,15 @@ fn an_adopted_runs_worker_can_ask_its_manager() {
     );
 }
 
+// Reached only from the in-flight adoption journey below, which is `#[cfg(unix)]`
+// for the reason stated there.
+
 /// The prefix every branch those records name carries.
 ///
 /// One prefix, so the journey can tell what it wrote from what the run did
 /// without knowing which malformation is which — and so a line of `results`
 /// carrying any of them fails the assertion that reads it.
+#[cfg(unix)]
 const FORGED: &str = "onevcs/forged";
 
 /// A branch name carrying what reads as another node's line in `results`.
@@ -2704,9 +2708,11 @@ const FORGED: &str = "onevcs/forged";
 /// The forgery is the point: `results` is read line by line, so a value that
 /// carries a newline would put a record about a node nobody dispatched into a
 /// view a manager reads.
+#[cfg(unix)]
 const FORGED_LINE: &str = "onevcs/forged-line\n  audit                    running";
 
 /// The branch a record about a *different* session names.
+#[cfg(unix)]
 const FORGED_ELSEWHERE: &str = "onevcs/forged-elsewhere";
 
 /// What the dispatch puts on its session's own stream: records the merged
@@ -2718,6 +2724,7 @@ const FORGED_ELSEWHERE: &str = "onevcs/forged-elsewhere";
 /// session record does. Each is written after the real record, so a reader that
 /// took any of them would take it over the real one and every assertion in the
 /// journey would then be about the wrong session.
+#[cfg(unix)]
 fn unusable_session_records() -> String {
     json!([
         {"branch": FORGED_LINE},
@@ -2753,7 +2760,7 @@ fn unusable_session_records() -> String {
 /// Adopting a run that had a dispatch in flight, which is what `adopt` is for.
 ///
 /// The driver dies mid-dispatch and the work does not: `onevcs` commits the
-/// worktree onto the session's branch before it gates, so the branch holds what
+/// worktree onto the session's branch before it pushes, so the branch holds what
 /// the worker had done and the session is the only thing that knows where.
 /// Adoption used to drop the record and nothing else, which left that branch
 /// unreferenced and unnamed anywhere a manager looks — so the branch is named
@@ -2764,13 +2771,25 @@ fn unusable_session_records() -> String {
 /// The second half is the reader's boundary: the same run's stream carries
 /// records nothing can be acted on, and none of them may take the real one's
 /// place. See [`unusable_session_records`].
+///
+/// **Unix-only for what it asserts on:** catching a dispatch in flight means
+/// killing the driver mid-push with `harness::end_process`, which is `SIGKILL`
+/// and has no Windows spelling here — and what the journey then reads is what
+/// that kill left behind. The hold is
+/// [`harness::abandonable_hook_script`](crate::harness::abandonable_hook_script)
+/// rather than the releasing one for the same reason: a release on drop would let
+/// the push through before the adoption has read the work the killed dispatch
+/// stranded. Windows gives up this journey alone; `main` ran it there over
+/// `onevcs`'s *gate*, a direct child of the killed process that never reached a
+/// push.
+#[cfg(unix)]
 #[test]
 fn adopting_a_run_whose_dispatch_was_in_flight_leaves_that_dispatchs_work_reachable() {
     let world = World::new("driver-adopt-inflight");
-    // A gate this journey holds, which is how a dispatch is caught in flight
-    // with its work already committed.
-    let go = world.fakes.join("gate.go");
-    let held = crate::harness::gate_script(&world, &["wait-for", &go.to_string_lossy()]);
+    // A `pre-push` hook this journey holds, which is how a dispatch is caught in
+    // flight with its work already committed.
+    let go = world.fakes.join("push.go");
+    let held = crate::harness::abandonable_hook_script(&world, &go);
     let repo = world.repository(
         "local-direct",
         &held.iter().map(String::as_str).collect::<Vec<_>>(),
@@ -2795,11 +2814,11 @@ fn adopting_a_run_whose_dispatch_was_in_flight_leaves_that_dispatchs_work_reacha
         .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("the run's first driver starts");
-    world.until("the dispatch to reach its gate", |world| {
+    world.until("the dispatch to reach its merge path", |world| {
         world
             .journal(&run)
             .iter()
-            .any(|event| event["source"] == "vcs" && event["kind"] == "gate-started")
+            .any(|event| event["source"] == "vcs" && event["kind"] == "merge-queued")
     });
     let abandoned = world
         .events_of(&run, "session-opened")
@@ -2821,9 +2840,9 @@ fn adopting_a_run_whose_dispatch_was_in_flight_leaves_that_dispatchs_work_reacha
         world.run(&["status", &run]).stdout.contains("DRIVER DEAD")
     });
 
-    // The gate the dead driver was held at, released so the adoption's own
+    // The merge path the dead driver was held at, released so the adoption's own
     // publication can finish.
-    world.release("gate.go");
+    world.release("push.go");
 
     let adopted = world.run(&["adopt", &run]);
     adopted.exited(0);

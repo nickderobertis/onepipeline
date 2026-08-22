@@ -6,9 +6,9 @@
 //! rather than spawning it, so there is no subprocess boundary to stand in at —
 //! every journey below drives the real repository side, over a real bare-
 //! repository origin on disk, and what a journey states instead is the world that
-//! library reads: the repository's rules, its gate command, and — at `onevcs`'s
-//! own `ONEVCS_GH` override — what GitHub does with the change request it is
-//! handed.
+//! library reads: the repository's rules, the `pre-push` hook its merge path
+//! verifies a publishing push with, and — at `onevcs`'s own `ONEVCS_GH` override
+//! — what GitHub does with the change request it is handed.
 //!
 //! Nothing *inside* `onepipeline` is substituted either: it is driven as a
 //! compiled subprocess.
@@ -100,6 +100,17 @@ pub const STALL_AFTER_ENV: &str = "ONEPIPELINE_STALL_AFTER_SECONDS";
 /// because two things set it — every command this world runs, at a value above
 /// its own patience, and the journey that proves an out-of-range one is refused.
 pub const RENDEZVOUS_SECONDS_ENV: &str = "ONEPIPELINE_FAKE_RENDEZVOUS_SECONDS";
+
+/// The variable that says how long the repository's own `pre-push` hook waits
+/// for its rendezvous before it refuses the push.
+///
+/// The hook's own bound, and `hook.sh` says why it has one and why it is 300
+/// seconds. Named here because one journey sets it —
+/// [`a_held_push_nothing_releases_expires_rather_than_waiting_out_the_job`],
+/// which cannot wait the default out — and every other journey runs on the
+/// default, so a hold that outlives its journey is refused rather than left
+/// waiting.
+const HOOK_WAIT_SECONDS_ENV: &str = "ONEPIPELINE_FAKE_HOOK_WAIT_SECONDS";
 
 /// How long a launch given a one-second backstop may take before the override
 /// has to be presumed inert.
@@ -484,10 +495,25 @@ impl World {
     ///
     /// `publication` is the policy — `local-direct` reaches the base with git
     /// alone and asks no host for anything; a `change-*` policy opens a change
-    /// request through [`ONEVCS_GH`](World::cmd)'s stand-in. `gate` is the
-    /// command that verifies the branch, which is where a journey states a gate
-    /// that rejects or one that holds.
-    pub fn repository(&self, publication: &str, gate: &[&str]) -> Repository {
+    /// request through [`ONEVCS_GH`](World::cmd)'s stand-in.
+    ///
+    /// `pre_push` is the repository's **own `pre-push` hook**, which is what
+    /// verifies a local-publishing change now that nothing in this stack runs a
+    /// gate of its own: `onevcs` names none, and a remote-publishing identity is
+    /// verified by the host's required checks instead. `&[]` installs no hook,
+    /// which is a repository whose merge path lets every publishing push
+    /// through; a journey that needs verification to *refuse* states the argv
+    /// [`hook_script`] writes here, and one that needs it to *hold* the push
+    /// states [`held_publication`]'s, which is let through however that journey
+    /// ends. A journey that means to *abandon* a hold reaches for
+    /// [`abandonable_hook_script`], which exists on Unix alone.
+    ///
+    /// The hook is installed through `core.hooksPath` on the checkout rather
+    /// than as tracked content, because a file in the tree would be published by
+    /// the very journeys that install it. `onevcs` carries that setting into the
+    /// clone a session cuts — `git clone` copies no repository-local config — so
+    /// the hook git runs at the publishing push is this one.
+    pub fn repository(&self, publication: &str, pre_push: &[&str]) -> Repository {
         let origin = self.root.join("origin.git");
         let checkout = self.root.join("service");
         let home = self.onevcs_home();
@@ -510,15 +536,28 @@ impl World {
         );
         git(self, &checkout, &["push", "-u", "origin", "main"]);
 
+        // Version 3, which is the shape with no `gate:` in it at all: what
+        // verifies a change is the repository's own merge path, so the rules file
+        // says only how the change is published and whether it needs approving.
         std::fs::write(
             home.join("rules.yml"),
             format!(
-                "version: 2\nrules: []\ndefault:\n  publication: {publication}\n  approvals: \
-                 none\n  gate:\n    command: {}\n",
-                serde_json::json!(gate)
+                "version: 3\nrules: []\ndefault:\n  publication: {publication}\n  approvals: \
+                 none\n"
             ),
         )
         .expect("the rules file is written");
+
+        if !pre_push.is_empty() {
+            let hooks = hooks_dir(self);
+            std::fs::create_dir_all(&hooks).expect("a hooks directory");
+            install_hook(&hooks.join("pre-push"), pre_push);
+            git(
+                self,
+                &checkout,
+                &["config", "core.hooksPath", &hooks.to_string_lossy()],
+            );
+        }
 
         // A hosted origin, so the identity resolves to a host slug and a
         // `change-*` policy has somewhere to open a change request. It names the
@@ -575,13 +614,18 @@ impl World {
     /// [`agentgraph_cmd`](World::agentgraph_cmd)'s callers must.
     ///
     /// The host stand-in [`cmd`](World::cmd) wires up is **removed** here, and
-    /// that removal is the whole difference. Left in place it would point the
-    /// one credentialled journey in this repository at a program that answers
-    /// every `gh` call out of a scratch directory — a smoke that passes without
-    /// having talked to GitHub, which is the defect that tier exists to remove.
+    /// so are the check-polling bounds it shortens. Left in place, the first
+    /// would point the one credentialled journey in this repository at a program
+    /// that answers every `gh` call out of a scratch directory — a smoke that
+    /// passes without having talked to GitHub, which is the defect that tier
+    /// exists to remove. The second would hold a real host to a two-second
+    /// answer: behind the stand-in there is nothing to wait for, and against
+    /// GitHub there is, so this tier waits on the sibling's own defaults.
     pub fn real_cmd(&self, args: &[&str]) -> Command {
         let mut command = self.agentgraph_cmd(args);
         command.env_remove("ONEVCS_GH");
+        command.env_remove("ONEVCS_CHECKS_POLL_SECONDS");
+        command.env_remove("ONEVCS_CHECKS_TIMEOUT_SECONDS");
         command
     }
 
@@ -726,6 +770,72 @@ impl World {
         let dir = self.root.join("empty-path");
         std::fs::create_dir_all(&dir).expect("a directory with nothing in it");
         dir
+    }
+
+    /// A `PATH` holding **only** what a dispatch resolves by name, and nothing
+    /// else this host happens to have installed.
+    ///
+    /// Between [`empty_path`](Self::empty_path) — where a dispatch is refused
+    /// because it cannot ask when its own process started — and the inherited
+    /// `PATH`, where every program an operator installed is in reach. A journey
+    /// whose premise is that some *particular* program cannot be resolved needs
+    /// this one: it has to name what the launch may find rather than what it may
+    /// not, because the set it may not find is everything on the host and no
+    /// journey can enumerate that.
+    ///
+    /// On Unix that set is `ps`, which `sys::process_start_token` asks when a
+    /// dispatch is registered, delegated to the real one by absolute path.
+    /// Windows asks the process itself, so there is nothing to hold there and
+    /// this is an empty directory.
+    #[cfg(unix)]
+    pub fn path_with_only_what_a_dispatch_resolves(&self) -> PathBuf {
+        self.path_with_ps("only-ps", &format!("exec {} \"$@\"", real_ps().display()))
+    }
+
+    /// A `PATH` holding only what a dispatch resolves by name — which on Windows
+    /// is nothing, because the start token is read off the process itself.
+    #[cfg(windows)]
+    pub fn path_with_only_what_a_dispatch_resolves(&self) -> PathBuf {
+        self.empty_path()
+    }
+
+    /// Where `name` resolves on the `PATH` a built command carries, if it does.
+    ///
+    /// For a journey to state its premise as a *checked fact* rather than as a
+    /// comment. A fall-through journey needs a candidate the launch cannot
+    /// resolve, and left to the inherited `PATH` that premise is the host's to
+    /// decide: with `codex` installed, oneharness resolved it, ran it, and the
+    /// chain never advanced — so the journey failed twenty seconds later over an
+    /// empty event list rather than at the premise it had lost.
+    ///
+    /// The command's own `PATH` and not this process's, because that is the one
+    /// deciding. The suffixes are tried on Windows only, where a bare name never
+    /// names a program: what this asks is whether the name is reachable *at all*,
+    /// so it errs towards finding one.
+    ///
+    /// A candidate has to be one the host would actually *start*, which on Unix is
+    /// the executable bit and not mere presence — a `codex` on the `PATH` without
+    /// it is a file `execvp` skips, so reporting it as resolved would fail the
+    /// journey below for a premise it still had.
+    pub fn resolved_on(command: &Command, name: &str) -> Option<PathBuf> {
+        let path = command
+            .get_envs()
+            .find(|(key, _)| *key == "PATH")
+            .and_then(|(_, value)| value)
+            .map(std::ffi::OsString::from)
+            .unwrap_or_else(|| std::env::var_os("PATH").unwrap_or_default());
+        let suffixes: &[&str] = if cfg!(windows) {
+            &["", ".exe", ".cmd", ".bat", ".com"]
+        } else {
+            &[""]
+        };
+        std::env::split_paths(&path)
+            .flat_map(|dir| {
+                suffixes
+                    .iter()
+                    .map(move |suffix| dir.join(format!("{name}{suffix}")))
+            })
+            .find(|candidate| runnable(candidate))
     }
 
     /// A `PATH` whose `ps` runs and **fails**, for the journeys about what a
@@ -1323,6 +1433,30 @@ impl World {
     }
 }
 
+/// Wait for a child this journey spawned with piped streams to end, draining
+/// them as it goes.
+///
+/// `Child::wait` on a child whose `stdout` or `stderr` is a pipe nothing is
+/// reading is not bounded by that child at all: it is bounded by the OS pipe
+/// buffer. The child blocks writing once the buffer is full, the waiter blocks
+/// waiting for a child that will never exit, and neither ever moves again.
+///
+/// The size of that buffer is the whole reason this is a harness function rather
+/// than a call spelled at each site. Rust's standard library creates its
+/// anonymous pipes with an 8192-byte buffer on Windows and inherits the kernel's
+/// 65536 on Linux and macOS, so a server that writes 16 KiB passes on both
+/// platforms this suite is developed on and deadlocks on the third — silently,
+/// with no test named, which is exactly the failure the `cross (windows-latest)`
+/// leg cannot afford to produce again. `wait_with_output` reads both streams
+/// while it waits, so what bounds the wait is the child's own exit and nothing
+/// else.
+///
+/// What it wrote is discarded: every caller here has already read what it needed
+/// off a stream it took, or is ending a server whose output it never claimed.
+pub fn ended(child: std::process::Child) {
+    child.wait_with_output().expect("the child ends");
+}
+
 /// Poll until `ready` holds, reporting whether it did before the deadline.
 ///
 /// Every wait in this suite is on work another process or thread is doing, so
@@ -1769,6 +1903,17 @@ fn held_dir() -> PathBuf {
 
 /// Build one package's binaries into the target directory this test's own binary
 /// came out of, and return the per-process directory they are held in.
+///
+/// The one wait in this harness that is deliberately left unbounded. Every test
+/// process needing a double runs this, so several of them queue on cargo's lock
+/// over the shared target directory and cargo says so — `Blocking waiting for
+/// file lock on build directory` — and then waits as long as it takes. A
+/// deadline here would end whichever process drew the short straw, on a host
+/// that was working the whole time, and it would do it more often the more
+/// parallel the runner is. What bounds it instead is the runner: `slow-timeout`
+/// in `.config/nextest.toml` names the test that is waiting and then ends it, so
+/// a lock nothing is going to release reads as one named test rather than as a
+/// suite that stopped.
 fn build(selection: &[&str]) -> PathBuf {
     let debug = binary()
         .parent()
@@ -1977,40 +2122,240 @@ fn a_double_is_placed_whole_or_not_at_all() {
     let _ = std::fs::remove_dir_all(&dir);
 } // llmlint: ignore-end[tests_mirror_real_usage]
 
-/// A repository gate command, written into this world as a script.
+/// A verb the repository's own `pre-push` hook answers **and returns from on its
+/// own**.
+///
+/// A closed set rather than the free argv this used to be handed: the hook's third
+/// verb, `wait-for`, blocks until something writes its rendezvous, and a journey
+/// that means to hold a push states [`held_publication`] or
+/// [`abandonable_hook_script`] instead of spelling one.
+pub enum ReturningHookVerb {
+    /// Leave a file where the session's stream directory was, so the next read of
+    /// that stream meets a broken store rather than a missing one.
+    BreakStreams,
+    /// Append a line to this session's stream that no build of `onevcs` can read.
+    AppendFutureEvent,
+}
+
+impl ReturningHookVerb {
+    /// The word both halves of the hook dispatch on.
+    fn word(&self) -> &'static str {
+        match self {
+            Self::BreakStreams => "break-streams",
+            Self::AppendFutureEvent => "append-future-event",
+        }
+    }
+}
+
+/// A repository's own `pre-push` hook running `verb`, written into this world as
+/// a script and handed back as the argv that runs it.
+///
+/// Available on every platform, because every verb reachable through here runs
+/// and returns on its own: git waits for it, the push it declines or lets through
+/// is over by the time the journey looks, and nothing is left holding a pipe.
+pub fn hook_script(world: &World, verb: &ReturningHookVerb) -> Vec<String> {
+    hook_argv(world, &[verb.word()])
+}
+
+/// A `pre-push` hook **holding** the publishing push, and the release that ends
+/// the hold however the journey ends.
+///
+/// [`Drop`] covers abandonment — the rendezvous is written on the assertion that
+/// failed, the [`World::until`] that ran out, the panic that unwound past both —
+/// and the ceiling `hook.sh` states covers the deadlock it cannot reach, a
+/// journey that waits for the publication to finish before its own scope ends.
+/// Between them a held push cannot outlive its journey on any platform.
+///
+/// Declare it *after* the [`World`], so it drops *before* the world removes the
+/// tree the rendezvous lives in. Holding the value is not optional and the
+/// compiler says so: [`argv`](Self::argv) borrows from `self`, so a temporary
+/// cannot reach [`World::repository`].
+pub struct HeldPublication {
+    argv: Vec<String>,
+    rendezvous: PathBuf,
+}
+
+impl HeldPublication {
+    /// The argv [`World::repository`] installs as the repository's own hook.
+    pub fn argv(&self) -> Vec<&str> {
+        self.argv.iter().map(String::as_str).collect()
+    }
+
+    /// Let the held push through, now, because this journey has seen what it
+    /// needed to while the publication was still running.
+    pub fn release(&self) {
+        std::fs::write(&self.rendezvous, "go").expect("the held publication is released");
+    }
+}
+
+impl Drop for HeldPublication {
+    fn drop(&mut self) {
+        // Unconditional, and best-effort: a journey that already released writes
+        // the same bytes twice, and one that panicked before releasing is exactly
+        // the case this exists for. Failure here means the world's tree is already
+        // gone, which means so is the hook.
+        let _ = std::fs::write(&self.rendezvous, "go");
+    }
+}
+
+/// A merge path that holds the publishing push until this journey lets it
+/// through. See [`HeldPublication`].
+pub fn held_publication(world: &World, rendezvous: &Path) -> HeldPublication {
+    HeldPublication {
+        argv: hook_argv(world, &["wait-for", &rendezvous.to_string_lossy()]),
+        rendezvous: rendezvous.to_path_buf(),
+    }
+}
+
+/// An abandoned hold still lets the push through.
+///
+/// This is half of why the journeys that hold a publication run on every
+/// platform: not that they release, but that they cannot fail to. Delete the
+/// [`Drop`] and three of them go back to leaving a hook waiting on a rendezvous
+/// nobody writes, which off Unix nothing reaps — and nothing else in the suite
+/// would say so, because on Unix the run's own group teardown covers for it. The
+/// other half is the hook's own ceiling, which bounds even a hold this cannot
+/// reach; `hook.sh` states it, and
+/// [`a_held_push_nothing_releases_expires_rather_than_waiting_out_the_job`]
+/// drives it.
+// llmlint: ignore-block[tests_mirror_real_usage] this holds the suite's own scaffolding,
+// not a journey: the property is what happens when a journey is abandoned, which no
+// journey can assert about itself. The journeys built on it are `lifecycle.rs`'s and
+// `views.rs`'s, and those do drive the binary.
+#[test]
+fn an_abandoned_hold_is_released_anyway() {
+    let world = World::new("held-abandoned");
+    let go = world.fakes.join("push.go");
+    let abandoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _held = held_publication(&world, &go);
+        assert!(
+            !go.exists(),
+            "the rendezvous was written while the push was supposed to be held"
+        );
+        panic!("a journey that ends before it releases");
+    }));
+
+    assert!(abandoned.is_err(), "the abandonment did not happen");
+    assert!(
+        go.is_file(),
+        "an abandoned hold left {} unwritten, so the hook waiting on it outlives the \
+         journey — which is what wedges a platform that cannot reap one",
+        go.display()
+    );
+} // llmlint: ignore-end[tests_mirror_real_usage]
+
+/// The same hold, as a bare argv with **no release attached** — for a journey
+/// that abandons its hook on purpose and asserts on what the host leaves behind.
+///
+/// **Unix-only for what those journeys assert**, not because a hold is unsafe off
+/// Unix: they read the teardown itself — `ps` and process groups in
+/// `session_reuse.rs`, the Unix-only `end_process` in `driver.rs` — and neither
+/// has a Windows spelling. Anything that merely *holds* a push wants
+/// [`held_publication`], which runs everywhere; the release on drop it has would
+/// let the push through before these have read what an abandoned hold leaves.
+#[cfg(unix)]
+pub fn abandonable_hook_script(world: &World, rendezvous: &Path) -> Vec<String> {
+    hook_argv(world, &["wait-for", &rendezvous.to_string_lossy()])
+}
+
+/// The hook script for this platform, written into this world's own scratch, with
+/// `args` behind it.
 ///
 /// A script rather than a compiled binary, and per platform rather than one
 /// artifact, because the alternative was a workspace member shipping a Rust
-/// program to stand in for three shell one-liners. `onevcs` runs the gate as
-/// `Command::new(argv[0])`, which on Windows cannot start a `.bat` directly, so
-/// each platform's interpreter leads its own argv.
+/// program to stand in for three shell one-liners. The argv is what
+/// [`install_hook`] puts behind the hook git executes, and on Windows nothing can
+/// start a `.bat` directly, so each platform's interpreter leads its own.
 ///
-/// The three verbs are what the lifecycle and telemetry journeys state: a gate
-/// that blocks until a file appears, one that breaks the sibling's event stream
-/// under it, and one that appends a line no build of that sibling can read.
-pub fn gate_script(world: &World, args: &[&str]) -> Vec<String> {
-    let mut argv = interpreted(&write_gate_script(world));
+/// Private, and free-form only in here: the two public doors above are what a
+/// journey states a merge path with, and the one caller that needs a command line
+/// neither of them can spell is [`the_hook_refuses_a_command_line_it_does_not_speak`],
+/// which is about the argv the hook *turns down*.
+fn hook_argv(world: &World, args: &[&str]) -> Vec<String> {
+    let mut argv = interpreted(&write_hook_script(world));
     argv.extend(args.iter().map(|arg| (*arg).to_owned()));
     argv
 }
 
-/// The two halves of the gate answer the same verbs.
+/// What the hook's POSIX line has to say before it hands the process over, so
+/// that the verb's argv arrives as it was written. See [`install_hook`].
+#[cfg(windows)]
+const VERBATIM_ARGUMENTS: &str =
+    "MSYS2_ARG_CONV_EXCL='*'\nMSYS_NO_PATHCONV=1\nexport MSYS2_ARG_CONV_EXCL MSYS_NO_PATHCONV\n";
+
+/// Nothing: no runtime stands between this shell and the verb it starts.
+#[cfg(not(windows))]
+const VERBATIM_ARGUMENTS: &str = "";
+
+/// Where a world keeps the repository's own hooks, which is what its checkout's
+/// `core.hooksPath` names.
+///
+/// One statement of it, so the journey that installs a hook and the drift gate
+/// that rewrites one are naming the same directory rather than agreeing by hand.
+fn hooks_dir(world: &World) -> PathBuf {
+    world.root.join("hooks")
+}
+
+/// Write `argv` at `path` as an executable `pre-push` hook.
+///
+/// git runs a hook as a program of its own, so the argv a journey states is
+/// wrapped rather than written out: one POSIX line that hands the process over to
+/// it, which is what git for Windows runs its hooks with too. `exec` rather than a
+/// call, so what git waits on — and what its refusal reports — is the verb itself
+/// and never a shell that outlived it.
+///
+/// Every word is single-quoted, because a world's scratch directory carries the
+/// journey's own name and nothing promises that a path is one shell word.
+///
+/// On Windows that POSIX line is read by the MSYS2 `sh` git for Windows bundles,
+/// and it is [`interpreted`] that puts `cmd /C` in front of the verb — so the
+/// shell starts a *native* program, and the MSYS2 runtime rewrites arguments
+/// shaped like POSIX paths on the way across that boundary. `/C` is exactly that
+/// shape, and rewritten it stops being cmd's switch: cmd reads the verb as a
+/// command line rather than running it as a batch file, and the push is left in a
+/// hook that never returns. So [`VERBATIM_ARGUMENTS`] switches the conversion off
+/// for the one `exec` below, under both names, because `MSYS_NO_PATHCONV` is git
+/// for Windows' own spelling of the MSYS2 knob and neither release promises the
+/// other. Empty on Unix, where the line is what it always was.
+fn install_hook(path: &Path, argv: &[&str]) {
+    let quoted: Vec<String> = argv
+        .iter()
+        .map(|word| format!("'{}'", word.replace('\'', r"'\''")))
+        .collect();
+    std::fs::write(
+        path,
+        format!(
+            "#!/bin/sh\n{}exec {}\n",
+            VERBATIM_ARGUMENTS,
+            quoted.join(" ")
+        ),
+    )
+    .expect("the pre-push hook is written");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+            .expect("the pre-push hook is executable");
+    }
+}
+
+/// The two halves of the hook answer the same verbs.
 ///
 /// One contract in two languages, because no platform runs both — so a verb
 /// added to one and not the other is a journey that passes here and hangs on the
-/// Windows leg, a fortnight later, with nothing pointing at the gate. Held by
+/// Windows leg, a fortnight later, with nothing pointing at the hook. Held by
 /// reading the scripts rather than by generating one from the other: a generator
 /// would need a third source, and what actually has to agree is the verb each
 /// half dispatches on.
 // llmlint: ignore-block[tests_mirror_real_usage] this is a drift gate over the suite's own
 // scaffolding, not a journey: what it holds is that two files stay in step, and neither
 // file is reachable from any interface a user of this crate has. There is nothing to drive
-// through the binary here — the gate is a command `onevcs` runs on the operator's behalf,
-// and the journeys that exercise it are `lifecycle.rs`'s and `views.rs`'s, which do drive
-// the binary. Reading the two scripts is the only way to compare them, because no platform
-// executes both.
+// through the binary here — the hook is the repository's own, which git runs at the
+// publishing push, and the journeys that exercise it are `lifecycle.rs`'s and `views.rs`'s,
+// which do drive the binary. Reading the two scripts is the only way to compare them,
+// because no platform executes both.
 #[test]
-fn both_gate_scripts_answer_the_same_verbs() {
+fn both_hook_scripts_answer_the_same_verbs() {
     let verb = |candidate: &str| {
         !candidate.is_empty()
             && candidate
@@ -2020,14 +2365,14 @@ fn both_gate_scripts_answer_the_same_verbs() {
     // `sh`'s `case` arms, which are the only lines ending in a bare `)` whose
     // whole body is a verb — `*)` and every expression that happens to close a
     // parenthesis are filtered out by the alphabet.
-    let shell: Vec<&str> = include_str!("gate.sh")
+    let shell: Vec<&str> = include_str!("hook.sh")
         .lines()
         .map(str::trim)
         .filter_map(|line| line.strip_suffix(')'))
         .filter(|candidate| verb(candidate))
         .collect();
     // `cmd`'s dispatch, which is one `if "%~1"=="VERB" goto …` per verb.
-    let batch: Vec<&str> = include_str!("gate.bat")
+    let batch: Vec<&str> = include_str!("hook.bat")
         .lines()
         .map(str::trim)
         .filter_map(|line| line.strip_prefix("if \"%~1\"==\""))
@@ -2036,7 +2381,7 @@ fn both_gate_scripts_answer_the_same_verbs() {
         .collect();
     assert_eq!(
         shell, batch,
-        "the gate scripts have drifted: one platform answers verbs the other does not"
+        "the hook scripts have drifted: one platform answers verbs the other does not"
     );
     // The extraction is only a drift gate while it still finds anything: a
     // rewrite that changed either dispatch's shape would otherwise compare two
@@ -2044,15 +2389,44 @@ fn both_gate_scripts_answer_the_same_verbs() {
     assert_eq!(
         shell,
         ["wait-for", "break-streams", "append-future-event"],
-        "the gate scripts no longer dispatch the way this reads them"
+        "the hook scripts no longer dispatch the way this reads them"
+    );
+    // The ceiling `wait-for` gives up at is the other thing two files have to
+    // agree on: a half that waited longer would hang the leg the bound exists to
+    // keep off, and one that waited less would refuse pushes its journeys are
+    // still holding. Read as the default each half writes, because the
+    // environment can move it and neither half may disagree about what it moves.
+    let ceiling = |script: &str, source: &str| -> String {
+        source
+            .lines()
+            .map(str::trim)
+            .filter_map(|line| line.split_once("seconds=").map(|(_, rest)| rest))
+            .map(|rest| {
+                rest.chars()
+                    .take_while(|character| character.is_ascii_digit())
+                    .collect::<String>()
+            })
+            .find(|digits| !digits.is_empty())
+            .unwrap_or_else(|| panic!("{script} states no default ceiling for wait-for"))
+    };
+    assert_eq!(
+        ceiling("hook.sh", include_str!("hook.sh")),
+        ceiling("hook.bat", include_str!("hook.bat")),
+        "the hook scripts give a held push up at different ceilings"
+    );
+    assert_eq!(
+        ceiling("hook.sh", include_str!("hook.sh")),
+        "300",
+        "the ceiling moved: `hook.sh` says why it is 300 seconds, and a journey \
+         that holds a push for longer than that is a journey this suite does not have"
     );
     // The refusal names the verbs, so it is a third statement of the same list
-    // and drifts the same way — and it is the one a person reads when the gate
+    // and drifts the same way — and it is the one a person reads when the hook
     // has just refused them, so a verb missing from it is worse than a verb
     // missing from a comment.
     for (script, source) in [
-        ("gate.sh", include_str!("gate.sh")),
-        ("gate.bat", include_str!("gate.bat")),
+        ("hook.sh", include_str!("hook.sh")),
+        ("hook.bat", include_str!("hook.bat")),
     ] {
         let usage = source
             .lines()
@@ -2067,58 +2441,353 @@ fn both_gate_scripts_answer_the_same_verbs() {
     }
 } // llmlint: ignore-end[tests_mirror_real_usage]
 
-/// The other half of that contract — what the gate *refuses*, and with what —
-/// held by running this platform's own script.
+/// The other half of that contract — what the hook *refuses*, and with what —
+/// held by pushing at a repository that has it installed.
 ///
-/// The verb list is the part two files can be compared on; the exit code and
-/// the refusal message are the part only running proves, and no host runs both
+/// The verb list is the part two files can be compared on; what a refusal
+/// actually costs a caller is the part only a push proves, and no host runs both
 /// halves. So each platform's leg proves its own: read together across the CI
 /// matrix, the two tests are the whole drift gate.
 ///
-/// Run the way `onevcs` runs a gate — `Command::new(argv[0])` with the rest as
-/// arguments — because a refusal that only holds when invoked some other way is
-/// not the one a publication would meet. Only the refusing command lines are
-/// driven: each of them exits before the verb does anything, so this needs no
-/// session and leaves nothing behind.
+/// Driven through **git**, because that is the only thing that runs a `pre-push`
+/// hook: the repository is the one every journey publishes into, the hook behind
+/// its `core.hooksPath` is written by [`install_hook`] from the argv
+/// [`hook_argv`] states, and each case is a real `git push` at a real bare
+/// origin. That also makes this the one test that runs the wrapper `install_hook`
+/// writes rather than the argv inside it — on Windows the wrapper is a POSIX line
+/// git's bundled shell reads before it ever reaches `hook.bat`, and a wrapper that
+/// lost the verb's arguments there would leave every push in a hook that never
+/// returns.
 ///
-/// The state root is handed over even though nothing here reaches it, and that
-/// is the point: without it every one of these would refuse for the *missing*
-/// root, and the test would pass against a script that had lost its argument
-/// checks entirely.
+/// What is asserted is what git makes observable, and the exit code is not part
+/// of it: git relays a hook's *words* to the caller and its own verdict to the
+/// shell, so every non-zero the script can answer with arrives as one declined
+/// push. `sysexits.h`'s 64 and a host that refused a write are still separate
+/// exits in both halves — `hook.sh` says why — but nothing downstream of git can
+/// tell them apart, so a test asserting the difference here would be asserting
+/// against an interface no caller has. What a caller does have is these three,
+/// and each of them is load-bearing: the push is **refused**, the base does
+/// **not** move, and the hook's own complaint reaches them — the last checked as
+/// the words both halves write, because the two disagree over how much of the
+/// usage line a missing argument earns and neither wording is wrong.
+///
+/// The last push is the control. Six refusals prove nothing on their own — a hook
+/// that turned every push down would pass all of them — so a command line the
+/// script *does* speak follows, and the base moves.
+///
+/// The state root is handed over even though only the last case reaches it, and
+/// that is the point: without it that one would refuse for the *missing* root
+/// rather than for the tree git is running the hook in, and the complaint
+/// asserted on below would be one this test never meant to provoke.
 #[test]
-fn the_gate_refuses_a_command_line_it_does_not_speak() {
-    let world = World::new("gate-refusals");
-    for argv in [
-        vec!["nonsense"],
-        vec!["wait-for"],
-        vec!["wait-for", "one", "two"],
-        vec!["break-streams", "extra"],
-        vec!["append-future-event", "extra"],
-        // Not a session worktree, which is the layout the token is read out of.
-        vec!["append-future-event"],
+fn the_hook_refuses_a_command_line_it_does_not_speak() {
+    let world = World::new("hook-refusals");
+    // Installed through the same door a journey uses, so what git runs here is
+    // what git runs there. The argv is rewritten per case below; the checkout's
+    // `core.hooksPath` already points at the directory holding it.
+    let repo = world.repository("local-direct", &as_argv(&hook_argv(&world, &["nonsense"])));
+    let hook = hooks_dir(&world).join("pre-push");
+    let base = || git(&world, &repo.origin, &["rev-parse", "main"]);
+    let seed = base();
+
+    for (argv, complaint) in [
+        (vec!["nonsense"], "unknown command 'nonsense'"),
+        // Both halves refuse this, and they word it differently — one counts the
+        // arguments before it looks at them and says so, the other misses the
+        // path first. The part they share is the part a caller needs.
+        (vec!["wait-for"], "wait-for takes the path to wait for"),
+        (
+            vec!["wait-for", "one", "two"],
+            "wait-for takes the path to wait for, and nothing else",
+        ),
+        (
+            vec!["break-streams", "extra"],
+            "break-streams takes no arguments",
+        ),
+        (
+            vec!["append-future-event", "extra"],
+            "append-future-event takes no arguments",
+        ),
+        // Not under a session's run root, which is where the stream is found.
+        (
+            vec!["append-future-event"],
+            "append-future-event runs in a tree under a session's run root",
+        ),
     ] {
-        let command = gate_script(&world, &argv);
-        let refused = Command::new(&command[0])
-            .args(&command[1..])
-            .current_dir(&world.root)
-            .env("ONEVCS_HOME", world.onevcs_home())
-            .output()
-            .expect("the gate runs");
+        install_hook(&hook, &as_argv(&hook_argv(&world, &argv)));
+        let refused = publishing_push(&world, &repo.checkout, &format!("{argv:?}"));
         let said = String::from_utf8_lossy(&refused.stderr).into_owned();
-        assert_eq!(
-            refused.status.code(),
-            Some(64),
-            "the gate answered {argv:?} with {:?}, not the usage refusal: {said}",
-            refused.status.code()
+        assert!(
+            !refused.status.success(),
+            "the repository's merge path let {argv:?} through: {said}"
+        );
+        assert!(
+            said.contains(complaint),
+            "the hook refused {argv:?} without saying {complaint:?}: {said}"
         );
         assert!(
             said.contains("the verbs are:"),
-            "the gate refused {argv:?} without naming the verbs it does speak: {said}"
+            "the hook refused {argv:?} without naming the verbs it does speak: {said}"
+        );
+        assert_eq!(
+            base(),
+            seed,
+            "a push the repository's merge path turned down over {argv:?} landed anyway"
         );
     }
+
+    // `wait-for`, and yet this case runs on every platform — because the
+    // rendezvous is written *first*, so the verb finds it on its first look and
+    // returns without ever blocking. A hook this test could abandon still waiting
+    // is what [`abandonable_hook_script`]'s Unix-only gate is drawn around, and this
+    // one cannot be; that is why the argv is spelled through [`hook_argv`] rather than
+    // through the gated door.
+    //
+    // The ordering is therefore load-bearing rather than incidental, and it is
+    // asserted rather than left to the reader: move the write below the install,
+    // or drop it, and this refuses here instead of hanging the Windows leg on a
+    // push nothing releases — which is the failure this whole gate exists to end.
+    let go = world.root.join("push.go");
+    std::fs::write(&go, "go").expect("the rendezvous is written");
+    assert!(
+        go.is_file(),
+        "the rendezvous at {} is not in place before the hook that waits for it is \
+         installed, so the push below would block on a file nothing writes",
+        go.display()
+    );
+    install_hook(
+        &hook,
+        &as_argv(&hook_argv(&world, &["wait-for", &go.to_string_lossy()])),
+    );
+    let accepted = publishing_push(&world, &repo.checkout, "a verb it speaks");
+    assert!(
+        accepted.status.success(),
+        "the repository's merge path turned down a command line its hook speaks: {}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+    assert_ne!(
+        base(),
+        seed,
+        "the base did not move for a push nothing refused, so the six above were \
+         refused by something other than the hook"
+    );
 }
 
-/// The interpreter that leads a gate script's argv on this platform.
+/// A removal `break-streams` cannot perform refuses the push, rather than
+/// reporting the verb it did not do as done.
+///
+/// The verb's other ending. [`the_hook_refuses_a_command_line_it_does_not_speak`]
+/// covers the argv a caller got wrong, which `hook.sh` answers with `fail`; this
+/// is the host's own refusal, which it answers with `broke` — and the difference
+/// matters to the caller, because the remedy for one is the command line and for
+/// the other the mount. Without the check behind it the removal's failure would
+/// print on stderr and the verb would still succeed, leaving a journey asserting
+/// on a stream that is still there.
+///
+/// Provoked the only way a removal can be made to fail without touching the code
+/// under test: the state root is sealed, so `rm -rf` still empties `streams/` and
+/// then cannot unlink the directory out of its parent.
+///
+/// **Unix-only for the provocation, not for the path** — `hook.bat` guards the
+/// same removal, and the drift gate in
+/// [`both_hook_scripts_answer_the_same_verbs`] is what keeps the
+/// two halves in step. A mode bit is what has no Windows spelling. It also reads
+/// a suite that is not running as root, which unlinks whatever the mode says: no
+/// runner this suite runs on does, and one that did would fail here rather than
+/// pass on a provocation that never happened.
+#[cfg(unix)]
+#[test]
+fn a_removal_the_host_refuses_declines_the_push_rather_than_reporting_it_done() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let world = World::new("hook-unremovable-streams");
+    let repo = world.repository(
+        "local-direct",
+        &as_argv(&hook_argv(&world, &["break-streams"])),
+    );
+    let base = || git(&world, &repo.origin, &["rev-parse", "main"]);
+    let seed = base();
+
+    // The parts of the state root a real run would have written and registering
+    // alone does not. `require_state_root` demands the whole store `onevcs::home`
+    // lays out, and then the stream of the session making the push — found by the
+    // basename of an ancestor of the tree git runs the hook in. Laid out here so
+    // the verb reaches its removal rather than refusing earlier, for a root that
+    // is not this push's, in a complaint this journey never meant to provoke.
+    let home = world.onevcs_home();
+    assert!(
+        home.join("registry.json").is_file(),
+        "registering wrote no registry.json, so this journey would provoke the hook's \
+         complaint about the root rather than about the removal"
+    );
+    let streams = home.join("streams");
+    for held in ["locks", "sessions", "workspaces"] {
+        std::fs::create_dir_all(home.join(held)).expect("the state root is laid out");
+    }
+    std::fs::create_dir_all(&streams).expect("the state root is laid out");
+    let named = repo
+        .checkout
+        .file_name()
+        .expect("the checkout is a named directory");
+    std::fs::write(
+        streams.join(format!("{}.ndjson", named.to_string_lossy())),
+        "",
+    )
+    .expect("this tree's stream is in place");
+
+    // Sealed after the registration above, which needed to write here.
+    let opened = std::fs::metadata(&home)
+        .expect("the state root is there to seal")
+        .permissions();
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o555))
+        .expect("the state root is sealed");
+    let refused = publishing_push(&world, &repo.checkout, "a removal the host refuses");
+    // Restored before anything is asserted, so a failing assertion still leaves
+    // the world's scratch removable rather than failing its teardown as well.
+    std::fs::set_permissions(&home, opened).expect("the state root is unsealed");
+
+    let said = String::from_utf8_lossy(&refused.stderr).into_owned();
+    assert!(
+        !refused.status.success(),
+        "the merge path let a push through whose hook could not remove {}: {said}",
+        streams.display()
+    );
+    // The hook's own words, not `rm`'s. Unguarded, the removal still writes
+    // `rm: cannot remove …` to the same stderr and the verb carries on — so an
+    // assertion on that phrase alone passes against the bug it exists to catch.
+    assert!(
+        said.contains("pre-push: cannot remove"),
+        "the hook declined the push without saying the removal is what failed: {said}"
+    );
+    assert!(
+        said.contains("the host refused the write, not the caller"),
+        "the hook read a removal it could not perform as the caller's mistake: {said}"
+    );
+    assert_eq!(
+        base(),
+        seed,
+        "a push the repository's merge path turned down landed anyway"
+    );
+}
+
+/// A hold nothing releases gives the push up, rather than waiting out the job it
+/// runs in.
+///
+/// The one thing no other journey reaches: every journey that holds a publication
+/// releases it, on drop if not before, so none of them ever waits the ceiling out.
+///
+/// Driven through **git** for the reason
+/// [`the_hook_refuses_a_command_line_it_does_not_speak`] gives, and asserting what
+/// that leaves a caller: the push declined, the words the hook wrote, and a base
+/// that did not move. The ceiling comes from the environment because no journey
+/// can wait five minutes out.
+#[test]
+fn a_held_push_nothing_releases_expires_rather_than_waiting_out_the_job() {
+    let world = World::new("hook-expiry").with_env(HOOK_WAIT_SECONDS_ENV, "2");
+    // Written by nothing, here or in the world's teardown: the abandonment this
+    // ceiling exists for is a hold whose journey is gone, and a rendezvous that
+    // arrived late would make this a slow release rather than an expiry.
+    let go = world.root.join("push.go");
+    let repo = world.repository(
+        "local-direct",
+        &as_argv(&hook_argv(&world, &["wait-for", &go.to_string_lossy()])),
+    );
+    let base = || git(&world, &repo.origin, &["rev-parse", "main"]);
+    let seed = base();
+
+    let waited = std::time::Instant::now();
+    let refused = publishing_push(&world, &repo.checkout, "a hold nothing releases");
+    let said = String::from_utf8_lossy(&refused.stderr).into_owned();
+
+    assert!(
+        !refused.status.success(),
+        "the repository's merge path let a push through that its hook was still \
+         holding: {said}"
+    );
+    assert!(
+        said.contains(&go.display().to_string()),
+        "the hook gave up without naming the rendezvous nothing wrote, which is the \
+         one thing a person reading this has to know: {said}"
+    );
+    assert!(
+        said.contains("the held push expired"),
+        "the hook refused the push without saying the wait expired, so this reads \
+         like a merge path that turned the change down: {said}"
+    );
+    assert!(
+        said.contains("within the ceiling of 2 seconds"),
+        "the hook gave up at a ceiling other than the one this world gave it, so \
+         what expired is some other bound: {said}"
+    );
+    assert_eq!(
+        base(),
+        seed,
+        "the push landed anyway, so the expiry refused nothing"
+    );
+    // It waited. A ceiling misread as zero would expire every hold before its
+    // journey had looked at anything, and the words above would not say so.
+    // A second rather than the two given, because the hook counts its deadline in
+    // whole seconds and may start a fraction of one into the first.
+    assert!(
+        waited.elapsed() >= std::time::Duration::from_secs(1),
+        "the hook gave up at once instead of holding the push for the ceiling it \
+         was given: {said}"
+    );
+    assert!(
+        !go.is_file(),
+        "something wrote the rendezvous at {}, so the push was released rather \
+         than expired",
+        go.display()
+    );
+}
+
+/// Commit one change and push it, and hand back whatever git made of that —
+/// which is a refusal as often as not, so unlike [`git`] this does not assert.
+///
+/// A commit of its own per push because git runs no `pre-push` hook for a push
+/// with nothing in it: without one the second case onwards would be
+/// `Everything up-to-date`, the hook would never run, and every assertion after
+/// it would be reading the first case's answer.
+///
+/// The state root travels on the push rather than on this process, because the
+/// hook is git's child and inherits it from there.
+fn publishing_push(world: &World, checkout: &Path, what: &str) -> std::process::Output {
+    let file = checkout.join(format!("{}.md", slug_of(what)));
+    std::fs::write(&file, format!("{what}\n")).expect("the change is written");
+    git(world, checkout, &["add", "-A"]);
+    git(world, checkout, &["commit", "-m", &format!("feat: {what}")]);
+    Command::new("git")
+        .args(["push", "origin", "main"])
+        .current_dir(checkout)
+        .env("GIT_CONFIG_GLOBAL", world.gitconfig())
+        .env("GIT_AUTHOR_NAME", GIT_WHO)
+        .env("GIT_AUTHOR_EMAIL", GIT_EMAIL)
+        .env("GIT_COMMITTER_NAME", GIT_WHO)
+        .env("GIT_COMMITTER_EMAIL", GIT_EMAIL)
+        .env("ONEVCS_HOME", world.onevcs_home())
+        // What the world was handed reaches the hook too: git passes its own
+        // environment to the hook it runs, and a journey that stated one for this
+        // world means it wherever this world publishes.
+        .envs(world.environment.iter().map(|(key, value)| (key, value)))
+        .output()
+        .expect("git runs")
+}
+
+/// The borrowed argv every installer takes, out of the owned one
+/// [`hook_argv`] hands back.
+fn as_argv(argv: &[String]) -> Vec<&str> {
+    argv.iter().map(String::as_str).collect()
+}
+
+/// A filename for a case named by its own argv, which is full of characters a
+/// path is not.
+fn slug_of(what: &str) -> String {
+    what.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
+}
+
+/// The interpreter that leads a hook script's argv on this platform.
 #[cfg(windows)]
 fn interpreted(script: &Path) -> Vec<String> {
     vec![
@@ -2128,13 +2797,13 @@ fn interpreted(script: &Path) -> Vec<String> {
     ]
 }
 
-/// The interpreter that leads a gate script's argv on this platform.
+/// The interpreter that leads a hook script's argv on this platform.
 #[cfg(not(windows))]
 fn interpreted(script: &Path) -> Vec<String> {
     vec!["sh".to_owned(), script.to_string_lossy().into_owned()]
 }
 
-/// The gate script for this platform, written into the world's own scratch.
+/// The hook script for this platform, written into the world's own scratch.
 ///
 /// Written with **CRLF**, and that is a correctness requirement rather than a
 /// convention. `cmd.exe` does not read a batch file line by line: it seeks by
@@ -2148,19 +2817,38 @@ fn interpreted(script: &Path) -> Vec<String> {
 /// from the repository's line-ending policy for a file no editor on this side
 /// ever opens.
 #[cfg(windows)]
-fn write_gate_script(world: &World) -> PathBuf {
-    let path = world.root.join("gate.bat");
-    std::fs::write(&path, include_str!("gate.bat").replace('\n', "\r\n"))
-        .expect("the gate script is written");
+fn write_hook_script(world: &World) -> PathBuf {
+    let path = world.root.join("hook.bat");
+    std::fs::write(&path, include_str!("hook.bat").replace('\n', "\r\n"))
+        .expect("the hook script is written");
     path
 }
 
-/// The gate script for this platform, written into the world's own scratch.
+/// The hook script for this platform, written into the world's own scratch.
 #[cfg(not(windows))]
-fn write_gate_script(world: &World) -> PathBuf {
-    let path = world.root.join("gate.sh");
-    std::fs::write(&path, include_str!("gate.sh")).expect("the gate script is written");
+fn write_hook_script(world: &World) -> PathBuf {
+    let path = world.root.join("hook.sh");
+    std::fs::write(&path, include_str!("hook.sh")).expect("the hook script is written");
     path
+}
+
+/// Whether the host would start this file if a `PATH` lookup landed on it.
+///
+/// The executable bit is what `execvp` asks on Unix, so it is what is asked here.
+/// Windows carries no such bit and decides by extension instead, which
+/// [`World::resolved_on`] has already applied by the time this is reached.
+#[cfg(unix)]
+fn runnable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+/// Whether the host would start this file if a `PATH` lookup landed on it.
+#[cfg(not(unix))]
+fn runnable(path: &Path) -> bool {
+    path.is_file()
 }
 
 /// A file shipped in the repository.

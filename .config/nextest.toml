@@ -10,6 +10,49 @@
 [test-groups]
 e2e = { max-threads = 4 }
 
+[profile.default]
+# llmlint: ignore-block[comments_earn_their_place] the run number, test count, and
+# elapsed time below are not history: they are the measurement that sets both bounds
+# on the line beneath them. `period` has to sit above what a test here costs and
+# under `waited()`'s deadline, and `terminate-after` above that whole suite and the
+# hook's ceiling — so a reader who cannot see what a run of this suite actually
+# costs cannot tell a bound that was measured from one somebody liked, and the next
+# person to move either has nothing to move it against.
+# A test that blocks names itself, and is then ended. Without this it produces no
+# output and no failure — it simply stops, and only the CI job's own limit ends it.
+#
+# `period` sits between what a test here costs (the macOS leg of run 32538759791
+# was 731 tests in 270.422s) and the 120-second deadline `waited()` in
+# `tests/e2e/harness.rs` gives every poll, so the first `SLOW` line lands while
+# the stuck journey's own deadline is still running.
+#
+# `terminate-after` is 6 periods — 360s — above both that whole suite and the
+# 300-second ceiling the `pre-push` hook waits under (`tests/e2e/hook.sh`,
+# `hook.bat`), so a held push reaches its own refusal, which names the rendezvous
+# nothing wrote, rather than being cut off by the runner, which can only name the
+# test.
+slow-timeout = { period = "60s", terminate-after = 6 }
+# llmlint: ignore-end[comments_earn_their_place]
+# `fail` — what the recipes used to pass on the command line — suppresses the
+# `SLOW` lines above along with the passes, which would leave a hanging test
+# unnamed until the runner ended it. `slow` is the same silence about successes
+# with the one report a hang produces kept.
+status-level = "slow"
+
+# What CI's cross-platform legs run under, and the only difference is that every
+# test reports as it finishes.
+#
+# On a terminal nextest already names the running tests in its progress bar, so a
+# developer loses nothing by the default above. CI has no terminal and no bar, so
+# with successes silent a 237-minute run and a 3-second one produce byte-identical
+# logs up to the last line. A line per test is what makes a cancelled or timed-out
+# leg say how far it got: the last line names where it stopped.
+[profile.ci]
+status-level = "pass"
+
+# Declared on `default` and inherited by `ci`, so the cap holds on the
+# cross-platform legs too. Asked of the runner rather than assumed: `cargo nextest
+# show-config test-groups --profile ci` reports `group: e2e (max threads = 4)`.
 [[profile.default.overrides]]
 filter = 'binary(e2e)'
 test-group = 'e2e'
