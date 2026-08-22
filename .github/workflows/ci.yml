@@ -78,6 +78,27 @@ jobs:
 
   # Prove the artifact builds and its tests pass on macOS and Windows (without
   # the coverage threshold, which is enforced on Linux).
+  #
+  # Bounded, and diagnostic when it is not green. Run 32538759791's
+  # `cross (windows-latest)` leg printed `Starting 703 tests across 6 binaries`
+  # and then produced nothing for 237 minutes: GitHub's default limit is 360, and
+  # the leg reported no test as it passed, so that run and a 3-second one had
+  # byte-identical logs up to the last line.
+  #
+  # `NEXTEST_PROFILE` is the line that selects the reporting: `just check-cross`
+  # reaches the suite through `just test-quick`, which names no profile, so the
+  # environment is what picks one and `.config/nextest.toml`'s `ci` profile is
+  # what reports a line per test. That is the half that would have diagnosed the
+  # run above — whatever cuts the leg short, the last line names where it got to.
+  #
+  # Two limits, because they buy different things. The step's is the one that
+  # bounds the hang: a step that times out leaves the job running, so the step
+  # after it still gets to say what was alive, which a job-level limit alone would
+  # kill along with everything else. That step takes 5m49s-8m00s on `main`, so 20
+  # is over twice its worst; the whole job takes 8m13s-12m38s, so 30 leaves the
+  # diagnostic room to run and still ends a wedged leg inside the hour.
+  #
+  # The job limit is half of what nickderobertis/onepipeline#99 asks for.
   cross:
     needs: changes
     if: needs.changes.outputs.crate == 'true'
@@ -86,6 +107,9 @@ jobs:
       matrix:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      NEXTEST_PROFILE: ci
     defaults:
       run:
         shell: bash
@@ -101,7 +125,25 @@ jobs:
       - name: Bootstrap
         run: just bootstrap
       - name: Quality gate (cross-platform legs)
+        timeout-minutes: 20
         run: just check-cross
+      # What the step above could not say for itself. A leg that stops without a
+      # verdict stops holding something — a test process, or a child of one that
+      # outlived it — and on Windows there are no process groups to make that
+      # visible afterwards, so it is read here while it is still true. Never the
+      # reason the leg is red: it runs only when there is already something to
+      # explain, and its own failure is not one.
+      - name: What was still running when it stopped
+        if: failure() || cancelled()
+        continue-on-error: true
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            powershell -NoProfile -Command \
+              "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,CommandLine | Format-Table -AutoSize -Wrap" \
+              || tasklist /v
+          else
+            ps -ef
+          fi
 
   # The declared MSRV is a promise to consumers, so prove it rather than document
   # it: a floor that only lives in Cargo.toml drifts the first time a dependency

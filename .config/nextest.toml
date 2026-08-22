@@ -10,6 +10,46 @@
 [test-groups]
 e2e = { max-threads = 4 }
 
+[profile.default]
+# A test that blocks names itself, and is then ended.
+#
+# Without this a blocked test produces no output and no failure — it simply
+# stops, and the only thing that ever ends it is the CI job's own limit. That is
+# not a hypothetical: the `cross (windows-latest)` leg of run 32538759791 printed
+# `Starting 703 tests across 6 binaries` and then nothing for 237 minutes, and
+# bought not one test name for it.
+#
+# `period` is 60s because that is far above what any test here costs — the whole
+# macOS suite in that same run was `731 tests run` in 270.422s — and below the
+# longest bound a single journey carries inside itself, `waited()`'s 120 seconds
+# in `tests/e2e/harness.rs`. So the first `SLOW` line lands while the stuck
+# journey's own deadline is still running, and repeats every period after that:
+# the log names the test long before anything gives up on it.
+#
+# `terminate-after` is 6 of those periods — 360 seconds — which is deliberately
+# *above* the 300-second ceiling the repository's own `pre-push` hook waits under
+# (`tests/e2e/hook.sh`, `tests/e2e/hook.bat`). A held push must always reach its
+# own refusal, which names the rendezvous nothing wrote, rather than be cut off
+# by the runner, which can only name the test. It is also above the whole macOS
+# suite's 270 seconds, so no single test can reach it by being slow.
+slow-timeout = { period = "60s", terminate-after = 6 }
+# `fail` — what the recipes used to pass on the command line — suppresses the
+# `SLOW` lines above along with the passes, which would leave a hanging test
+# unnamed until the runner ended it. `slow` is the same silence about successes
+# with the one report a hang produces kept.
+status-level = "slow"
+
+# What CI's cross-platform legs run under, and the only difference is that every
+# test reports as it finishes.
+#
+# On a terminal nextest already names the running tests in its progress bar, so a
+# developer loses nothing by the default above. CI has no terminal and no bar, so
+# with successes silent a 237-minute run and a 3-second one produce byte-identical
+# logs up to the last line. A line per test is what makes a cancelled or timed-out
+# leg say how far it got: the last line names where it stopped.
+[profile.ci]
+status-level = "pass"
+
 [[profile.default.overrides]]
 filter = 'binary(e2e)'
 test-group = 'e2e'
