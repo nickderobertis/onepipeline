@@ -104,6 +104,7 @@ pub fn allows(author: Author, command: &Command) -> crate::Result<()> {
         | Command::Requeue { .. }
         | Command::Cancel { .. }
         | Command::Context { .. }
+        | Command::Finding { .. }
         | Command::Add { .. } => return Ok(()),
         Command::Complete { .. } => {
             "whether the run is finished is the planner's verdict, not an observation"
@@ -136,6 +137,7 @@ pub fn op_of(command: &Command) -> &'static str {
         Command::Attest { .. } => "attest",
         Command::Complete { .. } => "complete",
         Command::Context { .. } => "context",
+        Command::Finding { .. } => "finding",
     }
 }
 
@@ -150,6 +152,7 @@ pub fn target_of(command: &Command) -> Option<String> {
         | Command::Requeue { id, .. }
         | Command::Context { id, .. } => Some(id.clone()),
         Command::Attest { reference } => Some(reference.clone()),
+        Command::Finding { id, .. } => id.clone(),
         Command::Complete { .. } => None,
     }
 }
@@ -305,6 +308,33 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Deliver::is_auto")]
         deliver: Deliver,
     },
+    /// Raise one finding to the planner, changing nothing about the graph.
+    ///
+    /// The op an observer reports *through*. Its edits already travel in this
+    /// envelope, so a member that emitted its observations as raw turn text
+    /// surfaced one on every turn it took — including the turns that only said
+    /// it was about to look. A finding is a deliberate act instead: a turn with
+    /// nothing to report issues no op, and the planner's queue stays empty.
+    Finding {
+        /// The finding's text. Blank is refused rather than queued.
+        message: String,
+        /// Whether the run waits on the planner's answer. Omitted, `false`: an
+        /// observation holds nothing back, and a finding that means to stop the
+        /// subtree it names says so.
+        #[serde(default, skip_serializing_if = "is_false")]
+        blocking: bool,
+        /// The node it is about, when it is about one. It must be a node the
+        /// graph has: a name the graph does not carry would pass validation and
+        /// then hold nothing, so a blocking finding raised about work nobody is
+        /// doing would read as one the run is waiting on.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+    },
+}
+
+/// Whether a flag is at its `false` default, so serialization can omit it.
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// When a `context` note reaches the node it is for.
@@ -343,6 +373,23 @@ pub enum SurfaceKind {
     /// The durable planner-update pacemaker came due. Consuming one resets that
     /// clock through `oneagentgraph reset-timer RUN check-in`.
     CheckIn,
+    /// Something a watcher saw and decided the planner should know. Raised
+    /// deliberately — by the [`Command::Finding`] op, or by `surface` — rather
+    /// than as a side effect of a turn having happened.
+    Finding,
+}
+
+impl SurfaceKind {
+    /// The word a queued surface names this kind with.
+    ///
+    /// The wire spelling is this enum's rather than a string beside it, so the
+    /// kind a queue holds and the kind a command line accepts cannot drift.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::CheckIn => "check-in",
+            Self::Finding => "finding",
+        }
+    }
 }
 
 /// The environment variable bounding how long `reply` waits for the
@@ -498,7 +545,15 @@ impl ChannelState {
         Ok(surface)
     }
 
-    /// Claim the next readable surface.
+    /// Claim the next readable surface: **a blocking one first**, and arrival
+    /// order within each class.
+    ///
+    /// Strict arrival order is the wrong order here, and only for one reason. A
+    /// blocking surface holds back the subtree that depends on it and produces
+    /// no other signal until somebody reads it; nothing else in the queue does
+    /// either of those things. So a question queued behind narration is a
+    /// stopped frontier waiting on a reader who is working through a backlog,
+    /// while the narration it is behind loses nothing by being read second.
     ///
     /// Nothing to outlive: a surface describes the one continuous run, so it
     /// stays consumable until somebody reads it. A check-in that has been
@@ -506,12 +561,22 @@ impl ChannelState {
     /// here.
     pub fn claim(&self) -> crate::Result<Option<Surface>> {
         let mut queue = self.queue();
-        let claimed = (!queue.waiting.is_empty()).then(|| queue.waiting.remove(0));
+        let next = queue
+            .waiting
+            .iter()
+            .position(|surface| surface.blocking)
+            .unwrap_or(0);
+        let claimed = (!queue.waiting.is_empty()).then(|| queue.waiting.remove(next));
         if let Some(surface) = &claimed {
-            // A surface outlives its delivery while it waits for an answer, so
-            // it is held here rather than dropped: the run is reported as
-            // waiting for a planner decision until a reply arrives.
-            queue.pending = surface.blocking.then(|| surface.clone());
+            // A blocking surface outlives its delivery while it waits for an
+            // answer, so it is held here rather than dropped: the run is
+            // reported as waiting for a planner decision until a reply arrives.
+            // Narration read afterwards leaves that standing — reading a report
+            // is not answering a question, and a decision the planner never made
+            // must not release the subtree it is holding.
+            if surface.blocking {
+                queue.pending = Some(surface.clone());
+            }
         }
         self.write_queue(&queue)?;
         Ok(claimed)

@@ -1174,7 +1174,28 @@ fn op_of(command: &Edit) -> &'static str {
         Edit::Attest { .. } => "attest",
         Edit::Complete { .. } => "complete",
         Edit::Context { .. } => "context",
+        Edit::Finding { .. } => "finding",
     }
+}
+
+/// Every surface kind this build carries, in its wire spelling.
+///
+/// Enumerated rather than listed: `SurfaceKind` is `#[non_exhaustive]`, so no
+/// match written out here can be exhaustive, and a hardcoded array would miss
+/// exactly the variant somebody added without writing it down. `ValueEnum` is
+/// what `--kind` already parses against, so this *is* the set a caller can spell
+/// and the set the queue can hold.
+fn every_surface_kind() -> BTreeSet<String> {
+    <SurfaceKind as clap::ValueEnum>::value_variants()
+        .iter()
+        .map(|kind| {
+            serde_json::to_value(kind)
+                .expect("a surface kind serializes")
+                .as_str()
+                .expect("as a string")
+                .to_string()
+        })
+        .collect()
 }
 
 /// The ops the contract lists, in the order it lists them.
@@ -1315,6 +1336,95 @@ fn the_contract_lists_exactly_the_ops_this_crate_accepts() {
         op_of(&Edit::Cancel { id: "x".into() }),
         "cancel",
         "the exhaustive match above is what proves the variant set, and it runs"
+    );
+}
+
+/// One divergence entry's fenced JSON block, by the number it opens with.
+fn divergence_block(number: &str) -> Value {
+    let record = std::fs::read_to_string(repo_root().join("docs/contract-divergences.md"))
+        .expect("the divergence record reads");
+    let entry = record
+        .split("\n## ")
+        .find(|entry| entry.starts_with(number))
+        .unwrap_or_else(|| panic!("the divergence record still carries entry {number}"));
+    let block = entry
+        .split("```json")
+        .nth(1)
+        .and_then(|rest| rest.split("```").next())
+        .unwrap_or_else(|| panic!("entry {number} carries the json block this test drives"));
+    serde_json::from_str(block).unwrap_or_else(|e| panic!("entry {number}'s block is JSON: {e}"))
+}
+
+/// The ops and surface kinds this build carries **beyond** the contract's own
+/// lists are exactly the ones the divergence record proposes.
+///
+/// The contract is committed as approved and names neither, so the entry that
+/// proposes them is the only place they are written down — and a divergence
+/// nothing gates quietly stops being true. Both directions: a build that grows
+/// an op or a kind the entry does not name fails here as loudly as one that
+/// drops one it does.
+#[test]
+fn what_this_build_carries_beyond_the_contract_is_what_the_divergence_record_names() {
+    let block = divergence_block("39.");
+    let fixtures: Vec<Value> =
+        serde_json::from_value(block["ops"].clone()).expect("entry 39 names the ops it adds");
+    let monitor_may: BTreeSet<String> = serde_json::from_value(block["monitor_may_issue"].clone())
+        .expect("entry 39 says which of them the monitor may issue");
+    let kinds: Vec<String> = serde_json::from_value(block["surface_kinds"].clone())
+        .expect("entry 39 names the surface kinds it adds");
+    assert!(!fixtures.is_empty() && !kinds.is_empty(), "{block}");
+
+    for fixture in &fixtures {
+        let op = fixture["op"].as_str().expect("the fixture names its op");
+        assert!(
+            !OPS.contains(&op),
+            "`{op}` is on the contract's own list, so it is no divergence"
+        );
+        // Written as the wire carries it: the entry's block is the source, so
+        // what parses here is what a planner would type.
+        let edit: Edit = serde_json::from_value(fixture.clone())
+            .unwrap_or_else(|e| panic!("`{op}` deserializes: {e}"));
+        assert_eq!(op_of(&edit), op, "`{op}` deserialized into another variant");
+        assert_eq!(
+            &serde_json::to_value(&edit).expect("serializes"),
+            fixture,
+            "`{op}` round-trips unchanged"
+        );
+
+        // The planner owns the graph, so nothing is refused for it.
+        allows(Author::Planner, &edit)
+            .unwrap_or_else(|e| panic!("the planner was refused `{op}`: {e}"));
+        let verdict = allows(Author::Monitor, &edit);
+        if monitor_may.contains(op) {
+            verdict.unwrap_or_else(|e| panic!("the monitor was refused `{op}`: {e}"));
+        } else {
+            verdict.expect_err(&format!("the monitor was allowed `{op}`"));
+        }
+    }
+
+    // The kind set is the contract's one plus the entry's, and nothing else —
+    // held against the variants themselves, so a kind added without a line in
+    // either document fails here rather than shipping unwritten-down.
+    for kind in &kinds {
+        assert!(
+            !CONTRACT.contains(&format!("--kind {kind}")),
+            "the contract names `{kind}`, so it is no divergence"
+        );
+        let parsed: SurfaceKind = serde_json::from_value(json!(kind))
+            .unwrap_or_else(|e| panic!("`{kind}` is a kind this build parses: {e}"));
+        assert_eq!(
+            serde_json::to_value(parsed).expect("serializes"),
+            json!(kind),
+            "`{kind}` round-trips unchanged"
+        );
+    }
+    let declared: BTreeSet<String> = std::iter::once("check-in".to_string())
+        .chain(kinds.iter().cloned())
+        .collect();
+    assert_eq!(
+        every_surface_kind(),
+        declared,
+        "the surface kinds this build carries are not the contract's plus entry 39's"
     );
 }
 
@@ -2341,6 +2451,93 @@ fn every_persona_the_contract_ships_is_present_and_has_both_sides() {
         assert!(
             effective.pointer("/user/persona").is_some(),
             "{file} states the supervisor's review bar"
+        );
+    }
+}
+
+/// The monitor persona's own account of its allowlist is the allowlist.
+///
+/// The persona is the only thing the member ever reads, so a persona naming an
+/// op the channel refuses sends it to be refused every run, and one silent about
+/// an op the channel allows leaves that op unreachable however carefully it was
+/// wired. Both directions, off the same `allows` the channel enforces with.
+#[test]
+fn the_monitor_persona_names_exactly_the_ops_the_channel_lets_it_issue() {
+    let text = std::fs::read_to_string(repo_root().join("personas/orchestrator.yaml"))
+        .expect("the monitor persona ships");
+    let prose = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let node = Node {
+        id: "fresh".into(),
+        persona: Some("engineer".into()),
+        task: Some("## What\ndo it".into()),
+        ..Node::default()
+    };
+    // Every op this build has, contract's and divergent alike, each in the shape
+    // the wire carries it.
+    let every: Vec<Edit> = vec![
+        Edit::Add { node: node.clone() },
+        Edit::Drop {
+            id: "x".into(),
+            dependents: Dependents::Detach,
+        },
+        Edit::Reparent {
+            id: "x".into(),
+            deps: Vec::new(),
+        },
+        Edit::Retry {
+            id: "x".into(),
+            node,
+        },
+        Edit::Cancel { id: "x".into() },
+        Edit::Requeue {
+            id: "x".into(),
+            amend: None,
+        },
+        Edit::Attest {
+            reference: "x".into(),
+        },
+        Edit::Complete {
+            reason: "done".into(),
+        },
+        Edit::Context {
+            id: "x".into(),
+            note: "look here".into(),
+            deliver: onepipeline::channel::Deliver::Auto,
+        },
+        Edit::Finding {
+            message: "it drifted".into(),
+            blocking: false,
+            id: None,
+        },
+    ];
+    assert_eq!(
+        every.len(),
+        OPS.len() + 1,
+        "an op is missing from this table; `op_of` above is what says so"
+    );
+
+    // The persona states both lists in one sentence pair, which is what makes
+    // this readable to the member: what it may issue, then what is refused.
+    let window = prose
+        .split_once("what that author may issue:")
+        .and_then(|(_, tail)| tail.split_once("are refused for you"))
+        .map(|(window, _)| window.to_string())
+        .expect("the monitor persona still states its allowlist and its refusals");
+    let (may_issue, refused) = window
+        .split_once(". ")
+        .expect("the persona's allowlist and its refusals are two sentences");
+
+    for command in &every {
+        let op = op_of(command);
+        let spelt = format!("`{op}`");
+        let allowed = allows(Author::Monitor, command).is_ok();
+        let (says_it_may, says_it_may_not) = (may_issue.contains(&spelt), refused.contains(&spelt));
+        assert_eq!(
+            (says_it_may, says_it_may_not),
+            (allowed, !allowed),
+            "the channel {} the monitor `{op}` and its persona says otherwise: \
+             may issue '{may_issue}', refused '{refused}'",
+            if allowed { "allows" } else { "refuses" }
         );
     }
 }
