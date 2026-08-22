@@ -435,16 +435,10 @@ fn telemetry_buckets_sum_exactly_to_the_wall_clock() {
 /// The other direction, which never balanced: measured buckets that add up to
 /// **more** than the wall clock, with nothing left in `scheduling` to give back.
 ///
-/// A store is three producers' records merged — each stream in its own `seq`,
-/// the streams interleaved by `ts` — and those stamps are wall clocks from
-/// different processes and, for a relayed one, different machines. So the walk
-/// over a store meets stretches it charges twice: a stamp that goes backwards
-/// zeroes the span across it, and the next one forward re-charges ground already
-/// counted, while the wall clock stays first-to-last as read. The old rule put
-/// the whole residue in `scheduling`, which cannot give back what it never had:
-/// a real run on 2026-08-22 emitted eight buckets summing thirteen milliseconds
-/// past its own `wall_ms` with `scheduling` at zero, and a consumer holding the
-/// document to the promise it makes had to refuse it.
+/// A store is several producers' records merged, each stream in its own `seq`
+/// and the streams interleaved by `ts`, so a stamp that goes backwards zeroes
+/// the span across it and the next one forward re-charges ground already
+/// counted — while the wall clock stays first-to-last as read.
 ///
 /// The store is the one this run wrote, down to its records, streams and
 /// sequences. What is arranged is the **clock**: a doubled dispatch settles
@@ -544,18 +538,12 @@ fn telemetry_balances_a_store_that_overcounts_past_an_empty_scheduling_bucket() 
 
 /// The same direction taken past what one bucket can give back: an overcount
 /// **larger than the longest span the run measured**, which has to keep coming
-/// off the next-longest and the one after that until it is gone.
+/// off the next-longest until it is gone.
 ///
 /// The run above skews one producer and the residue fits inside the dispatch it
-/// skewed. This one skews all of them, which is what a host running several
-/// sessions against several machines' clocks looks like: the dispatch's records
-/// alternate between the opening and fifty seconds past it and the publishing
-/// session's between the opening and twenty, each on its own clock, while every
-/// stream ends on the closing stamp one second after the opening. A merged walk
-/// over that charges each forward step and nothing for each step back, so the
-/// parts come out a minute and a half long against a whole of one second —
-/// spread across the dispatch, the publication and the workspace setup, so no
-/// one of those three can give it back on its own.
+/// skewed. This one skews every stream, on a clock apiece, so the overcount is
+/// spread across the dispatch, the publication and the workspace setup and no
+/// one of the three can give it back alone.
 ///
 /// What is arranged is the **clock** alone: the records, the streams, the
 /// sequences and the reader are the ones this run produced.
