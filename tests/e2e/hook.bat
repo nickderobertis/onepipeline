@@ -1,14 +1,9 @@
 @echo off
-rem The Windows half of the repository's own `pre-push` hook body: the same three
-rem verbs `hook.sh` answers, with the same exit codes — 0 when the verb did what
-rem it names, 64 (EX_USAGE) for a verb or an argument this script does not have —
-rem including an argument the verb does not take, because one this script ignored
-rem is one the caller believed it was steering the hook with — and 1 for a verb
-rem the host would not let it carry out, `wait-for` outliving its ceiling
-rem included. See
-rem `hook.sh` for what each verb is for and why it refuses rather than defaults;
-rem `both_hook_scripts_answer_the_same_verbs` holds the two halves to each other,
-rem because no platform runs both.
+rem The Windows half of the repository's own `pre-push` hook body. `hook.sh` is
+rem where the contract both halves answer is written down — the verbs, the exit
+rem codes, and why each one refuses rather than defaults — and
+rem `both_hook_scripts_answer_the_same_verbs` holds the two in step, because no
+rem platform runs both. What is written down here is what cmd makes different.
 setlocal enabledelayedexpansion
 
 if "%~1"=="wait-for" goto waitfor
@@ -88,10 +83,10 @@ if errorlevel 1 (
 exit /b 0
 
 rem How long `wait-for` waits for its rendezvous before it refuses the push, and
-rem the environment variable that carries it. See `hook.sh` for why the wait is
-rem bounded at all, why the ceiling is 300 seconds, and why a value outside 1 to
-rem 3600 seconds — a leading zero included, which `set /a` reads as octal — is
-rem refused rather than defaulted.
+rem the environment variable that carries it — both in `hook.sh`, with why the
+rem wait is bounded and why a value it does not accept is refused rather than
+rem defaulted. What is cmd's own is the leading zero the pattern below turns down:
+rem `set /a` reads one as octal.
 :waitceiling
 set "seconds=300"
 if defined ONEPIPELINE_FAKE_HOOK_WAIT_SECONDS set "seconds=%ONEPIPELINE_FAKE_HOOK_WAIT_SECONDS%"
