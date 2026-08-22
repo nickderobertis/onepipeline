@@ -196,7 +196,9 @@ case "${1-}" in
   break-streams)
     takes "$#" 1 "break-streams takes no arguments"
     require_state_root
-    rm -rf "$ONEVCS_HOME/streams"
+    if ! rm -rf "$ONEVCS_HOME/streams"; then
+      broke "cannot remove $ONEVCS_HOME/streams"
+    fi
     if ! : >"$ONEVCS_HOME/streams"; then
       broke "cannot leave a file where $ONEVCS_HOME/streams was"
     fi

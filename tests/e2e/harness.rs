@@ -2573,6 +2573,103 @@ fn the_hook_refuses_a_command_line_it_does_not_speak() {
     );
 }
 
+/// A removal `break-streams` cannot perform refuses the push, rather than
+/// reporting the verb it did not do as done.
+///
+/// The verb's other ending. [`the_hook_refuses_a_command_line_it_does_not_speak`]
+/// covers the argv a caller got wrong, which `hook.sh` answers with `fail`; this
+/// is the host's own refusal, which it answers with `broke` — and the difference
+/// matters to the caller, because the remedy for one is the command line and for
+/// the other the mount. Without the check behind it the removal's failure would
+/// print on stderr and the verb would still succeed, leaving a journey asserting
+/// on a stream that is still there.
+///
+/// Provoked the only way a removal can be made to fail without touching the code
+/// under test: the state root is sealed, so `rm -rf` still empties `streams/` and
+/// then cannot unlink the directory out of its parent.
+///
+/// **Unix-only for the provocation, not for the path** — `hook.bat` guards the
+/// same removal, and the drift gate in
+/// [`both_hook_scripts_answer_the_same_verbs`] is what keeps the
+/// two halves in step. A mode bit is what has no Windows spelling. It also reads
+/// a suite that is not running as root, which unlinks whatever the mode says: no
+/// runner this suite runs on does, and one that did would fail here rather than
+/// pass on a provocation that never happened.
+#[cfg(unix)]
+#[test]
+fn a_removal_the_host_refuses_declines_the_push_rather_than_reporting_it_done() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let world = World::new("hook-unremovable-streams");
+    let repo = world.repository(
+        "local-direct",
+        &as_argv(&hook_argv(&world, &["break-streams"])),
+    );
+    let base = || git(&world, &repo.origin, &["rev-parse", "main"]);
+    let seed = base();
+
+    // The parts of the state root a real run would have written and registering
+    // alone does not. `require_state_root` demands the whole store `onevcs::home`
+    // lays out, and then the stream of the session making the push — found by the
+    // basename of an ancestor of the tree git runs the hook in. Laid out here so
+    // the verb reaches its removal rather than refusing earlier, for a root that
+    // is not this push's, in a complaint this journey never meant to provoke.
+    let home = world.onevcs_home();
+    assert!(
+        home.join("registry.json").is_file(),
+        "registering wrote no registry.json, so this journey would provoke the hook's \
+         complaint about the root rather than about the removal"
+    );
+    let streams = home.join("streams");
+    for held in ["locks", "sessions", "workspaces"] {
+        std::fs::create_dir_all(home.join(held)).expect("the state root is laid out");
+    }
+    std::fs::create_dir_all(&streams).expect("the state root is laid out");
+    let named = repo
+        .checkout
+        .file_name()
+        .expect("the checkout is a named directory");
+    std::fs::write(
+        streams.join(format!("{}.ndjson", named.to_string_lossy())),
+        "",
+    )
+    .expect("this tree's stream is in place");
+
+    // Sealed after the registration above, which needed to write here.
+    let opened = std::fs::metadata(&home)
+        .expect("the state root is there to seal")
+        .permissions();
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o555))
+        .expect("the state root is sealed");
+    let refused = publishing_push(&world, &repo.checkout, "a removal the host refuses");
+    // Restored before anything is asserted, so a failing assertion still leaves
+    // the world's scratch removable rather than failing its teardown as well.
+    std::fs::set_permissions(&home, opened).expect("the state root is unsealed");
+
+    let said = String::from_utf8_lossy(&refused.stderr).into_owned();
+    assert!(
+        !refused.status.success(),
+        "the merge path let a push through whose hook could not remove {}: {said}",
+        streams.display()
+    );
+    // The hook's own words, not `rm`'s. Unguarded, the removal still writes
+    // `rm: cannot remove …` to the same stderr and the verb carries on — so an
+    // assertion on that phrase alone passes against the bug it exists to catch.
+    assert!(
+        said.contains("pre-push: cannot remove"),
+        "the hook declined the push without saying the removal is what failed: {said}"
+    );
+    assert!(
+        said.contains("the host refused the write, not the caller"),
+        "the hook read a removal it could not perform as the caller's mistake: {said}"
+    );
+    assert_eq!(
+        base(),
+        seed,
+        "a push the repository's merge path turned down landed anyway"
+    );
+}
+
 /// A hold nothing releases gives the push up, rather than waiting out the job it
 /// runs in.
 ///

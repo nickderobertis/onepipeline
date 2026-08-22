@@ -52,7 +52,13 @@ if not "%~2"=="" (
 )
 call :requirestateroot
 if errorlevel 1 exit /b 64
-rmdir /s /q "%ONEVCS_HOME%\streams" 2>nul
+if exist "%ONEVCS_HOME%\streams" (
+  rmdir /s /q "%ONEVCS_HOME%\streams"
+  if errorlevel 1 (
+    call :broke "cannot remove %ONEVCS_HOME%\streams"
+    exit /b 1
+  )
+)
 type nul >"%ONEVCS_HOME%\streams"
 if errorlevel 1 (
   call :broke "cannot leave a file where %ONEVCS_HOME%\streams was"
