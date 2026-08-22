@@ -1071,6 +1071,10 @@ fn a_transcript_prints_a_tools_output_structured_stripped_bounded_and_labelled()
                 // And one past what a line prints, which only this path can be.
                 {"kind": "tool_result", "index": 1,
                  "output": format!("{}the tail nobody sees", "y".repeat(5_000))},
+                // A producer that stated its truncation flag as something this
+                // build cannot read as either answer.
+                {"kind": "tool_result", "index": 2, "output": "a flag nobody can read",
+                 "output_truncated": "sometimes"},
             ]}]},
         })
         .to_string(),
@@ -1093,6 +1097,10 @@ fn a_transcript_prints_a_tools_output_structured_stripped_bounded_and_labelled()
     // Bounded, and counted out loud rather than cut in silence.
     transcript.out_has("… [4096 of 5020 characters]");
     transcript.out_lacks("the tail nobody sees");
+    // And a flag that is neither answer is reported as neither, rather than
+    // read as the one that claims the output is whole.
+    transcript
+        .out_has(r#"a flag nobody can read … [the producer's truncation flag is unreadable]"#);
 }
 
 /// A dispatch that has recorded something without naming a tool claims the

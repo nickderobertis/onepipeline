@@ -56,6 +56,7 @@ use crate::graph::{self, Landing, NodeStatus};
 use crate::journal::PipelineKind;
 use crate::ledger::{self, LaunchRecord, LockRecord};
 use crate::projection::{self, MemberLabel, Refusal, RunState, Served};
+use crate::report::Truncation;
 use crate::sys;
 
 /// A run root a view refused, and the reason it gave.
@@ -1648,11 +1649,7 @@ pub fn transcript(view: &RunView, only: Option<&str>) -> String {
                     tool_text(
                         field("detail"),
                         field("output"),
-                        event
-                            .payload
-                            .get("output_truncated")
-                            .and_then(serde_json::Value::as_bool)
-                            .unwrap_or(false),
+                        crate::report::Truncation::of(event.payload.get("output_truncated")),
                     )
                 )),
                 _ => {}
@@ -1758,7 +1755,7 @@ const MAX_TOOL_OUTPUT_CHARS: usize = crate::event::MAX_PAYLOAD_TEXT_BYTES;
 /// reader is looking at — a truncated output rendered as though it were whole is
 /// how a reader concludes a tool returned nothing further, which is the reading
 /// this verb exists to correct.
-fn tool_text(detail: &str, output: &str, output_truncated: bool) -> String {
+fn tool_text(detail: &str, output: &str, output_truncated: Truncation) -> String {
     if output.is_empty() {
         return one_line(detail);
     }
@@ -1769,8 +1766,15 @@ fn tool_text(detail: &str, output: &str, output_truncated: bool) -> String {
     if whole > MAX_TOOL_OUTPUT_CHARS {
         notes.push(format!("{MAX_TOOL_OUTPUT_CHARS} of {whole} characters"));
     }
-    if output_truncated {
-        notes.push("already cut short by the producer".to_string());
+    match output_truncated {
+        Truncation::Whole => {}
+        Truncation::Cut => notes.push("already cut short by the producer".to_string()),
+        // Not silence, and not `false`: a flag this build cannot read leaves
+        // whether the output is whole unanswered, and a line that said nothing
+        // would be answering it.
+        Truncation::Unstated => {
+            notes.push("the producer's truncation flag is unreadable".to_string());
+        }
     }
     if !notes.is_empty() {
         text.push_str(&format!(" … [{}]", notes.join("; ")));
@@ -3356,8 +3360,36 @@ mod tests {
     /// view's own.
     #[test]
     fn a_control_character_in_an_output_is_stripped_like_every_other_value() {
-        let rendered = tool_text("", "first\r\nsecond\u{1b}[2K", false);
+        let rendered = tool_text("", "first\r\nsecond\u{1b}[2K", Truncation::Whole);
         assert_eq!(rendered, "first  second [2K");
+    }
+
+    /// What a producer says about having cut an output short, in each of the
+    /// three things it can say — including the one that is neither answer.
+    ///
+    /// A flag this build cannot read used to be read as `false`, which is a
+    /// claim that the output is whole made on behalf of a producer that claimed
+    /// nothing of the sort. It is the same claim this view was corrected for
+    /// making, so it is said rather than assumed.
+    #[test]
+    fn a_truncation_flag_this_build_cannot_read_is_said_rather_than_assumed() {
+        let text = |flag: Option<serde_json::Value>| {
+            tool_text("", "what it returned", Truncation::of(flag.as_ref()))
+        };
+        assert_eq!(text(None), "what it returned");
+        assert_eq!(text(Some(json!(false))), "what it returned");
+        assert_eq!(text(Some(json!(null))), "what it returned");
+        assert_eq!(
+            text(Some(json!(true))),
+            "what it returned … [already cut short by the producer]"
+        );
+        for unreadable in [json!("true"), json!(1), json!({"cut": true})] {
+            assert_eq!(
+                text(Some(unreadable.clone())),
+                "what it returned … [the producer's truncation flag is unreadable]",
+                "{unreadable}"
+            );
+        }
     }
 
     /// A settlement whose report this run kept no copy of is said to be

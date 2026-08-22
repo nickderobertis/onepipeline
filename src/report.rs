@@ -681,10 +681,10 @@ pub(crate) struct Tool {
     pub detail: String,
     /// What it returned, where the event carries one.
     pub output: String,
-    /// Whether the producer had already cut that output short before this run
-    /// ever saw it — a fact about the text, which a reader has no second source
-    /// for.
-    pub output_truncated: bool,
+    /// What the producer said about having already cut that output short before
+    /// this run ever saw it — a fact about the text, which a reader has no
+    /// second source for.
+    pub output_truncated: Truncation,
 }
 
 impl Tool {
@@ -694,12 +694,41 @@ impl Tool {
             name: string(event, "name"),
             detail: compact(event.get("input")),
             output: compact(event.get("output")),
-            // Read leniently like everything else here: a producer that states
-            // nothing states that it cut nothing.
-            output_truncated: event
-                .get("output_truncated")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
+            output_truncated: Truncation::of(event.get("output_truncated")),
+        }
+    }
+}
+
+/// What a producer said about whether an output reached this run whole.
+///
+/// Three readings rather than a boolean, because the third one is real and the
+/// two answers it used to fall into are both wrong. A flag this build cannot
+/// read is not a statement that nothing was cut — reading it as one claims a
+/// completeness nobody asserted, which is the reading this whole view was
+/// corrected for — and it is not grounds to refuse a real, retained, readable
+/// report either. So it is carried as its own answer and rendered as one.
+///
+/// Derived in one place for both sources: the journal's `turn-activity` payload
+/// and a retained report's event spell this field the same way, and two readings
+/// of one field is how they come to disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Truncation {
+    /// The producer said nothing, or said `false`. A producer that states
+    /// nothing states that it cut nothing.
+    Whole,
+    /// The producer said it had already cut this output short.
+    Cut,
+    /// The producer stated something this build cannot read as either.
+    Unstated,
+}
+
+impl Truncation {
+    pub(crate) fn of(value: Option<&Value>) -> Self {
+        match value {
+            None | Some(Value::Null) => Self::Whole,
+            Some(Value::Bool(true)) => Self::Cut,
+            Some(Value::Bool(false)) => Self::Whole,
+            Some(_) => Self::Unstated,
         }
     }
 }
