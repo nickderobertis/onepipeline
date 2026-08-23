@@ -408,7 +408,11 @@ fn signal_one(pid: u32, signal: i32) -> Reached {
 /// Walked in whatever order the frontier gives — the caller needs the *set*. A
 /// pid already found is never queued again, which is what makes a table
 /// reporting a cycle terminate rather than hang a teardown.
-#[cfg(unix)]
+///
+/// One walk for both platforms, because descent is the boundary [`stop`]
+/// promises everywhere and a second implementation would be that boundary fixed
+/// in one of them. What a *link* in the table means is the platform's own
+/// question, and each [`process_table`] answers it before this is handed one.
 fn descended_from(table: &[(u32, u32)], pid: u32) -> Vec<u32> {
     let mut found: Vec<u32> = Vec::new();
     let mut frontier = vec![pid];
@@ -483,28 +487,58 @@ fn parse_table(listed: &str) -> Option<Vec<(u32, u32)>> {
 /// the Unix arm reads off `ESRCH`: a `taskkill` aimed at a tree that is already
 /// gone reached nothing, and reporting that as a stop is the false completion
 /// this seam exists to remove.
-// llmlint: ignore-block[changed_behavior_has_e2e] this arm is `#[cfg(windows)]`, so the only
-// build that compiles it is the one that runs the suite's journeys on Windows — and there they
-// are its e2e: `the_owner_stops_its_own_run_without_force` and
-// `stopping_a_run_whose_work_is_over_says_there_was_nothing_to_stop` are deliberately not
-// `#[cfg(unix)]`, and each drives a real `stop` of a run holding a driver and its registered
-// dispatches, which is this fold over several roots. What is `#[cfg(unix)]` in
-// `tests/e2e/driver.rs` is every journey that asserts against a **process table**, because that
-// oracle is the platform's, not the teardown's. A journey here would be a Windows journey run on
-// a host that is not one.
+///
+/// The tree is then **enumerated**, as the Unix arm enumerates it, and what
+/// comes back is the set the caller is handed. `taskkill /T` walks descent
+/// itself and still does — this does not replace it — but that walk is the
+/// program's and its result is never reported back, so a set built from the
+/// roots alone leaves [`stop_and_confirm`] watching the pids a run's records
+/// name and nothing under them: a teardown that answers while a descendant is
+/// still running, which here is a process still holding every inheritable handle
+/// its parent held. Asking each of them separately also reaches a subtree
+/// orphaned while `taskkill` was walking, which its own snapshot cannot.
+///
+/// Read **before** anything is asked to end, for the reason the Unix arm gives:
+/// a process whose parent has gone is beyond descent from the root.
+// llmlint: ignore-block[changed_behavior_has_e2e] this arm is `#[cfg(windows)]`, so its e2e can
+// only run where it compiles: `the_owner_stops_its_own_run_without_force` and
+// `stopping_a_run_whose_work_is_over_says_there_was_nothing_to_stop` are on no cfg and drive a
+// real `stop` there, and `a_confirmed_stop_answers_only_once_every_descendant_is_gone` holds the
+// enumeration below on both platforms.
 #[cfg(windows)]
 fn platform_stop(roots: &[u32], _how: Stop) -> (Teardown, Vec<u32>) {
-    let aimed: Vec<u32> = aimable(roots)
+    let aimed_roots: Vec<u32> = aimable(roots)
+        .into_iter()
+        .filter(|pid| platform_process_may_be_live(*pid))
+        .collect();
+    if aimed_roots.is_empty() {
+        return (Teardown::NothingToStop, aimed_roots);
+    }
+    let Some(table) = process_table() else {
+        return (Teardown::NotAttempted, Vec::new());
+    };
+    let mut tree = aimed_roots.clone();
+    for root in &aimed_roots {
+        tree.extend(descended_from(&table, *root));
+    }
+    // What descent found is held to exactly the rule the roots were: never `0`,
+    // never this process, each named once, and asked only where this host still
+    // says there is something there. A descendant that went between the listing
+    // and here is one the walk raced to exit rather than one left running, which
+    // is the same reading the Unix arm takes off `ESRCH`.
+    let aimed: Vec<u32> = aimable(&tree)
         .into_iter()
         .filter(|pid| platform_process_may_be_live(*pid))
         .collect();
     if aimed.is_empty() {
         return (Teardown::NothingToStop, aimed);
     }
-    // Every tree is asked separately, because `taskkill` takes one root, and the
-    // answers are folded the way a teardown of several trees has to be: one tree
-    // untouched beside one that was signalled is a run that is neither intact nor
-    // ended, which is what [`Teardown::PartlySignalled`] says.
+    // Every process is asked separately, because `taskkill` takes one root, and
+    // the answers are folded the way a teardown of several trees has to be: one
+    // tree untouched beside one that was signalled is a run that is neither
+    // intact nor ended, which is what [`Teardown::PartlySignalled`] says. The
+    // roots come first, so what is left has stopped growing while its members are
+    // taken down.
     let mut walked = true;
     let mut attempted = false;
     for pid in &aimed {
@@ -515,7 +549,7 @@ fn platform_stop(roots: &[u32], _how: Stop) -> (Teardown, Vec<u32>) {
                 walked = false;
             }
             Teardown::NotAttempted => walked = false,
-            // `taskkill_established` never answers it: a root this teardown
+            // `taskkill_established` never answers it: everything this teardown
             // aimed at was live when it was filtered above. `Teardown::Refused`
             // is not an arm here at all, because this platform cannot establish
             // it — the note on the variant says why.
@@ -619,6 +653,195 @@ fn taskkill_established(
         Ok(_) => Teardown::Signalled,
     }
 }
+
+/// This host's `(pid, parent pid)` pairs, or `None` when it gave no listing this
+/// can be trusted to have read.
+///
+/// The question the Unix arm puts to `ps`, put here to a **toolhelp snapshot** —
+/// the listing this platform gives without a program on a `PATH` the run being
+/// torn down could have changed.
+///
+/// A parent link means less here. Windows records the id a process was created
+/// by, never revises it, and reissues ids, so a listing can make a process the
+/// child of one that ended long ago and whose id something unrelated now holds.
+/// Descending that would aim a teardown at work this run never started, which
+/// [`stop`] promises it will not do, so a link survives only where the two
+/// creation times can order it. A dropped link leaves the row out, and descent
+/// *through* that process still works: what names it as a parent is every other
+/// row. What a link this host would not answer for costs is a descendant of a
+/// process this teardown could not have opened, and so could not have ended.
+// llmlint: ignore-block[invalid_states_unrepresentable] `(pid, parent)` is the pair the Unix
+// arm has always handed `descended_from`, and that walk is one piece of code for both
+// platforms — so a row type belongs to both arms or to neither, and introducing one on this
+// one would fork the walk this change exists to share. `created_at`'s reading is compared
+// only against another reading of itself, in the one expression that takes it.
+#[cfg(windows)]
+fn process_table() -> Option<Vec<(u32, u32)>> {
+    let listed = toolhelp_snapshot()?;
+    let created: Vec<(u32, Option<u64>)> = listed
+        .iter()
+        .map(|(pid, _)| (*pid, created_at(*pid)))
+        .collect();
+    let created_at_of = |pid: u32| {
+        created
+            .iter()
+            .find(|(listed, _)| *listed == pid)
+            .and_then(|(_, at)| *at)
+    };
+    Some(
+        listed
+            .iter()
+            // llmlint: ignore[changed_behavior_has_e2e] the case this rejects is a reissued
+            // id, which no test can produce: it takes the kernel handing a pid back out.
+            .filter(
+                |(pid, parent)| match (created_at_of(*pid), created_at_of(*parent)) {
+                    (Some(child), Some(parent_at)) => child >= parent_at,
+                    _ => false,
+                },
+            )
+            .copied()
+            .collect(),
+    )
+}
+
+/// How many times a snapshot is asked for before this host is taken to have
+/// refused one.
+///
+/// `CreateToolhelp32Snapshot` answers `ERROR_BAD_LENGTH` while the list it is
+/// copying changes under it, and is documented as retryable on exactly that. A
+/// teardown that read it as a refusal would answer [`Teardown::NotAttempted`] to
+/// an operator because something else on the host started at the wrong moment.
+/// Bounded, because a host that will not answer has to be reported rather than
+/// spun on.
+#[cfg(windows)]
+const SNAPSHOT_TRIES: usize = 4;
+
+/// Every `(pid, parent pid)` this host's process snapshot holds, or `None` if it
+/// would not give one.
+///
+/// Read strictly, for the reason the Unix listing is: a snapshot that could not
+/// be taken, one whose walk stopped on anything but running out of processes,
+/// and one that does not hold the process reading it are each not a listing.
+/// The caller is told the tree is unknown rather than handed part of one,
+/// because the row that was dropped could be the descendant that matters and the
+/// process a teardown misses is the expensive one.
+#[cfg(windows)]
+fn toolhelp_snapshot() -> Option<Vec<(u32, u32)>> {
+    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_BAD_LENGTH, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, TH32CS_SNAPPROCESS,
+    };
+
+    for _ in 0..SNAPSHOT_TRIES {
+        // SAFETY: the flag is the documented one for a process list and the call
+        // borrows nothing from this frame.
+        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+        if snapshot == INVALID_HANDLE_VALUE {
+            // llmlint: ignore[changed_behavior_has_e2e] neither arm is a state a test can
+            // ask for: `ERROR_BAD_LENGTH` is the host's own list moving under the call.
+            if std::io::Error::last_os_error().raw_os_error() == Some(ERROR_BAD_LENGTH as i32) {
+                continue;
+            }
+            return None;
+        }
+        let walked = walk_snapshot(snapshot);
+        // SAFETY: the handle came from `CreateToolhelp32Snapshot` above and is
+        // closed once, on every path out of this loop.
+        unsafe { CloseHandle(snapshot) };
+        return walked;
+    }
+    None
+}
+
+/// Read one snapshot from end to end.
+///
+/// Split out of [`toolhelp_snapshot`] so the handle is closed on one path
+/// whatever the walk answers.
+///
+/// `ERROR_NO_MORE_FILES` is the one ending that means the whole list was read.
+/// Anything else is a walk that stopped early, and the rows it did collect are
+/// a partial listing rather than a short one.
+#[cfg(windows)]
+fn walk_snapshot(snapshot: windows_sys::Win32::Foundation::HANDLE) -> Option<Vec<(u32, u32)>> {
+    use windows_sys::Win32::Foundation::ERROR_NO_MORE_FILES;
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        Process32FirstW, Process32NextW, PROCESSENTRY32W,
+    };
+
+    // SAFETY: `PROCESSENTRY32W` is a plain-data structure with no invalid bit
+    // patterns, and the call below overwrites it before anything is read.
+    let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
+    entry.dwSize = u32::try_from(std::mem::size_of::<PROCESSENTRY32W>()).ok()?;
+    let mut found: Vec<(u32, u32)> = Vec::new();
+    // SAFETY: `snapshot` is a live snapshot handle and `entry` is owned by this
+    // frame with its `dwSize` set, which is what the call requires of it.
+    let mut more = unsafe { Process32FirstW(snapshot, &raw mut entry) };
+    while more != 0 {
+        found.push((entry.th32ProcessID, entry.th32ParentProcessID));
+        // SAFETY: as above; `entry` is reused for every row by design.
+        more = unsafe { Process32NextW(snapshot, &raw mut entry) };
+    }
+    // llmlint: ignore[changed_behavior_has_e2e] a walk that stops part-way needs the host's
+    // own snapshot to fail mid-iteration, which nothing can ask it to do.
+    if std::io::Error::last_os_error().raw_os_error() != Some(ERROR_NO_MORE_FILES as i32) {
+        return None;
+    }
+    // llmlint: ignore[changed_behavior_has_e2e] a host that answered with somebody else's
+    // process list is not a state a test can put it in.
+    found
+        .iter()
+        .any(|(pid, _)| *pid == self::pid())
+        .then_some(found)
+}
+
+/// When this host says a process was created, as the count the platform keeps it
+/// in.
+///
+/// Read for one purpose — putting a claimed parent in order against its claimed
+/// child in [`process_table`] — and deliberately not for liveness. A Windows
+/// process *object* outlives the process while any handle to it is open, so a
+/// creation time says a pid was issued then and never that it is still held;
+/// [`process_start_token`] is the reading that pairs it with an exit check, and
+/// this one must not be mistaken for it.
+///
+/// `None` is "this host would not say", which drops the link rather than
+/// following it.
+#[cfg(windows)]
+fn created_at(pid: u32) -> Option<u64> {
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
+    use windows_sys::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    // SAFETY: `OpenProcess` returns a null handle on failure and a handle this
+    // function closes on success; no borrowed memory crosses the boundary.
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return None;
+    }
+    let mut created = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let mut exited = created;
+    let mut kernel = created;
+    let mut user = created;
+    // SAFETY: `handle` is a live handle and every out-parameter is a `FILETIME`
+    // this frame owns for the duration of the call.
+    let read = unsafe {
+        GetProcessTimes(
+            handle,
+            &raw mut created,
+            &raw mut exited,
+            &raw mut kernel,
+            &raw mut user,
+        )
+    };
+    // SAFETY: the handle came from `OpenProcess` above and is closed once.
+    unsafe { CloseHandle(handle) };
+    (read != 0).then(|| u64::from(created.dwHighDateTime) << 32 | u64::from(created.dwLowDateTime))
+}
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 /// Whether a process *may* be live on this host.
 ///
@@ -1663,15 +1886,7 @@ mod tests {
             .stderr(std::process::Stdio::null())
             .spawn()
             .expect("a console process tree");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        let mut leaf = None;
-        while leaf.is_none() && std::time::Instant::now() < deadline {
-            leaf = child_of(root.id());
-            if leaf.is_none() {
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-        }
-        match leaf {
+        match awaited_child_of(root.id()) {
             Some(leaf) => (root, leaf),
             None => {
                 let pid = root.id();
@@ -1679,6 +1894,25 @@ mod tests {
                 let _ = root.wait();
                 panic!("the tree under {pid} never started its leaf");
             }
+        }
+    }
+
+    /// The pid of one child of `parent`, once it has one.
+    ///
+    /// A level appears a moment after the one above it starts, so this waits
+    /// rather than asking once — and gives up rather than waiting for ever, so a
+    /// tree that never grew is a named failure instead of a suite that hangs.
+    #[cfg(windows)]
+    fn awaited_child_of(parent: u32) -> Option<u32> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            if let Some(child) = child_of(parent) {
+                return Some(child);
+            }
+            if std::time::Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
         }
     }
 
@@ -1938,6 +2172,182 @@ mod tests {
             taskkill_established(exited(128), || false),
             Teardown::Signalled,
             "a tree that was already gone was reported as a process still to be found"
+        );
+    }
+
+    /// A tree of real processes, and the pids of everything below its root.
+    ///
+    /// The shape a run makes — a driver, the graph it starts, and the paid agent
+    /// under that — built out of what each platform has and read back through
+    /// that platform's own oracle rather than through the crate's. The Unix arm
+    /// has every level print its own pid; the Windows arm reads each level's
+    /// child out of `Win32_Process`, for the reason [`console_tree`] gives.
+    ///
+    /// The root is this process's own child, so the fixture can reap it. What is
+    /// below it is not, and that is what makes a liveness probe on those pids
+    /// mean something: a grandchild nobody can `wait` on is either running or
+    /// gone, never a zombie answering for a process that has ended.
+    #[cfg(unix)]
+    fn a_tree_and_what_it_started() -> (std::process::Child, Vec<u32>) {
+        // `exec 2>&1` folds the tree's own diagnostics into the stream the pids
+        // arrive on: a level that cannot start is then a line this fails on and
+        // quotes, rather than a level that never appears and says nothing about
+        // why.
+        let mut tree = std::process::Command::new("sh")
+            .args([
+                "-c",
+                "exec 2>&1; echo $$; sh -c 'echo $$; sh -c \"echo \\$\\$; sleep 120\" & \
+                 sleep 120' & sleep 120",
+            ])
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("a process tree");
+        let mut pids: Vec<u32> = Vec::new();
+        {
+            use std::io::BufRead;
+            let out = std::io::BufReader::new(tree.stdout.take().expect("the tree reports itself"));
+            for line in out.lines().take(3) {
+                let line = line.expect("a reported pid");
+                pids.push(
+                    line.trim()
+                        .parse::<u32>()
+                        .unwrap_or_else(|_| panic!("the tree said {line:?} where a pid was due")),
+                );
+            }
+        }
+        assert_eq!(pids.len(), 3, "the tree did not report three levels");
+        assert_eq!(
+            pids[0],
+            tree.id(),
+            "the shell replaced itself instead of starting the tree below it, so the pids below \
+             are not this child's descendants"
+        );
+        (tree, pids[1..].to_vec())
+    }
+
+    /// The same tree, made of the console processes this platform builds one out
+    /// of: `cmd` starting `cmd` starting `ping`.
+    #[cfg(windows)]
+    fn a_tree_and_what_it_started() -> (std::process::Child, Vec<u32>) {
+        let mut root = std::process::Command::new("cmd")
+            .args(["/C", "cmd /C ping -n 120 127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("a process tree");
+        let below = awaited_child_of(root.id())
+            .and_then(|middle| awaited_child_of(middle).map(|leaf| vec![middle, leaf]));
+        match below {
+            Some(below) => (root, below),
+            None => {
+                let pid = root.id();
+                let _ = root.kill();
+                let _ = root.wait();
+                panic!("the tree under {pid} never started all three of its levels");
+            }
+        }
+    }
+
+    /// This host's own listing descends from a real tree's root to its leaf.
+    ///
+    /// Not `#[cfg(unix)]`, and that is the point of it. The reader under
+    /// [`descended_from`] is the platform's — `ps` on one, a toolhelp snapshot
+    /// with its dangling parent links thrown away on the other — and the walk
+    /// over what they hand back is one piece of code that has to get the same
+    /// answer from both. A teardown that cannot see the leaf cannot end it,
+    /// whichever of the two is failing to say where it is.
+    ///
+    /// The oracle is the tree's own: every pid asserted on was reported by the
+    /// process holding it, so nothing here asks the code under test to say what
+    /// the tree was.
+    #[test]
+    fn this_hosts_own_listing_descends_from_a_real_tree_to_its_leaf() {
+        let (mut tree, below) = a_tree_and_what_it_started();
+        let root = tree.id();
+
+        let table = process_table().expect("this host lists its processes");
+        let found = descended_from(&table, root);
+
+        // Cleaned up before the assertion, so a listing that lost the tree does
+        // not also leave it running.
+        let missing: Vec<u32> = below
+            .iter()
+            .copied()
+            .filter(|pid| !found.contains(pid))
+            .collect();
+        stop(root, Stop::Now);
+        let _ = tree.wait();
+        assert!(
+            missing.is_empty(),
+            "this host's listing did not descend from {root} to {missing:?}, so a teardown aimed \
+             at that root would never have aimed at them either"
+        );
+    }
+
+    /// A stop that watches answers only once every process under the root has
+    /// gone.
+    ///
+    /// The whole of what a teardown's answer is worth. A caller reporting
+    /// [`Teardown::Signalled`] to a person is saying the run's work is over, and
+    /// a descendant still running is that work still running. It is also what a
+    /// leaked test *is* on the platform whose CI leg counts them: a child
+    /// inherits every inheritable handle its parent holds, one of those is the
+    /// pipe the runner reads the test's output from, and a test that ended while
+    /// a grandchild survived leaves that pipe short of the end for ever.
+    ///
+    /// Not `#[cfg(unix)]` and not `#[cfg(windows)]`: the two arms reach the tree
+    /// by different means and promise the same thing, and the promise is what is
+    /// held here. Watched through [`stop_and_confirm`] rather than [`stop`],
+    /// because the promise is about *when the answer comes back* — a teardown
+    /// whose descendants die a moment later is the one that leaks, and polling
+    /// after the answer would pass for it.
+    ///
+    /// The root is reaped on a thread of its own while the stop watches, because
+    /// the root here is this process's child and a signalled child nobody has
+    /// collected is a zombie — which answers a liveness probe as alive. Nothing a
+    /// real stop aims at is the stopping process's child; the reaper is what puts
+    /// the fixture back in that position rather than a courtesy to it.
+    #[test]
+    fn a_confirmed_stop_answers_only_once_every_descendant_is_gone() {
+        let (tree, below) = a_tree_and_what_it_started();
+        let root = tree.id();
+        assert!(
+            below.iter().all(|pid| process_may_be_live(*pid)),
+            "the tree {below:?} under {root} was not running before it was stopped"
+        );
+        let reaper = std::thread::spawn(move || {
+            let mut tree = tree;
+            let _ = tree.wait();
+        });
+
+        let established = stop_and_confirm(&[root], Stop::Now, std::time::Duration::from_secs(30));
+
+        // Read the instant the answer came back, and only then clean up:
+        // anything that outlived the stop is what this exists to catch, and a
+        // second look after tidying would be looking at a different host.
+        let surviving: Vec<u32> = below
+            .iter()
+            .copied()
+            .filter(|pid| process_may_be_live(*pid))
+            .collect();
+        // Deepest first, because a process whose parent has gone is beyond
+        // descent and this is the fixture's own last chance to reach it.
+        for pid in below.iter().rev() {
+            stop(*pid, Stop::Now);
+        }
+        stop(root, Stop::Now);
+        reaper.join().expect("the fixture's root is reaped");
+
+        assert_eq!(
+            established,
+            Teardown::Signalled,
+            "a stop that watched the tree {below:?} under {root} did not report reaching it"
+        );
+        assert!(
+            surviving.is_empty(),
+            "a stop answered that it had reached the tree under {root} while {surviving:?} was \
+             still running, so every caller that reports a stop to a person reports one that had \
+             not happened yet"
         );
     }
 

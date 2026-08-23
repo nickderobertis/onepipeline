@@ -1492,22 +1492,16 @@ impl World {
     /// the pipe `cargo nextest` reads this test's output from: the test exits,
     /// the pipe never reaches EOF, and the test is reported `LEAK`.
     ///
-    /// Through the binary's own `stop`, which walks the run's descendants and
-    /// waits until they are gone, rather than a second teardown here that would
-    /// walk the tree differently. `--force` because a world seen through
-    /// [`as_session`](World::as_session) is ending a run another session's label
-    /// owns.
+    /// Through the binary's own `stop`, which on either platform walks the run's
+    /// descendants and waits until they are gone, rather than a second teardown
+    /// here that would walk the tree differently. `--force` because a world seen
+    /// through [`as_session`](World::as_session) is ending a run another
+    /// session's label owns.
     ///
     /// What it cannot stop it leaves, which is why it promises only the runs it
     /// can: `stop` refuses a run whose dispatch registry it cannot read, and
     /// `driver::a_dispatch_this_run_cannot_record_is_refused_and_does_not_run`
     /// takes that registry away on purpose.
-    ///
-    /// The `LEAK` count `cross (windows-latest)` reports is this teardown's tail
-    /// rather than a defect in the journeys it names. `sys::platform_stop`
-    /// confirms the whole tree on Unix, off the process table; on Windows it
-    /// confirms only the roots the run's records name, because `process_table`
-    /// and `descended_from` are `#[cfg(unix)]`.
     fn stop_the_runs_it_can(&self) {
         let Ok(entries) = std::fs::read_dir(&self.runs) else {
             return;
