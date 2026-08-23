@@ -199,6 +199,15 @@ class Workspace {
     return readFileSync(this.judgeLog, "utf8").split("\n").filter(Boolean);
   }
 
+  /// Drive the tier's own script, for the states the recipe's default hides.
+  driver(args = [], { env = {} } = {}) {
+    return spawnSync("bash", ["scripts/llmlint-diff.sh", ...args], {
+      cwd: this.root,
+      encoding: "utf8",
+      env: { ...this.env, ...env },
+    });
+  }
+
   /// Drive the cached Nx target directly, as someone who skipped the recipe does.
   target({ env = {} } = {}) {
     return spawnSync("bash", ["scripts/nx.sh", "run", "onepipeline:lint-llm-diff"], {
@@ -206,6 +215,17 @@ class Workspace {
       encoding: "utf8",
       env: { ...this.env, ...env },
     });
+  }
+
+  /// A PATH with just enough to run a shell script, and no sha256 tool on it.
+  onBareToolchain() {
+    const directory = join(this.sandbox, "bare-bin");
+    mkdirSync(directory, { recursive: true });
+    for (const tool of ["bash", "env", "cat", "sed", "dirname"]) {
+      const resolved = execFileSync("bash", ["-c", `command -v ${tool}`], { encoding: "utf8" });
+      symlinkSync(resolved.trim(), join(directory, tool));
+    }
+    return { PATH: directory };
   }
 
   /// Prepend an `llmlint` to the caller's PATH, as a shell that never ran setup has.
@@ -564,6 +584,39 @@ describe("the judged tier's refusals", () => {
       assert.equal(ws.judgeRuns().length, 0, report(result));
     });
   }
+
+  it("says what to pass when it is handed no base at all", (t) => {
+    // Unreachable through the recipe, which defaults the base — so this is what a
+    // script, a hook, or a workflow calling the driver directly is told.
+    const ws = workspace(t);
+
+    const result = ws.driver();
+
+    assert.equal(result.status, 2, report(result));
+    assert.match(result.stderr, /pass the base to judge against/);
+    assert.equal(ws.judgeRuns().length, 0, report(result));
+  });
+
+  it("names the missing tool when the host cannot hash the judge configuration", (t) => {
+    // The fingerprint resolves its own toolchain, so it still finds llmlint with
+    // nothing else on PATH — and then has nothing to hash with.
+    const ws = workspace(t);
+
+    const result = ws.fingerprint({ env: ws.onBareToolchain() });
+
+    assert.equal(result.status, 2, report(result));
+    assert.match(result.stderr, /no sha256 tool found/);
+  });
+
+  it("says what to free when it cannot open storage for the report", (t) => {
+    const ws = workspace(t);
+
+    const result = ws.lint(ws.head(), { env: { TMPDIR: join(ws.sandbox, "no-such-tmp") } });
+
+    assert.notEqual(result.status, 0, report(result));
+    assert.match(result.stderr, /could not open temporary storage for the judge report/);
+    assert.equal(ws.judgeRuns().length, 0, report(result));
+  });
 
   it("refuses a base whose shape is not a git ref, before reaching git", (t) => {
     const ws = workspace(t);

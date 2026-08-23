@@ -32,14 +32,11 @@
 # summary substituted for it.
 set -euo pipefail
 
-root="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)" || {
-  echo "lint-llm-diff: could not locate the repository from this script; reinstall the checkout and retry" >&2
+CDPATH='' cd -- "$(dirname -- "$0")/.." || {
+  echo "lint-llm-diff: could not enter the repository from this script; reinstall the checkout and retry" >&2
   exit 1
 }
-cd "$root" || {
-  echo "lint-llm-diff: could not enter '$root'; repair its permissions and retry" >&2
-  exit 1
-}
+root=$PWD
 
 # The base arrives from a command line, so its shape is checked before it reaches
 # git or Nx: a ref is what a ref may look like. Everything after it is passed to Nx
@@ -75,16 +72,21 @@ if [ -n "${NX_SKIP_NX_CACHE:-}${NX_DISABLE_NX_CACHE:-}" ]; then
 fi
 unset NX_SKIP_NX_CACHE NX_DISABLE_NX_CACHE
 
-report="$(mktemp)" || {
+# The report is captured to read the provenance off it, and each half is replayed
+# to the stream it came from: a run with findings has to leave its diagnostics on
+# stderr, not folded into the verdict on stdout.
+captured="$(mktemp -d)" || {
   echo "lint-llm-diff: could not open temporary storage for the judge report; free disk space and retry" >&2
   exit 1
 }
-trap 'rm -f "$report"' EXIT
+trap 'rm -rf "$captured"' EXIT
 
 status=0
 LLMLINT_DIFF_BASE_SHA="$base_sha" ONEPIPELINE_NX_SHOW_OUTPUT=1 \
-  bash scripts/nx.sh run onepipeline:lint-llm-diff "$@" >"$report" 2>&1 || status=$?
-cat "$report"
+  bash scripts/nx.sh run onepipeline:lint-llm-diff "$@" \
+  >"$captured/out" 2>"$captured/err" || status=$?
+cat "$captured/out"
+cat "$captured/err" >&2
 
 # Provenance is Nx's own cache reporting: the annotation on the task line, or the
 # summary line it prints only when it replayed a task instead of running it. Both
@@ -95,7 +97,7 @@ cat "$report"
 # inside another Nx task — and an unstripped match reports each replay as a fresh
 # judgement.
 escape="$(printf '\033')"
-if sed "s/${escape}\[[0-9;]*[a-zA-Z]//g" "$report" |
+if sed "s/${escape}\[[0-9;]*[a-zA-Z]//g" "$captured/out" "$captured/err" |
   grep -qE '^Nx read the output from the cache instead of running the command|^> nx run onepipeline:lint-llm-diff +\[(local cache|remote cache|existing outputs match the cache)'; then
   echo "lint-llm-diff: replayed the recorded verdict for base $base_sha (Nx cache hit)" >&2
 else

@@ -21,10 +21,11 @@
 # so it is handed through untouched rather than reduced to a line.
 set -euo pipefail
 
-root="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)" || {
-  echo "lint-llm-diff: could not locate the repository from this script; reinstall the checkout and retry" >&2
+CDPATH='' cd -- "$(dirname -- "$0")/.." || {
+  echo "lint-llm-diff: could not enter the repository from this script; reinstall the checkout and retry" >&2
   exit 1
 }
+root=$PWD
 # shellcheck source=scripts/llmlint-runtime-env.sh
 . "$root/scripts/llmlint-runtime-env.sh" || {
   echo "lint-llm-diff: could not load the shared runtime environment; restore scripts/llmlint-runtime-env.sh and retry" >&2
@@ -41,8 +42,4 @@ git -C "$root" rev-parse --verify --quiet "${base_sha}^{commit}" >/dev/null || {
 }
 
 llmlint_runtime_env
-cd "$root" || {
-  echo "lint-llm-diff: could not enter '$root'; repair its permissions and retry" >&2
-  exit 1
-}
 exec llmlint --diff --diff-base "$base_sha"

@@ -32,10 +32,11 @@
 # at all; the two say which of the toolchain or the checkout to repair.
 set -euo pipefail
 
-root="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)" || {
-  echo "llmlint fingerprint: could not locate the repository from this script; reinstall the checkout and retry" >&2
+CDPATH='' cd -- "$(dirname -- "$0")/.." || {
+  echo "llmlint fingerprint: could not enter the repository from this script; reinstall the checkout and retry" >&2
   exit 1
 }
+root=$PWD
 # shellcheck source=scripts/llmlint-runtime-env.sh
 . "$root/scripts/llmlint-runtime-env.sh" || {
   echo "llmlint fingerprint: could not load the shared runtime environment; restore scripts/llmlint-runtime-env.sh and retry" >&2
@@ -46,10 +47,6 @@ llmlint_runtime_env
 version="$(llmlint --version)" || {
   echo "llmlint fingerprint: 'llmlint --version' failed; run 'just setup-llmlint' and retry" >&2
   exit 2
-}
-cd "$root" || {
-  echo "llmlint fingerprint: could not enter '$root'; repair its permissions and retry" >&2
-  exit 1
 }
 config="$(env -u LLMLINT_ONEHARNESS_BIN llmlint config)" || {
   echo "llmlint fingerprint: 'llmlint config' failed; repair llmlint.yml or its plugin pins and retry" >&2
