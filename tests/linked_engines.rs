@@ -655,31 +655,43 @@ fn a_tree_the_check_cannot_read_is_refused_rather_than_answered() {
             "serves 'onejudge' at '0.0', which is not a version this check can order",
         ),
     ];
-    // Not expressible as an `Engine`, whose versions always go into well-formed
-    // records: a line the registry served that this cannot read at all. Dropped
-    // silently, it would leave the lines around it answering "the newest
+    // Records no `Engine` can express, because its versions always go into
+    // well-formed entries filed under its own name. Each is appended to a sound
+    // index, so what is refused is the record rather than the file. Dropped
+    // silently, either would leave the lines around it answering "the newest
     // release" for a file that had more.
-    let malformed = tree("malformed-index-record", &CARET_SHAPES);
-    let entry = repo_root()
-        .join(&malformed.index)
-        .join(index_path("oneagentgraph"));
-    let served = fs::read_to_string(&entry).expect("the fixture index entry");
-    fs::write(&entry, format!("{served}{{\"name\":\"oneagentgraph\"}}\n"))
-        .expect("a record with no version or yanked flag on it");
-    let run = linked_engines(&malformed.args());
-    assert_eq!(
-        run.status.code(),
-        Some(3),
-        "a record this cannot read leaves the registry's answer incomplete, which is neither \
-         current nor behind:\n{}",
-        said(&run)
-    );
-    assert!(
-        String::from_utf8_lossy(&run.stderr)
-            .contains("served a 'oneagentgraph' record with no name, version or yanked flag"),
-        "the refusal does not name what it could not read:\n{}",
-        said(&run)
-    );
+    for (case, record, expected) in [
+        (
+            "malformed-index-record",
+            "{\"name\":\"oneagentgraph\"}",
+            "served a 'oneagentgraph' record with no name, version or yanked flag",
+        ),
+        (
+            "foreign-index-record",
+            "{\"name\":\"serde\",\"vers\":\"9.9.9\",\"yanked\":false}",
+            "served a record for 'serde' under 'oneagentgraph'",
+        ),
+    ] {
+        let fixture = tree(case, &CARET_SHAPES);
+        let entry = repo_root()
+            .join(&fixture.index)
+            .join(index_path("oneagentgraph"));
+        let served = fs::read_to_string(&entry).expect("the fixture index entry");
+        fs::write(&entry, format!("{served}{record}\n")).expect("one more record in it");
+        let run = linked_engines(&fixture.args());
+        assert_eq!(
+            run.status.code(),
+            Some(3),
+            "'{case}' leaves the registry's answer one this cannot read, which is neither \
+             current nor behind:\n{}",
+            said(&run)
+        );
+        assert!(
+            String::from_utf8_lossy(&run.stderr).contains(expected),
+            "'{case}' was refused without naming '{expected}':\n{}",
+            said(&run)
+        );
+    }
 
     for (case, engine, expected) in cases {
         let tree = tree(case, &but(engine));
@@ -815,8 +827,9 @@ fn a_registry_that_hiccups_is_retried_and_one_that_never_answers_is_not_a_findin
         &registry(&tree.index, 1),
     ]);
     assert!(
-        recovered.status.success(),
-        "one refused request is a registry hiccup, not a stale lock:\n{}",
+        recovered.status.success() && recovered.stderr.is_empty(),
+        "one refused request is a registry hiccup, not a stale lock, and not something a \
+         weekly job should say anything about:\n{}",
         said(&recovered)
     );
 
@@ -907,5 +920,37 @@ fn the_marker_the_note_opens_with_is_the_one_the_release_job_replaces() {
         release.contains(&format!("/^{marker}$/")),
         "release.yml trims the old section at a marker that is not the one the note opens \
          with ({marker}), so re-running a release stacks a second table"
+    );
+}
+
+/// A release carrying build metadata is a release the lock can be behind.
+///
+/// `2.5.0+20260823` orders as 2.5.0 — cargo ignores build metadata — and
+/// crates.io really does serve versions spelled that way. Read as a prerelease
+/// and skipped, this check would call a lock at 2.4.0 current against it.
+///
+/// The requirement here is written with its `^` spelled out, which is the other
+/// half of what cargo accepts and what this repository's own pins never use.
+#[test]
+fn a_release_carrying_build_metadata_is_one_the_lock_can_be_behind() {
+    let engines = but(Engine {
+        name: "oneagentgraph",
+        requirement: "^2.1",
+        locked: &["2.4.0"],
+        served: &["2.4.0", "2.5.0+20260823"],
+    });
+    let run = linked_engines(&tree("build-metadata", &engines).args());
+    assert_eq!(
+        run.status.code(),
+        Some(1),
+        "2.5.0+20260823 is a stable release `^2.1` permits, so a lock at 2.4.0 is behind \
+         it:\n{}",
+        said(&run)
+    );
+    assert!(
+        String::from_utf8_lossy(&run.stderr)
+            .contains("oneagentgraph: links 2.4.0, but its requirement already permits 2.5.0"),
+        "the refusal does not name the release with metadata on it as the one permitted:\n{}",
+        said(&run)
     );
 }

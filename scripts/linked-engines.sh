@@ -189,28 +189,41 @@ index_path() {
 # resolve to: a yanked release is not a candidate, and neither is a prerelease,
 # which a requirement without one never matches.
 #
-# The index is one JSON object per line and `"vers"` and `"yanked"` each appear
-# exactly once on it — a dependency entry carries `"req"`, not either — so the
-# fields are read positionally rather than by standing up a JSON parser this
-# script otherwise has no need of. What comes back is a third party's, so a
-# record missing any of the three fields this reads is emitted as `!` and
-# refused by the caller: dropping it silently would leave the remaining lines
-# answering "the newest release" for a file that had more.
+# The index is one JSON object per line and `"name"`, `"vers"` and `"yanked"`
+# each appear exactly once on it — a dependency entry carries `"req"`, not any
+# of them — so the fields are read positionally rather than by standing up a
+# JSON parser this script otherwise has no need of. What comes back is a third
+# party's, so a record missing one of those fields is emitted as `!` and one
+# filed under another crate's name as `?<name>`; the caller refuses both. Either
+# dropped silently would leave the lines around it answering "the newest
+# release" for a file that had more.
+#
+# Build metadata is not part of an ordering — `1.2.4+meta` *is* 1.2.4, and
+# crates.io serves versions spelled that way — so it is stripped rather than
+# read as a prerelease and skipped, which would call a lock behind it current.
 index_versions() {
   local name="$1" path body attempt
   path="$(index_path "$name")"
   case "$index" in
     http://*|https://*)
       body=""
+      # A registry read is the one part of this that fails for reasons having
+      # nothing to do with the lock, so it is retried — and curl's own diagnosis
+      # is held here rather than left on stderr, because an attempt a later one
+      # recovers from is not something a weekly job should report.
+      errors="$(mktemp)"
       for attempt in 1 2 3; do
-        if body="$(curl -fsSL "$index/$path")"; then break; fi
+        if body="$(curl -fsSL "$index/$path" 2>"$errors")"; then break; fi
         body=""
-        # A registry read is the one part of this that fails for reasons having
-        # nothing to do with the lock, so it is retried before it is reported.
         [ "$attempt" -eq 3 ] || sleep "$attempt"
       done
-      [ -n "$body" ] || die "the crates.io index at '$index' did not serve '$name'" \
-        "check reachability of '$index', or pass '--index' naming a mirror or a local sparse-index tree"
+      if [ -z "$body" ]; then
+        detail="$(tr '\n' ' ' <"$errors")"
+        rm -f "$errors"
+        die "the crates.io index at '$index' did not serve '$name': $detail" \
+          "check reachability of '$index', or pass '--index' naming a mirror or a local sparse-index tree"
+      fi
+      rm -f "$errors"
       ;;
     *)
       [ -f "$index/$path" ] || die "no index entry for '$name' under '$index'" \
@@ -218,16 +231,20 @@ index_versions() {
       body="$(cat "$index/$path")"
       ;;
   esac
-  printf '%s\n' "$body" | awk '
+  printf '%s\n' "$body" | awk -v want="$name" '
     /^[[:space:]]*$/ { next }
     {
-      vers = ""; yanked = ""
+      vers = ""; yanked = ""; who = ""
       if (match($0, /"vers":"[^"]*"/)) vers = substr($0, RSTART + 8, RLENGTH - 9)
       if (match($0, /"yanked":(true|false)/)) yanked = substr($0, RSTART + 9, RLENGTH - 9)
-      if (vers == "" || yanked == "" || $0 !~ /"name":"/) { print "!"; next }
+      if (match($0, /"name":"[^"]*"/)) who = substr($0, RSTART + 8, RLENGTH - 9)
+      if (vers == "" || yanked == "" || who == "") { print "!"; next }
+      if (who != want) { print "?" who; next }
       if (yanked == "true") next
-      if (vers ~ /[-+]/) next
-      print vers
+      core = vers
+      sub(/\+.*$/, "", core)
+      if (core ~ /-/) next
+      print core
     }
   '
 }
@@ -267,8 +284,12 @@ for name in "${SIBLINGS[@]}"; do
   permitted=""
   while read -r version; do
     [ -n "$version" ] || continue
-    [ "$version" != "!" ] || die "the index served a '$name' record with no name, version or yanked flag on it" \
-      "'$index' is not answering in the crates.io sparse-index format — pass '--index' naming one that does"
+    case "$version" in
+      "!") die "the index served a '$name' record with no name, version or yanked flag on it" \
+        "'$index' is not answering in the crates.io sparse-index format — pass '--index' naming one that does" ;;
+      "?"*) die "the index served a record for '${version#?}' under '$name'" \
+        "'$index' files a crate's releases under another crate's name — pass '--index' naming a sparse-index tree that does not" ;;
+    esac
     orderable "$version" || die "the index serves '$name' at '$version', which is not a version this check can order" \
       "'$index' is not answering in the crates.io sparse-index format — pass '--index' naming one that does"
     if ver_ge "$version" "$lower" && ver_lt "$version" "$upper"; then
