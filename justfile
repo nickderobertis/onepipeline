@@ -246,5 +246,5 @@ lint-llm-validate *args:
 # that contract, including the one supported way to force a re-judge.
 # The blocking `llmlint` PR check; `just gate` runs it before you push.
 # llmlint scoped to the files this branch changed since it forked from main.
-lint-llm-diff base="origin/main" *nx_args:
+lint-llm-diff base="origin/main" *options:
     @bash scripts/llmlint-diff.sh "$@"

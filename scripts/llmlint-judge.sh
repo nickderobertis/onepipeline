@@ -14,21 +14,12 @@
 # judging on the same value is what stops a clean verdict computed against one base
 # from being replayed for another. Exits 2 when what it was handed is not a base it
 # can judge, 3 when this checkout or host cannot support a run, and otherwise
-# llmlint's own status — which Nx collapses to a failed task either way, so the
-# report is what says whether the judge ruled or never reached a verdict.
+# llmlint's own status, which is this task's status and so the cache's verdict.
 #
 # llmlint: ignore-file[tool_output_is_signal] llmlint's own report is this tier's
 # product — Nx replays this task's terminal output in place of a verdict record —
 # so it is handed through untouched rather than reduced to a line.
 set -euo pipefail
-
-#: Where this states what it exited with, for `scripts/llmlint-diff.sh` to report.
-#: Nx collapses every failed task to 1, so findings and a toolchain that never
-#: reached a verdict would otherwise arrive at the caller as one answer. A fixed
-#: path under the ignored `.nx/` directory rather than a caller-named one: nothing
-#: else writes here, so the status cannot be supplied by anything but this script,
-#: and nothing here can be made to write somewhere it should not.
-readonly JUDGE_STATUS_FILE=".nx/llmlint-diff-status"
 
 # llmlint: ignore-block[changed_behavior_has_e2e] Reaching this needs a checkout
 # whose own directory cannot be entered while this script is still readable inside
@@ -55,18 +46,6 @@ git -C "$root" rev-parse --verify --quiet "${base_sha}^{commit}" >/dev/null || {
   exit 2
 }
 
-mkdir -p "$(dirname -- "$JUDGE_STATUS_FILE")" || {
-  echo "lint-llm-diff: could not open '$root/.nx' to record this run's status; repair its permissions and retry" >&2
-  exit 3
-}
-record_status() {
-  local judged=$?
-  printf '%s\n' "$judged" >"$JUDGE_STATUS_FILE" ||
-    echo "lint-llm-diff: could not record this run's status; the tier reports it as a plain failure" >&2
-  exit "$judged"
-}
-trap record_status EXIT
-
 llmlint_runtime_env || exit 3
 
-llmlint --diff --diff-base "$base_sha"
+exec llmlint --diff --diff-base "$base_sha"

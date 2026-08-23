@@ -472,7 +472,6 @@ describe("the judged tier's computation cache", () => {
 
     assert.equal(ws.judgeRuns().length, 2, "the judge was asked a different number of times");
     for (const result of [first, second]) {
-      // 1, not Nx's collapsed failure: the judge ruled on this diff and said no.
       assert.equal(result.status, 1, report(result));
       assert.match(report(result), new RegExp(FINDING));
       assert.match(report(result), new RegExp(FAIL_VERDICT));
