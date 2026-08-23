@@ -11,6 +11,12 @@
 
 set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 
+# Recipe parameters reach a recipe's shell as `$1`, `$2`, ... as well as through
+# `{{ }}`. The judged tier takes its base and its options that way: a value
+# interpolated into shell source is read as shell before anything can validate it,
+# and that one is typed at a command line.
+set positional-arguments := true
+
 # llmlint: ignore-file[tool_output_is_signal] recipes that hand straight to cargo,
 # clippy, rustdoc, or cargo-deny inherit those tools' diagnostics, which already
 # name the exact problem and its fix; a wrapper message would bury them. The
@@ -235,8 +241,10 @@ lint-llm-validate *args:
     @command -v llmlint >/dev/null 2>&1 || { echo "llmlint not installed — run 'just setup-llmlint'" >&2; exit 1; }
     llmlint validate {{args}}
 
+# One verdict per tree, base commit, and judge configuration, rather than a fresh
+# roll of a non-deterministic judge every time. `scripts/llmlint-diff.sh` holds
+# that contract, including the one supported way to force a re-judge.
 # The blocking `llmlint` PR check; `just gate` runs it before you push.
 # llmlint scoped to the files this branch changed since it forked from main.
-lint-llm-diff base="origin/main" *args:
-    @command -v llmlint >/dev/null 2>&1 || { echo "llmlint not installed — run 'just setup-llmlint'" >&2; exit 1; }
-    llmlint --diff --diff-base "{{base}}" {{args}}
+lint-llm-diff base="origin/main" *options:
+    @bash scripts/llmlint-diff.sh "$@"
