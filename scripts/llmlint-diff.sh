@@ -131,11 +131,16 @@ if ((status != 0)); then
   exit "$status"
 fi
 
-# A pass is one line, like every other recipe here. Nx's orchestration chatter is
-# not this tier's answer, and the judge's own answer is a verdict and a pointer to
-# the run that produced it — a fresh run and a replayed one say the same thing,
-# which is the whole claim this cache makes. `llmlint history` has the rest.
-verdict="$(grep -m1 -E '^[0-9]+ rules: ' "$plain")" || verdict=""
-pointer="$(sed -n 's/.*\(llmlint history [A-Za-z0-9_-]*\).*/\1/p' "$plain" | tail -1)"
-echo "lint-llm-diff: $provenance${verdict:+ — $verdict}${pointer:+ (full report: $pointer)}" >&2
+# A pass is one line, like every other recipe here: Nx's orchestration chatter is
+# not this tier's answer. The answer is the verdict line the task itself produced,
+# which is what Nx stored and what it replays — so a fresh run and a replayed one
+# say the same thing, which is the whole claim this cache makes.
+#
+# A task that succeeded without producing one has not certified anything, whatever
+# its status said, so it is refused rather than reported as a pass.
+verdict="$(grep -m1 '^lint-llm-diff: ' "$plain")" || {
+  echo "lint-llm-diff: the judged run reported no verdict for base $base_sha; rerun with --skip-nx-cache, and if it stays empty run 'bash scripts/llmlint-judge.sh' with LLMLINT_DIFF_BASE_SHA set to see what it did" >&2
+  exit 2
+}
+echo "lint-llm-diff: $provenance — ${verdict#lint-llm-diff: }" >&2
 exit "$status"

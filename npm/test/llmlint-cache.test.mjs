@@ -83,7 +83,9 @@ if [[ \${FAKE_LLMLINT_EXIT:-0} != 0 ]]; then
   echo 'See full results with \`${POINTER}\`'
   exit "$FAKE_LLMLINT_EXIT"
 fi
-echo "${PASS_VERDICT}\${FAKE_LLMLINT_NOTE:+ ($FAKE_LLMLINT_NOTE)}"
+if [[ -z \${FAKE_LLMLINT_NO_VERDICT:-} ]]; then
+  echo "${PASS_VERDICT}\${FAKE_LLMLINT_NOTE:+ ($FAKE_LLMLINT_NOTE)}"
+fi
 echo 'See full results with \`${POINTER}\`'
 `;
 
@@ -677,6 +679,38 @@ describe("the judged tier's refusals", () => {
     assert.equal(result.status, 3, report(result));
     assert.match(result.stderr, /could not open temporary storage for the judge report/);
     assert.equal(ws.judgeRuns().length, 0, report(result));
+  });
+
+  it("refuses to certify a judge that exited cleanly without a verdict", (t) => {
+    // llmlint's status is not the whole answer: a clean exit that reached no
+    // verdict would otherwise be stored as a pass and replayed for this tree.
+    const ws = workspace(t);
+    const base = ws.head();
+
+    const first = ws.lint(base, { env: { FAKE_LLMLINT_NO_VERDICT: "1" } });
+    const second = ws.lint(base, { env: { FAKE_LLMLINT_NO_VERDICT: "1" } });
+
+    for (const result of [first, second]) {
+      // The tier fails, as it does for any diff it could not certify; what the
+      // report says is which of the two happened.
+      assert.notEqual(result.status, 0, report(result));
+      assert.match(report(result), /without reporting a verdict/, report(result));
+    }
+    // Never stored, so the next run asks again rather than replaying the silence.
+    assert.equal(ws.judgeRuns().length, 2, report(second));
+    assert.match(second.stderr, new RegExp(CACHE_MISS), report(second));
+  });
+
+  it("refuses to report a pass the cached target never put a verdict in", (t) => {
+    // The target is a seam: whatever runs behind it has to leave the verdict the
+    // driver reports, and a driver that invented one would certify silence.
+    const ws = workspace(t);
+    writeExecutable(join(ws.root, "scripts", "llmlint-judge.sh"), "#!/usr/bin/env bash\nexit 0\n");
+
+    const result = ws.lint(ws.head());
+
+    assert.equal(result.status, 2, report(result));
+    assert.match(result.stderr, /reported no verdict for base/, report(result));
   });
 
   it("refuses an option that is not one of this tier's own", (t) => {
