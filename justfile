@@ -210,24 +210,12 @@ deps-check:
     @# them would leave a failing gate with no actionable detail.
     @cargo machete
 
-# Outside `check` for the reason `deps-check` is outside it: this reads the
-# crates.io index to learn what each requirement permits *now*, and the
-# deterministic gate stays offline. `.github/workflows/lock-currency.yml` runs it
-# weekly through this recipe.
-#
-# What it protects: a lock resolving a sibling engine older than the requirement
-# beside it already allows is invisible to every signal a reader reaches for —
-# the tag, the changelog, the requirement — and has three times been read as the
-# fix having shipped.
+# Both are outside `check` for the reason `deps-check` is: they read the
+# crates.io index, and the deterministic gate stays offline.
 # Fail when Cargo.lock resolves a sibling engine older than Cargo.toml permits.
 lock-current:
     @bash scripts/linked-engines.sh --format check
 
-# The same reading, as the markdown a release's notes carry: what that release
-# actually links, and where a resolved engine is behind what its own requirement
-# permits. `release.yml` appends this to the GitHub Release body, so the answer
-# to "what does this release link?" is where the reader already is rather than
-# inside a published wheel's SBOM.
 # Compose the release note recording the engine versions this build links.
 linked-engines:
     @bash scripts/linked-engines.sh --format notes

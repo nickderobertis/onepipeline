@@ -1,52 +1,33 @@
 #!/usr/bin/env bash
-# What this build actually links, and whether it is what its own manifest
-# already permits.
+# What this build links, held to what its own manifest already permits.
 #
-# The failure this exists to prevent has happened three times: a release ships a
-# `Cargo.lock` that resolves a sibling engine *older* than `Cargo.toml`'s own
-# requirement permits, and a downstream reader who checks the requirement — the
-# only signal that is easy to reach — concludes the fix is in the binary. The
-# tag exists, the changelog says it shipped, the requirement allows it, and the
-# running binary has never contained it. Only the lock disagrees, and nothing
-# was reading the lock.
+# `Cargo.lock` can resolve a sibling engine older than the requirement beside it
+# allows, and nothing a reader reaches — the tag, the changelog, the requirement
+# — disagrees with them; that has shipped three times. So this reads the lock,
+# asks the crates.io sparse index what each requirement permits today, and
+# reports the difference: `--format check` as a gate, `--format notes` as the
+# markdown a release's notes carry.
 #
-# Two modes over one reading of the tree:
-#
-#   --format check   (default) exits 1 naming every engine the lock holds behind
-#                    what its requirement permits, with the version it resolves,
-#                    the version the requirement permits, and the `cargo update`
-#                    spec that fixes it. `just lock-current` runs this, and
-#                    `.github/workflows/lock-currency.yml` runs that recipe
-#                    weekly.
-#   --format notes   the markdown a release's notes carry, so "what does this
-#                    release link?" is answered where a reader already is
-#                    rather than only inside a published wheel's SBOM.
-#                    `just linked-engines` runs this, and release.yml appends
-#                    its output to the GitHub Release body.
-#
-# It reads the crates.io **sparse index** to learn what a requirement permits
-# today, which is why the recipes sit outside `just check` — the same reason
-# `deps-check` does, and recorded in AGENTS.md beside it. `--index` also accepts
-# a directory in that same layout, which is what `tests/linked_engines.rs`
-# drives it against so the offline gate can prove both modes end to end.
+# Exits 0 with nothing behind, 1 naming every engine that is, 2 for an argument
+# it cannot use, and 3 for a manifest, lock, or index it could not read — which
+# says nothing about currency either way. `--index` also takes a directory in
+# the sparse index's own layout.
 #
 # Usage:
 #   linked-engines.sh [--format check|notes] [--manifest PATH] [--lock PATH]
 #                     [--index URL_OR_DIR]
 set -euo pipefail
 
-# The siblings whose currency is a claim this repository makes. `oneagentgraph`
-# and `onevcs` are what it composes, `onejudge` is the verdict vocabulary it
-# relays, and the two test-support pins are here because a double writing a
-# stale shape is the same lie one build removed: it passes while proving a
-# fixture. Every one of them is pinned in `[workspace.dependencies]`, which is
-# what makes "the requirement already permitted it" checkable at all.
+# The engines whose currency this repository claims: the two it composes, the
+# verdict vocabulary it relays, and the two test-support pins whose drift would
+# leave a double proving a fixture. Every one is pinned in
+# `[workspace.dependencies]`, which is what makes the claim checkable at all.
 SIBLINGS=(oneagentgraph onevcs onevcs-testing onejudge oneharness-core)
 
 format=check
 manifest=Cargo.toml
 lock=Cargo.lock
-# Overridable so a mirror — or a test's fixture tree — can answer instead. The
+# Overridable so a mirror — or a test's fixture tree — answers instead. The
 # default is the registry cargo itself resolves from.
 index="${ONEPIPELINE_CRATES_INDEX:-https://index.crates.io}"
 
@@ -62,8 +43,6 @@ need_value() {
   fi
 }
 
-# The tree could not be read at all, which says nothing about whether the lock
-# is current — a distinct exit from the finding this check exists to report.
 die() {
   echo "linked-engines: $1" >&2
   echo "ACTION: $2" >&2
@@ -98,10 +77,23 @@ esac
 [ -f "$lock" ] || die "no lockfile at '$lock'" \
   "run this from the repository root, or pass '--lock <path to Cargo.lock>'"
 
+# A version this check can order: exactly three numeric components, which is
+# what the registry and the lock both write. Everything ordered below is checked
+# against this first — a string from a file this script did not write reaching
+# the numeric comparison is the one way this could report a currency it never
+# established.
+orderable() {
+  case "$1" in
+    ""|*[!0-9.]*|*..*|.*|*.) return 1 ;;
+  esac
+  [ "${1//[^.]/}" = ".." ]
+}
+
 # The requirement `[workspace.dependencies]` states for one engine. Read from
 # that table alone: `[dependencies]` names the same engines as
 # `{ workspace = true }`, and a match there would report the word "true" as a
-# version requirement.
+# version requirement. What comes back is validated by `req_window` before it
+# decides anything, so a value of the wrong type is refused rather than guessed.
 requirement() {
   awk -v want="$1" '
     /^\[/ { inside = ($0 ~ /^\[workspace\.dependencies\]/); next }
@@ -115,29 +107,34 @@ requirement() {
   ' "$manifest"
 }
 
-# Every version of one package the lock resolves. More than one is ordinary:
-# two crates in the graph can require ranges that do not unify, and this
-# workspace deliberately carries `oneharness-core` twice.
+# Every version of one package the lock resolves. More than one is ordinary: two
+# crates in the graph can require ranges that do not unify, and this workspace
+# deliberately carries `oneharness-core` twice.
+#
+# The `version = "..."` line is required rather than assumed, so a lock whose
+# shape is not the one cargo writes yields nothing here — which the caller
+# refuses by name — instead of a neighbouring field read as a version.
 lock_versions() {
   awk -v want="$1" '
     $0 == "name = \"" want "\"" {
       getline line
-      if (match(line, /"[^"]*"/)) print substr(line, RSTART + 1, RLENGTH - 2)
+      if (match(line, /^version = "[^"]*"$/)) {
+        print substr(line, 12, length(line) - 12)
+      }
     }
   ' "$lock"
 }
 
-# Order two `X.Y.Z` versions: prints -1, 0 or 1. Registry and lock versions are
-# always three numeric components, and a prerelease is dropped before it gets
-# here, so this needs no ordering rule beyond the numbers.
+# Order two versions: prints -1, 0 or 1. Both are `orderable` before they get
+# here, so this needs no rule beyond the numbers.
 ver_cmp() {
   local -a left right
   local a b i
   IFS=. read -r -a left <<<"$1"
   IFS=. read -r -a right <<<"$2"
   for i in 0 1 2; do
-    a="${left[i]:-0}"
-    b="${right[i]:-0}"
+    a="${left[i]}"
+    b="${right[i]}"
     if [ "$a" -lt "$b" ]; then echo -1; return; fi
     if [ "$a" -gt "$b" ]; then echo 1; return; fi
   done
@@ -147,14 +144,14 @@ ver_cmp() {
 ver_ge() { [ "$(ver_cmp "$1" "$2")" -ge 0 ]; }
 ver_lt() { [ "$(ver_cmp "$1" "$2")" -lt 0 ]; }
 
-# The window a requirement permits, printed as `lower upper` with `upper`
-# exclusive — cargo's default `^` operator, whose 0.x rule is what this whole
-# check turns on: `^0.3.0` permits every 0.3.z, so a lock at 0.3.6 with 0.3.9
-# published is behind without the requirement having said anything.
+# The window a requirement permits, as `lower upper` with `upper` exclusive —
+# cargo's default `^`, whose 0.x rule is what this whole check turns on: `^0.3.0`
+# permits every 0.3.z, so a lock at 0.3.6 with 0.3.9 published is behind without
+# the requirement having said anything.
 #
-# Refuses a requirement shape it does not model rather than guessing at one: a
-# `~`, `=`, `>=`, `*` or comma-separated range here would be silently read as a
-# caret and could report a currency this repository never claimed.
+# Refuses a shape it does not model rather than guessing: a `~`, `=`, `>=`, `*`
+# or comma-separated range read as a caret could report a currency this
+# repository never claimed.
 req_window() {
   local core major minor patch upper dots
   core="${1#^}"
@@ -178,26 +175,23 @@ req_window() {
   printf '%s %s\n' "$major.${minor:-0}.${patch:-0}" "$upper"
 }
 
-# Where the sparse index files one crate, by the registry's own prefix rule.
+# Where the sparse index files one crate. The registry has shorter forms for
+# one-, two- and three-character names; nothing in SIBLINGS is that short, and
+# one that were would fail the read below by name rather than silently.
 index_path() {
-  local n="$1"
-  case "${#n}" in
-    1) printf '1/%s\n' "$n" ;;
-    2) printf '2/%s\n' "$n" ;;
-    3) printf '3/%s/%s\n' "${n:0:1}" "$n" ;;
-    *) printf '%s/%s/%s\n' "${n:0:2}" "${n:2:2}" "$n" ;;
-  esac
+  printf '%s/%s/%s\n' "${1:0:2}" "${1:2:2}" "$1"
 }
 
 # Every version the registry serves for one crate that a plain requirement can
-# resolve to: yanked releases are not candidates, and neither are prereleases,
+# resolve to: a yanked release is not a candidate, and neither is a prerelease,
 # which a requirement without one never matches.
 #
 # The index is one JSON object per line and `"vers"` and `"yanked"` each appear
-# exactly once on it — a dependency entry carries `"req"`, not either of these —
-# so the fields are read positionally rather than by standing up a JSON parser
-# this script otherwise has no need of. `release.yml` reads the same file the
-# same way to decide whether a version is already on crates.io.
+# exactly once on it — a dependency entry carries `"req"`, not either — so the
+# fields are read positionally rather than by standing up a JSON parser this
+# script otherwise has no need of; `release.yml` reads the same file the same
+# way. What comes back is a third party's, so every version of it is `orderable`
+# before it is compared and the caller refuses the file outright if one is not.
 index_versions() {
   local name="$1" path body attempt
   path="$(index_path "$name")"
@@ -207,17 +201,16 @@ index_versions() {
       for attempt in 1 2 3; do
         if body="$(curl -fsSL "$index/$path")"; then break; fi
         body=""
-        # A registry read is the one part of this that can fail for reasons
-        # that have nothing to do with the lock, so it is retried before it is
-        # reported as unreadable.
-        [ "$attempt" -eq 3 ] || sleep "$((attempt * 2))"
+        # A registry read is the one part of this that fails for reasons having
+        # nothing to do with the lock, so it is retried before it is reported.
+        [ "$attempt" -eq 3 ] || sleep "$attempt"
       done
       [ -n "$body" ] || die "the crates.io index at '$index' did not serve '$name'" \
-        "check network reachability to '$index', or pass '--index' pointing at a mirror"
+        "check reachability of '$index', or pass '--index' naming a mirror or a local sparse-index tree"
       ;;
     *)
       [ -f "$index/$path" ] || die "no index entry for '$name' under '$index'" \
-        "pass '--index' pointing at a sparse-index tree that files '$name' at '$path'"
+        "pass '--index' naming a sparse-index tree that files '$name' at '$path'"
       body="$(cat "$index/$path")"
       ;;
   esac
@@ -233,7 +226,7 @@ index_versions() {
 
 # One row per resolved copy, in the order the report prints them.
 rows=()
-# The subset of those rows that are behind, as `name resolved permitted`.
+# The subset that are behind, as `name resolved permitted`.
 behind=()
 
 for name in "${SIBLINGS[@]}"; do
@@ -251,6 +244,8 @@ for name in "${SIBLINGS[@]}"; do
   ungoverned=()
   while read -r version; do
     [ -n "$version" ] || continue
+    orderable "$version" || die "'$lock' resolves '$name' at '$version', which is not a version this check can order" \
+      "the lockfile is not one cargo wrote — regenerate it with 'cargo update --workspace'"
     if ver_ge "$version" "$lower" && ver_lt "$version" "$upper"; then
       governed+=("$version")
     else
@@ -263,6 +258,9 @@ for name in "${SIBLINGS[@]}"; do
 
   permitted=""
   while read -r version; do
+    [ -n "$version" ] || continue
+    orderable "$version" || die "the index serves '$name' at '$version', which is not a version this check can order" \
+      "'$index' is not answering in the crates.io sparse-index format — pass '--index' naming one that does"
     if ver_ge "$version" "$lower" && ver_lt "$version" "$upper"; then
       if [ -z "$permitted" ] || ver_lt "$permitted" "$version"; then
         permitted="$version"
@@ -288,9 +286,14 @@ for name in "${SIBLINGS[@]}"; do
   done
 done
 
+# llmlint: ignore-block[tool_output_is_signal] the document below *is* this mode's
+# product — `--format notes` asks for it, `release.yml` captures the stdout whole and
+# appends it to a Release body, and there is no shorter form of "which version of each
+# engine did this release link". The check mode, which is the one a gate reads, keeps
+# to a line.
 if [ "$format" = notes ]; then
   # An HTML comment the release job trims from before re-appending, so a re-run
-  # of a release replaces this section rather than stacking a second copy.
+  # replaces this section rather than stacking a second copy.
   echo "<!-- linked-engines -->"
   echo "### Linked engines"
   echo
@@ -324,6 +327,7 @@ if [ "$format" = notes ]; then
   fi
   exit 0
 fi
+# llmlint: ignore-end[tool_output_is_signal]
 
 if [ "${#behind[@]}" -eq 0 ]; then
   summary=""

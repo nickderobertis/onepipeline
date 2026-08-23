@@ -122,22 +122,15 @@ jobs:
       - run: just bootstrap
       - run: just check
 
-  # What this release actually links, written into the notes a reader actually
-  # reads.
+  # Which version of each sibling engine this release links, in the notes rather
+  # than only in the CycloneDX SBOM inside a published wheel — where nobody who
+  # asks the question is looking.
   #
-  # Until now the only authoritative answer to "which oneagentgraph does this
-  # release contain?" was a CycloneDX SBOM inside a published wheel, and that
-  # inaccessibility is the whole cause of the episode this job exists to end: a
-  # reader met the requirement in `Cargo.toml`, concluded the fix was adopted,
-  # and was wrong three times over. One table in the release notes answers it,
-  # and where a resolved engine is behind what the requirement already permitted,
-  # that table says so on the spot.
-  #
-  # Deliberately not gated on `test`: this is a factual reading of the tagged
-  # tree, true whether or not the artifacts publish, and a release whose gate
-  # went red is exactly the one whose notes should not be silent about what it
-  # links. `contents: write` because it edits the Release body — nothing else
-  # here needs it, so it is asked for job by job.
+  # Deliberately not gated on `test`: this reads the tagged tree and is true
+  # whether or not the artifacts publish, and a release whose gate went red is
+  # the one whose notes should least be silent about what it links.
+  # `contents: write` because it edits the Release body, which nothing else here
+  # needs.
   linked-engines:
     runs-on: ubuntu-latest
     permissions:

@@ -96,9 +96,8 @@ consuming `project.json` — an undeclared one silently drops that project out o
   unknown fields, so a typo fails loudly instead of being silently dropped.
 - **The lock may not lag what the manifest already permits.** `just lock-current`
   fails when a sibling engine resolves older than its own requirement allows, and
-  every release's notes record what that release links. Three releases shipped a
-  lock behind their requirement and were read — off the tag, the changelog, and
-  the requirement, all of which agreed — as carrying a fix the binary never had.
+  every release's notes record what that release links. Neither a tag, a
+  changelog, nor a requirement says what a build contains; only the lock does.
 - **Secrets never enter the tree.** `gh-secrets.json` names the required secrets
   and where they come from; the values live in the platform secret store.
 
