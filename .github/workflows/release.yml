@@ -16,6 +16,9 @@ name: Release
 #
 #   * test          — the complete deterministic gate, so untested artifacts
 #                     never publish.
+#   * linked-engines — record in the Release's own notes which version of each
+#                     sibling engine this release links, and say so where one is
+#                     older than this release's own requirement permits.
 #   * upload        — build each target on a native runner and attach the archive
 #                     + sha256 checksum to the Release.
 #   * publish-crate — idempotent crates.io publish; self-activates the day
@@ -118,6 +121,49 @@ jobs:
           tool: just,nextest,cargo-llvm-cov
       - run: just bootstrap
       - run: just check
+
+  # What this release actually links, written into the notes a reader actually
+  # reads.
+  #
+  # Until now the only authoritative answer to "which oneagentgraph does this
+  # release contain?" was a CycloneDX SBOM inside a published wheel, and that
+  # inaccessibility is the whole cause of the episode this job exists to end: a
+  # reader met the requirement in `Cargo.toml`, concluded the fix was adopted,
+  # and was wrong three times over. One table in the release notes answers it,
+  # and where a resolved engine is behind what the requirement already permitted,
+  # that table says so on the spot.
+  #
+  # Deliberately not gated on `test`: this is a factual reading of the tagged
+  # tree, true whether or not the artifacts publish, and a release whose gate
+  # went red is exactly the one whose notes should not be silent about what it
+  # links. `contents: write` because it edits the Release body — nothing else
+  # here needs it, so it is asked for job by job.
+  linked-engines:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      # Through the recipe, so the note a release carries and the check a
+      # developer runs are one reading rather than two that can disagree.
+      - name: Compose the note from this release's own lockfile
+        run: just linked-engines > "$RUNNER_TEMP/linked-engines.md"
+      - name: Record it in the release notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          gh release view "$TAG" --json body --jq .body > "$RUNNER_TEMP/body.md"
+          # Re-running a release replaces the section rather than stacking a
+          # second copy: everything from the marker onward is dropped first.
+          awk '/^<!-- linked-engines -->$/ { exit } { print }' \
+            "$RUNNER_TEMP/body.md" > "$RUNNER_TEMP/notes.md"
+          printf '\n' >> "$RUNNER_TEMP/notes.md"
+          cat "$RUNNER_TEMP/linked-engines.md" >> "$RUNNER_TEMP/notes.md"
+          gh release edit "$TAG" --notes-file "$RUNNER_TEMP/notes.md"
 
   upload:
     name: upload (${{ matrix.target }})

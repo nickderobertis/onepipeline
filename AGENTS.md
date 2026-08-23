@@ -64,9 +64,13 @@ and is never resolved unilaterally.
 `just --list` is the index; do not hand-roll equivalents. `just check` is the
 deterministic gate and `just gate` is the complete pre-push bar — `check` plus
 the diff-scoped llmlint tier — and a change is not done until `gate` is green.
-`deps-check`, `msrv`, and `smoke-real` sit outside both because one needs a
-network advisory database, one a second toolchain, and one a GitHub credential;
-CI runs each as its own job, through the recipe rather than around it.
+`deps-check`, `lock-current`, `msrv`, and `smoke-real` sit outside both: two of
+them need the network — a fetched advisory database, and the crates.io index —
+one needs a second toolchain, and one a GitHub credential. CI runs each as its
+own job, through the recipe rather than around it. `lock-current`'s job is a
+weekly schedule rather than a pull-request check, because what it answers changes
+when the registry moves and not when this tree does; `linked-engines` prints the
+same reading as the markdown `release.yml` appends to a release's notes.
 
 The repo-wide verbs delegate to **Nx**, which fans a uniformly-named target out
 across every project; what a target *does* stays with its project. Never loop
@@ -90,6 +94,11 @@ consuming `project.json` — an undeclared one silently drops that project out o
 - **Validate external input at its trust boundary.** Plan files, executor-rules
   files, and reply envelopes are external input: the schema structs reject
   unknown fields, so a typo fails loudly instead of being silently dropped.
+- **The lock may not lag what the manifest already permits.** `just lock-current`
+  fails when a sibling engine resolves older than its own requirement allows, and
+  every release's notes record what that release links. Three releases shipped a
+  lock behind their requirement and were read — off the tag, the changelog, and
+  the requirement, all of which agreed — as carrying a fix the binary never had.
 - **Secrets never enter the tree.** `gh-secrets.json` names the required secrets
   and where they come from; the values live in the platform secret store.
 

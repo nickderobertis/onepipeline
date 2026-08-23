@@ -1,0 +1,55 @@
+name: Lock currency
+
+# Whether `Cargo.lock` still resolves what `Cargo.toml` already permits, checked
+# weekly.
+#
+# The gate proves the tree against the engines it links. It cannot prove that
+# those engines are the newest the requirements beside them allow, because that
+# answer changes when the *registry* moves and not when this tree does — so
+# nothing on a pull request would ever ask it, and three releases have shipped a
+# lock quietly behind its own requirement. Every signal a reader reaches for
+# agreed the fix had shipped: the tag existed, the changelog said so, and the
+# requirement permitted the release. Only the lock disagreed, and nothing read
+# the lock.
+#
+# A red run here means one `cargo update -p <spec>` and a commit; the job's own
+# output names the spec. Then ask what is in the gap — if the newer engine
+# carries behaviour this crate depends on, that floor is written down by hand in
+# `src/agentgraph.rs`, which is what the recipe's refusal tells its reader.
+#
+# Scheduled and manual only. It reaches the network, so it stays outside `just
+# check` and `just gate` for the same reason `deps-check` does, and it gates no
+# branch: adding it to the required set would make a registry release nobody
+# here made able to redden an unrelated pull request.
+#
+# llmlint: ignore-file[changed_behavior_has_e2e] the subject of this workflow is the
+# schedule and the crates.io index — neither of which a test can stand in for without
+# the stand-in becoming what is under test. Everything it drives is proven locally and
+# offline: `tests/linked_engines.rs` runs the same script this calls through the same
+# recipe's entry point, against a lock that is current and a lock that is behind.
+
+on:
+  schedule:
+    # Mondays, 08:00 UTC — a working-week morning, so a red run is seen, and an
+    # hour after `published-smoke.yml` so the two do not report at once.
+    - cron: "0 8 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lock-currency
+  cancel-in-progress: true
+
+jobs:
+  lock-current:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      # Through the recipe, not around it: what "current" means lives in one
+      # place, so a check run here and a check run on a laptop cannot disagree.
+      - run: just lock-current
