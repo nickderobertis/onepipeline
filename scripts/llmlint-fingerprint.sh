@@ -47,7 +47,7 @@ root=$PWD
   echo "llmlint fingerprint: could not load the shared runtime environment; restore scripts/llmlint-runtime-env.sh and retry" >&2
   exit 3
 }
-llmlint_runtime_env
+llmlint_runtime_env || exit 3
 
 # Both answers are external input, and both are cache-key material: an empty one
 # would hash to a fingerprint that says nothing about the judge configuration and

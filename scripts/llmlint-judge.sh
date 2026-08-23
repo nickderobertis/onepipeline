@@ -13,21 +13,14 @@
 # hashes declared environment variables but not target arguments: keying and
 # judging on the same value is what stops a clean verdict computed against one base
 # from being replayed for another. Exits 2 when what it was handed is not a base it
-# can judge, 3 when this checkout cannot be read, and otherwise llmlint's own
-# status.
+# can judge, 3 when this checkout or host cannot support a run, and otherwise
+# llmlint's own status — which Nx collapses to a failed task either way, so the
+# report is what says whether the judge ruled or never reached a verdict.
 #
 # llmlint: ignore-file[tool_output_is_signal] llmlint's own report is this tier's
 # product — Nx replays this task's terminal output in place of a verdict record —
 # so it is handed through untouched rather than reduced to a line.
 set -euo pipefail
-
-#: Prefix of the status line this states on the way out, on every path. Nx collapses
-#: a failed task to 1, so without it findings, a toolchain that never reached a
-#: verdict, and a checkout that could not run one all reach the caller as the same
-#: answer. `scripts/llmlint-diff.sh` matches the same string and keeps it out of
-#: what it replays, so the two must agree.
-readonly JUDGE_STATUS_MARKER="lint-llm-diff: judge exit status"
-trap 'printf "%s %s\n" "$JUDGE_STATUS_MARKER" "$?" >&2' EXIT
 
 # llmlint: ignore-block[changed_behavior_has_e2e] Reaching this needs a checkout
 # whose own directory cannot be entered while this script is still readable inside
@@ -54,7 +47,6 @@ git -C "$root" rev-parse --verify --quiet "${base_sha}^{commit}" >/dev/null || {
   exit 2
 }
 
-llmlint_runtime_env
-exec_status=0
-llmlint --diff --diff-base "$base_sha" || exec_status=$?
-exit "$exec_status"
+llmlint_runtime_env || exit 3
+
+exec llmlint --diff --diff-base "$base_sha"

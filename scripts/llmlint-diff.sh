@@ -23,10 +23,12 @@
 # non-deterministic judge from every unrelated command. Every other Nx target
 # still honours it.
 #
-# Exits 0 on a clean verdict and 1 when the judge ruled against this diff, which
-# are llmlint's own meanings. 2 is what it could not be asked — a base or an option
-# it cannot use, or a judge toolchain that never reached a verdict. 3 is this
-# checkout or host being unable to support a run at all; nothing about the diff.
+# Exits 0 on a clean verdict and 1 when the judge did not certify this diff — Nx
+# collapses a failed task, so the report above the exit is what says whether the
+# judge ruled against the diff or never reached a verdict. 2 is a question this
+# tier could not be asked: a base or an option it cannot use, or a judge
+# configuration it could not fingerprint. 3 is this checkout or host being unable
+# to support a run at all, which says nothing about the diff.
 #
 # llmlint: ignore-file[tool_output_is_signal] The judge's report is this tier's
 # product — Nx replays this task's terminal output in place of a verdict record —
@@ -91,10 +93,6 @@ if [ -n "${NX_SKIP_NX_CACHE:-}${NX_DISABLE_NX_CACHE:-}" ]; then
 fi
 unset NX_SKIP_NX_CACHE NX_DISABLE_NX_CACHE
 
-#: The line the judge states its own exit status on, which this reads and keeps out
-#: of what it replays. `scripts/llmlint-judge.sh` writes the same string.
-readonly JUDGE_STATUS_MARKER="lint-llm-diff: judge exit status"
-
 # The report is captured to read the provenance off it, and each half is replayed
 # to the stream it came from: a run with findings has to leave its diagnostics on
 # stderr, not folded into the verdict on stdout.
@@ -108,26 +106,22 @@ status=0
 LLMLINT_DIFF_BASE_SHA="$base_sha" ONEPIPELINE_NX_SHOW_OUTPUT=1 \
   bash scripts/nx.sh run onepipeline:lint-llm-diff "$@" \
   >"$captured/out" 2>"$captured/err" || status=$?
-# Nx collapses every failed task to 1, which would say the same thing about a diff
-# the judge ruled against and a diff it never reached. The judge states its own
-# status on the line below, which travels *with* the report rather than beside it,
-# so a replayed verdict carries its status as well as its text.
-judged="$(sed -n "s/^${JUDGE_STATUS_MARKER} \([0-9][0-9]*\)$/\1/p" "$captured/err" | tail -1)"
-[ -z "$judged" ] || status=$judged
+# Colour is not cosmetic to what is read below: Nx wraps its own lines, and the
+# words inside them, in escapes whenever it thinks the terminal takes colour —
+# which includes every run nested inside another Nx task, and an unstripped match
+# reports each replay as a fresh judgement. What is read is a stripped copy; what
+# is replayed keeps whatever the judge chose to say.
+escape="$(printf '\033')"
+plain="$captured/plain"
+sed "s/${escape}\[[0-9;]*[a-zA-Z]//g" "$captured/out" "$captured/err" >"$plain"
 cat "$captured/out"
-grep -v "^${JUDGE_STATUS_MARKER} " "$captured/err" >&2 || true
+cat "$captured/err" >&2
 
 # Provenance is Nx's own cache reporting: the annotation on the task line, or the
 # summary line it prints only when it replayed a task instead of running it. Both
-# are read because only the first is safe at any size — Nx replays a hit as one
-# burst, so a large replay can arrive truncated and its summary never does. Colour
-# is stripped first: Nx wraps those lines, and the words inside them, in escapes
-# whenever it thinks the terminal takes colour — which includes every run nested
-# inside another Nx task — and an unstripped match reports each replay as a fresh
-# judgement.
-escape="$(printf '\033')"
-if sed "s/${escape}\[[0-9;]*[a-zA-Z]//g" "$captured/out" "$captured/err" |
-  grep -qE '^Nx read the output from the cache instead of running the command|^> nx run onepipeline:lint-llm-diff +\[existing outputs match the cache'; then
+# are read, because only the first is safe at any size — Nx replays a hit as one
+# burst, so a large replay can arrive truncated and its summary never does.
+if grep -qE '^Nx read the output from the cache instead of running the command|^> nx run onepipeline:lint-llm-diff +\[existing outputs match the cache' "$plain"; then
   echo "lint-llm-diff: replayed the recorded verdict for base $base_sha (Nx cache hit)" >&2
 else
   echo "lint-llm-diff: judged this diff against base $base_sha (Nx cache miss)" >&2

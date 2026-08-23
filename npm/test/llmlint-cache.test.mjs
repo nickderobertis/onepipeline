@@ -299,8 +299,12 @@ describe("the judged tier's computation cache", () => {
     assert.equal(second.status, 0, report(second));
     assert.deepEqual(ws.judgeRuns(), [`--diff --diff-base ${base}`], "the judge was asked twice");
     // The restored run says what the fresh one said: the report is the record.
-    for (const result of [first, second])
+    for (const result of [first, second]) {
       assert.match(result.stdout, new RegExp(PASS_VERDICT), report(result));
+      // What a replayed run says is what the judged one said, with one line of
+      // provenance added — no protocol of this tier's own leaks into the report.
+      assert.doesNotMatch(report(result), /judge exit status/, report(result));
+    }
     // "Green" is a claim about one base commit, so the provenance line names it:
     // a gate run and a CI run resolving different bases answer different questions.
     assert.match(first.stderr, new RegExp(`${CACHE_MISS} ${base}`), report(first));
@@ -468,7 +472,6 @@ describe("the judged tier's computation cache", () => {
 
     assert.equal(ws.judgeRuns().length, 2, "the judge was asked a different number of times");
     for (const result of [first, second]) {
-      // 1, not Nx's collapsed failure: the judge ruled on this diff and said no.
       assert.equal(result.status, 1, report(result));
       assert.match(report(result), new RegExp(FINDING));
       assert.match(report(result), new RegExp(FAIL_VERDICT));
@@ -485,8 +488,9 @@ describe("the judged tier's computation cache", () => {
 
     assert.equal(ws.judgeRuns().length, 2, "the judge was asked a different number of times");
     for (const result of [first, second]) {
-      // 2, kept apart from findings: nothing ruled on this diff at all.
-      assert.equal(result.status, 2, report(result));
+      // Nx collapses a failed task, so what separates this from findings is the
+      // report above it — which is why a red is never stored and always re-judged.
+      assert.notEqual(result.status, 0, report(result));
       assert.match(result.stderr, new RegExp(CACHE_MISS), report(result));
     }
   });
