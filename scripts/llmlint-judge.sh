@@ -59,10 +59,13 @@ llmlint --diff --diff-base "$base_sha" >"$report" 2>&1 || status=$?
 if ((status != 0)); then
   # Never cached, so never replayed: a failure can afford every byte, and the
   # operator who has to clear it is the one who needs the judge's report verbatim.
-  # What to do about it differs, and llmlint's own status says which: 1 is a
-  # verdict against the diff, anything above it is a judge that never reached one.
+  # What to do about it differs, and what llmlint left behind says which: nothing
+  # at all is a judge that said nothing to act on, 1 is a verdict against the diff,
+  # and anything above it is a judge that never reached one.
   cat "$report" >&2
-  if ((status == 1)); then
+  if [ ! -s "$report" ]; then
+    echo "lint-llm-diff: llmlint exited $status without reporting anything; run 'llmlint --diff --diff-base $base_sha -v' by hand to see what it did, then retry" >&2
+  elif ((status == 1)); then
     echo "lint-llm-diff: clear the findings above with 'just lint-llm-diff <base>' alone, then run the gate once to confirm" >&2
   else
     echo "lint-llm-diff: llmlint exited $status without judging this diff; run 'llmlint doctor', or 'just setup-llmlint' to reinstall the toolchain, then retry" >&2

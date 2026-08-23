@@ -78,15 +78,19 @@ fi
 # One line per judge run: the arguments the tier actually asked for.
 printf "%s\\n" "$*" >>"$FAKE_LLMLINT_LOG"
 if [[ \${FAKE_LLMLINT_EXIT:-0} != 0 ]]; then
-  echo "${FINDING}"
-  echo "${FAIL_VERDICT}"
-  echo 'See full results with \`${POINTER}\`'
+  if [[ -z \${FAKE_LLMLINT_SILENT:-} ]]; then
+    echo "${FINDING}"
+    echo "${FAIL_VERDICT}"
+    echo 'See full results with \`${POINTER}\`'
+  fi
   exit "$FAKE_LLMLINT_EXIT"
 fi
 if [[ -z \${FAKE_LLMLINT_NO_VERDICT:-} ]]; then
   echo "${PASS_VERDICT}\${FAKE_LLMLINT_NOTE:+ ($FAKE_LLMLINT_NOTE)}"
 fi
-echo 'See full results with \`${POINTER}\`'
+if [[ -z \${FAKE_LLMLINT_NO_POINTER:-} ]]; then
+  echo 'See full results with \`${POINTER}\`'
+fi
 `;
 
 /// An `llmlint` that can report a version and nothing else, for the journeys about
@@ -397,6 +401,23 @@ describe("the judged tier's computation cache", () => {
     assert.match(judged.stderr, new RegExp(PASS_VERDICT), report(judged));
     assert.match(replayed.stderr, new RegExp(CACHE_HIT), report(replayed));
     assert.match(digest.stdout.trim(), /^[0-9a-f]{64}$/, report(digest));
+  });
+
+  it("reports a pass whose judge offered no pointer to the run behind it", (t) => {
+    const ws = workspace(t);
+    const base = ws.head();
+    const noPointer = { env: { FAKE_LLMLINT_NO_POINTER: "1" } };
+
+    const judged = ws.lint(base, noPointer);
+    const replayed = ws.lint(base, noPointer);
+
+    for (const result of [judged, replayed]) {
+      assert.equal(result.status, 0, report(result));
+      assert.match(result.stderr, new RegExp(PASS_VERDICT), report(result));
+      assert.doesNotMatch(result.stderr, /full report:/, report(result));
+    }
+    assert.equal(ws.judgeRuns().length, 1, report(replayed));
+    assert.match(replayed.stderr, new RegExp(CACHE_HIT), report(replayed));
   });
 
   it("judges again when the workspace changes", (t) => {
@@ -765,6 +786,20 @@ describe("the judged tier's refusals", () => {
     assert.equal(result.status, 3, report(result));
     assert.match(result.stderr, /could not open temporary storage for the judge's report/);
     assert.equal(ws.judgeRuns().length, 0, report(result));
+  });
+
+  it("names the run to look at when the judge fails without saying anything", (t) => {
+    // Nothing to clear, so nothing is said about clearing: what an operator needs
+    // is the command that shows what the judge actually did.
+    const ws = workspace(t);
+
+    const result = ws.lint(ws.head(), {
+      env: { FAKE_LLMLINT_EXIT: "1", FAKE_LLMLINT_SILENT: "1" },
+    });
+
+    assert.notEqual(result.status, 0, report(result));
+    assert.match(report(result), /exited 1 without reporting anything/, report(result));
+    assert.doesNotMatch(report(result), /clear the findings above/, report(result));
   });
 
   it("refuses an option that is not one of this tier's own", (t) => {
