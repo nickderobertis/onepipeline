@@ -20,6 +20,11 @@
 //! host **merged**, when `gh.merged` is scripted, and one it is holding
 //! otherwise. Which of those a publication settles on is the repository's
 //! policy, not this program's.
+//!
+//! And one non-ending: `gh.outage` makes this host **unreachable**, which is not
+//! a decision about a change request but the absence of one. It is how a journey
+//! reaches a publication whose push landed and whose merge path then could not be
+//! read at all.
 
 use onepipeline_testfakes as fake;
 use std::num::NonZeroU64;
@@ -40,6 +45,18 @@ const HEAD_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
 
 /// The commit a merge lands at, when this host merges one.
 const MERGE_SHA: &str = "fedcba9876543210fedcba9876543210fedcba98";
+
+/// What `gh` says when it never reached GitHub at all — its own two lines, in its
+/// own order, on stderr with nothing on stdout and exit 1.
+///
+/// Scripted by the presence of `gh.outage`, and it answers **every** invocation:
+/// an outage is not a per-command state, and a double that kept answering `pr
+/// list` while refusing `pr checks` would be a host no operator has ever met.
+/// What it is *for* is the one publication ending that has no other cause — the
+/// publishing push reaches the origin, which is git and not this program, and
+/// then the merge path behind it cannot be read.
+const UNREACHABLE: &str = "error connecting to api.github.com\ncheck your internet \
+                           connection or https://githubstatus.com";
 
 /// What this host knows about one change request.
 ///
@@ -76,6 +93,14 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let dir = fake::script_dir();
     fake::record(&dir, "gh", &args);
+
+    // Recorded first, so a journey scripting the outage can still assert this
+    // host was asked — an unreachable host is one that was called, not one that
+    // never was.
+    if fake::node_script(&dir, "gh", "outage").is_some() {
+        eprintln!("{UNREACHABLE}");
+        return ExitCode::from(1);
+    }
 
     match (
         args.first().map(String::as_str),

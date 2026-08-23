@@ -444,6 +444,13 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     // Scripted rather than always: every other journey here is about the
     // dispatch, and a file appearing in the workspace would be a change nobody
     // asked for.
+    // Before the work below, so the two do not collide: this one leaves the
+    // worktree back on the session's own branch, and what the dispatch writes
+    // there is published exactly as it always is.
+    if let Some(branch) = fake::node_script(dir, &key, "side-branch") {
+        commit_on_a_branch_of_its_own(args, &branch);
+    }
+
     if let Some(body) = fake::node_script(dir, &key, "work") {
         write_work(args, &fake::segment(&key), &body);
     }
@@ -644,6 +651,59 @@ fn publish_session(args: &[String], title: &str) {
             published.status.code().unwrap_or(-1),
             String::from_utf8_lossy(&published.stderr).trim()
         ));
+    }
+}
+
+/// Cut a branch inside the session worktree and commit onto it.
+///
+/// The other incident this stack loses work to: `git checkout -b fix/…` is one
+/// line, an agent writes it freely, and the commits it leaves are not on the
+/// branch the session hands back. Scripted here for the same reason
+/// [`publish_session`] is — it is the *agent's* behaviour, and an agent is what
+/// this program stands in for.
+///
+/// Real git in the real worktree, because the work this leaves behind is only
+/// interesting if it is work: a commit written some other way would be this
+/// program deciding what the session's clone holds rather than a worker doing
+/// what workers do. Everything it needs — the identity, the config — is the
+/// environment the dispatch was launched with, which is the one `onevcs` itself
+/// runs git under.
+fn commit_on_a_branch_of_its_own(args: &[String], branch: &str) {
+    let worktree = session_worktree(args, "committing on a dispatch's own branch");
+    let path = worktree.join(format!("{}.md", fake::segment(branch)));
+    if let Err(error) = std::fs::write(&path, "the worker committed this somewhere else\n") {
+        fake::fail(&format!("cannot write {}: {error}", path.display()));
+    }
+    for argv in [
+        vec!["checkout", "-b", branch],
+        vec!["add", "-A"],
+        vec![
+            "commit",
+            "-m",
+            "chore: work the session's branch does not carry",
+        ],
+        // Back where the dispatch found it, so the commit above is *stray* —
+        // reachable from a ref the session's branch does not carry — rather than
+        // the branch the publication is about to read.
+        vec!["checkout", "-"],
+    ] {
+        let ran = std::process::Command::new("git")
+            .args(&argv)
+            .current_dir(&worktree)
+            .stdin(std::process::Stdio::null())
+            .output();
+        let ran = match ran {
+            Ok(ran) => ran,
+            Err(error) => fake::fail(&format!("cannot run `git {}`: {error}", argv.join(" "))),
+        };
+        if !ran.status.success() {
+            fake::fail(&format!(
+                "`git {}` exited {}: {}",
+                argv.join(" "),
+                ran.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&ran.stderr).trim()
+            ));
+        }
     }
 }
 

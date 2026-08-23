@@ -24,7 +24,7 @@
 use std::path::PathBuf;
 
 use crate::harness::{
-    agent, hook_script, lifecycle, plan_of, Repository, ReturningHookVerb, World, REFUSED,
+    agent, git, hook_script, lifecycle, plan_of, Repository, ReturningHookVerb, World, REFUSED,
 };
 use onevcs::provenance::SUBJECT_LIMIT;
 use serde_json::json;
@@ -1819,6 +1819,149 @@ fn a_push_the_merge_path_refuses_is_redispatched_carrying_what_the_remote_wrote(
     assert!(
         repo.has_branch(&world, branch),
         "the branch a refused push left behind was not handed back"
+    );
+}
+
+/// A publishing push that reached the origin behind a host that cannot then be
+/// read is the preserving failure whose work is **already on the remote**.
+///
+/// The distinction the word exists for. The refusal above published nothing, so
+/// the branch handed back to the checkout is the only copy of the work; here the
+/// push landed and only the merge path behind it went dark. Settled as the
+/// residual the two read identically — and this one would end the node with the
+/// work sitting on the origin and nothing left in the run that would ever look at
+/// it again, which is the shape an operator reads as a release that shipped and a
+/// fix that never ran. Under its own word it is preserving instead, because
+/// asking again is exactly what answers it: the attempt that follows continues
+/// the same branch and re-reads the merge path rather than re-pushing what the
+/// remote already carries.
+///
+/// The host is scripted unreachable — `gh`'s own two lines for a call that never
+/// got an answer — and nothing on the repository side is scripted at all, so the
+/// branch arriving on the origin is a fact this journey reads out of real git
+/// rather than one it arranges. Two attempts, like the refusal above, because
+/// what this proves is the routing rather than the size of the budget.
+#[test]
+fn a_push_whose_merge_path_goes_unread_is_redispatched_with_the_work_on_the_origin() {
+    let world =
+        World::new("lifecycle-pushedunverified").with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "2");
+    let repo = world.repository("change-auto", &[]);
+    world.script("service.work", "the worker wrote this\n");
+    world.script("gh.outage", "");
+
+    let run = settle(&world, "pushedunverified", vec![lifecycle("service", &[])]);
+    let result = world.run_json(&run, "result.json");
+    let node = result["nodes"][0].clone();
+    assert_eq!(node["status"], "failed", "{result}\n{}", why(&world, &run));
+    assert_eq!(node["outcome"], "pushed-unverified", "{result}");
+    // Nothing is reported landed and no change request is offered to read it on:
+    // the host never answered about one, and saying otherwise is the false report
+    // this whole vocabulary exists to remove.
+    assert_eq!(node["landing"], json!(null), "{result}");
+    assert!(node["change_url"].is_null(), "{result}");
+
+    // The half that makes it a word of its own: the branch is on the **origin**.
+    // A refused push cannot reach this state, and the residual would have left
+    // that branch there with nobody coming back for it.
+    let branch = node["branch"].as_str().expect("the node names its branch");
+    assert!(
+        !git(&world, &repo.origin, &["branch", "--list", branch])
+            .trim()
+            .is_empty(),
+        "the push this failure says reached the remote is not on the origin"
+    );
+    // And it is in the checkout too, which is where the attempt that follows
+    // finds it.
+    assert!(
+        repo.has_branch(&world, branch),
+        "the branch an unread merge path was left on was not handed back"
+    );
+
+    let dispatched = dispatches_of(&world, &run, "service");
+    assert_eq!(
+        dispatched.len(),
+        2,
+        "the node was not dispatched again on its preserved branch\n{}",
+        why(&world, &run)
+    );
+    assert!(
+        dispatched[1]["payload"]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.starts_with("pushed-unverified:")),
+        "{}",
+        dispatched[1]
+    );
+    // The diagnosis travels with it, in the sibling's own words: where the work
+    // landed, and what stopped the read.
+    let second = &tasks_dispatched_to(&world, &run, "service")[1];
+    for said in ["pushed-unverified", "is on origin", "api.github.com"] {
+        assert!(
+            second.contains(said),
+            "the re-dispatch was not told {said:?}:\n{second}"
+        );
+    }
+    // And an operator reads the word without opening the store.
+    world
+        .run(&["results", &run])
+        .exited(0)
+        .out_has("pushed-unverified");
+}
+
+/// Work a worker committed onto a branch of its own survives the session that
+/// held it.
+///
+/// The other half of what this stack loses work to, and the half nothing here
+/// classifies: `git checkout -b fix/…` is one line, an agent writes it freely,
+/// and the commits it leaves are on a ref the session's own branch does not
+/// carry. Tearing the worktree down and reclaiming the run root afterwards is
+/// what makes them unreachable — which on the operator's host cost about half an
+/// hour of gate-green work and reported the node as though there had been none
+/// to do.
+///
+/// This crate closes every session best-effort and reads nothing back from it,
+/// so what holds the floor is where the work **ends up**: `onevcs` 0.11.1 copies
+/// a stray ref into the execution checkout before refusing to reap the worktree
+/// over it, and the execution checkout is the one place that outlives the run.
+/// Below the floor the close removes the worktree and the branch below is
+/// nowhere, so this fails rather than reads differently. The pin is carried by
+/// `Cargo.toml`'s `onevcs` requirement, and the reason is with it.
+///
+/// The dispatch's own work is published as it always is — the side branch is cut
+/// and left before the worker writes anything on the session's branch — so this
+/// journey is about the ref that is *not* the publication's.
+#[test]
+fn work_a_worker_committed_on_a_branch_of_its_own_outlives_the_session() {
+    /// The branch the worker cuts, spelled once because the journey both
+    /// scripts it and asserts on it.
+    const CUT: &str = "fix/the-worker-cut-this";
+
+    let world = World::new("lifecycle-straywork");
+    // `local-direct` publishes without a host at all, which keeps this journey
+    // about the ref the publication never looked at.
+    let repo = world.repository("local-direct", &[]);
+    world.script("service.side-branch", CUT);
+    world.script("service.work", "the worker wrote this\n");
+
+    let run = settle(&world, "straywork", vec![lifecycle("service", &[])]);
+    let result = world.run_json(&run, "result.json");
+    let node = result["nodes"][0].clone();
+    // The node did its own job: the session's branch published and landed, which
+    // is what makes the ref below *stray* rather than the work itself.
+    assert_eq!(node["status"], "done", "{result}\n{}", why(&world, &run));
+    assert_eq!(node["outcome"], "merged", "{result}");
+
+    // And the commits nobody asked for are still reachable, in the checkout that
+    // outlives the session.
+    assert!(
+        repo.has_branch(&world, CUT),
+        "the work the worker committed on a branch of its own was reaped with the session's \
+         worktree\n{}",
+        why(&world, &run)
+    );
+    assert_eq!(
+        git(&world, &repo.checkout, &["log", "--format=%s", "-1", CUT]).trim(),
+        "chore: work the session's branch does not carry",
+        "the branch handed back is not the one the worker committed on"
     );
 }
 

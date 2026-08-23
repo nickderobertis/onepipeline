@@ -82,12 +82,14 @@ own settlement says the same thing, so `results` shows it. Naming no graph and
 writing the `body` yourself spend no dispatch and are not reported.
 
 A publication that fails does not always finish the node. `onevcs` says which
-failure it was, and four of them settle under a word of their own — `checks-failed`
+failure it was, and five of them settle under a word of their own — `checks-failed`
 for a required check the host reports concluded red, `checks-unsettled` for a bound
 that elapsed with the change still outstanding, `push-rejected` for a push the merge
-path refused, and `sync-conflict` for a base that moved under the publication. Each
-of the four leaves the rejected tree on the branch the session handed back, so the
-node is **dispatched again on that branch**, with no step recorded as completed and
+path refused, `sync-conflict` for a base that moved under the publication, and
+`pushed-unverified` for a push that reached the remote with the merge path unreadable
+behind it. Each of the five leaves the rejected tree on the branch the session
+handed back, so the node is **dispatched again on that branch**, with no step
+recorded as completed and
 with the failure's reason and the id of every artifact its publication recorded
 delivered as that dispatch's own context — the worker meets the diagnosis, on the
 tree that has to change. Everything else settles `publication-failed` as it always

@@ -327,7 +327,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -857,13 +857,13 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "oneagentgraph"
-version = "0.3.6"
+version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd1a33540ded32061894e936c5b24b73d44a3598521a1b8ee3c2661d295758a8"
+checksum = "1dab5330cdafe3eddbf9e58e42eae6ec08f38c460d16385f8f17e42faa06ab58"
 dependencies = [
  "clap",
  "libc",
- "oneharness-core 0.10.1",
+ "oneharness-core 0.10.2",
  "onejudge",
  "serde",
  "serde_json",
@@ -898,9 +898,9 @@ dependencies = [
 
 [[package]]
 name = "oneharness-core"
-version = "0.10.1"
+version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "703b2cae0e922191ae5baea8bafde9d738a09e1e8f40847b9bae1880231a955f"
+checksum = "bc75e9515cb96aa947a83ff541a0d4b400eb366fcfd5a02da8269748961cf54a"
 dependencies = [
  "fs2",
  "jsonschema",
@@ -919,9 +919,9 @@ dependencies = [
 
 [[package]]
 name = "onejudge"
-version = "0.5.0"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9f918b0c1ee535541834539bc9a7b54aa6b533ef4cd6270cebc79b5514ba872b"
+checksum = "34854dade78c1b2efe1d60ad7daa1bcb858b62ac67d7d5d997ebda53b1c982e3"
 dependencies = [
  "clap",
  "oneharness-core 0.8.0",
@@ -969,9 +969,9 @@ dependencies = [
 
 [[package]]
 name = "onevcs"
-version = "0.11.0"
+version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "457d733f49fd0265ab9732dae1f8ed33a95bc0ce27b739711308f75f078b00bb"
+checksum = "4750d87e3e2b0d5798dd6e66e6b320112f82a21b8672012e0f67d51c1b6a864b"
 dependencies = [
  "clap",
  "dunce",
@@ -991,9 +991,9 @@ dependencies = [
 
 [[package]]
 name = "onevcs-testing"
-version = "0.4.0"
+version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "437cd6d61232746a80f99fc8350dd29385716093584783e698d40fb8ace96874"
+checksum = "fdc958c1db0ad99d36982a8dd442144f3b2c117e913bc7d09d3aa7e2e94f5b04"
 dependencies = [
  "onevcs",
  "serde",
@@ -1200,7 +1200,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1257,7 +1257,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1937,7 +1937,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

@@ -131,10 +131,10 @@ pub fn outcome_of(outcome: &PublishOutcome) -> &'static str {
 
 /// A publication failure a further attempt on the same branch could answer.
 ///
-/// A closed set and not a word, because these four *are* the vocabulary: each
+/// A closed set and not a word, because these five *are* the vocabulary: each
 /// one is a settlement the contract publishes, a routing decision this crate
 /// makes, and a case a reader of a preserved failure switches on. Carried as a
-/// string, a fifth spelling would be constructible everywhere one of these is —
+/// string, a sixth spelling would be constructible everywhere one of these is —
 /// in a settlement, in a re-dispatch's reason, in the roll-up a spent budget
 /// writes — and every one of those is a word the contract does not name reaching
 /// an operator as though it did.
@@ -149,6 +149,10 @@ pub enum Preserving {
     /// The base moved under the publication and the bounded resolve-and-requeue
     /// did not converge.
     SyncConflict,
+    /// The publishing push reached the remote and the merge path could not then
+    /// be read. The one whose work is already **on the origin**, so what a
+    /// further attempt re-reads is that path rather than the push.
+    PushedUnverified,
 }
 
 impl Preserving {
@@ -160,6 +164,7 @@ impl Preserving {
             Self::ChecksUnsettled => "checks-unsettled",
             Self::PushRejected => "push-rejected",
             Self::SyncConflict => "sync-conflict",
+            Self::PushedUnverified => "pushed-unverified",
         }
     }
 }
@@ -216,6 +221,10 @@ pub fn failure_of(kind: onevcs::FailureKind) -> Failure {
         FailureKind::ChecksUnsettled => Failure::Preserving(Preserving::ChecksUnsettled),
         FailureKind::PushRejected => Failure::Preserving(Preserving::PushRejected),
         FailureKind::SyncConflict => Failure::Preserving(Preserving::SyncConflict),
+        // The push landed and only the *read* behind it did not, which is the
+        // opposite of "nothing a further attempt could answer" — so preserving,
+        // and under a word of its own rather than the residual.
+        FailureKind::PushedUnverified => Failure::Preserving(Preserving::PushedUnverified),
         // `Gate` is a kind no publication produces any more — `onevcs` 0.11.0
         // runs no gate — and it is routed rather than dropped because the
         // sibling still names it: an arm removed here would be a wildcard by
@@ -988,6 +997,7 @@ mod tests {
         onevcs::FailureKind::ChecksFailed,
         onevcs::FailureKind::ChecksUnsettled,
         onevcs::FailureKind::PushRejected,
+        onevcs::FailureKind::PushedUnverified,
     ];
 
     /// Every failure a further attempt can answer, as the type spells them.
@@ -1002,6 +1012,7 @@ mod tests {
         Preserving::ChecksUnsettled,
         Preserving::PushRejected,
         Preserving::SyncConflict,
+        Preserving::PushedUnverified,
     ];
 
     /// The words this crate settles a failed publication on and the words the
@@ -1074,6 +1085,10 @@ mod tests {
     /// across that line would have them waiting for a retry that never comes —
     /// so the clause naming those is compared as a set with what `Preserving`
     /// closes rather than searched one word at a time.
+    ///
+    /// Both ends of that clause are anchored on prose that does not count them,
+    /// so widening the vocabulary is a README edit rather than a README edit and
+    /// a test edit.
     #[test]
     fn the_readmes_publication_failure_summary_is_the_vocabulary_this_crate_settles_on() {
         let raw = std::fs::read_to_string(
@@ -1093,8 +1108,8 @@ mod tests {
             .split_once("settle under a word of their own")
             .expect("the README names the failures that settle under a word of their own")
             .1
-            .split_once("Each of the four")
-            .expect("that clause ends where the README says what those four share")
+            .split_once("leaves the rejected tree")
+            .expect("that clause ends where the README says what those failures share")
             .0;
         let listed: BTreeSet<&str> = clause.split('`').skip(1).step_by(2).collect();
         let routed: BTreeSet<&str> = EVERY_PRESERVING
@@ -1149,9 +1164,10 @@ mod tests {
                 "checks-failed",
                 "checks-unsettled",
                 "push-rejected",
+                "pushed-unverified",
                 "sync-conflict"
             ]),
-            "the failures a further attempt can answer are not the four the contract names"
+            "the failures a further attempt can answer are not the five the contract names"
         );
         // And the residual is one word for all of them, which is what keeps it a
         // residual rather than a fifth name.
@@ -1345,6 +1361,10 @@ mod tests {
         );
         assert_eq!(failed(onevcs::FailureKind::PushRejected), "push-rejected");
         assert_eq!(failed(onevcs::FailureKind::SyncConflict), "sync-conflict");
+        assert_eq!(
+            failed(onevcs::FailureKind::PushedUnverified),
+            "pushed-unverified"
+        );
     }
 
     /// Which endings this crate is willing to call landed.
