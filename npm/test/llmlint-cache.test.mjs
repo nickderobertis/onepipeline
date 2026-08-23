@@ -227,6 +227,23 @@ class Workspace {
     });
   }
 
+  /// Drive the judge itself, for the states only its own caller can arrange.
+  judge({ env = {} } = {}) {
+    return spawnSync("bash", ["scripts/llmlint-judge.sh"], {
+      cwd: this.root,
+      encoding: "utf8",
+      env: this.environment(env),
+    });
+  }
+
+  /// Leave llmlint only where the caller's PATH finds it, never where setup puts it.
+  onInheritedLlmlintOnly() {
+    const inherited = join(this.sandbox, "inherited-bin");
+    installLlmlint(inherited, FAKE_LLMLINT);
+    rmSync(join(this.sandbox, "home", ".local", "bin", "llmlint"));
+    return { PATH: `${inherited}${delimiter}${this.env.PATH}` };
+  }
+
   /// Drive the cached Nx target directly, as someone who skipped the recipe does.
   target({ env = {} } = {}) {
     return spawnSync("bash", ["scripts/nx.sh", "run", "onepipeline:lint-llm-diff"], {
@@ -360,6 +377,26 @@ describe("the judged tier's computation cache", () => {
     assert.equal(ws.judgeRuns().length, 1, report(second));
     assert.match(first.stderr, new RegExp(CACHE_MISS), report(first));
     assert.match(second.stderr, new RegExp(CACHE_HIT), report(second));
+  });
+
+  it("judges with an llmlint the caller's PATH provides and setup's directory does not", (t) => {
+    // The install directory goes first, not instead: a contributor who installed
+    // llmlint somewhere else is still judged, and both ends of the key still agree
+    // because both take that same order.
+    const ws = workspace(t);
+    const base = ws.head();
+    const inherited = { env: ws.onInheritedLlmlintOnly() };
+
+    const judged = ws.lint(base, inherited);
+    const replayed = ws.lint(base, inherited);
+    const digest = ws.fingerprint(inherited);
+
+    assert.equal(judged.status, 0, report(judged));
+    assert.equal(replayed.status, 0, report(replayed));
+    assert.equal(ws.judgeRuns().length, 1, report(replayed));
+    assert.match(judged.stderr, new RegExp(PASS_VERDICT), report(judged));
+    assert.match(replayed.stderr, new RegExp(CACHE_HIT), report(replayed));
+    assert.match(digest.stdout.trim(), /^[0-9a-f]{64}$/, report(digest));
   });
 
   it("judges again when the workspace changes", (t) => {
@@ -506,6 +543,7 @@ describe("the judged tier's computation cache", () => {
       assert.equal(result.status, 1, report(result));
       assert.match(report(result), new RegExp(FINDING));
       assert.match(report(result), new RegExp(FAIL_VERDICT));
+      assert.match(report(result), /clear the findings above/, report(result));
       assert.match(result.stderr, new RegExp(CACHE_MISS), report(result));
     }
   });
@@ -522,6 +560,10 @@ describe("the judged tier's computation cache", () => {
       // Nx collapses a failed task, so what separates this from findings is the
       // report above it — which is why a red is never stored and always re-judged.
       assert.notEqual(result.status, 0, report(result));
+      // A judge that never ruled is told apart from one that ruled against the
+      // diff by the only thing that differs for the operator: what to do next.
+      assert.match(report(result), /without judging this diff/, report(result));
+      assert.doesNotMatch(report(result), /clear the findings above/, report(result));
       assert.match(result.stderr, new RegExp(CACHE_MISS), report(result));
     }
   });
@@ -711,6 +753,18 @@ describe("the judged tier's refusals", () => {
 
     assert.equal(result.status, 2, report(result));
     assert.match(result.stderr, /reported no verdict for base/, report(result));
+  });
+
+  it("says what to free when the judge cannot open storage for its report", (t) => {
+    const ws = workspace(t);
+
+    const result = ws.judge({
+      env: { LLMLINT_DIFF_BASE_SHA: ws.head(), TMPDIR: join(ws.sandbox, "no-such-tmp") },
+    });
+
+    assert.equal(result.status, 3, report(result));
+    assert.match(result.stderr, /could not open temporary storage for the judge's report/);
+    assert.equal(ws.judgeRuns().length, 0, report(result));
   });
 
   it("refuses an option that is not one of this tier's own", (t) => {
