@@ -23,9 +23,10 @@
 # non-deterministic judge from every unrelated command. Every other Nx target
 # still honours it.
 #
-# Exits 0 on a clean verdict, 1 when the judge ruled against this diff, and 2 when
-# it was asked for something it cannot judge — including a judge toolchain that
-# never reached a verdict, which is llmlint's own meaning for that code.
+# Exits 0 on a clean verdict and 1 when the judge ruled against this diff, which
+# are llmlint's own meanings. 2 is what it could not be asked — a base or an option
+# it cannot use, or a judge toolchain that never reached a verdict. 3 is this
+# checkout or host being unable to support a run at all; nothing about the diff.
 #
 # llmlint: ignore-file[tool_output_is_signal] The judge's report is this tier's
 # product — Nx replays this task's terminal output in place of a verdict record —
@@ -39,7 +40,7 @@ set -euo pipefail
 # is driven in npm/test/llmlint-cache.test.mjs.
 CDPATH='' cd -- "$(dirname -- "$0")/.." || {
   echo "lint-llm-diff: could not enter the repository from this script; reinstall the checkout and retry" >&2
-  exit 1
+  exit 3
 }
 # llmlint: ignore-end[changed_behavior_has_e2e]
 root=$PWD
@@ -99,7 +100,7 @@ readonly JUDGE_STATUS_MARKER="lint-llm-diff: judge exit status"
 # stderr, not folded into the verdict on stdout.
 captured="$(mktemp -d)" || {
   echo "lint-llm-diff: could not open temporary storage for the judge report; free disk space and retry" >&2
-  exit 1
+  exit 3
 }
 trap 'rm -rf "$captured"' EXIT
 

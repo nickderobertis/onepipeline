@@ -28,8 +28,8 @@
 #
 # Run it by hand to see the current judge fingerprint — the answer to "why did the
 # cache miss when nothing in the tree changed?". It exits 2 when the toolchain
-# cannot answer what the judge would ask, and 1 when this checkout cannot be read
-# at all; the two say which of the toolchain or the checkout to repair.
+# cannot answer what the judge would ask, and 3 when this checkout or host cannot
+# support the question; the two say which of them to repair.
 set -euo pipefail
 
 # llmlint: ignore-block[changed_behavior_has_e2e] Reaching this needs a checkout
@@ -38,14 +38,14 @@ set -euo pipefail
 # is driven in npm/test/llmlint-cache.test.mjs.
 CDPATH='' cd -- "$(dirname -- "$0")/.." || {
   echo "llmlint fingerprint: could not enter the repository from this script; reinstall the checkout and retry" >&2
-  exit 1
+  exit 3
 }
 # llmlint: ignore-end[changed_behavior_has_e2e]
 root=$PWD
 # shellcheck source=scripts/llmlint-runtime-env.sh
 . "$root/scripts/llmlint-runtime-env.sh" || {
   echo "llmlint fingerprint: could not load the shared runtime environment; restore scripts/llmlint-runtime-env.sh and retry" >&2
-  exit 1
+  exit 3
 }
 llmlint_runtime_env
 
@@ -72,12 +72,20 @@ config="${config//"$root"/\{root\}}"
 
 # `sha256sum` on Linux, `shasum` where coreutils is not the default — the tier is
 # reachable from `just gate` on every platform a contributor develops on.
+digest=""
 if command -v sha256sum >/dev/null 2>&1; then
-  digest="$(printf '%s\n%s\n' "$version" "$config" | sha256sum)"
+  digest="$(printf '%s\n%s\n' "$version" "$config" | sha256sum)" || digest=""
 elif command -v shasum >/dev/null 2>&1; then
-  digest="$(printf '%s\n%s\n' "$version" "$config" | shasum -a 256)"
+  digest="$(printf '%s\n%s\n' "$version" "$config" | shasum -a 256)" || digest=""
 else
   echo "llmlint fingerprint: no sha256 tool found; install coreutils (sha256sum) or perl (shasum) and retry" >&2
   exit 2
 fi
-printf '%s\n' "${digest%% *}"
+# What a hash tool returned is external input like any other, and this one becomes
+# cache-key material: anything but a digest would key a verdict on nothing.
+digest="${digest%% *}"
+[[ "$digest" =~ ^[0-9a-f]{64}$ ]] || {
+  echo "llmlint fingerprint: the host's sha256 tool returned '$digest' rather than a digest; verify 'sha256sum' (or 'shasum -a 256') works on this machine and retry" >&2
+  exit 2
+}
+printf '%s\n' "$digest"

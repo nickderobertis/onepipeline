@@ -603,7 +603,10 @@ describe("the judged tier's refusals", () => {
           ? ws.fingerprint()
           : ws.target({ env: { LLMLINT_DIFF_BASE_SHA: base } });
 
-      assert.notEqual(result.status, 0, report(result));
+      // 3 from the fingerprint, which the caller runs directly; through Nx the
+      // target's own code is collapsed, and the driver is what restores it.
+      if (entrypoint === "fingerprint") assert.equal(result.status, 3, report(result));
+      else assert.notEqual(result.status, 0, report(result));
       assert.match(report(result), /could not load the shared runtime environment/);
       assert.match(report(result), /restore scripts\/llmlint-runtime-env\.sh and retry/);
       assert.equal(ws.judgeRuns().length, 0, report(result));
@@ -638,7 +641,7 @@ describe("the judged tier's refusals", () => {
 
     const result = ws.lint(ws.head(), { env: { TMPDIR: join(ws.sandbox, "no-such-tmp") } });
 
-    assert.notEqual(result.status, 0, report(result));
+    assert.equal(result.status, 3, report(result));
     assert.match(result.stderr, /could not open temporary storage for the judge report/);
     assert.equal(ws.judgeRuns().length, 0, report(result));
   });
@@ -702,12 +705,32 @@ describe("the judged tier's refusals", () => {
     assert.equal(here.stdout.trim(), elsewhere.stdout.trim(), "the digest is path-shaped");
   });
 
+  for (const [what, body] of [
+    ["fails", "exit 7"],
+    ["answers with something that is not a digest", "echo 'no digest here'"],
+  ]) {
+    it(`refuses a fingerprint when the host's sha256 tool ${what}`, (t) => {
+      // Whatever the hash tool returns is cache-key material, so a run that keyed
+      // a verdict on 'no digest here' would replay it for every other tree too.
+      const ws = workspace(t);
+      const bare = ws.onBareToolchain();
+      writeExecutable(join(bare.PATH, "sha256sum"), `#!/usr/bin/env bash\n${body}\n`);
+
+      const result = ws.fingerprint({ env: bare });
+
+      assert.equal(result.status, 2, report(result));
+      assert.match(result.stderr, /rather than a digest/);
+      assert.equal(result.stdout.trim(), "", "a refused fingerprint must contribute nothing");
+    });
+  }
+
   it("says whose HOME to set when the toolchain cannot be located at all", (t) => {
     const ws = workspace(t);
 
     const result = ws.fingerprint({ env: { HOME: undefined } });
 
     assert.notEqual(result.status, 0, report(result));
+
     assert.match(result.stderr, /HOME is not set/);
     assert.match(result.stderr, /just setup-llmlint/);
   });
