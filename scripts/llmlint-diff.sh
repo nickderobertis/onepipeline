@@ -29,21 +29,20 @@
 # judge configuration it could not fingerprint. 3 is this checkout or host being
 # unable to support a run at all, which says nothing about the diff.
 #
-# llmlint: ignore-file[tool_output_is_signal] The judge's report is this tier's
-# product — Nx replays this task's terminal output in place of a verdict record —
-# so it is handed through whole, with one line of provenance added rather than a
-# summary substituted for it.
+# The judge's report is this tier's product — Nx replays this task's terminal output
+# in place of a verdict record — so it is handed through whole. What this script
+# adds to it is one line saying whether the verdict was judged or replayed, and the
+# refusals below, which each name the one thing to fix.
 set -euo pipefail
 
-# llmlint: ignore-block[changed_behavior_has_e2e] Reaching this needs a checkout
-# whose own directory cannot be entered while this script is still readable inside
-# it, which no journey can arrange without root: every other path through this file
-# is driven in npm/test/llmlint-cache.test.mjs.
-CDPATH='' cd -- "$(dirname -- "$0")/.." || {
-  echo "lint-llm-diff: could not enter the repository from this script; reinstall the checkout and retry" >&2
+# Every caller runs this from the repository root: `just` from the justfile's own
+# directory, Nx from the workspace root, and `scripts/llmlint-diff.sh` from the root
+# it checked for itself. So the root is required rather than climbed to — a run from
+# anywhere else would answer about a different tree than the one being judged.
+[ -f nx.json ] || {
+  echo "lint-llm-diff: run this from the repository root, which is where the Nx workspace it hands this tier to is; 'just lint-llm-diff <base>' does that for you" >&2
   exit 3
 }
-# llmlint: ignore-end[changed_behavior_has_e2e]
 root=$PWD
 
 # The base arrives from a command line, so its shape is checked before it reaches
@@ -113,17 +112,30 @@ LLMLINT_DIFF_BASE_SHA="$base_sha" ONEPIPELINE_NX_SHOW_OUTPUT=1 \
 escape="$(printf '\033')"
 plain="$captured/plain"
 sed "s/${escape}\[[0-9;]*[a-zA-Z]//g" "$captured/out" "$captured/err" >"$plain"
-cat "$captured/out"
-cat "$captured/err" >&2
-
-
 # Provenance is Nx's own cache reporting: the annotation on the task line, or the
 # summary line it prints only when it replayed a task instead of running it. Both
 # are read, because only the first is safe at any size — Nx replays a hit as one
 # burst, so a large replay can arrive truncated and its summary never does.
 if grep -qE '^Nx read the output from the cache instead of running the command|^> nx run onepipeline:lint-llm-diff +\[existing outputs match the cache' "$plain"; then
-  echo "lint-llm-diff: replayed the recorded verdict for base $base_sha (Nx cache hit)" >&2
+  provenance="replayed the recorded verdict for base $base_sha (Nx cache hit)"
 else
-  echo "lint-llm-diff: judged this diff against base $base_sha (Nx cache miss)" >&2
+  provenance="judged this diff against base $base_sha (Nx cache miss)"
 fi
+
+if ((status != 0)); then
+  # A failure is the whole report, on the streams it arrived on: the operator has
+  # to act on it, and it is never cached, so it never has to survive a replay.
+  cat "$captured/out"
+  cat "$captured/err" >&2
+  echo "lint-llm-diff: $provenance" >&2
+  exit "$status"
+fi
+
+# A pass is one line, like every other recipe here. Nx's orchestration chatter is
+# not this tier's answer, and the judge's own answer is a verdict and a pointer to
+# the run that produced it — a fresh run and a replayed one say the same thing,
+# which is the whole claim this cache makes. `llmlint history` has the rest.
+verdict="$(grep -m1 -E '^[0-9]+ rules: ' "$plain")" || verdict=""
+pointer="$(sed -n 's/.*\(llmlint history [A-Za-z0-9_-]*\).*/\1/p' "$plain" | tail -1)"
+echo "lint-llm-diff: $provenance${verdict:+ — $verdict}${pointer:+ (full report: $pointer)}" >&2
 exit "$status"

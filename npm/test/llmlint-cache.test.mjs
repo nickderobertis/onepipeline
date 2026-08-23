@@ -40,9 +40,12 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 /// What the double reports, and what the recipe says about where a verdict came
 /// from. A replayed run has to carry the first two verbatim, so they are what
 /// separates a restored report from a fresh one.
-const PASS_VERDICT = "fake-judge: 31 rules, 0 failed";
-const FINDING = "fake-judge finding: robust_shell in scripts/llmlint-judge.sh";
-const FAIL_VERDICT = "fake-judge: 30 rules, 1 failed";
+const PASS_VERDICT = "31 rules: 11 passed, 0 failed";
+const FINDING = "FAIL robust_shell in scripts/llmlint-judge.sh";
+const FAIL_VERDICT = "31 rules: 10 passed, 1 failed";
+//// The pointer llmlint prints to the run behind a verdict. A replayed verdict has
+//// to carry it: it is where the report a one-line pass elides stays retrievable.
+const POINTER = "llmlint history 20260823T-fake";
 const CACHE_HIT = "replayed the recorded verdict for base";
 const CACHE_MISS = "judged this diff against base";
 
@@ -77,9 +80,11 @@ printf "%s\\n" "$*" >>"$FAKE_LLMLINT_LOG"
 if [[ \${FAKE_LLMLINT_EXIT:-0} != 0 ]]; then
   echo "${FINDING}"
   echo "${FAIL_VERDICT}"
+  echo 'See full results with \`${POINTER}\`'
   exit "$FAKE_LLMLINT_EXIT"
 fi
 echo "${PASS_VERDICT}\${FAKE_LLMLINT_NOTE:+ ($FAKE_LLMLINT_NOTE)}"
+echo 'See full results with \`${POINTER}\`'
 `;
 
 /// An `llmlint` that can report a version and nothing else, for the journeys about
@@ -229,6 +234,20 @@ class Workspace {
     });
   }
 
+  /// Run one of the tier's scripts from somewhere that is not a checkout root.
+  ///
+  /// Every caller gives these scripts the repository root as their working
+  /// directory; this is what a hand-run from the wrong place looks like.
+  fromElsewhere(script, args = []) {
+    const elsewhere = join(this.sandbox, "elsewhere");
+    mkdirSync(elsewhere, { recursive: true });
+    return spawnSync("bash", [join(this.root, "scripts", script), ...args], {
+      cwd: elsewhere,
+      encoding: "utf8",
+      env: this.environment({}),
+    });
+  }
+
   /// A PATH with just enough to run a shell script, plus whatever a journey names.
   ///
   /// No sha256 tool comes with it: which one is on the host is the subject of two
@@ -300,11 +319,21 @@ describe("the judged tier's computation cache", () => {
     assert.deepEqual(ws.judgeRuns(), [`--diff --diff-base ${base}`], "the judge was asked twice");
     // The restored run says what the fresh one said: the report is the record.
     for (const result of [first, second]) {
-      assert.match(result.stdout, new RegExp(PASS_VERDICT), report(result));
-      // What a replayed run says is what the judged one said, with one line of
-      // provenance added — no protocol of this tier's own leaks into the report.
-      assert.doesNotMatch(report(result), /judge exit status/, report(result));
+      // A pass is one line: this tier's verdict and the pointer to the run behind
+      // it, without the orchestration that produced either.
+      assert.match(result.stderr, new RegExp(PASS_VERDICT), report(result));
+      assert.match(result.stderr, new RegExp(POINTER), report(result));
+      assert.equal(result.stdout, "", report(result));
+      assert.doesNotMatch(result.stderr, /Successfully ran target/, report(result));
     }
+    // The whole claim, stated as one equality: strike the clause that says where a
+    // verdict came from, and the replayed run said exactly what the judged one did.
+    const withoutProvenance = (result) =>
+      result.stderr.replace(
+        /(judged this diff against|replayed the recorded verdict for) base \w+ \(Nx cache (miss|hit)\)/,
+        "<provenance>",
+      );
+    assert.equal(withoutProvenance(second), withoutProvenance(first));
     // "Green" is a claim about one base commit, so the provenance line names it:
     // a gate run and a CI run resolving different bases answer different questions.
     assert.match(first.stderr, new RegExp(`${CACHE_MISS} ${base}`), report(first));
@@ -534,11 +563,11 @@ describe("the judged tier's computation cache", () => {
     assert.equal(ambient.status, 0, report(ambient));
     assert.equal(ws.judgeRuns().length, 2, "the ambient skip re-rolled the judge");
     assert.match(forced.stderr, new RegExp(CACHE_MISS), report(forced));
-    assert.match(forced.stdout, /forced/);
+    assert.match(forced.stderr, /forced/);
     assert.match(ambient.stderr, new RegExp(CACHE_HIT), report(ambient));
     // Under this Nx the lever neither reads nor writes: the run after it replays
     // the entry the forced roll left in place, not the forced roll's own report.
-    assert.doesNotMatch(ambient.stdout, /forced/);
+    assert.doesNotMatch(ambient.stderr, /forced/);
     for (const result of [forced, ambient]) {
       assert.match(result.stderr, /ignoring the ambient global Nx cache skip/);
       assert.match(
@@ -727,6 +756,37 @@ describe("the judged tier's refusals", () => {
       assert.equal(result.stdout.trim(), "", "a refused fingerprint must contribute nothing");
     });
   }
+
+  for (const [script, wants] of [
+    ["llmlint-diff.sh", "the Nx workspace it hands this tier to"],
+    ["llmlint-judge.sh", "the judge configuration it lints under"],
+    ["llmlint-fingerprint.sh", "the judge configuration it hashes"],
+  ]) {
+    it(`refuses to run ${script} from anywhere but the repository root`, (t) => {
+      // Answering from the wrong tree is worse than not answering: a fingerprint
+      // taken elsewhere would key this tree's verdict to another tree's rules.
+      const ws = workspace(t);
+
+      const result = ws.fromElsewhere(script, [ws.head()]);
+
+      assert.equal(result.status, 3, report(result));
+      assert.match(result.stderr, /run this from the repository root/);
+      assert.match(result.stderr, new RegExp(wants));
+      assert.equal(ws.judgeRuns().length, 0, report(result));
+    });
+  }
+
+  it("says what HOME has to be when it is not an absolute path", (t) => {
+    // Both ends of the key resolve their toolchain under HOME, so a relative one
+    // would resolve it from wherever each end happened to be run.
+    const ws = workspace(t);
+
+    const result = ws.fingerprint({ env: { HOME: "relative/home" } });
+
+    assert.notEqual(result.status, 0, report(result));
+    assert.match(result.stderr, /HOME is 'relative\/home', which is not an absolute path/);
+    assert.equal(result.stdout.trim(), "", "a refused fingerprint must contribute nothing");
+  });
 
   it("says whose HOME to set when the toolchain cannot be located at all", (t) => {
     const ws = workspace(t);

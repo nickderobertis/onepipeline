@@ -32,15 +32,14 @@
 # support the question; the two say which of them to repair.
 set -euo pipefail
 
-# llmlint: ignore-block[changed_behavior_has_e2e] Reaching this needs a checkout
-# whose own directory cannot be entered while this script is still readable inside
-# it, which no journey can arrange without root: every other path through this file
-# is driven in npm/test/llmlint-cache.test.mjs.
-CDPATH='' cd -- "$(dirname -- "$0")/.." || {
-  echo "llmlint fingerprint: could not enter the repository from this script; reinstall the checkout and retry" >&2
+# Every caller runs this from the repository root: `just` from the justfile's own
+# directory, Nx from the workspace root, and `scripts/llmlint-diff.sh` from the root
+# it checked for itself. So the root is required rather than climbed to — a run from
+# anywhere else would answer about a different tree than the one being judged.
+[ -f llmlint.yml ] || {
+  echo "llmlint fingerprint: run this from the repository root, which is where the judge configuration it hashes is; 'just lint-llm-diff <base>' does that for you" >&2
   exit 3
 }
-# llmlint: ignore-end[changed_behavior_has_e2e]
 root=$PWD
 # shellcheck source=scripts/llmlint-runtime-env.sh
 . "$root/scripts/llmlint-runtime-env.sh" || {

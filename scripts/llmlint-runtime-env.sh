@@ -13,10 +13,10 @@
 # rather than replaced: a contributor who installed llmlint elsewhere is still
 # judged, and both ends still agree, because both take this same order.
 #
-# llmlint: ignore-file[boundary_inputs_validated] The inherited PATH is the only
-# value read here, and it is deliberately kept rather than validated or narrowed:
-# an opinion about it here would let the judge and the fingerprint resolve
-# different binaries, which is the split key this helper exists to prevent.
+# `HOME` decides which toolchain both ends resolve, so its shape is checked here.
+# The inherited `PATH` is deliberately kept behind that directory rather than
+# narrowed: an opinion about it here would let the judge and the fingerprint
+# resolve different binaries, which is the split key this helper exists to prevent.
 set -euo pipefail
 
 llmlint_runtime_env() {
@@ -24,6 +24,10 @@ llmlint_runtime_env() {
   # directory, and `npm/test/llmlint-cache.test.mjs` holds them to that.
   [ -n "${HOME:-}" ] || {
     echo "llmlint runtime env: HOME is not set, so the judged tier cannot find the toolchain 'just setup-llmlint' installs; set HOME to the account that ran it and retry" >&2
+    return 1
+  }
+  [[ "$HOME" == /* ]] || {
+    echo "llmlint runtime env: HOME is '$HOME', which is not an absolute path, so the toolchain would be resolved from wherever this happened to run; set HOME to the account's own directory and retry" >&2
     return 1
   }
   export PATH="$HOME/.local/bin${PATH:+:$PATH}"
