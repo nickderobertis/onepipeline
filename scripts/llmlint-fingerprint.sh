@@ -27,7 +27,9 @@
 # has to reach its harness through a wrapper keeps doing so.
 #
 # Run it by hand to see the current judge fingerprint — the answer to "why did the
-# cache miss when nothing in the tree changed?".
+# cache miss when nothing in the tree changed?". It exits 2 when the toolchain
+# cannot answer what the judge would ask, and 1 when this checkout cannot be read
+# at all; the two say which of the toolchain or the checkout to repair.
 set -euo pipefail
 
 root="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)" || {
@@ -39,13 +41,11 @@ root="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)" || {
   echo "llmlint fingerprint: could not load the shared runtime environment; restore scripts/llmlint-runtime-env.sh and retry" >&2
   exit 1
 }
-# Resolve llmlint the way `scripts/llmlint-judge.sh` resolves it, so the key
-# describes the judge configuration the judged run would actually use.
 llmlint_runtime_env
 
 version="$(llmlint --version)" || {
   echo "llmlint fingerprint: 'llmlint --version' failed; run 'just setup-llmlint' and retry" >&2
-  exit 1
+  exit 2
 }
 cd "$root" || {
   echo "llmlint fingerprint: could not enter '$root'; repair its permissions and retry" >&2
@@ -53,7 +53,7 @@ cd "$root" || {
 }
 config="$(env -u LLMLINT_ONEHARNESS_BIN llmlint config)" || {
   echo "llmlint fingerprint: 'llmlint config' failed; repair llmlint.yml or its plugin pins and retry" >&2
-  exit 1
+  exit 2
 }
 config="${config//"$root"/\{root\}}"
 
@@ -65,6 +65,6 @@ elif command -v shasum >/dev/null 2>&1; then
   digest="$(printf '%s\n%s\n' "$version" "$config" | shasum -a 256)"
 else
   echo "llmlint fingerprint: no sha256 tool found; install coreutils (sha256sum) or perl (shasum) and retry" >&2
-  exit 1
+  exit 2
 fi
 printf '%s\n' "${digest%% *}"

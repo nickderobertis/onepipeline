@@ -23,7 +23,6 @@ set -euo pipefail
 # directory, and `npm/test/llmlint-cache.test.mjs` holds them to that.
 LLMLINT_INSTALL_DIR="$HOME/.local/bin"
 
-# Put the judged tier's own toolchain first, for whichever end is asking.
 llmlint_runtime_env() {
   export PATH="$LLMLINT_INSTALL_DIR:$PATH"
 }

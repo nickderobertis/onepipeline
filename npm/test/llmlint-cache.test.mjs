@@ -53,6 +53,7 @@ const CACHE_MISS = "judged this diff against base";
 const FAKE_LLMLINT = `#!/usr/bin/env bash
 set -euo pipefail
 if [[ \${1:-} == "--version" ]]; then
+  [[ \${FAKE_LLMLINT_VERSION_EXIT:-0} == 0 ]] || exit "$FAKE_LLMLINT_VERSION_EXIT"
   echo "llmlint \${FAKE_LLMLINT_VERSION:-0.0.0-e2e}"
   exit 0
 fi
@@ -90,7 +91,6 @@ function writeExecutable(path, body) {
   chmodSync(path, 0o755);
 }
 
-/// Install an `llmlint` in its own directory and hand back that directory.
 function installLlmlint(directory, body) {
   mkdirSync(directory, { recursive: true });
   writeExecutable(join(directory, "llmlint"), body);
@@ -173,7 +173,7 @@ class Workspace {
     this.commit("checkout under test");
   }
 
-  /// Run the recipe an operator, the `gate` recipe, and CI all invoke.
+  /// The recipe an operator, the `gate` recipe, and CI all invoke.
   lint(base, { args = [], env = {} } = {}) {
     const environment = { ...this.env, ...env };
     for (const [name, value] of Object.entries(env)) {
@@ -186,7 +186,7 @@ class Workspace {
     });
   }
 
-  /// Run the fingerprint the way an operator diagnosing a cache miss would.
+  /// The fingerprint alone, as an operator diagnosing a cache miss runs it.
   fingerprint({ env = {} } = {}) {
     return spawnSync("bash", ["scripts/llmlint-fingerprint.sh"], {
       cwd: this.root,
@@ -195,9 +195,17 @@ class Workspace {
     });
   }
 
-  /// How many times the judge was actually asked, across every run so far.
   judgeRuns() {
     return readFileSync(this.judgeLog, "utf8").split("\n").filter(Boolean);
+  }
+
+  /// Drive the cached Nx target directly, as someone who skipped the recipe does.
+  target({ env = {} } = {}) {
+    return spawnSync("bash", ["scripts/nx.sh", "run", "onepipeline:lint-llm-diff"], {
+      cwd: this.root,
+      encoding: "utf8",
+      env: { ...this.env, ...env },
+    });
   }
 
   /// Prepend an `llmlint` to the caller's PATH, as a shell that never ran setup has.
@@ -500,6 +508,71 @@ describe("the judged tier's computation cache", () => {
     assert.notEqual(result.status, 0, report(result));
     assert.match(result.stderr, /'no-such-ref' does not resolve to a commit/);
     assert.equal(ws.judgeRuns().length, 0, "the judge was asked a different number of times");
+  });
+});
+
+describe("the judged tier's refusals", () => {
+  // The recipe resolves the base itself, so these states are reachable only by
+  // driving the cached target directly — which is the misuse the guard names.
+  for (const [what, base, expected] of [
+    ["nothing at all", undefined, "must be a resolved commit id"],
+    ["a ref rather than a commit", "origin/main", "must be a resolved commit id"],
+    ["a commit this checkout does not have", "0".repeat(40), "missing from this checkout"],
+  ]) {
+    it(`refuses ${what} as a base to judge against`, (t) => {
+      const ws = workspace(t);
+
+      const result = ws.target({ env: { LLMLINT_DIFF_BASE_SHA: base } });
+
+      assert.notEqual(result.status, 0, report(result));
+      assert.match(report(result), new RegExp(expected));
+      assert.equal(ws.judgeRuns().length, 0, report(result));
+    });
+  }
+
+  for (const [what, broken, expected] of [
+    ["report its version", { FAKE_LLMLINT_VERSION_EXIT: "4" }, "'llmlint --version' failed"],
+    ["resolve its config", { FAKE_LLMLINT_CONFIG_EXIT: "5" }, "'llmlint config' failed"],
+  ]) {
+    it(`names a judge toolchain that cannot ${what}`, (t) => {
+      const ws = workspace(t);
+
+      const result = ws.fingerprint({ env: broken });
+
+      // Distinct from a checkout this cannot read: one says repair the toolchain,
+      // the other says repair the checkout, and the exit code says which.
+      assert.equal(result.status, 2, report(result));
+      assert.match(result.stderr, new RegExp(expected));
+      assert.equal(result.stdout.trim(), "", "a failed fingerprint must contribute nothing");
+    });
+  }
+
+  for (const entrypoint of ["fingerprint", "target"]) {
+    it(`says what to restore when the ${entrypoint} loses the shared runtime environment`, (t) => {
+      const ws = workspace(t);
+      const base = ws.head();
+      rmSync(join(ws.root, "scripts", "llmlint-runtime-env.sh"));
+
+      const result =
+        entrypoint === "fingerprint"
+          ? ws.fingerprint()
+          : ws.target({ env: { LLMLINT_DIFF_BASE_SHA: base } });
+
+      assert.notEqual(result.status, 0, report(result));
+      assert.match(report(result), /could not load the shared runtime environment/);
+      assert.match(report(result), /restore scripts\/llmlint-runtime-env\.sh and retry/);
+      assert.equal(ws.judgeRuns().length, 0, report(result));
+    });
+  }
+
+  it("refuses a base whose shape is not a git ref, before reaching git", (t) => {
+    const ws = workspace(t);
+
+    const result = ws.lint("origin/main; touch pwned");
+
+    assert.equal(result.status, 2, report(result));
+    assert.match(result.stderr, /is not a usable git ref/);
+    assert.equal(ws.judgeRuns().length, 0, report(result));
   });
 });
 

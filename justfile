@@ -235,68 +235,10 @@ lint-llm-validate *args:
     @command -v llmlint >/dev/null 2>&1 || { echo "llmlint not installed — run 'just setup-llmlint'" >&2; exit 1; }
     llmlint validate {{args}}
 
-# The judge is non-deterministic across the gap between what it judges — every
-# file in the base-to-head diff, because llmlint has no increment mode — and what
-# changed, so with no memo every worker gate, every push and every CI run over one
-# diff is an independent roll, and rolls of one branch have named a different rule
-# each time. The cached Nx `onepipeline:lint-llm-diff` target caches the judge run
-# itself: an unchanged tree judged against an unchanged base replays that run's own
-# report instead of rolling again. There is no verdict record to write, restore, or
-# race on — Nx's task cache is the whole mechanism.
-#
-# The base ref is resolved to a commit here, before Nx hashes it, so a rebased or
-# advanced base misses rather than replaying a verdict computed against a different
-# comparison. It is reported with the verdict, because "green" means green *against
-# that commit*: a gate run and the CI run that judges a different base are
-# answering different questions.
-#
-# Only a clean run is cached, because Nx caches successful tasks only. Findings
-# (llmlint exit 1) and a toolchain that never reached a verdict (exit >= 2) are
-# both judged again next invocation, and every roll lands in `llmlint history`.
-#
-# `just lint-llm-diff <base> --skip-nx-cache` is the one supported way to force a
-# real re-judge, and it is deliberately per-invocation. An ambient global cache
-# skip (`NX_SKIP_NX_CACHE` / `NX_DISABLE_NX_CACHE`, exported to re-judge this tier
-# and then inherited by everything else) is reported and ignored here: it would
-# re-roll a non-deterministic judge from every unrelated command. Every other Nx
-# target still honours it.
-#
-# Provenance comes from Nx's own cache reporting: the task line it annotates, or
-# the summary line it prints, only when it replayed a task instead of running it.
-# Both are matched because only the first is safe at any size — Nx replays a hit as
-# one burst, so a replay larger than a pipe buffer can arrive truncated and its
-# summary never does. Colour is stripped before matching, because it is not
-# cosmetic here: Nx wraps those lines — and the words inside them — in escapes
-# whenever it thinks the terminal takes colour, which includes every run nested
-# inside another Nx task, and an unstripped match then reports each replay as a
-# fresh judgement. `npm/test/llmlint-cache.test.mjs` drives both the plain and the
-# coloured shape, so an Nx upgrade that renames either wording fails the suite
-# rather than quietly reporting every run as freshly judged.
+# One verdict per tree, base commit, and judge configuration, rather than a fresh
+# roll of a non-deterministic judge every time. `scripts/llmlint-diff.sh` holds
+# that contract, including the one supported way to force a re-judge.
 # The blocking `llmlint` PR check; `just gate` runs it before you push.
 # llmlint scoped to the files this branch changed since it forked from main.
 lint-llm-diff base="origin/main" *nx_args:
-    @# Nx scores a runtime input that exits non-zero as *no contribution* rather
-    @# than as an error, so a fingerprint it cannot produce would silently shrink
-    @# the key to the tree and the base. Refuse here instead, while a stale verdict
-    @# can still be kept from replaying. This resolves llmlint exactly as the judged
-    @# target does, so it is also where a missing toolchain is named.
-    @bash scripts/llmlint-fingerprint.sh >/dev/null || { echo "lint-llm-diff: refusing to judge without the judge-configuration fingerprint named above; the cache key would drop it and replay a verdict that configuration has moved on from" >&2; exit 1; }
-    @base_sha=$(git rev-parse --verify --quiet "{{base}}^{commit}") || { echo "lint-llm-diff: '{{base}}' does not resolve to a commit; fetch it or pass an existing base" >&2; exit 1; }; \
-      if [ -n "${NX_SKIP_NX_CACHE:-}${NX_DISABLE_NX_CACHE:-}" ]; then \
-        echo "lint-llm-diff: ignoring the ambient global Nx cache skip; force a fresh judgement of this tier alone with 'just lint-llm-diff {{base}} --skip-nx-cache'" >&2; \
-      fi; \
-      unset NX_SKIP_NX_CACHE NX_DISABLE_NX_CACHE; \
-      report=$(mktemp) || { echo "lint-llm-diff: could not open temporary storage for the judge report; free disk space and retry" >&2; exit 1; }; \
-      trap 'rm -f "$report"' EXIT; \
-      status=0; \
-      LLMLINT_DIFF_BASE_SHA="$base_sha" ONEPIPELINE_NX_SHOW_OUTPUT=1 \
-        bash scripts/nx.sh run onepipeline:lint-llm-diff {{nx_args}} >"$report" 2>&1 || status=$?; \
-      cat "$report"; \
-      escape=$(printf '\033'); \
-      if sed "s/${escape}\[[0-9;]*[a-zA-Z]//g" "$report" \
-         | grep -qE '^Nx read the output from the cache instead of running the command|^> nx run onepipeline:lint-llm-diff +\[(local cache|remote cache|existing outputs match the cache)'; then \
-        echo "lint-llm-diff: replayed the recorded verdict for base $base_sha (Nx cache hit)" >&2; \
-      else \
-        echo "lint-llm-diff: judged this diff against base $base_sha (Nx cache miss)" >&2; \
-      fi; \
-      exit "$status"
+    @bash scripts/llmlint-diff.sh "{{base}}" {{nx_args}}
