@@ -31,10 +31,11 @@
 //! `src/agentgraph.rs` — which is what the check's own refusal tells its reader
 //! to do.
 
+use std::ffi::OsStr;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::thread;
 
@@ -151,10 +152,80 @@ fn index_serving(case: &str, extra: &[(&str, &str, bool)]) -> String {
     relative
 }
 
+/// Whether a candidate is a file this host would actually start — which on Unix
+/// is the executable bit and not mere presence, because a `bash` on the `PATH`
+/// without it is a file `execvp` skips.
+fn runnable(candidate: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(candidate)
+            .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        candidate.is_file()
+    }
+}
+
+/// Where `bash` resolves on one `PATH`, given the directory Windows keeps its
+/// own copy in.
+///
+/// `Command::new("bash")` is not this. Rust spawns through `CreateProcess`,
+/// whose search reaches the system directory *before* `PATH`, and the
+/// `bash.exe` Windows keeps there is not a shell at all — it is the WSL
+/// launcher, which on a host with no distribution installed writes "Windows
+/// Subsystem for Linux has no installed distributions." to stdout and exits 1.
+/// Every assertion here reads an exit code and a stream, so that program
+/// answering instead of the script turns each one into a report about a shell
+/// that never opened the file. That is what `cross (windows-latest)` reported.
+///
+/// Skipping the Windows directory is not a preference between two shells:
+/// Windows ships no POSIX shell there, so nothing skipped is a candidate. It
+/// costs nothing anywhere else, where `SystemRoot` is unset and no directory is
+/// dropped. Both spellings are tried in every directory because a bare name
+/// never names a program on Windows.
+///
+/// The `PATH` and the Windows directory are parameters rather than read here so
+/// that the case only Windows produces is driven on every platform.
+fn bash_on(path: &OsStr, system_root: Option<&OsStr>) -> Option<PathBuf> {
+    let windows_dir = system_root.map(|root| root.to_string_lossy().to_lowercase());
+    std::env::split_paths(path)
+        .filter(|dir| {
+            windows_dir.as_ref().is_none_or(|root| {
+                !dir.to_string_lossy()
+                    .to_lowercase()
+                    .starts_with(root.as_str())
+            })
+        })
+        .flat_map(|dir| {
+            ["", ".exe"]
+                .into_iter()
+                .map(move |ext| dir.join(format!("bash{ext}")))
+        })
+        .find(|candidate| runnable(candidate))
+}
+
+/// The `bash` this host runs the check's shell scripts with.
+///
+/// Refuses by name rather than falling back to the bare `"bash"`: that
+/// fallback is exactly the lookup this exists to avoid, and a suite that
+/// silently took it would report the WSL launcher's exit code as the script's.
+fn bash() -> PathBuf {
+    bash_on(
+        &std::env::var_os("PATH").unwrap_or_default(),
+        std::env::var_os("SystemRoot").as_deref(),
+    )
+    .expect(
+        "a bash on PATH outside the Windows system directory, which is what runs this \
+         repository's shell scripts",
+    )
+}
+
 /// The script, run the way `just engines-current` and `just linked-engines` run
 /// it: from the repository root, over this repository's real manifest and lock.
 fn linked_engines(args: &[&str]) -> Output {
-    Command::new("bash")
+    Command::new(bash())
         .arg("scripts/linked-engines.sh")
         .args(args)
         .current_dir(repo_root())
@@ -709,6 +780,58 @@ fn a_tree_the_check_cannot_read_is_refused_rather_than_answered() {
             said(&run)
         );
     }
+}
+
+/// The shell this suite runs the check in is never the `bash` Windows keeps in
+/// its own system directory.
+///
+/// That file is the WSL launcher rather than a shell, and `CreateProcess`
+/// reaches it before `PATH`. On `cross (windows-latest)` it answered a run of
+/// the check with "Windows Subsystem for Linux has no installed distributions."
+/// on stdout and exit 1, so the assertion below read an exit code from a
+/// program that had never opened the script — a reading about WSL reported as a
+/// reading about the lock.
+///
+/// Every other test here proves the lookup by using it. This one proves the
+/// rule that makes it right, over a tree laid out the way that runner's is,
+/// because the hosts able to run this suite are the ones where the bug cannot
+/// reproduce. Both readings are asserted — with the Windows directory known and
+/// with it unknown — so this fails if the skip stops being what chooses.
+#[test]
+fn the_shell_the_check_runs_in_is_never_the_bash_windows_keeps_in_its_system_directory() {
+    let root = repo_root().join("target/linked-engines/shell-lookup");
+    let _ = fs::remove_dir_all(&root);
+    let windows = root.join("Windows");
+    let system32 = windows.join("System32");
+    let elsewhere = root.join("Git/usr/bin");
+
+    let mut candidates = Vec::new();
+    for dir in [&system32, &elsewhere] {
+        fs::create_dir_all(dir).expect("a fixture directory");
+        let candidate = dir.join(if cfg!(windows) { "bash.exe" } else { "bash" });
+        fs::write(&candidate, "#!/bin/sh\nexit 1\n").expect("a fixture bash");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&candidate, fs::Permissions::from_mode(0o755))
+                .expect("a fixture bash this host would start");
+        }
+        candidates.push(candidate);
+    }
+    let path = std::env::join_paths([&system32, &elsewhere]).expect("a fixture PATH");
+
+    assert_eq!(
+        bash_on(&path, Some(windows.as_os_str())).as_deref(),
+        Some(candidates[1].as_path()),
+        "the lookup took the `bash` out of the Windows directory, which is the WSL launcher \
+         and not a shell this script can be read by"
+    );
+    assert_eq!(
+        bash_on(&path, None).as_deref(),
+        Some(candidates[0].as_path()),
+        "the Windows directory is not what the lookup skipped, so the assertion above says \
+         nothing about the runner it was written for"
+    );
 }
 
 /// A command line the check cannot use is an argument error, told apart from
