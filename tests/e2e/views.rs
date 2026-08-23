@@ -435,16 +435,10 @@ fn telemetry_buckets_sum_exactly_to_the_wall_clock() {
 /// The other direction, which never balanced: measured buckets that add up to
 /// **more** than the wall clock, with nothing left in `scheduling` to give back.
 ///
-/// A store is three producers' records merged — each stream in its own `seq`,
-/// the streams interleaved by `ts` — and those stamps are wall clocks from
-/// different processes and, for a relayed one, different machines. So the walk
-/// over a store meets stretches it charges twice: a stamp that goes backwards
-/// zeroes the span across it, and the next one forward re-charges ground already
-/// counted, while the wall clock stays first-to-last as read. The old rule put
-/// the whole residue in `scheduling`, which cannot give back what it never had:
-/// a real run on 2026-08-22 emitted eight buckets summing thirteen milliseconds
-/// past its own `wall_ms` with `scheduling` at zero, and a consumer holding the
-/// document to the promise it makes had to refuse it.
+/// A store is several producers' records merged, each stream in its own `seq`
+/// and the streams interleaved by `ts`, so a stamp that goes backwards zeroes
+/// the span across it and the next one forward re-charges ground already
+/// counted — while the wall clock stays first-to-last as read.
 ///
 /// The store is the one this run wrote, down to its records, streams and
 /// sequences. What is arranged is the **clock**: a doubled dispatch settles
@@ -529,6 +523,159 @@ fn telemetry_balances_a_store_that_overcounts_past_an_empty_scheduling_bucket() 
     // Absent stays absent: an overcount comes off what was measured and is never
     // charged to a bucket nothing measured.
     for absent in ["judge", "llmlint", "gate"] {
+        let bucket = document["buckets"]
+            .as_array()
+            .expect("buckets")
+            .iter()
+            .find(|bucket| bucket["name"] == absent)
+            .expect("the bucket is still named");
+        assert!(
+            bucket.get("ms").is_none(),
+            "{absent} reported a span nothing measured: {bucket}"
+        );
+    }
+}
+
+/// The same direction taken past what one bucket can give back: an overcount
+/// **larger than the longest span the run measured**, which has to keep coming
+/// off the next-longest until it is gone.
+///
+/// The run above skews one producer and the residue fits inside the dispatch it
+/// skewed. This one skews every stream, on a clock apiece, so the overcount is
+/// spread across the dispatch, the publication and the workspace setup and no
+/// one of the three can give it back alone.
+///
+/// What is arranged is the **clock** alone: the records, the streams, the
+/// sequences and the reader are the ones this run produced.
+#[test]
+fn telemetry_drains_an_overcount_past_the_longest_span_onto_the_next() {
+    /// The first record, and the low half of every sawtooth after it.
+    const OPENED: &str = "2026-08-22T00:00:00.000Z";
+    /// The high half: fifty seconds is longer than the whole run's wall clock,
+    /// so one step alone already overcounts it.
+    const LATER: &str = "2026-08-22T00:00:50.000Z";
+    /// The forward half of the publishing session's own sawtooth, on a clock of
+    /// its own.
+    const MIDWAY: &str = "2026-08-22T00:00:20.000Z";
+    /// The last record, one second after the first — the whole this run's parts
+    /// have to add back up to.
+    const CLOSED: &str = "2026-08-22T00:00:01.000Z";
+
+    let world = World::new("views-telemetry-drain");
+    world.repository("local-direct", &[]);
+    world.script("service.work", "the worker wrote this\n");
+    let run = settled(&world, "drained", vec![lifecycle("service", &[])]);
+
+    // llmlint: ignore-block[tests_mirror_real_usage] the records, the streams, the
+    // sequences and the reader are all real; only the clock is arranged, because
+    // clock skew is the one thing a journey cannot ask a producer for.
+    let journal = world.run_file(&run, "events.jsonl");
+    let mut records: Vec<Envelope> = std::fs::read_to_string(&journal)
+        .expect("the journal reads")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("a record reads back as an envelope"))
+        .collect();
+    // Every stream ends on the closing stamp, so whichever the merge emits last
+    // carries it and the wall clock is the second between the first record and
+    // the last. A stream's last record is its highest `seq` — the order the
+    // reader merges that stream in — and not the line it happens to sit on.
+    let mut tails: std::collections::BTreeMap<String, (u64, usize)> =
+        std::collections::BTreeMap::new();
+    for (index, record) in records.iter().enumerate() {
+        let tail = tails
+            .entry(record.stream.clone())
+            .or_insert((record.seq, index));
+        if record.seq >= tail.0 {
+            *tail = (record.seq, index);
+        }
+    }
+    let closing: std::collections::BTreeSet<usize> =
+        tails.values().map(|(_, index)| *index).collect();
+    let mut ahead: std::collections::BTreeMap<String, bool> = std::collections::BTreeMap::new();
+    for (index, record) in records.iter_mut().enumerate() {
+        record.ts = if index == 0 || closing.contains(&index) {
+            if index == 0 { OPENED } else { CLOSED }.to_string()
+        } else {
+            let ahead = ahead.entry(record.stream.clone()).or_default();
+            *ahead = !*ahead;
+            if *ahead {
+                if record.source == Source::Vcs {
+                    MIDWAY
+                } else {
+                    LATER
+                }
+            } else {
+                OPENED
+            }
+            .to_string()
+        };
+    }
+    // The arranged clock, kept for the failure messages: what this test asserts
+    // is a property of an order the reader derives, so a red run that cannot
+    // show the stamps it derived it from says nothing a reader can act on.
+    let store: Vec<String> = records
+        .iter()
+        .map(|record| {
+            format!(
+                "{} {} {} {}",
+                record.stream, record.seq, record.kind.0, record.ts
+            )
+        })
+        .collect();
+    let skewed: String = records
+        .iter()
+        .map(|record| {
+            format!(
+                "{}\n",
+                serde_json::to_string(record).expect("the envelope serialises")
+            )
+        })
+        .collect();
+    std::fs::write(&journal, skewed).expect("the store is written back");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    let document = world.run(&["telemetry", &run]).json();
+    let wall = document["wall_ms"].as_u64().expect("a wall clock");
+    assert_eq!(wall, 1_000, "{document}\n{store:#?}");
+    let spans: Vec<(&str, u64)> = document["buckets"]
+        .as_array()
+        .expect("buckets")
+        .iter()
+        .filter_map(|bucket| {
+            Some((
+                bucket["name"].as_str()?,
+                bucket.get("ms").and_then(serde_json::Value::as_u64)?,
+            ))
+        })
+        .collect();
+    // The premise, checked rather than assumed: the run charged three different
+    // buckets, so the residue had somewhere further to go than the first one it
+    // came off.
+    for charged in ["agent", "publication_wait", "setup"] {
+        assert!(
+            spans.iter().any(|(name, _)| *name == charged),
+            "{charged} was never measured, so nothing overcounted through \
+             it: {document}\n{store:#?}"
+        );
+    }
+    assert_eq!(
+        measured(&document),
+        wall,
+        "the buckets do not sum to WALL: {document}\n{store:#?}"
+    );
+    // And it went there: every measured span but one was taken down to nothing.
+    // A residue the longest span absorbed alone could not leave this — the other
+    // two would still be carrying tens of seconds against a wall clock of one.
+    let standing: Vec<&(&str, u64)> = spans.iter().filter(|(_, ms)| *ms > 0).collect();
+    assert_eq!(
+        standing.len(),
+        1,
+        "{spans:?} against a wall of {wall}\n{store:#?}"
+    );
+    assert_eq!(standing[0].1, wall, "{spans:?}");
+    // Absent stays absent: an overcount comes off what was measured and is never
+    // charged to a bucket nothing measured.
+    for absent in ["judge", "llmlint"] {
         let bucket = document["buckets"]
             .as_array()
             .expect("buckets")
@@ -1030,29 +1177,48 @@ fn a_transcript_prints_a_tools_output_structured_stripped_bounded_and_labelled()
         .expect("the settled run recorded a settlement");
 
     // The journal half: an output the producer had already cut short, carrying a
-    // control character a rendered line must not be able to obey.
-    let mut relayed = world
+    // control character a rendered line must not be able to obey, and one a
+    // harness relayed as the structure it really had.
+    let relayed = world
         .journal(&run)
         .into_iter()
         .filter_map(|event| serde_json::from_value::<Envelope>(event).ok())
         .find(|event| event.kind.0 == "turn-activity")
         .expect("the dispatch relayed its activity");
-    relayed.seq += 1_000;
-    relayed.payload = serde_json::json!({
-        "kind": "tool_result",
-        "output": "cleared\u{1b}[2K the line",
-        "output_truncated": true,
-        "index": 9,
-    })
-    .as_object()
-    .expect("a payload")
-    .clone();
     let journal = world.run_file(&run, "events.jsonl");
     let mut store = std::fs::read_to_string(&journal).expect("the journal reads");
-    store.push_str(&format!(
-        "{}\n",
-        serde_json::to_string(&relayed).expect("the envelope serialises")
-    ));
+    for (seq, payload) in [
+        (
+            1_000,
+            serde_json::json!({
+                "kind": "tool_result",
+                "output": "cleared\u{1b}[2K the line",
+                "output_truncated": true,
+                "index": 9,
+            }),
+        ),
+        // A harness that relayed the structure it really had rather than text.
+        // The store carries it under the same key, so the verb reads it the one
+        // way it reads a retained report's — a reader that took only the string
+        // case would drop this back to the blank column the verb was corrected
+        // for.
+        (
+            1_001,
+            serde_json::json!({
+                "kind": "tool_result",
+                "output": {"exit": 0, "stdout": "relayed, not text"},
+                "index": 10,
+            }),
+        ),
+    ] {
+        let mut record = relayed.clone();
+        record.seq += seq;
+        record.payload = payload.as_object().expect("a payload").clone();
+        store.push_str(&format!(
+            "{}\n",
+            serde_json::to_string(&record).expect("the envelope serialises")
+        ));
+    }
     std::fs::write(&journal, store).expect("the store is appended to");
 
     // The report half: this run's own copy, at the name the reader derives from
@@ -1092,6 +1258,7 @@ fn a_transcript_prints_a_tools_output_structured_stripped_bounded_and_labelled()
         "a control character in a tool's output reached the rendered line:\n{}",
         transcript.stdout
     );
+    transcript.out_has(r#"tool_result   {"exit":0,"stdout":"relayed, not text"}"#);
     transcript.out_has(r#"tool_result   {"exit":0,"stdout":"structured, not text"}"#);
     transcript.out_has("… [4096 of 5020 characters]");
     transcript.out_lacks("the tail nobody sees");

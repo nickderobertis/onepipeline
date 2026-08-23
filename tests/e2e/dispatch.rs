@@ -1191,9 +1191,7 @@ fn transcript_renders_a_real_dispatched_turns_tools_and_words() {
 
     let transcript = world.run(&["transcript", "read", "build"]);
     transcript.exited(0).out_has("read  build");
-    // The tools, from the turn summaries the sibling emitted as it ran...
     transcript.out_has("tool_call bash  echo the turn ran");
-    // ...and the words, out of the report that member settled with.
     transcript.out_has("report ");
     transcript.out_has("Ran what the task asked for.");
     // Both sources carry what the tool **returned**, which is the half a reader

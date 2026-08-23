@@ -1124,15 +1124,9 @@ mod tests {
     /// The direction the balance never held: measured buckets that add up to
     /// **more** than the wall clock, with `scheduling` already at zero.
     ///
-    /// A run's records come from three producers whose clocks are not one clock,
-    /// and the merge orders them by arrival rather than by stamp — so a
-    /// settlement can reach the store stamped *before* a turn that is already in
-    /// it. The walk charges the forward spans and the wall clock is
-    /// first-to-last as read, which leaves the parts longer than the whole. The
-    /// old rule put the whole residue in `scheduling`, and a bucket already at
-    /// zero cannot give any of it back: this run shipped a document whose parts
-    /// were ten seconds past its own wall clock, which is the real one measured
-    /// on 2026-08-22 at thirteen milliseconds.
+    /// A settlement stamped before a turn already in the store leaves the walk's
+    /// forward spans longer than a wall clock read first-to-last, and the old
+    /// rule put that residue in `scheduling` — which at zero has none to give.
     #[test]
     fn buckets_that_overcount_a_zero_scheduling_run_still_sum_to_wall() {
         let telemetry = of_run(
@@ -1159,19 +1153,15 @@ mod tests {
             "the parts overcount the whole: {:?}",
             telemetry.buckets
         );
-        // Taken off the longest span rather than clamped out of the shortest,
-        // and `scheduling` is still the measured zero it was.
         assert_eq!(bucket_of(&telemetry, BucketName::Agent), Some(90_000));
         assert_eq!(bucket_of(&telemetry, BucketName::Scheduling), Some(0));
     }
 
     /// The document that was actually emitted, balanced.
     ///
-    /// The numbers are the real ones off a run this crate recorded on
-    /// 2026-08-22 — buckets summing to 9,191,060 against a `wall_ms` of
-    /// 9,191,047, thirteen milliseconds over, with `scheduling` at zero. Pinned
-    /// rather than paraphrased: this is the shape that shipped, and a consumer
-    /// holding the eight buckets to their own wall clock refused it.
+    /// Pinned rather than paraphrased, because the margin is what makes it hard:
+    /// thirteen milliseconds over nine thousand seconds, with `scheduling` at
+    /// zero.
     #[test]
     fn the_document_measured_thirteen_milliseconds_over_balances_on_its_longest_span() {
         let mut buckets = vec![
@@ -1207,9 +1197,6 @@ mod tests {
             "{buckets:?}"
         );
         assert_eq!(buckets[0].ms, Some(9_098_048 - 13), "{buckets:?}");
-        // Every other bucket is what it measured, including the two zeroes: an
-        // overcount is charged to the longest span alone while that span can
-        // carry it.
         assert_eq!(buckets[1].ms, Some(1_229), "{buckets:?}");
         assert_eq!(buckets[5].ms, Some(0), "{buckets:?}");
     }
