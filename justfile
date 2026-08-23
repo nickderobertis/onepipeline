@@ -213,7 +213,7 @@ deps-check:
 # Both are outside `check` for the reason `deps-check` is: they read the
 # crates.io index, and the deterministic gate stays offline.
 # Fail when Cargo.lock resolves a sibling engine older than Cargo.toml permits.
-lock-current:
+engines-current:
     @bash scripts/linked-engines.sh --format check
 
 # Compose the release note recording the engine versions this build links.

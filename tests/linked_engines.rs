@@ -4,7 +4,7 @@
 //! engine older than `Cargo.toml`'s requirement allowed, and each time a reader
 //! met the requirement, concluded the fix was adopted, and acted on a binary
 //! that had never contained it. `scripts/linked-engines.sh` is the mechanism
-//! that ends that: `just lock-current` fails when the lock is behind, and
+//! that ends that: `just engines-current` fails when the lock is behind, and
 //! `just linked-engines` composes the line a release's own notes carry.
 //!
 //! # Why these drive the script rather than read it
@@ -100,9 +100,9 @@ fn linked(name: &str) -> Vec<String> {
     found
 }
 
-/// Where the crates.io sparse index files one crate, by the registry's own
-/// prefix rule. Every sibling's name is four characters or longer, so only that
-/// arm is exercised — the script carries the shorter ones for the day one is.
+/// Where the crates.io sparse index files one crate. The registry's own prefix
+/// rule has shorter forms for one-, two- and three-character names; the script
+/// implements only this one, because no engine it reports on is that short.
 fn index_path(name: &str) -> String {
     format!("{}/{}/{name}", &name[0..2], &name[2..4])
 }
@@ -151,7 +151,7 @@ fn index_serving(case: &str, extra: &[(&str, &str, bool)]) -> String {
     relative
 }
 
-/// The script, run the way `just lock-current` and `just linked-engines` run
+/// The script, run the way `just engines-current` and `just linked-engines` run
 /// it: from the repository root, over this repository's real manifest and lock.
 fn linked_engines(args: &[&str]) -> Output {
     Command::new("bash")
@@ -441,7 +441,12 @@ fn tree(case: &str, engines: &[Engine]) -> Tree {
     let mut manifest = String::from("[workspace.dependencies]\n");
     let mut lock = String::from("version = 4\n");
     for engine in engines {
-        if !engine.requirement.is_empty() {
+        // A requirement written as a table goes in verbatim: the check accepts
+        // only `name = "..."`, and a table is how a version-looking string
+        // reaches this file without being the requirement.
+        if engine.requirement.starts_with('{') {
+            manifest.push_str(&format!("{} = {}\n", engine.name, engine.requirement));
+        } else if !engine.requirement.is_empty() {
             manifest.push_str(&format!("{} = \"{}\"\n", engine.name, engine.requirement));
         }
         for version in engine.locked {
@@ -568,12 +573,22 @@ fn the_windows_this_check_computes_are_cargos_own_caret_rules() {
 /// currency nothing established, which is the failure it exists to prevent.
 #[test]
 fn a_tree_the_check_cannot_read_is_refused_rather_than_answered() {
-    let cases: [(&str, Engine, &str); 7] = [
+    let cases: [(&str, Engine, &str); 8] = [
         (
             "no-pin",
             Engine {
                 name: "onejudge",
                 requirement: "",
+                locked: &["0.0.7"],
+                served: &["0.0.7"],
+            },
+            "has no requirement in [workspace.dependencies]",
+        ),
+        (
+            "table-pin",
+            Engine {
+                name: "onejudge",
+                requirement: "{ version = \"0.0.7\", path = \"vendor/onejudge\" }",
                 locked: &["0.0.7"],
                 served: &["0.0.7"],
             },
@@ -640,6 +655,31 @@ fn a_tree_the_check_cannot_read_is_refused_rather_than_answered() {
             "serves 'onejudge' at '0.0', which is not a version this check can order",
         ),
     ];
+    // Not expressible as an `Engine`, whose versions always go into well-formed
+    // records: a line the registry served that this cannot read at all. Dropped
+    // silently, it would leave the lines around it answering "the newest
+    // release" for a file that had more.
+    let malformed = tree("malformed-index-record", &CARET_SHAPES);
+    let entry = repo_root()
+        .join(&malformed.index)
+        .join(index_path("oneagentgraph"));
+    let served = fs::read_to_string(&entry).expect("the fixture index entry");
+    fs::write(&entry, format!("{served}{{\"name\":\"oneagentgraph\"}}\n"))
+        .expect("a record with no version or yanked flag on it");
+    let run = linked_engines(&malformed.args());
+    assert_eq!(
+        run.status.code(),
+        Some(3),
+        "a record this cannot read leaves the registry's answer incomplete, which is neither \
+         current nor behind:\n{}",
+        said(&run)
+    );
+    assert!(
+        String::from_utf8_lossy(&run.stderr)
+            .contains("served a 'oneagentgraph' record with no name, version or yanked flag"),
+        "the refusal does not name what it could not read:\n{}",
+        said(&run)
+    );
 
     for (case, engine, expected) in cases {
         let tree = tree(case, &but(engine));
@@ -663,10 +703,12 @@ fn a_tree_the_check_cannot_read_is_refused_rather_than_answered() {
 /// both a finding and an unreadable tree.
 #[test]
 fn a_command_line_the_check_cannot_use_is_refused_with_what_to_run_instead() {
-    let cases: [(&[&str], &str, i32); 6] = [
+    let cases: [(&[&str], &str, i32); 8] = [
         (&["--nonsense"], "unknown option --nonsense", 2),
         (&["--format"], "--format needs a value", 2),
         (&["--index"], "--index needs a value", 2),
+        (&["--manifest"], "--manifest needs a value", 2),
+        (&["--lock"], "--lock needs a value", 2),
         (&["--format", "sideways"], "unknown format 'sideways'", 2),
         (
             &["--manifest", "target/linked-engines/absent.toml"],
@@ -797,5 +839,73 @@ fn a_registry_that_hiccups_is_retried_and_one_that_never_answers_is_not_a_findin
         String::from_utf8_lossy(&unread.stderr).contains("did not serve 'oneagentgraph'"),
         "the refusal does not name the registry read that failed:\n{}",
         said(&unread)
+    );
+}
+
+/// Both recipes are entry points to this check rather than restatements of it.
+///
+/// The weekly workflow and the release job reach it only through `just`, so
+/// what they actually run is the recipe: one naming a different script, or the
+/// wrong mode, would leave every test above proving a file nothing calls. The
+/// fixture index reaches them through `ONEPIPELINE_CRATES_INDEX`, which is the
+/// override a caller with no option to pass has.
+#[test]
+fn both_recipes_are_entry_points_to_this_check() {
+    let index = index_serving("through-just", &[]);
+    let recipe = |name: &str| {
+        Command::new("just")
+            .arg(name)
+            .env("ONEPIPELINE_CRATES_INDEX", &index)
+            .current_dir(repo_root())
+            .output()
+            .expect("just runs this repository's recipes")
+    };
+
+    let current = recipe("engines-current");
+    assert!(
+        current.status.success()
+            && String::from_utf8_lossy(&current.stdout).contains("linked engines are current"),
+        "`just engines-current` is not the check this suite proves:\n{}",
+        said(&current)
+    );
+
+    let notes = recipe("linked-engines");
+    assert!(
+        notes.status.success()
+            && String::from_utf8_lossy(&notes.stdout).contains("### Linked engines"),
+        "`just linked-engines` is not the note composer this suite proves:\n{}",
+        said(&notes)
+    );
+}
+
+/// The marker the note opens with is the one the release job cuts the old
+/// section at.
+///
+/// Two files hold that string: the script writes it, and `release.yml` trims
+/// the existing body from it before appending. Spelled differently in either,
+/// nothing fails — a re-run of a release quietly grows a second copy of the
+/// table, which is the failure mode this whole change exists to avoid a version
+/// of.
+#[test]
+fn the_marker_the_note_opens_with_is_the_one_the_release_job_replaces() {
+    let index = index_serving("marker", &[]);
+    let run = linked_engines(&["--index", &index, "--format", "notes"]);
+    let notes = String::from_utf8_lossy(&run.stdout);
+    let marker = notes
+        .lines()
+        .next()
+        .expect("the note opens with a line of its own");
+    assert!(
+        marker.starts_with("<!--") && marker.ends_with("-->"),
+        "the note does not open with a marker a release job could cut at:\n{}",
+        said(&run)
+    );
+
+    let release = fs::read_to_string(repo_root().join(".github/workflows/release.yml"))
+        .expect("the workflow that appends the note");
+    assert!(
+        release.contains(&format!("/^{marker}$/")),
+        "release.yml trims the old section at a marker that is not the one the note opens \
+         with ({marker}), so re-running a release stacks a second table"
     );
 }

@@ -183,7 +183,7 @@ resolver = "2"
 # the reason the entry below gives.
 #
 # What keeps this block's resolutions at what its own requirements permit is no
-# longer whoever thinks to look: `just lock-current` fails when one lags, and
+# longer whoever thinks to look: `just engines-current` fails when one lags, and
 # every release's notes record what that release links.
 [workspace.dependencies]
 oneagentgraph = "0.3.0"

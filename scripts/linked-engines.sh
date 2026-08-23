@@ -89,20 +89,23 @@ orderable() {
   [ "${1//[^.]/}" = ".." ]
 }
 
-# The requirement `[workspace.dependencies]` states for one engine. Read from
-# that table alone: `[dependencies]` names the same engines as
+# The requirement `[workspace.dependencies]` states for one engine.
+#
+# Read from that table alone: `[dependencies]` names the same engines as
 # `{ workspace = true }`, and a match there would report the word "true" as a
-# version requirement. What comes back is validated by `req_window` before it
-# decides anything, so a value of the wrong type is refused rather than guessed.
+# version requirement. The whole declaration must be `name = "..."` — a table
+# (`{ version = "1", path = "..." }`) yields nothing here, and the caller
+# refuses by name, rather than the first quoted substring in it being read as
+# the requirement. `req_window` then decides whether the string is one this
+# check models.
 requirement() {
   awk -v want="$1" '
     /^\[/ { inside = ($0 ~ /^\[workspace\.dependencies\]/); next }
     !inside { next }
-    {
-      key = $0
-      sub(/[[:space:]]*=.*$/, "", key)
-      if (key != want) next
-      if (match($0, /"[^"]*"/)) { print substr($0, RSTART + 1, RLENGTH - 2); exit }
+    $0 ~ "^" want "[[:space:]]*=[[:space:]]*\"[^\"]*\"[[:space:]]*$" {
+      match($0, /"[^"]*"/)
+      print substr($0, RSTART + 1, RLENGTH - 2)
+      exit
     }
   ' "$manifest"
 }
@@ -189,9 +192,10 @@ index_path() {
 # The index is one JSON object per line and `"vers"` and `"yanked"` each appear
 # exactly once on it — a dependency entry carries `"req"`, not either — so the
 # fields are read positionally rather than by standing up a JSON parser this
-# script otherwise has no need of; `release.yml` reads the same file the same
-# way. What comes back is a third party's, so every version of it is `orderable`
-# before it is compared and the caller refuses the file outright if one is not.
+# script otherwise has no need of. What comes back is a third party's, so a
+# record missing any of the three fields this reads is emitted as `!` and
+# refused by the caller: dropping it silently would leave the remaining lines
+# answering "the newest release" for a file that had more.
 index_versions() {
   local name="$1" path body attempt
   path="$(index_path "$name")"
@@ -215,11 +219,15 @@ index_versions() {
       ;;
   esac
   printf '%s\n' "$body" | awk '
+    /^[[:space:]]*$/ { next }
     {
-      vers = ""; yanked = "true"
+      vers = ""; yanked = ""
       if (match($0, /"vers":"[^"]*"/)) vers = substr($0, RSTART + 8, RLENGTH - 9)
       if (match($0, /"yanked":(true|false)/)) yanked = substr($0, RSTART + 9, RLENGTH - 9)
-      if (vers != "" && yanked == "false" && vers !~ /[-+]/) print vers
+      if (vers == "" || yanked == "" || $0 !~ /"name":"/) { print "!"; next }
+      if (yanked == "true") next
+      if (vers ~ /[-+]/) next
+      print vers
     }
   '
 }
@@ -259,6 +267,8 @@ for name in "${SIBLINGS[@]}"; do
   permitted=""
   while read -r version; do
     [ -n "$version" ] || continue
+    [ "$version" != "!" ] || die "the index served a '$name' record with no name, version or yanked flag on it" \
+      "'$index' is not answering in the crates.io sparse-index format — pass '--index' naming one that does"
     orderable "$version" || die "the index serves '$name' at '$version', which is not a version this check can order" \
       "'$index' is not answering in the crates.io sparse-index format — pass '--index' naming one that does"
     if ver_ge "$version" "$lower" && ver_lt "$version" "$upper"; then

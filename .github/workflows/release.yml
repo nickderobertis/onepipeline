@@ -16,9 +16,9 @@ name: Release
 #
 #   * test          — the complete deterministic gate, so untested artifacts
 #                     never publish.
-#   * linked-engines — record in the Release's own notes which version of each
-#                     sibling engine this release links, and say so where one is
-#                     older than this release's own requirement permits.
+#   * linked-engines — record the sibling-engine versions this release links in
+#                     its own notes, ungated so a red gate still says what it
+#                     would have shipped.
 #   * upload        — build each target on a native runner and attach the archive
 #                     + sha256 checksum to the Release.
 #   * publish-crate — idempotent crates.io publish; self-activates the day
