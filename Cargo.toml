@@ -41,7 +41,7 @@ resolver = "2"
 # `tests/e2e/dispatch.rs` and `tests/e2e/real_vcs.rs` drive those surfaces against
 # the real siblings, so a pin moved below one fails rather than reads differently.
 #
-# Five further floors, each a **requirement** of what this crate composes today:
+# Further floors, each a **requirement** of what this crate composes today:
 #
 # - `oneagentgraph` 0.2.16 lets a `kind: oneharness` member's own oneharness
 #   config decide its run — `schema_file` there asks for a validated JSON answer,
@@ -106,8 +106,25 @@ resolver = "2"
 #   and the contract's `gate` WALL bucket are both kept, the first because the
 #   cross-library failure vocabulary is fixed and the second because a bucket
 #   nothing measures is served absent — `src/telemetry.rs` documents that.
+# - `onevcs` 0.11.1 **refuses to reap a session worktree holding commits its own
+#   branch does not carry**, copying them where the execution checkout will take
+#   them first. Below it, a worker that ran `git checkout -b fix/…` loses
+#   everything it committed there when the worktree goes — half an hour of
+#   gate-green work on the operator's host, under a node reporting `merged`.
+#   `tests/e2e/lifecycle.rs`'s
+#   `work_a_worker_committed_on_a_branch_of_its_own_outlives_the_session` drives
+#   it, and fails below the floor rather than reading differently.
+# - `onevcs` 0.12.0 adds `FailureKind::PushedUnverified` — the publishing push
+#   **reached the remote** and the merge path could not then be read — which
+#   `src/vcs.rs` routes **preserving**, under `pushed-unverified`, because asking
+#   again is what answers a read that never happened. It is a **requirement** and
+#   not a lock floor for the reason 0.8.0 and 0.11.0 were: `^0.11.0` excludes it,
+#   because pre-1.0 the minor is the breaking position. `tests/e2e/lifecycle.rs`'s
+#   `a_push_whose_merge_path_goes_unread_is_redispatched_with_the_work_on_the_origin`
+#   drives that ending against the real sibling, and `failure_of` matches arm by
+#   arm, so a pin below 0.12.0 does not compile.
 #
-# Two floors are carried by `Cargo.lock` rather than by the requirement below,
+# Four floors are carried by `Cargo.lock` rather than by the requirement below,
 # and deliberately.
 #
 # `oneagentgraph` 0.3.3 carries the **session-conversation producer**: a `session`
@@ -145,9 +162,28 @@ resolver = "2"
 # be the version *that* pin resolves to. `src/agentgraph.rs`'s
 # `the_linked_oneagentgraph_produces_the_whole_turn_this_crate_relays` holds the
 # resolution, and `tests/e2e/turns.rs` drives the relay itself.
+#
+# `oneagentgraph` 0.3.8 moves the **activity rule's default bound** from ten
+# minutes to half an hour. Every dispatch this crate makes runs as a single-sided
+# member, whose clock that rule stamps on tool events and on live work under the
+# tree and on nothing else — so a member spending a quarter of an hour composing
+# a report reads as silent, and under the old bound was killed mid-report.
+# `^0.3.0` already permits it, so the resolution is the whole of the fix.
+# `tests/oneagentgraph_liveness.rs` holds both halves of it against the linked
+# library: the bound a dispatch really runs under, read through that library's
+# own launch-time `Bounds::from_env`, and the rule that bound governs, driven
+# over real processes under a bound the environment sets small. The lock
+# resolves 0.3.9, the newest the caret permits, whose addition — a script run
+# before a member's turn — this crate names nowhere.
+#
+# `onejudge` 0.5.1 and the `oneharness-core` 0.10.x copy at 0.10.2 move with the
+# lock and carry **no runtime behaviour a dispatch observes** — onejudge 0.5.1
+# changes no `src/` file at all — so they are here to keep the lock current
+# rather than for a fix. The `oneharness-core` 0.8 copy stays where it is, for
+# the reason the entry below gives.
 [workspace.dependencies]
 oneagentgraph = "0.3.0"
-onevcs = "0.11.0"
+onevcs = "0.12"
 # **Not a third sibling this crate composes** — nothing here launches, calls, or
 # spawns onejudge. It is one vocabulary: the verdicts a two-party member settles
 # on, which `oneagentgraph` copies onto the `member-settled` this crate relays.

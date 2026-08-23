@@ -56,8 +56,11 @@ pub struct Launch {
 /// publication fails in a way that leaves the work behind.
 ///
 /// A publication that ends `checks-failed`, `checks-unsettled`, `push-rejected`,
-/// or `sync-conflict` did not reject the node — it rejected the **tree** the node
-/// produced, and that tree is still on the branch the session handed back. There
+/// `pushed-unverified`, or `sync-conflict` did not reject the node — it rejected
+/// the **tree** the node produced, and that tree is still on the branch the
+/// session handed back (`pushed-unverified` more than the rest: that one is
+/// already on the origin, and what a further attempt re-reads is the merge path
+/// rather than the push). There
 /// is nothing left in the run that would ever look at it again: the node settles
 /// `failed`, its dependents never start, and an operator hand-builds a
 /// replacement node out of the settlement's detail. So the node is asked again
