@@ -210,6 +210,12 @@ deps-check:
     @# them would leave a failing gate with no actionable detail.
     @cargo machete
 
+# llmlint: ignore-block[comments_earn_their_place] the line above a recipe is not a
+# comment on it — `just` prints it as that recipe's description, and `just --list`
+# is this repository's documented index of its command surface. Read as prose each
+# one restates the name below it, which is what a one-line help string does;
+# deleting them empties the index rather than tightening it.
+
 # Both are outside `check` for the reason `deps-check` is: they read the
 # crates.io index, and the deterministic gate stays offline.
 # Fail when Cargo.lock resolves a sibling engine older than Cargo.toml permits.
@@ -219,6 +225,7 @@ engines-current:
 # Compose the release note recording the engine versions this build links.
 linked-engines:
     @bash scripts/linked-engines.sh --format notes
+# llmlint: ignore-end[comments_earn_their_place]
 
 # Reads the floor from Cargo.toml's `rust-version`; that toolchain must be
 # installed (`rustup toolchain install <version>`). Warnings are errors here too.
