@@ -86,7 +86,17 @@ orderable() {
   case "$1" in
     ""|*[!0-9.]*|*..*|.*|*.) return 1 ;;
   esac
-  [ "${1//[^.]/}" = ".." ]
+  [ "${1//[^.]/}" = ".." ] || return 1
+  # And a number the comparison below can actually make. Bash's integers are
+  # 64-bit, and `[ 99999999999999999999 -lt 1 ]` is not false but an *error*:
+  # `ver_cmp` reads that as neither less nor greater and answers "equal", which
+  # orders an unreadable version against every real one and is precisely the
+  # currency this must never claim. Eighteen digits is past every release the
+  # registry has ever served and short of where `[` stops answering.
+  local IFS=. part
+  for part in $1; do
+    [ "${#part}" -le 18 ] || return 1
+  done
 }
 
 # The requirement `[workspace.dependencies]` states for one engine.
@@ -235,6 +245,12 @@ index_versions() {
     /^[[:space:]]*$/ { next }
     {
       vers = ""; yanked = ""; who = ""
+      # Read positionally, so each field has to appear exactly once: a record
+      # carrying two is one this cannot read, and taking the first would answer
+      # for a line that said something else. `gsub` puts back what it matched,
+      # so this counts without altering the record.
+      if (gsub(/"vers":"/, "&") > 1 || gsub(/"yanked":/, "&") > 1 ||
+          gsub(/"name":"/, "&") > 1) { print "!"; next }
       if (match($0, /"vers":"[^"]*"/)) vers = substr($0, RSTART + 8, RLENGTH - 9)
       if (match($0, /"yanked":(true|false)/)) yanked = substr($0, RSTART + 9, RLENGTH - 9)
       if (match($0, /"name":"[^"]*"/)) who = substr($0, RSTART + 8, RLENGTH - 9)

@@ -742,6 +742,22 @@ fn a_tree_the_check_cannot_read_is_refused_rather_than_answered() {
             "{\"name\":\"serde\",\"vers\":\"9.9.9\",\"yanked\":false}",
             "served a record for 'serde' under 'oneagentgraph'",
         ),
+        // Read positionally, a second `vers` is a release the line also names
+        // and this cannot see: taking the first would answer 0.0.1 for a record
+        // that went on to say 9.9.9.
+        (
+            "twice-versioned-index-record",
+            "{\"name\":\"oneagentgraph\",\"vers\":\"0.0.1\",\"vers\":\"9.9.9\",\"yanked\":false}",
+            "served a 'oneagentgraph' record with no name, version or yanked flag",
+        ),
+        // A number `[` cannot compare is one `ver_cmp` answers "equal" to
+        // everything for, which would order a lock current against a release it
+        // never read.
+        (
+            "unorderable-index-version",
+            "{\"name\":\"oneagentgraph\",\"vers\":\"99999999999999999999.0.0\",\"yanked\":false}",
+            "at '99999999999999999999.0.0', which is not a version this check can order",
+        ),
     ] {
         let fixture = tree(case, &CARET_SHAPES);
         let entry = repo_root()
