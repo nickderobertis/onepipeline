@@ -13,6 +13,9 @@
       "{projectRoot}/**/*",
       "sharedGlobals"
     ],
+    "wholeWorkspace": [
+      "{workspaceRoot}/**/*"
+    ],
     "crateSource": [
       "{workspaceRoot}/src/**/*",
       "{workspaceRoot}/tests/**/*",
@@ -64,6 +67,18 @@
       "cache": true,
       "inputs": [
         "default"
+      ]
+    },
+    "lint-llm-diff": {
+      "cache": true,
+      "inputs": [
+        "wholeWorkspace",
+        {
+          "env": "LLMLINT_DIFF_BASE_SHA"
+        },
+        {
+          "runtime": "bash scripts/llmlint-fingerprint.sh"
+        }
       ]
     },
     "check": {

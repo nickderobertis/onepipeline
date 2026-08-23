@@ -44,6 +44,12 @@
         "crateSource"
       ]
     },
+    "lint-llm-diff": {
+      "command": "bash scripts/llmlint-judge.sh",
+      "options": {
+        "cwd": "."
+      }
+    },
     "check": {
       "executor": "nx:noop",
       "dependsOn": [
