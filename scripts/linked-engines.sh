@@ -254,6 +254,16 @@ rows=()
 # The subset that are behind, as `name resolved permitted`.
 behind=()
 
+# Every array this file fills is expanded below as `${a[@]+"${a[@]}"}` rather
+# than as `"${a[@]}"`. macOS ships bash 3.2 — the last GPLv2 release, and what
+# this repository's own `cross (macos-latest)` leg runs this script on — and
+# under `set -u` that bash treats `"${a[@]}"` on an *empty* array as an unbound
+# variable and aborts, where 4.4 and later expand it to nothing. An engine with
+# no copy outside its window is the ordinary case rather than an error, so the
+# one form that means "the elements, or nothing" on both bashes is used at every
+# such site, not only at the one that found this. Each element survives whole:
+# the inner expansion is quoted, so a row carrying spaces stays one word.
+
 for name in "${SIBLINGS[@]}"; do
   req="$(requirement "$name")"
   [ -n "$req" ] || die "'$name' has no requirement in [workspace.dependencies] of '$manifest'" \
@@ -301,7 +311,7 @@ for name in "${SIBLINGS[@]}"; do
   [ -n "$permitted" ] || die "the index serves no '$name' version that '$req' permits" \
     "the requirement names a window the registry has nothing in — correct the pin in '$manifest'"
 
-  for version in "${governed[@]}"; do
+  for version in ${governed[@]+"${governed[@]}"}; do
     if ver_lt "$version" "$permitted"; then
       rows+=("$name|$version|$req|$permitted|behind")
       behind+=("$name $version $permitted")
@@ -312,7 +322,7 @@ for name in "${SIBLINGS[@]}"; do
   # A copy outside the window is in the build because another crate in the graph
   # requires it, so no requirement of this repository's is a claim about it.
   # Reported anyway: it is linked, and this is the answer to what is linked.
-  for version in "${ungoverned[@]}"; do
+  for version in ${ungoverned[@]+"${ungoverned[@]}"}; do
     rows+=("$name|$version|$req|$permitted|transitive")
   done
 done
@@ -332,7 +342,7 @@ if [ "$format" = notes ]; then
   echo
   echo "| Engine | Linked | Requirement | Newest the requirement permits |"
   echo "| --- | --- | --- | --- |"
-  for row in "${rows[@]}"; do
+  for row in ${rows[@]+"${rows[@]}"}; do
     IFS='|' read -r name version req permitted state <<<"$row"
     case "$state" in
       behind)
@@ -351,7 +361,7 @@ if [ "$format" = notes ]; then
     echo "> This release links an engine **older than its own requirement permits**, so reading"
     echo "> \`Cargo.toml\` overstates what this build contains:"
     echo ">"
-    for entry in "${behind[@]}"; do
+    for entry in ${behind[@]+"${behind[@]}"}; do
       read -r name version permitted <<<"$entry"
       echo "> - \`$name\` links $version; the requirement already permitted $permitted."
     done
@@ -362,7 +372,7 @@ fi
 
 if [ "${#behind[@]}" -eq 0 ]; then
   summary=""
-  for row in "${rows[@]}"; do
+  for row in ${rows[@]+"${rows[@]}"}; do
     IFS='|' read -r name version req permitted state <<<"$row"
     [ "$state" = current ] || continue
     summary="${summary:+$summary, }$name $version"
@@ -374,7 +384,7 @@ fi
 {
   echo "'$lock' links an engine older than '$manifest' already permits:"
   echo
-  for entry in "${behind[@]}"; do
+  for entry in ${behind[@]+"${behind[@]}"}; do
     read -r name version permitted <<<"$entry"
     echo "  $name: links $version, but its requirement already permits $permitted"
     echo "    fix: cargo update -p $name@$version"
