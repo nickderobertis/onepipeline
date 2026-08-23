@@ -275,6 +275,15 @@ for name in "${SIBLINGS[@]}"; do
   fi
   read -r lower upper <<<"$window"
 
+  # A reading that failed is not a reading that found nothing. `die` inside a
+  # process substitution exits that subshell alone, so a loop fed by one sees an
+  # empty answer and the check then refuses for the wrong reason — telling a
+  # reader whose registry was unreachable to correct a pin that is correct.
+  # Both answers are captured before they are read, so a reading that failed
+  # ends the run instead of being mistaken for one that found nothing.
+  resolved="$(lock_versions "$name")" || die "'$lock' could not be read for '$name'" \
+    "make '$lock' readable, or pass '--lock <path to Cargo.lock>'"
+
   governed=()
   ungoverned=()
   while read -r version; do
@@ -286,10 +295,14 @@ for name in "${SIBLINGS[@]}"; do
     else
       ungoverned+=("$version")
     fi
-  done < <(lock_versions "$name")
+  done <<<"$resolved"
 
   [ "${#governed[@]}" -gt 0 ] || die "'$lock' resolves no '$name' that '$req' permits" \
     "the lock and the manifest disagree about '$name' — run 'cargo update --workspace' and commit the lock"
+
+  # `index_versions` has already named what failed and what to do about it, so
+  # this only has to stop rather than write a second diagnosis over the first.
+  served="$(index_versions "$name")" || exit 3
 
   permitted=""
   while read -r version; do
@@ -307,7 +320,7 @@ for name in "${SIBLINGS[@]}"; do
         permitted="$version"
       fi
     fi
-  done < <(index_versions "$name")
+  done <<<"$served"
   [ -n "$permitted" ] || die "the index serves no '$name' version that '$req' permits" \
     "the requirement names a window the registry has nothing in — correct the pin in '$manifest'"
 

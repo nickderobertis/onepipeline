@@ -976,6 +976,16 @@ fn a_registry_that_hiccups_is_retried_and_one_that_never_answers_is_not_a_findin
         "the refusal does not name the registry read that failed:\n{}",
         said(&unread)
     );
+    // And says it once. A reading that failed inside a process substitution
+    // exits that subshell alone, which left the check to refuse a second time
+    // for having found no permitted version — sending a reader whose registry
+    // was unreachable to correct a pin that is correct.
+    assert!(
+        !String::from_utf8_lossy(&unread.stderr).contains("serves no 'oneagentgraph' version"),
+        "a registry that never answered was also reported as a registry with nothing in the \
+         window, so the reader is told to edit a requirement that is not the problem:\n{}",
+        said(&unread)
+    );
 }
 
 /// Both recipes are entry points to this check rather than restatements of it.
