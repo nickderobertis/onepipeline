@@ -1,0 +1,42 @@
+name: Engine currency
+
+# Whether `Cargo.lock` still resolves the sibling engines `Cargo.toml` already
+# permits.
+#
+# No pull request can ask this: the answer changes when the *registry* moves and
+# not when this tree does. Hence a schedule — and hence no branch protection, so
+# that a release nobody here made cannot redden an unrelated pull request. A red
+# run is one `cargo update -p <spec>` and a commit; `just engines-current` prints
+# the spec and says where to record a floor if the gap holds one.
+#
+# llmlint: ignore-file[changed_behavior_has_e2e] the subject of this workflow is the
+# schedule and the crates.io index — neither of which a test can stand in for without
+# the stand-in becoming what is under test. Everything it drives is proven locally and
+# offline: `tests/linked_engines.rs` runs the same script this calls through the same
+# recipe's entry point, against a lock that is current and a lock that is behind.
+
+on:
+  schedule:
+    # Mondays, 08:00 UTC — a working-week morning, so a red run is seen, and an
+    # hour after `published-smoke.yml` so the two do not report at once.
+    - cron: "0 8 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: engine-currency
+  cancel-in-progress: true
+
+jobs:
+  engines-current:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      # Through the recipe, not around it: what "current" means lives in one
+      # place, so a check run here and a check run on a laptop cannot disagree.
+      - run: just engines-current

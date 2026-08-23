@@ -16,6 +16,9 @@ name: Release
 #
 #   * test          — the complete deterministic gate, so untested artifacts
 #                     never publish.
+#   * linked-engines — record the sibling-engine versions this release links in
+#                     its own notes, ungated so a red gate still says what it
+#                     would have shipped.
 #   * upload        — build each target on a native runner and attach the archive
 #                     + sha256 checksum to the Release.
 #   * publish-crate — idempotent crates.io publish; self-activates the day
@@ -118,6 +121,42 @@ jobs:
           tool: just,nextest,cargo-llvm-cov
       - run: just bootstrap
       - run: just check
+
+  # Which version of each sibling engine this release links, in the notes rather
+  # than only in the CycloneDX SBOM inside a published wheel — where nobody who
+  # asks the question is looking.
+  #
+  # Deliberately not gated on `test`: this reads the tagged tree and is true
+  # whether or not the artifacts publish, and a release whose gate went red is
+  # the one whose notes should least be silent about what it links.
+  # `contents: write` because it edits the Release body, which nothing else here
+  # needs.
+  linked-engines:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      # Through the recipe, so the note a release carries and the check a
+      # developer runs are one reading rather than two that can disagree.
+      - name: Compose the note from this release's own lockfile
+        run: just linked-engines > "$RUNNER_TEMP/linked-engines.md"
+      - name: Record it in the release notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          gh release view "$TAG" --json body --jq .body > "$RUNNER_TEMP/body.md"
+          # Re-running a release replaces the section rather than stacking a
+          # second copy: everything from the marker onward is dropped first.
+          awk '/^<!-- linked-engines -->$/ { exit } { print }' \
+            "$RUNNER_TEMP/body.md" > "$RUNNER_TEMP/notes.md"
+          printf '\n' >> "$RUNNER_TEMP/notes.md"
+          cat "$RUNNER_TEMP/linked-engines.md" >> "$RUNNER_TEMP/notes.md"
+          gh release edit "$TAG" --notes-file "$RUNNER_TEMP/notes.md"
 
   upload:
     name: upload (${{ matrix.target }})

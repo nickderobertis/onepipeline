@@ -64,9 +64,10 @@ and is never resolved unilaterally.
 `just --list` is the index; do not hand-roll equivalents. `just check` is the
 deterministic gate and `just gate` is the complete pre-push bar — `check` plus
 the diff-scoped llmlint tier — and a change is not done until `gate` is green.
-`deps-check`, `msrv`, and `smoke-real` sit outside both because one needs a
-network advisory database, one a second toolchain, and one a GitHub credential;
-CI runs each as its own job, through the recipe rather than around it.
+`deps-check`, `engines-current`, `msrv`, and `smoke-real` sit outside both
+because two need the network — an advisory database and the crates.io index —
+one a second toolchain, and one a GitHub credential; CI runs each as its own job,
+through the recipe rather than around it.
 
 The repo-wide verbs delegate to **Nx**, which fans a uniformly-named target out
 across every project; what a target *does* stays with its project. Never loop
@@ -90,6 +91,11 @@ consuming `project.json` — an undeclared one silently drops that project out o
 - **Validate external input at its trust boundary.** Plan files, executor-rules
   files, and reply envelopes are external input: the schema structs reject
   unknown fields, so a typo fails loudly instead of being silently dropped.
+- **The lock may not lag what the manifest already permits.**
+  `just engines-current` fails when a sibling engine resolves older than its own
+  requirement allows, and
+  every release's notes record what that release links. Neither a tag, a
+  changelog, nor a requirement says what a build contains; only the lock does.
 - **Secrets never enter the tree.** `gh-secrets.json` names the required secrets
   and where they come from; the values live in the platform secret store.
 

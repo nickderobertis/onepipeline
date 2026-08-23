@@ -181,6 +181,10 @@ resolver = "2"
 # changes no `src/` file at all — so they are here to keep the lock current
 # rather than for a fix. The `oneharness-core` 0.8 copy stays where it is, for
 # the reason the entry below gives.
+#
+# What keeps this block's resolutions at what its own requirements permit is no
+# longer whoever thinks to look: `just engines-current` fails when one lags, and
+# every release's notes record what that release links.
 [workspace.dependencies]
 oneagentgraph = "0.3.0"
 onevcs = "0.12"
