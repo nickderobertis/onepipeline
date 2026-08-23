@@ -1072,6 +1072,46 @@ fn the_marker_the_note_opens_with_is_the_one_the_release_job_replaces() {
     );
 }
 
+/// A lock carrying build metadata is ordered by the release under it, and
+/// reported by what it actually says.
+///
+/// The other half of the same rule. Cargo writes `2.4.0+20260823` into
+/// `Cargo.lock` when a crate publishes that way, and read literally it is not a
+/// version this check can order at all — `ver_cmp` splits on dots and reads
+/// `0+20260823` as a number, so the run refused a lockfile cargo had in fact
+/// written. Ordered by the release and reported verbatim, because the spec the
+/// refusal prints has to name a copy `cargo update` can find.
+#[test]
+fn a_lock_carrying_build_metadata_is_ordered_by_the_release_under_it() {
+    let engines = but(Engine {
+        name: "oneagentgraph",
+        requirement: "2.1",
+        locked: &["2.4.0+20260823"],
+        served: &["2.4.0", "2.5.0"],
+    });
+    let run = linked_engines(&tree("locked-build-metadata", &engines).args());
+    assert_eq!(
+        run.status.code(),
+        Some(1),
+        "2.4.0+20260823 orders as 2.4.0, so a lock holding it is behind 2.5.0:\n{}",
+        said(&run)
+    );
+    let report = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        report.contains(
+            "oneagentgraph: links 2.4.0+20260823, but its requirement already permits 2.5.0"
+        ),
+        "the refusal does not report the version the lock actually spells:\n{}",
+        said(&run)
+    );
+    assert!(
+        report.contains("cargo update -p oneagentgraph@2.4.0+20260823"),
+        "the refusal prints a spec that names no copy in the lock, so its advice does not \
+         run:\n{}",
+        said(&run)
+    );
+}
+
 /// A release carrying build metadata is a release the lock can be behind.
 ///
 /// `2.5.0+20260823` orders as 2.5.0 — cargo ignores build metadata — and

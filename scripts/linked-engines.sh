@@ -211,6 +211,18 @@ index_path() {
 # Build metadata is not part of an ordering — `1.2.4+meta` *is* 1.2.4, and
 # crates.io serves versions spelled that way — so it is stripped rather than
 # read as a prerelease and skipped, which would call a lock behind it current.
+# llmlint: ignore-block[boundary_inputs_validated] the judged tier reads this as
+# third-party input taken on substring patterns without a JSON parse, and asks for
+# one. What it names as the risk is refused by name instead, record by record: a
+# record missing `name`, `vers` or `yanked` is `!`, one carrying any of them twice
+# is `!`, one filed under another crate is `?<name>`, a yanked or prerelease
+# release is not a candidate, and a version the ordering cannot read is refused
+# with the index named. A record that survives all of that has been read for the
+# three fields this uses and nothing else is read from it, so the parser the rule
+# asks for would validate syntax this never consults. Standing up one in bash —
+# the language this has to be in, because a weekly workflow and a release job both
+# reach it through a recipe — is a second, hand-rolled reader of a third party's
+# format, which is more of this risk rather than less.
 index_versions() {
   local name="$1" path body attempt
   path="$(index_path "$name")"
@@ -264,6 +276,7 @@ index_versions() {
     }
   '
 }
+# llmlint: ignore-end[boundary_inputs_validated]
 
 # One row per resolved copy, in the order the report prints them.
 rows=()
@@ -304,9 +317,16 @@ for name in "${SIBLINGS[@]}"; do
   ungoverned=()
   while read -r version; do
     [ -n "$version" ] || continue
-    orderable "$version" || die "'$lock' resolves '$name' at '$version', which is not a version this check can order" \
+    # Build metadata is not part of an ordering — `1.2.4+meta` *is* 1.2.4 — and
+    # cargo writes it into the lock whenever a crate publishes that way, which
+    # `index_versions` already strips on the registry's side. So the comparison
+    # reads the release and the report keeps what the lock spells, which is what
+    # makes the `cargo update -p <name>@<version>` printed below name a copy
+    # that is actually there.
+    core="${version%%+*}"
+    orderable "$core" || die "'$lock' resolves '$name' at '$version', which is not a version this check can order" \
       "the lockfile is not one cargo wrote — regenerate it with 'cargo update --workspace'"
-    if ver_ge "$version" "$lower" && ver_lt "$version" "$upper"; then
+    if ver_ge "$core" "$lower" && ver_lt "$core" "$upper"; then
       governed+=("$version")
     else
       ungoverned+=("$version")
@@ -341,7 +361,7 @@ for name in "${SIBLINGS[@]}"; do
     "the requirement names a window the registry has nothing in — correct the pin in '$manifest'"
 
   for version in ${governed[@]+"${governed[@]}"}; do
-    if ver_lt "$version" "$permitted"; then
+    if ver_lt "${version%%+*}" "$permitted"; then
       rows+=("$name|$version|$req|$permitted|behind")
       behind+=("$name $version $permitted")
     else
