@@ -181,6 +181,13 @@ resolver = "2"
 # changes no `src/` file at all — so they are here to keep the lock current
 # rather than for a fix. The `oneharness-core` 0.8 copy stays where it is, for
 # the reason the entry below gives.
+#
+# `onevcs` 0.12.3 and `onevcs-testing` 0.4.5 — one tag, as that entry requires —
+# move for the same reason: every release in that window drops that repository's
+# own mutation-evidence suite and reaches nothing a caller calls. Keeping the
+# lock at what the requirements here already permit is no longer left to whoever
+# happens to look: `just lock-current` fails when it lags, and every release's
+# notes record what that release links.
 [workspace.dependencies]
 oneagentgraph = "0.3.0"
 onevcs = "0.12"
