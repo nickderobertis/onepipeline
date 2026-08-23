@@ -23,12 +23,12 @@
 # non-deterministic judge from every unrelated command. Every other Nx target
 # still honours it.
 #
-# Exits 0 on a clean verdict and 1 when the judge did not certify this diff — Nx
-# collapses a failed task, so the report above the exit is what says whether the
-# judge ruled against the diff or never reached a verdict. 2 is a question this
-# tier could not be asked: a base or an option it cannot use, or a judge
-# configuration it could not fingerprint. 3 is this checkout or host being unable
-# to support a run at all, which says nothing about the diff.
+# Exits 0 on a clean verdict and 1 when the judge ruled against this diff, which
+# are llmlint's own meanings. 2 is a question this tier could not be asked — a base
+# or an option it cannot use, a judge configuration it could not fingerprint, or a
+# judge toolchain that never reached a verdict, which is llmlint's own meaning for
+# that code too. 3 is this checkout or host being unable to support a run at all,
+# which says nothing about the diff.
 #
 # llmlint: ignore-file[tool_output_is_signal] The judge's report is this tier's
 # product — Nx replays this task's terminal output in place of a verdict record —
@@ -102,6 +102,11 @@ captured="$(mktemp -d)" || {
 }
 trap 'rm -rf "$captured"' EXIT
 
+#: Where `scripts/llmlint-judge.sh` states what it exited with. Cleared first, so
+#: what is read afterwards is this run's answer or nothing at all.
+readonly JUDGE_STATUS_FILE="$root/.nx/llmlint-diff-status"
+rm -f "$JUDGE_STATUS_FILE"
+
 status=0
 LLMLINT_DIFF_BASE_SHA="$base_sha" ONEPIPELINE_NX_SHOW_OUTPUT=1 \
   bash scripts/nx.sh run onepipeline:lint-llm-diff "$@" \
@@ -116,6 +121,18 @@ plain="$captured/plain"
 sed "s/${escape}\[[0-9;]*[a-zA-Z]//g" "$captured/out" "$captured/err" >"$plain"
 cat "$captured/out"
 cat "$captured/err" >&2
+
+# Nx collapses every failed task to 1, which would say the same thing about a diff
+# the judge ruled against and a diff it never reached. The judge states its own
+# status, and a replayed run states nothing because it never ran — which is right,
+# since a replay only ever restores a clean one.
+if ((status != 0)); then
+  judged="$(cat "$JUDGE_STATUS_FILE" 2>/dev/null)" || judged=""
+  if [[ "$judged" =~ ^[0-9]+$ ]] && ((judged != 0)); then
+    status=$judged
+  fi
+fi
+rm -f "$JUDGE_STATUS_FILE"
 
 # Provenance is Nx's own cache reporting: the annotation on the task line, or the
 # summary line it prints only when it replayed a task instead of running it. Both
