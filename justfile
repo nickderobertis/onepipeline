@@ -11,6 +11,12 @@
 
 set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 
+# Recipe parameters reach a recipe's shell as `$1`, `$2`, ... as well as through
+# `{{ }}`. The judged tier takes its base and its options that way: a value
+# interpolated into shell source is read as shell before anything can validate it,
+# and that one is typed at a command line.
+set positional-arguments := true
+
 # llmlint: ignore-file[tool_output_is_signal] recipes that hand straight to cargo,
 # clippy, rustdoc, or cargo-deny inherit those tools' diagnostics, which already
 # name the exact problem and its fix; a wrapper message would bury them. The
@@ -241,4 +247,4 @@ lint-llm-validate *args:
 # The blocking `llmlint` PR check; `just gate` runs it before you push.
 # llmlint scoped to the files this branch changed since it forked from main.
 lint-llm-diff base="origin/main" *nx_args:
-    @bash scripts/llmlint-diff.sh "{{base}}" {{nx_args}}
+    @bash scripts/llmlint-diff.sh "$@"

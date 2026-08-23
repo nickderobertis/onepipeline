@@ -36,6 +36,10 @@ root=$PWD
   echo "lint-llm-diff: could not load the shared runtime environment; restore scripts/llmlint-runtime-env.sh and retry" >&2
   exit 1
 }
+#: Prefix of the status line above. `scripts/llmlint-diff.sh` matches the same
+#: string and keeps it out of what it replays, so the two must agree.
+readonly JUDGE_STATUS_MARKER="lint-llm-diff: judge exit status"
+
 base_sha="${LLMLINT_DIFF_BASE_SHA:-}"
 [[ "$base_sha" =~ ^[0-9a-f]{40,64}$ ]] || {
   echo "lint-llm-diff: LLMLINT_DIFF_BASE_SHA must be a resolved commit id; run 'just lint-llm-diff <base>' instead of this target directly" >&2
@@ -49,12 +53,9 @@ git -C "$root" rev-parse --verify --quiet "${base_sha}^{commit}" >/dev/null || {
 llmlint_runtime_env
 status=0
 llmlint --diff --diff-base "$base_sha" || status=$?
-# What the driver reports to its caller: Nx collapses a failed task to 1, so
-# findings and a toolchain that never reached a verdict would otherwise arrive as
-# the same answer. Best effort by design — the file belongs to the run that asked
-# for it, and a verdict is not worth failing over the note about it.
-if [ -n "${LLMLINT_JUDGE_STATUS_FILE:-}" ]; then
-  printf '%s\n' "$status" >"$LLMLINT_JUDGE_STATUS_FILE" ||
-    echo "lint-llm-diff: could not record this run's exit status; the tier reports it as a plain failure" >&2
-fi
+# The one line `scripts/llmlint-diff.sh` reads rather than shows. Nx collapses a
+# failed task to 1, so findings and a toolchain that never reached a verdict would
+# otherwise arrive at the caller as the same answer; this travels with the report,
+# which means a replayed run carries the verdict's status as well as its text.
+printf '%s %s\n' "$JUDGE_STATUS_MARKER" "$status" >&2
 exit "$status"

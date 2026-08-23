@@ -22,6 +22,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import {
   appendFileSync,
   chmodSync,
+  copyFileSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -64,6 +65,9 @@ if [[ \${1:-} == "config" ]]; then
   # The one environment-resolved value a real \`llmlint config\` renders, so a
   # fingerprint that read the caller's copy of it would split this key too.
   echo "oneharness bin: \${LLMLINT_ONEHARNESS_BIN:-null}"
+  # A real merged config names the checkout every config file was resolved in, and
+  # so does this: the digest has to be about the rules, not about where they live.
+  echo "config file: $PWD/llmlint.yml"
   cat llmlint.yml
   for plugin in $(sed -n 's/^ *- *"\\(\\/[^"]*\\)".*/\\1/p' llmlint.yml); do cat "$plugin"; done
   exit 0
@@ -225,15 +229,26 @@ class Workspace {
     });
   }
 
-  /// A PATH with just enough to run a shell script, and no sha256 tool on it.
-  onBareToolchain() {
-    const directory = join(this.sandbox, "bare-bin");
+  /// A PATH with just enough to run a shell script, plus whatever a journey names.
+  ///
+  /// No sha256 tool comes with it: which one is on the host is the subject of two
+  /// journeys below, so neither may inherit the developer's answer.
+  onBareToolchain(...tools) {
+    const directory = join(this.sandbox, `bare-bin-${tools.join("-") || "none"}`);
     mkdirSync(directory, { recursive: true });
-    for (const tool of ["bash", "env", "cat", "sed", "dirname"]) {
+    for (const tool of ["bash", "env", "cat", "sed", "dirname", ...tools]) {
       const resolved = execFileSync("bash", ["-c", `command -v ${tool}`], { encoding: "utf8" });
       symlinkSync(resolved.trim(), join(directory, tool));
     }
     return { PATH: directory };
+  }
+
+  /// The same repository, checked out at a second path, sharing this one's rules.
+  secondCheckout() {
+    const root = join(this.sandbox, "second-checkout");
+    copyCheckout(root);
+    copyFileSync(join(this.root, "llmlint.yml"), join(root, "llmlint.yml"));
+    return root;
   }
 
   /// Prepend an `llmlint` to the caller's PATH, as a shell that never ran setup has.
@@ -654,6 +669,38 @@ describe("the judged tier's refusals", () => {
       assert.equal(result.stdout.trim(), "", "a refused fingerprint must contribute nothing");
     });
   }
+
+  it("hashes the same on a host whose sha256 tool is shasum", (t) => {
+    // `sha256sum` is coreutils and `shasum` is perl; a contributor on macOS has the
+    // second and not the first, and `just gate` reaches this tier on either.
+    const ws = workspace(t);
+
+    const coreutils = ws.fingerprint({ env: ws.onBareToolchain("sha256sum") });
+    const perl = ws.fingerprint({ env: ws.onBareToolchain("shasum") });
+
+    assert.equal(coreutils.status, 0, report(coreutils));
+    assert.equal(perl.status, 0, report(perl));
+    assert.notEqual(coreutils.stdout.trim(), "");
+    assert.equal(coreutils.stdout.trim(), perl.stdout.trim(), "one hash, two tools");
+  });
+
+  it("hashes the same judge configuration from two checkouts of this repository", (t) => {
+    // The merged configuration names the checkout it was resolved in, so a digest
+    // that kept those paths would miss for every worktree and share nothing.
+    const ws = workspace(t);
+
+    const here = ws.fingerprint();
+    const elsewhere = spawnSync("bash", ["scripts/llmlint-fingerprint.sh"], {
+      cwd: ws.secondCheckout(),
+      encoding: "utf8",
+      env: ws.environment({}),
+    });
+
+    assert.equal(here.status, 0, report(here));
+    assert.equal(elsewhere.status, 0, report(elsewhere));
+    assert.notEqual(here.stdout.trim(), "");
+    assert.equal(here.stdout.trim(), elsewhere.stdout.trim(), "the digest is path-shaped");
+  });
 
   it("says whose HOME to set when the toolchain cannot be located at all", (t) => {
     const ws = workspace(t);

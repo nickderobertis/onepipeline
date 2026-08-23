@@ -62,9 +62,9 @@ shift
 # this saying so, and `--skip-nx-cache` is the one documented way to re-judge.
 for argument in "$@"; do
   case "$argument" in
-  --skip-nx-cache | --verbose) ;;
+  --skip-nx-cache) ;;
   *)
-    echo "lint-llm-diff: '$argument' is not one of this tier's options; pass --skip-nx-cache to force one fresh judgement, or --verbose for Nx's own detail" >&2
+    echo "lint-llm-diff: '$argument' is not one of this tier's options; pass --skip-nx-cache to force one fresh judgement" >&2
     exit 2
     ;;
   esac
@@ -77,7 +77,7 @@ done
 # also where a missing toolchain is named.
 bash scripts/llmlint-fingerprint.sh >/dev/null || {
   echo "lint-llm-diff: refusing to judge without the judge-configuration fingerprint named above; the cache key would drop it and replay a verdict that configuration has moved on from" >&2
-  exit 1
+  exit 2
 }
 
 base_sha="$(git rev-parse --verify --quiet "${base_ref}^{commit}")" || {
@@ -90,6 +90,10 @@ if [ -n "${NX_SKIP_NX_CACHE:-}${NX_DISABLE_NX_CACHE:-}" ]; then
 fi
 unset NX_SKIP_NX_CACHE NX_DISABLE_NX_CACHE
 
+#: The line the judge states its own exit status on, which this reads and keeps out
+#: of what it replays. `scripts/llmlint-judge.sh` writes the same string.
+readonly JUDGE_STATUS_MARKER="lint-llm-diff: judge exit status"
+
 # The report is captured to read the provenance off it, and each half is replayed
 # to the stream it came from: a run with findings has to leave its diagnostics on
 # stderr, not folded into the verdict on stdout.
@@ -101,19 +105,16 @@ trap 'rm -rf "$captured"' EXIT
 
 status=0
 LLMLINT_DIFF_BASE_SHA="$base_sha" ONEPIPELINE_NX_SHOW_OUTPUT=1 \
-  LLMLINT_JUDGE_STATUS_FILE="$captured/judge-status" \
   bash scripts/nx.sh run onepipeline:lint-llm-diff "$@" \
   >"$captured/out" 2>"$captured/err" || status=$?
 # Nx collapses every failed task to 1, which would say the same thing about a diff
-# the judge ruled on and a diff it never reached. The judge records its own status
-# beside the report when it runs, so the two stay distinguishable; a replayed run
-# records nothing, and there is nothing to distinguish.
-if ((status != 0)) && judged="$(cat "$captured/judge-status" 2>/dev/null)" &&
-  [[ "$judged" =~ ^[0-9]+$ ]] && ((judged != 0)); then
-  status=$judged
-fi
+# the judge ruled against and a diff it never reached. The judge states its own
+# status on the line below, which travels *with* the report rather than beside it,
+# so a replayed verdict carries its status as well as its text.
+judged="$(sed -n "s/^${JUDGE_STATUS_MARKER} \([0-9][0-9]*\)$/\1/p" "$captured/err" | tail -1)"
+[ -z "$judged" ] || status=$judged
 cat "$captured/out"
-cat "$captured/err" >&2
+grep -v "^${JUDGE_STATUS_MARKER} " "$captured/err" >&2 || true
 
 # Provenance is Nx's own cache reporting: the annotation on the task line, or the
 # summary line it prints only when it replayed a task instead of running it. Both
@@ -125,7 +126,7 @@ cat "$captured/err" >&2
 # judgement.
 escape="$(printf '\033')"
 if sed "s/${escape}\[[0-9;]*[a-zA-Z]//g" "$captured/out" "$captured/err" |
-  grep -qE '^Nx read the output from the cache instead of running the command|^> nx run onepipeline:lint-llm-diff +\[(local cache|remote cache|existing outputs match the cache)'; then
+  grep -qE '^Nx read the output from the cache instead of running the command|^> nx run onepipeline:lint-llm-diff +\[existing outputs match the cache'; then
   echo "lint-llm-diff: replayed the recorded verdict for base $base_sha (Nx cache hit)" >&2
 else
   echo "lint-llm-diff: judged this diff against base $base_sha (Nx cache miss)" >&2
