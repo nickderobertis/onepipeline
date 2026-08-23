@@ -32,10 +32,15 @@
 # at all; the two say which of the toolchain or the checkout to repair.
 set -euo pipefail
 
+# llmlint: ignore-block[changed_behavior_has_e2e] Reaching this needs a checkout
+# whose own directory cannot be entered while this script is still readable inside
+# it, which no journey can arrange without root: every other path through this file
+# is driven in npm/test/llmlint-cache.test.mjs.
 CDPATH='' cd -- "$(dirname -- "$0")/.." || {
   echo "llmlint fingerprint: could not enter the repository from this script; reinstall the checkout and retry" >&2
   exit 1
 }
+# llmlint: ignore-end[changed_behavior_has_e2e]
 root=$PWD
 # shellcheck source=scripts/llmlint-runtime-env.sh
 . "$root/scripts/llmlint-runtime-env.sh" || {
@@ -44,12 +49,23 @@ root=$PWD
 }
 llmlint_runtime_env
 
+# Both answers are external input, and both are cache-key material: an empty one
+# would hash to a fingerprint that says nothing about the judge configuration and
+# replay a verdict it has moved on from, so emptiness is refused rather than hashed.
 version="$(llmlint --version)" || {
   echo "llmlint fingerprint: 'llmlint --version' failed; run 'just setup-llmlint' and retry" >&2
   exit 2
 }
+[ -n "${version//[[:space:]]/}" ] || {
+  echo "llmlint fingerprint: 'llmlint --version' answered nothing; reinstall the toolchain with 'just setup-llmlint' and retry" >&2
+  exit 2
+}
 config="$(env -u LLMLINT_ONEHARNESS_BIN llmlint config)" || {
   echo "llmlint fingerprint: 'llmlint config' failed; repair llmlint.yml or its plugin pins and retry" >&2
+  exit 2
+}
+[ -n "${config//[[:space:]]/}" ] || {
+  echo "llmlint fingerprint: 'llmlint config' answered nothing; repair llmlint.yml or its plugin pins and retry" >&2
   exit 2
 }
 config="${config//"$root"/\{root\}}"

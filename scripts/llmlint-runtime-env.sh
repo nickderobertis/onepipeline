@@ -19,10 +19,12 @@
 # different binaries, which is the split key this helper exists to prevent.
 set -euo pipefail
 
-# Where `scripts/setup-llmlint.sh` installs the toolchain. The two files name one
-# directory, and `npm/test/llmlint-cache.test.mjs` holds them to that.
-LLMLINT_INSTALL_DIR="$HOME/.local/bin"
-
 llmlint_runtime_env() {
-  export PATH="$LLMLINT_INSTALL_DIR:$PATH"
+  # Where `scripts/setup-llmlint.sh` installs the toolchain. The two files name one
+  # directory, and `npm/test/llmlint-cache.test.mjs` holds them to that.
+  [ -n "${HOME:-}" ] || {
+    echo "llmlint runtime env: HOME is not set, so the judged tier cannot find the toolchain 'just setup-llmlint' installs; set HOME to the account that ran it and retry" >&2
+    return 1
+  }
+  export PATH="$HOME/.local/bin${PATH:+:$PATH}"
 }

@@ -21,10 +21,15 @@
 # so it is handed through untouched rather than reduced to a line.
 set -euo pipefail
 
+# llmlint: ignore-block[changed_behavior_has_e2e] Reaching this needs a checkout
+# whose own directory cannot be entered while this script is still readable inside
+# it, which no journey can arrange without root: every other path through this file
+# is driven in npm/test/llmlint-cache.test.mjs.
 CDPATH='' cd -- "$(dirname -- "$0")/.." || {
   echo "lint-llm-diff: could not enter the repository from this script; reinstall the checkout and retry" >&2
   exit 1
 }
+# llmlint: ignore-end[changed_behavior_has_e2e]
 root=$PWD
 # shellcheck source=scripts/llmlint-runtime-env.sh
 . "$root/scripts/llmlint-runtime-env.sh" || {
@@ -42,4 +47,14 @@ git -C "$root" rev-parse --verify --quiet "${base_sha}^{commit}" >/dev/null || {
 }
 
 llmlint_runtime_env
-exec llmlint --diff --diff-base "$base_sha"
+status=0
+llmlint --diff --diff-base "$base_sha" || status=$?
+# What the driver reports to its caller: Nx collapses a failed task to 1, so
+# findings and a toolchain that never reached a verdict would otherwise arrive as
+# the same answer. Best effort by design — the file belongs to the run that asked
+# for it, and a verdict is not worth failing over the note about it.
+if [ -n "${LLMLINT_JUDGE_STATUS_FILE:-}" ]; then
+  printf '%s\n' "$status" >"$LLMLINT_JUDGE_STATUS_FILE" ||
+    echo "lint-llm-diff: could not record this run's exit status; the tier reports it as a plain failure" >&2
+fi
+exit "$status"

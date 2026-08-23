@@ -54,11 +54,13 @@ const FAKE_LLMLINT = `#!/usr/bin/env bash
 set -euo pipefail
 if [[ \${1:-} == "--version" ]]; then
   [[ \${FAKE_LLMLINT_VERSION_EXIT:-0} == 0 ]] || exit "$FAKE_LLMLINT_VERSION_EXIT"
+  [[ -z \${FAKE_LLMLINT_VERSION_EMPTY:-} ]] || exit 0
   echo "llmlint \${FAKE_LLMLINT_VERSION:-0.0.0-e2e}"
   exit 0
 fi
 if [[ \${1:-} == "config" ]]; then
   [[ \${FAKE_LLMLINT_CONFIG_EXIT:-0} == 0 ]] || exit "$FAKE_LLMLINT_CONFIG_EXIT"
+  [[ -z \${FAKE_LLMLINT_CONFIG_EMPTY:-} ]] || exit 0
   # The one environment-resolved value a real \`llmlint config\` renders, so a
   # fingerprint that read the caller's copy of it would split this key too.
   echo "oneharness bin: \${LLMLINT_ONEHARNESS_BIN:-null}"
@@ -173,16 +175,22 @@ class Workspace {
     this.commit("checkout under test");
   }
 
+  /// The environment one invocation runs under; an `undefined` override unsets
+  /// the name, which is how a journey says its subject is a *missing* variable.
+  environment(overrides) {
+    const merged = { ...this.env, ...overrides };
+    for (const [name, value] of Object.entries(overrides)) {
+      if (value === undefined) delete merged[name];
+    }
+    return merged;
+  }
+
   /// The recipe an operator, the `gate` recipe, and CI all invoke.
   lint(base, { args = [], env = {} } = {}) {
-    const environment = { ...this.env, ...env };
-    for (const [name, value] of Object.entries(env)) {
-      if (value === undefined) delete environment[name];
-    }
     return spawnSync("just", ["lint-llm-diff", base, ...args], {
       cwd: this.root,
       encoding: "utf8",
-      env: environment,
+      env: this.environment(env),
     });
   }
 
@@ -191,7 +199,7 @@ class Workspace {
     return spawnSync("bash", ["scripts/llmlint-fingerprint.sh"], {
       cwd: this.root,
       encoding: "utf8",
-      env: { ...this.env, ...env },
+      env: this.environment(env),
     });
   }
 
@@ -204,7 +212,7 @@ class Workspace {
     return spawnSync("bash", ["scripts/llmlint-diff.sh", ...args], {
       cwd: this.root,
       encoding: "utf8",
-      env: { ...this.env, ...env },
+      env: this.environment(env),
     });
   }
 
@@ -213,7 +221,7 @@ class Workspace {
     return spawnSync("bash", ["scripts/nx.sh", "run", "onepipeline:lint-llm-diff"], {
       cwd: this.root,
       encoding: "utf8",
-      env: { ...this.env, ...env },
+      env: this.environment(env),
     });
   }
 
@@ -445,7 +453,8 @@ describe("the judged tier's computation cache", () => {
 
     assert.equal(ws.judgeRuns().length, 2, "the judge was asked a different number of times");
     for (const result of [first, second]) {
-      assert.notEqual(result.status, 0, report(result));
+      // 1, not Nx's collapsed failure: the judge ruled on this diff and said no.
+      assert.equal(result.status, 1, report(result));
       assert.match(report(result), new RegExp(FINDING));
       assert.match(report(result), new RegExp(FAIL_VERDICT));
       assert.match(result.stderr, new RegExp(CACHE_MISS), report(result));
@@ -461,7 +470,8 @@ describe("the judged tier's computation cache", () => {
 
     assert.equal(ws.judgeRuns().length, 2, "the judge was asked a different number of times");
     for (const result of [first, second]) {
-      assert.notEqual(result.status, 0, report(result));
+      // 2, kept apart from findings: nothing ruled on this diff at all.
+      assert.equal(result.status, 2, report(result));
       assert.match(result.stderr, new RegExp(CACHE_MISS), report(result));
     }
   });
@@ -618,6 +628,43 @@ describe("the judged tier's refusals", () => {
     assert.equal(ws.judgeRuns().length, 0, report(result));
   });
 
+  it("refuses an option that is not one of this tier's own", (t) => {
+    const ws = workspace(t);
+
+    const result = ws.lint(ws.head(), { args: ["--parallel=8"] });
+
+    assert.equal(result.status, 2, report(result));
+    assert.match(result.stderr, /is not one of this tier's options/);
+    assert.equal(ws.judgeRuns().length, 0, report(result));
+  });
+
+  for (const [what, broken, expected] of [
+    ["version", { FAKE_LLMLINT_VERSION_EMPTY: "1" }, /'llmlint --version' answered nothing/],
+    ["configuration", { FAKE_LLMLINT_CONFIG_EMPTY: "1" }, /'llmlint config' answered nothing/],
+  ]) {
+    it(`refuses to hash a judge that answers with no ${what}`, (t) => {
+      // An empty answer would hash to a fingerprint that says nothing about the
+      // judge configuration, which is the silent key-shrink this tier guards.
+      const ws = workspace(t);
+
+      const result = ws.fingerprint({ env: broken });
+
+      assert.equal(result.status, 2, report(result));
+      assert.match(result.stderr, expected);
+      assert.equal(result.stdout.trim(), "", "a refused fingerprint must contribute nothing");
+    });
+  }
+
+  it("says whose HOME to set when the toolchain cannot be located at all", (t) => {
+    const ws = workspace(t);
+
+    const result = ws.fingerprint({ env: { HOME: undefined } });
+
+    assert.notEqual(result.status, 0, report(result));
+    assert.match(result.stderr, /HOME is not set/);
+    assert.match(result.stderr, /just setup-llmlint/);
+  });
+
   it("refuses a base whose shape is not a git ref, before reaching git", (t) => {
     const ws = workspace(t);
 
@@ -642,8 +689,8 @@ describe("the judged tier's toolchain directory", () => {
       ["llmlint-runtime-env.sh", runtime],
     ]) {
       assert.ok(
-        text.includes('"$HOME/.local/bin"'),
-        `${name} no longer names "$HOME/.local/bin" as the llmlint install directory`,
+        text.includes("$HOME/.local/bin"),
+        `${name} no longer names $HOME/.local/bin as the llmlint install directory`,
       );
     }
   });

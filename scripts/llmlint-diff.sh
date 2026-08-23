@@ -23,8 +23,9 @@
 # non-deterministic judge from every unrelated command. Every other Nx target
 # still honours it.
 #
-# Exits 2 when the caller asked for something this cannot judge, 1 when the judge
-# reported findings or its toolchain failed, 0 on a clean verdict.
+# Exits 0 on a clean verdict, 1 when the judge ruled against this diff, and 2 when
+# it was asked for something it cannot judge — including a judge toolchain that
+# never reached a verdict, which is llmlint's own meaning for that code.
 #
 # llmlint: ignore-file[tool_output_is_signal] The judge's report is this tier's
 # product — Nx replays this task's terminal output in place of a verdict record —
@@ -32,10 +33,15 @@
 # summary substituted for it.
 set -euo pipefail
 
+# llmlint: ignore-block[changed_behavior_has_e2e] Reaching this needs a checkout
+# whose own directory cannot be entered while this script is still readable inside
+# it, which no journey can arrange without root: every other path through this file
+# is driven in npm/test/llmlint-cache.test.mjs.
 CDPATH='' cd -- "$(dirname -- "$0")/.." || {
   echo "lint-llm-diff: could not enter the repository from this script; reinstall the checkout and retry" >&2
   exit 1
 }
+# llmlint: ignore-end[changed_behavior_has_e2e]
 root=$PWD
 
 # The base arrives from a command line, so its shape is checked before it reaches
@@ -51,6 +57,18 @@ shift
   echo "lint-llm-diff: '$base_ref' is not a usable git ref; pass a branch, tag, or commit" >&2
   exit 2
 }
+# The tier's own levers, rather than whatever the caller wanted Nx to do: an
+# unrecognized flag here would change how a non-deterministic judge is run without
+# this saying so, and `--skip-nx-cache` is the one documented way to re-judge.
+for argument in "$@"; do
+  case "$argument" in
+  --skip-nx-cache | --verbose) ;;
+  *)
+    echo "lint-llm-diff: '$argument' is not one of this tier's options; pass --skip-nx-cache to force one fresh judgement, or --verbose for Nx's own detail" >&2
+    exit 2
+    ;;
+  esac
+done
 
 # Nx scores a runtime input that exits non-zero as *no contribution* rather than as
 # an error, so a fingerprint it cannot produce would silently shrink the key to the
@@ -83,8 +101,17 @@ trap 'rm -rf "$captured"' EXIT
 
 status=0
 LLMLINT_DIFF_BASE_SHA="$base_sha" ONEPIPELINE_NX_SHOW_OUTPUT=1 \
+  LLMLINT_JUDGE_STATUS_FILE="$captured/judge-status" \
   bash scripts/nx.sh run onepipeline:lint-llm-diff "$@" \
   >"$captured/out" 2>"$captured/err" || status=$?
+# Nx collapses every failed task to 1, which would say the same thing about a diff
+# the judge ruled on and a diff it never reached. The judge records its own status
+# beside the report when it runs, so the two stay distinguishable; a replayed run
+# records nothing, and there is nothing to distinguish.
+if ((status != 0)) && judged="$(cat "$captured/judge-status" 2>/dev/null)" &&
+  [[ "$judged" =~ ^[0-9]+$ ]] && ((judged != 0)); then
+  status=$judged
+fi
 cat "$captured/out"
 cat "$captured/err" >&2
 
