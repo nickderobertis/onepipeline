@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0](https://github.com/nickderobertis/onepipeline/compare/v0.13.0...v0.14.0) - 2026-08-24
+
+### Added
+
+- *(events)* relay session-correlated release events ([#117](https://github.com/nickderobertis/onepipeline/pull/117))
+
+### Fixed
+
+- *(ci)* read the crates.io index in the shape it serves ([#115](https://github.com/nickderobertis/onepipeline/pull/115))
+
 ## [0.13.0](https://github.com/nickderobertis/onepipeline/compare/v0.12.4...v0.13.0) - 2026-08-24
 
 ### Added
