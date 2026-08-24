@@ -13,6 +13,12 @@
 //! and then started when its dependency's release answers. A fourth drives the
 //! two release **styles** side by side, and proves the only differences between
 //! them are where the readiness answer comes from and what is reported.
+//!
+//! Three more are about the **record of a release** rather than about when a node
+//! starts: the sibling's three release kinds reaching this run's store through
+//! the one reader and the one address this crate has — a session token — a launch
+//! filter keeping them out again, and a host that releases nothing holding the
+//! store it always held.
 
 // llmlint: ignore-file[e2e_not_mocked] the crate under test is driven as a real compiled
 // binary, and the sibling these journeys are about — `onevcs` — is the real library, over
@@ -213,13 +219,7 @@ fn the_siblings_release_probed_is_relayed_exactly_as_its_producer_wrote_it() {
     });
 
     // What the producer wrote, read through the producer's own reader.
-    let token = world
-        .journal(&run)
-        .into_iter()
-        .find(|event| event["source"] == "vcs" && event["payload"]["clone"].is_string())
-        .and_then(|event| event["payload"]["token"].as_str().map(str::to_string))
-        .map(onevcs::SessionToken)
-        .expect("the session the engine published from names itself");
+    let token = session_of(&world, &run, ENGINE);
     let written: Vec<Value> = sibling_stream(&world, &token)
         .into_iter()
         .filter(|event| event["kind"] == "release-probed")
@@ -232,12 +232,25 @@ fn the_siblings_release_probed_is_relayed_exactly_as_its_producer_wrote_it() {
 
     let relayed = world.events_of(&run, "release-probed");
     assert_eq!(relayed.len(), 1, "{relayed:?}");
-    for field in ["v", "ts", "stream", "seq", "source", "kind", "payload"] {
+    for field in [
+        "v",
+        "ts",
+        "stream",
+        "seq",
+        "source",
+        "kind",
+        "phase",
+        "payload",
+        "artifacts",
+    ] {
         assert_eq!(
             relayed[0][field], written[0][field],
             "the relay rewrote `{field}`"
         );
     }
+    // It is the *session's* own record, numbered in that stream's series: the
+    // publication captured its baselines while the follow was reading it.
+    assert_eq!(relayed[0]["stream"], json!(token.0));
     // The one key the relay adds, and the only one: what the producer stamped is
     // still exactly what it stamped.
     assert_eq!(relayed[0]["labels"]["node"], json!("engine"));
@@ -252,40 +265,363 @@ fn the_siblings_release_probed_is_relayed_exactly_as_its_producer_wrote_it() {
     }
 }
 
-/// **A terminal blocker, pinned so it cannot change in silence.** The sibling's
-/// `release-observed` and `release-acknowledged` are produced, and this crate has
-/// no published way to read them.
+/// The sibling's `release-observed` and `release-acknowledged` reach this run's
+/// store, through the **public session reader** and one address this crate
+/// already holds.
 ///
-/// Both are emitted on the *identity's* release stream rather than on any
-/// session's — releases happen outside a session, which is why `release-observed`
-/// carries the landing commit as the only thing that could correlate it. `onevcs`
-/// 0.13.0 publishes the reader for that stream (`EventStream::open` takes a
-/// `SessionToken`, and `SessionToken` is a public tuple struct) but **not the
-/// name**: nothing on its surface hands back the stream token for an identity, so
-/// the only way to open one is to restate a private naming scheme — which this
-/// crate refuses to do in production, and which this test does precisely to prove
-/// the events exist and it is the *reader* that is missing.
+/// Both are recorded on the *identity's* own release record rather than on any
+/// session's — a release happens long after the dispatch that produced the work
+/// has ended, outside every session, which is why `release-observed` carries the
+/// landing commit as the only thing that could correlate it. `onevcs` 0.14.0
+/// makes that correlation itself: `EventStream::open_filtered` takes the session
+/// token this crate already has and hands back the releases that carried *that
+/// session's* landing beside the session's own records. So nothing here — in
+/// `src/` or in this file — spells, derives, or knows the name of the second
+/// stream, which is what `docs/contract-divergences.md` entry 40 refused to do.
 ///
-/// See `docs/contract-divergences.md` entry 40 for the proposal. Both directions
-/// are held here: the day the sibling publishes the name, the last assertion
-/// stops being true and the entry is revisited.
+/// Both kinds are produced for real: the first by the sibling's own
+/// `release status`, the way a person's `onevcs release status` asks, and the
+/// second by its own `acknowledge`. And the identity's record is **shared** by
+/// every session in that repository, so a stranger's landing is put on it first:
+/// what must reach this run is its own landing's releases and only those.
 #[test]
-fn the_siblings_other_two_release_kinds_are_produced_and_cannot_be_read_from_a_run() {
-    let world = watching("adoption-unreadable");
+fn the_siblings_other_two_release_kinds_reach_this_run_through_the_public_session_reader() {
+    let world = watching("adoption-relayed-releases");
     world.write_graphs();
     let (engine_repo, _consumer) = two_repositories(&world);
     let (script, answer) = world.probe_in(&engine_repo, ENGINE);
     world.releases(&both_styles(&script));
     releases_at(&answer, "0.1.0");
 
-    let run = start(&world, "adoption-unreadable", vec![engine()]);
-    world.until("the engine to settle", |world| {
-        !world.events_of(&run, "node-settled").is_empty()
+    // Somebody else's work in the same repository, landed by a run of its own.
+    // The releases that carry it are recorded on the same identity's record as
+    // this run's, which is the confusion the correlation exists to prevent.
+    let stranger = elsewhere_in_the_engine_repository();
+    let other_run = start(&world, "adoption-relayed-stranger", vec![stranger]);
+    world.until("the stranger's work to land", |world| {
+        !world.events_of(&other_run, "node-settled").is_empty()
     });
+    let strangers_landing = landing_commit(&world, &other_run, "stranger");
+    let strangers_branch = branch_of(&world, &other_run, "stranger");
+    let strangers_token = session_of(&world, &other_run, "stranger");
+
+    // The run this journey is about: work that lands, and a node held on a
+    // **human-step** release nobody has taken yet — so the run is still going
+    // when the releases below happen, which is when they always happen.
+    world.script("consumer.turn-open", "");
+    world.script("consumer.wait", "hold");
+    let mut waiting = consumer(Some("published"));
+    waiting["consumes"] = json!({"engine": "wheel"});
+    let run = start(&world, "adoption-relayed-releases", vec![engine(), waiting]);
+    world.until("the engine to settle", |world| {
+        world
+            .events_of(&run, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "engine")
+    });
+    let token = session_of(&world, &run, ENGINE);
+    let landed = branch_of(&world, &run, "engine");
+    let landing = landing_commit(&world, &run, "engine");
+
+    // A release the probe can see, asked about both landings: the automated
+    // target answers for each, so the identity's record carries one apiece.
+    releases_at(&answer, "0.2.0");
+    for reference in [&strangers_branch, &landed] {
+        world.on_onevcs(|| {
+            onevcs::release_status(reference, None).expect("the sibling answers about the landing")
+        });
+    }
+    // And the human step somebody records, which is the second kind — and the
+    // one that ends the held node's wait.
+    world.on_onevcs(|| {
+        onevcs::acknowledge_release(
+            &landed,
+            &"wheel".parse().expect("a target name"),
+            "1.0.0",
+            false,
+        )
+        .expect("the release is acknowledged")
+    });
+
+    for kind in ["release-observed", "release-acknowledged"] {
+        world.until(&format!("a {kind} to reach the run"), |world| {
+            !world.events_of(&run, kind).is_empty()
+        });
+    }
+
+    // Read back through the same public reader the run relays through, and held
+    // field for field: what is in the store is what the producer wrote, with the
+    // context the producer could not know filled in beside it.
+    let written = sibling_stream(&world, &token);
+    let observed = world.events_of(&run, "release-observed");
+    let acknowledged = world.events_of(&run, "release-acknowledged");
+    assert_eq!(
+        acknowledged.len(),
+        1,
+        "the human step was acknowledged once: {acknowledged:?}"
+    );
+    for relayed in observed.iter().chain(&acknowledged) {
+        let producers = written
+            .iter()
+            .find(|event| event["stream"] == relayed["stream"] && event["seq"] == relayed["seq"])
+            .unwrap_or_else(|| panic!("the reader does not hand back {relayed:?}"));
+        for field in [
+            "v",
+            "ts",
+            "stream",
+            "seq",
+            "source",
+            "kind",
+            "phase",
+            "payload",
+            "artifacts",
+        ] {
+            assert_eq!(
+                relayed[field], producers[field],
+                "the relay rewrote `{field}`"
+            );
+        }
+        assert_eq!(relayed["phase"], json!("release"));
+        for (key, value) in producers["labels"]
+            .as_object()
+            .expect("the producer stamped labels")
+        {
+            assert_eq!(&relayed["labels"][key], value, "the relay rewrote `{key}`");
+        }
+        // The context the producer could not have: which run, and whose work the
+        // release carried. Filled in beside what it stamped, never over it.
+        assert_eq!(relayed["labels"]["run_id"], json!(run));
+        assert_eq!(relayed["labels"]["node"], json!("engine"));
+        // And it is *this* landing's release. The stranger's is on the same
+        // record, one line away, and is not this run's.
+        assert_eq!(relayed["payload"]["landing_commit"], json!(landing));
+    }
+
+    // Both targets answered for this landing: the machine one that was probed,
+    // and the one a person took the step for.
+    let targets: Vec<String> = observed
+        .iter()
+        .filter_map(|event| event["payload"]["target"].as_str().map(str::to_string))
+        .collect();
+    for target in ["crate", "wheel"] {
+        assert!(
+            targets.contains(&target.to_string()),
+            "no release was observed for the {target} target: {targets:?}"
+        );
+    }
+
+    // The stranger's release really was recorded, one line away on the same
+    // identity's record: the absence below is a correlation that held rather
+    // than a release that never happened.
+    assert!(
+        sibling_stream(&world, &strangers_token)
+            .iter()
+            .any(|event| {
+                event["kind"] == "release-observed"
+                    && event["payload"]["landing_commit"] == json!(strangers_landing)
+            }),
+        "nothing released the stranger's landing, so this journey proves nothing about \
+         which landing a release belongs to"
+    );
+
+    // And it is absent from this run entirely — not relabelled, not filtered
+    // later: never relayed.
+    for event in world.journal(&run) {
+        assert_ne!(
+            event["payload"]["landing_commit"],
+            json!(strangers_landing),
+            "another landing's release reached this run: {event}"
+        );
+    }
+
+    // The releases keep the record's own identity and numbering, which is not
+    // the session's: `seq` is a series over every session in that repository.
+    let streams: Vec<String> = observed
+        .iter()
+        .chain(&acknowledged)
+        .filter_map(|event| event["stream"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        streams.iter().all(|stream| *stream == streams[0]),
+        "the releases were not relayed as one producer's stream: {streams:?}"
+    );
+    assert_ne!(
+        streams[0], token.0,
+        "a release was relayed as though the session had written it"
+    );
+
+    // And the probe stays exactly one record. It is written on the session's own
+    // stream while the follow is reading it, so a second reader that counted it
+    // again would report one ask as two.
+    let probed = world.events_of(&run, "release-probed");
+    assert_eq!(
+        probed.len(),
+        1,
+        "the probe arrived more than once: {probed:?}"
+    );
+    assert_eq!(probed[0]["stream"], json!(token.0));
+    no_record_arrived_twice(&world, &run);
+
+    // A reader naming no profile sees them, because they are in the store.
+    world
+        .run(&["monitor", &run, "--all"])
+        .exited(0)
+        .out_has("release-observed")
+        .out_has("release-acknowledged");
+
+    world.release("consumer.go");
+    world.run(&["stop", &run]).exited(0);
+}
+
+/// A branch two sessions have worked on has its release attributed through the
+/// **newest** of them, not the one it superseded.
+///
+/// The shape a retry leaves behind: a run lands work on a pinned branch and
+/// finishes, and a later run pinned to the same name continues it — so `onevcs`
+/// cuts a *second* session onto that branch and records the first as superseded.
+/// Two run clones of one branch name then exist, each holding a landing, and
+/// only one of them is the work.
+///
+/// It is the dangerous half of the correlation and it is why this is a journey
+/// rather than an assertion: what a release is measured against is the landing
+/// the branch resolves to, so a reader answering from the superseded copy names
+/// the *previous* landing — and a release of the newest work then correlates to
+/// nothing and is silently never reported. Both directions are held: the release
+/// that reaches the run carries the second landing and not the first, and the
+/// superseded session's own record resolves to that same landing when it is read
+/// through the sibling's public reader.
+#[test]
+fn a_release_of_retried_work_is_attributed_through_the_newest_session_of_its_branch() {
+    let world = watching("adoption-retried-release");
+    world.write_graphs();
+    let (engine_repo, _consumer) = two_repositories(&world);
+    let (script, answer) = world.probe_in(&engine_repo, ENGINE);
+    world.releases(&automated(&script));
+    releases_at(&answer, "0.1.0");
+
+    // The run that goes first: it lands its work on a pinned branch and ends,
+    // leaving that branch — and the session that made it — behind.
+    let mut stranded = lifecycle("stranded", &[]);
+    stranded["repo"] = json!(ENGINE);
+    stranded["branch"] = json!(RETRIED);
+    let first = start(&world, "adoption-retried-first", vec![stranded]);
+    world.until("the first attempt to land", |world| {
+        !world.events_of(&first, "node-settled").is_empty()
+    });
+    let superseded = session_of(&world, &first, "stranded");
+    let first_landing = landing_commit(&world, &first, "stranded");
+
+    // The retry: the same branch, in a run of its own, which continues it by
+    // cutting a **second** session onto its tip. Its own work, because a tree
+    // its base already carries publishes nothing and would land no second time.
+    world.script("consumer.turn-open", "");
+    world.script("consumer.wait", "hold");
+    let mut retried = engine();
+    retried["branch"] = json!(RETRIED);
+    let run = start(
+        &world,
+        "adoption-retried-release",
+        vec![retried, consumer(Some("published"))],
+    );
+    world.until("the retry to land", |world| {
+        world
+            .events_of(&run, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == ENGINE)
+    });
+    let newest = session_of(&world, &run, ENGINE);
+    let landing = landing_commit(&world, &run, ENGINE);
+
+    // Two sessions, one branch, two landings: the state this is about.
+    assert_ne!(
+        newest.0, superseded.0,
+        "the retry took up the first run's session instead of continuing its branch, so \
+         there is no superseded copy to answer from"
+    );
+    assert_ne!(
+        landing, first_landing,
+        "both runs landed the same commit, so no answer could tell them apart"
+    );
+
+    // The release happens, and it is the run's own watch that asks — the held
+    // node is waiting on exactly this.
+    releases_at(&answer, "0.2.0");
+    world.until("a release-observed to reach the run", |world| {
+        !world.events_of(&run, "release-observed").is_empty()
+    });
+
+    let observed = world.events_of(&run, "release-observed");
+    for event in &observed {
+        assert_eq!(
+            event["payload"]["landing_commit"],
+            json!(landing),
+            "the release was correlated to the superseded copy's landing"
+        );
+        assert_ne!(event["payload"]["landing_commit"], json!(first_landing));
+        assert_eq!(event["labels"]["node"], json!(ENGINE));
+        assert_eq!(event["labels"]["run_id"], json!(run));
+        assert_eq!(event["phase"], json!("release"));
+    }
+    no_record_arrived_twice(&world, &run);
+
+    // And the other direction, at the seam the relay reads through: the
+    // superseded session's own record resolves along its retry chain to the
+    // newest, so a reader handed *either* token answers about the same landing.
+    // A reader that stopped at the superseded record would answer that this
+    // branch had not landed — which is the answer that invites re-running work
+    // that already merged.
+    for token in [&superseded, &newest] {
+        assert!(
+            sibling_stream(&world, token).iter().any(|event| {
+                event["kind"] == "release-observed"
+                    && event["payload"]["landing_commit"] == json!(landing)
+            }),
+            "the session {token:?} does not resolve to the landing its branch reached"
+        );
+    }
+
+    world.release("consumer.go");
+    world.run(&["stop", &run]).exited(0);
+}
+
+/// The branch two sessions work on, one after the other.
+const RETRIED: &str = "feature/retried";
+
+/// A launch whose `vcs` filter excludes the release kinds relays none of them,
+/// and is otherwise the run it was.
+///
+/// The control an operator already has, through the seam the source filter
+/// already crosses: the filter is handed to the sibling's own reader, which
+/// applies it to the releases it correlated as well as to the session's own
+/// records. Nothing new is declared anywhere to say so.
+#[test]
+fn a_launch_that_excludes_the_release_kinds_relays_none_of_them() {
+    let world = watching("adoption-relay-excluded");
+    world.write_graphs();
+    let (engine_repo, _consumer) = two_repositories(&world);
+    let (script, answer) = world.probe_in(&engine_repo, ENGINE);
+    world.releases(&both_styles(&script));
+    releases_at(&answer, "0.1.0");
+
+    world.script("consumer.turn-open", "");
+    world.script("consumer.wait", "hold");
+    let mut waiting = consumer(Some("published"));
+    waiting["consumes"] = json!({"engine": "wheel"});
+    let run = start_with(
+        &world,
+        "adoption-relay-excluded",
+        vec![engine(), waiting],
+        &["--filter-vcs", r#"{"exclude": [{"kind": "release-*"}]}"#],
+    );
+    world.until("the engine to settle", |world| {
+        world
+            .events_of(&run, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "engine")
+    });
+    let token = session_of(&world, &run, ENGINE);
     let landed = branch_of(&world, &run, "engine");
 
-    // A release the probe can see, so asking observes one; and a human step
-    // somebody records, which acknowledges one and observes it too.
     releases_at(&answer, "0.2.0");
     world.on_onevcs(|| {
         onevcs::release_status(&landed, None).expect("the sibling answers about the landing")
@@ -300,34 +636,87 @@ fn the_siblings_other_two_release_kinds_are_produced_and_cannot_be_read_from_a_r
         .expect("the release is acknowledged")
     });
 
-    // The producer works: both kinds are on the identity's own release stream.
-    let identity = "github.com/owner/engine";
-    let kinds: Vec<String> = sibling_stream(&world, &release_stream_of(identity))
+    // The releases really happened, and the reader really reaches them: this is
+    // a filter keeping them out rather than nothing having been written.
+    let kinds: Vec<String> = sibling_stream(&world, &token)
         .into_iter()
         .filter_map(|event| event["kind"].as_str().map(str::to_string))
         .collect();
-    for kind in ["release-observed", "release-acknowledged"] {
+    for kind in ["release-probed", "release-observed", "release-acknowledged"] {
         assert!(
             kinds.contains(&kind.to_string()),
-            "the sibling did not produce `{kind}` at all, so this is not a reader's problem: \
+            "the sibling recorded no `{kind}`, so this journey proves nothing about a filter: \
              {kinds:?}"
         );
     }
 
-    // And neither reaches this run — under any profile, because nothing put them
-    // in the store to be filtered.
-    for kind in ["release-observed", "release-acknowledged"] {
+    // The held node starting is this run having seen the acknowledgement, so
+    // every pass that could have relayed one has run.
+    world.until("the consumer's turn to open", |world| {
+        world
+            .events_of(&run, "turn-started")
+            .iter()
+            .any(|event| event["labels"]["node"] == "consumer")
+    });
+    for kind in ["release-probed", "release-observed", "release-acknowledged"] {
         assert!(
             world.events_of(&run, kind).is_empty(),
-            "`{kind}` reached the run store, so entry 40's blocker is resolved and the \
-             divergence record has to say so"
+            "`{kind}` reached a store whose launch excluded it"
         );
     }
+    // Narrowed, not silenced: the same session's other records are all there.
+    assert!(
+        !world.events_of(&run, "session-closed").is_empty(),
+        "the filter silenced the session rather than narrowing it"
+    );
+    no_record_arrived_twice(&world, &run);
+
+    world.release("consumer.go");
+    world.run(&["stop", &run]).exited(0);
+}
+
+/// A node in the repository that releases, belonging to somebody else's run.
+fn elsewhere_in_the_engine_repository() -> Value {
+    let mut node = lifecycle("stranger", &[]);
+    node["repo"] = json!(ENGINE);
+    node
+}
+
+/// The `onevcs` session one node published from, as the run recorded it opening.
+fn session_of(world: &World, run: &str, node: &str) -> onevcs::SessionToken {
     world
-        .run(&["monitor", &run, "--all"])
-        .exited(0)
-        .out_lacks("release-observed")
-        .out_lacks("release-acknowledged");
+        .journal(run)
+        .into_iter()
+        .find(|event| {
+            event["source"] == "vcs"
+                && event["labels"]["node"] == node
+                && event["payload"]["clone"].is_string()
+        })
+        .and_then(|event| event["payload"]["token"].as_str().map(str::to_string))
+        .map(onevcs::SessionToken)
+        .unwrap_or_else(|| panic!("nothing recorded the session {node} published from"))
+}
+
+/// No two records of one run's store are the same producer's same record.
+///
+/// A relayed record arriving twice is the same defect as one lost, seen from the
+/// other side — and a run that reads one session through two readers is exactly
+/// where it would happen. `(stream, seq)` is what says so: every producer numbers
+/// its own stream monotonically, so one pair is one record.
+fn no_record_arrived_twice(world: &World, run: &str) {
+    let mut seen: std::collections::BTreeSet<(String, u64)> = std::collections::BTreeSet::new();
+    for event in world.journal(run) {
+        let Some(stream) = event["stream"].as_str() else {
+            continue;
+        };
+        let Some(seq) = event["seq"].as_u64() else {
+            continue;
+        };
+        assert!(
+            seen.insert((stream.to_owned(), seq)),
+            "{stream} #{seq} is in the store twice: {event}"
+        );
+    }
 }
 
 /// A plan whose `consumes` names something the node does not depend on is
@@ -508,37 +897,14 @@ fn an_unusable_bound_leaves_the_run_behaving_as_the_shipped_one_does() {
     world.run(&["stop", &run]).exited(0);
 }
 
-/// The stream token `onevcs` records one repository's release activity under.
-///
-/// Recomputed here because the sibling publishes the **reader** and not the
-/// **name**: `EventStream::open` takes any `SessionToken`, and `SessionToken` is a
-/// public tuple struct, but nothing on that crate's surface hands back the token
-/// for an identity's release stream. So a test that wants to look at what the
-/// sibling wrote has to spell `releases-<first 12 hex of the identity's SHA-256>`
-/// itself — which is exactly why this crate does **not** do it in production, and
-/// why `docs/contract-divergences.md` entry 40 proposes that the name be
-/// published.
-///
-/// Its being here is the drift gate for that entry: the day the scheme changes,
-/// the reads below stop finding a stream and the entry is revisited.
-// llmlint: ignore-block[tests_mirror_real_usage] reaching what a real caller cannot
-// discover is the *claim*, not a shortcut around one. The journey this serves asserts that
-// `release-observed` and `release-acknowledged` are produced and yet cannot reach a run,
-// and it can only tell "the producer never wrote them" from "this crate cannot read them"
-// by looking at the stream the sibling wrote. Nothing in `src/` spells this token, and the
-// day `onevcs` publishes it — or changes it — this helper stops working and entry 40 is
-// revisited, which is the outcome that would make the suppression wrong to keep.
-fn release_stream_of(identity: &str) -> onevcs::SessionToken {
-    use sha2::{Digest, Sha256};
-    let digest: String = Sha256::digest(identity.as_bytes())
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    onevcs::SessionToken(format!("releases-{}", &digest[..12]))
-} // llmlint: ignore-end[tests_mirror_real_usage]
-
-/// Every envelope the sibling wrote on one of its own streams, read back through
+/// Every envelope the sibling wrote about one session, read back through
 /// the sibling's own reader.
+///
+/// One reader and one address: the **session's** token, which this crate already
+/// holds. `onevcs` joins the identity's own release record to the session whose
+/// landing commit it names, so what comes back is that session's records and the
+/// releases that carried its work — and nothing here spells, derives, or knows
+/// the name of the second stream.
 fn sibling_stream(world: &World, token: &onevcs::SessionToken) -> Vec<Value> {
     world.on_onevcs(|| {
         let mut stream = onevcs::EventStream::open(token)
@@ -638,13 +1004,28 @@ fn wait_surface(world: &World, run: &str, node: &str) -> String {
 /// to ask about. What each of these journeys is keyed to is a *landing*, so each
 /// node's work has to be real.
 fn start(world: &World, name: &str, nodes: Vec<Value>) -> String {
+    start_with(world, name, nodes, &[])
+}
+
+/// The same, for a launch that also declares something about its own events.
+///
+/// The source filter is a **launch** decision — declared once, before a session
+/// is cut — so a journey about what a filter keeps out of the store has to state
+/// it here rather than after the run is going.
+fn start_with(world: &World, name: &str, nodes: Vec<Value>, extra: &[&str]) -> String {
     for node in &nodes {
         let id = node["id"].as_str().expect("every node has an id");
         world.script(&format!("{id}.work"), &format!("{id} did its work\n"));
     }
     let path = world.plan(name, &plan_of(name, nodes));
+    let mut argv: Vec<String> = vec![
+        "start".to_owned(),
+        path.to_string_lossy().into_owned(),
+        "--detach".to_owned(),
+    ];
+    argv.extend(extra.iter().map(|arg| (*arg).to_owned()));
     world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .run(&argv.iter().map(String::as_str).collect::<Vec<&str>>())
         .exited(0);
     name.to_string()
 }
@@ -669,7 +1050,9 @@ fn watching(name: &str) -> World {
 /// The compatibility promise, driven where it is actually at risk — a run over
 /// **two repositories**, which is the shape that grows a reference block the
 /// moment a node opts in. A host with no release-targets document at all is the
-/// other half of it, and this journey is that too.
+/// other half of it, and this journey is that too: no repository here has a
+/// release target, so nothing releases, nothing is recorded about a release, and
+/// the sessions this run followed end where they always ended.
 #[test]
 fn a_plan_naming_neither_field_runs_exactly_as_it_did() {
     let world = World::new("adoption-unchanged");
@@ -699,6 +1082,25 @@ fn a_plan_naming_neither_field_runs_exactly_as_it_did() {
             "a plan naming neither field recorded a `{kind}`"
         );
     }
+    // And nothing the *sibling* records about releases either: a repository with
+    // no release targets releases nothing, so there is no probe to relay and no
+    // release record to read — the store is the store this run always held.
+    for kind in ["release-probed", "release-observed", "release-acknowledged"] {
+        assert!(
+            world.events_of(&run, kind).is_empty(),
+            "a repository that releases nothing put a `{kind}` in the store"
+        );
+    }
+    no_record_arrived_twice(&world, &run);
+    // The run ended on its own, with both sessions closed: a follow that had
+    // gone on reading for a release that cannot happen is a run that never
+    // settles.
+    assert_eq!(
+        world.events_of(&run, "session-closed").len(),
+        2,
+        "a session this run followed did not close"
+    );
+    world.run(&["results", &run]).exited(0).out_has("merged");
 }
 
 /// A fast-adoption node launches on its dependency's **branch** readiness, is

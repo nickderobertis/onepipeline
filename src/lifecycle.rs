@@ -930,7 +930,7 @@ fn relay_into(tx: &Sender<Message>, node: Labels) -> Box<dyn Fn(Envelope) + Send
 /// so every per-node view reads it as work that happened to nobody.
 ///
 /// An enricher, so it never rewrites: a key the producer stamped stands.
-fn stamp(labels: &mut Labels, known: &Labels) {
+pub(crate) fn stamp(labels: &mut Labels, known: &Labels) {
     labels.run_id = labels.run_id.take().or_else(|| known.run_id.clone());
     labels.node = labels.node.take().or_else(|| known.node.clone());
     labels.persona = labels.persona.take().or_else(|| known.persona.clone());
@@ -953,10 +953,10 @@ fn end_session(
     filter: Option<&EventFilter>,
 ) {
     close(token);
-    // `None` from either side is the whole stream still to read: no follow was
+    // Empty from either side is the whole stream still to read: no follow was
     // started, or one was and relayed nothing.
-    let followed_through = stream.and_then(crate::vcs::Follower::finish);
-    relay_session_events(tx, token, node, followed_through, filter);
+    let followed_through = stream.map(crate::vcs::Follower::finish).unwrap_or_default();
+    relay_session_events(tx, token, node, &followed_through, filter);
 }
 
 /// Fold the part of the session's stream nothing has relayed into the merged one.
@@ -964,15 +964,17 @@ fn end_session(
 /// `onevcs` records the commits and the publication against the session, the
 /// merge path's own verdict on the `push` among them; without this the merged
 /// store would carry a lifecycle node's settlement with none of the evidence
-/// behind it. `followed_through` is the highest `seq` the follow already
-/// relayed, so a record arrives **once**: the
-/// stream is numbered monotonically and resumes its series across the processes
-/// that write to it, which makes that one number the whole of the bookkeeping.
+/// behind it. `followed_through` is the highest `seq` the follow already relayed
+/// **per stream**, so a record arrives **once**: each stream is numbered
+/// monotonically and resumes its series across the processes that write to it,
+/// which makes those marks the whole of the bookkeeping. Per stream and not one
+/// mark over all of them, because reading one session hands back the identity's
+/// release records as well as the session's own, in a series of their own.
 fn relay_session_events(
     tx: &Sender<Message>,
     token: Option<&onevcs::SessionToken>,
     node: &Labels,
-    followed_through: Option<u64>,
+    followed_through: &crate::vcs::Watermarks,
     filter: Option<&EventFilter>,
 ) {
     let Some(token) = token else { return };
@@ -986,17 +988,17 @@ fn relay_session_events(
     }
 }
 
-/// The part of a stream a follow did not already relay.
+/// The part of what a read handed back that a follow did not already relay.
 ///
-/// `None` is the whole of it — no follow was started, or one was and relayed
-/// nothing — which is a stream still to read rather than a stream that held
-/// nothing. Otherwise everything numbered past the highest `seq` the follow
-/// reached, and nothing at or below it: a record relayed twice is the same
+/// Empty marks are the whole of it — no follow was started, or one was and
+/// relayed nothing — which is a stream still to read rather than a stream that
+/// held nothing. Otherwise everything numbered past the mark **its own stream**
+/// stands at, and nothing at or below it: a record relayed twice is the same
 /// defect as one lost, seen from the other side.
-fn beyond(envelopes: Vec<Envelope>, followed_through: Option<u64>) -> Vec<Envelope> {
+fn beyond(envelopes: Vec<Envelope>, followed_through: &crate::vcs::Watermarks) -> Vec<Envelope> {
     envelopes
         .into_iter()
-        .filter(|envelope| !followed_through.is_some_and(|seq| envelope.seq <= seq))
+        .filter(|envelope| followed_through.beyond(envelope))
         .collect()
 }
 
@@ -1300,40 +1302,78 @@ mod tests {
         assert_eq!(steps[0].persona.as_deref(), Some("engineer"));
     }
 
-    /// The record a follow ended one read short of, relayed exactly once.
+    /// The record a follow ended one read short of, relayed exactly once — and
+    /// counted against **its own** stream.
     ///
     /// The window this covers is inside a library call now — closing a session
     /// flips its record and only then writes `session-closed`, and the follow
     /// reads and only then asks whether the session closed — so it cannot be
     /// forced from an e2e the way a delayed subprocess once could. This is the
     /// arithmetic that makes "once" true either way, held on its own.
+    ///
+    /// Two streams rather than one, because reading a session hands back two:
+    /// its own records, and the identity's release records that name its
+    /// landing, numbered in a series of their own over every session in that
+    /// repository. Under one mark over both, a release numbered higher than the
+    /// session had reached would hide the session's next record — a relayed
+    /// record lost, silently.
     #[test]
-    fn relays_only_what_the_follow_did_not() {
-        let wrote = |seq: u64| Envelope {
+    fn relays_only_what_the_follow_did_not_counting_each_stream_on_its_own() {
+        let wrote = |stream: &str, seq: u64| Envelope {
             v: crate::event::ENVELOPE_VERSION,
             ts: "2026-01-01T00:00:00.000Z".into(),
-            stream: "s-1".into(),
+            stream: stream.to_owned(),
             seq,
             source: crate::event::Source::Vcs,
             kind: crate::event::EventKind("session-closed".into()),
+            phase: None,
             labels: Labels::default(),
             payload: serde_json::Map::new(),
             artifacts: Vec::new(),
         };
-        let stream: Vec<Envelope> = (1..=4).map(wrote).collect();
+        let session: Vec<Envelope> = (1..=4).map(|seq| wrote("s-1", seq)).collect();
 
         // A follow that reached the third record leaves the tail and nothing
         // else: re-reading the whole stream would put the first three in twice.
-        let tail = beyond(stream.clone(), Some(3));
+        let mut reached = crate::vcs::Watermarks::default();
+        for envelope in &session[..3] {
+            reached.reached(envelope);
+        }
+        let tail = beyond(session.clone(), &reached);
         assert_eq!(tail.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![4]);
 
         // A follow that ended having relayed everything leaves nothing.
-        assert!(beyond(stream.clone(), Some(4)).is_empty());
+        reached.reached(&session[3]);
+        assert!(beyond(session.clone(), &reached).is_empty());
 
-        // And one that relayed nothing at all leaves the whole stream, which is
-        // a stream still to read rather than a stream that held nothing.
+        // A release the same read handed back is another stream's record, so a
+        // mark four records into the session's says nothing about it.
+        let released = wrote("releases-0a1b2c3d4e5f", 2);
         assert_eq!(
-            beyond(stream, None)
+            beyond(vec![released.clone()], &reached)
+                .iter()
+                .map(|e| e.stream.clone())
+                .collect::<Vec<_>>(),
+            vec!["releases-0a1b2c3d4e5f".to_owned()],
+            "a release was hidden by how far the session's own stream had got"
+        );
+        // And once it has been relayed, the session's tail is still relayable
+        // from the mark it stands at rather than from that release's.
+        reached.reached(&released);
+        assert!(beyond(vec![released], &reached).is_empty());
+        assert_eq!(
+            beyond(vec![wrote("s-1", 5)], &reached)
+                .iter()
+                .map(|e| e.seq)
+                .collect::<Vec<_>>(),
+            vec![5]
+        );
+
+        // And a follow that relayed nothing at all leaves the whole stream,
+        // which is a stream still to read rather than a stream that held
+        // nothing.
+        assert_eq!(
+            beyond(session, &crate::vcs::Watermarks::default())
                 .iter()
                 .map(|e| e.seq)
                 .collect::<Vec<_>>(),

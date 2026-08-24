@@ -21,8 +21,8 @@ use onepipeline::cli::{Cli, Command, DAG_GRAPH_OFF, DEFAULT_HEARTBEAT_INTERVAL_S
 use onepipeline::controls::NodeControls;
 use onepipeline::error::{EXIT_NOTHING_DRIVING, EXIT_QUEUED, EXIT_REFUSED, EXIT_SUCCESS};
 use onepipeline::event::{
-    ArtifactId, ArtifactRef, Envelope, EventKind, Labels, PipelineKind, Source, ENVELOPE_VERSION,
-    PIPELINE_KINDS,
+    ArtifactId, ArtifactRef, Envelope, EventKind, Labels, Phase, PipelineKind, Source,
+    ENVELOPE_VERSION, PIPELINE_KINDS,
 };
 use onepipeline::executor::{
     CancelMode, CancellationToken, Capabilities, CapacityReport, DispatchRequest, Executor,
@@ -589,6 +589,7 @@ fn the_grammar_matches_the_way_the_contract_says_it_does() {
         seq: 0,
         source,
         kind: EventKind(kind.into()),
+        phase: None,
         labels,
         payload: Default::default(),
         artifacts: Vec::new(),
@@ -1872,6 +1873,74 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
         PipelineKind::from_wire(&EventKind("gate-finished".into())),
         None
     );
+}
+
+/// The envelope's `phase` is the **sibling's** vocabulary, spelled the same way
+/// on both sides of the relay, and every one of it.
+///
+/// The one field on the merged envelope that neither this crate nor
+/// `docs/contract.md` owns: `onevcs` classifies what an event of its own belongs
+/// to and this crate carries the classification rather than making one. So the
+/// gate is exhaustive in both directions and over that library's own list — a
+/// phase it adds fails here rather than arriving as a value every reader
+/// silently declines, and one this copy grew alone fails here too.
+///
+/// `docs/contract-divergences.md` entry 40 is where the field is proposed to the
+/// planner who owns the contract; this is what holds it to the sibling's while
+/// it is a proposal.
+#[test]
+fn the_envelopes_phase_is_the_siblings_own_vocabulary_and_all_of_it() {
+    // Spelled by a match rather than by a list, so a variant added to this
+    // copy has to be spelled here as well as there.
+    let spelled = |phase: Phase| match phase {
+        Phase::Development => "development",
+        Phase::Integrate => "integrate",
+        Phase::Review => "review",
+        Phase::Release => "release",
+    };
+    let theirs = onevcs::Phase::every();
+    assert_eq!(
+        theirs.len(),
+        4,
+        "the sibling's phase vocabulary changed size"
+    );
+    for phase in theirs {
+        let wire = serde_json::to_value(phase).expect("the sibling's phase serializes");
+        let mine: Phase = serde_json::from_value(wire.clone())
+            .unwrap_or_else(|e| panic!("this copy does not read the sibling's {wire}: {e}"));
+        assert_eq!(json!(spelled(mine)), wire, "the two copies spell it apart");
+        // And back, so neither side carries a phase the other cannot read.
+        let round: onevcs::Phase = serde_json::from_value(json!(spelled(mine)))
+            .expect("the sibling reads what this copy writes");
+        assert_eq!(round, phase);
+    }
+
+    // On the wire it is optional and omitted when absent: a store written before
+    // there was a phase round-trips as its writer wrote it, and one written with
+    // a phase keeps it.
+    let without = json!({
+        "v": ENVELOPE_VERSION,
+        "ts": "2026-08-07T12:00:01.500Z",
+        "stream": "onevcs-1a2b",
+        "seq": 3,
+        "source": "vcs",
+        "kind": "session-opened",
+        "labels": {},
+        "payload": {},
+        "artifacts": []
+    });
+    let envelope: Envelope = serde_json::from_value(without.clone()).expect("parses");
+    assert_eq!(envelope.phase, None);
+    assert_eq!(
+        serde_json::to_value(&envelope).expect("serializes"),
+        without
+    );
+
+    let mut with = without.clone();
+    with["phase"] = json!("release");
+    let envelope: Envelope = serde_json::from_value(with.clone()).expect("parses");
+    assert_eq!(envelope.phase, Some(Phase::Release));
+    assert_eq!(serde_json::to_value(&envelope).expect("serializes"), with);
 }
 
 #[test]

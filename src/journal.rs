@@ -66,6 +66,10 @@ impl Journal {
             seq: self.next_seq,
             source: Source::Pipeline,
             kind: kind.into(),
+            // This crate's own kinds, which no producer classifies into one of
+            // `onevcs`'s phases: a phase here would be a classification invented
+            // rather than relayed.
+            phase: None,
             labels,
             payload,
             artifacts: Vec::new(),
@@ -606,6 +610,7 @@ mod tests {
             seq: 3,
             source: Source::Agentgraph,
             kind: EventKind("turn-message".into()),
+            phase: None,
             labels: Labels::default(),
             payload,
             artifacts: Vec::new(),
@@ -860,6 +865,7 @@ mod tests {
             seq: 7,
             source: Source::Agentgraph,
             kind: EventKind("turn-finished".into()),
+            phase: None,
             labels: labels("demo", Some("build")),
             payload: payload(&[]),
             artifacts: Vec::new(),
@@ -881,6 +887,7 @@ mod tests {
             seq,
             source: Source::Pipeline,
             kind: EventKind("k".into()),
+            phase: None,
             labels: Labels::default(),
             payload: Map::new(),
             artifacts: Vec::new(),

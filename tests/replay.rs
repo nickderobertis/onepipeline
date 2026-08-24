@@ -81,6 +81,7 @@ fn recorded(
         seq: 0,
         source: Source::Pipeline,
         kind: EventKind(kind.as_str().into()),
+        phase: None,
         labels: Labels {
             node: node.map(str::to_string),
             ..Labels::default()

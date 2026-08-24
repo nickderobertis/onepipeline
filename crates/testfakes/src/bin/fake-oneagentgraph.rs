@@ -837,6 +837,9 @@ fn session_records(args: &[String], script: &str) {
             seq: 0,
             source: onevcs::Source::Vcs,
             kind: onevcs::EventKind::SessionOpened,
+            // The phase the sibling itself stamps on that kind, through its own answer.
+            phase: onevcs::Phase::of(onevcs::EventKind::SessionOpened)
+                .unwrap_or(onevcs::Phase::Development),
             labels: onevcs::Labels {
                 node: named("node").map(str::to_owned),
                 ..onevcs::Labels::default()

@@ -1295,6 +1295,7 @@ mod tests {
             seq,
             source: Source::Pipeline,
             kind: kind.into(),
+            phase: None,
             labels: Labels {
                 node: node.map(str::to_string),
                 ..labels("demo", None)

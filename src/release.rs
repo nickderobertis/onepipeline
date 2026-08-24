@@ -421,6 +421,17 @@ pub(crate) struct Watch {
     surfaced: BTreeMap<String, Instant>,
     /// How often a held node's wait is surfaced.
     surface_every: Duration,
+    /// How often the identity's release records are read for what they say
+    /// about this run's own landed work.
+    ///
+    /// The **probe's** interval, because it is the same question asked from the
+    /// other end: a release nobody has asked about yet has nothing recorded
+    /// about it either, so reading more often than the run asks would read the
+    /// same file again for an answer nothing has written.
+    relay_every: Duration,
+    /// When the release records were last read. `None` before the first read,
+    /// which is due immediately.
+    relayed: Option<Instant>,
     asker: Asker,
 }
 
@@ -475,6 +486,8 @@ impl Watch {
             arrived,
             surfaced: BTreeMap::new(),
             surface_every: Duration::from_secs(surface_every_seconds()),
+            relay_every: Duration::from_secs(poll_seconds()),
+            relayed: None,
             asker: Asker::start(Duration::from_secs(poll_seconds())),
         }
     }
@@ -625,6 +638,94 @@ impl Watch {
         // reported by `release-arrived`, and repeating the wait after it ended
         // would report a run as waiting on something it has.
         self.surfaced.retain(|node, _| held.contains(node));
+        Ok(())
+    }
+
+    /// Relay what the sibling recorded about the releases carrying this run's
+    /// own landed work.
+    ///
+    /// A release happens long after the dispatch that produced the work has
+    /// ended, outside every session — so `onevcs` records it on the repository's
+    /// own release record and joins it back to the session whose **landing
+    /// commit** it names. That join is the sibling's, and the address of that
+    /// record is the sibling's too: this asks only for the session it already
+    /// knows, through the same phase-aware reader every followed session is read
+    /// through, and takes back whatever that reader says belongs to it.
+    ///
+    /// Only the [`Release`](crate::event::Phase::Release) phase, and only past
+    /// the mark each stream already stands at in this run's own store. The
+    /// session's own records were relayed by the follow that watched them, and
+    /// `release-probed` — which the publication wrote on the session's stream
+    /// while that follow was reading it — is among them: reporting one ask as
+    /// two is the same defect as losing it.
+    ///
+    /// The marks are folded from the store rather than kept beside it, so what
+    /// stops a record arriving twice is the record itself. A driver that took
+    /// this run over from another one is then no different from the one that
+    /// started it, and neither is a reader that has just been asked for the
+    /// first time.
+    pub(crate) fn relay_releases(
+        &mut self,
+        paths: &RunPaths,
+        journal: &mut Journal,
+        state: &RunState,
+        filter: Option<&crate::filter::EventFilter>,
+    ) -> Result<()> {
+        if !self
+            .relayed
+            .is_none_or(|last| last.elapsed() >= self.relay_every)
+        {
+            return Ok(());
+        }
+        self.relayed = Some(Instant::now());
+        let statuses = state.statuses();
+        let mut relayed = crate::vcs::Watermarks::of_relayed(&journal::read(&paths.journal()));
+        for (node, session) in &state.sessions {
+            // A dispatch still in flight has a follow of its own reading that
+            // session as it is written, and two readers of one stream deciding
+            // separately what the store already holds is how a record arrives
+            // twice. Its releases are read once it has settled, which is the
+            // earliest its work can have landed anyway.
+            if statuses.get(node) == Some(&NodeStatus::Running) {
+                continue;
+            }
+            let releases_nothing = state
+                .graph
+                .get(node)
+                .and_then(|node| node.repo.clone())
+                .and_then(|repo| self.repositories.of(&repo))
+                .is_none_or(|releases| releases.targets.is_empty());
+            // A repository that declares no release targets releases nothing, so
+            // there is nothing recorded about it to read — which is every host
+            // that has configured none, and is what keeps such a run's store
+            // exactly the store it held before there was a release record at all.
+            if releases_nothing {
+                continue;
+            }
+            let known = crate::engine::dispatch_labels(
+                &paths.run,
+                node,
+                None,
+                state
+                    .graph
+                    .get(node)
+                    .and_then(|node| node.persona.as_deref()),
+            );
+            for mut envelope in crate::vcs::events(session.token(), filter) {
+                if envelope.phase != Some(crate::event::Phase::Release) {
+                    continue;
+                }
+                if !relayed.beyond(&envelope) {
+                    continue;
+                }
+                // An enricher, never a rewriter: the producer could not know
+                // which node's work this release carries, and everything it did
+                // stamp stands.
+                crate::lifecycle::stamp(&mut envelope.labels, &known);
+                journal.relay(&envelope)?;
+                relayed.reached(&envelope);
+            }
+        }
         Ok(())
     }
 

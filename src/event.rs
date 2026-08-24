@@ -53,6 +53,22 @@ pub struct Envelope {
     pub source: Source,
     /// What happened, as the producing library named it.
     pub kind: EventKind,
+    /// Which part of a change's life the event belongs to, as its producer
+    /// classified it.
+    ///
+    /// Stamped by the producer and never derived here: one kind's phase is not a
+    /// fact about the kind — `onevcs` classifies a push of the session's own
+    /// branch and a push of the base it landed on differently, and only the
+    /// thing that made the push knows which it was — so this is relayed exactly
+    /// as it arrived.
+    ///
+    /// `None` for a producer that stamps none, which is every `oneagentgraph`
+    /// envelope, everything this crate emits, and every `onevcs` record written
+    /// before that library stamped one. Omitted from the wire when absent, so a
+    /// store written before this field round-trips as its writer wrote it. See
+    /// `docs/contract-divergences.md` entry 40.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<Phase>,
     /// Where in the run the producer stamped the event.
     #[serde(default)]
     pub labels: Labels,
@@ -63,6 +79,32 @@ pub struct Envelope {
     /// Evidence stored by the producing library and referenced by id.
     #[serde(default)]
     pub artifacts: Vec<ArtifactRef>,
+}
+
+/// Which part of a change's life an event belongs to.
+///
+/// `onevcs`'s own four, relayed as that library stamps them: the work is made
+/// ([`Development`](Self::Development)), it is brought together with the base it
+/// is going onto ([`Integrate`](Self::Integrate)), it is proposed and ruled on
+/// ([`Review`](Self::Review)), and what carries it is released
+/// ([`Release`](Self::Release)).
+///
+/// A closed set here where [`EventKind`] is a wire string, and the difference is
+/// which side owns the vocabulary: a kind is one of three libraries' and this
+/// crate relays all three, while a phase is `onevcs`'s alone and `src/vcs.rs`
+/// converts it arm by arm — so a phase that library adds fails to compile here
+/// rather than arriving as a string nothing folds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Phase {
+    /// The work is being made.
+    Development,
+    /// The work is being brought together with the base.
+    Integrate,
+    /// The change request is open and being ruled on.
+    Review,
+    /// What carries the landed change is being released.
+    Release,
 }
 
 /// The library that produced an event — one per merged stream.

@@ -1957,6 +1957,7 @@ mod tests {
             seq: 0,
             source,
             kind,
+            phase: None,
             labels: Labels {
                 run_id: Some("demo".into()),
                 round: Some(1),
