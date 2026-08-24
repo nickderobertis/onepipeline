@@ -443,7 +443,15 @@ impl Watch {
             };
             match journal::PipelineKind::from_wire(&event.kind) {
                 Some(journal::PipelineKind::ReleaseAdopted) => {
-                    adopted.insert(node);
+                    // Usable only if it names a release this build can read: a
+                    // record whose versions are gone is one nothing can say what
+                    // the node was told, so suppressing on it would leave a node
+                    // never told anything and never told again.
+                    if !Released::of_payload(event.payload.get("versions").unwrap_or(&Value::Null))
+                        .is_empty()
+                    {
+                        adopted.insert(node);
+                    }
                 }
                 Some(journal::PipelineKind::ReleaseArrived) => {
                     if let Some(dep) = event
@@ -1448,7 +1456,15 @@ mod tests {
                 record(
                     journal::PipelineKind::ReleaseAdopted,
                     "told",
-                    json!({"node": "told", "delivery": "live", "versions": []}),
+                    json!({
+                        "node": "told",
+                        "delivery": "live",
+                        "versions": [{
+                            "identity": "github.com/owner/engine",
+                            "target": "crate",
+                            "version": "0.2.0"
+                        }]
+                    }),
                 ),
                 record(
                     journal::PipelineKind::ReleaseArrived,
@@ -1484,6 +1500,25 @@ mod tests {
                 .arrived
                 .contains(&("told".to_owned(), "engine".to_owned())),
             "a fresh driver did not take up the arrival its predecessor reported"
+        );
+
+        // A record naming no release this build can read says nothing about what
+        // its node was told, so it suppresses nothing.
+        std::fs::write(
+            paths.journal(),
+            format!(
+                "{}\n",
+                record(
+                    journal::PipelineKind::ReleaseAdopted,
+                    "told",
+                    json!({"node": "told", "delivery": "live", "versions": [{"identity": ""}]}),
+                ),
+            ),
+        )
+        .expect("the predecessor's journal is written");
+        assert!(
+            Watch::of_run(&paths).adopted.is_empty(),
+            "an unreadable record suppressed a delivery nothing can say happened"
         );
 
         // A node its predecessor never told is told, which is what says the

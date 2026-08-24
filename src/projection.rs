@@ -735,8 +735,14 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
             let Some(versions) = payload.get("versions") else {
                 return;
             };
-            let note =
-                crate::release::arrival_note(&crate::release::Released::of_payload(versions));
+            let released = crate::release::Released::of_payload(versions);
+            // A record naming no release this build can read cannot say what the
+            // node was told, and a note listing nothing is worse than none: it
+            // would tell a worker its releases had arrived and name not one.
+            if released.is_empty() {
+                return;
+            }
+            let note = crate::release::arrival_note(&released);
             state.pending_context.insert(node.clone(), note.clone());
             if let Some(waiting) = state.graph.get_mut(node) {
                 waiting.context = Some(note);
@@ -1657,6 +1663,25 @@ mod tests {
             Some(note.as_str()),
             "the note did not reach the node it is for"
         );
+
+        // A record naming no release this build can read is skipped: a note that
+        // told a worker its releases had arrived and named not one of them would
+        // be worse than none.
+        let unreadable = fold(&[
+            started.clone(),
+            pipeline(
+                journal::PipelineKind::ReleaseAdopted,
+                1,
+                Some("build"),
+                &[
+                    ("node", json!("build")),
+                    ("delivery", json!("next")),
+                    ("versions", json!([{"identity": "", "target": "crate"}])),
+                ],
+            ),
+        ]);
+        assert!(unreadable.pending_context.is_empty());
+        assert_eq!(unreadable.graph.get("build").expect("build").context, None);
 
         // A note the running turn took is not also owed to the next dispatch —
         // the same rule a planner's own live note is folded under.
