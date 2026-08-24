@@ -918,10 +918,12 @@ impl Released {
     /// The releases an event payload recorded, read back.
     ///
     /// A journal is external input like any other — a record this build reads may
-    /// have been written by a different one — so an entry that does not carry all
-    /// three fields as strings is **skipped**, exactly as every other reader of a
-    /// journal skips a record it cannot read. Substituting an empty string would
-    /// tell a worker a release arrived at a version nobody named.
+    /// have been written by a different one, and it is a file on disk either way —
+    /// so every field is checked where it is read and an entry that fails is
+    /// **skipped**, exactly as every other reader of a journal skips a record it
+    /// cannot read. What is at stake is the rendering: all three land in a
+    /// worker's own task, and one carrying a control character forges a line
+    /// there.
     pub(crate) fn of_payload(payload: &Value) -> Vec<Self> {
         payload
             .as_array()
@@ -929,21 +931,39 @@ impl Released {
             .unwrap_or_default()
             .iter()
             .filter_map(|entry| {
-                let field = |key: &str| {
-                    entry
-                        .get(key)
-                        .and_then(Value::as_str)
-                        .filter(|value| !value.is_empty())
-                        .map(str::to_owned)
-                };
+                let field = |key: &str| renderable(entry.get(key)?.as_str()?);
                 Some(Self {
                     identity: field("identity")?,
-                    target: field("target")?,
+                    // The sibling's own conversion, which is the one thing that
+                    // decides what may spell a release target: a replayed name
+                    // this host would refuse to configure is refused here too.
+                    target: entry
+                        .get("target")?
+                        .as_str()?
+                        .parse::<TargetName>()
+                        .ok()?
+                        .to_string(),
                     version: field("version")?,
                 })
             })
             .collect()
     }
+}
+
+/// One replayed field, held to what it will be rendered as.
+///
+/// The same rule `src/vcs.rs` holds a session token and a branch name to, and for
+/// the same reason: these are printed into a task, a surface, and an event
+/// payload, so a value carrying whitespace or a control character renders as
+/// something other than what it is wherever it lands. `None` for one that would.
+fn renderable(value: &str) -> Option<String> {
+    if value.is_empty() || value.len() >= crate::event::MAX_PAYLOAD_TEXT_BYTES {
+        return None;
+    }
+    if value.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return None;
+    }
+    Some(value.to_owned())
 }
 
 /// The note a fast-adoption node is sent when the releases it was waiting on
@@ -1214,6 +1234,13 @@ mod tests {
             json!([{"identity": "a", "target": "crate", "version": ""}]),
             json!([{"target": "crate", "version": "0.13.0"}]),
             json!("not a list at all"),
+            // A value that would forge a line in the task it is rendered into.
+            json!([{"identity": "a\n- b — c 9.9.9", "target": "crate", "version": "0.13.0"}]),
+            json!([{"identity": "a", "target": "crate", "version": "0.13.0\u{7}"}]),
+            json!([{"identity": "a", "target": "crate", "version": "0.13.0 and more"}]),
+            // A target name the sibling's own conversion refuses.
+            json!([{"identity": "a", "target": "not a target name", "version": "0.13.0"}]),
+            json!([{"identity": "a", "target": "-leading", "version": "0.13.0"}]),
         ] {
             assert!(
                 Released::of_payload(&unreadable).is_empty(),

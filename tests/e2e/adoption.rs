@@ -985,8 +985,13 @@ fn the_two_release_styles_take_one_scheduling_path_and_are_reported_apart() {
     world.releases(&both_styles(&script));
     releases_at(&answer, "0.1.0");
 
+    // In a repository of its own, because the two waits end at different moments
+    // and two lifecycle nodes publishing from one checkout at once race each
+    // other's fetch. Nothing here is about that.
+    let packaging = world.extra_repository("tool");
     let mut on_the_wheel = consumer(Some("published"));
     on_the_wheel["id"] = json!("packager");
+    on_the_wheel["repo"] = json!("tool");
     on_the_wheel["title"] = json!("feat: ship packager");
     on_the_wheel["consumes"] = json!({"engine": "wheel"});
     let run = start(
@@ -1083,6 +1088,7 @@ fn the_two_release_styles_take_one_scheduling_path_and_are_reported_apart() {
             "a node one of the two waits held was failed: {event}"
         );
     }
+    let _ = packaging;
     let arrived: Vec<Value> = world.events_of(&run, "release-arrived");
     assert!(
         arrived
