@@ -412,18 +412,33 @@ pub(crate) struct Watch {
 
 impl Watch {
     /// Start watching one run, taking up whatever a previous driver said.
+    ///
+    /// The journal is external input, and what it seeds here **suppresses** a
+    /// delivery — so a record that does not name both halves of what it claims
+    /// was said is skipped rather than read as something. A record naming a node
+    /// or a dependency this graph does not have suppresses nothing, because
+    /// nothing is ever looked up under it; what a lax reading would cost is a
+    /// record with an *empty* node or dep, which is a key a real one could
+    /// collide with.
     pub(crate) fn of_run(paths: &RunPaths) -> Self {
         let mut adopted = BTreeSet::new();
         let mut arrived = BTreeSet::new();
         for event in journal::read(&paths.journal()) {
-            let node = event.labels.node.clone().unwrap_or_default();
+            let Some(node) = event.labels.node.clone().and_then(|node| renderable(&node)) else {
+                continue;
+            };
             match journal::PipelineKind::from_wire(&event.kind) {
                 Some(journal::PipelineKind::ReleaseAdopted) => {
                     adopted.insert(node);
                 }
                 Some(journal::PipelineKind::ReleaseArrived) => {
-                    if let Some(dep) = event.payload.get("dep").and_then(Value::as_str) {
-                        arrived.insert((node, dep.to_owned()));
+                    if let Some(dep) = event
+                        .payload
+                        .get("dep")
+                        .and_then(Value::as_str)
+                        .and_then(renderable)
+                    {
+                        arrived.insert((node, dep));
                     }
                 }
                 _ => {}
@@ -1371,13 +1386,12 @@ mod tests {
     /// time — a correction the worker has already acted on, arriving again with
     /// nothing to tell it from a new one.
     ///
-    /// Held here rather than by a journey, and deliberately: a journey for it has
-    /// to kill a driver mid-dispatch, adopt the run, and get a *second* node told
-    /// before it can assert about the first — which it does, and which costs long
-    /// enough under the instrumented suite to time out against its own deadline.
-    /// What the seeding actually is, is a fold of a durable record, and that is
-    /// what this drives. The delivery either side of it — live and deferred — is
-    /// driven end to end in `tests/e2e/adoption.rs`.
+    /// The whole takeover is driven end to end by
+    /// `tests/e2e/adoption.rs`'s
+    /// `a_fresh_driver_does_not_tell_a_node_the_releases_arrived_a_second_time`,
+    /// which kills a driver mid-dispatch and adopts the run. What this one adds
+    /// is the half that journey cannot show: that the seeding **narrowed** rather
+    /// than silenced — a node the predecessor never told is still told.
     #[test]
     fn a_fresh_driver_takes_up_what_its_predecessor_already_said() {
         let root = std::env::temp_dir().join(format!("op-release-seed-{}", std::process::id()));

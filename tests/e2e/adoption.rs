@@ -739,6 +739,122 @@ fn a_delivery_that_broke_leaves_the_note_owed_and_is_tried_again() {
     assert!(redirected(&world, &run, "consumer").contains("crate 0.2.0"));
 }
 
+/// A note is delivered **once per node**, across a driver that died holding it.
+///
+/// A fresh driver re-dispatches what it found running, so without taking up what
+/// its predecessor already said it tells that node a second time — a correction
+/// the worker has already acted on, arriving again with nothing to tell it from a
+/// new one.
+///
+/// The second node is the clock: it is held behind a person until after the
+/// takeover, so *its* note is what says the fresh driver's own watch has answered
+/// released — which is the moment the first node must not be told again. It lands
+/// in a repository of its own, because two lifecycle nodes publishing from one
+/// checkout at once race each other's fetch and the predecessor's session is
+/// still holding this one's.
+///
+/// Unix-only, because it needs the driver *gone* without the tree it started
+/// going with it, and [`end_process`](crate::harness::end_process) is that on
+/// this platform alone. What it holds is not platform-specific.
+#[cfg(unix)]
+#[test]
+fn a_fresh_driver_does_not_tell_a_node_the_releases_arrived_a_second_time() {
+    let world = watching("adoption-restart");
+    world.write_graphs();
+    let (engine_repo, _consumer) = two_repositories(&world);
+    let later = world.extra_repository("tool");
+    let (script, answer) = world.probe_in(&engine_repo, ENGINE);
+    world.releases(&automated(&script));
+    releases_at(&answer, "0.1.0");
+
+    for node in ["consumer", "second"] {
+        world.script(&format!("{node}.turn-open"), "");
+        world.script(&format!("{node}.wait"), "hold");
+    }
+    let mut second = consumer(Some("fast"));
+    second["id"] = json!("second");
+    second["repo"] = json!("tool");
+    second["title"] = json!("feat: ship second");
+    second["deps"] = json!(["engine", "gate"]);
+    let plan = plan_of(
+        "adoption-restart",
+        vec![
+            engine(),
+            consumer(Some("fast")),
+            crate::harness::human("gate", &["engine"]),
+            second,
+        ],
+    );
+    for node in ["engine", "consumer", "second"] {
+        world.script(&format!("{node}.work"), &format!("{node} did its work\n"));
+    }
+    let path = world.plan("adoption-restart", &plan);
+    let started = world.run(&["start", &path.to_string_lossy(), "--detach"]);
+    started.exited(0);
+    let run = "adoption-restart".to_string();
+    let pid = serde_json::from_str::<Value>(started.stdout.trim())
+        .ok()
+        .and_then(|announced| announced["pid"].as_u64())
+        .and_then(|pid| u32::try_from(pid).ok())
+        .unwrap_or_else(|| panic!("a detached launch announces its driver: {}", started.stdout));
+
+    world.until("the consumer's turn to open", |world| {
+        world
+            .events_of(&run, "turn-started")
+            .iter()
+            .any(|event| event["labels"]["node"] == "consumer")
+    });
+    releases_at(&answer, "0.2.0");
+    world.until("the consumer to be told", |world| {
+        !world.events_of(&run, "release-adopted").is_empty()
+    });
+
+    // The driver dies with that node still running and still held.
+    crate::harness::end_process(pid);
+    world.until("the driver to be reported dead", |world| {
+        world.run(&["status", &run]).stdout.contains("DRIVER DEAD")
+    });
+
+    // A fresh one takes the run over, re-dispatches what it found running, and —
+    // once the person has acted — tells the second node.
+    // Piped and drained by `ended`, which is what every other background driver
+    // in this suite does: a child holding the test process's own captured
+    // descriptors blocks on them once they fill, and a driver relays everything
+    // its dispatches say.
+    let adopted = world
+        .cmd(&["adopt", &run])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("a fresh driver starts");
+    world.until("the person's action to be attestable", |world| {
+        world.run(&["attest", &run, "gate"]).code == 0
+    });
+    world.until("the second node to be told", |world| {
+        world
+            .events_of(&run, "release-adopted")
+            .iter()
+            .any(|event| event["labels"]["node"] == "second")
+    });
+
+    let told: Vec<Value> = world
+        .events_of(&run, "release-adopted")
+        .into_iter()
+        .filter(|event| event["labels"]["node"] == "consumer")
+        .collect();
+    assert_eq!(
+        told.len(),
+        1,
+        "a fresh driver told a node its releases had arrived a second time: {told:?}"
+    );
+
+    for node in ["consumer", "second"] {
+        world.release(&format!("{node}.go"));
+    }
+    crate::harness::ended(adopted);
+    let _ = later;
+}
+
 /// A fast-adoption node whose dependency lands in its **own** repository gets no
 /// reference block and waits for no release: the lifecycle already puts that
 /// dependency's work under it, and nothing here changes that.
