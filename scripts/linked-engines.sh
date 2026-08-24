@@ -199,15 +199,12 @@ index_path() {
 # resolve to: a yanked release is not a candidate, and neither is a prerelease,
 # which a requirement without one never matches.
 #
-# The index is one JSON object per line. Each is walked rather than searched:
-# `"name"` is *not* a field that appears once on a record — every entry of its
-# `deps` array carries one too, seven of them on the first `oneagentgraph`
-# release — so counting the string across the line finds one occurrence per
-# dependency and reads every record crates.io actually serves as unreadable.
-# That is what it did, on the weekly job and on every release from v0.12.4 on:
-# the fixtures it was proven against wrote `"deps":[]`, which is the one shape
-# the registry never serves. So `read_record` below walks the outermost object
-# and reads only its own members, skipping a nested object or array whole.
+# The index is one JSON object per line, walked rather than searched: `"name"`
+# is *not* a field that appears once on a record — every entry of its `deps`
+# array carries one too — so counting the string across the line reads every
+# record crates.io actually serves as unreadable. `read_record` below walks the
+# outermost object and reads only its own members, skipping a nested object or
+# array whole.
 #
 # What comes back is still a third party's, so this answers in tagged lines and
 # each way a record can be unreadable gets its own tag, which the caller refuses
@@ -266,7 +263,6 @@ index_versions() {
       ;;
   esac
   printf '%s\n' "$body" | awk -v want="$name" '
-    # Past whitespace at `i`.
     function skip_ws(s, i,   c) {
       while (i <= length(s)) {
         c = substr(s, i, 1)
@@ -275,11 +271,9 @@ index_versions() {
       }
       return i
     }
-    # Past the string opening at `i`, leaving its contents in STR when `keep`.
-    # 0 for one that never closes. An escape and the character after it are one
-    # unit, so a `\"` inside a string does not end it; what the escape encodes is
-    # never decoded, because a crate name or a version carrying one is not a name
-    # or a version this can read, and the refusals below say so by name.
+    # Contents in STR when `keep`, 0 when it never closes. What an escape encodes
+    # is never decoded: a name or a version carrying one is not a name or a
+    # version this can read, and the refusals below say so by name.
     function scan_string(s, i, keep,   n, c) {
       n = length(s); STR = ""
       for (i++; i <= n; i++) {
@@ -290,10 +284,9 @@ index_versions() {
       }
       return 0
     }
-    # Past the object or array opening at `i` — the whole of it, however deep.
-    # This is what keeps the `name` on a `deps` entry from being read as the one
-    # on the record. (No apostrophes below: the whole program is one shell
-    # single-quoted string, which any of them would end.)
+    # Skipping the value whole is what keeps the `name` on a `deps` entry from
+    # being read as the one on the record. (No apostrophes below: the whole
+    # program is one shell single-quoted string, which any would end.)
     function scan_nested(s, i,   n, c, depth) {
       n = length(s); depth = 0
       while (i <= n) {
@@ -305,7 +298,6 @@ index_versions() {
       }
       return 0
     }
-    # Past the number, `true`, `false` or `null` at `i`, leaving it in LIT.
     function scan_literal(s, i,   n, c, start) {
       n = length(s); start = i
       while (i <= n) {
@@ -317,24 +309,18 @@ index_versions() {
       LIT = substr(s, start, i - start)
       return (LIT == "") ? 0 : i
     }
-    # Marks one of the three members this reads as present on the record, and
-    # marks the record if it is present twice — where taking the first would
-    # answer for a record that went on to say something else. Presence is noted
-    # apart from readability, so a second copy is caught even where the first was
-    # the only readable one.
+    # Presence is noted apart from readability, so a second copy is caught even
+    # where the first was the only readable one — and taking the first would
+    # answer for a record that went on to say something else.
     function note(key) {
       if (key == "name")   { if (SAW_NAME)   TWICE = 1; SAW_NAME   = 1; return 1 }
       if (key == "vers")   { if (SAW_VERS)   TWICE = 1; SAW_VERS   = 1; return 1 }
       if (key == "yanked") { if (SAW_YANKED) TWICE = 1; SAW_YANKED = 1; return 1 }
       return 0
     }
-    # One record: its own `name`, `vers` and `yanked`, and how it failed if it
-    # did. BAD is a line that is not one JSON object; TWICE a record carrying one
-    # of the three more than once; an OK_ left unset a member missing, or holding
-    # a shape it cannot be read from — a `yanked` spelled as a string is not a
-    # flag that happens to say `false`. A member of a nested object is never any
-    # of these: `scan_nested` skips the value whole, so the `name` on a `deps`
-    # entry is never read as the one on the record.
+    # A member is read only where it holds the shape it should: a `yanked`
+    # spelled as a string is not a flag that happens to say `false`, so its OK_
+    # stays unset and the caller refuses the record.
     function read_record(s,   i, n, c, key) {
       NAME = ""; VERS = ""; YANKED = ""
       SAW_NAME = 0; SAW_VERS = 0; SAW_YANKED = 0

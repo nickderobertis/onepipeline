@@ -110,16 +110,12 @@ fn index_path(name: &str) -> String {
 
 /// One sparse-index record, shaped the way crates.io actually shapes one.
 ///
-/// The `deps` array is populated, and its entries are named after engines this
-/// check reports on. That is the fixture, not decoration around it. A real
-/// record embeds one `"name"` per dependency — seven on the first
-/// `oneagentgraph` release — so a reader that counts that string across the
-/// whole line sees a record with the field on it many times over, and one that
+/// The populated `deps` array is the fixture, not decoration around it: a real
+/// record embeds one `"name"` per dependency, so a reader that counts that
+/// string across the whole line sees the field many times over, and one that
 /// takes the first match sees a dependency's name where the crate's belongs.
-/// Written `"deps":[]`, as every fixture here was until v0.12.4 released with
-/// no record in its notes, this suite proves a shape the registry never serves:
-/// the check passed every test in this file while refusing, with exit 3, every
-/// answer index.crates.io gave it.
+/// Written `"deps":[]`, as every fixture here once was, this suite proves a
+/// shape the registry never serves.
 ///
 /// The nesting is the real one too — an array of objects, an object of arrays,
 /// a `null`, and a string carrying a crate name — because each is a place the
@@ -1094,17 +1090,13 @@ fn both_recipes_are_entry_points_to_this_check() {
 /// answer it can read, and refusing one it cannot rather than composing part of
 /// one.
 ///
-/// Nothing here is substituted for the release job except the registry's
-/// address, which is what `ONEPIPELINE_CRATES_INDEX` exists for. Every other
-/// test in this file reaches the script through a directory, which is the
-/// affordance a test has rather than the transport a release uses; this is the
-/// transport.
+/// Nothing is substituted except the registry's address, which is what
+/// `ONEPIPELINE_CRATES_INDEX` exists for. Every other test here reaches the
+/// script through a directory, which is the affordance a test has rather than
+/// the transport a release uses; this is the transport.
 ///
-/// Both halves are the bar, and neither on its own was. v0.12.4 and v0.13.0
-/// published with the refusing half working exactly as designed and the
-/// composing half refusing every answer the real index gave it, so their notes
-/// carried no record at all. A suite proving only the refusal was green through
-/// both.
+/// Both halves are the bar, and neither on its own was: a suite proving only the
+/// refusal stayed green while every real answer was being refused.
 #[test]
 fn the_release_recipe_composes_over_http_and_refuses_an_answer_it_cannot_read() {
     let sound = registry(&index_serving("recipe-sound", &[]), 0);

@@ -1,28 +1,13 @@
-//! The gate's coverage step, driven with the artifact that turned it red.
+//! The gate's coverage step, held against the artifact a killed child leaves.
 //!
-//! `just check` merges one `.profraw` per process the suite ran, and this suite
-//! kills instrumented processes on purpose: the cancellation journeys in
-//! `tests/e2e/` tear down the `onepipeline` binary and the sibling doubles it
-//! started, and a job's own cleanup reaps whatever outlived a test. A child
-//! killed while the profiling runtime is still flushing leaves a *truncated*
-//! profile behind, and `llvm-profdata merge` defaults to rejecting the entire
-//! merge over a single one of those. That is how CI run 32721690155's `gate`
-//! job died with 809 of 809 tests green:
+//! The cancellation journeys kill instrumented processes, and one killed while
+//! the profiling runtime is still flushing leaves a *truncated* profile in the
+//! set `_crate-test` merges. `llvm-profdata` rejects the whole merge over a
+//! single one of those, which the recipe reports as a test failure.
 //!
-//! ```text
-//! warning: .../onepipeline-46576-18438271468876688950_0.profraw: invalid
-//!          instrumentation profile data (file header is corrupt)
-//! error: no profile can be merged
-//! ```
-//!
-//! which `_crate-test` then reported as `tests failed, or coverage fell below
-//! 95%` — a message about the suite, for a suite that had passed.
-//!
-//! So this plants exactly that artifact, on every coverage run, in the directory
-//! the recipe merges from — and the recipe is the assertion. `just check` has to
-//! merge the surviving profiles, report over them, and still enforce
-//! `--fail-under-lines`. Take `--failure-mode all` back out of the justfile and
-//! the recipe fails again, which is the regression this exists to hold.
+//! So this plants that artifact, on every coverage run, in the directory the
+//! recipe merges from — and the recipe is the assertion. Take
+//! `--failure-mode all` out of the justfile and it fails again.
 
 use std::path::PathBuf;
 use std::process::Command;

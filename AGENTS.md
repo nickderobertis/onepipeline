@@ -78,10 +78,7 @@ consuming `project.json` — an undeclared one silently drops that project out o
 ## Invariants (non-negotiable)
 
 - **Coverage is enforced at 95% line coverage.** `just check` fails below it.
-  Lower the bar only with the reason written here. That step's `--failure-mode
-  all` is load-bearing rather than slack — see the justfile comment on
-  `_crate-test`, which `tests/coverage.rs` keeps honest by planting the artifact
-  it exists for.
+  Lower the bar only with the reason written here.
 - **Tests are realistic — never mock the layer under test.** Drive the compiled
   binary as a subprocess and assert on exit code, stdout, and stderr; assemble
   the real package around the real binary. An in-process `main()` call is not an
