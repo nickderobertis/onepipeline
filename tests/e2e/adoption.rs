@@ -53,20 +53,26 @@ fn both_styles(script: &str) -> String {
 /// registry, because every build already in the field refuses a key it does not
 /// know and the first host to configure a release target would stop them all.
 fn document(script: &str, extra: &str) -> String {
-    let mut lines = vec![
-        "version: 1".to_owned(),
-        "repositories:".to_owned(),
-        "  - match: {host: github.com, owner: owner, name: engine}".to_owned(),
-        "    default_target: crate".to_owned(),
-        "    targets:".to_owned(),
-        "    - name: crate".to_owned(),
-        "      style: automated".to_owned(),
-        format!("      probe: {{script: {script}, timeout_seconds: 30}}"),
-    ];
-    lines.extend(extra.lines().map(str::to_owned));
-    lines.push("default:".to_owned());
-    lines.push("  adoption: fast".to_owned());
-    format!("{}\n", lines.join("\n"))
+    let extra: String = extra.lines().map(|line| format!("{line}\n")).collect();
+    format!(
+        "{}{extra}default:\n\x20 adoption: fast\n",
+        repositories(script)
+    )
+}
+
+/// The document's version and its one rule for the engine repository, up to but
+/// not including whatever a journey states after them.
+fn repositories(script: &str) -> String {
+    format!(
+        "version: 1\n\
+         repositories:\n\
+         \x20 - match: {{host: github.com, owner: owner, name: engine}}\n\
+         \x20   default_target: crate\n\
+         \x20   targets:\n\
+         \x20   - name: crate\n\
+         \x20     style: automated\n\
+         \x20     probe: {{script: {script}, timeout_seconds: 30}}\n"
+    )
 }
 
 /// What a person has to do for the human-step target, as the document states it
@@ -389,6 +395,62 @@ fn redirected(world: &World, run: &str, node: &str) -> String {
         .unwrap_or_default()
 }
 
+/// A fast-adoption node whose dependency lands in its **own** repository gets no
+/// reference block and waits for no release: the lifecycle already puts that
+/// dependency's work under it, and nothing here changes that.
+///
+/// The other half of the fast-adoption promise, and the one that is easy to
+/// break: the block exists for work a worker cannot reach from its own branch,
+/// and a dependency in the same repository is exactly the work it can.
+#[test]
+fn a_dependency_inside_the_nodes_own_repository_is_not_pinned_against_git() {
+    let world = watching("adoption-same-repo");
+    world.write_graphs();
+    let repository = world.repository("local-direct", &[]);
+    let (script, answer) = world.probe_in(&repository, "service");
+    // The consumer's *own* repository releases something, so nothing here is
+    // spared a row by there being no release to wait for — which is what would
+    // make this journey pass without proving anything.
+    world.releases(&document(&script, "").replace("name: engine", "name: service"));
+    releases_at(&answer, "0.1.0");
+    let declares = world.on_onevcs(|| onevcs::release_targets("service"));
+    assert!(
+        declares.is_ok_and(|releases| !releases.targets.is_empty()),
+        "this journey's own repository declares no release target, so it proves nothing"
+    );
+
+    let mut first = lifecycle("first", &[]);
+    first["title"] = json!("feat: ship first");
+    let mut second = lifecycle("second", &["first"]);
+    second["title"] = json!("feat: ship second");
+    second["adoption"] = json!("fast");
+    let run = start(&world, "adoption-same-repo", vec![first, second]);
+    world.until("both nodes to settle", |world| {
+        world.events_of(&run, "node-settled").len() == 2
+    });
+
+    let task = task_of(&world, "second");
+    assert!(
+        !task.contains(CROSS_REPO_REFERENCES_HEADING),
+        "a dependency in the node's own repository was rendered as a git pin:\n{task}"
+    );
+    for kind in ["release-wait", "release-arrived", "release-adopted"] {
+        assert!(
+            world.events_of(&run, kind).is_empty(),
+            "a dependency in the node's own repository started a `{kind}`"
+        );
+    }
+    // And both nodes' work reached the base, which is the second having been cut
+    // from a base that already carried the first — the stacking this crate has
+    // always done, unchanged.
+    for node in ["first", "second"] {
+        assert!(
+            repository.base_file(&format!("{node}.md")).is_some(),
+            "{node}'s work did not reach the base"
+        );
+    }
+}
+
 /// A published-adoption node is **not scheduled at all** while its
 /// out-of-repository dependency is unreleased, and is started by nothing but an
 /// answer of released.
@@ -476,6 +538,83 @@ fn a_published_node_is_held_until_the_release_answers_and_by_nothing_else() {
             "a node the wait held was failed: {event}"
         );
     }
+}
+
+/// The adoption mode resolves through **exactly four rungs**, and each of them
+/// decides a node the rung beneath it would have decided differently.
+///
+/// Driven as behaviour rather than as a lookup, because the mode is not a value
+/// anything reports: what a rung decides is whether the node is scheduled. So
+/// each rung is proved by a pair — one node it holds beside one the next rung
+/// down would have let go, and the other way round.
+#[test]
+fn the_adoption_mode_resolves_through_exactly_four_rungs() {
+    let world = watching("adoption-rungs");
+    world.write_graphs();
+    let consumer_repo = world.repository("local-direct", &[]);
+    let engine_repo = world.extra_repository(ENGINE);
+    let unruled = world.extra_repository("tool");
+    let (script, answer) = world.probe_in(&engine_repo, ENGINE);
+    // Rung 3, the global one, says `published`. Rung 2 says `fast` for the
+    // `service` repository and says nothing at all for `tool`, which is what
+    // leaves `tool` on rung 3.
+    world.releases(&format!(
+        "{}  - match: {{host: github.com, owner: owner, name: service}}\n\
+         \x20   adoption: fast\n\
+         default:\n\
+         \x20 adoption: published\n",
+        repositories(&script),
+    ));
+    releases_at(&answer, "0.1.0");
+
+    // Rung 1 — the node's own field — against rung 4, the floor: two nodes with
+    // no repository at all, one stating `published` and one stating nothing.
+    let mut stated = crate::harness::agent("stated", &[ENGINE]);
+    stated["adoption"] = json!("published");
+    let floor = crate::harness::agent("floor", &[ENGINE]);
+    // Rung 2 against rung 3: one node in the repository a rule names `fast`, and
+    // one in a repository no rule names, which takes the global `published`.
+    let mut by_repository = lifecycle("by-repository", &[ENGINE]);
+    by_repository["title"] = json!("feat: ship by-repository");
+    let mut by_global = lifecycle("by-global", &[ENGINE]);
+    by_global["repo"] = json!("tool");
+    by_global["title"] = json!("feat: ship by-global");
+
+    let run = start(
+        &world,
+        "adoption-rungs",
+        vec![engine(), stated, floor, by_repository, by_global],
+    );
+    world.until("the two waits to carry their own answer", |world| {
+        answered(world, &run, "stated") == Some("not-released".to_owned())
+            && answered(world, &run, "by-global") == Some("not-released".to_owned())
+    });
+
+    // The floor let a node go that the global rung above it would have held, and
+    // the node's own field held one the floor would have let go.
+    assert!(
+        dispatched(&world, &run, "floor"),
+        "rung 4 did not decide a node with no repository and no field of its own"
+    );
+    assert!(
+        !dispatched(&world, &run, "stated"),
+        "rung 1 did not win over the floor beneath it"
+    );
+    // The repository rung let a node go that the global rung would have held.
+    assert!(
+        dispatched(&world, &run, "by-repository"),
+        "rung 2 did not win over rung 3"
+    );
+    assert!(
+        !dispatched(&world, &run, "by-global"),
+        "rung 3 did not decide a node no rule names"
+    );
+
+    releases_at(&answer, "0.2.0");
+    world.until("every node to settle", |world| {
+        world.events_of(&run, "node-settled").len() == 5
+    });
+    let _ = (consumer_repo, unruled);
 }
 
 /// Both release styles, side by side, through the sibling's own interface: one

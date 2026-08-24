@@ -1619,6 +1619,39 @@ mod tests {
         assert!(Graph::default().is_empty());
     }
 
+    /// `consumes` is keyed by **dependency node id**, so a key naming nothing this
+    /// node depends on is refused where the plan is read.
+    ///
+    /// Silently dropping it is the failure this exists to remove: a planner who
+    /// wrote a release target and had it ignored would find out from a node that
+    /// launched against the wrong artifact, long after the plan loaded.
+    #[test]
+    fn consumes_naming_something_this_node_does_not_depend_on_is_refused() {
+        let named = |on: &str| {
+            let mut node = agent("consumer", &["engine"]);
+            node.consumes.insert(
+                on.to_string(),
+                "crate".parse().expect("a release target name"),
+            );
+            plan_of(vec![agent("engine", &[]), node])
+        };
+        let refusal = validate(&named("packager")).unwrap_err().to_string();
+        assert!(
+            refusal.contains("node 'consumer'")
+                && refusal.contains("`consumes` names 'packager'")
+                && refusal.contains("not one of this node's deps"),
+            "{refusal}"
+        );
+        // The dependency it does name is legal, and so is a cross-DAG one.
+        validate(&named("engine")).expect("a target for a dependency it has");
+        let mut across = agent("consumer", &["run:other#upstream"]);
+        across.consumes.insert(
+            "run:other#upstream".to_string(),
+            "crate".parse().expect("a release target name"),
+        );
+        validate(&plan_of(vec![across])).expect("a target for a cross-DAG dependency");
+    }
+
     #[test]
     fn a_graph_renders_back_as_the_plan_it_came_from() {
         let source = plan_of(vec![agent("a", &[])]);

@@ -800,6 +800,113 @@ mod tests {
         );
     }
 
+    /// The reference block is the shape the divergence record states, appended by
+    /// the same rendering the planner note is — and a node with none renders
+    /// exactly what it always rendered.
+    #[test]
+    fn out_of_repository_dependencies_render_as_a_table_under_their_own_heading() {
+        let node = Node {
+            id: "consumer".into(),
+            persona: Some("engineer".into()),
+            task: Some("## What\nship it".into()),
+            ..Node::default()
+        };
+        let references = vec![
+            CrossRepoReference {
+                dependency: "onevcs-release-targets".into(),
+                repository: "github.com/nickderobertis/onevcs".into(),
+                branch: "onevcs-release-targets".into(),
+                commit: "9f3c1ab".into(),
+                release_target: "crate".into(),
+            },
+            // A dependency the run cannot fully name: the cells it cannot fill
+            // are empty and the row is still there, because a worker needs to see
+            // that the dependency exists.
+            CrossRepoReference {
+                dependency: "packager".into(),
+                repository: "github.com/nickderobertis/other".into(),
+                ..CrossRepoReference::default()
+            },
+        ];
+        assert_eq!(
+            node.rendered_task_with(&references),
+            "## What\nship it\n\n\
+             ## Cross-repository references\n\n\
+             This node launched under fast adoption: the work it depends on is finished but has \
+             no\nrelease yet. Pin against the git references below rather than against a version. \
+             Do\nnot change a shared interface unilaterally — propose it and keep building \
+             against the\nagreed surface. When these releases arrive you will be sent a note \
+             naming the\nversions; move the pin then.\n\n\
+             | dependency | repository | branch | commit | release target |\n\
+             | --- | --- | --- | --- | --- |\n\
+             | onevcs-release-targets | github.com/nickderobertis/onevcs | \
+             onevcs-release-targets | 9f3c1ab | crate |\n\
+             | packager | github.com/nickderobertis/other |  |  |  |\n"
+        );
+        assert_eq!(
+            node.rendered_task_with(&[]),
+            node.rendered_task(),
+            "a node with no out-of-repository dependency did not render what it always rendered"
+        );
+
+        // It sits under the planner note rather than beside it: one document,
+        // and the note is still the note.
+        let noted = Node {
+            context: Some("the earlier round already landed the schema".into()),
+            ..node
+        };
+        let rendered = noted.rendered_task_with(&references);
+        assert!(
+            rendered.find(PLANNER_CONTEXT_HEADING) < rendered.find(CROSS_REPO_REFERENCES_HEADING),
+            "{rendered}"
+        );
+        assert!(rendered.contains("adds no acceptance criteria"), "{rendered}");
+        // And every step of one workstream is handed the same block.
+        let step = Step {
+            id: "implement".into(),
+            task: Some("## What\nimplement".into()),
+            ..Step::default()
+        };
+        assert!(step
+            .rendered_task_with(None, &references)
+            .contains(CROSS_REPO_REFERENCES_HEADING));
+        assert_eq!(step.rendered_task_with(None, &[]), step.rendered_task(None));
+    }
+
+    /// Both new fields are optional, load at schema 3, and are omitted from what
+    /// this crate writes when a plan named neither.
+    #[test]
+    fn the_adoption_fields_round_trip_and_never_appear_in_a_plan_that_omitted_them() {
+        let written = serde_json::json!({
+            "id": "consumer",
+            "deps": ["engine"],
+            "adoption": "published",
+            "consumes": {"engine": "crate"}
+        });
+        let node: Node = serde_json::from_value(written.clone()).expect("both fields load");
+        assert_eq!(node.adoption, Some(Adoption::Published));
+        assert_eq!(
+            node.consumes.get("engine").map(ToString::to_string),
+            Some("crate".to_string())
+        );
+        assert_eq!(serde_json::to_value(&node).expect("serializes"), written);
+
+        let bare = serde_json::json!({"id": "solo"});
+        let node: Node = serde_json::from_value(bare.clone()).expect("a node naming neither loads");
+        assert_eq!(node.adoption, None);
+        assert!(node.consumes.is_empty());
+        assert_eq!(serde_json::to_value(&node).expect("serializes"), bare);
+
+        // External input, refused at the boundary: an adoption mode this build
+        // does not know, and a target name that could not be one.
+        serde_json::from_value::<Node>(serde_json::json!({"id": "x", "adoption": "eventually"}))
+            .expect_err("an undeclared adoption mode is refused");
+        serde_json::from_value::<Node>(
+            serde_json::json!({"id": "x", "consumes": {"engine": "not a target name"}}),
+        )
+        .expect_err("a target name the sibling would refuse is refused here");
+    }
+
     #[test]
     fn a_node_with_no_note_renders_its_task_unchanged() {
         let node = Node {

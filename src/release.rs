@@ -988,3 +988,323 @@ fn surface_every_seconds() -> u64 {
         .filter(|seconds| *seconds > 0)
         .unwrap_or(DEFAULT_SURFACE_SECONDS)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use onevcs::Baseline;
+
+    fn dependency(target: Option<&str>, style: Option<ReleaseStyle>) -> Dependency {
+        Dependency {
+            dep: "engine".to_owned(),
+            identity: "github.com/owner/engine".to_owned(),
+            branch: Some("onevcs/s-1".to_owned()),
+            commit: Some("9f3c1ab".to_owned()),
+            target: target.map(|name| name.parse().expect("a target name")),
+            style,
+            action: style
+                .filter(|style| *style == ReleaseStyle::HumanStep)
+                .map(|_| "cut a release on PyPI".to_owned()),
+        }
+    }
+
+    /// Every answer `onevcs` can give, and the refusal it can give instead, read
+    /// as this crate's own vocabulary.
+    ///
+    /// Arm by arm, because the whole design rests on three of them staying
+    /// apart: "awaiting a human step" is neither of its neighbours, and neither a
+    /// probe that failed nor a question that could not be *put* is ever "not
+    /// released".
+    #[test]
+    fn no_answer_the_sibling_gives_is_folded_into_another() {
+        let cases: Vec<(onevcs::Result<ReleaseStatus>, &str)> = vec![
+            (
+                Ok(ReleaseStatus::Released {
+                    target: "crate".parse().expect("a target name"),
+                    style: ReleaseStyle::Automated,
+                    version: "0.2.0".to_owned(),
+                }),
+                "released",
+            ),
+            (
+                Ok(ReleaseStatus::NotReleased {
+                    at_landing: Baseline::At {
+                        version: "0.1.0".to_owned(),
+                    },
+                    now: "0.1.0".to_owned(),
+                }),
+                "not-released",
+            ),
+            (
+                Ok(ReleaseStatus::AwaitingHumanStep {
+                    target: "wheel".parse().expect("a target name"),
+                    action: "cut a release on PyPI".to_owned(),
+                    since: "2026-08-24T00:00:00.000Z".to_owned(),
+                }),
+                "awaiting-human-step",
+            ),
+            (
+                Ok(ReleaseStatus::NotAnswered {
+                    reason: "the probe timed out".to_owned(),
+                }),
+                "not-answered",
+            ),
+            (Ok(ReleaseStatus::NotLanded), "not-landed"),
+            // A question that could not be *put* at all — the repository
+            // declares no target answering to the name, or names no default.
+            // Not an answer that the release has not happened.
+            (
+                Err(onevcs::Error::Invalid {
+                    reason: "the repository declares no release targets".to_owned(),
+                }),
+                "not-answered",
+            ),
+        ];
+        for (status, expected) in cases {
+            assert_eq!(
+                Answer::of(&status).as_str(),
+                expected,
+                "{status:?} was read as another answer"
+            );
+        }
+        // Exactly one of them releases a hold, and it is the one that names a
+        // version.
+        assert_eq!(
+            Answer::Released {
+                version: "0.2.0".to_owned()
+            }
+            .version(),
+            Some("0.2.0")
+        );
+        for answer in [
+            Answer::NotReleased,
+            Answer::AwaitingHumanStep,
+            Answer::NotAnswered,
+            Answer::NotLanded,
+        ] {
+            assert_eq!(answer.version(), None, "{answer:?} released a hold");
+        }
+    }
+
+    /// The two rungs a plan and this crate own: the node's own field, and the
+    /// floor beneath every rung.
+    ///
+    /// The two in between are `onevcs`'s, and a node held against them is
+    /// `tests/e2e/adoption.rs`'s
+    /// `the_adoption_mode_resolves_through_exactly_four_rungs`, which drives all
+    /// four against a real host — a rung is not a value anything reports, so what
+    /// it decides is whether the node is scheduled.
+    #[test]
+    fn the_node_rung_wins_outright_and_a_node_with_no_repository_falls_to_the_floor() {
+        let stated = Node {
+            id: "stated".to_owned(),
+            adoption: Some(Adoption::Published),
+            ..Node::default()
+        };
+        assert_eq!(adoption_of(&stated), Adoption::Published);
+        // No repository, so no repository rung — and no way to reach the global
+        // one without naming one, which is the floor.
+        assert_eq!(adoption_of(&Node::default()), Adoption::Fast);
+        // A repository the sibling cannot answer for is a question that was not
+        // put, which is the floor too rather than a node held for ever.
+        let unknown = Node {
+            id: "unknown".to_owned(),
+            repo: Some("no-such-repository-on-this-host".to_owned()),
+            ..Node::default()
+        };
+        assert_eq!(adoption_of(&unknown), Adoption::Fast);
+    }
+
+    /// A cell the run cannot name is **empty**, and the row is still there.
+    #[test]
+    fn a_dependency_the_run_cannot_fully_name_is_rendered_with_the_cell_empty() {
+        let named = dependency(Some("crate"), Some(ReleaseStyle::Automated)).row();
+        assert_eq!(named.repository, "github.com/owner/engine");
+        assert_eq!(named.branch, "onevcs/s-1");
+        assert_eq!(named.commit, "9f3c1ab");
+        assert_eq!(named.release_target, "crate");
+
+        // A repository declaring targets but no default, asked for none: the
+        // sibling names no target, so the cell is empty and the row stands.
+        let mut unnamed = dependency(None, None);
+        unnamed.branch = None;
+        unnamed.commit = None;
+        let row = unnamed.row();
+        assert_eq!(row.dependency, "engine");
+        assert_eq!(row.repository, "github.com/owner/engine");
+        assert!(row.branch.is_empty() && row.commit.is_empty() && row.release_target.is_empty());
+    }
+
+    /// The branch is what the sibling is asked about, and the commit is the
+    /// fallback — see [`Dependency::reference`].
+    #[test]
+    fn the_reference_the_sibling_is_asked_about_is_the_branch() {
+        assert_eq!(
+            dependency(Some("crate"), None).reference(),
+            Some("onevcs/s-1")
+        );
+        let mut branchless = dependency(Some("crate"), None);
+        branchless.branch = None;
+        assert_eq!(branchless.reference(), Some("9f3c1ab"));
+        branchless.commit = None;
+        assert_eq!(branchless.reference(), None);
+    }
+
+    /// The note reports observed state and adds no bar, and round-trips through
+    /// the payload it is journalled as.
+    #[test]
+    fn the_arrival_note_names_the_versions_and_states_no_criterion() {
+        let released = vec![Released {
+            identity: "github.com/nickderobertis/onevcs".to_owned(),
+            target: "crate".to_owned(),
+            version: "0.13.0".to_owned(),
+        }];
+        let note = arrival_note(&released);
+        assert_eq!(
+            note,
+            "The releases this node was waiting on have arrived:\n\n\
+             - github.com/nickderobertis/onevcs — crate 0.13.0\n\n\
+             Move from the git pin to that released version."
+        );
+        assert!(!note.to_lowercase().contains("acceptance criteria"));
+        assert!(!note.to_lowercase().contains("must"));
+
+        let payload = json!(released.iter().map(Released::payload).collect::<Vec<_>>());
+        assert_eq!(
+            arrival_note(&Released::of_payload(&payload)),
+            note,
+            "a note replayed from the record is not the note that was sent"
+        );
+    }
+
+    /// The surface a held node raises names the **style** of each release it
+    /// awaits, and a human-step wait carries the action a person needs.
+    ///
+    /// Read off the surface's own text, because that is the promise: a reader
+    /// tells the two waits apart without opening a configuration file.
+    #[test]
+    fn a_wait_on_a_machine_and_a_wait_on_a_person_read_differently() {
+        let mut watch = Watch::of_run(&RunPaths::under(std::path::Path::new("/nowhere"), "demo"));
+        watch.dependencies.insert(
+            "auto".to_owned(),
+            vec![dependency(Some("crate"), Some(ReleaseStyle::Automated))],
+        );
+        watch.dependencies.insert(
+            "person".to_owned(),
+            vec![dependency(Some("wheel"), Some(ReleaseStyle::HumanStep))],
+        );
+        watch.answers.insert(
+            ("auto".to_owned(), "engine".to_owned()),
+            Answer::NotReleased,
+        );
+        watch.answers.insert(
+            ("person".to_owned(), "engine".to_owned()),
+            Answer::AwaitingHumanStep,
+        );
+
+        let automated = watch.wait_surface("auto").message;
+        assert!(
+            automated.contains("automated release") && !automated.contains("human-step"),
+            "{automated}"
+        );
+        assert!(automated.contains("last answer: not-released"), "{automated}");
+        let person = watch.wait_surface("person").message;
+        assert!(
+            person.contains("human-step release — a person has to: cut a release on PyPI"),
+            "{person}"
+        );
+        assert!(
+            person.contains("last answer: awaiting-human-step"),
+            "a wait on a person read as a probe that failed: {person}"
+        );
+        // Neither is a decision point: the hold is the scheduler's.
+        for surface in [watch.wait_surface("auto"), watch.wait_surface("person")] {
+            assert!(!surface.blocking, "a release wait held a subtree twice");
+            assert_eq!(surface.kind, WAIT_SURFACE_KIND);
+        }
+
+        // The payload carries the same distinction, so the surface is not the
+        // only place it exists.
+        let entries = watch.awaiting("person");
+        assert_eq!(entries[0]["style"], json!("human-step"));
+        assert_eq!(entries[0]["last_answer"], json!("awaiting-human-step"));
+        assert_eq!(entries[0]["action"], json!("cut a release on PyPI"));
+        assert!(watch.awaiting("auto")[0].get("action").is_none());
+    }
+
+    /// Only an answer of released lets a `published` node start, and a node the
+    /// run cannot name a dependency for is not held at all.
+    #[test]
+    fn nothing_but_released_releases_a_hold() {
+        let published = Node {
+            id: "held".to_owned(),
+            adoption: Some(Adoption::Published),
+            ..Node::default()
+        };
+        let mut watch = Watch::of_run(&RunPaths::under(std::path::Path::new("/nowhere"), "demo"));
+        watch.dependencies.insert(
+            "held".to_owned(),
+            vec![dependency(Some("crate"), Some(ReleaseStyle::Automated))],
+        );
+        let watching = vec![published.clone()];
+        // No answer at all holds it, and so does every answer but one.
+        assert!(watch.held(&watching).contains("held"));
+        for answer in [
+            Answer::NotReleased,
+            Answer::AwaitingHumanStep,
+            Answer::NotAnswered,
+            Answer::NotLanded,
+        ] {
+            watch
+                .answers
+                .insert(("held".to_owned(), "engine".to_owned()), answer.clone());
+            assert!(
+                watch.held(&watching).contains("held"),
+                "{answer:?} released the hold"
+            );
+        }
+        watch.answers.insert(
+            ("held".to_owned(), "engine".to_owned()),
+            Answer::Released {
+                version: "0.2.0".to_owned(),
+            },
+        );
+        assert!(watch.held(&watching).is_empty());
+
+        // A node with nothing outside its repository is never held, whatever it
+        // declares — there is no release for it to be waiting on.
+        watch.dependencies.insert("held".to_owned(), Vec::new());
+        watch.answers.clear();
+        assert!(watch.held(&watching).is_empty());
+        // Nor is a `fast` node, ever.
+        let fast = Node {
+            adoption: Some(Adoption::Fast),
+            ..published
+        };
+        watch.dependencies.insert(
+            "held".to_owned(),
+            vec![dependency(Some("crate"), Some(ReleaseStyle::Automated))],
+        );
+        assert!(watch.held(&[fast]).is_empty());
+    }
+
+    /// The two bounds fall back rather than to zero or to no bound at all.
+    #[test]
+    fn an_unusable_bound_falls_back_to_the_shipped_one() {
+        for (key, read) in [
+            (POLL_ENV, poll_seconds as fn() -> u64),
+            (SURFACE_ENV, surface_every_seconds as fn() -> u64),
+        ] {
+            let shipped = read();
+            for unusable in ["0", "", "soon", "-1"] {
+                std::env::set_var(key, unusable);
+                assert_eq!(read(), shipped, "{key}={unusable:?}");
+            }
+            std::env::set_var(key, "7");
+            assert_eq!(read(), 7);
+            std::env::remove_var(key);
+        }
+        assert_eq!(poll_seconds(), DEFAULT_POLL_SECONDS);
+        assert_eq!(surface_every_seconds(), DEFAULT_SURFACE_SECONDS);
+    }
+}
