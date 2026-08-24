@@ -95,8 +95,7 @@ pub fn execute(
     let mut node = std::borrow::Cow::Borrowed(node);
     let mut attempt = std::num::NonZeroU32::MIN;
     loop {
-        let preserved = match attempt_once(executor, paths, launch, &node, references, cancel, tx)
-        {
+        let preserved = match attempt_once(executor, paths, launch, &node, references, cancel, tx) {
             Attempt::Settled(settlement) => return settlement,
             Attempt::Preserving(preserved) => preserved,
         };

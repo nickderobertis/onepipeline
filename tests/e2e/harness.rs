@@ -588,8 +588,11 @@ impl World {
             &self.root,
             &["clone", &origin.to_string_lossy(), alias],
         );
-        std::fs::write(checkout.join("README.md"), format!("the {alias} repository\n"))
-            .expect("the seed file is written");
+        std::fs::write(
+            checkout.join("README.md"),
+            format!("the {alias} repository\n"),
+        )
+        .expect("the seed file is written");
         git(self, &checkout, &["add", "-A"]);
         git(
             self,
@@ -621,8 +624,11 @@ impl World {
         let answer = self.root.join(format!("{name}.version"));
         let (script, body) = probe_script();
         let path = repository.checkout.join(script);
-        std::fs::write(&path, body.replace("@VERSION_FILE@", &answer.to_string_lossy()))
-            .expect("the probe script is written");
+        std::fs::write(
+            &path,
+            body.replace("@VERSION_FILE@", &answer.to_string_lossy()),
+        )
+        .expect("the probe script is written");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

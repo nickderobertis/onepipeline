@@ -81,6 +81,9 @@ pub const WAIT_SURFACE_KIND: &str = "release-wait";
 /// it is waiting on.
 type Key = (String, String);
 
+/// One answer, on its way back from the asker to the reconcile loop.
+type Answered = (Key, Answer);
+
 /// Which rung of the adoption chain one node resolves to.
 ///
 /// Exactly four rungs, in this order and with no fifth:
@@ -287,7 +290,7 @@ struct Asker {
     /// The current question set. Dropping this ends the thread.
     questions: Sender<Vec<Question>>,
     /// What has been answered since the loop last looked.
-    answers: Receiver<(Key, Answer)>,
+    answers: Receiver<Answered>,
 }
 
 /// How long the asker waits for a new question set before re-asking the one it
@@ -303,14 +306,13 @@ impl Asker {
     /// Start asking, pacing automated questions at `poll`.
     fn start(poll: Duration) -> Self {
         let (questions, asked): (Sender<Vec<Question>>, Receiver<Vec<Question>>) = mpsc::channel();
-        let (answered, answers): (Sender<(Key, Answer)>, Receiver<(Key, Answer)>) =
-            mpsc::channel();
+        let (answered, answers): (Sender<Answered>, Receiver<Answered>) = mpsc::channel();
         // Detached: it holds no run state, writes nothing, and ends when the
         // reconcile loop drops its end of `questions`.
         std::thread::Builder::new()
             .name("release-asker".to_owned())
             .spawn(move || ask_until_dropped(&asked, &answered, poll))
-            .map(|handle| drop(handle))
+            .map(drop)
             .unwrap_or_else(|error| {
                 // A thread this host would not start is reported and nothing
                 // more: every answer then stays unarrived, which holds a
@@ -330,17 +332,13 @@ impl Asker {
     }
 
     /// Everything answered since the last look. Never blocks.
-    fn answered(&self) -> Vec<(Key, Answer)> {
+    fn answered(&self) -> Vec<Answered> {
         self.answers.try_iter().collect()
     }
 }
 
 /// The asker's own loop.
-fn ask_until_dropped(
-    asked: &Receiver<Vec<Question>>,
-    answered: &Sender<(Key, Answer)>,
-    poll: Duration,
-) {
+fn ask_until_dropped(asked: &Receiver<Vec<Question>>, answered: &Sender<Answered>, poll: Duration) {
     let mut questions: Vec<Question> = Vec::new();
     let mut probed: Option<Instant> = None;
     loop {
@@ -551,7 +549,10 @@ impl Watch {
                         ("node", json!(node.id)),
                         ("dep", json!(dependency.dep)),
                         ("identity", json!(dependency.identity)),
-                        ("target", json!(dependency.target.as_ref().map(ToString::to_string))),
+                        (
+                            "target",
+                            json!(dependency.target.as_ref().map(ToString::to_string)),
+                        ),
                         ("style", json!(dependency.style.map(|style| style.as_str()))),
                         ("version", json!(version)),
                     ]),
@@ -613,7 +614,10 @@ impl Watch {
                 if dependency.style == Some(ReleaseStyle::HumanStep) {
                     entry.insert("action".to_owned(), json!(dependency.action));
                 }
-                entry.insert("since".to_owned(), json!(crate::sys::rfc3339_from_millis(since)));
+                entry.insert(
+                    "since".to_owned(),
+                    json!(crate::sys::rfc3339_from_millis(since)),
+                );
                 entry.insert(
                     "waited_seconds".to_owned(),
                     json!(now.saturating_sub(since) / 1_000),
@@ -639,7 +643,12 @@ impl Watch {
     fn wait_surface(&self, node: &str) -> Surface {
         let now = crate::sys::now_millis();
         let mut lines: Vec<String> = Vec::new();
-        for dependency in self.dependencies.get(node).map(Vec::as_slice).unwrap_or(&[]) {
+        for dependency in self
+            .dependencies
+            .get(node)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+        {
             let key = (node.to_owned(), dependency.dep.clone());
             if self.answers.get(&key).and_then(Answer::version).is_some() {
                 continue;
@@ -1207,7 +1216,10 @@ mod tests {
             automated.contains("automated release") && !automated.contains("human-step"),
             "{automated}"
         );
-        assert!(automated.contains("last answer: not-released"), "{automated}");
+        assert!(
+            automated.contains("last answer: not-released"),
+            "{automated}"
+        );
         let person = watch.wait_surface("person").message;
         assert!(
             person.contains("human-step release — a person has to: cut a release on PyPI"),

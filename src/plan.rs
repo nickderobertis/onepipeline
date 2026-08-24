@@ -860,7 +860,10 @@ mod tests {
             rendered.find(PLANNER_CONTEXT_HEADING) < rendered.find(CROSS_REPO_REFERENCES_HEADING),
             "{rendered}"
         );
-        assert!(rendered.contains("adds no acceptance criteria"), "{rendered}");
+        assert!(
+            rendered.contains("adds no acceptance criteria"),
+            "{rendered}"
+        );
         // And every step of one workstream is handed the same block.
         let step = Step {
             id: "implement".into(),

@@ -1414,6 +1414,24 @@ means something new. `release-wait`, `release-arrived` and `release-adopted`
 arrive with a **minor** version bump, cut by `release-plz` from the `feat` commit
 that introduces them, exactly as entry 39's `SurfaceKind` addition did.
 
+**Two rules the journeys settled, and both are load-bearing.**
+
+*A repository that declares **no release targets** releases nothing*, so a
+dependency landing there earns no row and no hold whatever the consuming node's
+adoption mode says. That is every repository on a host that has configured none —
+which is every host there was before `onevcs` had a release-targets document at
+all — and it is what makes "a plan naming neither field produces exactly the run
+it produces today" exact rather than nearly so. The alternative reading, holding a
+`published` node for ever against a repository nobody has configured, is a wait no
+answer can end.
+
+*The reference `onevcs` resolves landed work by is the **branch***. That library
+knows a change request's URL, a session token, a branch a registered checkout or
+run clone holds, and a commit one of *those branches* carries — and a landing
+commit sitting on the base alone is none of them. So the branch is what is asked
+about and the landing commit is what the reference block *shows*, which is the
+cell a worker actually wants.
+
 **Two things this crate could not compile as the workstream described them.**
 
 *The global adoption rung is not reachable for a node with no `repo`.* The chain
@@ -1427,6 +1445,15 @@ what the global rung itself answers on every host that has not set
 `onevcs`: publish the global rung on its own** — a `global_adoption()`, or a
 loader for the release-targets document — and this crate reads rung three where
 it now reads rung four.
+
+*A deferred arrival note is owed to the next dispatch the engine starts, which
+within one run is limited.* Where the running turn has no controllable lever the
+note is recorded `delivery: next` and folded back onto the node exactly as a
+planner's own deferred `context` note is — same mechanism, same rendering, same
+consumption by the dispatch that takes it. What is limited is not this addition
+but the mechanism it reuses: a node that has already settled is not re-derived
+ready by any user-facing verb, so its owed note waits for whatever does dispatch
+it next. That is the `context` op's own reachability and is not changed here.
 
 *Only one of the sibling's three release kinds can reach this run's store.*
 `release-probed` is emitted on the **session's** own stream when a publication

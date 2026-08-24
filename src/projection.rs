@@ -727,7 +727,8 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
             let Some(versions) = payload.get("versions") else {
                 return;
             };
-            let note = crate::release::arrival_note(&crate::release::Released::of_payload(versions));
+            let note =
+                crate::release::arrival_note(&crate::release::Released::of_payload(versions));
             state.pending_context.insert(node.clone(), note.clone());
             if let Some(waiting) = state.graph.get_mut(node) {
                 waiting.context = Some(note);
@@ -1606,6 +1607,91 @@ mod tests {
         ]);
         assert!(state.pending_context.is_empty());
         assert_eq!(state.graph.get("build").expect("build").context, None);
+    }
+
+    /// An arrival note the running turn could not take is owed to the node's next
+    /// dispatch, and is reconstructed from the versions the record names.
+    ///
+    /// The record is the only durable thing: nothing submitted this note, so
+    /// there is no `edit-committed` and no author to attribute it to. What makes
+    /// a replayed note the note that was sent is that both come out of
+    /// `release::arrival_note`.
+    #[test]
+    fn an_arrival_note_that_did_not_reach_a_running_turn_is_owed_to_the_next_dispatch() {
+        let plan = plan_of_nodes(vec![agent("build", &[])]);
+        let started = pipeline(
+            journal::PipelineKind::RunStarted,
+            0,
+            None,
+            &[("plan", json!(plan))],
+        );
+        let versions = json!([{
+            "identity": "github.com/nickderobertis/onevcs",
+            "target": "crate",
+            "version": "0.13.0"
+        }]);
+        let adopted = |seq: u64, delivery: &str| {
+            pipeline(
+                journal::PipelineKind::ReleaseAdopted,
+                seq,
+                Some("build"),
+                &[
+                    ("node", json!("build")),
+                    ("delivery", json!(delivery)),
+                    ("versions", versions.clone()),
+                ],
+            )
+        };
+
+        let owed = fold(&[started.clone(), adopted(1, "next")]);
+        let note = owed
+            .pending_context
+            .get("build")
+            .expect("the note is owed to the next dispatch");
+        assert!(
+            note.contains("github.com/nickderobertis/onevcs — crate 0.13.0"),
+            "{note}"
+        );
+        assert_eq!(
+            owed.graph.get("build").expect("build").context.as_deref(),
+            Some(note.as_str()),
+            "the note did not reach the node it is for"
+        );
+
+        // A note the running turn took is not also owed to the next dispatch —
+        // the same rule a planner's own live note is folded under.
+        let taken = fold(&[started.clone(), adopted(1, "live")]);
+        assert!(taken.pending_context.is_empty());
+        assert_eq!(taken.graph.get("build").expect("build").context, None);
+
+        // And the dispatch that takes it consumes it.
+        let consumed = fold(&[
+            started,
+            adopted(1, "next"),
+            pipeline(journal::PipelineKind::NodeDispatched, 2, Some("build"), &[]),
+        ]);
+        assert!(!consumed.pending_context.contains_key("build"));
+
+        // The two reports beside it change nothing about the graph.
+        for kind in [
+            journal::PipelineKind::ReleaseWait,
+            journal::PipelineKind::ReleaseArrived,
+        ] {
+            let reported = fold(&[
+                pipeline(
+                    journal::PipelineKind::RunStarted,
+                    0,
+                    None,
+                    &[("plan", json!(plan_of_nodes(vec![agent("build", &[])])))],
+                ),
+                pipeline(kind, 1, Some("build"), &[("node", json!("build"))]),
+            ]);
+            assert!(
+                reported.pending_context.is_empty(),
+                "{kind} changed the graph"
+            );
+            assert_eq!(reported.graph.get("build").expect("build").context, None);
+        }
     }
 
     /// A driver that takes a run over ends the dispatches the one before it left

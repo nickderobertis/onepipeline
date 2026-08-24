@@ -120,6 +120,11 @@ fn releases_at(answer: &Path, version: &str) {
 /// reported an activity yet. The launch's own argv is what the dispatch was
 /// composed with, which is exactly the question.
 fn task_of(world: &World, node: &str) -> String {
+    tasks_of(world, node).pop().unwrap_or_default()
+}
+
+/// The task prose every one of a node's dispatches was handed, in order.
+fn tasks_of(world: &World, node: &str) -> Vec<String> {
     let mine = format!("## What\nShip {node}.");
     world
         .invocations()
@@ -130,8 +135,8 @@ fn task_of(world: &World, node: &str) -> String {
             let at = args.iter().position(|arg| arg == "--task")?;
             args.get(at + 1)?.as_str().map(str::to_owned)
         })
-        .find(|task| task.starts_with(&mine))
-        .unwrap_or_default()
+        .filter(|task| task.starts_with(&mine))
+        .collect()
 }
 
 /// Whether a node has been dispatched at all.
@@ -147,8 +152,7 @@ fn awaiting(world: &World, run: &str, node: &str) -> Vec<Value> {
     world
         .events_of(run, "release-wait")
         .into_iter()
-        .filter(|event| event["labels"]["node"] == node)
-        .next_back()
+        .rfind(|event| event["labels"]["node"] == node)
         .and_then(|event| event["payload"]["awaiting"].as_array().cloned())
         .unwrap_or_default()
 }
@@ -171,10 +175,15 @@ fn wait_surface(world: &World, run: &str, node: &str) -> String {
     world
         .events_of(run, "planner-surface-queued")
         .into_iter()
-        .filter(|event| event["payload"]["kind"] == "release-wait")
-        .filter(|event| event["labels"]["node"] == node)
-        .next_back()
-        .map(|event| event["payload"]["message"].as_str().unwrap_or_default().to_owned())
+        .rfind(|event| {
+            event["payload"]["kind"] == "release-wait" && event["labels"]["node"] == node
+        })
+        .map(|event| {
+            event["payload"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        })
         .unwrap_or_default()
 }
 
@@ -351,6 +360,8 @@ fn a_fast_node_pins_against_git_and_is_told_when_the_release_arrives() {
     // The lever really was pulled, and the sibling's own record of it reached the
     // merged store stamped with the node it was about.
     let interrupted = world.events_of(&run, "turn-interrupted");
+    eprintln!("DIAG kinds={:?}", world.kinds(&run));
+    eprintln!("DIAG invocations={:?}", world.invocations().iter().filter(|c| c["tool"]=="oneagentgraph").map(|c| c["args"][0].clone()).collect::<Vec<_>>());
     assert_eq!(interrupted.len(), 1, "{interrupted:?}");
     assert_eq!(interrupted[0]["payload"]["delivered"], json!(true));
     assert_eq!(interrupted[0]["labels"]["node"], json!("consumer"));
@@ -393,6 +404,81 @@ fn redirected(world: &World, run: &str, node: &str) -> String {
                 .to_owned()
         })
         .unwrap_or_default()
+}
+
+/// A fast-adoption node whose running turn has no lever is **not** told the note
+/// reached one: the lever is really pulled, it really answers that there is no
+/// turn, and the note is owed to the node's next dispatch instead.
+///
+/// The other half of `auto`, and the compatibility half: a harness with no
+/// out-of-band turn control is what every `context` edit written before delivery
+/// had modes ran under, and the note must be owed rather than lost. What a
+/// deferred note then does — ride the next dispatch and be consumed by it — is
+/// the `context` mechanism's own, driven end to end in `context_delivery.rs` and
+/// folded from this record in `projection.rs`.
+#[test]
+fn an_arrival_note_with_no_live_turn_to_reach_is_owed_to_the_next_dispatch() {
+    let world = watching("adoption-deferred");
+    world.write_graphs();
+    let (engine_repo, _consumer) = two_repositories(&world);
+    let (script, answer) = world.probe_in(&engine_repo, ENGINE);
+    world.releases(&automated(&script));
+    releases_at(&answer, "0.1.0");
+
+    // A member on a harness with no out-of-band turn control: it runs, and there
+    // is nothing to redirect.
+    world.script("consumer.no-lever", "");
+    world.script("consumer.turn-open", "");
+    world.script("consumer.wait", "hold");
+    let run = start(
+        &world,
+        "adoption-deferred",
+        vec![engine(), consumer(Some("fast"))],
+    );
+
+    // After the engine has landed — so the baseline its publication captured is
+    // the version that was out then rather than the one about to be — and after
+    // the consumer's turn has opened, so what the note meets is a turn that
+    // exists and has no lever rather than a dispatch that has not spoken yet.
+    world.until("the consumer's turn to open", |world| {
+        world
+            .events_of(&run, "turn-started")
+            .iter()
+            .any(|event| event["labels"]["node"] == "consumer")
+    });
+    releases_at(&answer, "0.2.0");
+    world.until("the release to be adopted", |world| {
+        !world.events_of(&run, "release-adopted").is_empty()
+    });
+
+    let adopted = world.events_of(&run, "release-adopted");
+    assert_eq!(adopted.len(), 1, "the note was delivered more than once");
+    assert_eq!(
+        adopted[0]["payload"]["delivery"],
+        json!("next"),
+        "a note with no turn to reach was recorded as having reached one"
+    );
+    // The lever was pulled and answered, which is what tells this apart from a
+    // note nobody tried to deliver.
+    let interrupted = world.events_of(&run, "turn-interrupted");
+    assert_eq!(interrupted.len(), 1, "{interrupted:?}");
+    assert_eq!(interrupted[0]["payload"]["delivered"], json!(false));
+    assert_eq!(interrupted[0]["labels"]["node"], json!("consumer"));
+
+    world.release("consumer.go");
+    world.until("the run to settle", |world| {
+        world.events_of(&run, "node-settled").len() == 2
+    });
+    // The turn that was running never saw it, and its own prose could not have
+    // carried it — the task was rendered before the release existed.
+    let dispatched = tasks_of(&world, "consumer");
+    assert_eq!(dispatched.len(), 1, "{dispatched:?}");
+    assert!(
+        !dispatched[0].contains("0.2.0"),
+        "a version that did not exist at launch reached the dispatch that launched:\n{}",
+        dispatched[0]
+    );
+    assert!(redirected(&world, &run, "consumer").is_empty());
 }
 
 /// A fast-adoption node whose dependency lands in its **own** repository gets no
@@ -534,7 +620,8 @@ fn a_published_node_is_held_until_the_release_answers_and_by_nothing_else() {
     let settled = world.events_of(&run, "node-settled");
     for event in &settled {
         assert_ne!(
-            event["payload"]["status"], json!("failed"),
+            event["payload"]["status"],
+            json!("failed"),
             "a node the wait held was failed: {event}"
         );
     }
@@ -683,7 +770,11 @@ fn the_two_release_styles_take_one_scheduling_path_and_are_reported_apart() {
     let probed = world.events_of(&run, "release-probed");
     assert!(!probed.is_empty(), "no probe was relayed at all");
     for event in &probed {
-        assert_eq!(event["source"], json!("vcs"), "a relayed kind was rewritten");
+        assert_eq!(
+            event["source"],
+            json!("vcs"),
+            "a relayed kind was rewritten"
+        );
         assert_eq!(
             event["payload"]["target"],
             json!("crate"),
@@ -722,7 +813,8 @@ fn the_two_release_styles_take_one_scheduling_path_and_are_reported_apart() {
     });
     for event in world.events_of(&run, "node-settled") {
         assert_ne!(
-            event["payload"]["status"], json!("failed"),
+            event["payload"]["status"],
+            json!("failed"),
             "a node one of the two waits held was failed: {event}"
         );
     }
