@@ -155,9 +155,21 @@ offline-tiers := "not binary(smoke)"
 
 # 95% line coverage is the gate; lower it only with a documented reason in
 # AGENTS.md.
+#
+# `--failure-mode all` is load-bearing rather than slack. This suite kills
+# instrumented processes on purpose — the cancellation journeys tear down the
+# `onepipeline` binary and the sibling doubles it started — and a child killed
+# while the profiling runtime is still flushing leaves a truncated `.profraw` in
+# the set `llvm-profdata` merges from. Its default, `any`, aborts the merge of
+# every other profile in the run over that one file, and the recipe then fails
+# saying tests did: 809 of 809 green, `no profile can be merged`, and the whole
+# gate red. `all` fails only when *every* profile is unmergeable, so a merge that
+# is genuinely broken still stops the gate and `--fail-under-lines` still catches
+# any real coverage loss. `tests/coverage.rs` plants that artifact on every run,
+# so taking the flag back out fails the recipe rather than passing quietly.
 # The crate's offline suite (unit + contract + e2e) with coverage enforced.
 _crate-test:
-    @cargo llvm-cov nextest --locked --fail-under-lines 95 \
+    @cargo llvm-cov nextest --locked --failure-mode all --fail-under-lines 95 \
       -E '{{offline-tiers}}' --final-status-level fail \
       || { echo "tests failed, or coverage fell below 95% — cover the lines the table above counts as missed" >&2; exit 1; }
 
