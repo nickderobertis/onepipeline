@@ -583,9 +583,34 @@ impl CrossRepoReference {
     fn row(&self) -> String {
         format!(
             "| {} | {} | {} | {} | {} |",
-            self.dependency, self.repository, self.branch, self.commit, self.release_target
+            cell(&self.dependency),
+            cell(&self.repository),
+            cell(&self.branch),
+            cell(&self.commit),
+            cell(&self.release_target),
         )
     }
+}
+
+/// One cell of the reference table, held to what a table row may carry.
+///
+/// Every cell's text came from somewhere else: a repository identity and a
+/// release target out of this host's own configuration, a branch and a commit out
+/// of git, and either of the last two out of *another run's* ledger. A `|` in any
+/// of them ends the cell early and a newline ends the row, so what a worker reads
+/// would be a row about a dependency nobody has — which is exactly the misreading
+/// the block exists to prevent. Escaped rather than refused, because the point of
+/// a row is that the dependency is visible.
+fn cell(value: &str) -> String {
+    let mut rendered = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '|' => rendered.push_str("\\|"),
+            _ if character.is_control() || character.is_whitespace() => rendered.push(' '),
+            _ => rendered.push(character),
+        }
+    }
+    rendered
 }
 
 #[cfg(test)]
@@ -847,6 +872,34 @@ mod tests {
             node.rendered_task_with(&[]),
             node.rendered_task(),
             "a node with no out-of-repository dependency did not render what it always rendered"
+        );
+
+        // A cell whose text would end the cell or the row is escaped, so the
+        // table stays a table and the row stays about the dependency it names.
+        let forged = CrossRepoReference {
+            dependency: "dep".into(),
+            repository: "github.com/owner/a|b".into(),
+            branch: "topic\n| forged | row | here | now |".into(),
+            ..CrossRepoReference::default()
+        };
+        let rendered = node.rendered_task_with(&[forged]);
+        let rows: Vec<&str> = rendered
+            .lines()
+            .filter(|line| line.starts_with("| dep |"))
+            .collect();
+        assert_eq!(rows.len(), 1, "a cell forged a second row:\n{rendered}");
+        assert_eq!(
+            rows[0],
+            "| dep | github.com/owner/a\\|b | topic \\| forged \\| row \\| here \\| now \\| |  |  |",
+            "a cell was not escaped"
+        );
+        assert_eq!(
+            rendered
+                .lines()
+                .filter(|line| line.starts_with('|'))
+                .count(),
+            3,
+            "the table is not a header, a separator, and one row:\n{rendered}"
         );
 
         // It sits under the planner note rather than beside it: one document,

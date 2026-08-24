@@ -181,6 +181,68 @@ fn a_target_this_host_cannot_name_holds_the_node_rather_than_releasing_it() {
     world.run(&["stop", &run]).exited(0);
 }
 
+/// A probe that **answered unusably** holds the node exactly as one that answered
+/// "not yet" does, and is reported as the different thing it is.
+///
+/// The whole distinction, driven against a real probe: "not answered" never
+/// releases a hold and is never recorded as "not released" anywhere — not in the
+/// scheduler, not in the payload, and not in the surface a person reads.
+#[test]
+fn a_probe_that_could_not_answer_holds_the_node_and_is_never_read_as_not_released() {
+    let world = watching("adoption-unanswered");
+    world.write_graphs();
+    let (engine_repo, _consumer) = two_repositories(&world);
+    let (script, answer) = world.probe_in(&engine_repo, ENGINE);
+    world.releases(&automated(&script));
+    // A version at the landing, so the baseline the publication captures is one
+    // a later answer can be compared against.
+    releases_at(&answer, "0.1.0");
+
+    let run = start(
+        &world,
+        "adoption-unanswered",
+        vec![engine(), consumer(Some("published"))],
+    );
+    world.until("the probe's answer to reach the wait", |world| {
+        answered(world, &run, "consumer") == Some("not-released".to_owned())
+    });
+
+    // Now the probe answers something that is not a version at all. The sibling
+    // cannot say whether it carries the change, so it does not — and neither
+    // does this run.
+    releases_at(&answer, "whatever-the-nightly-was");
+    world.until("the probe's failure to reach the wait", |world| {
+        answered(world, &run, "consumer") == Some("not-answered".to_owned())
+    });
+    assert!(
+        !dispatched(&world, &run, "consumer"),
+        "a probe that could not answer started a node"
+    );
+    let surface = wait_surface(&world, &run, "consumer");
+    assert!(
+        surface.contains("last answer: not-answered"),
+        "the surface reports a probe that could not answer as something else:\n{surface}"
+    );
+    assert!(
+        !surface.contains("last answer: not-released"),
+        "a probe that could not answer was read as a release that has not happened:\n{surface}"
+    );
+
+    // And only a release starts it, which is what says the hold was the hold and
+    // not the probe being broken.
+    releases_at(&answer, "0.2.0");
+    world.until("the release to start the held node", |world| {
+        world.events_of(&run, "node-settled").len() == 2
+    });
+    for event in world.events_of(&run, "node-settled") {
+        assert_ne!(
+            event["payload"]["status"],
+            json!("failed"),
+            "a probe that could not answer failed a node: {event}"
+        );
+    }
+}
+
 /// An unusable poll or surface bound falls back to the shipped one rather than to
 /// zero or to no bound at all, and the run behaves.
 ///

@@ -168,8 +168,16 @@ impl Answer {
     /// release has not happened.
     fn of(status: &onevcs::Result<ReleaseStatus>) -> Self {
         match status {
-            Ok(ReleaseStatus::Released { version, .. }) => Self::Released {
-                version: version.clone(),
+            // A version this crate cannot **render** is one it cannot report: it
+            // is written into a worker's own note, into a surface, and into an
+            // event payload, so one carrying whitespace or a control character
+            // forges a line in each. Answered unusably is the sibling's own
+            // reading of a probe whose output is not one usable line, and it is
+            // this one's of a version that is not one usable word — which holds
+            // the node, exactly as every answer but a release does.
+            Ok(ReleaseStatus::Released { version, .. }) => match renderable(version) {
+                Some(version) => Self::Released { version },
+                None => Self::NotAnswered,
             },
             Ok(ReleaseStatus::NotReleased { .. }) => Self::NotReleased,
             Ok(ReleaseStatus::AwaitingHumanStep { .. }) => Self::AwaitingHumanStep,
@@ -309,6 +317,12 @@ impl Asker {
         let (answered, answers): (Sender<Answered>, Receiver<Answered>) = mpsc::channel();
         // Detached: it holds no run state, writes nothing, and ends when the
         // reconcile loop drops its end of `questions`.
+        // llmlint: ignore-block[changed_behavior_has_e2e] no invocation a user can type
+        // reaches this arm: it is a host that will not start a thread at all, which no
+        // plan, flag, or environment of this crate's decides. What it does when it is
+        // reached is the safe direction of every answer staying unarrived, which is the
+        // hold a published node is under before its first probe answers and is driven end
+        // to end by `tests/e2e/adoption.rs`.
         std::thread::Builder::new()
             .name("release-asker".to_owned())
             .spawn(move || ask_until_dropped(&asked, &answered, poll))
@@ -320,7 +334,7 @@ impl Asker {
                 // a fast node with the git pin it launched under. Neither is a
                 // node failed for a reason that is not about the node.
                 eprintln!("onepipeline: cannot start the release watch: {error}");
-            });
+            }); // llmlint: ignore-end[changed_behavior_has_e2e]
         Self { questions, answers }
     }
 
@@ -898,6 +912,16 @@ impl Watch {
 }
 
 /// What one `deps` entry turned out to be.
+///
+// llmlint: ignore[changed_behavior_has_e2e] [`Unreadable`](Resolution::Unreadable) is not
+// reachable from a run, and the graph is why: this is only ever asked about a node whose
+// dependencies have all settled `done`, and each of the three ways a dependency can be
+// unreadable stops that happening. A dep that is not in the graph is refused by
+// `graph::validate`; a dep whose repository `onevcs` cannot answer for is a node whose own
+// session could not open, so it settles `failed` and its consumer stays blocked; and a
+// cross-DAG dep whose upstream ledger cannot be read is an edge that does not resolve, so
+// its consumer stays blocked too. What the arm does — leave the set unfrozen and ask
+// again next pass — is what keeps a node from launching against a row that is missing.
 enum Resolution {
     /// There is no release to wait for: it lands in this node's own repository,
     /// in none at all, or in one that declares no release targets.
