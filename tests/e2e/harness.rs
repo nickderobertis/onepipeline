@@ -568,6 +568,105 @@ impl World {
         Repository { origin, checkout }
     }
 
+    /// A **second** repository, beside [`repository`](World::repository)'s own.
+    ///
+    /// A journey about a dependency that lands *outside* a node's own repository
+    /// needs two identities to tell apart, and one origin cannot be two. It takes
+    /// no publication policy and installs no hook: the rules file the first
+    /// repository wrote is this **host's**, so it already decides how work
+    /// published from either of them lands. Call it after that one.
+    ///
+    /// The alias is what `onevcs` registers the checkout under and therefore what
+    /// a plan node names as its `repo`.
+    pub fn extra_repository(&self, alias: &str) -> Repository {
+        let origin = self.root.join(format!("{alias}.git"));
+        let checkout = self.root.join(alias);
+        std::fs::create_dir_all(&origin).expect("a scratch directory");
+        git(self, &origin, &["init", "--bare", "--initial-branch=main"]);
+        git(
+            self,
+            &self.root,
+            &["clone", &origin.to_string_lossy(), alias],
+        );
+        std::fs::write(checkout.join("README.md"), format!("the {alias} repository\n"))
+            .expect("the seed file is written");
+        git(self, &checkout, &["add", "-A"]);
+        git(
+            self,
+            &checkout,
+            &["commit", "-m", "chore: seed the repository"],
+        );
+        git(self, &checkout, &["push", "-u", "origin", "main"]);
+        self.register(
+            &checkout,
+            Some(&format!("https://github.com/owner/{alias}.git")),
+        );
+        Repository { origin, checkout }
+    }
+
+    /// Commit a **release probe** into a repository, and say what it answers.
+    ///
+    /// The `script` form of a probe is a file the repository being released
+    /// carries, run as a direct subprocess from the publication checkout on its
+    /// base branch — so it is committed and pushed here rather than dropped in
+    /// the tree. What it prints is whatever [`releases`](World::releases) later
+    /// writes to the returned path, so one committed script answers "nothing is
+    /// released", "0.1.0 is", and "0.2.0 is" as a journey moves through them; an
+    /// absent file is a target with no release, which is an answer.
+    ///
+    /// Returns the script's name relative to the repository root — which is what
+    /// the release-targets document names it by — and the file its answer is
+    /// written to.
+    pub fn probe_in(&self, repository: &Repository, name: &str) -> (String, PathBuf) {
+        let answer = self.root.join(format!("{name}.version"));
+        let (script, body) = probe_script();
+        let path = repository.checkout.join(script);
+        std::fs::write(&path, body.replace("@VERSION_FILE@", &answer.to_string_lossy()))
+            .expect("the probe script is written");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("the probe script is executable");
+        }
+        git(self, &repository.checkout, &["add", "-A"]);
+        git(
+            self,
+            &repository.checkout,
+            &["commit", "-m", "chore: carry a release probe"],
+        );
+        git(self, &repository.checkout, &["push", "origin", "main"]);
+        (script.to_owned(), answer)
+    }
+
+    /// Write this host's release-targets document.
+    ///
+    /// `onevcs` finds it at one conventional path under the state root and
+    /// nowhere else, so this writes it there. A world that never calls this has
+    /// no such file at all, which is a host where every repository has no release
+    /// targets and adopts fast — the behaviour every journey written before
+    /// adoption existed runs under.
+    pub fn releases(&self, document: &str) {
+        let home = self.onevcs_home();
+        std::fs::create_dir_all(&home).expect("the state root is there");
+        std::fs::write(home.join("releases.yml"), document)
+            .expect("the release-targets file is written");
+    }
+
+    /// Run one `onevcs` release verb **in this process**, under this world's
+    /// state root.
+    ///
+    /// The same lock and the same reason as [`register`](World::register): the
+    /// state root is process-global, so two worlds asking at once would otherwise
+    /// read one another's.
+    pub fn on_onevcs<T>(&self, ask: impl FnOnce() -> T) -> T {
+        static ASKING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _held = ASKING.lock().unwrap_or_else(|held| held.into_inner());
+        std::env::set_var("ONEVCS_HOME", self.onevcs_home());
+        std::env::set_var("GIT_CONFIG_GLOBAL", self.gitconfig());
+        ask()
+    }
+
     /// Register a checkout with `onevcs`, **in this process**.
     ///
     /// A library call, because nothing in this repository reaches that sibling by
@@ -2982,6 +3081,22 @@ fn runnable(path: &Path) -> bool {
 #[cfg(not(unix))]
 fn runnable(path: &Path) -> bool {
     path.is_file()
+}
+
+/// The release-probe script for this platform: its file name and its body.
+///
+/// Written with **CRLF** on Windows, and for the reason
+/// [`write_hook_script`] states at length: `cmd.exe` seeks a batch file by byte
+/// offset and the arithmetic assumes two bytes end a line.
+#[cfg(windows)]
+fn probe_script() -> (&'static str, String) {
+    ("probe.bat", include_str!("probe.bat").replace('\n', "\r\n"))
+}
+
+/// The release-probe script for this platform: its file name and its body.
+#[cfg(not(windows))]
+fn probe_script() -> (&'static str, String) {
+    ("probe.sh", include_str!("probe.sh").to_owned())
 }
 
 /// A file shipped in the repository.

@@ -176,11 +176,14 @@ impl Answer {
     }
 }
 
-/// One dependency of a node whose work lands **outside** that node's repository.
+/// One dependency of a node whose work lands **outside** that node's repository,
+/// in a repository that releases something.
 ///
 /// A dependency inside the same repository is not one of these: the lifecycle
 /// already prepares the stacked or merged-stacked branch for it, and nothing
-/// here changes that.
+/// here changes that. Neither is one whose repository declares no release
+/// targets — there is no release to wait for, which is every repository on a host
+/// that has configured none.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Dependency {
     /// The dependency as the plan names it: a node id, or a cross-DAG
@@ -201,13 +204,17 @@ pub(crate) struct Dependency {
 }
 
 impl Dependency {
-    /// What `onevcs` is asked about: the landing commit, or the branch.
+    /// What `onevcs` is asked about.
     ///
-    /// The commit first because it is what a release is measured against — the
-    /// baseline is captured at a landing — and the branch is the answer for work
-    /// whose landing commit this run did not observe.
+    /// The **branch**, because that is the spelling the sibling resolves work by:
+    /// a reference is a change request's URL, a session token, a branch a
+    /// registered checkout or run clone holds, or a commit one of *those branches*
+    /// carries — and a landing commit sitting on the base alone is none of them.
+    /// The sibling resolves the branch to the landing itself, which is what a
+    /// release is measured against; the commit is what the reference block shows a
+    /// worker, and the fallback for work whose branch this run did not record.
     fn reference(&self) -> Option<&str> {
-        self.commit.as_deref().or(self.branch.as_deref())
+        self.branch.as_deref().or(self.commit.as_deref())
     }
 
     /// The row this dependency renders as in a fast-adoption node's task.
@@ -736,7 +743,7 @@ impl Watch {
                 // set unfrozen: it is answered again next pass rather than the
                 // node being launched against a set with a row missing from it.
                 Resolution::Unreadable => return Vec::new(),
-                Resolution::InRepository => {}
+                Resolution::NothingToAwait => {}
                 Resolution::Outside(dependency) => resolved.push(dependency),
             }
         }
@@ -769,7 +776,7 @@ impl Watch {
             else {
                 // The upstream node lands in no repository, so it releases
                 // nothing and there is nothing to pin against.
-                return Resolution::InRepository;
+                return Resolution::NothingToAwait;
             };
             return self.outside(
                 dep,
@@ -784,7 +791,7 @@ impl Watch {
         };
         let Some(repo) = upstream.repo.clone() else {
             // A dependency that lands in no repository releases nothing.
-            return Resolution::InRepository;
+            return Resolution::NothingToAwait;
         };
         let identity = self.repositories.of(&repo).map(|it| it.identity.clone());
         if identity.is_none() {
@@ -793,7 +800,7 @@ impl Watch {
         if identity.as_deref() == mine {
             // The lifecycle already prepares the stacked or merged-stacked
             // branch for this one, exactly as it does today.
-            return Resolution::InRepository;
+            return Resolution::NothingToAwait;
         }
         self.outside(
             dep,
@@ -816,6 +823,16 @@ impl Watch {
         let Some(releases) = self.repositories.of(repo) else {
             return Resolution::Unreadable;
         };
+        // A repository that declares **no release targets releases nothing**, so
+        // there is no release to wait for and nothing to pin against instead of
+        // one. That is every repository on a host that has configured none —
+        // which is every host there was before `onevcs` had a release-targets
+        // document at all — and it is what keeps a plan naming neither new field
+        // producing exactly the run it produced then: no row, no hold, and a
+        // rendered task byte-identical to the one it rendered before.
+        if releases.targets.is_empty() {
+            return Resolution::NothingToAwait;
+        }
         let identity = releases.identity.clone();
         // A repository declaring no target that answers to this name leaves the
         // cell empty rather than the row absent: a worker still needs to see the
@@ -844,8 +861,9 @@ impl Watch {
 
 /// What one `deps` entry turned out to be.
 enum Resolution {
-    /// It lands in this node's own repository, or in none at all.
-    InRepository,
+    /// There is no release to wait for: it lands in this node's own repository,
+    /// in none at all, or in one that declares no release targets.
+    NothingToAwait,
     /// It lands elsewhere, and this is what the run can say about it.
     Outside(Dependency),
     /// The run cannot say yet.
