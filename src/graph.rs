@@ -482,6 +482,19 @@ pub fn validate_node(node: &Node) -> Result<()> {
         validate_title(title).map_err(|why| named(&why))?;
     }
 
+    // `consumes` is keyed by **dependency node id**, so a key that names nothing
+    // this node depends on is a plan whose author expected a target to apply and
+    // will not find out from the run that it did not. Refused here, at the
+    // boundary every plan and every edited graph crosses, rather than silently
+    // dropped where the dependency is resolved.
+    for consumed in node.consumes.keys() {
+        if !node.deps.iter().any(|dep| dep == consumed) {
+            return Err(named(&format!(
+                "`consumes` names '{consumed}', which is not one of this node's deps"
+            )));
+        }
+    }
+
     if node.kind == NodeKind::Human {
         if node.id.contains(STEP_SEPARATOR) {
             return Err(named(

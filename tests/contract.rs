@@ -32,7 +32,8 @@ use onepipeline::filter::{
     EventFilter, Filters, LaunchConfig, Matcher, LAUNCH_CONFIG_SCHEMA_VERSION,
 };
 use onepipeline::plan::{
-    Node, NodeKind, Plan, Resume, Step, PLAN_SCHEMA_VERSION, PLAN_SCHEMA_VERSIONS_READ,
+    Node, NodeKind, Plan, Resume, Step, CROSS_REPO_REFERENCES_HEADING, PLANNER_CONTEXT_HEADING,
+    PLAN_SCHEMA_VERSION, PLAN_SCHEMA_VERSIONS_READ,
 };
 use onepipeline::report::{
     retain, ACCEPTED_REPORT_FILE, MAX_REPORT_BYTES, MEMBER_SETTLED, REPORT_PATH,
@@ -40,7 +41,7 @@ use onepipeline::report::{
 use onepipeline::rules::{ExecutorKind, ExecutorRules, Predicate};
 use onepipeline::views::RunPaths;
 use onevcs::registry::{RepoType, Workflow};
-use onevcs::{MergePolicy, SessionRequest};
+use onevcs::{Adoption, MergePolicy, SessionRequest};
 use serde_json::{json, Value};
 
 /// The approved contract itself.
@@ -1428,6 +1429,69 @@ fn what_this_build_carries_beyond_the_contract_is_what_the_divergence_record_nam
     );
 }
 
+/// The release-adoption surface this build carries **beyond** the contract is
+/// exactly what the divergence record proposes.
+///
+/// The contract is committed as approved and names none of it, so entry 40 is the
+/// only place it is written down — and a divergence nothing gates quietly stops
+/// being true. The entry's own block is the source: what parses here is what a
+/// planner would write in a plan file.
+#[test]
+fn the_release_adoption_surface_is_what_the_divergence_record_names() {
+    let block = divergence_block("40.");
+
+    // The node shape, exactly as the entry writes it.
+    let written = block["node"].clone();
+    let node: Node = serde_json::from_value(written.clone()).expect("entry 40's node parses");
+    assert_eq!(
+        serde_json::to_value(&node).expect("serializes"),
+        written,
+        "entry 40's node does not round-trip as written"
+    );
+    assert_eq!(
+        node.adoption,
+        Some(Adoption::Published),
+        "`adoption` is the node rung of the chain"
+    );
+    assert_eq!(
+        node.consumes
+            .get("engine")
+            .map(std::string::ToString::to_string),
+        Some("crate".to_string()),
+        "`consumes` is keyed by dependency node id"
+    );
+    // At schema 3, and optional: a plan naming neither field is the plan it
+    // always was, and round-trips without either appearing.
+    let plain = json!({"id": "solo", "persona": "engineer", "task": "## What\nx"});
+    let bare: Node = serde_json::from_value(plain.clone()).expect("a node naming neither parses");
+    assert_eq!(bare.adoption, None);
+    assert!(bare.consumes.is_empty());
+    assert_eq!(
+        serde_json::to_value(&bare).expect("serializes"),
+        plain,
+        "a node naming neither field gained one on the way out"
+    );
+    // The event kinds, held against the enum itself and against the contract.
+    let kinds: Vec<String> =
+        serde_json::from_value(block["event_kinds"].clone()).expect("entry 40 names its kinds");
+    assert!(!kinds.is_empty());
+    for kind in &kinds {
+        assert!(
+            PipelineKind::from_wire(&EventKind(kind.clone())).is_some(),
+            "`{kind}` is not a kind this crate emits"
+        );
+    }
+
+    // The heading, which is a published constant so a reader finds the block by
+    // name rather than by matching prose.
+    assert_eq!(
+        block["heading"].as_str(),
+        Some(CROSS_REPO_REFERENCES_HEADING),
+        "entry 40 names a different heading than this crate publishes"
+    );
+    assert_ne!(CROSS_REPO_REFERENCES_HEADING, PLANNER_CONTEXT_HEADING);
+}
+
 #[test]
 fn every_op_deserializes_with_the_fields_the_protocol_requires() {
     let envelopes: Vec<(&str, Value)> = vec![
@@ -1774,19 +1838,27 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
     // undocumented wire; a kind the contract lists and the enum does not carry is
     // a promise nothing keeps. `PIPELINE_KINDS` is what `Journal::emit` accepts,
     // so this is the emitted set and not a second copy of it.
-    assert_eq!(PIPELINE_KINDS.len(), 20, "the closed set changed size");
+    assert_eq!(PIPELINE_KINDS.len(), 23, "the closed set changed size");
     let listed: BTreeSet<String> = backticked()
         .into_iter()
         .filter(|token| {
             token.chars().all(|c| c.is_ascii_lowercase() || c == '-') && token.contains('-')
         })
         .collect();
-    for kind in PIPELINE_KINDS {
-        assert!(
-            listed.contains(kind.as_str()),
-            "docs/contract.md does not list the `{kind}` kind this crate emits"
-        );
-    }
+    // The kinds the contract does not list are exactly the ones the divergence
+    // record proposes, and no others: a kind neither document names fails here.
+    let proposed: BTreeSet<String> =
+        serde_json::from_value(divergence_block("40.")["event_kinds"].clone())
+            .expect("entry 40 names the kinds it adds");
+    let undocumented: BTreeSet<String> = PIPELINE_KINDS
+        .iter()
+        .map(|kind| kind.as_str().to_string())
+        .filter(|kind| !listed.contains(kind))
+        .collect();
+    assert_eq!(
+        undocumented, proposed,
+        "the kinds this crate emits that docs/contract.md does not list are not entry 40's"
+    );
 
     // The wire spelling is the enum's, not a string beside it.
     assert_eq!(PipelineKind::RunStarted.as_str(), "run-started");

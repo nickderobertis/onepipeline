@@ -123,6 +123,18 @@ resolver = "2"
 #   `a_push_whose_merge_path_goes_unread_is_redispatched_with_the_work_on_the_origin`
 #   drives that ending against the real sibling, and `failure_of` matches arm by
 #   arm, so a pin below 0.12.0 does not compile.
+# - `onevcs` 0.13.0 is the release that **tracks releases**: `adoption_for`,
+#   `release_targets`, `release_status`, and `acknowledge_release`, with the
+#   `Adoption` / `ReleaseStyle` / `ReleaseStatus` vocabulary they answer in. A
+#   node's adoption mode is resolved through the first and held against the third
+#   — including `ReleaseStatus::AwaitingHumanStep`, which is a variant no earlier
+#   release has and which `src/release.rs` matches arm by arm — so a pin below
+#   0.13.0 does not compile. It is a **requirement** and not a lock floor for the
+#   reason 0.8.0, 0.11.0 and 0.12.0 were: `^0.12.0` excludes it, because pre-1.0
+#   the minor is the breaking position. `tests/e2e/adoption.rs` drives both
+#   release styles against the real sibling — a real probe for the automated one
+#   and the real `acknowledge` for the human-step one — so a resolution below the
+#   floor fails rather than reads differently.
 #
 # Four floors are carried by `Cargo.lock` rather than by the requirement below,
 # and deliberately.
@@ -187,7 +199,7 @@ resolver = "2"
 # every release's notes record what that release links.
 [workspace.dependencies]
 oneagentgraph = "0.3.0"
-onevcs = "0.12"
+onevcs = "0.13"
 # **Not a third sibling this crate composes** — nothing here launches, calls, or
 # spawns onejudge. It is one vocabulary: the verdicts a two-party member settles
 # on, which `oneagentgraph` copies onto the `member-settled` this crate relays.
@@ -210,12 +222,12 @@ onejudge = "0.5"
 oneharness-core = "0.8"
 # The sibling's own test-support crate, from the **same** revision as the library
 # it implements — here by resolving both from the registry at the releases cut
-# from one commit: `onevcs-testing` v0.4.0 and `onevcs` v0.11.0 are the same tag,
-# and v0.4.0 requires `onevcs = "0.11.0"`, so the build has one copy. Two copies
+# from one commit: `onevcs-testing` v0.4.6 and `onevcs` v0.13.0 are the same tag,
+# and v0.4.6 requires `onevcs = "0.13.0"`, so the build has one copy. Two copies
 # is not a version skew but a compile error: `tests/onevcs_seam.rs` — whose whole
 # job is to drive this crate's seam against those providers — would not build,
 # because the two copies' types are different types.
-onevcs-testing = "0.4.0"
+onevcs-testing = "0.4.6"
 
 [package]
 name = "onepipeline"

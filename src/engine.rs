@@ -520,6 +520,11 @@ fn converge(
     let mut in_flight: BTreeMap<String, Dispatch> = BTreeMap::new();
     let stall_after = Duration::from_secs(stall_after_seconds());
     let mut upstreams = crate::crossdag::Observer::of_run(paths, state);
+    // What each node's dependencies have released, and what this run has already
+    // said about it. It asks `onevcs` on a thread of its own: an automated
+    // target's answer is a probe, and a slow one asked inline would stall the
+    // loop every other node in the run depends on.
+    let mut releases = crate::release::Watch::of_run(paths);
     // What the loop has already said out loud, so each fact is announced once
     // and again only when it becomes true again.
     let mut announced_ready: BTreeSet<String> = BTreeSet::new();
@@ -558,7 +563,25 @@ fn converge(
         // holding dependents back and again when it releases them.
         let decisions = decisions_now(state, &statuses, &channel);
         report_decisions(paths, journal, &decisions, &mut held)?;
-        let paused = paused_by(&decisions);
+        let mut paused = paused_by(&decisions);
+
+        // The releases this pass cares about: every node ready to start, where a
+        // `published` hold applies and where a `fast` node's reference block is
+        // composed, and every node still running, where an arrival note is
+        // delivered.
+        let watching = crate::release::watching(
+            state,
+            &statuses,
+            &in_flight.keys().cloned().collect::<BTreeSet<String>>(),
+        );
+        releases.refresh(paths, state, &watching);
+        let held_for_release = releases.held(&watching);
+        releases.report(paths, journal, &held_for_release, &watching)?;
+        // One hold, beside the decision points rather than in place of them: a
+        // node a person is holding and a node a release is holding are both nodes
+        // this pass does not start, and neither shortens the other's wait.
+        paused.extend(held_for_release);
+        adopt_releases(paths, journal, state, &mut releases, &in_flight)?;
 
         // Start what became actionable *before* asking whether the run is over.
         // A ready human action derives as `waiting`, which is a settled status —
@@ -574,6 +597,7 @@ fn converge(
             &tx,
             &mut in_flight,
             &paused,
+            &releases,
         )?;
 
         if in_flight.is_empty() {
@@ -1138,6 +1162,72 @@ fn not_live(deliver: Deliver, id: &str, reason: &str) -> Result<edits::Delivery>
     }
 }
 
+/// Tell every still-running fast-adoption node whose awaited releases have all
+/// arrived, exactly once.
+///
+/// Delivery is the `context` mechanism a planner's own note uses, at `auto`: into
+/// the node's running turn where it has a controllable one, and onto its next
+/// dispatch where it does not. `release-adopted` is the durable record of both —
+/// which is what makes the note deliver once across a driver's death, and what
+/// the fold reattaches a deferred note from.
+///
+/// The note is not an edit: nobody submitted it and no author owns it, so it is
+/// recorded under its own kind rather than as an `edit-committed` attributed to a
+/// planner who never wrote it.
+fn adopt_releases(
+    paths: &RunPaths,
+    journal: &mut Journal,
+    state: &mut RunState,
+    releases: &mut crate::release::Watch,
+    in_flight: &BTreeMap<String, Dispatch>,
+) -> Result<()> {
+    let running: Vec<String> = in_flight.keys().cloned().collect();
+    let ready = releases.ready_to_adopt(&running);
+    if ready.is_empty() {
+        return Ok(());
+    }
+    for (node, released) in ready {
+        let note = crate::release::arrival_note(&released);
+        // Whatever the lever answered, the node has been told: `auto` falls
+        // through to the next dispatch where there is no controllable turn, and
+        // a delivery that was *attempted and broke* is the one case that leaves
+        // the note owed — so that one is not recorded and is tried again.
+        let delivery = match deliver_note(journal, Deliver::Auto, &node, &note, in_flight) {
+            Ok(delivery) => delivery,
+            Err(error) => {
+                eprintln!(
+                    "onepipeline: the release note for node '{node}' was not delivered: {error}"
+                );
+                continue;
+            }
+        };
+        releases.adopted(&node);
+        journal.emit(
+            journal::PipelineKind::ReleaseAdopted,
+            journal::labels(&paths.run, Some(&node)),
+            journal::payload(&[
+                ("node", json!(node)),
+                (
+                    "delivery",
+                    json!(match delivery {
+                        edits::Delivery::Live => "live",
+                        edits::Delivery::Deferred => "next",
+                    }),
+                ),
+                (
+                    "versions",
+                    json!(released
+                        .iter()
+                        .map(crate::release::Released::payload)
+                        .collect::<Vec<_>>()),
+                ),
+            ]),
+        )?;
+    }
+    *state = projection::fold(&journal::read(&paths.journal()));
+    Ok(())
+}
+
 /// The nodes whose in-flight dispatch a command stops.
 fn cancelled_by(command: &Command) -> Vec<String> {
     match command {
@@ -1172,6 +1262,7 @@ fn start_ready(
     tx: &Sender<Message>,
     in_flight: &mut BTreeMap<String, Dispatch>,
     paused: &BTreeSet<String>,
+    releases: &crate::release::Watch,
 ) -> Result<()> {
     let statuses = state.statuses();
     let concurrency = state.graph.concurrency as usize;
@@ -1226,7 +1317,20 @@ fn start_ready(
             journal::labels(&paths.run, Some(&node.id)),
             journal::payload(&[("persona", json!(node.persona)), ("attempt", json!(1))]),
         )?;
-        spawn(paths, rules, launch, &node, cancel.clone(), tx.clone())?;
+        // What the run can say about every dependency of this node that lands
+        // outside its own repository. Empty for a node that has none — which is
+        // every node a plan naming neither new field carries — and the dispatch
+        // is then composed exactly as it always was.
+        let references = releases.references(&node.id);
+        spawn(
+            paths,
+            rules,
+            launch,
+            &node,
+            &references,
+            cancel.clone(),
+            tx.clone(),
+        )?;
         let now = Instant::now();
         in_flight.insert(
             node.id.clone(),
@@ -1248,11 +1352,17 @@ fn start_ready(
 }
 
 /// Run one node's dispatch on a thread, reporting back to the single writer.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one dispatch's whole context: the run, the rules, the launch, the node, \
+              its cross-repository references, its cancellation, and where to report"
+)]
 fn spawn(
     paths: &RunPaths,
     rules: &ExecutorRules,
     launch: &LaunchRecord,
     node: &Node,
+    references: &[crate::plan::CrossRepoReference],
     cancel: CancellationToken,
     tx: Sender<Message>,
 ) -> Result<()> {
@@ -1276,6 +1386,7 @@ fn spawn(
 
     let run = paths.run.clone();
     let node = node.clone();
+    let references = references.to_vec();
     let paths = paths.clone();
     // Cloned off the record the loop read **strictly**, rather than re-read from
     // disk where a dispatch needs it: `launch.json` is external input, and a
@@ -1291,13 +1402,22 @@ fn spawn(
         .spawn(move || {
             let executor = crate::rules::executor_for(&entry);
             let settlement = if node.repo.is_some() {
-                crate::lifecycle::execute(executor.as_ref(), &paths, &launched, &node, &cancel, &tx)
+                crate::lifecycle::execute(
+                    executor.as_ref(),
+                    &paths,
+                    &launched,
+                    &node,
+                    &references,
+                    &cancel,
+                    &tx,
+                )
             } else {
                 execute_direct(
                     executor.as_ref(),
                     &run,
                     &launched.node_graph,
                     &node,
+                    &references,
                     &cancel,
                     &tx,
                 )
@@ -1314,6 +1434,7 @@ fn execute_direct(
     run: &str,
     default_graph: &str,
     node: &Node,
+    references: &[crate::plan::CrossRepoReference],
     cancel: &CancellationToken,
     tx: &Sender<Message>,
 ) -> Settlement {
@@ -1343,7 +1464,7 @@ fn execute_direct(
     }; // llmlint: ignore-end[changed_behavior_has_e2e]
     let request = || DispatchRequest {
         graph: graph.clone(),
-        task: node.rendered_task(),
+        task: node.rendered_task_with(references),
         labels: dispatch_labels(run, &node.id, None, node.persona.as_deref()),
         controls,
         workspace: WorkspaceSpec::Path(project_dir()),
@@ -2335,6 +2456,7 @@ mod tests {
             "demo",
             "graphs/node-scope.yaml",
             &node,
+            &[],
             &CancellationToken::new(),
             &tx,
         );

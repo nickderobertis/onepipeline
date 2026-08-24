@@ -78,6 +78,16 @@ pub struct RunState {
     pub abandoned: BTreeMap<String, crate::vcs::DispatchSession>,
     /// Where a human reads the change each published node opened.
     pub change_urls: BTreeMap<String, String>,
+    /// The commit each node's change reached its base at, as `onevcs` reported
+    /// it on the session's own stream.
+    ///
+    /// The one thing that names *where* a node's work landed, and therefore the
+    /// only thing a release can be measured against: a baseline is captured at a
+    /// landing, so asking whether a release carries this work means naming that
+    /// landing. Folded from the relayed `merge-completed` rather than from a
+    /// settlement, because the settlement records that a change landed and not
+    /// what it landed as.
+    pub landing_commits: BTreeMap<String, String>,
     /// Whether each published node's change reached its base branch.
     ///
     /// Written only by a settlement that observed one, like
@@ -543,6 +553,7 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
         fold_refusal(state, event);
         fold_invocation(state, event);
         fold_session(state, event);
+        fold_landing_commit(state, event);
         return;
     }
     let payload = &event.payload;
@@ -701,6 +712,30 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
                 }
             }
         }
+        // A note delivered onto the node's *next* dispatch is owed to it, exactly
+        // as a deferred planner note is, and this record is the only thing that
+        // says so: the note itself is reconstructed from the versions the payload
+        // names, by the same function that composed the one that was sent, so a
+        // replayed note is the note the node was told.
+        Some(journal::PipelineKind::ReleaseAdopted) => {
+            let Some(node) = &event.labels.node else {
+                return;
+            };
+            if payload.get("delivery").and_then(Value::as_str) != Some("next") {
+                return;
+            }
+            let Some(versions) = payload.get("versions") else {
+                return;
+            };
+            let note = crate::release::arrival_note(&crate::release::Released::of_payload(versions));
+            state.pending_context.insert(node.clone(), note.clone());
+            if let Some(waiting) = state.graph.get_mut(node) {
+                waiting.context = Some(note);
+            }
+        }
+        // Reports, both: what a run is waiting on and what has arrived are
+        // derived afresh by whatever is driving it, so neither changes the graph.
+        Some(journal::PipelineKind::ReleaseWait | journal::PipelineKind::ReleaseArrived) => {}
         Some(journal::PipelineKind::HumanAttested) => {
             if let Some(reference) = payload.get("ref").and_then(Value::as_str) {
                 state.attestations.insert(reference.to_string());
@@ -886,6 +921,31 @@ fn abandon_the_dispatch_in_flight(state: &mut RunState) {
 /// What the record has to be for this crate to act on it is
 /// [`DispatchSession::read_from`](crate::vcs::DispatchSession::read_from)'s
 /// question, which is where it is answered.
+/// Record where one node's change reached its base.
+///
+/// Off the sibling's own `merge-completed`, which is the one record that carries
+/// the landing commit: `landing_of` reads it out of git on the direct path and
+/// out of the host's answer on the change-request one, and neither reaches this
+/// crate's settlement. A payload without a usable `sha` records nothing, which
+/// leaves the run naming a dependency's branch instead of its landing.
+fn fold_landing_commit(state: &mut RunState, event: &Envelope) {
+    if event.source != Source::Vcs || !crate::vcs::is_merge_completed(&event.kind) {
+        return;
+    }
+    let Some(node) = event.labels.node.as_deref() else {
+        return;
+    };
+    let Some(commit) = event
+        .payload
+        .get("sha")
+        .and_then(Value::as_str)
+        .and_then(crate::vcs::usable_value)
+    else {
+        return;
+    };
+    state.landing_commits.insert(node.to_string(), commit);
+}
+
 fn fold_session(state: &mut RunState, event: &Envelope) {
     if event.source != Source::Vcs || !crate::vcs::is_session_opened(&event.kind) {
         return;

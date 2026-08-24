@@ -963,6 +963,24 @@ pub fn is_session_opened(kind: &crate::event::EventKind) -> bool {
     *kind == kind_of(onevcs::EventKind::SessionOpened)
 }
 
+/// Whether an envelope is a publication reaching its base, in `onevcs`'s own
+/// vocabulary.
+///
+/// Asked through that library's enum for the reason
+/// [`is_session_opened`] is: how a kind is spelled is the sibling's to decide.
+pub fn is_merge_completed(kind: &crate::event::EventKind) -> bool {
+    *kind == kind_of(onevcs::EventKind::MergeCompleted)
+}
+
+/// One value off a relayed payload, held to what a payload text may carry.
+///
+/// The same check [`usable`] makes of a session token and a branch name, and for
+/// the same reason: a landing commit is rendered into a table and a task, where
+/// a value carrying whitespace or a control character forges a row.
+pub fn usable_value(value: &str) -> Option<String> {
+    usable(value)
+}
+
 /// The session a lifecycle node asks for.
 pub fn request_for(node: &crate::plan::Node) -> Option<SessionRequest> {
     Some(SessionRequest {
