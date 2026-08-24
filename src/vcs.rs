@@ -28,8 +28,9 @@
 //! misread that way: what the publication did is a case of [`PublishOutcome`],
 //! and the compiler checks every reader of it.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use onevcs::{
@@ -521,8 +522,9 @@ fn sibling_filter(filter: &EventFilter) -> Result<onevcs::EventFilter> {
 /// One of the sibling's envelopes, as one of this crate's.
 ///
 /// Field for field, out of `onevcs`'s own type: the merged stream keeps a
-/// relayed envelope's producer `stream`, `seq`, `source`, and kind exactly as it
-/// was written, which is what lets a consumer detect loss per stream.
+/// relayed envelope's producer `stream`, `seq`, `source`, kind, and phase
+/// exactly as they were written, which is what lets a consumer detect loss per
+/// stream and read a change's life without enumerating the kinds in it.
 fn relayed(envelope: onevcs::Envelope) -> Envelope {
     Envelope {
         v: envelope.v,
@@ -531,6 +533,7 @@ fn relayed(envelope: onevcs::Envelope) -> Envelope {
         seq: envelope.seq,
         source: source_of(envelope.source),
         kind: kind_of(envelope.kind),
+        phase: Some(phase_of(envelope.phase)),
         labels: labels_of(envelope.labels),
         payload: envelope.payload,
         artifacts: envelope
@@ -543,6 +546,35 @@ fn relayed(envelope: onevcs::Envelope) -> Envelope {
             })
             .collect(),
     }
+}
+
+/// Which part of a change's life a relayed envelope belongs to.
+///
+/// Arm by arm rather than through the sibling's serializer, unlike
+/// [`kind_of`] beside it, and the difference is which side owns the vocabulary:
+/// a *kind* is one of three libraries' and this crate relays all three, so an
+/// enum here would reject a kind a newer sibling already emits. A phase is
+/// `onevcs`'s alone and this crate's readers fold a closed set of them — so a
+/// phase that library adds has to arrive here as a compile error rather than as
+/// a string every reader silently declines.
+fn phase_of(phase: onevcs::Phase) -> crate::event::Phase {
+    match phase {
+        onevcs::Phase::Development => crate::event::Phase::Development,
+        onevcs::Phase::Integrate => crate::event::Phase::Integrate,
+        onevcs::Phase::Review => crate::event::Phase::Review,
+        onevcs::Phase::Release => crate::event::Phase::Release,
+    }
+}
+
+/// The phase the sibling stamps on an event of one of its kinds.
+///
+/// For the envelopes this crate writes *beside* the sibling's own records about
+/// one session: they carry the sibling's kind, so they carry the phase that
+/// library puts that kind in rather than a second classification made here.
+/// `None` for the one kind whose phase its producer decides — a push, which this
+/// crate never records.
+fn phase_of_kind(kind: onevcs::EventKind) -> Option<crate::event::Phase> {
+    onevcs::Phase::of(kind).map(phase_of)
 }
 
 /// Which library produced a relayed envelope.
@@ -623,7 +655,7 @@ pub fn follow(
 ) -> Option<Follower> {
     let mut stream = opened(token, filter)?;
 
-    let progress = Arc::new(Progress::default());
+    let progress: Arc<Mutex<Watermarks>> = Arc::new(Mutex::new(Watermarks::default()));
     let reached = Arc::clone(&progress);
     let stop = Arc::new(AtomicBool::new(false));
     let stopping = Arc::clone(&stop);
@@ -635,7 +667,9 @@ pub fn follow(
             // written between the two is relayed on the next pass rather than
             // lost to a follow that stopped one read early.
             for envelope in next_batch(&mut stream, &followed) {
-                reached.reached(envelope.seq);
+                if let Ok(mut reached) = reached.lock() {
+                    reached.reached(&envelope);
+                }
                 sink(envelope);
             }
             if stopping.load(Ordering::SeqCst) || settled(&followed) {
@@ -670,34 +704,58 @@ fn settled(session: &SessionToken) -> bool {
         .unwrap_or(true)
 }
 
-/// How far into a session's stream a follow got.
+/// How far a reader got into each stream it relayed from.
 ///
 /// The `seq` rather than a count, because that is what says which records are
 /// still unread: `onevcs` numbers a stream monotonically from one and resumes
 /// the series in the next process that writes to it, so the highest `seq`
 /// relayed is exactly the point a second reader continues from.
+///
+/// Per **stream**, and that is load-bearing rather than tidy. Reading one
+/// session hands back records of more than one stream: the session's own, and —
+/// since `onevcs` joined the identity's release record to the session whose
+/// landing it names — that repository's releases, numbered in a series of their
+/// own over every session in it. One high-water mark over both would let the
+/// higher series hide the lower one's next record, which is a relayed record
+/// lost, and would make the per-stream `seq` gaps a consumer detects loss
+/// through describe two producers at once.
 #[derive(Debug, Default)]
-struct Progress {
-    /// How many envelopes were relayed.
-    count: AtomicU64,
-    /// The highest `seq` among them.
-    seq: AtomicU64,
+pub struct Watermarks {
+    /// The highest `seq` relayed, per producing stream.
+    reached: BTreeMap<String, u64>,
 }
 
-impl Progress {
-    /// Record that one envelope was relayed.
-    fn reached(&self, seq: u64) {
-        self.count.fetch_add(1, Ordering::SeqCst);
-        self.seq.fetch_max(seq, Ordering::SeqCst);
+impl Watermarks {
+    /// The marks a run's own store already stands at.
+    ///
+    /// Folded from what was relayed rather than tracked beside it, so what stops
+    /// a record being relayed twice is the record.
+    pub fn of_relayed(envelopes: &[Envelope]) -> Self {
+        let mut marks = Self::default();
+        for envelope in envelopes {
+            marks.reached(envelope);
+        }
+        marks
     }
 
-    /// The highest `seq` relayed, or `None` if nothing was.
+    /// Record that one envelope was relayed.
+    pub fn reached(&mut self, envelope: &Envelope) {
+        self.reached
+            .entry(envelope.stream.clone())
+            .and_modify(|seq| *seq = (*seq).max(envelope.seq))
+            .or_insert(envelope.seq);
+    }
+
+    /// Whether one envelope is past the mark its own stream stands at.
     ///
-    /// Not a bare `0`: a producer numbering from zero would then be
-    /// indistinguishable from one that produced nothing, and the caller reading
-    /// on from here would skip that stream's first record.
-    fn reached_through(&self) -> Option<u64> {
-        (self.count.load(Ordering::SeqCst) > 0).then(|| self.seq.load(Ordering::SeqCst))
+    /// A stream nothing has been relayed from is entirely unread, so its first
+    /// record passes: not a bare `0`, which a producer numbering from zero would
+    /// be indistinguishable from and whose first record a reader would skip.
+    #[must_use]
+    pub fn beyond(&self, envelope: &Envelope) -> bool {
+        self.reached
+            .get(&envelope.stream)
+            .is_none_or(|seq| envelope.seq > *seq)
     }
 }
 
@@ -714,7 +772,7 @@ pub struct Follower {
     reader: Option<std::thread::JoinHandle<()>>,
     /// Set to end the follow without waiting for the session to close.
     stop: Arc<AtomicBool>,
-    progress: Arc<Progress>,
+    progress: Arc<Mutex<Watermarks>>,
 }
 
 impl Drop for Follower {
@@ -742,9 +800,9 @@ impl Follower {
     /// record out of the merged store; the caller reads the stream once more
     /// from this point instead.
     ///
-    /// `None` when it relayed nothing at all, which is the whole stream still to
+    /// Empty when it relayed nothing at all, which is the whole stream still to
     /// read rather than a stream that held nothing.
-    pub fn finish(mut self) -> Option<u64> {
+    pub fn finish(mut self) -> Watermarks {
         let deadline = Instant::now() + FOLLOW_GRACE;
         while self
             .reader
@@ -758,7 +816,11 @@ impl Follower {
         if let Some(reader) = self.reader.take() {
             let _ = reader.join();
         }
-        self.progress.reached_through()
+        let mut reached = self
+            .progress
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        std::mem::take(&mut *reached)
     }
 }
 
@@ -778,6 +840,8 @@ pub fn session_opened_event(session: &Session, labels: &crate::event::Labels) ->
         // stands beside the ones `onevcs` writes for the same session, and a
         // reader that folds one of them has to fold both.
         kind: kind_of(onevcs::EventKind::SessionOpened),
+        // And the phase that library puts that kind in, for the same reason.
+        phase: phase_of_kind(onevcs::EventKind::SessionOpened),
         labels: labels.clone(),
         payload: crate::journal::payload(&[
             ("token", serde_json::json!(session.token.0)),
@@ -802,6 +866,10 @@ pub fn published_event(published: &Publication, labels: &crate::event::Labels) -
         seq: 1,
         source: crate::event::Source::Vcs,
         kind: crate::event::EventKind("published".into()),
+        // `published` is this crate's own kind rather than one of the sibling's,
+        // so there is no producer's classification to carry: a phase here would
+        // be this crate inventing one.
+        phase: None,
         labels: labels.clone(),
         payload: crate::journal::payload(&[
             ("branch", serde_json::json!(published.branch)),
@@ -1591,6 +1659,45 @@ mod tests {
         "ONEVCS_HOME"
     }
 
+    /// The marks a reader starts from are the store's own, one series per stream.
+    ///
+    /// A store holds more than one producer's records, so a fold that kept a
+    /// single mark would let the higher series hide the lower one's next record.
+    #[test]
+    fn the_marks_a_later_reader_starts_from_are_folded_from_what_the_store_holds() {
+        let wrote = |stream: &str, seq: u64| Envelope {
+            v: crate::event::ENVELOPE_VERSION,
+            ts: "2026-01-01T00:00:00.000Z".into(),
+            stream: stream.to_owned(),
+            seq,
+            source: crate::event::Source::Vcs,
+            kind: crate::event::EventKind("release-observed".into()),
+            phase: Some(crate::event::Phase::Release),
+            labels: crate::event::Labels::default(),
+            payload: serde_json::Map::new(),
+            artifacts: Vec::new(),
+        };
+        // A store holding two producers' records, each in its own series and
+        // neither of them contiguous: what a run is handed of a stream its
+        // producer shares across runs is the part correlated to its own work.
+        let held = vec![wrote("s-1", 1), wrote("s-1", 2), wrote("releases-abc", 7)];
+        let marks = Watermarks::of_relayed(&held);
+        for envelope in &held {
+            assert!(
+                !marks.beyond(envelope),
+                "a record the store already holds would be relayed again: {envelope:?}"
+            );
+        }
+        // And each stream continues from its own mark, so the higher series
+        // cannot hide the lower one's next record.
+        assert!(marks.beyond(&wrote("s-1", 3)));
+        assert!(marks.beyond(&wrote("releases-abc", 8)));
+        assert!(!marks.beyond(&wrote("releases-abc", 6)));
+        // A stream nothing was relayed from is entirely unread, first record and
+        // all: a producer numbering from zero is not a producer that said nothing.
+        assert!(marks.beyond(&wrote("releases-def", 0)));
+    }
+
     #[test]
     fn a_relayed_envelope_keeps_the_kind_and_attribution_its_producer_wrote() {
         let mut labels = onevcs::Labels {
@@ -1607,6 +1714,7 @@ mod tests {
             seq: 4,
             source: onevcs::Source::Vcs,
             kind: onevcs::EventKind::ChangeOpened,
+            phase: onevcs::Phase::Review,
             labels,
             payload: serde_json::Map::new(),
             artifacts: vec![onevcs::ArtifactRef {

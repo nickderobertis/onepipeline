@@ -834,6 +834,7 @@ mod tests {
             seq: 4,
             source: Source::Agentgraph,
             kind: EventKind(MEMBER_SETTLED.into()),
+            phase: None,
             labels,
             payload: crate::journal::payload(&[(REPORT_PATH, json!(path))]),
             artifacts: Vec::new(),

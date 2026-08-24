@@ -577,6 +577,11 @@ fn converge(
         releases.refresh(paths, state, &watching);
         let held_for_release = releases.held(&watching);
         releases.report(paths, journal, &held_for_release, &watching)?;
+        // What the sibling recorded about the releases carrying this run's own
+        // landed work. Not part of the wait: a release is reported whether or
+        // not anything is waiting on it, because the node whose work it carries
+        // has settled and its own follow ended with the session it watched.
+        releases.relay_releases(paths, journal, state, launch.filters.vcs.as_ref())?;
         // One hold, beside the decision points rather than in place of them: a
         // node a person is holding and a node a release is holding are both nodes
         // this pass does not start, and neither shortens the other's wait.
@@ -2514,6 +2519,7 @@ mod tests {
                 seq: 0,
                 source,
                 kind: crate::event::EventKind("turn-started".into()),
+                phase: None,
                 labels,
                 payload: serde_json::Map::new(),
                 artifacts: Vec::new(),

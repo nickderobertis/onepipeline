@@ -135,6 +135,15 @@ resolver = "2"
 #   release styles against the real sibling — a real probe for the automated one
 #   and the real `acknowledge` for the human-step one — so a resolution below the
 #   floor fails rather than reads differently.
+# - `onevcs` 0.14.0 stamps a **phase** on every envelope and joins the identity's
+#   release record to the session whose landing commit it names, which is what
+#   makes `release-observed` and `release-acknowledged` reachable at all — see
+#   `docs/contract-divergences.md` entry 40. It is a **requirement** and not a
+#   lock floor for the reason 0.8.0, 0.11.0, 0.12.0 and 0.13.0 were: `^0.13`
+#   excludes it, because pre-1.0 the minor is the breaking position — and
+#   `Envelope::phase` is a field `src/vcs.rs` relays arm by arm, so a pin below
+#   0.14.0 does not compile. `tests/e2e/adoption.rs` drives both kinds into the
+#   run's store against the real sibling.
 #
 # Four floors are carried by `Cargo.lock` rather than by the requirement below,
 # and deliberately.
@@ -199,7 +208,7 @@ resolver = "2"
 # every release's notes record what that release links.
 [workspace.dependencies]
 oneagentgraph = "0.3.0"
-onevcs = "0.13"
+onevcs = "0.14"
 # **Not a third sibling this crate composes** — nothing here launches, calls, or
 # spawns onejudge. It is one vocabulary: the verdicts a two-party member settles
 # on, which `oneagentgraph` copies onto the `member-settled` this crate relays.
@@ -222,12 +231,12 @@ onejudge = "0.5"
 oneharness-core = "0.8"
 # The sibling's own test-support crate, from the **same** revision as the library
 # it implements — here by resolving both from the registry at the releases cut
-# from one commit: `onevcs-testing` v0.4.6 and `onevcs` v0.13.0 are the same tag,
-# and v0.4.6 requires `onevcs = "0.13.0"`, so the build has one copy. Two copies
+# from one commit: `onevcs-testing` v0.4.7 and `onevcs` v0.14.0 are the same tag,
+# and v0.4.7 requires `onevcs = "0.14.0"`, so the build has one copy. Two copies
 # is not a version skew but a compile error: `tests/onevcs_seam.rs` — whose whole
 # job is to drive this crate's seam against those providers — would not build,
 # because the two copies' types are different types.
-onevcs-testing = "0.4.6"
+onevcs-testing = "0.4.7"
 
 [package]
 name = "onepipeline"

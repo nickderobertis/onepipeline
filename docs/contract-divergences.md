@@ -1472,55 +1472,131 @@ but the mechanism it reuses: a node that has already settled is not re-derived
 ready by any user-facing verb, so its owed note waits for whatever does dispatch
 it next. That is the `context` op's own reachability and is not changed here.
 
-*Only one of the sibling's three release kinds can reach this run's store, and
-the reason is that the stream has no published **name**.* `release-probed` is
-emitted on the **session's** own stream when a publication captures its baselines,
-so the session follow that already exists relays it into the merged store —
-unchanged and unrewritten, like every other `onevcs` kind.
-`tests/e2e/adoption.rs`'s
+**What became of the blocker this entry used to carry.**
+
+*All three of the sibling's release kinds reach this run's store, and the join
+that carries the other two is `onevcs`'s own.* `release-probed` is emitted on the
+**session's** own stream when a publication captures its baselines, so the
+session follow that already exists relays it into the merged store — unchanged
+and unrewritten, like every other `onevcs` kind. `tests/e2e/adoption.rs`'s
 `the_siblings_release_probed_is_relayed_exactly_as_its_producer_wrote_it` holds
 that field by field against the sibling's own copy, read back through `onevcs`'s
-own reader out of the stream the producer wrote it on: `v`, `ts`, `stream`, `seq`,
-`source`, `kind`, and `payload` are identical, and every label the producer
-stamped stands, with `node` — which the producer cannot know — added beside them.
+own reader out of the stream the producer wrote it on: `v`, `ts`, `stream`,
+`seq`, `source`, `kind`, `phase`, `payload`, and `artifacts` are identical, and
+every label the producer stamped stands, with `node` — which the producer cannot
+know — added beside them.
 
-`release-observed` and `release-acknowledged` are emitted on the **identity's**
-release stream instead. Releases happen long after the dispatch that produced the
-work has ended, outside any session, which is why `release-observed` carries the
-landing commit as the only thing that could correlate it.
+`release-observed` and `release-acknowledged` are recorded on the **identity's**
+own release record instead. A release happens long after the dispatch that
+produced the work has ended, outside every session, which is why
+`release-observed` carries the landing commit as the only thing that could
+correlate it. This entry used to record that as a **terminal blocker**: the
+reader for that record was published and its *name* was not, so the only way to
+open it was to restate a naming scheme `onevcs` owns — a SHA-256 recomputed to
+spell a filename — which this crate refused to do, because the day that scheme
+changed a consumer that had guessed it would relay nothing, silently, and no test
+that guessed the same way would catch it.
 
-The reader for that stream **is** published, and it is the same one: `EventStream`
-opens any stream by token, `EventStream::open` takes a `SessionToken`, and
-`SessionToken` is a public tuple struct that wraps a plain `String`. What is not
-published is the **token**. `onevcs` records a repository's release activity under
-`releases-<the first twelve hex characters of the identity's SHA-256>`
-(`stream::Stream::releases`, which calls the private `ids::short_digest`), and
-nothing on that crate's public surface hands that string back for an identity —
-not `Identity`, not `RepositoryReleases`, not `release_targets`. `onevcs events`
-is no answer either: it takes the same token.
+**`onevcs` 0.14.0 resolves it, and resolves it at the right end.** That library
+now stamps a `phase` on every envelope and **joins the identity's release record
+to the session whose landing commit it names**, so
+`EventStream::open_filtered` — handed the session token this crate already
+holds — returns that session's releases beside the session's own records. The
+address of the second stream is never handed out, named in a refusal, or
+derivable: the consumer asks about the session it knows and the sibling answers
+about the work. `0.14.0` is the version `Cargo.lock` resolves, from
+`registry+https://github.com/rust-lang/crates.io-index`, and the floor
+`Cargo.toml` requires — pre-1.0 the minor is the breaking position, so `^0.13`
+excluded it and the requirement rather than the lock is what permits it. The
+proposal this entry made — *publish the name* — is **withdrawn**: the scheme
+stays private, which is the outcome it was asking for.
 
-So the only way for this crate to read the stream would be to **restate a private
-naming scheme in production code** — recomputing a SHA-256 to spell a filename the
-sibling owns. It does not, and deliberately: the day that scheme changes, a
-consumer that had guessed it relays *nothing*, silently, and no test that guessed
-the same way would catch it. It is the failure the contract's own retention rule
-already names — "the sanitiser is not public: a report path is obtained by calling
-`report_for` and in no other way, so the writer and every reader share one
-implementation instead of two that happen to agree."
+What this crate does with it is one paced read and no new vocabulary. On the
+reconcile loop's own passes, on the release watch's interval — `ONEPIPELINE_RELEASE_POLL_SECONDS`,
+120 seconds by default, the same bound the probe is asked under and not a second
+one — every node that has **settled** and whose repository declares release
+targets has its session read through that reader, under the launch's own
+`filters.vcs`: the same value the follow was opened with, crossing the same seam.
+Everything in the **Release** phase past the mark its own stream already stands
+at in this run's store is relayed, enriched with the run and the node the producer
+could not know and with nothing rewritten. A node still running is skipped,
+because its own follow is reading that session and two readers deciding
+separately what the store already holds is how a record arrives twice. There is
+no launch key, no flag, no plan field, no run-only adoption override, and **no
+second wait control**: the hold is still the one this entry describes — four
+rungs, one hold, indefinite, never failing, released only by an answer of
+released.
 
-**Proposal for `onevcs`, in preference order: publish the name.** A
-`releases::stream_token(identity) -> SessionToken` — or a `release_events(repo)`
-returning an `EventStream` — makes the existing reader reach the existing stream
-and costs that crate one function. Failing that, stamp a release observed for a
-session's landing onto that session's own stream, where the follow would pick it
-up. Until one of them lands, this crate relays the one kind that reaches it and
-**cannot** relay the other two; that is a blocker on the published API rather than
-something this repository can resolve.
+Four things follow, and each is held by a journey in `tests/e2e/adoption.rs`:
 
-It is pinned rather than asserted. `the_siblings_other_two_release_kinds_are_produced_and_cannot_be_read_from_a_run`
-drives the sibling until it really emits both kinds, reads them back off the
-release stream to prove the *producer* works and it is the reader that is missing,
-and then holds that neither reaches the run's store under any profile. The token
-it needs is spelled by a test helper and by nothing in `src/`, so the day the
-scheme changes or the name is published, that journey fails and this entry is
-revisited.
+- `the_siblings_other_two_release_kinds_reach_this_run_through_the_public_session_reader`
+  emits both kinds for real — the sibling's own `release status` and its own
+  `acknowledge` — and holds what reaches the store field for field against what
+  the same public reader hands back, with `release-probed` arriving exactly once
+  and no `(stream, seq)` in the store twice. A **stranger's** landing is put on
+  the same identity's record first, by a run of its own, and is absent from this
+  run entirely: what correlates a release is the landing, not the repository.
+- `a_release_of_retried_work_is_attributed_through_the_newest_session_of_its_branch`
+  is the dangerous half of that. A branch two sessions have worked on — a run that
+  landed on it and a later run pinned to the same name, which `onevcs` continues by
+  cutting a second session onto its tip and recording the first as superseded — has
+  **two** landings, and only one is the work. The release that reaches the run
+  carries the second, and the superseded session's own record resolves along its
+  retry chain to that same landing when it is read through the public reader. A
+  reader that stopped at the superseded copy would answer that the branch had not
+  landed, which is the answer that invites re-running work that already merged.
+- `a_launch_that_excludes_the_release_kinds_relays_none_of_them` states
+  `filters.vcs` as `exclude: [{kind: "release-*"}]` and gets a store with none of
+  the three in it and the same session's other records all present — narrowed
+  rather than silenced, through the control an operator already has.
+- `a_plan_naming_neither_field_runs_exactly_as_it_did` is the other end: a host
+  with no release-targets document has no repository with a release phase, so
+  nothing is recorded about a release and nothing is read, both sessions close,
+  and the run ends exactly where it ended before there was a release record at
+  all.
+
+**Three shared-contract departures this change makes, and none of them is made in
+`docs/contract.md`.**
+
+*The merged envelope carries a `phase`.* `docs/contract.md` declares the envelope
+and does not name the field. It is carried because it is the producer's own
+classification of its own event and dropping it in the relay would lose what only
+the producer knew — `onevcs` puts a push of the session's branch and a push of the
+base it landed on in different phases, and no reader downstream can recover which
+one it was. It is **optional and omitted when absent**, inside `v: 1`, exactly as
+`onevcs` added it to its copy: a store written before this field round-trips as
+its writer wrote it, and everything this crate emits and everything
+`oneagentgraph` produces carries none. **Proposal for the planner who owns the
+contract: add `phase` to the envelope that document declares, and to the matcher
+list beside it.** Until that is ruled on, this crate carries the *field* and not
+the *matcher* — the approved matcher list is `source`, `kind`, and the reserved
+labels, and a spec naming `phase` is refused by name exactly as the grammar says
+it should be, so a launch that wants a phase kept out names the kinds in it.
+`tests/contract.rs`'s
+`the_envelopes_phase_is_the_siblings_own_vocabulary_and_all_of_it` holds this copy
+to the sibling's, exhaustively and in both directions, so a phase either side
+grows alone fails `just check`.
+
+*A settled node's session is read again after its follow has ended.* The contract
+says a lifecycle node's session is followed "from the moment there is a token
+until the session closes", with a read-once fallback for a follow that never
+started or did not end cleanly. A release happens after all of that, by
+construction, so the record of one cannot reach the store through either. What
+the paced read adds is bounded in the two ways that matter: it reads only nodes
+whose dispatch has settled, and it relays only the Release phase — every other
+record of that session was relayed by the follow that watched it, and the marks it
+reads past are the store's own. **Proposal: extend that sentence to say that a
+settled node's session is re-read for the releases that carried its work, on the
+release watch's interval, until the run ends.**
+
+*Per-stream `seq` on the identity's release record is not contiguous for one run,
+and cannot be.* The contract says a consumer detects loss through per-stream `seq`
+gaps. That record is the **repository's**, shared by every session in it, and a
+run is handed only the events correlated to its own landings — so a gap in that
+stream's series is another session's release rather than a record this run lost.
+Every other stream in the store is unaffected, and the accounting is kept **per
+stream** rather than per read for exactly this reason: one mark over a session's
+own records and its repository's releases together would let the higher series
+hide the lower one's next record, which is a relayed record lost in silence.
+**Proposal: say in the contract that a relayed stream a producer shares across
+runs is contiguous per producer and not per run.**

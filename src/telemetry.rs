@@ -763,6 +763,7 @@ mod tests {
             stream: "s".into(),
             seq: seconds,
             source,
+            phase: None,
             kind,
             labels: Labels {
                 run_id: Some("demo".into()),
