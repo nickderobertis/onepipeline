@@ -521,6 +521,13 @@ fn an_unusable_bound_leaves_the_run_behaving_as_the_shipped_one_does() {
 ///
 /// Its being here is the drift gate for that entry: the day the scheme changes,
 /// the reads below stop finding a stream and the entry is revisited.
+// llmlint: ignore-block[tests_mirror_real_usage] reaching what a real caller cannot
+// discover is the *claim*, not a shortcut around one. The journey this serves asserts that
+// `release-observed` and `release-acknowledged` are produced and yet cannot reach a run,
+// and it can only tell "the producer never wrote them" from "this crate cannot read them"
+// by looking at the stream the sibling wrote. Nothing in `src/` spells this token, and the
+// day `onevcs` publishes it — or changes it — this helper stops working and entry 40 is
+// revisited, which is the outcome that would make the suppression wrong to keep.
 fn release_stream_of(identity: &str) -> onevcs::SessionToken {
     use sha2::{Digest, Sha256};
     let digest: String = Sha256::digest(identity.as_bytes())
@@ -528,7 +535,7 @@ fn release_stream_of(identity: &str) -> onevcs::SessionToken {
         .map(|byte| format!("{byte:02x}"))
         .collect();
     onevcs::SessionToken(format!("releases-{}", &digest[..12]))
-}
+} // llmlint: ignore-end[tests_mirror_real_usage]
 
 /// Every envelope the sibling wrote on one of its own streams, read back through
 /// the sibling's own reader.
