@@ -1336,6 +1336,105 @@ mod tests {
         assert!(watch.held(&[fast]).is_empty());
     }
 
+    /// A fresh driver takes up what its predecessor already said, so a node is
+    /// told **once** across a driver that died holding it.
+    ///
+    /// Read out of the journal, which is the only thing that outlives a driver.
+    /// Without it the node a fresh driver finds still running is told a second
+    /// time — a correction the worker has already acted on, arriving again with
+    /// nothing to tell it from a new one.
+    ///
+    /// Held here rather than by a journey, and deliberately: a journey for it has
+    /// to kill a driver mid-dispatch, adopt the run, and get a *second* node told
+    /// before it can assert about the first — which it does, and which costs long
+    /// enough under the instrumented suite to time out against its own deadline.
+    /// What the seeding actually is, is a fold of a durable record, and that is
+    /// what this drives. The delivery either side of it — live and deferred — is
+    /// driven end to end in `tests/e2e/adoption.rs`.
+    #[test]
+    fn a_fresh_driver_takes_up_what_its_predecessor_already_said() {
+        let root = std::env::temp_dir().join(format!("op-release-seed-{}", std::process::id()));
+        let paths = RunPaths::under(&root, "restarted");
+        std::fs::create_dir_all(&paths.dir).expect("a scratch run directory");
+        let record = |kind: journal::PipelineKind, node: &str, payload: Value| {
+            serde_json::json!({
+                "v": 1,
+                "ts": "2026-08-24T00:00:00.000Z",
+                "stream": "predecessor",
+                "seq": 0,
+                "source": "pipeline",
+                "kind": kind.as_str(),
+                "labels": {"run_id": "restarted", "node": node},
+                "payload": payload,
+            })
+            .to_string()
+        };
+        std::fs::write(
+            paths.journal(),
+            format!(
+                "{}\n{}\n",
+                record(
+                    journal::PipelineKind::ReleaseAdopted,
+                    "told",
+                    json!({"node": "told", "delivery": "live", "versions": []}),
+                ),
+                record(
+                    journal::PipelineKind::ReleaseArrived,
+                    "told",
+                    json!({"node": "told", "dep": "engine"}),
+                ),
+            ),
+        )
+        .expect("the predecessor's journal is written");
+
+        let mut watch = Watch::of_run(&paths);
+        watch.dependencies.insert(
+            "told".to_owned(),
+            vec![dependency(Some("crate"), Some(ReleaseStyle::Automated))],
+        );
+        watch.answers.insert(
+            ("told".to_owned(), "engine".to_owned()),
+            Answer::Released {
+                version: "0.2.0".to_owned(),
+            },
+        );
+        let running = vec![Node {
+            id: "told".to_owned(),
+            adoption: Some(Adoption::Fast),
+            ..Node::default()
+        }];
+        assert!(
+            watch.ready_to_adopt(&running).is_empty(),
+            "a fresh driver told a node its releases had arrived a second time"
+        );
+        assert!(
+            watch
+                .arrived
+                .contains(&("told".to_owned(), "engine".to_owned())),
+            "a fresh driver did not take up the arrival its predecessor reported"
+        );
+
+        // A node its predecessor never told is told, which is what says the
+        // seeding narrowed rather than silenced.
+        let fresh = vec![Node {
+            id: "fresh".to_owned(),
+            adoption: Some(Adoption::Fast),
+            ..Node::default()
+        }];
+        watch.dependencies.insert(
+            "fresh".to_owned(),
+            vec![dependency(Some("crate"), Some(ReleaseStyle::Automated))],
+        );
+        watch.answers.insert(
+            ("fresh".to_owned(), "engine".to_owned()),
+            Answer::Released {
+                version: "0.2.0".to_owned(),
+            },
+        );
+        assert_eq!(watch.ready_to_adopt(&fresh).len(), 1);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// The two bounds fall back rather than to zero or to no bound at all.
     #[test]
     fn an_unusable_bound_falls_back_to_the_shipped_one() {

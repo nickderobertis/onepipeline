@@ -1455,6 +1455,18 @@ but the mechanism it reuses: a node that has already settled is not re-derived
 ready by any user-facing verb, so its owed note waits for whatever does dispatch
 it next. That is the `context` op's own reachability and is not changed here.
 
+*The exactly-once seeding across a driver takeover is held by a fold test rather
+than a journey.* A fresh driver reads what its predecessor already said out of the
+journal before it starts watching, so a node it finds still running is not told a
+second time. A journey for it has to kill a driver mid-dispatch, adopt the run,
+and get a *second* node told before it can assert about the first — which it does,
+and which costs long enough under the instrumented suite to time out against its
+own deadline while holding four of its concurrency slots. What the seeding is, is
+a fold of a durable record, and `src/release.rs`'s
+`a_fresh_driver_takes_up_what_its_predecessor_already_said` drives exactly that.
+Both deliveries either side of it — into a live turn and onto the next dispatch —
+are driven end to end.
+
 *Only one of the sibling's three release kinds can reach this run's store.*
 `release-probed` is emitted on the **session's** own stream when a publication
 captures its baselines, so it is relayed into the merged store by the session

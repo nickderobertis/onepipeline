@@ -23,7 +23,7 @@
 
 use std::path::Path;
 
-use crate::harness::{lifecycle, plan_of, Repository, World};
+use crate::harness::{lifecycle, plan_of, Repository, World, REFUSED};
 use onepipeline::plan::CROSS_REPO_REFERENCES_HEADING;
 use serde_json::{json, Value};
 
@@ -110,6 +110,122 @@ fn engine() -> Value {
 /// Say what the probe answers from now on.
 fn releases_at(answer: &Path, version: &str) {
     std::fs::write(answer, format!("{version}\n")).expect("the probe's answer is written");
+}
+
+/// A plan whose `consumes` names something the node does not depend on is
+/// refused where the plan is read, and told which key and why.
+///
+/// The refusal a planner actually meets: silently dropping the target would
+/// launch the node against the wrong artifact and say nothing about it.
+#[test]
+fn a_plan_consuming_a_dependency_it_does_not_have_is_refused_by_name() {
+    let world = World::new("adoption-refusal");
+    let mut node = lifecycle("consumer", &["engine"]);
+    node["consumes"] = json!({"packager": "crate"});
+    let path = world.plan("refused", &plan_of("refused", vec![engine(), node]));
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(REFUSED)
+        .err_has("node 'consumer'")
+        .err_has("`consumes` names 'packager'")
+        .err_has("not one of this node's deps");
+}
+
+/// A `published` node whose repository declares release targets but **not the one
+/// it consumes** holds indefinitely, and says so: an unanswerable question is not
+/// an answer that the release has happened.
+#[test]
+fn a_target_this_host_cannot_name_holds_the_node_rather_than_releasing_it() {
+    let world = watching("adoption-unanswerable");
+    world.write_graphs();
+    let (engine_repo, _consumer) = two_repositories(&world);
+    let (script, answer) = world.probe_in(&engine_repo, ENGINE);
+    world.releases(&automated(&script));
+    // A release is out and past the baseline, so nothing about the *release* is
+    // what holds this node.
+    releases_at(&answer, "9.9.9");
+
+    let mut node = consumer(Some("published"));
+    node["consumes"] = json!({"engine": "wheel"});
+    let run = start(&world, "adoption-unanswerable", vec![engine(), node]);
+    world.until("the wait to be surfaced", |world| {
+        !wait_surface(world, &run, "consumer").is_empty()
+    });
+
+    assert!(
+        !dispatched(&world, &run, "consumer"),
+        "a node awaiting a target this host cannot name was started anyway"
+    );
+    let entries = awaiting(&world, &run, "consumer");
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    assert_eq!(
+        entries[0]["target"],
+        json!("wheel"),
+        "the wait does not name the target the plan asked for"
+    );
+    assert_eq!(
+        entries[0]["style"],
+        json!(null),
+        "a target this host declares nothing for was given a style"
+    );
+    assert_eq!(
+        entries[0]["last_answer"],
+        json!("not-answered"),
+        "a question that could not be put was recorded as an answer"
+    );
+    let surface = wait_surface(&world, &run, "consumer");
+    assert!(
+        surface.contains("no release target this host can name"),
+        "the surface does not say why nothing can answer:\n{surface}"
+    );
+    world.run(&["stop", &run]).exited(0);
+}
+
+/// An unusable poll or surface bound falls back to the shipped one rather than to
+/// zero or to no bound at all, and the run behaves.
+///
+/// Zero is the reading that matters: a poll of zero spends the host on probes,
+/// and a surface interval of zero raises the wait on every reconcile pass — which
+/// is the one line this host's operating rules say may never be filtered.
+#[test]
+fn an_unusable_bound_leaves_the_run_behaving_as_the_shipped_one_does() {
+    let world = watching("adoption-bounds")
+        .with_env("ONEPIPELINE_RELEASE_POLL_SECONDS", "nonsense")
+        .with_env("ONEPIPELINE_RELEASE_SURFACE_SECONDS", "0");
+    world.write_graphs();
+    let (engine_repo, _consumer) = two_repositories(&world);
+    let (script, answer) = world.probe_in(&engine_repo, ENGINE);
+    world.releases(&automated(&script));
+    releases_at(&answer, "0.1.0");
+
+    let run = start(
+        &world,
+        "adoption-bounds",
+        vec![engine(), consumer(Some("published"))],
+    );
+    // The watch was not disabled: the hold is on and the wait is raised.
+    world.until("the wait to be surfaced", |world| {
+        !wait_surface(world, &run, "consumer").is_empty()
+    });
+    assert!(!dispatched(&world, &run, "consumer"));
+
+    // Nor was it read as **zero**, which is the reading that matters: the
+    // reconcile loop runs a pass every 25ms, so a surface interval of zero would
+    // raise the wait dozens of times over the two reads below — each of which is
+    // what a person waiting on a held run actually does.
+    for _ in 0..2 {
+        world.run(&["status", &run]).exited(0);
+    }
+    let surfaced = world
+        .events_of(&run, "planner-surface-queued")
+        .into_iter()
+        .filter(|event| event["payload"]["kind"] == "release-wait")
+        .count();
+    assert_eq!(
+        surfaced, 1,
+        "an unusable surface bound was read as zero, so the wait was raised on every pass"
+    );
+    world.run(&["stop", &run]).exited(0);
 }
 
 /// The task prose one node's dispatch was handed, read off the `--task` the
