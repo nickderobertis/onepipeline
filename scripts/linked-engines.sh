@@ -199,30 +199,42 @@ index_path() {
 # resolve to: a yanked release is not a candidate, and neither is a prerelease,
 # which a requirement without one never matches.
 #
-# The index is one JSON object per line and `"name"`, `"vers"` and `"yanked"`
-# each appear exactly once on it — a dependency entry carries `"req"`, not any
-# of them — so the fields are read positionally rather than by standing up a
-# JSON parser this script otherwise has no need of. What comes back is a third
-# party's, so a record missing one of those fields is emitted as `!` and one
-# filed under another crate's name as `?<name>`; the caller refuses both. Either
-# dropped silently would leave the lines around it answering "the newest
-# release" for a file that had more.
+# The index is one JSON object per line. Each is walked rather than searched:
+# `"name"` is *not* a field that appears once on a record — every entry of its
+# `deps` array carries one too, seven of them on the first `oneagentgraph`
+# release — so counting the string across the line finds one occurrence per
+# dependency and reads every record crates.io actually serves as unreadable.
+# That is what it did, on the weekly job and on every release from v0.12.4 on:
+# the fixtures it was proven against wrote `"deps":[]`, which is the one shape
+# the registry never serves. So `read_record` below walks the outermost object
+# and reads only its own members, skipping a nested object or array whole.
+#
+# What comes back is still a third party's, so this answers in tagged lines and
+# each way a record can be unreadable gets its own tag, which the caller refuses
+# by name: `not-json` for a line that is not one JSON object, `twice` for one
+# carrying `name`, `vers` or `yanked` more than once, `unreadable` for one where
+# any of the three is missing or is not the shape it should be, and
+# `foreign <name>` for one filed under another crate. A readable release is
+# `release <version>`, tagged like the rest because a bare version and a bare
+# marker are the same shape and the index chooses the version. Any of these
+# dropped silently would leave the lines around it answering "the newest release"
+# for a file that had more.
 #
 # Build metadata is not part of an ordering — `1.2.4+meta` *is* 1.2.4, and
 # crates.io serves versions spelled that way — so it is stripped rather than
 # read as a prerelease and skipped, which would call a lock behind it current.
 # llmlint: ignore-block[boundary_inputs_validated] the judged tier reads this as
-# third-party input taken on substring patterns without a JSON parse, and asks for
-# one. What it names as the risk is refused by name instead, record by record: a
-# record missing `name`, `vers` or `yanked` is `!`, one carrying any of them twice
-# is `!`, one filed under another crate is `?<name>`, a yanked or prerelease
-# release is not a candidate, and a version the ordering cannot read is refused
-# with the index named. A record that survives all of that has been read for the
-# three fields this uses and nothing else is read from it, so the parser the rule
-# asks for would validate syntax this never consults. Standing up one in bash —
-# the language this has to be in, because a weekly workflow and a release job both
-# reach it through a recipe — is a second, hand-rolled reader of a third party's
-# format, which is more of this risk rather than less.
+# third-party input parsed in awk rather than by a library, and asks for a real
+# parser. `read_record` is one, for the object level this consults: it walks the
+# record token by token, tracks nesting so a `deps` entry's fields are never
+# mistaken for the record's own, requires each of the three members it reads to
+# appear exactly once and to hold the type it should, and refuses the record
+# otherwise. It is checked against `json.loads` over all five engines' real index
+# files, and the shapes it refuses are driven in `tests/linked_engines.rs`. The
+# library the rule asks for does not exist in bash — the language this has to be
+# in, because a weekly workflow and a release job both reach it through a recipe
+# — and shelling out to one adds an interpreter to a release job whose whole
+# purpose is to be reachable without a build.
 index_versions() {
   local name="$1" path body attempt
   path="$(index_path "$name")"
@@ -254,25 +266,132 @@ index_versions() {
       ;;
   esac
   printf '%s\n' "$body" | awk -v want="$name" '
+    # Past whitespace at `i`.
+    function skip_ws(s, i,   c) {
+      while (i <= length(s)) {
+        c = substr(s, i, 1)
+        if (c != " " && c != "\t" && c != "\r" && c != "\n") break
+        i++
+      }
+      return i
+    }
+    # Past the string opening at `i`, leaving its contents in STR when `keep`.
+    # 0 for one that never closes. An escape and the character after it are one
+    # unit, so a `\"` inside a string does not end it; what the escape encodes is
+    # never decoded, because a crate name or a version carrying one is not a name
+    # or a version this can read, and the refusals below say so by name.
+    function scan_string(s, i, keep,   n, c) {
+      n = length(s); STR = ""
+      for (i++; i <= n; i++) {
+        c = substr(s, i, 1)
+        if (c == "\\") { if (keep) STR = STR substr(s, i, 2); i++; continue }
+        if (c == "\"") return i + 1
+        if (keep) STR = STR c
+      }
+      return 0
+    }
+    # Past the object or array opening at `i` — the whole of it, however deep.
+    # This is what keeps the `name` on a `deps` entry from being read as the one
+    # on the record. (No apostrophes below: the whole program is one shell
+    # single-quoted string, which any of them would end.)
+    function scan_nested(s, i,   n, c, depth) {
+      n = length(s); depth = 0
+      while (i <= n) {
+        c = substr(s, i, 1)
+        if (c == "\"") { i = scan_string(s, i, 0); if (i == 0) return 0; continue }
+        if (c == "{" || c == "[") depth++
+        else if (c == "}" || c == "]") { depth--; if (depth <= 0) return i + 1 }
+        i++
+      }
+      return 0
+    }
+    # Past the number, `true`, `false` or `null` at `i`, leaving it in LIT.
+    function scan_literal(s, i,   n, c, start) {
+      n = length(s); start = i
+      while (i <= n) {
+        c = substr(s, i, 1)
+        if (c == "," || c == "}" || c == "]" || c == " " || c == "\t" ||
+            c == "\r" || c == "\n") break
+        i++
+      }
+      LIT = substr(s, start, i - start)
+      return (LIT == "") ? 0 : i
+    }
+    # Marks one of the three members this reads as present on the record, and
+    # marks the record if it is present twice — where taking the first would
+    # answer for a record that went on to say something else. Presence is noted
+    # apart from readability, so a second copy is caught even where the first was
+    # the only readable one.
+    function note(key) {
+      if (key == "name")   { if (SAW_NAME)   TWICE = 1; SAW_NAME   = 1; return 1 }
+      if (key == "vers")   { if (SAW_VERS)   TWICE = 1; SAW_VERS   = 1; return 1 }
+      if (key == "yanked") { if (SAW_YANKED) TWICE = 1; SAW_YANKED = 1; return 1 }
+      return 0
+    }
+    # One record: its own `name`, `vers` and `yanked`, and how it failed if it
+    # did. BAD is a line that is not one JSON object; TWICE a record carrying one
+    # of the three more than once; an OK_ left unset a member missing, or holding
+    # a shape it cannot be read from — a `yanked` spelled as a string is not a
+    # flag that happens to say `false`. A member of a nested object is never any
+    # of these: `scan_nested` skips the value whole, so the `name` on a `deps`
+    # entry is never read as the one on the record.
+    function read_record(s,   i, n, c, key) {
+      NAME = ""; VERS = ""; YANKED = ""
+      SAW_NAME = 0; SAW_VERS = 0; SAW_YANKED = 0
+      OK_NAME = 0; OK_VERS = 0; OK_YANKED = 0
+      TWICE = 0; BAD = 0
+      n = length(s)
+      i = skip_ws(s, 1)
+      if (substr(s, i, 1) != "{") { BAD = 1; return }
+      i = skip_ws(s, i + 1)
+      if (substr(s, i, 1) == "}") { if (skip_ws(s, i + 1) <= n) BAD = 1; return }
+      while (1) {
+        if (substr(s, i, 1) != "\"") { BAD = 1; return }
+        i = scan_string(s, i, 1); if (i == 0) { BAD = 1; return }
+        key = STR
+        i = skip_ws(s, i)
+        if (substr(s, i, 1) != ":") { BAD = 1; return }
+        i = skip_ws(s, i + 1)
+        c = substr(s, i, 1)
+        if (c == "\"") {
+          i = scan_string(s, i, (key == "name" || key == "vers"))
+          if (i == 0) { BAD = 1; return }
+          note(key)
+          if (key == "name") { OK_NAME = 1; NAME = STR }
+          else if (key == "vers") { OK_VERS = 1; VERS = STR }
+        } else if (c == "{" || c == "[") {
+          i = scan_nested(s, i); if (i == 0) { BAD = 1; return }
+          note(key)
+        } else {
+          i = scan_literal(s, i); if (i == 0) { BAD = 1; return }
+          note(key)
+          if (key == "yanked" && (LIT == "true" || LIT == "false")) {
+            OK_YANKED = 1; YANKED = LIT
+          }
+        }
+        i = skip_ws(s, i)
+        c = substr(s, i, 1)
+        if (c == ",") { i = skip_ws(s, i + 1); continue }
+        if (c == "}") { if (skip_ws(s, i + 1) <= n) BAD = 1; return }
+        BAD = 1; return
+      }
+    }
     /^[[:space:]]*$/ { next }
+    # One tagged line per record, because a version is whatever the index chose
+    # to serve: a marker spelled as a bare character is a marker a `vers` could
+    # also be, and the caller would then report the wrong one of these. The tag
+    # comes first and holds no spaces, so `read -r verdict rest` splits it.
     {
-      vers = ""; yanked = ""; who = ""
-      # Read positionally, so each field has to appear exactly once: a record
-      # carrying two is one this cannot read, and taking the first would answer
-      # for a line that said something else. `gsub` puts back what it matched,
-      # so this counts without altering the record.
-      if (gsub(/"vers":"/, "&") > 1 || gsub(/"yanked":/, "&") > 1 ||
-          gsub(/"name":"/, "&") > 1) { print "!"; next }
-      if (match($0, /"vers":"[^"]*"/)) vers = substr($0, RSTART + 8, RLENGTH - 9)
-      if (match($0, /"yanked":(true|false)/)) yanked = substr($0, RSTART + 9, RLENGTH - 9)
-      if (match($0, /"name":"[^"]*"/)) who = substr($0, RSTART + 8, RLENGTH - 9)
-      if (vers == "" || yanked == "" || who == "") { print "!"; next }
-      if (who != want) { print "?" who; next }
-      if (yanked == "true") next
-      core = vers
+      read_record($0)
+      if (BAD) { print "not-json"; next }
+      if (TWICE) { print "twice"; next }
+      if (!OK_NAME || !OK_VERS || !OK_YANKED) { print "unreadable"; next }
+      if (NAME != want) { print "foreign " NAME; next }
+      if (YANKED == "true") next
+      core = VERS
       sub(/\+.*$/, "", core)
       if (core ~ /-/) next
-      print core
+      print "release " core
     }
   '
 }
@@ -341,13 +460,23 @@ for name in "${SIBLINGS[@]}"; do
   served="$(index_versions "$name")" || exit 3
 
   permitted=""
-  while read -r version; do
-    [ -n "$version" ] || continue
-    case "$version" in
-      "!") die "the index served a '$name' record with no name, version or yanked flag on it" \
-        "'$index' is not answering in the crates.io sparse-index format — pass '--index' naming one that does" ;;
-      "?"*) die "the index served a record for '${version#?}' under '$name'" \
+  # Each tag `index_versions` emits names a different way the record was
+  # unreadable, so the refusal says what it saw rather than that something was
+  # wrong with it. A tag this does not know is a reader and a caller that have
+  # drifted apart, which is refused rather than skipped: skipped, it would leave
+  # the lines around it answering "the newest release" for a file that had more.
+  not_sparse="'$index' is not answering in the crates.io sparse-index format — pass '--index' naming one that does"
+  while read -r verdict version; do
+    [ -n "$verdict" ] || continue
+    case "$verdict" in
+      release) ;;
+      not-json) die "the index served a '$name' line that is not one JSON object" "$not_sparse" ;;
+      twice) die "the index served a '$name' record carrying name, vers or yanked more than once" "$not_sparse" ;;
+      unreadable) die "the index served a '$name' record with no readable name, vers or yanked on it" "$not_sparse" ;;
+      foreign) die "the index served a record for '$version' under '$name'" \
         "'$index' files a crate's releases under another crate's name — pass '--index' naming a sparse-index tree that does not" ;;
+      *) die "the reader of '$index' answered '$verdict', which this check has no rule for" \
+        "restore scripts/linked-engines.sh — its record reader and the loop that reads it have drifted apart" ;;
     esac
     orderable "$version" || die "the index serves '$name' at '$version', which is not a version this check can order" \
       "'$index' is not answering in the crates.io sparse-index format — pass '--index' naming one that does"

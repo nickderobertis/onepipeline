@@ -108,6 +108,35 @@ fn index_path(name: &str) -> String {
     format!("{}/{}/{name}", &name[0..2], &name[2..4])
 }
 
+/// One sparse-index record, shaped the way crates.io actually shapes one.
+///
+/// The `deps` array is populated, and its entries are named after engines this
+/// check reports on. That is the fixture, not decoration around it. A real
+/// record embeds one `"name"` per dependency — seven on the first
+/// `oneagentgraph` release — so a reader that counts that string across the
+/// whole line sees a record with the field on it many times over, and one that
+/// takes the first match sees a dependency's name where the crate's belongs.
+/// Written `"deps":[]`, as every fixture here was until v0.12.4 released with
+/// no record in its notes, this suite proves a shape the registry never serves:
+/// the check passed every test in this file while refusing, with exit 3, every
+/// answer index.crates.io gave it.
+///
+/// The nesting is the real one too — an array of objects, an object of arrays,
+/// a `null`, and a string carrying a crate name — because each is a place the
+/// record's own members could be read out of.
+fn index_record(name: &str, version: &str, yanked: bool) -> String {
+    format!(
+        "{{\"name\":\"{name}\",\"vers\":\"{version}\",\"deps\":[\
+         {{\"name\":\"onevcs\",\"req\":\"^0.13\",\"features\":[],\"optional\":false,\
+         \"default_features\":true,\"target\":null,\"kind\":\"normal\"}},\
+         {{\"name\":\"oneagentgraph\",\"req\":\"^0.3.0\",\"features\":[\"test-doubles\"],\
+         \"optional\":true,\"default_features\":true,\"target\":\"cfg(windows)\",\
+         \"kind\":\"dev\"}}],\"cksum\":\"0\",\
+         \"features\":{{\"test-doubles\":[\"dep:onevcs-testing\"]}},\"yanked\":{yanked},\
+         \"rust_version\":\"1.88\",\"pubtime\":\"2026-08-23T05:22:32Z\"}}\n"
+    )
+}
+
 /// A sparse-index tree that serves every version this build links, plus
 /// `extra`, as `(crate, version, yanked)`.
 ///
@@ -140,12 +169,7 @@ fn index_serving(case: &str, extra: &[(&str, &str, bool)]) -> String {
         let body: String = entries
             .iter()
             .filter(|(crate_name, _, _)| crate_name == name)
-            .map(|(_, version, yanked)| {
-                format!(
-                    "{{\"name\":\"{name}\",\"vers\":\"{version}\",\"deps\":[],\
-                     \"cksum\":\"0\",\"features\":{{}},\"yanked\":{yanked}}}\n"
-                )
-            })
+            .map(|(_, version, yanked)| index_record(name, version, *yanked))
             .collect();
         fs::write(&file, body).expect("a fixture index entry");
     }
@@ -231,6 +255,18 @@ fn linked_engines(args: &[&str]) -> Output {
         .current_dir(repo_root())
         .output()
         .expect("bash runs scripts/linked-engines.sh")
+}
+
+/// A recipe, run the way the release job and the weekly workflow run it —
+/// through `just`, with the registry named by `ONEPIPELINE_CRATES_INDEX`, which
+/// is the override a caller with no option to pass has.
+fn recipe(name: &str, index: &str) -> Output {
+    Command::new("just")
+        .arg(name)
+        .env("ONEPIPELINE_CRATES_INDEX", index)
+        .current_dir(repo_root())
+        .output()
+        .expect("just runs this repository's recipes")
 }
 
 /// Everything the run said, so an assertion's failure names the whole report
@@ -535,13 +571,7 @@ fn tree(case: &str, engines: &[Engine]) -> Tree {
         let body: String = engine
             .served
             .iter()
-            .map(|version| {
-                format!(
-                    "{{\"name\":\"{}\",\"vers\":\"{version}\",\"deps\":[],\
-                     \"cksum\":\"0\",\"features\":{{}},\"yanked\":false}}\n",
-                    engine.name
-                )
-            })
+            .map(|version| index_record(engine.name, version, false))
             .collect();
         fs::write(&file, body).expect("a fixture index entry");
     }
@@ -735,20 +765,47 @@ fn a_tree_the_check_cannot_read_is_refused_rather_than_answered() {
         (
             "malformed-index-record",
             "{\"name\":\"oneagentgraph\"}",
-            "served a 'oneagentgraph' record with no name, version or yanked flag",
+            "served a 'oneagentgraph' record with no readable name, vers or yanked on it",
         ),
         (
             "foreign-index-record",
             "{\"name\":\"serde\",\"vers\":\"9.9.9\",\"yanked\":false}",
             "served a record for 'serde' under 'oneagentgraph'",
         ),
-        // Read positionally, a second `vers` is a release the line also names
-        // and this cannot see: taking the first would answer 0.0.1 for a record
-        // that went on to say 9.9.9.
+        // A second `vers` is a release the line also names and this cannot see:
+        // taking the first would answer 0.0.1 for a record that went on to say
+        // 9.9.9. A `deps` entry's own fields are not this — the record is walked
+        // rather than searched, so only the outermost object's members count.
         (
             "twice-versioned-index-record",
             "{\"name\":\"oneagentgraph\",\"vers\":\"0.0.1\",\"vers\":\"9.9.9\",\"yanked\":false}",
-            "served a 'oneagentgraph' record with no name, version or yanked flag",
+            "served a 'oneagentgraph' record carrying name, vers or yanked more than once",
+        ),
+        // Not JSON at all, which is what a proxy, an error page or a mirror
+        // serving its own format looks like from here.
+        (
+            "unparseable-index-record",
+            "oneagentgraph 9.9.9",
+            "served a 'oneagentgraph' line that is not one JSON object",
+        ),
+        // A `yanked` spelled as a string is a flag this cannot read, not a flag
+        // that happens to say `false`. Read as one, a yanked release becomes a
+        // candidate and the check reports a lock behind a version nobody can
+        // resolve.
+        (
+            "restyped-flag-index-record",
+            "{\"name\":\"oneagentgraph\",\"vers\":\"9.9.9\",\"yanked\":\"false\"}",
+            "served a 'oneagentgraph' record with no readable name, vers or yanked on it",
+        ),
+        // A `vers` spelled like one of the reader's own verdicts is a version,
+        // not a verdict. The verdict is a field of its own on each answered
+        // line, so an index that serves a release called `unreadable` is
+        // refused for the version it is rather than reported as a record the
+        // reader could not read.
+        (
+            "verdict-shaped-index-version",
+            "{\"name\":\"oneagentgraph\",\"vers\":\"unreadable\",\"yanked\":false}",
+            "serves 'oneagentgraph' at 'unreadable', which is not a version this check can order",
         ),
         // A number `[` cannot compare is one `ver_cmp` answers "equal" to
         // everything for, which would order a lock current against a release it
@@ -1014,16 +1071,8 @@ fn a_registry_that_hiccups_is_retried_and_one_that_never_answers_is_not_a_findin
 #[test]
 fn both_recipes_are_entry_points_to_this_check() {
     let index = index_serving("through-just", &[]);
-    let recipe = |name: &str| {
-        Command::new("just")
-            .arg(name)
-            .env("ONEPIPELINE_CRATES_INDEX", &index)
-            .current_dir(repo_root())
-            .output()
-            .expect("just runs this repository's recipes")
-    };
 
-    let current = recipe("engines-current");
+    let current = recipe("engines-current", &index);
     assert!(
         current.status.success()
             && String::from_utf8_lossy(&current.stdout).contains("linked engines are current"),
@@ -1031,12 +1080,88 @@ fn both_recipes_are_entry_points_to_this_check() {
         said(&current)
     );
 
-    let notes = recipe("linked-engines");
+    let notes = recipe("linked-engines", &index);
     assert!(
         notes.status.success()
             && String::from_utf8_lossy(&notes.stdout).contains("### Linked engines"),
         "`just linked-engines` is not the note composer this suite proves:\n{}",
         said(&notes)
+    );
+}
+
+/// The whole chain the release job runs: the recipe, the script, HTTP, and a
+/// registry answering the way crates.io does — composing the record from an
+/// answer it can read, and refusing one it cannot rather than composing part of
+/// one.
+///
+/// Nothing here is substituted for the release job except the registry's
+/// address, which is what `ONEPIPELINE_CRATES_INDEX` exists for. Every other
+/// test in this file reaches the script through a directory, which is the
+/// affordance a test has rather than the transport a release uses; this is the
+/// transport.
+///
+/// Both halves are the bar, and neither on its own was. v0.12.4 and v0.13.0
+/// published with the refusing half working exactly as designed and the
+/// composing half refusing every answer the real index gave it, so their notes
+/// carried no record at all. A suite proving only the refusal was green through
+/// both.
+#[test]
+fn the_release_recipe_composes_over_http_and_refuses_an_answer_it_cannot_read() {
+    let sound = registry(&index_serving("recipe-sound", &[]), 0);
+    let composed = recipe("linked-engines", &sound);
+    assert!(
+        composed.status.success(),
+        "the recipe the release job runs refused a registry answering as crates.io does, so \
+         that release's notes would carry no record of what it links:\n{}",
+        said(&composed)
+    );
+    let note = String::from_utf8_lossy(&composed.stdout);
+    assert!(
+        note.contains("### Linked engines"),
+        "the recipe succeeded without composing the section the release job appends:\n{}",
+        said(&composed)
+    );
+    for name in SIBLINGS {
+        let version = &linked(name)[0];
+        assert!(
+            note.contains(&format!("| `{name}` | {version} |")),
+            "the note the release job would append does not record what `{name}` links, \
+             which is the whole of what it is for:\n{}",
+            said(&composed)
+        );
+    }
+
+    // The same tree, with one entry no sparse index could have written. Served
+    // over the same transport, so what differs is the answer and not the road.
+    let unreadable = index_serving("recipe-unreadable", &[]);
+    fs::write(
+        repo_root()
+            .join(&unreadable)
+            .join(index_path("oneagentgraph")),
+        "oneagentgraph 0.3.9\n",
+    )
+    .expect("an index entry in a format the registry does not serve");
+    let refused = recipe("linked-engines", &registry(&unreadable, 0));
+    assert_eq!(
+        refused.status.code(),
+        Some(3),
+        "an index answering in a shape this cannot read is neither current nor behind, and \
+         the recipe has to say so rather than answer over it:\n{}",
+        said(&refused)
+    );
+    assert!(
+        String::from_utf8_lossy(&refused.stderr)
+            .contains("served a 'oneagentgraph' line that is not one JSON object"),
+        "the refusal does not name what the registry served:\n{}",
+        said(&refused)
+    );
+    // The release job appends this stdout to a Release body whatever is on it,
+    // so a partial table here is a record in the notes that nothing established.
+    assert!(
+        !String::from_utf8_lossy(&refused.stdout).contains("Linked engines"),
+        "the refusal still put part of a record on stdout, which the release job appends to \
+         the notes verbatim:\n{}",
+        said(&refused)
     );
 }
 
