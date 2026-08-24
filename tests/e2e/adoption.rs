@@ -112,6 +112,224 @@ fn releases_at(answer: &Path, version: &str) {
     std::fs::write(answer, format!("{version}\n")).expect("the probe's answer is written");
 }
 
+/// The three kinds this crate emits reach a planner through the **shipped
+/// profile with no filter change**, and the sibling's own relayed kind is in the
+/// store beside them.
+///
+/// Two halves of one promise, and they are different halves. `release-wait`,
+/// `release-arrived`, and `release-adopted` are this crate's own, so the shipped
+/// `planner` profile — `include: [{source: pipeline}]` — admits them without
+/// anybody editing a filter. `release-probed` is `onevcs`'s, so the same profile
+/// leaves it out exactly as it leaves out every other sibling kind, and an
+/// unfiltered read is where it is seen.
+#[test]
+fn the_three_release_kinds_reach_a_planner_through_the_shipped_profile() {
+    let world = watching("adoption-profile");
+    world.write_graphs();
+    let (engine_repo, _consumer) = two_repositories(&world);
+    let waiting_repo = world.extra_repository("tool");
+    let (script, answer) = world.probe_in(&engine_repo, ENGINE);
+    world.releases(&both_styles(&script));
+    releases_at(&answer, "0.1.0");
+
+    // One fast node, to be told when the release arrives, and one published node
+    // awaiting the human-step target nobody will acknowledge, so its wait is
+    // raised while the other's arrival is reported.
+    world.script("consumer.turn-open", "");
+    world.script("consumer.wait", "hold");
+    let mut waiter = consumer(Some("published"));
+    waiter["id"] = json!("waiter");
+    waiter["repo"] = json!("tool");
+    waiter["title"] = json!("feat: ship waiter");
+    waiter["consumes"] = json!({"engine": "wheel"});
+    let run = start(
+        &world,
+        "adoption-profile",
+        vec![engine(), consumer(Some("fast")), waiter],
+    );
+
+    world.until("the consumer's turn to open", |world| {
+        world
+            .events_of(&run, "turn-started")
+            .iter()
+            .any(|event| event["labels"]["node"] == "consumer")
+    });
+    releases_at(&answer, "0.2.0");
+    for kind in ["release-wait", "release-arrived", "release-adopted"] {
+        world.until(&format!("a {kind} to be recorded"), |world| {
+            !world.events_of(&run, kind).is_empty()
+        });
+    }
+
+    // The shipped profile, which is what a reader naming none is given.
+    let planner = world.run(&["monitor", &run]);
+    planner.exited(0);
+    for kind in ["release-wait", "release-arrived", "release-adopted"] {
+        assert!(
+            planner.stdout.contains(kind),
+            "`{kind}` did not reach a planner reading through the shipped profile:\n{}",
+            planner.stdout
+        );
+    }
+    assert!(
+        !planner.stdout.contains("release-probed"),
+        "the planner profile admitted a sibling's kind, so it is not `source: pipeline`:\n{}",
+        planner.stdout
+    );
+
+    // And the sibling's own kind is in the store, which an unfiltered read shows.
+    world
+        .run(&["monitor", &run, "--all"])
+        .exited(0)
+        .out_has("release-probed");
+
+    world.release("consumer.go");
+    world.run(&["stop", &run]).exited(0);
+    let _ = waiting_repo;
+}
+
+/// The sibling's `release-probed` reaches this run's store **exactly as its
+/// producer wrote it**.
+///
+/// Held against the sibling's own copy rather than against a shape restated here:
+/// the same envelope is read back through `onevcs`'s own reader, out of the
+/// session stream it was written on, and compared field by field with the one in
+/// the merged store. The single documented difference is the `node` label, which
+/// this crate stamps because the producer cannot know it — and which the contract
+/// permits precisely because an enricher never rewrites a key the producer
+/// stamped.
+#[test]
+fn the_siblings_release_probed_is_relayed_exactly_as_its_producer_wrote_it() {
+    let world = watching("adoption-relay");
+    world.write_graphs();
+    let (engine_repo, _consumer) = two_repositories(&world);
+    let (script, answer) = world.probe_in(&engine_repo, ENGINE);
+    world.releases(&automated(&script));
+    releases_at(&answer, "0.1.0");
+
+    let run = start(&world, "adoption-relay", vec![engine()]);
+    world.until("the engine to settle", |world| {
+        !world.events_of(&run, "node-settled").is_empty()
+    });
+
+    // What the producer wrote, read through the producer's own reader.
+    let token = world
+        .journal(&run)
+        .into_iter()
+        .find(|event| event["source"] == "vcs" && event["payload"]["clone"].is_string())
+        .and_then(|event| event["payload"]["token"].as_str().map(str::to_string))
+        .map(onevcs::SessionToken)
+        .expect("the session the engine published from names itself");
+    let written: Vec<Value> = sibling_stream(&world, &token)
+        .into_iter()
+        .filter(|event| event["kind"] == "release-probed")
+        .collect();
+    assert_eq!(
+        written.len(),
+        1,
+        "the publication's baseline capture probed once: {written:?}"
+    );
+
+    let relayed = world.events_of(&run, "release-probed");
+    assert_eq!(relayed.len(), 1, "{relayed:?}");
+    for field in ["v", "ts", "stream", "seq", "source", "kind", "payload"] {
+        assert_eq!(
+            relayed[0][field], written[0][field],
+            "the relay rewrote `{field}`"
+        );
+    }
+    // The one key the relay adds, and the only one: what the producer stamped is
+    // still exactly what it stamped.
+    assert_eq!(relayed[0]["labels"]["node"], json!("engine"));
+    for (key, value) in written[0]["labels"]
+        .as_object()
+        .expect("the producer stamped labels")
+    {
+        assert_eq!(
+            &relayed[0]["labels"][key], value,
+            "the relay rewrote `{key}`"
+        );
+    }
+}
+
+/// **A terminal blocker, pinned so it cannot change in silence.** The sibling's
+/// `release-observed` and `release-acknowledged` are produced, and this crate has
+/// no published way to read them.
+///
+/// Both are emitted on the *identity's* release stream rather than on any
+/// session's — releases happen outside a session, which is why `release-observed`
+/// carries the landing commit as the only thing that could correlate it. `onevcs`
+/// 0.13.0 publishes the reader for that stream (`EventStream::open` takes a
+/// `SessionToken`, and `SessionToken` is a public tuple struct) but **not the
+/// name**: nothing on its surface hands back the stream token for an identity, so
+/// the only way to open one is to restate a private naming scheme — which this
+/// crate refuses to do in production, and which this test does precisely to prove
+/// the events exist and it is the *reader* that is missing.
+///
+/// See `docs/contract-divergences.md` entry 40 for the proposal. Both directions
+/// are held here: the day the sibling publishes the name, the last assertion
+/// stops being true and the entry is revisited.
+#[test]
+fn the_siblings_other_two_release_kinds_are_produced_and_cannot_be_read_from_a_run() {
+    let world = watching("adoption-unreadable");
+    world.write_graphs();
+    let (engine_repo, _consumer) = two_repositories(&world);
+    let (script, answer) = world.probe_in(&engine_repo, ENGINE);
+    world.releases(&both_styles(&script));
+    releases_at(&answer, "0.1.0");
+
+    let run = start(&world, "adoption-unreadable", vec![engine()]);
+    world.until("the engine to settle", |world| {
+        !world.events_of(&run, "node-settled").is_empty()
+    });
+    let landed = branch_of(&world, &run, "engine");
+
+    // A release the probe can see, so asking observes one; and a human step
+    // somebody records, which acknowledges one and observes it too.
+    releases_at(&answer, "0.2.0");
+    world.on_onevcs(|| {
+        onevcs::release_status(&landed, None).expect("the sibling answers about the landing")
+    });
+    world.on_onevcs(|| {
+        onevcs::acknowledge_release(
+            &landed,
+            &"wheel".parse().expect("a target name"),
+            "1.0.0",
+            false,
+        )
+        .expect("the release is acknowledged")
+    });
+
+    // The producer works: both kinds are on the identity's own release stream.
+    let identity = "github.com/owner/engine";
+    let kinds: Vec<String> = sibling_stream(&world, &release_stream_of(identity))
+        .into_iter()
+        .filter_map(|event| event["kind"].as_str().map(str::to_string))
+        .collect();
+    for kind in ["release-observed", "release-acknowledged"] {
+        assert!(
+            kinds.contains(&kind.to_string()),
+            "the sibling did not produce `{kind}` at all, so this is not a reader's problem: \
+             {kinds:?}"
+        );
+    }
+
+    // And neither reaches this run — under any profile, because nothing put them
+    // in the store to be filtered.
+    for kind in ["release-observed", "release-acknowledged"] {
+        assert!(
+            world.events_of(&run, kind).is_empty(),
+            "`{kind}` reached the run store, so entry 40's blocker is resolved and the \
+             divergence record has to say so"
+        );
+    }
+    world
+        .run(&["monitor", &run, "--all"])
+        .exited(0)
+        .out_lacks("release-observed")
+        .out_lacks("release-acknowledged");
+}
+
 /// A plan whose `consumes` names something the node does not depend on is
 /// refused where the plan is read, and told which key and why.
 ///
@@ -288,6 +506,43 @@ fn an_unusable_bound_leaves_the_run_behaving_as_the_shipped_one_does() {
         "an unusable surface bound was read as zero, so the wait was raised on every pass"
     );
     world.run(&["stop", &run]).exited(0);
+}
+
+/// The stream token `onevcs` records one repository's release activity under.
+///
+/// Recomputed here because the sibling publishes the **reader** and not the
+/// **name**: `EventStream::open` takes any `SessionToken`, and `SessionToken` is a
+/// public tuple struct, but nothing on that crate's surface hands back the token
+/// for an identity's release stream. So a test that wants to look at what the
+/// sibling wrote has to spell `releases-<first 12 hex of the identity's SHA-256>`
+/// itself — which is exactly why this crate does **not** do it in production, and
+/// why `docs/contract-divergences.md` entry 40 proposes that the name be
+/// published.
+///
+/// Its being here is the drift gate for that entry: the day the scheme changes,
+/// the reads below stop finding a stream and the entry is revisited.
+fn release_stream_of(identity: &str) -> onevcs::SessionToken {
+    use sha2::{Digest, Sha256};
+    let digest: String = Sha256::digest(identity.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    onevcs::SessionToken(format!("releases-{}", &digest[..12]))
+}
+
+/// Every envelope the sibling wrote on one of its own streams, read back through
+/// the sibling's own reader.
+fn sibling_stream(world: &World, token: &onevcs::SessionToken) -> Vec<Value> {
+    world.on_onevcs(|| {
+        let mut stream = onevcs::EventStream::open(token)
+            .unwrap_or_else(|error| panic!("the sibling's stream {token:?} reads: {error}"));
+        stream
+            .read()
+            .expect("the sibling's own reader reads its own stream")
+            .into_iter()
+            .map(|envelope| serde_json::to_value(envelope).expect("an envelope serializes"))
+            .collect()
+    })
 }
 
 /// The task prose one node's dispatch was handed, read off the `--task` the
@@ -799,122 +1054,6 @@ fn a_delivery_that_broke_leaves_the_note_owed_and_is_tried_again() {
         world.events_of(&run, "node-settled").len() == 2
     });
     assert!(redirected(&world, &run, "consumer").contains("crate 0.2.0"));
-}
-
-/// A note is delivered **once per node**, across a driver that died holding it.
-///
-/// A fresh driver re-dispatches what it found running, so without taking up what
-/// its predecessor already said it tells that node a second time — a correction
-/// the worker has already acted on, arriving again with nothing to tell it from a
-/// new one.
-///
-/// The second node is the clock: it is held behind a person until after the
-/// takeover, so *its* note is what says the fresh driver's own watch has answered
-/// released — which is the moment the first node must not be told again. It lands
-/// in a repository of its own, because two lifecycle nodes publishing from one
-/// checkout at once race each other's fetch and the predecessor's session is
-/// still holding this one's.
-///
-/// Unix-only, because it needs the driver *gone* without the tree it started
-/// going with it, and [`end_process`](crate::harness::end_process) is that on
-/// this platform alone. What it holds is not platform-specific.
-#[cfg(unix)]
-#[test]
-fn a_fresh_driver_does_not_tell_a_node_the_releases_arrived_a_second_time() {
-    let world = watching("adoption-restart");
-    world.write_graphs();
-    let (engine_repo, _consumer) = two_repositories(&world);
-    let later = world.extra_repository("tool");
-    let (script, answer) = world.probe_in(&engine_repo, ENGINE);
-    world.releases(&automated(&script));
-    releases_at(&answer, "0.1.0");
-
-    for node in ["consumer", "second"] {
-        world.script(&format!("{node}.turn-open"), "");
-        world.script(&format!("{node}.wait"), "hold");
-    }
-    let mut second = consumer(Some("fast"));
-    second["id"] = json!("second");
-    second["repo"] = json!("tool");
-    second["title"] = json!("feat: ship second");
-    second["deps"] = json!(["engine", "gate"]);
-    let plan = plan_of(
-        "adoption-restart",
-        vec![
-            engine(),
-            consumer(Some("fast")),
-            crate::harness::human("gate", &["engine"]),
-            second,
-        ],
-    );
-    for node in ["engine", "consumer", "second"] {
-        world.script(&format!("{node}.work"), &format!("{node} did its work\n"));
-    }
-    let path = world.plan("adoption-restart", &plan);
-    let started = world.run(&["start", &path.to_string_lossy(), "--detach"]);
-    started.exited(0);
-    let run = "adoption-restart".to_string();
-    let pid = serde_json::from_str::<Value>(started.stdout.trim())
-        .ok()
-        .and_then(|announced| announced["pid"].as_u64())
-        .and_then(|pid| u32::try_from(pid).ok())
-        .unwrap_or_else(|| panic!("a detached launch announces its driver: {}", started.stdout));
-
-    world.until("the consumer's turn to open", |world| {
-        world
-            .events_of(&run, "turn-started")
-            .iter()
-            .any(|event| event["labels"]["node"] == "consumer")
-    });
-    releases_at(&answer, "0.2.0");
-    world.until("the consumer to be told", |world| {
-        !world.events_of(&run, "release-adopted").is_empty()
-    });
-
-    // The driver dies with that node still running and still held.
-    crate::harness::end_process(pid);
-    world.until("the driver to be reported dead", |world| {
-        world.run(&["status", &run]).stdout.contains("DRIVER DEAD")
-    });
-
-    // A fresh one takes the run over, re-dispatches what it found running, and —
-    // once the person has acted — tells the second node.
-    // Piped and drained by `ended`, which is what every other background driver
-    // in this suite does: a child holding the test process's own captured
-    // descriptors blocks on them once they fill, and a driver relays everything
-    // its dispatches say.
-    let adopted = world
-        .cmd(&["adopt", &run])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .expect("a fresh driver starts");
-    world.until("the person's action to be attestable", |world| {
-        world.run(&["attest", &run, "gate"]).code == 0
-    });
-    world.until("the second node to be told", |world| {
-        world
-            .events_of(&run, "release-adopted")
-            .iter()
-            .any(|event| event["labels"]["node"] == "second")
-    });
-
-    let told: Vec<Value> = world
-        .events_of(&run, "release-adopted")
-        .into_iter()
-        .filter(|event| event["labels"]["node"] == "consumer")
-        .collect();
-    assert_eq!(
-        told.len(),
-        1,
-        "a fresh driver told a node its releases had arrived a second time: {told:?}"
-    );
-
-    for node in ["consumer", "second"] {
-        world.release(&format!("{node}.go"));
-    }
-    crate::harness::ended(adopted);
-    let _ = later;
 }
 
 /// A fast-adoption node whose dependency lands in its **own** repository gets no

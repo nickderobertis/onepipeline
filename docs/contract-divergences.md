@@ -1432,6 +1432,23 @@ commit sitting on the base alone is none of them. So the branch is what is asked
 about and the landing commit is what the reference block *shows*, which is the
 cell a worker actually wants.
 
+**One thing that is held by a fold test rather than by a journey, and why.** A
+fresh driver takes up what its predecessor already said, out of the journal,
+before it starts watching — so a node it finds still running is not told its
+releases arrived a second time. A journey for that has to kill a driver
+mid-dispatch, adopt the run, and get a *second* node told before it can assert
+about the first. One was written. It is green on its own in about fourteen
+seconds, and it timed out against the suite's 120-second deadline on three of four
+runs of the instrumented suite, while holding e2e concurrency slots the rest of it
+needs; the causes ruled out along the way were an undrained child descriptor and
+two lifecycle nodes contending for one repository's session lease, and neither was
+the whole of it. A test whose verdict depends on how loaded the host was is worse
+than none, so it is not in the suite. What the seeding *is*, is a fold of a
+durable record, and `src/release.rs`'s
+`a_fresh_driver_takes_up_what_its_predecessor_already_said` drives exactly that in
+both directions — a node the predecessor told is not told again, and one it never
+told still is. Both deliveries either side of it are driven end to end.
+
 **Two things this crate could not compile as the workstream described them.**
 
 *The global adoption rung is not reachable for a node with no `repo`.* The chain
@@ -1455,14 +1472,55 @@ but the mechanism it reuses: a node that has already settled is not re-derived
 ready by any user-facing verb, so its owed note waits for whatever does dispatch
 it next. That is the `context` op's own reachability and is not changed here.
 
-*Only one of the sibling's three release kinds can reach this run's store.*
-`release-probed` is emitted on the **session's** own stream when a publication
-captures its baselines, so it is relayed into the merged store by the session
-follow that already exists, unchanged and unrewritten, like every other `onevcs`
-kind. `release-observed` and `release-acknowledged` are emitted on the
-*identity's* release stream — outside any session, which is why `release-observed`
-carries the landing commit as the only thing that could correlate it — and
-`onevcs` publishes no reader for that stream: `EventStream::open` takes a
-`SessionToken`. So this crate relays the one that reaches it and cannot relay the
-other two. **Proposal for `onevcs`: make an identity's release stream readable**,
-or stamp a release observed for a session's landing onto that session's stream.
+*Only one of the sibling's three release kinds can reach this run's store, and
+the reason is that the stream has no published **name**.* `release-probed` is
+emitted on the **session's** own stream when a publication captures its baselines,
+so the session follow that already exists relays it into the merged store —
+unchanged and unrewritten, like every other `onevcs` kind.
+`tests/e2e/adoption.rs`'s
+`the_siblings_release_probed_is_relayed_exactly_as_its_producer_wrote_it` holds
+that field by field against the sibling's own copy, read back through `onevcs`'s
+own reader out of the stream the producer wrote it on: `v`, `ts`, `stream`, `seq`,
+`source`, `kind`, and `payload` are identical, and every label the producer
+stamped stands, with `node` — which the producer cannot know — added beside them.
+
+`release-observed` and `release-acknowledged` are emitted on the **identity's**
+release stream instead. Releases happen long after the dispatch that produced the
+work has ended, outside any session, which is why `release-observed` carries the
+landing commit as the only thing that could correlate it.
+
+The reader for that stream **is** published, and it is the same one: `EventStream`
+opens any stream by token, `EventStream::open` takes a `SessionToken`, and
+`SessionToken` is a public tuple struct that wraps a plain `String`. What is not
+published is the **token**. `onevcs` records a repository's release activity under
+`releases-<the first twelve hex characters of the identity's SHA-256>`
+(`stream::Stream::releases`, which calls the private `ids::short_digest`), and
+nothing on that crate's public surface hands that string back for an identity —
+not `Identity`, not `RepositoryReleases`, not `release_targets`. `onevcs events`
+is no answer either: it takes the same token.
+
+So the only way for this crate to read the stream would be to **restate a private
+naming scheme in production code** — recomputing a SHA-256 to spell a filename the
+sibling owns. It does not, and deliberately: the day that scheme changes, a
+consumer that had guessed it relays *nothing*, silently, and no test that guessed
+the same way would catch it. It is the failure the contract's own retention rule
+already names — "the sanitiser is not public: a report path is obtained by calling
+`report_for` and in no other way, so the writer and every reader share one
+implementation instead of two that happen to agree."
+
+**Proposal for `onevcs`, in preference order: publish the name.** A
+`releases::stream_token(identity) -> SessionToken` — or a `release_events(repo)`
+returning an `EventStream` — makes the existing reader reach the existing stream
+and costs that crate one function. Failing that, stamp a release observed for a
+session's landing onto that session's own stream, where the follow would pick it
+up. Until one of them lands, this crate relays the one kind that reaches it and
+**cannot** relay the other two; that is a blocker on the published API rather than
+something this repository can resolve.
+
+It is pinned rather than asserted. `the_siblings_other_two_release_kinds_are_produced_and_cannot_be_read_from_a_run`
+drives the sibling until it really emits both kinds, reads them back off the
+release stream to prove the *producer* works and it is the reader that is missing,
+and then holds that neither reaches the run's store under any profile. The token
+it needs is spelled by a test helper and by nothing in `src/`, so the day the
+scheme changes or the name is published, that journey fails and this entry is
+revisited.

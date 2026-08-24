@@ -1410,12 +1410,19 @@ mod tests {
     /// time — a correction the worker has already acted on, arriving again with
     /// nothing to tell it from a new one.
     ///
-    /// The whole takeover is driven end to end by
-    /// `tests/e2e/adoption.rs`'s
-    /// `a_fresh_driver_does_not_tell_a_node_the_releases_arrived_a_second_time`,
-    /// which kills a driver mid-dispatch and adopts the run. What this one adds
-    /// is the half that journey cannot show: that the seeding **narrowed** rather
-    /// than silenced — a node the predecessor never told is still told.
+    /// Held here rather than by a journey, and the reason is written down in
+    /// `docs/contract-divergences.md` entry 40: a journey for it has to kill a
+    /// driver mid-dispatch, adopt the run, and get a *second* node told before it
+    /// can assert about the first. One was written and it is green on its own —
+    /// and it timed out against the 120-second deadline on three of four runs of
+    /// the instrumented suite, while holding e2e slots the rest of it needs. A
+    /// test that reports the tree's health by how loaded the host was is worse
+    /// than none.
+    ///
+    /// What the seeding *is*, is a fold of a durable record, and that is what this
+    /// drives — both directions, so it holds that the seeding **narrowed** rather
+    /// than silenced. The deliveries either side of it, into a live turn and onto
+    /// the next dispatch, are driven end to end in `tests/e2e/adoption.rs`.
     #[test]
     fn a_fresh_driver_takes_up_what_its_predecessor_already_said() {
         let root = std::env::temp_dir().join(format!("op-release-seed-{}", std::process::id()));
