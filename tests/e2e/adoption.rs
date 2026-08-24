@@ -361,7 +361,15 @@ fn a_fast_node_pins_against_git_and_is_told_when_the_release_arrives() {
     // merged store stamped with the node it was about.
     let interrupted = world.events_of(&run, "turn-interrupted");
     eprintln!("DIAG kinds={:?}", world.kinds(&run));
-    eprintln!("DIAG invocations={:?}", world.invocations().iter().filter(|c| c["tool"]=="oneagentgraph").map(|c| c["args"][0].clone()).collect::<Vec<_>>());
+    eprintln!(
+        "DIAG invocations={:?}",
+        world
+            .invocations()
+            .iter()
+            .filter(|c| c["tool"] == "oneagentgraph")
+            .map(|c| c["args"][0].clone())
+            .collect::<Vec<_>>()
+    );
     assert_eq!(interrupted.len(), 1, "{interrupted:?}");
     assert_eq!(interrupted[0]["payload"]["delivered"], json!(true));
     assert_eq!(interrupted[0]["labels"]["node"], json!("consumer"));
@@ -479,6 +487,140 @@ fn an_arrival_note_with_no_live_turn_to_reach_is_owed_to_the_next_dispatch() {
         dispatched[0]
     );
     assert!(redirected(&world, &run, "consumer").is_empty());
+}
+
+/// A `run:<id>#<node>` dependency is pinned against git like any other outside
+/// the node's repository, and its row is read out of the **upstream run's own
+/// ledger**.
+///
+/// It is out-of-repository whatever repository it lands in: the branch belongs to
+/// another run, so the stacked-branch machinery this crate has cannot reach it
+/// and a git pin is the only thing a worker can hold.
+#[test]
+fn a_cross_dag_dependency_is_pinned_against_git_and_named_from_the_upstreams_ledger() {
+    let world = watching("adoption-crossdag");
+    world.write_graphs();
+    let (engine_repo, _consumer) = two_repositories(&world);
+    let (script, answer) = world.probe_in(&engine_repo, ENGINE);
+    world.releases(&automated(&script));
+    releases_at(&answer, "0.1.0");
+
+    // The upstream lands the engine's work in a run of its own, and settles.
+    let upstream = start(&world, "adoption-upstream", vec![engine()]);
+    world.until("the upstream to settle", |world| {
+        world.run_file(&upstream, "result.json").is_file()
+    });
+
+    // A second run, whose one node depends on that node of that run.
+    let mut across = consumer(Some("fast"));
+    across["deps"] = json!([format!("run:{upstream}#engine")]);
+    across["consumes"] = json!({format!("run:{upstream}#engine"): "crate"});
+    world.script("consumer.turn-open", "");
+    world.script("consumer.wait", "hold");
+    let run = start(&world, "adoption-crossdag", vec![across]);
+    world.until("the consumer's turn to open", |world| {
+        !world.events_of(&run, "turn-started").is_empty()
+    });
+
+    // The row is the upstream run's, read off its ledger: this run never
+    // dispatched the engine and has no settlement of its own to read.
+    let task = task_of(&world, "consumer");
+    let row = task
+        .lines()
+        .find(|line| line.starts_with(&format!("| run:{upstream}#engine |")))
+        .unwrap_or_else(|| panic!("no row for the cross-DAG dependency:\n{task}"))
+        .to_owned();
+    let cells: Vec<&str> = row.trim_matches('|').split('|').map(str::trim).collect();
+    assert_eq!(cells[1], "github.com/owner/engine", "row: {row}");
+    assert_eq!(
+        cells[2],
+        branch_of(&world, &upstream, "engine"),
+        "the branch cell is not the branch the upstream published from: {row}"
+    );
+    assert_eq!(
+        cells[3],
+        landing_commit(&world, &upstream, "engine"),
+        "the commit cell is not the landing the upstream observed: {row}"
+    );
+    assert_eq!(cells[4], "crate", "row: {row}");
+
+    // And the release it is waiting on reaches it, named by the dependency the
+    // plan wrote rather than by a node this graph has.
+    releases_at(&answer, "0.2.0");
+    world.until("the release to be adopted", |world| {
+        !world.events_of(&run, "release-adopted").is_empty()
+    });
+    let arrived = world.events_of(&run, "release-arrived");
+    assert_eq!(arrived.len(), 1, "{arrived:?}");
+    assert_eq!(
+        arrived[0]["payload"]["dep"],
+        json!(format!("run:{upstream}#engine"))
+    );
+    assert_eq!(arrived[0]["payload"]["version"], json!("0.2.0"));
+
+    world.release("consumer.go");
+    world.until("the run to settle", |world| {
+        !world.events_of(&run, "node-settled").is_empty()
+    });
+}
+
+/// A delivery that was attempted and **broke** leaves the note owed rather than
+/// recorded, and the node is told once the lever works again.
+///
+/// The one answer that is neither "it reached the turn" nor "there was no turn to
+/// reach": a run that recorded the note as delivered when the lever failed would
+/// never try again, and the worker would go on pinning against git with the
+/// release out.
+#[test]
+fn a_delivery_that_broke_leaves_the_note_owed_and_is_tried_again() {
+    let world = watching("adoption-lever-broken");
+    world.write_graphs();
+    let (engine_repo, _consumer) = two_repositories(&world);
+    let (script, answer) = world.probe_in(&engine_repo, ENGINE);
+    world.releases(&automated(&script));
+    releases_at(&answer, "0.1.0");
+
+    let broken = world.fakes.join("interrupt.fail");
+    world.script("interrupt.fail", "");
+    world.script("consumer.turn-open", "");
+    world.script("consumer.wait", "hold");
+    let run = start(
+        &world,
+        "adoption-lever-broken",
+        vec![engine(), consumer(Some("fast"))],
+    );
+    world.until("the consumer's turn to open", |world| {
+        world
+            .events_of(&run, "turn-started")
+            .iter()
+            .any(|event| event["labels"]["node"] == "consumer")
+    });
+
+    releases_at(&answer, "0.2.0");
+    // The release arrives and the delivery breaks: the arrival is reported, and
+    // the adoption is not — because it has not happened.
+    world.until("the release to arrive", |world| {
+        !world.events_of(&run, "release-arrived").is_empty()
+    });
+    assert!(
+        world.events_of(&run, "release-adopted").is_empty(),
+        "a note whose delivery broke was recorded as delivered"
+    );
+
+    // Mend the lever, and the note this run still owes is delivered.
+    std::fs::remove_file(&broken).expect("the broken lever is mended");
+    world.until("the note to be delivered", |world| {
+        !world.events_of(&run, "release-adopted").is_empty()
+    });
+    let adopted = world.events_of(&run, "release-adopted");
+    assert_eq!(adopted.len(), 1, "the note was delivered more than once");
+    assert_eq!(adopted[0]["payload"]["delivery"], json!("live"));
+
+    world.release("consumer.go");
+    world.until("the run to settle", |world| {
+        world.events_of(&run, "node-settled").len() == 2
+    });
+    assert!(redirected(&world, &run, "consumer").contains("crate 0.2.0"));
 }
 
 /// A fast-adoption node whose dependency lands in its **own** repository gets no
@@ -617,6 +759,13 @@ fn a_published_node_is_held_until_the_release_answers_and_by_nothing_else() {
         world.events_of(&run, "node-settled").len() == 2
     });
     assert!(dispatched(&world, &run, "consumer"));
+    // It launched *after* the release, so it has a version to pin against and no
+    // git reference block telling it otherwise.
+    let task = task_of(&world, "consumer");
+    assert!(
+        !task.contains(CROSS_REPO_REFERENCES_HEADING),
+        "a node that waited for the release was told it had launched without one:\n{task}"
+    );
     let settled = world.events_of(&run, "node-settled");
     for event in &settled {
         assert_ne!(
@@ -818,13 +967,13 @@ fn the_two_release_styles_take_one_scheduling_path_and_are_reported_apart() {
             "a node one of the two waits held was failed: {event}"
         );
     }
-    let adopted: Vec<Value> = world.events_of(&run, "release-arrived");
+    let arrived: Vec<Value> = world.events_of(&run, "release-arrived");
     assert!(
-        adopted
+        arrived
             .iter()
             .any(|event| event["payload"]["style"] == json!("human-step")
                 && event["payload"]["version"] == json!("1.0.0")),
-        "the human-step release was not reported as one: {adopted:?}"
+        "the human-step release was not reported as one: {arrived:?}"
     );
 }
 

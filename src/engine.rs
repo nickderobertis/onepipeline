@@ -1181,7 +1181,10 @@ fn adopt_releases(
     releases: &mut crate::release::Watch,
     in_flight: &BTreeMap<String, Dispatch>,
 ) -> Result<()> {
-    let running: Vec<String> = in_flight.keys().cloned().collect();
+    let running: Vec<Node> = in_flight
+        .values()
+        .map(|dispatch| dispatch.node.clone())
+        .collect();
     let ready = releases.ready_to_adopt(&running);
     if ready.is_empty() {
         return Ok(());
@@ -1321,7 +1324,7 @@ fn start_ready(
         // outside its own repository. Empty for a node that has none — which is
         // every node a plan naming neither new field carries — and the dispatch
         // is then composed exactly as it always was.
-        let references = releases.references(&node.id);
+        let references = releases.references(&node);
         spawn(
             paths,
             rules,

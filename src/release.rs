@@ -443,9 +443,17 @@ impl Watch {
     }
 
     /// The rows a node's dispatch is handed, in the order its `deps` name them.
-    pub(crate) fn references(&self, node: &str) -> Vec<CrossRepoReference> {
+    ///
+    /// **Fast adoption only.** A `published` node is not started until every one
+    /// of these has answered released, so it launches against versions rather
+    /// than against a git pin — and the block's own words say it launched under
+    /// fast adoption, which for that node would not be true.
+    pub(crate) fn references(&self, node: &Node) -> Vec<CrossRepoReference> {
+        if adoption_of(node) != Adoption::Fast {
+            return Vec::new();
+        }
         self.dependencies
-            .get(node)
+            .get(&node.id)
             .map(|dependencies| dependencies.iter().map(Dependency::row).collect())
             .unwrap_or_default()
     }
@@ -696,12 +704,18 @@ impl Watch {
 
     /// The nodes whose awaited releases have all arrived and which have not been
     /// told yet, with the versions to tell them.
-    pub(crate) fn ready_to_adopt(&self, running: &[String]) -> Vec<(String, Vec<Released>)> {
+    ///
+    /// **Fast adoption only**, for the reason [`references`](Self::references)
+    /// gives: a `published` node launched against those versions in the first
+    /// place, so a note telling it to move off a git pin it never held is noise
+    /// aimed at a worker who cannot act on it.
+    pub(crate) fn ready_to_adopt(&self, running: &[Node]) -> Vec<(String, Vec<Released>)> {
         running
             .iter()
-            .filter(|node| !self.adopted.contains(*node))
-            .filter(|node| self.all_released(node))
-            .map(|node| (node.clone(), self.released(node)))
+            .filter(|node| adoption_of(node) == Adoption::Fast)
+            .filter(|node| !self.adopted.contains(&node.id))
+            .filter(|node| self.all_released(&node.id))
+            .map(|node| (node.id.clone(), self.released(&node.id)))
             .collect()
     }
 
@@ -902,25 +916,31 @@ impl Released {
     }
 
     /// The releases an event payload recorded, read back.
+    ///
+    /// A journal is external input like any other — a record this build reads may
+    /// have been written by a different one — so an entry that does not carry all
+    /// three fields as strings is **skipped**, exactly as every other reader of a
+    /// journal skips a record it cannot read. Substituting an empty string would
+    /// tell a worker a release arrived at a version nobody named.
     pub(crate) fn of_payload(payload: &Value) -> Vec<Self> {
         payload
             .as_array()
             .map(Vec::as_slice)
             .unwrap_or_default()
             .iter()
-            .map(|entry| {
+            .filter_map(|entry| {
                 let field = |key: &str| {
                     entry
                         .get(key)
                         .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_owned()
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_owned)
                 };
-                Self {
-                    identity: field("identity"),
-                    target: field("target"),
-                    version: field("version"),
-                }
+                Some(Self {
+                    identity: field("identity")?,
+                    target: field("target")?,
+                    version: field("version")?,
+                })
             })
             .collect()
     }
@@ -1184,6 +1204,22 @@ mod tests {
             note,
             "a note replayed from the record is not the note that was sent"
         );
+
+        // A record this build cannot read whole is skipped rather than rendered
+        // with a blank where the version should be: a journal is external input,
+        // and a note naming no version tells a worker nothing it can act on.
+        for unreadable in [
+            json!([{"identity": "a", "target": "crate"}]),
+            json!([{"identity": "a", "target": "crate", "version": 13}]),
+            json!([{"identity": "a", "target": "crate", "version": ""}]),
+            json!([{"target": "crate", "version": "0.13.0"}]),
+            json!("not a list at all"),
+        ] {
+            assert!(
+                Released::of_payload(&unreadable).is_empty(),
+                "{unreadable} was read as a release"
+            );
+        }
     }
 
     /// The surface a held node raises names the **style** of each release it

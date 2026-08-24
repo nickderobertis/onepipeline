@@ -81,6 +81,14 @@ pub struct RunState {
     /// The commit each node's change reached its base at, as `onevcs` reported
     /// it on the session's own stream.
     ///
+    // llmlint: ignore[invalid_states_unrepresentable] a commit is the plain string every
+    // identifier in this crate is, for the reason `src/plan.rs` and `src/crossdag.rs`
+    // record: it is what the journal payload carries and what the sibling's own reference
+    // grammar takes. What could go wrong with an unchecked one — a value that forges a row
+    // where it is rendered — is checked where it enters, by `vcs::landing_commit_of`, which
+    // is the only thing that writes this map.
+    ///
+    ///
     /// The one thing that names *where* a node's work landed, and therefore the
     /// only thing a release can be measured against: a baseline is captured at a
     /// landing, so asking whether a release carries this work means naming that
@@ -930,18 +938,10 @@ fn abandon_the_dispatch_in_flight(state: &mut RunState) {
 /// crate's settlement. A payload without a usable `sha` records nothing, which
 /// leaves the run naming a dependency's branch instead of its landing.
 fn fold_landing_commit(state: &mut RunState, event: &Envelope) {
-    if event.source != Source::Vcs || !crate::vcs::is_merge_completed(&event.kind) {
-        return;
-    }
     let Some(node) = event.labels.node.as_deref() else {
         return;
     };
-    let Some(commit) = event
-        .payload
-        .get("sha")
-        .and_then(Value::as_str)
-        .and_then(crate::vcs::usable_value)
-    else {
+    let Some(commit) = crate::vcs::landing_commit_of(event) else {
         return;
     };
     state.landing_commits.insert(node.to_string(), commit);

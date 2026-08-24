@@ -972,13 +972,19 @@ pub fn is_merge_completed(kind: &crate::event::EventKind) -> bool {
     *kind == kind_of(onevcs::EventKind::MergeCompleted)
 }
 
-/// One value off a relayed payload, held to what a payload text may carry.
+/// The commit one publication reached its base at, off the sibling's own record.
 ///
-/// The same check [`usable`] makes of a session token and a branch name, and for
-/// the same reason: a landing commit is rendered into a table and a task, where
-/// a value carrying whitespace or a control character forges a row.
-pub fn usable_value(value: &str) -> Option<String> {
-    usable(value)
+/// The whole boundary read in one named place rather than a validator handed back
+/// for a caller to apply: a landing commit is rendered into a table, into a task,
+/// and into an event payload, so a value carrying whitespace or a control
+/// character forges a row wherever it lands. `None` for an envelope that is not
+/// one, and for a `sha` that could not be rendered — the same check [`usable`]
+/// makes of a session token and a branch name, and for the same reason.
+pub fn landing_commit_of(event: &crate::event::Envelope) -> Option<String> {
+    if event.source != crate::event::Source::Vcs || !is_merge_completed(&event.kind) {
+        return None;
+    }
+    usable(event.payload.get("sha")?.as_str()?)
 }
 
 /// The session a lifecycle node asks for.
