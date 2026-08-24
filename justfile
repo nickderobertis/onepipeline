@@ -155,9 +155,16 @@ offline-tiers := "not binary(smoke)"
 
 # 95% line coverage is the gate; lower it only with a documented reason in
 # AGENTS.md.
+#
+# `--failure-mode all` is load-bearing. The cancellation journeys kill
+# instrumented processes, which leaves truncated `.profraw` files in the merge
+# set, and `llvm-profdata`'s default rejects the whole merge over one of them —
+# which this recipe then reports as a test failure. `all` refuses only when every
+# profile is unmergeable; `tests/coverage.rs` plants one, so removing the flag
+# fails the recipe rather than passing quietly.
 # The crate's offline suite (unit + contract + e2e) with coverage enforced.
 _crate-test:
-    @cargo llvm-cov nextest --locked --fail-under-lines 95 \
+    @cargo llvm-cov nextest --locked --failure-mode all --fail-under-lines 95 \
       -E '{{offline-tiers}}' --final-status-level fail \
       || { echo "tests failed, or coverage fell below 95% — cover the lines the table above counts as missed" >&2; exit 1; }
 
