@@ -558,7 +558,11 @@ fn task_of(world: &World, node: &str) -> String {
 
 /// The task prose every one of a node's dispatches was handed, in order.
 fn tasks_of(world: &World, node: &str) -> Vec<String> {
-    let mine = format!("## What\nShip {node}.");
+    // Either shape a node's own prose takes here: `lifecycle`'s and `agent`'s.
+    let mine = [
+        format!("## What\nShip {node}."),
+        format!("## What\nDo {node}."),
+    ];
     world
         .invocations()
         .into_iter()
@@ -568,7 +572,7 @@ fn tasks_of(world: &World, node: &str) -> Vec<String> {
             let at = args.iter().position(|arg| arg == "--task")?;
             args.get(at + 1)?.as_str().map(str::to_owned)
         })
-        .filter(|task| task.starts_with(&mine))
+        .filter(|task| mine.iter().any(|prose| task.starts_with(prose)))
         .collect()
 }
 
@@ -855,8 +859,8 @@ fn redirected(world: &World, run: &str, node: &str) -> String {
 /// out-of-band turn control is what every `context` edit written before delivery
 /// had modes ran under, and the note must be owed rather than lost. What a
 /// deferred note then does — ride the next dispatch and be consumed by it — is
-/// the `context` mechanism's own, driven end to end in `context_delivery.rs` and
-/// folded from this record in `projection.rs`.
+/// `a_deferred_arrival_note_rides_the_next_dispatch_and_is_consumed_by_it`, just
+/// below.
 #[test]
 fn an_arrival_note_with_no_live_turn_to_reach_is_owed_to_the_next_dispatch() {
     let world = watching("adoption-deferred");
@@ -1054,6 +1058,114 @@ fn a_delivery_that_broke_leaves_the_note_owed_and_is_tried_again() {
         world.events_of(&run, "node-settled").len() == 2
     });
     assert!(redirected(&world, &run, "consumer").contains("crate 0.2.0"));
+}
+
+/// The note a running turn could not take **rides the node's next dispatch**, and
+/// is consumed by it.
+///
+/// The other half of the deferred delivery: the journey above proves the note is
+/// *owed*, and this one proves the owing is honoured. What puts the node back on
+/// the frontier is the pair the contract already documents for idling one and
+/// picking it up again — `cancel` then `requeue` — and the second dispatch is
+/// handed the note under `## Planner context`, disclaiming itself exactly as a
+/// planner's own note does.
+///
+/// A direct agent node, so the second dispatch is a dispatch and nothing else:
+/// a lifecycle node put back on the frontier re-opens a session and republishes a
+/// branch its base already carries, which is a different journey's subject.
+#[test]
+fn a_deferred_arrival_note_rides_the_next_dispatch_and_is_consumed_by_it() {
+    let world = watching("adoption-carried");
+    world.write_graphs();
+    let (engine_repo, _consumer) = two_repositories(&world);
+    let (script, answer) = world.probe_in(&engine_repo, ENGINE);
+    world.releases(&automated(&script));
+    releases_at(&answer, "0.1.0");
+
+    // No lever, so the note is deferred; and a second node held open beside it,
+    // because the loop returns as soon as nothing can move and a requeue needs a
+    // driver to pick it up.
+    world.script("consumer.no-lever", "");
+    world.script("consumer.turn-open", "");
+    world.script("consumer.wait", "hold");
+    world.script("keeper.wait", "hold");
+    let mut carried = crate::harness::agent("consumer", &[ENGINE]);
+    carried["adoption"] = json!("fast");
+    let run = start(
+        &world,
+        "adoption-carried",
+        vec![engine(), carried, crate::harness::agent("keeper", &[])],
+    );
+
+    world.until("the consumer's turn to open", |world| {
+        world
+            .events_of(&run, "turn-started")
+            .iter()
+            .any(|event| event["labels"]["node"] == "consumer")
+    });
+    releases_at(&answer, "0.2.0");
+    world.until("the release to be adopted", |world| {
+        !world.events_of(&run, "release-adopted").is_empty()
+    });
+    let adopted = world.events_of(&run, "release-adopted");
+    assert_eq!(adopted[0]["payload"]["delivery"], json!("next"));
+
+    // Idle it and put it back: what it is handed the second time is what the
+    // note was owed to. `cancel` takes a node that is pending or running, so it
+    // comes while the turn is still held; `requeue` refuses while the dispatch it
+    // asked to stop is still in flight, so it is retried until that one has gone.
+    let envelope = |commands: Value| json!({"version": 1, "commands": commands}).to_string();
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([{"op": "cancel", "id": "consumer"}])),
+        )
+        .exited(0);
+    world.release("consumer.go");
+    world.until("the cancelled dispatch to have gone", |world| {
+        world
+            .run_with_stdin(
+                &["reply", &run],
+                &envelope(json!([{"op": "requeue", "id": "consumer"}])),
+            )
+            .code
+            == 0
+    });
+    world.until("the node to be dispatched again", |world| {
+        tasks_of(world, "consumer").len() == 2
+    });
+
+    let dispatched = tasks_of(&world, "consumer");
+    assert!(
+        dispatched[1].contains("## Planner context")
+            && dispatched[1].contains("github.com/owner/engine — crate 0.2.0")
+            && dispatched[1].contains("Move from the git pin to that released version"),
+        "the next dispatch was not handed the note it was owed:\n{}",
+        dispatched[1]
+    );
+    assert!(
+        dispatched[1].contains("adds no acceptance criteria"),
+        "the carried note did not disclaim itself:\n{}",
+        dispatched[1]
+    );
+    assert!(
+        !dispatched[0].contains("0.2.0"),
+        "a version that did not exist at launch reached the dispatch that launched"
+    );
+
+    // And it carried exactly one dispatch: nothing owes it again.
+    world.release("keeper.go");
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+    assert_eq!(
+        tasks_of(&world, "consumer")
+            .iter()
+            .filter(|task| task.contains("crate 0.2.0"))
+            .count(),
+        1,
+        "the note outlived the dispatch that took it"
+    );
 }
 
 /// A fast-adoption node whose dependency lands in its **own** repository gets no
