@@ -728,9 +728,8 @@ pub struct Watermarks {
 impl Watermarks {
     /// The marks a run's own store already stands at.
     ///
-    /// Folded from what was relayed rather than tracked beside it: the store is
-    /// the record of what reached this run, so a reader that starts from it
-    /// cannot relay a record twice however many drivers the run has had.
+    /// Folded from what was relayed rather than tracked beside it, so what stops
+    /// a record being relayed twice is the record.
     pub fn of_relayed(envelopes: &[Envelope]) -> Self {
         let mut marks = Self::default();
         for envelope in envelopes {
@@ -817,13 +816,11 @@ impl Follower {
         if let Some(reader) = self.reader.take() {
             let _ = reader.join();
         }
-        // The reader thread is joined above, so nothing else holds this and a
-        // poisoned lock is a panic in that thread — which is a follow that
-        // relayed nothing knowable, and therefore a whole stream still to read.
-        self.progress
+        let mut reached = self
+            .progress
             .lock()
-            .map(|mut reached| std::mem::take(&mut *reached))
-            .unwrap_or_default()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        std::mem::take(&mut *reached)
     }
 }
 
@@ -1660,6 +1657,45 @@ mod tests {
     /// scratch root says it here rather than in three places.
     fn onevcs_home() -> &'static str {
         "ONEVCS_HOME"
+    }
+
+    /// The marks a reader starts from are the store's own, one series per stream.
+    ///
+    /// A store holds more than one producer's records, so a fold that kept a
+    /// single mark would let the higher series hide the lower one's next record.
+    #[test]
+    fn the_marks_a_later_reader_starts_from_are_folded_from_what_the_store_holds() {
+        let wrote = |stream: &str, seq: u64| Envelope {
+            v: crate::event::ENVELOPE_VERSION,
+            ts: "2026-01-01T00:00:00.000Z".into(),
+            stream: stream.to_owned(),
+            seq,
+            source: crate::event::Source::Vcs,
+            kind: crate::event::EventKind("release-observed".into()),
+            phase: Some(crate::event::Phase::Release),
+            labels: crate::event::Labels::default(),
+            payload: serde_json::Map::new(),
+            artifacts: Vec::new(),
+        };
+        // A store holding two producers' records, each in its own series and
+        // neither of them contiguous: what a run is handed of a stream its
+        // producer shares across runs is the part correlated to its own work.
+        let held = vec![wrote("s-1", 1), wrote("s-1", 2), wrote("releases-abc", 7)];
+        let marks = Watermarks::of_relayed(&held);
+        for envelope in &held {
+            assert!(
+                !marks.beyond(envelope),
+                "a record the store already holds would be relayed again: {envelope:?}"
+            );
+        }
+        // And each stream continues from its own mark, so the higher series
+        // cannot hide the lower one's next record.
+        assert!(marks.beyond(&wrote("s-1", 3)));
+        assert!(marks.beyond(&wrote("releases-abc", 8)));
+        assert!(!marks.beyond(&wrote("releases-abc", 6)));
+        // A stream nothing was relayed from is entirely unread, first record and
+        // all: a producer numbering from zero is not a producer that said nothing.
+        assert!(marks.beyond(&wrote("releases-def", 0)));
     }
 
     #[test]

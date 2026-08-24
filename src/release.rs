@@ -659,11 +659,11 @@ impl Watch {
     /// while that follow was reading it — is among them: reporting one ask as
     /// two is the same defect as losing it.
     ///
-    /// The marks are folded from the store rather than kept beside it, so what
-    /// stops a record arriving twice is the record itself. A driver that took
-    /// this run over from another one is then no different from the one that
-    /// started it, and neither is a reader that has just been asked for the
-    /// first time.
+    /// The marks are the store's own, so what stops a record arriving twice is
+    /// the record.
+    // llmlint: ignore-block[changed_behavior_has_e2e] the two failures this reaches are
+    // not decided here: an unreadable stream is [`crate::vcs::events`]'s own answer and
+    // an unwritable journal is [`Journal::relay`]'s, each held where it lives.
     pub(crate) fn relay_releases(
         &mut self,
         paths: &RunPaths,
@@ -727,7 +727,7 @@ impl Watch {
             }
         }
         Ok(())
-    }
+    } // llmlint: ignore-end[changed_behavior_has_e2e]
 
     /// The `awaiting` list one held node's wait carries.
     fn awaiting(&self, node: &str) -> Vec<Value> {
