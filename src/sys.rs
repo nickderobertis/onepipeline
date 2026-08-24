@@ -215,13 +215,50 @@ pub fn stop(pid: u32, how: Stop) -> Teardown {
 /// [`Teardown::PartlySignalled`].
 pub fn stop_and_confirm(pids: &[u32], how: Stop, patience: Duration) -> Teardown {
     let (established, aimed) = platform_stop(pids, how);
-    if established != Teardown::Signalled {
-        return established;
-    }
-    if gone_within(&aimed, patience) {
-        Teardown::Signalled
-    } else {
-        Teardown::PartlySignalled
+    confirmed(established, || gone_within(&aimed, patience))
+}
+
+/// What the bounded liveness probe makes of what one round of signalling
+/// established.
+///
+/// Split out of [`stop_and_confirm`] so the decision can be driven where every
+/// platform this crate builds for runs it: what a teardown's own answer becomes
+/// once the tree has been watched is a question about this fold, and the two
+/// inputs it turns on — a platform's `established` and a platform's answer about
+/// what is still running — are the two things a host decides for itself. The
+/// probe is the caller's, so this is the whole of the decision.
+///
+/// **Both** signalled answers are confirmed, and that is the correction. A
+/// teardown asks about each process in the tree separately and a tree-kill ends
+/// descendants as it walks, so an ask aimed at a descendant its own root already
+/// ended meets a process that is terminated and has not yet gone — which is
+/// [`Teardown::PartlySignalled`] on the strength of a liveness answer taken
+/// microseconds after the signal. Returning that outright skipped the bounded
+/// confirmation in exactly the case the confirmation was written for, and
+/// reported a run whose tree was in fact reached as one only partly stopped.
+/// What settles it is the same question `patience` was always there to ask: is
+/// any of it still there a moment later.
+///
+/// The other three keep their own answers, because the confirmation has nothing
+/// to add to them. [`Teardown::NotAttempted`] and [`Teardown::Refused`] both say
+/// **nothing was signalled** — the distinction [`Teardown::PartlySignalled`]
+/// draws against them is the whole point of having three variants, and a tree
+/// that went away by itself while nobody signalled it is not a stop this
+/// teardown made. [`Teardown::NothingToStop`] found no tree to watch.
+fn confirmed(established: Teardown, gone: impl FnOnce() -> bool) -> Teardown {
+    match established {
+        // A tree that is gone within the patience was reached, however the
+        // per-process asks read at the instant they were made; one still
+        // standing when it runs out is the run the operator has to be told is
+        // still running.
+        Teardown::Signalled | Teardown::PartlySignalled => {
+            if gone() {
+                Teardown::Signalled
+            } else {
+                Teardown::PartlySignalled
+            }
+        }
+        established => established,
     }
 }
 
@@ -2348,6 +2385,80 @@ mod tests {
             "a stop answered that it had reached the tree under {root} while {surviving:?} was \
              still running, so every caller that reports a stop to a person reports one that had \
              not happened yet"
+        );
+    }
+
+    /// A tree the teardown reached is a clean stop, including when a descendant
+    /// its root's tree-kill had already ended was still answering "live" when
+    /// the ask reached it.
+    ///
+    /// The Windows race in one assertion, held on every platform this crate
+    /// builds for. `taskkill /T` ends descendants as it walks, so the later ask
+    /// aimed at one of them meets a process that is terminated and not yet gone,
+    /// which is `PartlySignalled` — and `stop_and_confirm` returned that
+    /// *immediately*, skipping the bounded confirmation written for exactly this
+    /// race. `onepipeline stop` then refused a teardown it had completed, which
+    /// on the `cross (windows-latest)` leg is three `adoption::` journeys failing
+    /// on a stop that exited 2, and a release blocked behind them.
+    ///
+    /// The probe is substituted and the decision is not: what a host says about
+    /// a process is the platform's, and what a teardown concludes from it is
+    /// this fold, which is the thing that was wrong.
+    #[test]
+    fn a_descendant_the_tree_kill_already_ended_is_a_clean_stop() {
+        assert_eq!(
+            confirmed(Teardown::PartlySignalled, || true),
+            Teardown::Signalled,
+            "a teardown whose tree was gone within the patience refused a stop it had made"
+        );
+        assert_eq!(
+            confirmed(Teardown::Signalled, || true),
+            Teardown::Signalled,
+            "a teardown that reached its whole tree was not reported as one"
+        );
+    }
+
+    /// A tree that is genuinely still standing when the confirmation runs out is
+    /// still a refusal, and still says which kind of refusal it is.
+    ///
+    /// The other half of the correction above, and the reason the fold cannot
+    /// simply answer `Signalled`. A process that took the ask and stayed, and one
+    /// this user may not signal, are both a run that is still running; and
+    /// "nothing was signalled" — a host that gave no listing, or a teardown every
+    /// ask of which was refused — is a different thing to tell an operator than
+    /// "part of it came down", which is why neither is confirmed into the other.
+    #[test]
+    fn a_tree_still_standing_when_the_patience_runs_out_is_still_a_refusal() {
+        assert_eq!(
+            confirmed(Teardown::PartlySignalled, || false),
+            Teardown::PartlySignalled,
+            "a stop that left part of the run running reported a clean teardown"
+        );
+        assert_eq!(
+            confirmed(Teardown::Signalled, || false),
+            Teardown::PartlySignalled,
+            "a signalled tree that was still there when the patience ran out was reported as \
+             gone"
+        );
+        // Nothing was signalled, so there is nothing for a liveness probe to
+        // confirm: a tree that went away by itself is not a stop this teardown
+        // made, and folding either of these into a signalled answer is the false
+        // completion the whole seam exists to remove.
+        for nothing_signalled in [
+            Teardown::NotAttempted,
+            #[cfg(unix)]
+            Teardown::Refused,
+        ] {
+            assert_eq!(
+                confirmed(nothing_signalled, || true),
+                nothing_signalled,
+                "a teardown that signalled nothing was reported as one that reached the tree"
+            );
+        }
+        assert_eq!(
+            confirmed(Teardown::NothingToStop, || true),
+            Teardown::NothingToStop,
+            "a teardown that found no tree to aim at was reported as one that ended a run"
         );
     }
 
