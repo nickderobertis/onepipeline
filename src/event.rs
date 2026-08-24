@@ -165,6 +165,18 @@ pub enum PipelineKind {
     UpstreamModified,
     /// The planner requested completion, independently of graph mutation.
     CompletionRequested,
+    /// A node is held under `published` adoption, waiting on releases.
+    ///
+    /// Raised when the wait begins and again on its own interval, so a wait
+    /// nobody has ended cannot go silent. Each awaited release names its style,
+    /// so a wait on a machine and a wait on a person are tellable apart from the
+    /// payload as well as from the surface beside it.
+    ReleaseWait,
+    /// One release a node was waiting on has happened.
+    ReleaseArrived,
+    /// A fast-adoption node was told the releases it was waiting on arrived, and
+    /// whether the note reached a running turn or its next dispatch.
+    ReleaseAdopted,
     /// A drafting dispatch ran for a change request's body and produced none.
     ///
     /// Only where one was *configured and attempted*: a launch that named no
@@ -197,6 +209,9 @@ impl PipelineKind {
             Self::CrossDagSatisfied => "cross-dag-satisfied",
             Self::UpstreamModified => "upstream-modified",
             Self::CompletionRequested => "completion-requested",
+            Self::ReleaseWait => "release-wait",
+            Self::ReleaseArrived => "release-arrived",
+            Self::ReleaseAdopted => "release-adopted",
             Self::BodyNotDrafted => "body-not-drafted",
         }
     }
@@ -246,6 +261,9 @@ pub const PIPELINE_KINDS: &[PipelineKind] = &[
     PipelineKind::CrossDagSatisfied,
     PipelineKind::UpstreamModified,
     PipelineKind::CompletionRequested,
+    PipelineKind::ReleaseWait,
+    PipelineKind::ReleaseArrived,
+    PipelineKind::ReleaseAdopted,
     PipelineKind::BodyNotDrafted,
 ];
 

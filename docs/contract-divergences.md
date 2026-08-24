@@ -11,13 +11,15 @@ the contract**, and `docs/contract.md` was amended to carry each ruling. They st
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–22, 33 and 35–39 are open**. Each states what the code does today and
+Entries **10–22, 33 and 35–40 are open**. Each states what the code does today and
 the proposal it is waiting on. Most are questions for a *producer* rather than for
 this crate, because `oneagentgraph` and `onevcs` are independent tools that expose
 general integration hooks only and nothing in them may know about this one; the
-rest — 36 to 39 — are for the planner who owns the contract, and name the sentence
-in it they would change. An open entry is recorded here and never resolved from
-this repository.
+rest — 36 to 40 — are for the planner who owns the contract, and name the sentence
+in it they would change. Entry 40 is for both: its plan-schema and event-kind
+halves are the contract owner's, and the two things it could not compile are
+`onevcs`'s. An open entry is recorded here and never resolved from this
+repository.
 
 ## 1. `ResolvedGraphRef` is not a type `oneagentgraph` exports — RESOLVED
 
@@ -1320,3 +1322,205 @@ those things — so narration loses nothing by being read second, while a questi
 behind it is a stopped frontier. Reading narration while a blocking surface is
 pending no longer clears that pending state either: a report is not an answer,
 and only a reply releases the subtree a decision is holding.
+
+## 40. A node cannot say it depends on the *release* rather than on the work — OPEN
+
+**Proposal (for the planner who owns the contract): add two optional node fields
+to plan schema 3 — `adoption` and `consumes` — and three kinds to this library's
+closed set: `release-wait`, `release-arrived`, `release-adopted`.**
+
+The contract's plan schema says when a node launches relative to its
+dependencies' **branches** and has no way to say "this node needs the *released*
+thing" as distinct from "this node needs the *work*". So a plan spanning several
+repositories has that sequencing done by a person: a node is held back by hand
+until somebody has watched a release go out, or it launches early and the worker
+is corrected mid-run once the thing it pinned against has been published. Both
+are manual supervision of something the run already has the events to know, now
+that `onevcs` 0.13.0 answers what a repository releases and whether the release
+carrying one landed change has happened yet.
+
+`adoption` is one of `fast` and `published`, and it is the **first rung of four**:
+the node's own field, then the repository rung and the global rung — which are
+`onevcs`'s and which [`onevcs::adoption_for`] answers together — then `fast`.
+There is deliberately no plan-level tier and no run-only override.
+
+`consumes` is keyed by **dependency node id** and not by repository, because the
+dependency is a node: two nodes in one repository can legitimately want different
+targets, and a repository key could not tell them apart. A dependency it names
+none for takes the target that dependency's repository declaration marks as its
+default.
+
+Under `fast` the node launches on its dependencies' branch readiness alone — the
+readiness the contract already describes, unchanged — and a dependency inside the
+node's own repository still produces the stacked or merged-stacked branch it
+produces today. A dependency **outside** it gains a row in a trailing block on
+the node's rendered task, under `onepipeline::plan::CROSS_REPO_REFERENCES_HEADING`
+and appended by the same rendering that appends `## Planner context`, so the
+worker pins against git rather than against a version that does not exist yet.
+When those releases arrive the still-running node is sent one `context` note at
+`deliver: auto` naming the versions, framed as observed state and adding no
+acceptance criteria.
+
+Under `published` the node is **not scheduled at all** until every one of those
+dependencies answers released. It holds beside the existing `paused_by` gate
+rather than in place of it, and the hold is absolute: no timeout, no deadline, no
+retry budget, and no automatic degrade to fast adoption. "Not answered" never
+releases it and is never recorded as "not released". The run raises a
+non-blocking planner surface naming what it awaits and for how long, repeated on
+its own interval, so the decision to keep waiting, to flip the node to fast
+adoption, or to stop the run stays a person's and is an informed one.
+
+The scheduler is **identical for both release styles** — one hold, indefinite,
+never failing — and what differs is only where the readiness answer comes from
+and what is reported. An automated target's answer is its probe, which is a
+subprocess: it is asked off the reconcile loop's own thread and paced on its own
+interval, `ONEPIPELINE_RELEASE_POLL_SECONDS` and 120 seconds by default. A
+human-step target's answer is the acknowledgement record, for which this crate
+runs no probe because there is none to run. `awaiting-human-step` is carried as
+its own answer through the scheduler, the surface, and the payload and is never
+folded into either neighbour. This crate never performs a human release step,
+never prompts for one, and never acknowledges one on somebody's behalf.
+
+**What this crate does today is the block below, and the block is the source.**
+`tests/contract.rs` parses it out of this file and holds it against the types:
+the node named here parses at schema 3, round-trips exactly as written, and
+carries the two fields with the values written; every event kind named here must
+be one `PipelineKind` carries and the contract's own list does not; and the
+heading named here must be the constant this crate publishes. The kind set is
+held both directions, so a build that grows a kind neither document names fails
+as loudly as one that drops one.
+
+```json
+{
+  "node": {
+    "id": "consumer",
+    "persona": "engineer",
+    "task": "## What\nbuild against the released engine",
+    "deps": ["engine"],
+    "adoption": "published",
+    "consumes": {"engine": "crate"}
+  },
+  "event_kinds": ["release-wait", "release-arrived", "release-adopted"],
+  "heading": "## Cross-repository references"
+}
+```
+
+Both fields are **optional and omitted when empty**, so a plan naming neither
+round-trips as the file wrote it and produces exactly the run it produces today:
+no reference block, no hold, and a rendered task byte-identical to the one it
+renders now. That is why the addition is at schema 3 rather than at a schema 4 —
+there is no document a version-3 reader would refuse and no field whose absence
+means something new. `release-wait`, `release-arrived` and `release-adopted`
+arrive with a **minor** version bump, cut by `release-plz` from the `feat` commit
+that introduces them, exactly as entry 39's `SurfaceKind` addition did.
+
+**Two rules the journeys settled, and both are load-bearing.**
+
+*A repository that declares **no release targets** releases nothing*, so a
+dependency landing there earns no row and no hold whatever the consuming node's
+adoption mode says. That is every repository on a host that has configured none —
+which is every host there was before `onevcs` had a release-targets document at
+all — and it is what makes "a plan naming neither field produces exactly the run
+it produces today" exact rather than nearly so. The alternative reading, holding a
+`published` node for ever against a repository nobody has configured, is a wait no
+answer can end.
+
+*The reference `onevcs` resolves landed work by is the **branch***. That library
+knows a change request's URL, a session token, a branch a registered checkout or
+run clone holds, and a commit one of *those branches* carries — and a landing
+commit sitting on the base alone is none of them. So the branch is what is asked
+about and the landing commit is what the reference block *shows*, which is the
+cell a worker actually wants.
+
+**One thing that is held by a fold test rather than by a journey, and why.** A
+fresh driver takes up what its predecessor already said, out of the journal,
+before it starts watching — so a node it finds still running is not told its
+releases arrived a second time. A journey for that has to kill a driver
+mid-dispatch, adopt the run, and get a *second* node told before it can assert
+about the first. One was written. It is green on its own in about fourteen
+seconds, and it timed out against the suite's 120-second deadline on three of four
+runs of the instrumented suite, while holding e2e concurrency slots the rest of it
+needs; the causes ruled out along the way were an undrained child descriptor and
+two lifecycle nodes contending for one repository's session lease, and neither was
+the whole of it. A test whose verdict depends on how loaded the host was is worse
+than none, so it is not in the suite. What the seeding *is*, is a fold of a
+durable record, and `src/release.rs`'s
+`a_fresh_driver_takes_up_what_its_predecessor_already_said` drives exactly that in
+both directions — a node the predecessor told is not told again, and one it never
+told still is. Both deliveries either side of it are driven end to end.
+
+**Two things this crate could not compile as the workstream described them.**
+
+*The global adoption rung is not reachable for a node with no `repo`.* The chain
+is node → repository → global → `fast`, and a node with no repository is meant to
+fall from the first rung straight to the third. `onevcs` answers the second and
+third rungs together, through `adoption_for(repo)`, and publishes no way to read
+the global rung without naming a repository — `releases::ReleasesFile` is a public
+type with no public loader. So such a node falls to the floor instead, which is
+what the global rung itself answers on every host that has not set
+`default.adoption: published`, and differs only on one that has. **Proposal for
+`onevcs`: publish the global rung on its own** — a `global_adoption()`, or a
+loader for the release-targets document — and this crate reads rung three where
+it now reads rung four.
+
+*A deferred arrival note is owed to the next dispatch the engine starts, which
+within one run is limited.* Where the running turn has no controllable lever the
+note is recorded `delivery: next` and folded back onto the node exactly as a
+planner's own deferred `context` note is — same mechanism, same rendering, same
+consumption by the dispatch that takes it. What is limited is not this addition
+but the mechanism it reuses: a node that has already settled is not re-derived
+ready by any user-facing verb, so its owed note waits for whatever does dispatch
+it next. That is the `context` op's own reachability and is not changed here.
+
+*Only one of the sibling's three release kinds can reach this run's store, and
+the reason is that the stream has no published **name**.* `release-probed` is
+emitted on the **session's** own stream when a publication captures its baselines,
+so the session follow that already exists relays it into the merged store —
+unchanged and unrewritten, like every other `onevcs` kind.
+`tests/e2e/adoption.rs`'s
+`the_siblings_release_probed_is_relayed_exactly_as_its_producer_wrote_it` holds
+that field by field against the sibling's own copy, read back through `onevcs`'s
+own reader out of the stream the producer wrote it on: `v`, `ts`, `stream`, `seq`,
+`source`, `kind`, and `payload` are identical, and every label the producer
+stamped stands, with `node` — which the producer cannot know — added beside them.
+
+`release-observed` and `release-acknowledged` are emitted on the **identity's**
+release stream instead. Releases happen long after the dispatch that produced the
+work has ended, outside any session, which is why `release-observed` carries the
+landing commit as the only thing that could correlate it.
+
+The reader for that stream **is** published, and it is the same one: `EventStream`
+opens any stream by token, `EventStream::open` takes a `SessionToken`, and
+`SessionToken` is a public tuple struct that wraps a plain `String`. What is not
+published is the **token**. `onevcs` records a repository's release activity under
+`releases-<the first twelve hex characters of the identity's SHA-256>`
+(`stream::Stream::releases`, which calls the private `ids::short_digest`), and
+nothing on that crate's public surface hands that string back for an identity —
+not `Identity`, not `RepositoryReleases`, not `release_targets`. `onevcs events`
+is no answer either: it takes the same token.
+
+So the only way for this crate to read the stream would be to **restate a private
+naming scheme in production code** — recomputing a SHA-256 to spell a filename the
+sibling owns. It does not, and deliberately: the day that scheme changes, a
+consumer that had guessed it relays *nothing*, silently, and no test that guessed
+the same way would catch it. It is the failure the contract's own retention rule
+already names — "the sanitiser is not public: a report path is obtained by calling
+`report_for` and in no other way, so the writer and every reader share one
+implementation instead of two that happen to agree."
+
+**Proposal for `onevcs`, in preference order: publish the name.** A
+`releases::stream_token(identity) -> SessionToken` — or a `release_events(repo)`
+returning an `EventStream` — makes the existing reader reach the existing stream
+and costs that crate one function. Failing that, stamp a release observed for a
+session's landing onto that session's own stream, where the follow would pick it
+up. Until one of them lands, this crate relays the one kind that reaches it and
+**cannot** relay the other two; that is a blocker on the published API rather than
+something this repository can resolve.
+
+It is pinned rather than asserted. `the_siblings_other_two_release_kinds_are_produced_and_cannot_be_read_from_a_run`
+drives the sibling until it really emits both kinds, reads them back off the
+release stream to prove the *producer* works and it is the reader that is missing,
+and then holds that neither reaches the run's store under any profile. The token
+it needs is spelled by a test helper and by nothing in `src/`, so the day the
+scheme changes or the name is published, that journey fails and this entry is
+revisited.

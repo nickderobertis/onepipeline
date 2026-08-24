@@ -18,11 +18,13 @@
 // interface the contract does not name. The `kind`/`repo`/`steps` combination rules are
 // enforced instead by `graph::validate_node`, at the trust boundary every plan crosses.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use oneagentgraph::config::ConfigRef;
 use onevcs::registry::{RepoType, Workflow};
-use onevcs::MergePolicy;
+use onevcs::releases::TargetName;
+use onevcs::{Adoption, MergePolicy};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
@@ -71,6 +73,27 @@ pub(crate) fn body_is_newer(declared: u32) -> String {
 
 /// The heading a carried planner note is rendered under.
 pub const PLANNER_CONTEXT_HEADING: &str = "## Planner context";
+
+/// The heading the out-of-repository dependencies of a fast-adoption node are
+/// rendered under.
+///
+/// Beside [`PLANNER_CONTEXT_HEADING`] because it is the same mechanism: one
+/// trailing section the dispatch's own rendering appends, declared here so a
+/// reader of the stream — or of the task — can find the block by a name this
+/// crate publishes rather than by matching prose.
+pub const CROSS_REPO_REFERENCES_HEADING: &str = "## Cross-repository references";
+
+/// What the reference block tells the worker it is looking at.
+///
+/// Framed as observed state, exactly as a carried planner note is: it reports
+/// where the work this node depends on currently is and adds no acceptance
+/// criteria, so no worker can read it as a new bar to clear.
+const CROSS_REPO_REFERENCES_PREAMBLE: &str =
+    "This node launched under fast adoption: the work it depends on is finished but has no\n\
+     release yet. Pin against the git references below rather than against a version. Do\n\
+     not change a shared interface unilaterally — propose it and keep building against the\n\
+     agreed surface. When these releases arrive you will be sent a note naming the\n\
+     versions; move the pin then.";
 
 /// A field the plan schema used to carry, and where its content goes now.
 ///
@@ -243,9 +266,22 @@ impl Node {
     /// section stating that it reports observed state and adds no acceptance
     /// criteria — so a worker cannot read one as a new bar to clear.
     pub fn rendered_task(&self) -> String {
+        self.rendered_task_with(&[])
+    }
+
+    /// The same, for a node launched under fast adoption against dependencies
+    /// outside its own repository.
+    ///
+    /// The references are appended by this rendering rather than beside it, so
+    /// the block a worker meets sits under the planner note in one document. An
+    /// empty slice renders exactly what [`rendered_task`](Self::rendered_task)
+    /// renders — which is every node that has no such dependency, and therefore
+    /// every plan written before this field existed.
+    pub fn rendered_task_with(&self, references: &[CrossRepoReference]) -> String {
         render_task(
             self.task.as_deref().unwrap_or_default(),
             self.context.as_deref(),
+            references,
         )
     }
 }
@@ -256,19 +292,49 @@ impl Step {
     /// The note is about the node the steps share, so a workstream renders it
     /// into every agent step and leaves human steps as written.
     pub fn rendered_task(&self, node_context: Option<&str>) -> String {
-        render_task(self.task.as_deref().unwrap_or_default(), node_context)
+        self.rendered_task_with(node_context, &[])
+    }
+
+    /// The same, carrying the node's out-of-repository dependencies.
+    ///
+    /// They are the *node's*, like the note beside them: every step of one
+    /// workstream is building against the same dependencies on the same branch.
+    pub fn rendered_task_with(
+        &self,
+        node_context: Option<&str>,
+        references: &[CrossRepoReference],
+    ) -> String {
+        render_task(
+            self.task.as_deref().unwrap_or_default(),
+            node_context,
+            references,
+        )
     }
 }
 
-fn render_task(task: &str, context: Option<&str>) -> String {
-    match context.map(str::trim).filter(|note| !note.is_empty()) {
+fn render_task(task: &str, context: Option<&str>, references: &[CrossRepoReference]) -> String {
+    let mut rendered = match context.map(str::trim).filter(|note| !note.is_empty()) {
         None => task.to_string(),
         Some(note) => format!(
             "{}\n\n{PLANNER_CONTEXT_HEADING}\n\
              This reports observed state and adds no acceptance criteria.\n\n{note}\n",
             task.trim_end()
         ),
+    };
+    if references.is_empty() {
+        return rendered;
     }
+    rendered = format!(
+        "{}\n\n{CROSS_REPO_REFERENCES_HEADING}\n\n{CROSS_REPO_REFERENCES_PREAMBLE}\n\n\
+         | dependency | repository | branch | commit | release target |\n\
+         | --- | --- | --- | --- | --- |\n",
+        rendered.trim_end()
+    );
+    for reference in references {
+        rendered.push_str(&reference.row());
+        rendered.push('\n');
+    }
+    rendered
 }
 
 /// What the run is for.
@@ -412,6 +478,28 @@ pub struct Node {
     /// Continue preserved work rather than cutting a fresh branch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume: Option<Resume>,
+    /// Whether this node waits for the **work** of its dependencies or for the
+    /// **releases** that carry it.
+    ///
+    /// The first rung of a four-rung chain, and the only one a plan states: the
+    /// repository rung and the global rung are `onevcs`'s, and `fast` is the
+    /// floor beneath both. Absent — which is every plan written before this
+    /// field existed — the node resolves through the three rungs below it, and a
+    /// host that has configured nothing resolves to `fast`, which is the
+    /// behaviour it always had.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adoption: Option<Adoption>,
+    /// The release target each dependency is consumed at, by **dependency node
+    /// id**.
+    ///
+    /// Keyed by node rather than by repository because the dependency is a node:
+    /// two nodes in one repository can legitimately want different targets — a
+    /// crate and a wheel cut from the same tree — and a repository key could not
+    /// tell them apart. A dependency this names none for takes the target its
+    /// own repository declaration marks as the default, so a plan states a
+    /// target only where the default is not what it wants.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub consumes: BTreeMap<String, TargetName>,
 }
 
 /// One step of a lifecycle node, sharing that node's branch.
@@ -467,6 +555,62 @@ pub struct Resume {
     /// crate watched finish is ever named here.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub completed_steps: Vec<String>,
+}
+
+/// One out-of-repository dependency, as the run can name it at dispatch time.
+///
+/// Every cell is what this run **observed**, and a cell it could not observe is
+/// empty rather than absent: a worker needs to see that a dependency exists even
+/// where the run cannot yet say which branch or commit it is on, and a row
+/// dropped for a missing cell would hide the dependency itself.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CrossRepoReference {
+    /// The dependency, as the plan names it — a node id, or a cross-DAG
+    /// `run:<id>#<node>` reference.
+    pub dependency: String,
+    /// The repository identity its work lands in.
+    pub repository: String,
+    /// The branch the work is on.
+    pub branch: String,
+    /// The commit that work reached its base at.
+    pub commit: String,
+    /// The release target this node consumes that repository at.
+    pub release_target: String,
+}
+
+impl CrossRepoReference {
+    /// The row this reference renders as, cells in the header's order.
+    fn row(&self) -> String {
+        format!(
+            "| {} | {} | {} | {} | {} |",
+            cell(&self.dependency),
+            cell(&self.repository),
+            cell(&self.branch),
+            cell(&self.commit),
+            cell(&self.release_target),
+        )
+    }
+}
+
+/// One cell of the reference table, held to what a table row may carry.
+///
+/// Every cell's text came from somewhere else: a repository identity and a
+/// release target out of this host's own configuration, a branch and a commit out
+/// of git, and either of the last two out of *another run's* ledger. A `|` in any
+/// of them ends the cell early and a newline ends the row, so what a worker reads
+/// would be a row about a dependency nobody has — which is exactly the misreading
+/// the block exists to prevent. Escaped rather than refused, because the point of
+/// a row is that the dependency is visible.
+fn cell(value: &str) -> String {
+    let mut rendered = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '|' => rendered.push_str("\\|"),
+            _ if character.is_control() || character.is_whitespace() => rendered.push(' '),
+            _ => rendered.push(character),
+        }
+    }
+    rendered
 }
 
 #[cfg(test)]
@@ -679,6 +823,144 @@ mod tests {
             rendered.contains("the fixture moved to tests/data"),
             "{rendered}"
         );
+    }
+
+    /// The reference block is the shape the divergence record states, appended by
+    /// the same rendering the planner note is — and a node with none renders
+    /// exactly what it always rendered.
+    #[test]
+    fn out_of_repository_dependencies_render_as_a_table_under_their_own_heading() {
+        let node = Node {
+            id: "consumer".into(),
+            persona: Some("engineer".into()),
+            task: Some("## What\nship it".into()),
+            ..Node::default()
+        };
+        let references = vec![
+            CrossRepoReference {
+                dependency: "onevcs-release-targets".into(),
+                repository: "github.com/nickderobertis/onevcs".into(),
+                branch: "onevcs-release-targets".into(),
+                commit: "9f3c1ab".into(),
+                release_target: "crate".into(),
+            },
+            // A dependency the run cannot fully name: the cells it cannot fill
+            // are empty and the row is still there, because a worker needs to see
+            // that the dependency exists.
+            CrossRepoReference {
+                dependency: "packager".into(),
+                repository: "github.com/nickderobertis/other".into(),
+                ..CrossRepoReference::default()
+            },
+        ];
+        assert_eq!(
+            node.rendered_task_with(&references),
+            "## What\nship it\n\n\
+             ## Cross-repository references\n\n\
+             This node launched under fast adoption: the work it depends on is finished but has \
+             no\nrelease yet. Pin against the git references below rather than against a version. \
+             Do\nnot change a shared interface unilaterally — propose it and keep building \
+             against the\nagreed surface. When these releases arrive you will be sent a note \
+             naming the\nversions; move the pin then.\n\n\
+             | dependency | repository | branch | commit | release target |\n\
+             | --- | --- | --- | --- | --- |\n\
+             | onevcs-release-targets | github.com/nickderobertis/onevcs | \
+             onevcs-release-targets | 9f3c1ab | crate |\n\
+             | packager | github.com/nickderobertis/other |  |  |  |\n"
+        );
+        assert_eq!(
+            node.rendered_task_with(&[]),
+            node.rendered_task(),
+            "a node with no out-of-repository dependency did not render what it always rendered"
+        );
+
+        // A cell whose text would end the cell or the row is escaped, so the
+        // table stays a table and the row stays about the dependency it names.
+        let forged = CrossRepoReference {
+            dependency: "dep".into(),
+            repository: "github.com/owner/a|b".into(),
+            branch: "topic\n| forged | row | here | now |".into(),
+            ..CrossRepoReference::default()
+        };
+        let rendered = node.rendered_task_with(&[forged]);
+        let rows: Vec<&str> = rendered
+            .lines()
+            .filter(|line| line.starts_with("| dep |"))
+            .collect();
+        assert_eq!(rows.len(), 1, "a cell forged a second row:\n{rendered}");
+        assert_eq!(
+            rows[0],
+            "| dep | github.com/owner/a\\|b | topic \\| forged \\| row \\| here \\| now \\| |  |  |",
+            "a cell was not escaped"
+        );
+        assert_eq!(
+            rendered
+                .lines()
+                .filter(|line| line.starts_with('|'))
+                .count(),
+            3,
+            "the table is not a header, a separator, and one row:\n{rendered}"
+        );
+
+        // It sits under the planner note rather than beside it: one document,
+        // and the note is still the note.
+        let noted = Node {
+            context: Some("the earlier round already landed the schema".into()),
+            ..node
+        };
+        let rendered = noted.rendered_task_with(&references);
+        assert!(
+            rendered.find(PLANNER_CONTEXT_HEADING) < rendered.find(CROSS_REPO_REFERENCES_HEADING),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("adds no acceptance criteria"),
+            "{rendered}"
+        );
+        // And every step of one workstream is handed the same block.
+        let step = Step {
+            id: "implement".into(),
+            task: Some("## What\nimplement".into()),
+            ..Step::default()
+        };
+        assert!(step
+            .rendered_task_with(None, &references)
+            .contains(CROSS_REPO_REFERENCES_HEADING));
+        assert_eq!(step.rendered_task_with(None, &[]), step.rendered_task(None));
+    }
+
+    /// Both new fields are optional, load at schema 3, and are omitted from what
+    /// this crate writes when a plan named neither.
+    #[test]
+    fn the_adoption_fields_round_trip_and_never_appear_in_a_plan_that_omitted_them() {
+        let written = serde_json::json!({
+            "id": "consumer",
+            "deps": ["engine"],
+            "adoption": "published",
+            "consumes": {"engine": "crate"}
+        });
+        let node: Node = serde_json::from_value(written.clone()).expect("both fields load");
+        assert_eq!(node.adoption, Some(Adoption::Published));
+        assert_eq!(
+            node.consumes.get("engine").map(ToString::to_string),
+            Some("crate".to_string())
+        );
+        assert_eq!(serde_json::to_value(&node).expect("serializes"), written);
+
+        let bare = serde_json::json!({"id": "solo"});
+        let node: Node = serde_json::from_value(bare.clone()).expect("a node naming neither loads");
+        assert_eq!(node.adoption, None);
+        assert!(node.consumes.is_empty());
+        assert_eq!(serde_json::to_value(&node).expect("serializes"), bare);
+
+        // External input, refused at the boundary: an adoption mode this build
+        // does not know, and a target name that could not be one.
+        serde_json::from_value::<Node>(serde_json::json!({"id": "x", "adoption": "eventually"}))
+            .expect_err("an undeclared adoption mode is refused");
+        serde_json::from_value::<Node>(
+            serde_json::json!({"id": "x", "consumes": {"engine": "not a target name"}}),
+        )
+        .expect_err("a target name the sibling would refuse is refused here");
     }
 
     #[test]

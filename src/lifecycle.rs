@@ -71,11 +71,17 @@ pub struct Launch {
 /// paying for the same refusal. The node that spends the budget settles `failed`
 /// saying how many attempts were made and what each one ended with, which is what
 /// tells a reader the difference between a failure and a loop.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one node's whole execution: the executor, the run, the launch, the node, \
+              its cross-repository references, its cancellation, and where to report"
+)]
 pub fn execute(
     executor: &dyn Executor,
     paths: &RunPaths,
     launch: &Launch,
     node: &Node,
+    references: &[crate::plan::CrossRepoReference],
     cancel: &crate::executor::CancellationToken,
     tx: &Sender<Message>,
 ) -> Settlement {
@@ -89,7 +95,7 @@ pub fn execute(
     let mut node = std::borrow::Cow::Borrowed(node);
     let mut attempt = std::num::NonZeroU32::MIN;
     loop {
-        let preserved = match attempt_once(executor, paths, launch, &node, cancel, tx) {
+        let preserved = match attempt_once(executor, paths, launch, &node, references, cancel, tx) {
             Attempt::Settled(settlement) => return settlement,
             Attempt::Preserving(preserved) => preserved,
         };
@@ -115,11 +121,16 @@ pub fn execute(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one attempt's whole context, which is `execute`'s own — see the reason there"
+)]
 fn attempt_once(
     executor: &dyn Executor,
     paths: &RunPaths,
     launch: &Launch,
     node: &Node,
+    references: &[crate::plan::CrossRepoReference],
     cancel: &crate::executor::CancellationToken,
     tx: &Sender<Message>,
 ) -> Attempt {
@@ -231,7 +242,7 @@ fn attempt_once(
         );
         let build = || DispatchRequest {
             graph: graph.clone(),
-            task: step.rendered_task(node.context.as_deref()),
+            task: step.rendered_task_with(node.context.as_deref(), references),
             labels: engine::dispatch_labels(
                 run,
                 &node.id,
@@ -1206,6 +1217,7 @@ mod tests {
                 ..Launch::default()
             },
             &node,
+            &[],
             &crate::executor::CancellationToken::new(),
             &tx,
         );

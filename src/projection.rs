@@ -78,6 +78,24 @@ pub struct RunState {
     pub abandoned: BTreeMap<String, crate::vcs::DispatchSession>,
     /// Where a human reads the change each published node opened.
     pub change_urls: BTreeMap<String, String>,
+    /// The commit each node's change reached its base at, as `onevcs` reported
+    /// it on the session's own stream.
+    ///
+    // llmlint: ignore[invalid_states_unrepresentable] a commit is the plain string every
+    // identifier in this crate is, for the reason `src/plan.rs` and `src/crossdag.rs`
+    // record: it is what the journal payload carries and what the sibling's own reference
+    // grammar takes. What could go wrong with an unchecked one — a value that forges a row
+    // where it is rendered — is checked where it enters, by `vcs::landing_commit_of`, which
+    // is the only thing that writes this map.
+    ///
+    ///
+    /// The one thing that names *where* a node's work landed, and therefore the
+    /// only thing a release can be measured against: a baseline is captured at a
+    /// landing, so asking whether a release carries this work means naming that
+    /// landing. Folded from the relayed `merge-completed` rather than from a
+    /// settlement, because the settlement records that a change landed and not
+    /// what it landed as.
+    pub landing_commits: BTreeMap<String, String>,
     /// Whether each published node's change reached its base branch.
     ///
     /// Written only by a settlement that observed one, like
@@ -543,6 +561,7 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
         fold_refusal(state, event);
         fold_invocation(state, event);
         fold_session(state, event);
+        fold_landing_commit(state, event);
         return;
     }
     let payload = &event.payload;
@@ -701,6 +720,37 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
                 }
             }
         }
+        // A note delivered onto the node's *next* dispatch is owed to it, exactly
+        // as a deferred planner note is, and this record is the only thing that
+        // says so: the note itself is reconstructed from the versions the payload
+        // names, by the same function that composed the one that was sent, so a
+        // replayed note is the note the node was told.
+        Some(journal::PipelineKind::ReleaseAdopted) => {
+            let Some(node) = &event.labels.node else {
+                return;
+            };
+            if payload.get("delivery").and_then(Value::as_str) != Some("next") {
+                return;
+            }
+            let Some(versions) = payload.get("versions") else {
+                return;
+            };
+            let released = crate::release::Released::of_payload(versions);
+            // A record naming no release this build can read cannot say what the
+            // node was told, and a note listing nothing is worse than none: it
+            // would tell a worker its releases had arrived and name not one.
+            if released.is_empty() {
+                return;
+            }
+            let note = crate::release::arrival_note(&released);
+            state.pending_context.insert(node.clone(), note.clone());
+            if let Some(waiting) = state.graph.get_mut(node) {
+                waiting.context = Some(note);
+            }
+        }
+        // Reports, both: what a run is waiting on and what has arrived are
+        // derived afresh by whatever is driving it, so neither changes the graph.
+        Some(journal::PipelineKind::ReleaseWait | journal::PipelineKind::ReleaseArrived) => {}
         Some(journal::PipelineKind::HumanAttested) => {
             if let Some(reference) = payload.get("ref").and_then(Value::as_str) {
                 state.attestations.insert(reference.to_string());
@@ -886,6 +936,23 @@ fn abandon_the_dispatch_in_flight(state: &mut RunState) {
 /// What the record has to be for this crate to act on it is
 /// [`DispatchSession::read_from`](crate::vcs::DispatchSession::read_from)'s
 /// question, which is where it is answered.
+/// Record where one node's change reached its base.
+///
+/// Off the sibling's own `merge-completed`, which is the one record that carries
+/// the landing commit: `landing_of` reads it out of git on the direct path and
+/// out of the host's answer on the change-request one, and neither reaches this
+/// crate's settlement. A payload without a usable `sha` records nothing, which
+/// leaves the run naming a dependency's branch instead of its landing.
+fn fold_landing_commit(state: &mut RunState, event: &Envelope) {
+    let Some(node) = event.labels.node.as_deref() else {
+        return;
+    };
+    let Some(commit) = crate::vcs::landing_commit_of(event) else {
+        return;
+    };
+    state.landing_commits.insert(node.to_string(), commit);
+}
+
 fn fold_session(state: &mut RunState, event: &Envelope) {
     if event.source != Source::Vcs || !crate::vcs::is_session_opened(&event.kind) {
         return;
@@ -1546,6 +1613,110 @@ mod tests {
         ]);
         assert!(state.pending_context.is_empty());
         assert_eq!(state.graph.get("build").expect("build").context, None);
+    }
+
+    /// An arrival note the running turn could not take is owed to the node's next
+    /// dispatch, and is reconstructed from the versions the record names.
+    ///
+    /// The record is the only durable thing: nothing submitted this note, so
+    /// there is no `edit-committed` and no author to attribute it to. What makes
+    /// a replayed note the note that was sent is that both come out of
+    /// `release::arrival_note`.
+    #[test]
+    fn an_arrival_note_that_did_not_reach_a_running_turn_is_owed_to_the_next_dispatch() {
+        let plan = plan_of_nodes(vec![agent("build", &[])]);
+        let started = pipeline(
+            journal::PipelineKind::RunStarted,
+            0,
+            None,
+            &[("plan", json!(plan))],
+        );
+        let versions = json!([{
+            "identity": "github.com/nickderobertis/onevcs",
+            "target": "crate",
+            "version": "0.13.0"
+        }]);
+        let adopted = |seq: u64, delivery: &str| {
+            pipeline(
+                journal::PipelineKind::ReleaseAdopted,
+                seq,
+                Some("build"),
+                &[
+                    ("node", json!("build")),
+                    ("delivery", json!(delivery)),
+                    ("versions", versions.clone()),
+                ],
+            )
+        };
+
+        let owed = fold(&[started.clone(), adopted(1, "next")]);
+        let note = owed
+            .pending_context
+            .get("build")
+            .expect("the note is owed to the next dispatch");
+        assert!(
+            note.contains("github.com/nickderobertis/onevcs — crate 0.13.0"),
+            "{note}"
+        );
+        assert_eq!(
+            owed.graph.get("build").expect("build").context.as_deref(),
+            Some(note.as_str()),
+            "the note did not reach the node it is for"
+        );
+
+        // A record naming no release this build can read is skipped: a note that
+        // told a worker its releases had arrived and named not one of them would
+        // be worse than none.
+        let unreadable = fold(&[
+            started.clone(),
+            pipeline(
+                journal::PipelineKind::ReleaseAdopted,
+                1,
+                Some("build"),
+                &[
+                    ("node", json!("build")),
+                    ("delivery", json!("next")),
+                    ("versions", json!([{"identity": "", "target": "crate"}])),
+                ],
+            ),
+        ]);
+        assert!(unreadable.pending_context.is_empty());
+        assert_eq!(unreadable.graph.get("build").expect("build").context, None);
+
+        // A note the running turn took is not also owed to the next dispatch —
+        // the same rule a planner's own live note is folded under.
+        let taken = fold(&[started.clone(), adopted(1, "live")]);
+        assert!(taken.pending_context.is_empty());
+        assert_eq!(taken.graph.get("build").expect("build").context, None);
+
+        // And the dispatch that takes it consumes it.
+        let consumed = fold(&[
+            started,
+            adopted(1, "next"),
+            pipeline(journal::PipelineKind::NodeDispatched, 2, Some("build"), &[]),
+        ]);
+        assert!(!consumed.pending_context.contains_key("build"));
+
+        // The two reports beside it change nothing about the graph.
+        for kind in [
+            journal::PipelineKind::ReleaseWait,
+            journal::PipelineKind::ReleaseArrived,
+        ] {
+            let reported = fold(&[
+                pipeline(
+                    journal::PipelineKind::RunStarted,
+                    0,
+                    None,
+                    &[("plan", json!(plan_of_nodes(vec![agent("build", &[])])))],
+                ),
+                pipeline(kind, 1, Some("build"), &[("node", json!("build"))]),
+            ]);
+            assert!(
+                reported.pending_context.is_empty(),
+                "{kind} changed the graph"
+            );
+            assert_eq!(reported.graph.get("build").expect("build").context, None);
+        }
     }
 
     /// A driver that takes a run over ends the dispatches the one before it left

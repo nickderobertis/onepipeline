@@ -21,6 +21,7 @@
 
 mod harness;
 
+mod adoption;
 mod boundary;
 mod cancellation;
 mod channel;
