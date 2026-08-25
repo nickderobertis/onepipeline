@@ -2321,11 +2321,16 @@ fn stopping_a_run_whose_lock_cannot_be_read_says_so_and_still_ends_what_it_finds
 /// run it never managed to ask, which is the false completion this verb exists to
 /// refuse, one layer further in.
 ///
-/// Both shapes an unreadable entry takes: one that is not a record at all, and
-/// one that is a record carrying a field this build does not know — a newer
-/// writer's, which a reader that shrugged would silently act on half of. Nothing
-/// is signalled for either, so the run is intact and the same ask works once the
-/// entry is gone.
+/// Every shape an *unreadable* entry takes: one that is not a record at all, one
+/// missing the stamp that says its pid is still the process it was written for,
+/// and a registry that has been taken away. Nothing is signalled for any of
+/// them, so the run is intact and the same ask works once what could not be read
+/// is put right.
+///
+/// A field this build does not know is **not** one of those shapes, and the
+/// journey below this one is where that entry is read and reached: it names a
+/// live process, and refusing the registry over a key it carries would leave
+/// that process running under a run nobody could stop.
 #[cfg(unix)]
 // llmlint: ignore-block[tests_mirror_real_usage] the only writer of a registry entry is a
 // live dispatch recording the process it is in, and it writes a record of its own schema, so
@@ -2339,20 +2344,6 @@ fn stopping_a_run_whose_registry_cannot_be_read_refuses_and_leaves_the_run_retry
         (
             "a record that is not one",
             Some("not an entry this build knows".to_string()),
-        ),
-        (
-            "a record from a writer this build does not know",
-            Some(
-                json!({
-                    "node": "build",
-                    "pid": 4_242,
-                    "host": "this-host",
-                    "dispatched_at": "2026-08-17T00:00:00.000Z",
-                    "started": "a start this host once reported",
-                    "reaped_by": "a build that came later",
-                })
-                .to_string(),
-            ),
         ),
         (
             "a record whose stamp proves nothing",
@@ -2441,6 +2432,68 @@ fn stopping_a_run_whose_registry_cannot_be_read_refuses_and_leaves_the_run_retry
         });
         world.release("build.go");
     }
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+/// A registry entry carrying a field this build does not know is **read**, and
+/// the stop reaches the live process it names.
+///
+/// The other half of the pair above, and the cost of getting it wrong is the
+/// larger one. A record here is written by some build of this crate and read
+/// back by another, so a key one of them does not know is a fact about versions
+/// rather than a typo to catch — and refusing the registry over it makes the
+/// verb that ends a run answer `cannot establish what it is running` about a
+/// dispatch it can see perfectly well. The same strictness, on the launch record
+/// beside this one, hid 148 run roots from one host's whole-host view.
+///
+/// The entry is the one the **live dispatch itself wrote**, with a stranger's key
+/// put on it, so what is proved is an otherwise entirely ordinary record — which
+/// is what a record from a neighbouring build is.
+#[cfg(unix)]
+// llmlint: ignore-block[tests_mirror_real_usage] no verb of this build writes a key this
+// build does not have, so the only way to hold a record another build wrote is to put the
+// key on the record this one wrote. Everything else — the launch, the dispatch, the stop,
+// and what it reached — is the real binary end to end.
+#[test]
+fn a_registry_entry_from_another_build_is_read_and_its_work_is_still_stopped() {
+    let world = World::new("driver-stop-newer-registry");
+    world.script("build.wait", "hold");
+    let (run, driver) = start_detached_announcing(&world, "newer", vec![agent("build", &[])]);
+    world.until("a node to be in flight", |world| {
+        !world.events_of(&run, "node-dispatched").is_empty()
+    });
+    world.until("the dispatch to be a process below the driver", |_| {
+        !descendants(driver).is_empty()
+    });
+    let tree: Vec<u32> = std::iter::once(driver).chain(descendants(driver)).collect();
+
+    // Every entry the run's own dispatches recorded, given the key.
+    let registry = world.run_file(&run, "dispatches");
+    let entries: Vec<std::path::PathBuf> = std::fs::read_dir(&registry)
+        .expect("the registry the run created")
+        .map(|entry| entry.expect("a registry entry").path())
+        .collect();
+    assert!(
+        !entries.is_empty(),
+        "the run recorded no dispatch, so there is no entry for another build to have written"
+    );
+    for entry in &entries {
+        let mut written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(entry).expect("a registry entry"))
+                .expect("a registry entry this build wrote");
+        written["reaped_by"] = json!("a build that came later");
+        std::fs::write(entry, written.to_string()).expect("an entry from another build");
+    }
+
+    world
+        .run(&["stop", &run])
+        .exited(0)
+        .out_has("\"stopped\":true")
+        .out_has("\"teardown\":\"signalled\"");
+    world.until("every process the run started to end", |_| {
+        tree.iter().all(|pid| !still_listed(*pid))
+    });
+    world.release("build.go");
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 
