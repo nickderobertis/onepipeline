@@ -24,15 +24,9 @@
 //!
 //! # The second question this asks
 //!
-//! Not only which release each engine resolves to, but **how many**. This
-//! workspace carried `oneharness-core` at two versions for a whole release
-//! cycle — `onejudge` linked 0.8 while `oneagentgraph` linked 0.10 — and a fix
-//! landing in 0.10.x was therefore unreachable by the member that needed it,
-//! invisibly: a currency check reads each copy separately and finds each of them
-//! current. [`this_build_resolves_one_copy_of_every_engine_it_links`] is the
-//! claim about this tree, and
-//! [`the_check_refuses_a_lock_that_resolves_one_engine_at_two_versions`] is the
-//! refusal that keeps it true.
+//! Not only which release each engine resolves to, but **how many**. A currency
+//! check reads each copy of a split engine separately and finds every one of
+//! them current, so nothing else here can see a graph carrying two.
 //!
 //! # What this cannot say
 //!
@@ -428,11 +422,9 @@ fn the_update_spec_this_check_prints_is_one_cargo_accepts() {
 /// This build resolves exactly one copy of every engine it links.
 ///
 /// The claim the refusal below exists to keep true, made about *this* tree and
-/// nothing else — the lock read is the committed one. It is the property the
-/// CycloneDX SBOM the published wheel carries then declares, because that
-/// document is generated from this resolution: a consumer deciding which
-/// releases are in force reads one version per engine there, or reads two and
-/// cannot say which one a given call reached.
+/// nothing else — the lock read is the committed one. The CycloneDX SBOM the
+/// published wheel carries is generated from this resolution, so a consumer
+/// reading it to decide which releases are in force gets one answer per engine.
 #[test]
 fn this_build_resolves_one_copy_of_every_engine_it_links() {
     for name in SIBLINGS {

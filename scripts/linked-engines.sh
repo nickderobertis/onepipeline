@@ -408,17 +408,9 @@ split=()
 
 # One copy of each engine, asked before the registry is asked anything.
 #
-# A graph carrying an engine twice does not link one behaviour at two versions —
-# it links two behaviours, and which one a crate reaches is decided by whichever
-# copy its own requirement unified with. `oneharness-core` was carried twice
-# here for a whole release cycle: `onejudge` linked 0.8 while `oneagentgraph`
-# linked 0.10, so a fix landing in 0.10.x was unreachable by the member that
-# needed it, and every check there was reported the copy it found as current.
-# Nothing noticed, because nothing was counting.
-#
-# First, and off the network, for two reasons. A split graph makes the currency
-# question below ambiguous rather than merely unanswered — "the release this
-# build links" has two answers — so there is nothing worth asking the index
+# Asked first, and off the network, for two reasons. A split graph makes the
+# currency question below ambiguous rather than merely unanswered — "the release
+# this build links" has two answers — so there is nothing worth asking the index
 # until it is one. And the refusal is then reachable with no index at all, which
 # is what lets the deterministic tier drive it.
 for name in "${SIBLINGS[@]}"; do
