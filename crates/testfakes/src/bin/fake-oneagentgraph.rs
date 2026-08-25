@@ -131,8 +131,12 @@ const OUTLIVE: &str = "outlive-the-dispatch";
 /// the node settled *while this was still here* rather than measure how long it
 /// took.
 fn outlive(args: &[String]) -> ExitCode {
-    let (Some(go), Some(gone)) = (args.get(1), args.get(2)) else {
-        return fake::refuse("outlive-the-dispatch takes a rendezvous and a marker");
+    // Exactly two, and a third is checked for: this double refuses what it was
+    // not given a meaning for, the way it refuses a `--label` the sibling
+    // reserves, so a journey that spelled an argument it does not take finds out
+    // here rather than by watching one be dropped.
+    let (Some(go), Some(gone), None) = (args.get(1), args.get(2), args.get(3)) else {
+        return fake::refuse("outlive-the-dispatch takes exactly a rendezvous and a marker");
     };
     fake::wait_for(std::path::Path::new(go));
     if let Err(error) = std::fs::write(gone, "gone\n") {

@@ -2140,6 +2140,64 @@ fn a_node_settles_when_its_dispatch_ends_and_not_when_what_outlived_it_does() {
     });
 }
 
+/// And what the dispatch **said** survives the same condition: a node that failed
+/// carries its graph's own words even while a process is still holding the pipe
+/// they came over.
+///
+/// The other half of the stream, and it broke the same way. A launch's stderr was
+/// read to the end of its pipe, so a failure's message was only available once
+/// every holder of that handle had gone — which is the very thing the settlement
+/// above no longer waits for. Read that way with a process still holding it, the
+/// node either never settled or settled saying nothing about why, and "why" is
+/// the whole of what a failed node is for.
+///
+/// So the dispatch here fails *and* leaves a holder behind, and the journey reads
+/// the settled node the way an operator does: the outcome, the detail, and the
+/// rendered result. All three while that holder is still running.
+#[test]
+fn a_failed_dispatch_says_why_while_something_still_holds_the_stream_it_said_it_on() {
+    let world = World::new("driver-outlived-failure");
+    // It speaks, then fails its gate on stderr, and leaves a process holding both
+    // of the streams it did that on.
+    world.script("build.fail", "3");
+    world.script("build.outlived-by", "");
+    let gone = world.fakes.join("build.outlived-by.gone");
+    let run = start_detached(&world, "outlivedfail", vec![agent("build", &[])]);
+
+    world.until("the node to settle", |world| {
+        !world.events_of(&run, "node-settled").is_empty()
+    });
+    assert!(
+        !gone.is_file(),
+        "the process that outlived the dispatch had already gone, so this proved nothing \
+         about what the failure was read past"
+    );
+    let settled = world.events_of(&run, "node-settled");
+    assert_eq!(
+        settled[0]["payload"]["outcome"],
+        json!("task-failed"),
+        "a dispatch that failed its gate settled as something else:\n{}",
+        settled[0]
+    );
+    let said = settled[0]["payload"]["detail"].as_str().unwrap_or_default();
+    assert!(
+        said.contains("failed its gate"),
+        "the settlement does not carry what the graph said on the stream something \
+         was still holding:\n{}",
+        settled[0]
+    );
+    // And where an operator reads it, not only in the store.
+    world
+        .run(&["results", &run])
+        .exited(0)
+        .out_has("failed its gate");
+
+    world.release("build.outlived-by.go");
+    world.until("the process that outlived the dispatch to go", |_| {
+        gone.is_file()
+    });
+}
+
 /// A stop that found nothing running says that, rather than claiming it reached
 /// a tree.
 ///

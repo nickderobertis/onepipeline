@@ -122,15 +122,18 @@ fn engine() -> Value {
 /// reader, so a probe run gets the answer before or the answer after and never
 /// half of either.
 fn releases_at(answer: &Path, version: &str) {
-    let half_written = answer.with_extension("next");
-    std::fs::write(&half_written, format!("{version}\n")).expect("the probe's answer is written");
+    // Written whole, under a name no probe reads, and then moved onto the one
+    // every probe does: what this avoids is a *reader* seeing half an answer, so
+    // the file here is the complete one and the rename is the single step.
+    let whole = answer.with_extension("next");
+    std::fs::write(&whole, format!("{version}\n")).expect("the probe's answer is written");
     // Replacing a file another process holds open is refused rather than queued on
     // one of the two platforms this suite runs on, and a probe here opens this one
     // every poll. So the replacement is retried for longer than a probe run can
     // hold it, and says which file it could not replace if it never gets in.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
-        match std::fs::rename(&half_written, answer) {
+        match std::fs::rename(&whole, answer) {
             Ok(()) => return,
             Err(failure) if std::time::Instant::now() >= deadline => panic!(
                 "the probe's answer {} could not replace the one before it: {failure}",
