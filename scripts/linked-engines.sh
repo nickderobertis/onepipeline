@@ -11,7 +11,7 @@
 # It answers a second question first, and offline: **how many** copies of each
 # engine the lock resolves. Currency is about which release is linked; that one
 # is about whether "the release this build links" is a question with one answer
-# at all. See `unified` below for what carrying two cost.
+# at all.
 #
 # Exits 0 with one current copy of each engine, 1 naming every engine the lock
 # splits or holds behind, 2 for an argument it cannot use, and 3 for a manifest,
