@@ -1873,6 +1873,10 @@ mod tests {
 
     /// A scratch directory of this test process's own, for the validator
     /// programs the journeys below run.
+    ///
+    /// Gated with the programs it holds: every caller is one of the `cfg(unix)`
+    /// journeys below, so on Windows this is dead code and `-D warnings` says so.
+    #[cfg(unix)]
     fn scratch(name: &str) -> std::path::PathBuf {
         let dir =
             std::env::temp_dir().join(format!("onepipeline-edits-{name}-{}", std::process::id()));
