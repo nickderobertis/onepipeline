@@ -785,6 +785,10 @@ fn a_target_this_host_cannot_name_holds_the_node_rather_than_releasing_it() {
         surface.contains("no release target this host can name"),
         "the surface does not say why nothing can answer:\n{surface}"
     );
+    // A question that can never be put is the other shape a wait takes, and a
+    // reader is owed the same thing about it: no record of this wait was written
+    // before a surface had told somebody the same.
+    every_wait_was_surfaced_before_it_was_recorded(&world, &run, "consumer");
     world.run(&["stop", &run]).exited(0);
 }
 
@@ -834,6 +838,11 @@ fn a_probe_that_could_not_answer_holds_the_node_and_is_never_read_as_not_release
         !surface.contains("last answer: not-released"),
         "a probe that could not answer was read as a release that has not happened:\n{surface}"
     );
+    // And the surface beside *every* record this run wrote said what that record
+    // said — which is the same promise, held where a reader's timing cannot
+    // decide whether it holds. The two asserts above read the newest of each and
+    // agree only if the store is caught between the two appends of one report.
+    every_wait_was_surfaced_before_it_was_recorded(&world, &run, "consumer");
 
     // And only a release starts it, which is what says the hold was the hold and
     // not the probe being broken.
@@ -995,6 +1004,68 @@ fn wait_surface(world: &World, run: &str, node: &str) -> String {
                 .to_owned()
         })
         .unwrap_or_default()
+}
+
+/// Every wait this run **recorded** about one node had already been surfaced,
+/// saying the same thing, by the time the record was written.
+///
+/// The record and the surface are two appends to one store saying one thing, so
+/// a reader holding the newest record and reading the surface beside it gets
+/// whichever surface was there when it looked. Raised second, that is the
+/// *previous* one — the previous answer, about a probe that has since stopped
+/// answering — which is how a probe that could not answer is read as a release
+/// that has not happened. Raised first, the surface a reader finds is never older
+/// than the record it holds.
+///
+/// Which is why this is the check that carries the promise on every platform: the
+/// window a reader has to land in to be handed the older surface is a couple of
+/// file appends wide, so a journey that reads the two and hopes they agree only
+/// fails where that window is wide enough to hit. The order they were written in
+/// is in the store afterwards, at any speed and on any host.
+fn every_wait_was_surfaced_before_it_was_recorded(world: &World, run: &str, node: &str) {
+    let mut surface = String::new();
+    let mut recorded = 0usize;
+    for event in world.journal(run) {
+        if event["labels"]["node"] != json!(node) {
+            continue;
+        }
+        match event["kind"].as_str().unwrap_or_default() {
+            "planner-surface-queued" if event["payload"]["kind"] == json!("release-wait") => {
+                surface = event["payload"]["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned();
+            }
+            "release-wait" => {
+                recorded += 1;
+                for entry in event["payload"]["awaiting"]
+                    .as_array()
+                    .unwrap_or(&Vec::new())
+                {
+                    let identity = entry["identity"].as_str().unwrap_or_default();
+                    let named = match entry["target"].as_str() {
+                        Some(target) => format!("{identity} {target}"),
+                        None => identity.to_owned(),
+                    };
+                    let said = entry["last_answer"].as_str().unwrap_or_default();
+                    let line = surface
+                        .lines()
+                        .find(|line| line.starts_with(&format!("- {named} ")))
+                        .unwrap_or_default();
+                    assert!(
+                        line.ends_with(&format!("last answer: {said}")),
+                        "'{node}' recorded {named} at '{said}', and the surface a reader had \
+                         beside that record said something else:\n{surface}"
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        recorded > 0,
+        "no wait was recorded about '{node}' at all, so this proved nothing"
+    );
 }
 
 /// Start a run detached, so the journey can move the world under a live loop.

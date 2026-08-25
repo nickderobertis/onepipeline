@@ -645,13 +645,23 @@ impl Watch {
                 continue;
             }
             self.surfaced.insert(node.clone(), Instant::now());
+            // The surface first and the record second, and that order is the
+            // promise. They are two appends to one store saying one thing, so a
+            // reader holding the newest record and reading the surface beside it
+            // gets whichever surface was there when it looked — and raised
+            // second, that is the *previous* one, carrying the previous answer
+            // about a probe that has since stopped answering. That is how a probe
+            // that could not answer is read as a release that has not happened,
+            // on a host slow enough between two appends for a reader to land
+            // there. This way round the surface a person has is never older than
+            // the record beside it.
+            crate::engine::raise(paths, journal, self.wait_surface(node))?;
             let awaiting = self.awaiting(node);
             journal.emit(
                 journal::PipelineKind::ReleaseWait,
                 journal::labels(&paths.run, Some(node)),
                 journal::payload(&[("node", json!(node)), ("awaiting", json!(awaiting))]),
             )?;
-            crate::engine::raise(paths, journal, self.wait_surface(node))?;
         }
         // A node that is no longer held says nothing more: the arrival is
         // reported by `release-arrived`, and repeating the wait after it ended
