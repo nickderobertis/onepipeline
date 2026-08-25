@@ -28,6 +28,25 @@ pub const WORK_FILE: &str = "work.md";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    #[cfg(unix)]
+    if args.first().map(String::as_str) == Some("outlive-the-graph") {
+        let [_, pid_file] = args.as_slice() else {
+            return fake::refuse("outlive-the-graph takes exactly one pid file");
+        };
+        // SAFETY: this fixture process owns its signal disposition; SIGKILL
+        // remains available to the graph's real final reaper and test cleanup.
+        if unsafe { libc::signal(libc::SIGTERM, libc::SIG_IGN) } == libc::SIG_ERR {
+            fake::fail(&format!(
+                "cannot ignore SIGTERM: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        std::fs::write(pid_file, format!("{}\n", std::process::id()))
+            .unwrap_or_else(|error| fake::fail(&format!("cannot record outliving pid: {error}")));
+        loop {
+            std::thread::park();
+        }
+    }
     // Before the script directory is required: oneharness probes a resolved
     // binary with `--version` to decide whether the identity is installed, and
     // that probe is not a turn — a double that refused it would report every
@@ -200,6 +219,32 @@ fn turn(args: &[String], dir: &std::path::Path) -> ExitCode {
         "claude-turn",
         &[prompt.clone(), cwd.display().to_string(), member],
     );
+
+    // Stamp a process to the graph-run root, above this member's scratch. The
+    // member's own teardown therefore leaves it alone and the graph's final
+    // teardown is the first real reaper that owns it.
+    #[cfg(unix)]
+    if dir.join("harness.outlives-graph").exists() && !prompt.contains("Observe this run") {
+        let scratch = std::env::var("ONEAGENTGRAPH_SCRATCH_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|error| fake::fail(&format!("the turn has no scratch: {error}")));
+        let run_root = scratch
+            .parent()
+            .and_then(std::path::Path::parent)
+            .unwrap_or_else(|| fake::fail("the member scratch has no graph-run root"));
+        let pid_file = dir.join("harness.outlives-graph.pid");
+        let exe = std::env::current_exe()
+            .unwrap_or_else(|error| fake::fail(&format!("fake claude has no image: {error}")));
+        std::process::Command::new(exe)
+            .args(["outlive-the-graph", &pid_file.to_string_lossy()])
+            .env("ONEAGENTGRAPH_SCRATCH_DIR", run_root)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap_or_else(|error| fake::fail(&format!("cannot outlive the graph: {error}")));
+        fake::wait_for(&pid_file);
+    }
 
     // A worker turn that leaves something behind in the worktree it was given.
     // Only when scripted, and only for the worker: a publication needs a diff —

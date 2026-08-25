@@ -22,6 +22,9 @@
 use crate::harness::{agent, human, plan_of, World, REFUSED, REPORTING_MEMBER};
 use serde_json::{json, Value};
 
+#[cfg(unix)]
+use crate::harness::end_process;
+
 /// The effective oneharness configuration one member's dispatch was prepared
 /// with, read off the run's own merged store.
 ///
@@ -717,6 +720,24 @@ fn a_plan_dispatches_through_the_real_oneagentgraph_and_its_members_run() {
         "the run did not settle: {}",
         world.dump()
     );
+    let journal = world.journal(&run);
+    let graph_settled = journal
+        .iter()
+        .position(|event| {
+            event["source"] == "agentgraph"
+                && event["kind"] == "graph-settled"
+                && event["labels"]["node"] == "build"
+        })
+        .expect("the linked graph published its terminal event");
+    let node_settled = journal
+        .iter()
+        .position(|event| event["kind"] == "node-settled" && event["labels"]["node"] == "build")
+        .expect("the terminal graph event settled its node");
+    assert!(
+        graph_settled < node_settled,
+        "the node settled without relaying the linked graph's terminal answer: {}",
+        world.dump()
+    );
 
     // The sibling's own envelopes are in the merged store, under the node they
     // belong to — which is the namespacing working end to end: the label was
@@ -743,6 +764,51 @@ fn a_plan_dispatches_through_the_real_oneagentgraph_and_its_members_run() {
             "the graph run's own id was overwritten by this run's: {event}"
         );
     }
+}
+
+/// A terminal graph event settles its node without waiting for graph-final
+/// process reaping to disconnect the sibling's event channel.
+#[cfg(unix)]
+#[test]
+fn a_library_dispatch_settles_while_the_graphs_final_reaper_is_still_running() {
+    let world = World::new("real-terminal-before-reap");
+    world.write_graphs();
+    world.script("harness.outlives-graph", "");
+    let path = world.plan(
+        "terminal-before-reap",
+        &plan_of("terminal-before-reap", vec![agent("build", &[])]),
+    );
+    let mut command = world.agentgraph_cmd(&["start", &path.to_string_lossy(), "--attach"]);
+    let mut launch = command
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the attached launch starts");
+    world.until("the node to settle", |world| {
+        !world
+            .events_of("terminal-before-reap", "node-settled")
+            .is_empty()
+    });
+
+    let pid: u32 = std::fs::read_to_string(world.fakes.join("harness.outlives-graph.pid"))
+        .expect("the process held for graph-final teardown recorded its pid")
+        .trim()
+        .parse()
+        .expect("the process recorded a pid");
+    let still_running = std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .status()
+        .expect("the host answers about the fixture process")
+        .success();
+    if still_running {
+        end_process(pid);
+    }
+    assert!(
+        still_running,
+        "the node waited for graph-final reaping instead of settling on graph-settled"
+    );
+    let status = launch.wait().expect("the attached launch exits");
+    assert!(status.success(), "the attached launch failed: {status}");
 }
 
 /// How many events a `status` line reports for one node.
