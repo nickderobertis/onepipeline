@@ -19,6 +19,7 @@
 //! which is the pin the workspace manifest explains.
 
 use oneharness_core::domain::events::ActionEvent;
+use oneharness_core::domain::fallback::RunWork;
 use oneharness_core::domain::mode::PermissionMode;
 use oneharness_core::domain::report::{
     OutputFormat, RunReport, RunResult, RunStreamEnvelope, Status, SCHEMA_VERSION,
@@ -573,6 +574,20 @@ impl Outcome {
         }
     }
 
+    /// What this run has to show for itself, which the report carries only where
+    /// `failure_kind` has nothing to say — a success needs no such reading.
+    ///
+    /// A failing turn here is one that ran: it billed usage and it answers in its
+    /// own words. Reported `none` instead, it would read to onejudge's fallback
+    /// verdict as a candidate that never got started — which is a chain this
+    /// double would fall through rather than the turn it is acting out.
+    fn work(self) -> Option<RunWork> {
+        match self {
+            Self::Answered => None,
+            Self::TurnFailed => Some(RunWork::Done),
+        }
+    }
+
     fn exit_code(self) -> ExitCode {
         match self {
             Self::Answered => ExitCode::SUCCESS,
@@ -713,6 +728,7 @@ fn report(
             schema_error: None,
             failure_kind: None,
             failure_kind_source: None,
+            work: outcome.work(),
             stdout: String::new(),
             stderr: String::new(),
             error: outcome.error(),

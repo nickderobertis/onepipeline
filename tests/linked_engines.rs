@@ -20,8 +20,19 @@
 //! The manifest and the lock are **this repository's own**, unsubstituted. That
 //! is what makes a green run here evidence about this tree: the requirements
 //! parsed are the real pin block, the resolutions compared are the real ones,
-//! and `oneharness-core` really is carried twice — the case where
-//! `cargo update -p <name>` is refused as ambiguous.
+//! and the count each engine resolves at is this build's own.
+//!
+//! # The second question this asks
+//!
+//! Not only which release each engine resolves to, but **how many**. This
+//! workspace carried `oneharness-core` at two versions for a whole release
+//! cycle — `onejudge` linked 0.8 while `oneagentgraph` linked 0.10 — and a fix
+//! landing in 0.10.x was therefore unreachable by the member that needed it,
+//! invisibly: a currency check reads each copy separately and finds each of them
+//! current. [`this_build_resolves_one_copy_of_every_engine_it_links`] is the
+//! claim about this tree, and
+//! [`the_check_refuses_a_lock_that_resolves_one_engine_at_two_versions`] is the
+//! refusal that keeps it true.
 //!
 //! # What this cannot say
 //!
@@ -99,6 +110,24 @@ fn linked(name: &str) -> Vec<String> {
     }
     assert!(!found.is_empty(), "this build links `{name}`");
     found
+}
+
+/// The requirement `[workspace.dependencies]` states for one engine.
+///
+/// Read from the manifest for the reason [`linked`] reads the lock: written
+/// down here it would be a second copy of a pin, and the assertions that quote
+/// it would go on passing over a manifest that had moved.
+fn required(name: &str) -> String {
+    let manifest = fs::read_to_string(repo_root().join("Cargo.toml")).expect("this build's pins");
+    manifest
+        .lines()
+        .skip_while(|line| *line != "[workspace.dependencies]")
+        .skip(1)
+        .take_while(|line| !line.starts_with('['))
+        .find_map(|line| line.strip_prefix(&format!("{name} = \"")))
+        .and_then(|rest| rest.strip_suffix('"'))
+        .unwrap_or_else(|| panic!("`{name}` is pinned in [workspace.dependencies]"))
+        .to_string()
 }
 
 /// Where the crates.io sparse index files one crate. The registry's own prefix
@@ -315,15 +344,12 @@ fn the_currency_check_passes_when_every_engine_is_the_newest_its_requirement_per
 #[test]
 fn the_currency_check_names_every_engine_the_lock_holds_behind_its_own_requirement() {
     let stale_graph = &linked("oneagentgraph")[0];
-    let stale_harness = linked("oneharness-core")
-        .into_iter()
-        .find(|version| version.starts_with("0.8."))
-        .expect("the workspace pins an `oneharness-core` 0.8 copy for onejudge's reader");
+    let stale_harness = &linked("oneharness-core")[0];
     let index = index_serving(
         "stale",
         &[
             ("oneagentgraph", "0.3.100", false),
-            ("oneharness-core", "0.8.100", false),
+            ("oneharness-core", "0.12.100", false),
         ],
     );
 
@@ -347,20 +373,22 @@ fn the_currency_check_names_every_engine_the_lock_holds_behind_its_own_requireme
         "the refusal does not carry the update that fixes oneagentgraph:\n{}",
         said(&run)
     );
-    // The twice-carried engine: `cargo update -p oneharness-core` is refused as
-    // ambiguous in this workspace, so the spec printed has to name the copy.
+    // The engine this repository names only as a dev-dependency, and the one the
+    // split above was found in: a check that reported on the crates this build
+    // publishes alone would drop exactly it.
     assert!(
         report.contains(&format!(
-            "oneharness-core: links {stale_harness}, but its requirement already permits 0.8.100"
+            "oneharness-core: links {stale_harness}, but its requirement already permits \
+             0.12.100"
         )),
-        "the refusal skipped the engine this workspace carries twice, which is the one a \
-         generic check is most likely to drop:\n{}",
+        "the refusal skipped the engine this workspace links only for its doubles, which is \
+         the one a generic check is most likely to drop:\n{}",
         said(&run)
     );
     assert!(
         report.contains(&format!("cargo update -p oneharness-core@{stale_harness}")),
         "the refusal names an `oneharness-core` spec that is not qualified by the copy it \
-         means, so running it would be refused as ambiguous:\n{}",
+         means, so running it names a version rather than the one the lock holds:\n{}",
         said(&run)
     );
     assert!(
@@ -371,43 +399,117 @@ fn the_currency_check_names_every_engine_the_lock_holds_behind_its_own_requireme
     );
 }
 
-/// The qualified spec the refusal prints is one `cargo` accepts, where the bare
-/// name is not.
+/// The qualified spec the refusal prints is one `cargo` accepts.
 ///
 /// Driven against the real workspace and the real `cargo`, because the claim is
 /// about that program's package-id grammar rather than about this repository's
-/// output. The two `oneharness-core` copies are deliberate and `Cargo.toml` says
-/// why; if that ever stops being true this fails, which is the right place to
-/// find out that the ambiguity this guards against is gone.
+/// output. Advice nobody can run is advice this check does not give.
 #[test]
-fn the_update_spec_this_check_prints_for_a_twice_carried_engine_is_one_cargo_accepts() {
+fn the_update_spec_this_check_prints_is_one_cargo_accepts() {
     let copies = linked("oneharness-core");
-    assert!(
-        copies.len() > 1,
-        "this workspace no longer carries `oneharness-core` twice, so there is no ambiguous \
-         spec left to guard against: {copies:?}"
-    );
-
-    let update = |spec: &str| {
-        Command::new(env!("CARGO"))
-            .args(["update", "--dry-run", "--offline", "-p", spec])
-            .current_dir(repo_root())
-            .output()
-            .expect("cargo runs an update dry run")
-    };
-
-    let bare = update("oneharness-core");
-    assert!(
-        !bare.status.success() && String::from_utf8_lossy(&bare.stderr).contains("ambiguous"),
-        "cargo accepted the bare spec, so the qualification below proves nothing:\n{}",
-        said(&bare)
-    );
-
-    let qualified = update(&format!("oneharness-core@{}", copies[0]));
+    let qualified = Command::new(env!("CARGO"))
+        .args([
+            "update",
+            "--dry-run",
+            "--offline",
+            "-p",
+            &format!("oneharness-core@{}", copies[0]),
+        ])
+        .current_dir(repo_root())
+        .output()
+        .expect("cargo runs an update dry run");
     assert!(
         qualified.status.success(),
         "cargo refused the qualified spec this check prints, so its advice does not run:\n{}",
         said(&qualified)
+    );
+}
+
+/// This build resolves exactly one copy of every engine it links.
+///
+/// The claim the refusal below exists to keep true, made about *this* tree and
+/// nothing else — the lock read is the committed one. It is the property the
+/// CycloneDX SBOM the published wheel carries then declares, because that
+/// document is generated from this resolution: a consumer deciding which
+/// releases are in force reads one version per engine there, or reads two and
+/// cannot say which one a given call reached.
+#[test]
+fn this_build_resolves_one_copy_of_every_engine_it_links() {
+    for name in SIBLINGS {
+        let copies = linked(name);
+        assert_eq!(
+            copies.len(),
+            1,
+            "`Cargo.lock` resolves `{name}` at {copies:?}. Two copies of an engine are two \
+             behaviours, and which one a crate in the graph reaches is decided by its own \
+             requirement — so a fix in one of them is a fix the other half of the graph does \
+             not have, and every currency check reports both as current."
+        );
+    }
+}
+
+/// A lock resolving one engine at two versions is refused, before the registry
+/// is asked anything.
+///
+/// The tree here is the shape the real split had: the older copy is the one
+/// `[workspace.dependencies]` requires and it is the newest release that
+/// requirement permits, while a *second* copy sits outside that window because
+/// another crate in the graph required it. Every currency question that tree
+/// answers, it answers "current" — which is exactly how `oneharness-core` was
+/// carried at 0.8 and 0.10 at once here for a release cycle without anything
+/// saying so.
+///
+/// The second run is the offline half of the claim: pointed at a registry that
+/// does not exist, the refusal still arrives as a refusal about the lock (exit
+/// 1) rather than as an unreadable index (exit 3). That is what lets the
+/// deterministic tier reach this rule at all.
+#[test]
+fn the_check_refuses_a_lock_that_resolves_one_engine_at_two_versions() {
+    let split = but(Engine {
+        name: "oneharness-core",
+        requirement: "1",
+        locked: &["1.2.3", "2.4.0"],
+        served: &["1.2.3", "2.0.0", "2.4.0"],
+    });
+    let tree = tree("split-graph", &split);
+
+    let run = linked_engines(&tree.args());
+    assert_eq!(
+        run.status.code(),
+        Some(1),
+        "a lock carrying one engine at two versions has to fail the check — every copy in it \
+         is separately the newest its own requirement permits, which is what makes this \
+         invisible to the currency question:\n{}",
+        said(&run)
+    );
+    let report = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        report.contains("oneharness-core: 1.2.3 2.4.0"),
+        "the refusal does not name the engine that is split and both versions it is split \
+         at, so a reader cannot tell which copy to move:\n{}",
+        said(&run)
+    );
+    assert!(
+        report.contains("cargo tree"),
+        "the refusal does not say how to find the crate whose requirement pins the other \
+         copy, which is the whole of the work it is asking for:\n{}",
+        said(&run)
+    );
+
+    let offline = linked_engines(&[
+        "--manifest",
+        &tree.manifest,
+        "--lock",
+        &tree.lock,
+        "--index",
+        "target/linked-engines/split-graph/no-such-index",
+    ]);
+    assert_eq!(
+        offline.status.code(),
+        Some(1),
+        "the check read the registry before counting what the lock holds, so this rule is \
+         only reachable with a network:\n{}",
+        said(&offline)
     );
 }
 
@@ -446,6 +548,7 @@ fn the_release_note_records_the_version_of_every_engine_the_build_links() {
 #[test]
 fn the_release_note_says_so_where_a_linked_engine_is_behind_the_requirement() {
     let stale_graph = &linked("oneagentgraph")[0];
+    let pinned = required("oneagentgraph");
     let index = index_serving("notes-stale", &[("oneagentgraph", "0.3.100", false)]);
     let run = linked_engines(&["--index", &index, "--format", "notes"]);
     assert!(
@@ -457,8 +560,8 @@ fn the_release_note_says_so_where_a_linked_engine_is_behind_the_requirement() {
     let notes = String::from_utf8_lossy(&run.stdout);
     assert!(
         notes.contains(&format!(
-            "| `oneagentgraph` | **{stale_graph}** | `0.3.0` | **0.3.100** — this release is \
-             behind it |"
+            "| `oneagentgraph` | **{stale_graph}** | `{pinned}` | **0.3.100** — this release \
+             is behind it |"
         )),
         "the note records the version without saying it is behind what the requirement \
          permits:\n{}",
@@ -475,6 +578,52 @@ fn the_release_note_says_so_where_a_linked_engine_is_behind_the_requirement() {
     assert!(
         !notes.contains("Every linked engine is the newest its own requirement permits."),
         "the note claims every engine is current while recording one that is not:\n{}",
+        said(&run)
+    );
+}
+
+/// Where the graph carries an engine twice, the notes say so rather than
+/// refusing to compose at all.
+///
+/// The two modes answer differently on purpose, and this is the half that is
+/// easy to get backwards: `--format check` is a gate and refuses, but the notes
+/// are what a release records about itself, and a release whose graph split is
+/// the one whose notes should least be silent about it. The `linked-engines` job
+/// is deliberately ungated for the same reason.
+#[test]
+fn the_release_note_says_so_where_the_graph_carries_an_engine_twice() {
+    let tree = tree(
+        "notes-split",
+        &but(Engine {
+            name: "oneharness-core",
+            requirement: "1",
+            locked: &["1.2.3", "2.4.0"],
+            served: &["1.2.3", "2.0.0", "2.4.0"],
+        }),
+    );
+    let mut args = tree.args();
+    args.extend(["--format", "notes"]);
+    let run = linked_engines(&args);
+    assert!(
+        run.status.success(),
+        "the note is composed for a split graph too — it is the release that most needs \
+         one:\n{}",
+        said(&run)
+    );
+    let notes = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        notes.contains("- `oneharness-core` links 1.2.3 2.4.0."),
+        "the note records the copies as two ordinary rows without saying they are the same \
+         engine, which is the one thing a reader cannot recover from a table:\n{}",
+        said(&run)
+    );
+    assert!(
+        notes.contains(
+            "| `oneharness-core` | 2.4.0 | — | — (another crate in the graph requires this \
+             copy) |"
+        ),
+        "the note drops the copy no requirement here governs, so it understates what the \
+         release links:\n{}",
         said(&run)
     );
 }
