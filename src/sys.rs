@@ -2352,10 +2352,8 @@ mod tests {
             .stderr(std::process::Stdio::null())
             .spawn()
             .expect("a process tree");
-        // Each level named by the image it runs, for the reason [`SHELL_IMAGE`]
-        // gives: the console helper a level may start is a child of it too, and
-        // descending into that one is a fixture waiting out its patience under a
-        // process that will never have a child.
+        // Each level asked for by the image it runs, for the reason
+        // [`SHELL_IMAGE`] gives.
         let below = awaited_child_of(root.id(), SHELL_IMAGE)
             .and_then(|middle| awaited_child_of(middle, LEAF_IMAGE).map(|leaf| vec![middle, leaf]));
         match below {
