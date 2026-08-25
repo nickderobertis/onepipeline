@@ -2161,6 +2161,12 @@ pub(crate) fn merge_path_backoff() -> Duration {
 
 /// The next backoff after one, doubled to the ceiling every wait here shares.
 pub(crate) fn doubled(backoff: Duration) -> Duration {
+    // llmlint: ignore[changed_behavior_has_e2e] the same ceiling as the one on the way in,
+    // and the same reason there is no journey: its only effect is to make a wait *shorter*,
+    // so a journey observing it is a journey that waits two minutes per read to prove it
+    // did not wait longer. What a user can reach — the reads themselves, and the settlement
+    // a spent budget writes — is driven end to end in `tests/e2e/lifecycle.rs`; the arithmetic
+    // is held by `the_wait_between_merge_path_reads_grows_to_the_ceiling_and_stops_there`.
     (backoff * 2).min(BOUNDARY_BACKOFF_CEILING)
 }
 
@@ -2581,6 +2587,26 @@ mod tests {
         std::env::set_var(MERGE_PATH_BACKOFF_ENV, "1");
         assert_eq!(merge_path_backoff(), Duration::from_secs(1));
         std::env::remove_var(MERGE_PATH_BACKOFF_ENV);
+    }
+
+    /// And it grows by doubling until it reaches that ceiling, where it stays.
+    ///
+    /// The other half of the bound: the wait on the way in is clamped once, and
+    /// this is what happens to it over a budget's worth of reads. Unbounded
+    /// doubling from a value an operator set would overflow the ceiling in three
+    /// reads and hold a node open for the rest.
+    #[test]
+    fn the_wait_between_merge_path_reads_grows_to_the_ceiling_and_stops_there() {
+        assert_eq!(doubled(Duration::from_secs(5)), Duration::from_secs(10));
+        assert_eq!(
+            doubled(BOUNDARY_BACKOFF_CEILING / 2),
+            BOUNDARY_BACKOFF_CEILING
+        );
+        assert_eq!(
+            doubled(BOUNDARY_BACKOFF_CEILING),
+            BOUNDARY_BACKOFF_CEILING,
+            "the wait grew past the ceiling every backoff in this crate shares"
+        );
     }
 
     /// The bound on re-reading a merge path that went dark is the one the
