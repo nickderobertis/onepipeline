@@ -1629,7 +1629,10 @@ dispatched — a node that has settled `done` is refused for the reason `context
 refuses one, since nothing will read the amendment — and carries non-blank text,
 a blank one being refused rather than recorded. The text becomes part of the
 node's **effective task** permanently: the worker and its judge read the same
-sentence on this dispatch and on every later dispatch of that node. Repeated
+sentence on the dispatch that follows the amendment and on every later dispatch
+of that node. A turn already in flight is not reached — its task was composed
+before the ruling existed, and so was the one its judge reads — which is the
+asymmetry with `context`, whose whole point is the turn running now. Repeated
 amendments **replace**, because a bar that can only grow cannot be corrected — a
 ruling issued and then thought better of would go on binding the judge beside its
 own correction, which is the same two-instructions-one-authority failure the op

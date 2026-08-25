@@ -502,6 +502,25 @@ fn a_validator_that_says_nothing_and_one_that_cannot_be_started_both_refuse_loud
         .exited(REFUSED)
         .err_has("exited 3");
     world.run(&["results", &run]).exited(0).out_lacks("fresh");
+    std::fs::remove_file(world.fakes.join("validator.silent")).expect("the scenario is lifted");
+
+    // A validator that ends on a **signal** has no exit status at all — it
+    // crashed, or somebody killed it — and the one thing that must not happen is
+    // that being read as a verdict. Unix-only for the provocation, not for the
+    // rule: only this platform lets a process end without a status.
+    #[cfg(unix)]
+    {
+        world.script("validator.signal", "");
+        world
+            .run_with_stdin(
+                &["reply", &run],
+                &envelope(json!([{"op": "add", "node": agent("fresh", &[])}])),
+            )
+            .exited(REFUSED)
+            .err_has("without a status");
+        world.run(&["results", &run]).exited(0).out_lacks("fresh");
+        std::fs::remove_file(world.fakes.join("validator.signal")).expect("the scenario is lifted");
+    }
 
     // A launch whose validator is not there at all. A separate run, because a
     // validator is resolved once, at the launch.

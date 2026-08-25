@@ -18,6 +18,9 @@
 //!   `validator.chatter`  present → write this file's text to **stdout** before
 //!                        answering, the way a host's rules engine narrates what
 //!                        it checked
+//!   `validator.signal`   present → end on a signal rather than an exit status,
+//!                        which is a validator that crashed or was killed and is
+//!                        still an answer the caller has to act on (Unix only)
 //!
 //! It names itself in every refusal, so a journey about which of three names a
 //! launch resolved reads the answer off `onepipeline reply`'s own stderr — the
@@ -28,6 +31,41 @@
 use std::io::Read;
 
 use onepipeline_testfakes as fake;
+use serde::Deserialize;
+
+/// The node as it crosses the validator's stdin.
+///
+/// A **shape** rather than a bare JSON value: the contract says a plan node
+/// arrives here, so a document that is not one — a list, a scalar, an object
+/// with no `id` — is a seam that broke, and a validator that read it anyway
+/// would let a journey pass on a node nothing checked. The three fields the
+/// journeys assert on are named; everything else a node carries is kept as
+/// written, because this is a host's validator and a host reads the whole node.
+#[derive(Debug, Deserialize)]
+struct OfferedNode {
+    id: String,
+    #[serde(default)]
+    task: Option<String>,
+    #[serde(default)]
+    amendment: Option<String>,
+    #[serde(flatten)]
+    rest: serde_json::Map<String, serde_json::Value>,
+}
+
+impl OfferedNode {
+    /// The node as this validator records it, which is the node as it arrived.
+    fn recorded(&self) -> serde_json::Value {
+        let mut document = serde_json::Map::new();
+        document.insert("id".into(), serde_json::Value::from(self.id.clone()));
+        for (key, value) in [("task", &self.task), ("amendment", &self.amendment)] {
+            if let Some(value) = value {
+                document.insert(key.into(), serde_json::Value::from(value.clone()));
+            }
+        }
+        document.extend(self.rest.clone());
+        serde_json::Value::Object(document)
+    }
+}
 
 fn main() -> std::process::ExitCode {
     let dir = fake::script_dir();
@@ -48,6 +86,21 @@ fn main() -> std::process::ExitCode {
     // A validator that refuses without reading its input is answering rather
     // than failing, and what decides the edit is the status below — so this one
     // exits with stdin still unread, deliberately.
+    // A validator that ends on a signal has no exit status at all — a crash, or
+    // an operator's `kill` — and what the caller must not do is read that as a
+    // verdict.
+    #[cfg(unix)]
+    if dir.join("validator.signal").is_file() {
+        fake::append(
+            &dir.join("validator.jsonl"),
+            &serde_json::json!({"as": invoked_as, "node": serde_json::Value::Null}).to_string(),
+        );
+        // SAFETY: `raise` delivers a signal to this process and nothing else; it
+        // is the only way to end without an exit status, which is the answer
+        // being acted out.
+        unsafe { libc::raise(libc::SIGKILL) };
+    }
+
     if dir.join("validator.silent").is_file() {
         fake::append(
             &dir.join("validator.jsonl"),
@@ -60,19 +113,20 @@ fn main() -> std::process::ExitCode {
     if let Err(error) = std::io::stdin().read_to_string(&mut document) {
         fake::fail(&format!("cannot read the node on stdin: {error}"));
     }
-    let node: serde_json::Value = match serde_json::from_str(&document) {
+    let node: OfferedNode = match serde_json::from_str(&document) {
         Ok(node) => node,
         Err(error) => {
-            // The contract says a node crosses as JSON. One that does not is a
-            // seam that broke, and a validator that accepted it anyway would let
-            // the journey pass on a node nothing checked.
-            eprintln!("the node did not cross as JSON: {error}: {document}");
+            eprintln!("the node did not cross as a plan node: {error}: {document}");
             return std::process::ExitCode::from(1);
         }
     };
+    if node.id.trim().is_empty() {
+        eprintln!("the node crossed with no id: {document}");
+        return std::process::ExitCode::from(1);
+    }
     fake::append(
         &dir.join("validator.jsonl"),
-        &serde_json::json!({"as": invoked_as, "node": node}).to_string(),
+        &serde_json::json!({"as": invoked_as, "node": node.recorded()}).to_string(),
     );
 
     // A validator that narrates on stdout is ordinary — a host's rules engine

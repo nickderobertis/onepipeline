@@ -129,8 +129,10 @@ acceptance criteria, it carries exactly one dispatch, and it does not change wha
 the node is judged against. An `amend` **does** change that: its text becomes part
 of the node's effective task, rendered under `## Amendment` above the task's
 operational notes and claiming precedence over them, so the worker and the judge
-reviewing it read the same ruling — on that dispatch and on every later one,
-until another `amend` replaces it. A node's current amendment is readable from
+reviewing it read the same ruling — on the dispatch that follows it and on every
+later one, until another `amend` replaces it. A turn already in flight is not
+reached: its task was composed before the ruling existed, and so was the one its
+judge reads. A node's current amendment is readable from
 `status` and from `results` before anything replaces it. Without the second lever
 a manager's mid-dispatch ruling reaches the worker and not its judge, and the
 node's own judge can tell it to undo what the manager decided.

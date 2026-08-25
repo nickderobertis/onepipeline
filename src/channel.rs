@@ -322,9 +322,10 @@ pub enum Command {
     /// The lever a manager has that a `context` note is not. A note steers the
     /// worker, says of itself that it adds no acceptance criteria, and carries
     /// exactly one dispatch; this becomes part of the node's **effective task**,
-    /// which the worker and the judge reviewing it are handed alike, on this
-    /// dispatch and on every later one. A manager who ruled mid-dispatch and had
-    /// that node's own judge overturn the ruling had no way to say this at all.
+    /// which the worker and the judge reviewing it are handed alike, on the
+    /// dispatch that follows it and on every later one. A turn already running
+    /// is not reached — its task was composed before the ruling existed — which
+    /// is the asymmetry with `context`, whose point is the turn running now.
     Amend {
         /// The node to amend. It must be one the graph holds and can still be
         /// dispatched: a node that has settled `done` is refused for the reason

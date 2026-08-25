@@ -1684,6 +1684,25 @@ fn the_amendment_and_validator_surface_is_what_the_divergence_record_names() {
             && prose.contains("the worker and the judge reviewing it read the same ruling"),
         "the README no longer states which lever changes what a node is judged against and          which one only steers its worker"
     );
+    // And *when* it binds, which is where the two levers differ in practice and
+    // where a paraphrase drifts: the journeys establish that a turn already in
+    // flight is not reached, so both copies have to say so.
+    let record = std::fs::read_to_string(repo_root().join("docs/contract-divergences.md"))
+        .expect("the divergence record ships");
+    for (which, copy) in [
+        ("the README", prose.clone()),
+        (
+            "divergence entry 41",
+            record.split_whitespace().collect::<Vec<_>>().join(" "),
+        ),
+    ] {
+        assert!(
+            copy.contains("on the dispatch that follows")
+                && copy.contains("A turn already in flight is not reached"),
+            "{which} no longer says which dispatch an amendment binds; the journeys \
+             establish that a turn already running is not reached"
+        );
+    }
     // The refusal it promises for a rejected edit, and the default it promises
     // for a launch that names none.
     assert!(

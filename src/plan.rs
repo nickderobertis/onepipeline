@@ -88,10 +88,9 @@ pub const AMENDMENT_HEADING: &str = "## Amendment";
 /// carried note is rendered under, and deliberately so. A note reports observed
 /// state and adds no acceptance criteria; an amendment **is** part of the bar,
 /// read by the worker and by the judge that reviews it, so where it and the
-/// task's own operational notes disagree it is the one that holds. Both
-/// supervisory conflicts this op was written for traced to an instruction whose
-/// authority was written down nowhere, so the authority is the first thing the
-/// section says.
+/// task's own operational notes disagree it is the one that holds. The authority
+/// is the section's first sentence because an instruction whose authority is
+/// unstated is one a reader has to guess at.
 const AMENDMENT_PRECEDENCE: &str =
     "Where this section and the operational notes below disagree, this section wins.";
 
@@ -508,8 +507,10 @@ pub struct Node {
     /// The other half of the pair [`context`](Self::context) is one of, and the
     /// distinction is the point of both: a note steers the worker for one
     /// dispatch and says it adds no acceptance criteria, while this is rendered
-    /// into the task the worker **and its judge** are handed, on this dispatch
-    /// and on every later one, until an `amend` replaces it. Replace rather than
+    /// into the task the worker **and its judge** are handed, on the dispatch
+    /// that follows it and on every later one, until an `amend` replaces it. A
+    /// turn already running is not reached: its task was composed before the
+    /// ruling existed. Replace rather than
     /// append, because a bar that can only grow cannot be corrected: a ruling
     /// thought better of would otherwise go on binding the judge beside its own
     /// correction.
