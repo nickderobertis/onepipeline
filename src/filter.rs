@@ -68,14 +68,37 @@ pub const LAUNCH_CONFIG_SCHEMA_VERSION: u32 = 3;
 /// a key no version ever had is.
 pub const LAUNCH_CONFIG_SCHEMA_VERSIONS_READ: [u32; 3] = [LAUNCH_CONFIG_SCHEMA_VERSION, 2, 1];
 
-/// The version each key that is younger than the schema itself arrived at.
+/// Each key younger than the schema itself: the version it arrived at, and
+/// whether a blank value is refused.
 ///
 /// A table rather than a comparison against [`LAUNCH_CONFIG_SCHEMA_VERSION`]:
 /// asked that way, every earlier key becomes refused the moment the schema
 /// version moves again, and a version-2 config naming the drafting graph
 /// version 2 introduced would start being turned down by the bump that added an
 /// unrelated key.
-const KEYS_BY_VERSION: &[(&str, u32)] = &[("pr_author_graph", 2), ("node_validator", 3)];
+///
+/// The blank rule is **per key and not per schema**, for the same reason. It is
+/// `node_validator`'s alone: that key arrives with this version, so no config
+/// on disk carries a blank one, and refusing it costs nobody a launch that used
+/// to work. `pr_author_graph` has shipped since version 2 and a document
+/// already written may carry a blank one; whatever that meant then it goes on
+/// meaning, because a build that started refusing it would break a config over
+/// a key the operator did not change.
+const KEYS_BY_VERSION: &[(&str, u32, BlankValue)] = &[
+    ("pr_author_graph", 2, BlankValue::Kept),
+    ("node_validator", 3, BlankValue::Refused),
+];
+
+/// What a key present and holding nothing means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlankValue {
+    /// Refused by the key's own name: a decision half-written, which everything
+    /// downstream would read as a launch that named one.
+    Refused,
+    /// Read as the document wrote it, whatever that key made of it before —
+    /// the promise every config already on disk was written against.
+    Kept,
+}
 
 /// A launch config: what a launch declares about its run, as one document.
 ///
@@ -191,9 +214,9 @@ impl LaunchConfig {
             ("node_validator", config.node_validator.as_ref()),
         ];
         for (key, value) in carried {
-            let Some(arrived) = KEYS_BY_VERSION
+            let Some((arrived, blank)) = KEYS_BY_VERSION
                 .iter()
-                .find_map(|(named, at)| (*named == key).then_some(*at))
+                .find_map(|(named, at, blank)| (*named == key).then_some((*at, *blank)))
             else {
                 continue;
             };
@@ -209,7 +232,12 @@ impl LaunchConfig {
             // command nothing can start. Refused here, at the boundary, rather
             // than left to fail every edit later — the only thing about a
             // command this crate can check is that there is one.
-            if value.is_some_and(|value| value.trim().is_empty()) {
+            //
+            // Only for a key that arrives with this version. An older one may
+            // already carry a blank value in a file somebody wrote, and turning
+            // that document down would break a launch over a key its author
+            // never touched — see [`KEYS_BY_VERSION`].
+            if blank == BlankValue::Refused && value.is_some_and(|value| value.trim().is_empty()) {
                 return Err(named(format!(
                     "`{key}` is present and names nothing — give it a value, or leave the \
                      key out to declare that this launch has none"
@@ -941,6 +969,66 @@ mod tests {
         );
     }
 
+    /// A config already on disk carrying a blank `pr_author_graph` reads exactly
+    /// as it always did.
+    ///
+    /// The regression this exists for: the blank-value refusal that arrived with
+    /// `node_validator` was written for every key at once, and applied to
+    /// `pr_author_graph` it turns down a document an operator wrote against a
+    /// build that accepted it — a launch broken over a key its author never
+    /// touched. Whatever a blank drafting graph meant at version 2 it goes on
+    /// meaning: the value is read as written, `Some("")` and not `None`, and the
+    /// document loads.
+    ///
+    /// Held at both versions that have the key, and with the surrounding block
+    /// intact, because what has to keep working is the file as it is on disk
+    /// rather than the key on its own.
+    #[test]
+    fn a_config_carrying_a_blank_drafting_graph_still_loads_as_it_always_did() {
+        let root = std::env::temp_dir().join(format!(
+            "onepipeline-config-blank-drafting-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).expect("a scratch directory");
+
+        for version in [2, LAUNCH_CONFIG_SCHEMA_VERSION] {
+            for written in ["\"\"", "\"   \""] {
+                let path = root.join(format!("v{version}-{}.yaml", written.len()));
+                std::fs::write(
+                    &path,
+                    format!(
+                        "schema_version: {version}\n\
+                         pr_author_graph: {written}\n\
+                         filters:\n\
+                        \x20 vcs:\n\
+                        \x20   include:\n\
+                        \x20     - kind: session-closed\n"
+                    ),
+                )
+                .expect("the config is written");
+
+                let read = LaunchConfig::load(&path).unwrap_or_else(|refusal| {
+                    panic!(
+                        "a schema-{version} config carrying a blank `pr_author_graph` no longer \
+                         loads, which breaks every one already on disk: {refusal}"
+                    )
+                });
+                assert_eq!(
+                    read.pr_author_graph.as_deref(),
+                    // As written, whitespace and all: this build does not decide
+                    // for an operator what their blank value meant.
+                    Some(written.trim_matches('"')),
+                    "a blank drafting graph was read as something other than what the file said"
+                );
+                assert_eq!(read.schema_version, version);
+                // The rest of the document is untouched by any of this.
+                assert!(read.filters.vcs.is_some(), "the block was dropped");
+                assert_eq!(read.node_validator, None);
+            }
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// The version is refused by its number, an unknown key by its name, and a
     /// key an earlier version never had by *that* key's name.
     #[test]
@@ -1001,20 +1089,18 @@ mod tests {
             assert_eq!(named, Some(value));
         }
 
-        // A key present and blank, which is a decision half-written rather than a
-        // launch that declared nothing.
-        for key in ["pr_author_graph", "node_validator"] {
-            let blank = LaunchConfig::load(&written(
-                &format!("blank-{key}.yaml"),
-                &format!("schema_version: {LAUNCH_CONFIG_SCHEMA_VERSION}\n{key}: \"   \"\n"),
-            ))
-            .expect_err("a key that names nothing is refused");
-            let said = blank.to_string();
-            assert!(
-                said.contains(&format!("`{key}`")) && said.contains("names nothing"),
-                "{said}"
-            );
-        }
+        // The key that arrives with this version, present and blank: a decision
+        // half-written rather than a launch that declared nothing.
+        let blank = LaunchConfig::load(&written(
+            "blank-node-validator.yaml",
+            &format!("schema_version: {LAUNCH_CONFIG_SCHEMA_VERSION}\nnode_validator: \"   \"\n"),
+        ))
+        .expect_err("a validator that names nothing is refused");
+        let said = blank.to_string();
+        assert!(
+            said.contains("`node_validator`") && said.contains("names nothing"),
+            "{said}"
+        );
 
         let stray = LaunchConfig::load(&written(
             "stray.yaml",

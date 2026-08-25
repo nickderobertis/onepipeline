@@ -635,32 +635,28 @@ fn a_config_naming_the_key_at_a_version_that_never_had_it_is_refused_by_that_nam
         .err_has(&format!("`{key}`"))
         .err_has(&format!("schema {arrived} key"));
 
-    // A key present and naming nothing is a decision half-written: everything
-    // downstream would read it as a launch that named one, and resolve it to a
-    // command nothing can start. Refused where the document is read.
-    // Both keys, because the rule is the schema's rather than this one key's: it
-    // reaches a `pr_author_graph` an operator already had in a file, and a launch
-    // that had it silently dropped would find out from a change request nobody
-    // drafted a body for.
-    for blank_key in [key.as_str(), "pr_author_graph"] {
-        let blank = world.root.join(format!("blank-{blank_key}.yaml"));
-        std::fs::write(
-            &blank,
-            format!("schema_version: {arrived}\n{blank_key}: \"   \"\n"),
-        )
-        .expect("the config is written");
-        world
-            .run(&[
-                "start",
-                &path.to_string_lossy(),
-                "--launch-config",
-                &blank.to_string_lossy(),
-                "--detach",
-            ])
-            .exited(REFUSED)
-            .err_has(&format!("`{blank_key}`"))
-            .err_has("names nothing");
-    }
+    // The validator key present and naming nothing is a decision half-written:
+    // everything downstream would read it as a launch that named one, and
+    // resolve it to a command nothing can start. Refused where the document is
+    // read — and only for this key, which arrives with this version, so no
+    // config on disk can be carrying a blank one.
+    let blank = world.root.join("blank-validator.yaml");
+    std::fs::write(
+        &blank,
+        format!("schema_version: {arrived}\n{key}: \"   \"\n"),
+    )
+    .expect("the config is written");
+    world
+        .run(&[
+            "start",
+            &path.to_string_lossy(),
+            "--launch-config",
+            &blank.to_string_lossy(),
+            "--detach",
+        ])
+        .exited(REFUSED)
+        .err_has(&format!("`{key}`"))
+        .err_has("names nothing");
 
     // The version before this one is still a whole document: it says nothing
     // about validating, which is what a launch naming no validator means, and it
@@ -682,6 +678,62 @@ fn a_config_naming_the_key_at_a_version_that_never_had_it_is_refused_by_that_nam
             &earlier.to_string_lossy(),
             "--attach",
         ])
+        .exited(0)
+        .settled();
+}
+
+/// A launch config already on disk carrying a **blank** `pr_author_graph` starts
+/// a run exactly as it did before this change.
+///
+/// The regression this exists for: the blank-value refusal that arrives with
+/// `node_validator` was written for every key at once, and applied to
+/// `pr_author_graph` it turns down a document an operator wrote against a build
+/// that accepted it — a launch broken over a key its author never touched. Driven
+/// through the CLI rather than through the loader alone, because what has to keep
+/// working is `onepipeline start` reading the file.
+#[test]
+fn a_config_carrying_a_blank_drafting_graph_still_launches_a_run() {
+    let world = World::new("validator-blank-drafting");
+    let plan_path = world.plan(
+        "blankdrafting",
+        &plan_of("blankdrafting", vec![agent("only", &[])]),
+    );
+
+    // At the version that introduced the key, and at this one, because a config
+    // on disk declares whichever it was written at.
+    for (at, version) in [2, proposed()["config_schema_version"].as_u64().unwrap_or(3)]
+        .into_iter()
+        .enumerate()
+    {
+        let config = world.root.join(format!("blank-drafting-v{version}.yaml"));
+        std::fs::write(
+            &config,
+            format!("schema_version: {version}\npr_author_graph: \"\"\n"),
+        )
+        .expect("the config is written");
+
+        let name = format!("blankdrafting-{at}");
+        let plan_for = world.plan(&name, &plan_of(&name, vec![agent("only", &[])]));
+        world
+            .run(&[
+                "start",
+                &plan_for.to_string_lossy(),
+                "--launch-config",
+                &config.to_string_lossy(),
+                "--attach",
+            ])
+            .exited(0)
+            .settled();
+        assert_eq!(
+            world.run_json(&name, "result.json")["state"],
+            "complete",
+            "a config carrying a blank drafting graph no longer runs its plan"
+        );
+    }
+    // And the plan itself was never the problem: the same one runs with no
+    // config at all, which is what the assertions above are compared against.
+    world
+        .run(&["start", &plan_path.to_string_lossy(), "--attach"])
         .exited(0)
         .settled();
 }
