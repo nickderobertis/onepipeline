@@ -37,10 +37,8 @@ use std::process::ExitCode;
 /// who opened one has a name to assert against.
 const WHO: &str = "onepipeline-e2e";
 
-/// The commit a change request's checks are reported against.
-///
-/// A real object id shape — forty hex characters — because it travels into
-/// `onevcs::Sha` and out onto the stream a journey reads.
+/// The commit a change request's checks are reported against, where this host
+/// has no branch to read one off. See [`head_of`].
 const HEAD_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
 
 /// The commit a merge lands at, when this host merges one.
@@ -356,6 +354,119 @@ fn create(args: &[String], dir: &Path) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// Where the origin behind one host slug actually is, as the world running this
+/// journey wrote it down.
+///
+/// The identity says `github.com/owner/service` while the git remote under it is
+/// a bare repository on this disk, and only that world knows both — so it writes
+/// the pairing down and this reads it back, rather than either side deriving the
+/// other from a directory layout neither owns.
+fn origin_of(dir: &Path, repo: &str) -> Option<PathBuf> {
+    let recorded = read_if_present(&dir.join("gh").join("origin").join(fake::segment(repo)))?;
+    let origin = PathBuf::from(recorded.trim());
+    // Checked rather than trusted for where it came from: what came back is a
+    // path off a file, and it is handed to `git --git-dir`. An absolute
+    // directory that is there is what the world writes; anything else names no
+    // repository this can read, and the placeholder is the answer for that.
+    (origin.is_absolute() && origin.is_dir()).then_some(origin)
+}
+
+/// A commit id this host reports: forty hexadecimal characters and nothing else.
+///
+/// A type rather than a `String` because one of these is read off `git`, and a
+/// value that reached `headRefOid` has to have been checked on the way in rather
+/// than trusted for where it came from — `onevcs` decides which checks are about
+/// which commit by comparing it.
+struct Sha(String);
+
+impl Sha {
+    fn parse(reported: &str) -> Option<Self> {
+        let reported = reported.trim();
+        (reported.len() == 40 && reported.chars().all(|c| c.is_ascii_hexdigit()))
+            .then(|| Self(reported.to_ascii_lowercase()))
+    }
+
+    fn placeholder() -> Self {
+        Self::parse(HEAD_SHA).unwrap_or_else(|| fake::fail("HEAD_SHA is not an object id"))
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// A branch name this host will build a ref out of.
+///
+/// `opened.head` is read back off a file rather than off this process's own
+/// command line, and it is interpolated into `refs/heads/…` — so a value
+/// carrying `..` or a separator of its own names a ref somewhere else in the
+/// namespace. Checked on the way in, by git's own branch rules as far as one
+/// component needs them.
+struct Branch(String);
+
+impl Branch {
+    fn parse(named: &str) -> Option<Self> {
+        let usable = !named.is_empty()
+            && !named.starts_with('/')
+            && !named.ends_with('/')
+            && !named.starts_with('.')
+            && !named.ends_with(".lock")
+            && !named.contains("..")
+            && !named.contains("//")
+            && !named.contains("@{")
+            && !named.contains("/.")
+            && named
+                .chars()
+                .all(|c| !c.is_ascii_control() && !" ~^:?*[\\".contains(c));
+        usable.then(|| Self(named.to_owned()))
+    }
+
+    fn as_ref_name(&self) -> String {
+        format!("refs/heads/{}", self.0)
+    }
+}
+
+/// The commit this host reports as a change request's head.
+///
+/// Read off the branch, because `onevcs` sets aside every check attached to some
+/// *other* commit. Answered from a constant, every check this host reports names
+/// a commit no publication pushed, so a red one reads as a check that has not
+/// arrived rather than as a check that failed.
+///
+/// [`HEAD_SHA`] where no usable origin was written down for the slug, where the
+/// recorded head is not a branch name a ref can be built from, where the origin
+/// carries no such branch, or where git answers something that is not an object
+/// id: a change request over a branch this host cannot see has no better answer.
+fn head_of(dir: &Path, opened: &Opened) -> Sha {
+    // Scripted `gh.head` is a host reporting some commit other than the branch's
+    // tip — the state a real host is in for the seconds after a push it has not
+    // processed, and the one a journey cannot reach by pushing, because every
+    // commit it makes is the tip by the time it asks.
+    if let Some(scripted) = fake::node_script(dir, "gh", "head") {
+        return Sha::parse(&scripted).unwrap_or_else(|| {
+            fake::fail(&format!(
+                "scripted `gh.head` {scripted:?} is not an object id"
+            ))
+        });
+    }
+    let (Some(origin), Some(branch)) = (origin_of(dir, &opened.repo), Branch::parse(&opened.head))
+    else {
+        return Sha::placeholder();
+    };
+    std::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(&origin)
+        .args(["rev-parse", "--verify", "--quiet"])
+        .arg(branch.as_ref_name())
+        .output()
+        .ok()
+        .filter(|answer| answer.status.success())
+        .and_then(|answer| String::from_utf8(answer.stdout).ok())
+        .as_deref()
+        .and_then(Sha::parse)
+        .unwrap_or_else(Sha::placeholder)
+}
+
 /// The URL a change request this host opened is reached at.
 ///
 /// Written once because `pr create` prints it and `pr list` reports it, and
@@ -402,11 +513,12 @@ fn list(args: &[String], dir: &Path) -> ExitCode {
         .filter(|change| change.base == flag("--base"))
         .filter(|change| recorded(dir, &change.number.to_string()) == Some(Change::Open))
         .map(|change| {
+            let head = head_of(dir, &change);
             serde_json::json!({
                 "number": change.number,
                 "url": url_of(&change),
                 "state": "OPEN",
-                "headRefOid": HEAD_SHA,
+                "headRefOid": head.as_str(),
             })
         })
         .collect();
@@ -490,6 +602,12 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
         Some("headRefOid") => "headRefOid",
         Some("state,mergeCommit") => "state,mergeCommit",
         Some("statusCheckRollup") => "statusCheckRollup",
+        // The rollup *and* the commit it was reported against, in one read.
+        // `onevcs` 0.15.0 asks for the pair because a rollup read on its own
+        // cannot say whether the checks in it ran on the head the publication
+        // just pushed — which is how a stale verdict from an earlier head
+        // decided a merge path and consumed a node's last retry.
+        Some("headRefOid,statusCheckRollup") => "headRefOid,statusCheckRollup",
         _ => "number,state,mergeStateStatus,headRefOid,mergeCommit,statusCheckRollup",
     };
     if let Err(refusal) = shaped(
@@ -508,13 +626,14 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
     let id = opened.number.to_string();
     let merged = state_of_opened(dir, &opened) == Change::Merged;
     let reported = scripted_checks(dir, &id);
+    let head = head_of(dir, &opened);
     println!(
         "{}",
         serde_json::json!({
             "number": opened.number,
             "state": if merged { "MERGED" } else { "OPEN" },
             "mergeStateStatus": "CLEAN",
-            "headRefOid": HEAD_SHA,
+            "headRefOid": head.as_str(),
             "mergeCommit": merged.then(|| serde_json::json!({"oid": MERGE_SHA})),
             // What this host reports about the change request's checks, which is
             // the scripted part: unscripted it reports none, which is the

@@ -2106,10 +2106,9 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some(conversation.as_str()),
             "the linked oneagentgraph stamps no `session` on a turn it names: the \
-             session-conversation producer ships in 0.3.3, `Cargo.toml`'s `^0.3.0` has \
-             permitted that release all along, so `Cargo.lock` is stale and \
-             `cargo update -p oneagentgraph` is the whole of the fix — editing the \
-             requirement changes nothing"
+             session-conversation producer ships in 0.3.3, and `Cargo.toml` requires the \
+             newest release, which is above that floor — so `Cargo.lock` is behind the \
+             manifest too and `cargo update -p oneagentgraph` is the whole of the fix"
         );
         assert!(
             serde_json::from_value::<oneagentgraph::event::EventKind>(serde_json::Value::String(
@@ -2143,9 +2142,10 @@ mod tests {
     fn the_linked_oneagentgraph_produces_the_whole_turn_this_crate_relays() {
         /// What every assertion here has to say, because it is the only thing
         /// that fixes any of them.
-        const MOVE_THE_LOCK: &str = "`Cargo.toml`'s `^0.3.0` has permitted 0.3.6 all along, \
-             so `Cargo.lock` is what is behind and `cargo update -p oneagentgraph` is the \
-             whole of the fix — editing the requirement changes nothing";
+        const MOVE_THE_LOCK: &str = "`Cargo.toml` requires the newest release, which is \
+             above this floor, so a resolution that fails here is behind the manifest too and \
+             `cargo update -p oneagentgraph` is the whole of the fix; `just engines-current` \
+             names it without running the suite";
 
         assert!(
             serde_json::from_value::<oneagentgraph::event::EventKind>(serde_json::Value::String(
@@ -2204,8 +2204,8 @@ mod tests {
     /// 0.3.5 that bar refused "done" until the behaviour was *proven end to
     /// end* — a demand no dispatch can meet now that no gate runs inside the
     /// publication and verification is the merge path's, so every node would
-    /// fail its review. The floor is carried by `Cargo.lock`: `^0.3.0` has
-    /// permitted 0.3.5 all along, so the resolution is the whole of the fix.
+    /// fail its review. The requirement is above that floor, so a resolution
+    /// below it is behind the manifest too and moving the lock is the fix.
     ///
     /// Read through [`merge`] rather than off the YAML, because the merged
     /// config is what a judge is handed; a bar that arrived some other way is
@@ -2238,9 +2238,9 @@ mod tests {
             !stance.contains("proven end to end"),
             "the linked oneagentgraph's `engineer` bar still refuses to accept work until it is \
              proven end to end, which no dispatch can satisfy from inside its own run: the \
-             correction ships in 0.3.5, `Cargo.toml`'s `^0.3.0` has permitted that release all \
-             along, so `Cargo.lock` is stale and `cargo update -p oneagentgraph` is the whole of \
-             the fix — editing the requirement changes nothing:\n{stance}"
+             correction ships in 0.3.5, and `Cargo.toml` requires the newest release, which is \
+             above that floor — so `Cargo.lock` is behind the manifest too and \
+             `cargo update -p oneagentgraph` is the whole of the fix:\n{stance}"
         );
         for demand in [
             "the task's acceptance criteria are met",
