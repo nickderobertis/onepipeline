@@ -2754,7 +2754,7 @@ fn both_probe_scripts_fill_in_the_same_placeholders() {
     // Only a drift gate while it still finds anything, and only the truth while
     // it names what the harness actually substitutes.
     assert_eq!(shell, ["@RUNS_FILE@", "@VERSION_FILE@"]);
-}
+} // llmlint: ignore-end[tests_mirror_real_usage]
 
 /// The other half of that contract — what the hook *refuses*, and with what —
 /// held by pushing at a repository that has it installed.

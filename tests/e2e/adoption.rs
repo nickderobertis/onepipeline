@@ -1030,9 +1030,12 @@ fn start_with(world: &World, name: &str, nodes: Vec<Value>, extra: &[&str]) -> S
     name.to_string()
 }
 
-/// The poll bound every journey here runs under, as [`watching`] sets it: how
-/// often this host may run **one** release's probe.
-const POLL_SECONDS: f64 = 1.0;
+/// How often a journey here lets this host run **one** release's probe.
+///
+/// [`watching`] is what sets it, from here rather than beside it: a journey that
+/// counts probe runs against this bound and a world that ran under another one
+/// would agree on nothing.
+const POLL_SECONDS: u64 = 1;
 
 /// How many asks
 /// [`nodes_awaiting_one_release_put_one_question_and_are_answered_together`]
@@ -1050,7 +1053,10 @@ const ASKS: usize = 5;
 /// changes: one hold, indefinite, released only by an answer of released.
 fn watching(name: &str) -> World {
     World::new(name)
-        .with_env("ONEPIPELINE_RELEASE_POLL_SECONDS", "1")
+        .with_env(
+            "ONEPIPELINE_RELEASE_POLL_SECONDS",
+            &POLL_SECONDS.to_string(),
+        )
         .with_env("ONEPIPELINE_RELEASE_SURFACE_SECONDS", "1")
 }
 
@@ -1741,20 +1747,15 @@ fn a_published_node_is_held_until_the_release_answers_and_by_nothing_else() {
     }
 }
 
-/// Nodes awaiting **one** release put one question between them, and are
-/// answered together.
+/// Nodes awaiting **one** release put one question between them, are answered
+/// together, and say so while they wait.
 ///
-/// The question `onevcs` is put is the reference and the target, so every node
-/// waiting on one dependency's release is asking the identical thing. Asked once
-/// per node, the same probe subprocess runs once per node on every poll — and
-/// because they are asked in turn, the last node hears nothing until every other
-/// node's copy of its own question has been run. That is what a person reads as
-/// one node holding on a release nothing has answered while the node beside it,
-/// awaiting the very same release, has an answer: not a broken probe, a queue.
-///
-/// Driven against the real probe, and asserted on what a reader can actually see:
-/// no node awaiting this release is ever left reporting no answer once a node
-/// beside it has one, and when the release lands none of them is still waiting.
+/// Three promises, against the real probe. The waits read `no-answer-yet` until
+/// the first answer comes back and never `not-answered`, which is a probe that
+/// ran and could not answer. None of them is left reporting no answer once a
+/// node beside it has one, and when the release lands none of them is still
+/// waiting. And the three of them cost one probe run a poll between them — the
+/// count that says the other two are structural rather than luck.
 #[test]
 fn nodes_awaiting_one_release_put_one_question_and_are_answered_together() {
     let world = watching("adoption-one-question");
@@ -1784,29 +1785,64 @@ fn nodes_awaiting_one_release_put_one_question_and_are_answered_together() {
     for node in waiters {
         assert!(!dispatched(&world, &run, node), "{node} was dispatched");
     }
-    // And no node was left reporting no answer after a node beside it had one.
-    // Read over the store in order, because the defect is a *sequence*: the third
-    // node reading `no-answer-yet` is right until the first node's answer lands,
-    // and wrong from that moment on.
-    let mut answered_yet = false;
+    // What every wait said, in the order the store holds it, because both of the
+    // next two promises are about a *sequence*: a node reading `no-answer-yet` is
+    // right until the first answer lands and wrong from that moment on.
+    let mut waited: Vec<(String, String)> = Vec::new();
     for event in world.journal(&run) {
         if event["kind"] != "release-wait" {
             continue;
         }
-        let Some(entries) = event["payload"]["awaiting"].as_array() else {
-            continue;
-        };
-        for entry in entries {
-            let last = entry["last_answer"].as_str().unwrap_or_default().to_owned();
-            let carries = last == "not-released" || last == "released";
-            assert!(
-                carries || !answered_yet,
-                "'{}' still reports '{last}' for a release a node beside it has already been \
-                 answered about: {event}",
-                event["labels"]["node"],
-            );
-            answered_yet |= carries;
+        let node = event["labels"]["node"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        for entry in event["payload"]["awaiting"]
+            .as_array()
+            .unwrap_or(&Vec::new())
+        {
+            waited.push((
+                node.clone(),
+                entry["last_answer"].as_str().unwrap_or_default().to_owned(),
+            ));
         }
+    }
+    // Each node's first wait is raised before anything can have answered it, and
+    // says so — `no-answer-yet`, and never `not-answered`, which is the word for
+    // a probe that ran and could not answer. This probe answers.
+    for node in waiters {
+        let first = waited.iter().find(|(who, _)| who == node);
+        assert_eq!(
+            first.map(|(_, said)| said.as_str()),
+            Some("no-answer-yet"),
+            "'{node}' reported its first wait as something other than a question still out",
+        );
+    }
+    assert!(
+        !wait_surface(&world, &run, "first").is_empty()
+            && world
+                .events_of(&run, "planner-surface-queued")
+                .iter()
+                .any(|event| event["payload"]["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("last answer: no-answer-yet")),
+        "no surface told a reader the probe was still out rather than broken"
+    );
+    // And no node was left reporting no answer after a node beside it had one.
+    let mut answered_yet = false;
+    for (node, said) in &waited {
+        assert_ne!(
+            said, "not-answered",
+            "'{node}' reported a probe that answers as one that could not"
+        );
+        let carries = said == "not-released" || said == "released";
+        assert!(
+            carries || !answered_yet,
+            "'{node}' still reports '{said}' for a release a node beside it has already been \
+             answered about"
+        );
+        answered_yet |= carries;
     }
     assert!(
         answered_yet,
@@ -1833,7 +1869,7 @@ fn nodes_awaiting_one_release_put_one_question_and_are_answered_together() {
     let asked = world.probe_runs(ENGINE) - before;
     let over = from.elapsed().as_secs_f64();
     assert!(
-        asked as f64 <= over / POLL_SECONDS + 2.0,
+        asked as f64 <= over / POLL_SECONDS as f64 + 2.0,
         "{asked} probes were run for one release in {over:.1}s, which is oftener than one \
          every {POLL_SECONDS}s — the nodes awaiting it are each buying their own copy of \
          one answer"

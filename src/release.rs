@@ -81,14 +81,11 @@ pub const WAIT_SURFACE_KIND: &str = "release-wait";
 /// it is waiting on.
 type Key = (String, String);
 
-/// One answer, on its way back from the asker to the reconcile loop, with every
-/// wait it answers.
+/// One answer, on its way back from the asker to the reconcile loop, and every
+/// wait [`questions_of`] put the question on behalf of.
 ///
-/// A list rather than one key, because one question is asked on behalf of every
-/// wait that put it — and the whole list travels as **one** message so the loop
-/// applies it in one go. Two nodes awaiting the same release cannot then be
-/// caught disagreeing about it, which is what a per-key message allows the moment
-/// the loop reads the channel between two of them.
+/// One message for all of them, so the loop applies them in one go and two nodes
+/// awaiting one release are never caught disagreeing about it.
 type Answered = (Vec<Key>, Answer);
 
 /// Which rung of the adoption chain one node resolves to.
@@ -308,15 +305,8 @@ impl Repositories {
     }
 }
 
-/// One question the asker puts to `onevcs`.
-///
-/// One *question*, and not one per waiting node: [`onevcs::release_status`] is
-/// answered by the reference and the target alone, so every wait naming the same
-/// pair is asking the identical question and is answered by one run of the probe.
-/// Asking it once per node instead would run the same subprocess once per node on
-/// every poll — the same answer, bought as many times as there are nodes waiting
-/// for it, with the last of them waiting out all the others before it hears
-/// anything.
+/// One question the asker puts to `onevcs`, and every wait it answers — see
+/// [`questions_of`] for why those are not the same count.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Question {
     /// Every node-and-dependency pair this one answer belongs to.
@@ -1484,16 +1474,9 @@ mod tests {
         }
     }
 
-    /// Waits naming one release put **one** question, and the answer belongs to
-    /// every one of them.
-    ///
-    /// The probe behind that question is a subprocess, so a question per waiting
-    /// node is a subprocess per waiting node on every poll — all of them asking
-    /// the identical thing, and the last of them hearing nothing until every
-    /// other has been run. What that costs is driven end to end by
-    /// `tests/e2e/adoption.rs`'s
-    /// `nodes_awaiting_one_release_put_one_question_and_are_answered_together`;
-    /// what it *is* is here, arm by arm.
+    /// Which waits share a question and which do not, arm by arm. What sharing
+    /// one *costs* a run is driven end to end by `tests/e2e/adoption.rs`'s
+    /// `nodes_awaiting_one_release_put_one_question_and_are_answered_together`.
     #[test]
     fn waits_naming_one_release_put_one_question_between_them() {
         let wait = |node: &str, dependency: Dependency| {
@@ -1558,12 +1541,8 @@ mod tests {
         assert!(questions_of(&[]).is_empty());
     }
 
-    /// A wait nothing has answered **yet** is not a probe that could not answer,
-    /// and neither is ever a release that has not happened.
-    ///
-    /// Three states, because a reader acts differently on each: wait, go and look
-    /// at the probe, or go and look at the configuration. Read off both places
-    /// the distinction has to exist — the payload and the surface a person reads.
+    /// The three states of a wait with no version yet, read off both places the
+    /// distinction has to exist: the payload and the surface a person reads.
     #[test]
     fn a_wait_still_expecting_its_first_answer_is_not_a_probe_that_could_not_answer() {
         let mut watch = Watch::of_run(&RunPaths::under(std::path::Path::new("/nowhere"), "demo"));
