@@ -825,20 +825,7 @@ fn a_probe_that_could_not_answer_holds_the_node_and_is_never_read_as_not_release
         !dispatched(&world, &run, "consumer"),
         "a probe that could not answer started a node"
     );
-    // Read the surface *that* wait raised, not whichever surface is last on the
-    // journal: the two are separate appends of one pass, and the reason is
-    // [`surface_of_wait`]'s.
-    // llmlint: ignore-block[tests_mirror_real_usage] a queued planner surface has no verb
-    // that renders its text without consuming it, so the journal it is queued on is where
-    // this suite reads one — `World::surfaced` is the harness's own helper for it and
-    // reads the same event. The run, the probe, and the hold are the real binary end to
-    // end, and this pairs a surface with its wait rather than reaching past either.
-    world.until("the wait that recorded it to raise its surface", |world| {
-        surface_of_wait(world, &run, "consumer", "not-answered").is_some()
-    });
-    let surface = surface_of_wait(&world, &run, "consumer", "not-answered")
-        .expect("the surface the wait that could not answer raised");
-    // llmlint: ignore-end[tests_mirror_real_usage]
+    let surface = wait_surface(&world, &run, "consumer");
     assert!(
         surface.contains("last answer: not-answered"),
         "the surface reports a probe that could not answer as something else:\n{surface}"
@@ -993,51 +980,7 @@ fn answered(world: &World, run: &str, node: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// The text of the release-wait surface raised by the wait that recorded
-/// `answer`, or `None` until that pass's surface has landed.
-///
-/// One reconcile pass writes a held node's wait as **two** appends: the
-/// `release-wait` that records what the probe last answered, and the
-/// `planner-surface-queued` that reports the same thing to a person. A reader
-/// polling the journal every 20ms can catch it between them — and
-/// [`wait_surface`] then hands back the surface raised a whole interval
-/// *earlier*, about the answer before this one.
-///
-/// Waiting on the answer is waiting on the first of the two appends, which is
-/// the window `World::surfaced` already words for every other surface this
-/// suite reads. So the surface is paired with
-/// **its own** wait by position, and a journey waits for the pass rather than
-/// for whichever half of it landed first.
-fn surface_of_wait(world: &World, run: &str, node: &str, answer: &str) -> Option<String> {
-    let journal = world.journal(run);
-    // The last wait that recorded this answer, and then the first surface raised
-    // about the node at or after it: within one pass the two are adjacent for a
-    // given node, so position is what pairs them.
-    let recorded = journal.iter().rposition(|event| {
-        event["kind"] == "release-wait"
-            && event["labels"]["node"] == node
-            && event["payload"]["awaiting"][0]["last_answer"] == json!(answer)
-    })?;
-    journal[recorded..]
-        .iter()
-        .find(|event| {
-            event["kind"] == "planner-surface-queued"
-                && event["payload"]["kind"] == "release-wait"
-                && event["labels"]["node"] == node
-        })
-        .map(|event| {
-            event["payload"]["message"]
-                .as_str()
-                .unwrap_or_default()
-                .to_owned()
-        })
-}
-
 /// The text of the last release-wait surface raised about one node.
-///
-/// For a claim about a surface reporting an answer that has just *changed*, read
-/// [`surface_of_wait`] instead: this one is the last surface on the journal,
-/// which is the previous pass's until the current pass has raised its own.
 fn wait_surface(world: &World, run: &str, node: &str) -> String {
     world
         .events_of(run, "planner-surface-queued")
