@@ -245,6 +245,18 @@ pub fn stop_and_confirm(pids: &[u32], how: Stop, patience: Duration) -> Teardown
 /// draws against them is the whole point of having three variants, and a tree
 /// that went away by itself while nobody signalled it is not a stop this
 /// teardown made. [`Teardown::NothingToStop`] found no tree to watch.
+// llmlint: ignore-block[changed_behavior_has_e2e] the arm this change adds cannot be
+// reached by a journey on either platform, which is why the fold is split out at all. A
+// `platform_stop` that answers `PartlySignalled` needs either a process this user may not
+// signal standing beside one that takes the ask — not a thing to go and make — or the
+// Windows tree-kill racing its own descendant to exit, which no test can ask a host for.
+// So the decision is driven from the answers, in
+// `a_descendant_the_tree_kill_already_ended_is_a_clean_stop` and
+// `a_tree_still_standing_when_the_patience_runs_out_is_still_a_refusal`, both on no cfg;
+// the reachable arms around it are driven end to end against a real tree in
+// `a_confirmed_stop_answers_only_once_every_descendant_is_gone` and
+// `a_stop_that_watches_reports_a_tree_that_took_the_ask_and_stayed`, and through the
+// binary in `tests/e2e/driver.rs`.
 fn confirmed(established: Teardown, gone: impl FnOnce() -> bool) -> Teardown {
     match established {
         // A tree that is gone within the patience was reached, however the
@@ -261,6 +273,7 @@ fn confirmed(established: Teardown, gone: impl FnOnce() -> bool) -> Teardown {
         established => established,
     }
 }
+// llmlint: ignore-end[changed_behavior_has_e2e]
 
 /// Whether every process in `aimed` is gone before `patience` runs out.
 ///
@@ -1952,11 +1965,9 @@ mod tests {
     /// End a fixture's whole tree and fail with what went wrong.
     ///
     /// The tree and not just its root: `Child::kill` ends one process, so a
-    /// fixture that gave up on its root left the levels under it running — which
-    /// is the `FAIL + LEAK` beside the failure on the leg this comes from, and a
-    /// `ping` left on the runner for two minutes. `stop` is the crate's own code
-    /// and is used here only to *clean up*, never as the oracle any assertion
-    /// reads.
+    /// fixture that gave up on its root leaks the levels under it. `stop` is the
+    /// crate's own code and is used here only to *clean up*, never as the oracle
+    /// any assertion reads.
     #[cfg(windows)]
     fn abandon(mut root: std::process::Child, why: &str) -> ! {
         stop(root.id(), Stop::Now);
@@ -2015,7 +2026,7 @@ mod tests {
                 ),
             ])
             .output()
-            .expect("this host lists its processes");
+            .map_err(|error| format!("`powershell` could not be run: {error}"))?;
         let complained = String::from_utf8_lossy(&listed.stderr).trim().to_owned();
         // Either half is this host declining to answer. `Get-CimInstance` reports
         // most of its failures without failing the shell, so the status alone
@@ -2023,9 +2034,22 @@ mod tests {
         if !listed.status.success() || !complained.is_empty() {
             return Err(format!("exited {} saying {complained:?}", listed.status));
         }
-        Ok(String::from_utf8_lossy(&listed.stdout)
-            .lines()
-            .find_map(|line| line.trim().parse::<u32>().ok()))
+        // Read strictly, for the reason [`parse_table`] is: the command asked for
+        // one column of pids, so a non-blank line that is not one means the answer
+        // is not the one that was asked for — and reading that as "no such child"
+        // is the fold this whole helper exists to undo.
+        let mut listed_pids: Vec<u32> = Vec::new();
+        for line in String::from_utf8_lossy(&listed.stdout).lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            listed_pids.push(
+                line.parse::<u32>()
+                    .map_err(|_| format!("listed {line:?} where a pid was due"))?,
+            );
+        }
+        Ok(listed_pids.first().copied())
     }
 
     /// Whether every pid in `tree` is gone inside `patience`.
