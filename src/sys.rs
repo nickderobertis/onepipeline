@@ -1945,14 +1945,13 @@ mod tests {
     /// The image each level of a fixture tree runs, so the level below one is
     /// asked for by **what it is** rather than as "some child of it".
     ///
-    /// The distinction the `cross (windows-latest)` leg turned on. A console
-    /// process started where the runner's own step has no console gets a
-    /// `conhost.exe` of its own, and that helper is a child of the level that
-    /// started it — so "some child of the root" is two processes, the listing
-    /// orders them as it pleases, and a fixture that followed the wrong one then
-    /// waited out its whole patience for a grandchild `conhost` never has. What
-    /// it reported was `never started all three of its levels`, about a tree that
-    /// was running the entire time and that nextest went on to count as a leak.
+    /// A console process started where the caller has no console of its own gets
+    /// a `conhost.exe`, and that helper is a child of the level that started it.
+    /// So "some child of this level" names two processes, the listing orders
+    /// them as it pleases, and a fixture that follows the wrong one waits out its
+    /// whole patience under a process that will never have a child — then
+    /// reports a tree that was running the entire time as one that never
+    /// started.
     #[cfg(windows)]
     const SHELL_IMAGE: &str = "cmd.exe";
 

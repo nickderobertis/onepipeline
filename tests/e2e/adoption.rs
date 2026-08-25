@@ -828,11 +828,17 @@ fn a_probe_that_could_not_answer_holds_the_node_and_is_never_read_as_not_release
     // Read the surface *that* wait raised, not whichever surface is last on the
     // journal: the two are separate appends of one pass, and the reason is
     // [`surface_of_wait`]'s.
+    // llmlint: ignore-block[tests_mirror_real_usage] a queued planner surface has no verb
+    // that renders its text without consuming it, so the journal it is queued on is where
+    // this suite reads one — `World::surfaced` is the harness's own helper for it and
+    // reads the same event. The run, the probe, and the hold are the real binary end to
+    // end, and this pairs a surface with its wait rather than reaching past either.
     world.until("the wait that recorded it to raise its surface", |world| {
         surface_of_wait(world, &run, "consumer", "not-answered").is_some()
     });
     let surface = surface_of_wait(&world, &run, "consumer", "not-answered")
         .expect("the surface the wait that could not answer raised");
+    // llmlint: ignore-end[tests_mirror_real_usage]
     assert!(
         surface.contains("last answer: not-answered"),
         "the surface reports a probe that could not answer as something else:\n{surface}"
@@ -997,13 +1003,11 @@ fn answered(world: &World, run: &str, node: &str) -> Option<String> {
 /// [`wait_surface`] then hands back the surface raised a whole interval
 /// *earlier*, about the answer before this one.
 ///
-/// That is not a hypothetical: it failed this journey on `cross (macos-latest)`
-/// and again on the Linux `gate`, both times with a surface still saying
-/// `last answer: not-released` about a wait that had already recorded
-/// `not-answered`. Waiting on the answer alone is waiting on the first of the
-/// two appends, so the surface is paired with **its own** wait by position and
-/// the journey waits for the pass rather than for whichever half of it landed
-/// first.
+/// Waiting on the answer is waiting on the first of the two appends, which is
+/// the window `World::surfaced` already words for every other surface this
+/// suite reads. So the surface is paired with
+/// **its own** wait by position, and a journey waits for the pass rather than
+/// for whichever half of it landed first.
 fn surface_of_wait(world: &World, run: &str, node: &str, answer: &str) -> Option<String> {
     let journal = world.journal(run);
     // The last wait that recorded this answer, and then the first surface raised
