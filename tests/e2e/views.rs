@@ -1685,23 +1685,22 @@ fn a_run_root_the_views_refuse_is_named_with_its_reason() {
     // llmlint: ignore-block[tests_mirror_real_usage] all three states are the
     // *filesystem's* rather than any command's, which is why the views met them in the
     // first place: **a run root with no launch record** (a crash between the directory and
-    // the record, or a directory an operator left beside the runs), **a launch record this
-    // build refuses** (nothing here writes an unknown field — that is the point of it), and
-    // **a launch record that is a directory**. None has an engine-side constructor, and a
-    // verb that made one would be the defect. The run beside them is launched through the
-    // CLI, and every claim is read off the CLI.
+    // the record, or a directory an operator left beside the runs), **a launch record that
+    // is not a launch record** (a document with none of what this build needs to say
+    // anything about the run), and **a launch record that is a directory**. None has an
+    // engine-side constructor, and a verb that made one would be the defect. The run
+    // beside them is launched through the CLI, and every claim is read off the CLI.
     // A run root left half-written: the directory is there and the launch record
     // that says who owns it is not.
     std::fs::create_dir_all(world.runs.join("half-written")).expect("a run root with no launch");
-    // And one whose launch record carries a field this build does not accept,
-    // which is the refusal `results` already words: the file, the offending
-    // field, and what was expected.
-    std::fs::create_dir_all(world.runs.join("typo")).expect("a run root");
+    // And one whose launch record this build genuinely cannot read: `results`
+    // words that refusal with the file and what the record was missing.
+    std::fs::create_dir_all(world.runs.join("not-a-record")).expect("a run root");
     std::fs::write(
-        world.runs.join("typo").join("launch.json"),
+        world.runs.join("not-a-record").join("launch.json"),
         r#"{"oops": true}"#,
     )
-    .expect("a launch record this build refuses");
+    .expect("a launch record this build cannot read");
     // And one whose launch record is there and is not a record at all: absent
     // and "present as something else" are different things to tell a reader.
     std::fs::create_dir_all(world.runs.join("impostor").join("launch.json"))
@@ -1716,7 +1715,7 @@ fn a_run_root_the_views_refuse_is_named_with_its_reason() {
             .out_has("3 run root(s) skipped")
             .out_has("half-written")
             .out_has("launch.json")
-            .out_has("unknown field `oops`")
+            .out_has("missing field `run_id`")
             .out_has("is not a file");
     }
     // `host` lists dispatches rather than runs, so the run it read is not on it
@@ -1726,6 +1725,46 @@ fn a_run_root_the_views_refuse_is_named_with_its_reason() {
         .exited(0)
         .out_has("3 run root(s) skipped")
         .out_has("half-written");
+}
+
+/// A run whose launch record carries a field this build has never had is **read**,
+/// and the whole-host view reports the run.
+///
+/// The defect this replaces, measured on one host on 2026-08-24: the launch
+/// record was deserialized strictly, so a key another build of this crate wrote
+/// — `channel_id`, a field later removed — took the *whole* record with it, and
+/// 148 run roots were invisible to the view an operator opens to see what is
+/// running on their machine. The refusal even named the field, which is what
+/// makes it the wrong answer: this build knew exactly what it was refusing over.
+///
+/// The record here is the one this build wrote for a real run driven through the
+/// CLI, with the stranger's key added to it — so what is proved is a record that
+/// is otherwise entirely ordinary, which is what a record from a neighbouring
+/// build is.
+#[test]
+fn a_run_whose_record_carries_a_field_this_build_never_had_is_still_reported() {
+    let world = World::new("views-newer-record");
+    let run = settled(&world, "from-a-newer-build", vec![agent("build", &[])]);
+    // llmlint: ignore-block[tests_mirror_real_usage] no verb of this build writes a key
+    // this build does not have — that is the point of it — so the only way to hold a
+    // record another build wrote is to put the key on the record this one wrote. The run
+    // is launched and settled through the CLI, and every claim below is read off the CLI.
+    let record = world.runs.join(&run).join("launch.json");
+    let mut written: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&record).expect("the launch record"))
+            .expect("a launch record");
+    written["channel_id"] = serde_json::json!("a field a later build removed");
+    std::fs::write(&record, written.to_string()).expect("a launch record from another build");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    for view in [vec!["runs"], vec!["status"], vec!["goals"]] {
+        let rendered = world.run(&view);
+        rendered.exited(0).out_has(&run);
+        rendered.out_lacks("run root(s) skipped");
+        rendered.out_lacks("channel_id");
+    }
+    // And the run still opens by name, with everything the record says about it.
+    world.run(&["results", &run]).exited(0).out_has(&run);
 }
 
 /// A root whose every run was refused is not a root with nothing in it.
