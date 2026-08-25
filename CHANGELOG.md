@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.1](https://github.com/nickderobertis/onepipeline/compare/v0.14.0...v0.14.1) - 2026-08-25
+
+### Fixed
+
+- stop a Windows run deterministically and read a run record an earlier build wrote ([#118](https://github.com/nickderobertis/onepipeline/pull/118))
+
 ## [0.14.0](https://github.com/nickderobertis/onepipeline/compare/v0.13.0...v0.14.0) - 2026-08-24
 
 ### Added
