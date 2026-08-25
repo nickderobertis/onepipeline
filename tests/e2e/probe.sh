@@ -33,7 +33,7 @@ if [ ! -f "@VERSION_FILE@" ]; then
   exit 0
 fi
 if [ ! -s "@VERSION_FILE@" ]; then
-  echo "probe: @VERSION_FILE@ is there and holds nothing, which is not an answer; a target with no release has no such file at all, so this is an answer half-written" >&2
+  echo "probe: @VERSION_FILE@ is there and holds nothing, which is not an answer; a target with no release has no such file at all, so this is an answer half-written; write it whole by renaming a complete file into place, or remove it to mean no release" >&2
   exit 1
 fi
 if ! cat "@VERSION_FILE@"; then

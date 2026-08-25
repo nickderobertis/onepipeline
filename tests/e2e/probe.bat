@@ -17,7 +17,7 @@ rem journey on the other platform can check.
 set PROBE_ANSWER_BYTES=0
 for %%A in ("@VERSION_FILE@") do set PROBE_ANSWER_BYTES=%%~zA
 if %PROBE_ANSWER_BYTES% equ 0 (
-  echo probe: @VERSION_FILE@ is there and holds nothing, which is not an answer; a target with no release has no such file at all, so this is an answer half-written 1>&2
+  echo probe: @VERSION_FILE@ is there and holds nothing, which is not an answer; a target with no release has no such file at all, so this is an answer half-written; write it whole by renaming a complete file into place, or remove it to mean no release 1>&2
   exit /b 1
 )
 type "@VERSION_FILE@"

@@ -504,7 +504,7 @@ const RELAY_POLL: Duration = Duration::from_millis(250);
 /// launch's message is not worth hanging a run on.
 const SAID_PATIENCE: Duration = Duration::from_secs(2);
 
-/// How often the two bounded waits above look again.
+/// How often [`Said::settled`] looks again while it waits out that bound.
 const SAID_POLL: Duration = Duration::from_millis(10);
 
 /// What a launch has said on its stderr, drained off the pipe as it arrives.
