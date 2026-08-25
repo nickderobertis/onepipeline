@@ -85,6 +85,15 @@ pub struct RunState {
     /// [`branches`](Self::branches) and [`change_urls`](Self::change_urls): most
     /// settlements carry none, and an entry cleared on any other event would turn
     /// a dispatch that died into one whose agent failed its task.
+    //
+    // llmlint: ignore[invalid_states_unrepresentable] a newtype here would have to hold the
+    // producer's own word, and there is no vocabulary to hold it against: the classifications
+    // belong to `oneharness`, which is deliberately not a dependency of this crate, so one
+    // that layer adds has to arrive without this crate learning it. What could go wrong with
+    // an unchecked one — a paragraph, or a line of its own, where a reader looks for a word —
+    // is checked on both edges it crosses, by `engine::is_a_classification`: where it is
+    // lifted off the dispatch's own detail, and again where this map is folded out of a
+    // journal another build wrote and a person can edit.
     pub causes: BTreeMap<String, String>,
     /// The commit each node's branch was left at, as its settlement recorded it.
     ///

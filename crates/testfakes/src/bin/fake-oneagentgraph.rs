@@ -600,7 +600,17 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
                 "{key}.fail holds {code:?}, which is not an exit code"
             ));
         };
-        eprintln!("the node failed its gate");
+        // The sentence the verdict is written in, where a journey needs one
+        // other than the usual. Still the *agent's* prose either way — this is
+        // the `<key>.fail` path, the verdict on the task — and that is what a
+        // journey scripting it is for: a reader of this stderr has only the
+        // sentence to go on, so an agent that writes about the machinery it ran
+        // against is the case that says where the reading stops.
+        eprintln!(
+            "{}",
+            fake::node_script(dir, &key, "fail-saying")
+                .unwrap_or_else(|| "the node failed its gate".to_owned())
+        );
         return ExitCode::from(code);
     }
     ExitCode::SUCCESS

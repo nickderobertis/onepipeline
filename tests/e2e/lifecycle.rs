@@ -3820,6 +3820,80 @@ fn a_dispatch_that_failed_with_nothing_published_settles_as_a_plain_task_failure
     );
 }
 
+/// A verdict that delimits a token but says nothing about the machinery is still
+/// the agent's own, and settles `task-failed`.
+///
+/// The guard, driven the way an operator meets it. A delimited token is what
+/// every gate in the world writes — `the gate failed (clippy)` — so lifting one
+/// on sight would have re-labelled every ordinary failure in this engine as a
+/// dispatch that died, which is the opposite of the distinction the word exists
+/// to draw.
+#[test]
+fn a_verdict_that_delimits_a_token_without_naming_the_machinery_stays_a_task_failure() {
+    let world = World::new("lifecycle-verdict-token");
+    world.repository("change-open", &[]);
+    world.script("service.work", "the work its judge would not pass\n");
+    world.script("service.fail", "1");
+    world.script("service.fail-saying", "the gate failed (clippy)");
+    let run = settle(&world, "verdicttoken", vec![lifecycle("service", &[])]);
+
+    let node = world.run_json(&run, "result.json")["nodes"][0].clone();
+    assert_eq!(node["status"], "failed", "{node}\n{}", why(&world, &run));
+    assert_eq!(
+        node["outcome"], "task-failed",
+        "a gate an agent failed was read as a dispatch that died: {node}"
+    );
+    assert!(
+        node["cause"].is_null(),
+        "an agent's own verdict was carried as a producer's classification: {node}"
+    );
+}
+
+/// A verdict that **does** name the machinery is read as the machinery, because
+/// the detail is the whole of what this crate is given.
+///
+/// The other side of the guard, and the boundary it draws rather than a case it
+/// gets right for free: nothing on this seam says whose sentence a detail is —
+/// `oneagentgraph` writes one stderr and the agent's verdict arrives on it — so a
+/// verdict that talks about the harness or the provider *in the machinery's own
+/// shape* is indistinguishable from one, and settles `dispatch-died` carrying the
+/// token it delimited. That is the reading, and it is here so a later change to
+/// the crate's `MACHINERY` words cannot move it without a journey saying so.
+///
+/// Its cost is bounded on purpose: `dispatch-died` is not re-dispatched and
+/// carries the branch, so the worst this reading does is hand an operator the
+/// commit their agent left instead of asking for the work again.
+#[test]
+fn a_verdict_written_in_the_machinerys_own_shape_is_read_as_the_machinery() {
+    let world = World::new("lifecycle-verdict-machinery");
+    world.repository("change-open", &[]);
+    world.script("service.work", "the work its judge would not pass\n");
+    world.script("service.fail", "1");
+    // An agent's own verdict, naming the provider it ran its work against and
+    // classifying itself the way the machinery does.
+    world.script(
+        "service.fail-saying",
+        "the provider fixture failed (timeout)",
+    );
+    let run = settle(&world, "verdictmachinery", vec![lifecycle("service", &[])]);
+
+    let node = world.run_json(&run, "result.json")["nodes"][0].clone();
+    assert_eq!(node["status"], "failed", "{node}\n{}", why(&world, &run));
+    assert_eq!(
+        node["outcome"], "dispatch-died",
+        "a detail written in the machinery's shape was classified some other way: {node}"
+    );
+    assert_eq!(node["cause"], "timeout", "{node}");
+    // And the node is not sent back to a worker: whatever the sentence was, the
+    // word it settled means the branch is handed over rather than re-derived.
+    assert_eq!(
+        dispatches_of(&world, &run, "service").len(),
+        1,
+        "a node that settled `dispatch-died` was dispatched again\n{}",
+        why(&world, &run)
+    );
+}
+
 /// A change that has merged since the node settled is not reported as work
 /// nobody landed.
 ///

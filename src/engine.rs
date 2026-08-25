@@ -1972,6 +1972,20 @@ const CLASSIFIED_IN: [(char, char); 2] = [('(', ')'), ('[', ']')];
 ///
 /// Read only where the detail names the machinery — see [`MACHINERY`] — because a
 /// delimited token is no evidence of anything on its own.
+///
+/// The guard is where the reading stops, and it is a reading: a detail is the
+/// whole of what this seam is given, so a detail written in the machinery's own
+/// shape is the machinery as far as anything here can tell. Both sides of that
+/// are driven end to end by `a_verdict_that_delimits_a_token_without_naming_the_/// machinery_stays_a_task_failure` and
+/// `a_verdict_written_in_the_machinerys_own_shape_is_read_as_the_machinery`.
+// llmlint: ignore[names_match_behavior] the name is the caller's question — `failed_task`
+// asks what killed this dispatch and takes `None` for "the agent's own verdict" — and the
+// answer is a reading of a sentence, because a sentence is all that arrives: nothing on
+// this seam says whose stderr a detail came off. A name encoding the heuristic instead
+// would put the mechanism in the caller's vocabulary and still not make it exact. Its cost
+// is bounded by what the word does: `dispatch-died` carries the branch and the commit and
+// is not re-dispatched, so the worst a misreading does is hand an operator finished work
+// rather than ask for it again.
 fn dispatch_death_cause(detail: &str) -> Option<String> {
     let lowered = detail.to_ascii_lowercase();
     if !MACHINERY.iter().any(|word| lowered.contains(word)) {
