@@ -118,6 +118,13 @@ pub fn allows(author: Author, command: &Command) -> crate::Result<()> {
         Command::Reparent { .. } => {
             "rewiring dependencies is a decomposition decision the planner owns"
         }
+        // The op the monitor most obviously *could* use, and the one it must
+        // not: an observer that could move a node's bar would resolve an
+        // ambiguity by editing rather than by escalating, which is the whole of
+        // what its own persona reserves to the planner.
+        Command::Amend { .. } => {
+            "what a node is judged against is a decomposition decision the planner owns"
+        }
     };
     Err(crate::Error::Refused(format!(
         "'{}' is not an op the monitor may issue: {refused}. Surface it to the planner instead",
@@ -137,6 +144,7 @@ pub fn op_of(command: &Command) -> &'static str {
         Command::Attest { .. } => "attest",
         Command::Complete { .. } => "complete",
         Command::Context { .. } => "context",
+        Command::Amend { .. } => "amend",
         Command::Finding { .. } => "finding",
     }
 }
@@ -150,7 +158,8 @@ pub fn target_of(command: &Command) -> Option<String> {
         | Command::Retry { id, .. }
         | Command::Cancel { id }
         | Command::Requeue { id, .. }
-        | Command::Context { id, .. } => Some(id.clone()),
+        | Command::Context { id, .. }
+        | Command::Amend { id, .. } => Some(id.clone()),
         Command::Attest { reference } => Some(reference.clone()),
         Command::Finding { id, .. } => id.clone(),
         Command::Complete { .. } => None,
@@ -307,6 +316,26 @@ pub enum Command {
         /// which is what every `context` edit written before this field got.
         #[serde(default, skip_serializing_if = "Deliver::is_auto")]
         deliver: Deliver,
+    },
+    /// Make one binding amendment to what a node is judged against.
+    ///
+    /// The lever a manager has that a `context` note is not. A note steers the
+    /// worker, says of itself that it adds no acceptance criteria, and carries
+    /// exactly one dispatch; this becomes part of the node's **effective task**,
+    /// which the worker and the judge reviewing it are handed alike, on this
+    /// dispatch and on every later one. A manager who ruled mid-dispatch and had
+    /// that node's own judge overturn the ruling had no way to say this at all.
+    Amend {
+        /// The node to amend. It must be one the graph holds and can still be
+        /// dispatched: a node that has settled `done` is refused for the reason
+        /// `context` refuses one, since nothing will read the amendment.
+        id: String,
+        /// The binding text. Blank is refused rather than recorded.
+        ///
+        /// A second amendment **replaces** the first: the latest is the node's
+        /// amendment and the earlier one stops being part of the effective task.
+        /// A bar that could only grow could not be corrected.
+        text: String,
     },
     /// Raise one finding to the planner, changing nothing about the graph.
     ///

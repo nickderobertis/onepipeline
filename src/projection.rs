@@ -474,6 +474,8 @@ impl RunState {
             recorded: self.statuses_recorded(),
             attestations: self.attestations.clone(),
             in_flight: BTreeMap::new(),
+            // The launch's, and only a caller holding the launch record has it.
+            node_validator: None,
         }
     }
 

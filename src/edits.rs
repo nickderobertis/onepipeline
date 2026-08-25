@@ -111,6 +111,18 @@ pub enum Operation {
         blocking: bool,
     },
     // llmlint: ignore-end[invalid_states_unrepresentable]
+    /// A node's effective task gained a binding amendment.
+    ///
+    /// Its own operation rather than a `requeue`-shaped merge, so replaying a
+    /// run's journal reconstructs the amended task without re-judging the
+    /// amendment — and so a reader of the record can see what a node was told,
+    /// and when, after a later amendment has replaced it.
+    TaskAmended {
+        /// The node.
+        node: String,
+        /// The binding text, which **replaces** whatever the node carried.
+        text: String,
+    },
     /// A planner note reached a node.
     ContextAdded {
         /// The node.
@@ -159,6 +171,17 @@ pub struct Frontier {
     /// a caller judging an edit from the ledger alone leaves it empty and the
     /// reconciler is where the refusal lands.
     pub in_flight: BTreeMap<String, LiveDispatch>,
+    /// The command this run's launch named to check a node before it joins the
+    /// graph, when it named one.
+    ///
+    /// A launch that named none leaves this empty and every edit is judged
+    /// exactly as it was before this field existed. The rules a validator
+    /// applies are the **consuming host's** — which acceptance criteria name a
+    /// property rather than a procedure, which review bar a node's own task must
+    /// answer — and none of them are this crate's to hold: a plan file has been
+    /// checked by one all along, and what was missing is that a node introduced
+    /// by a live edit reached a dispatch having been checked by nothing.
+    pub node_validator: Option<String>,
 }
 
 /// One dispatch the loop still has in flight, as an edit sees it.
@@ -236,8 +259,107 @@ pub fn compile_with(
         });
         graph::validate_edited(&plan).map_err(|e| Error::Refused(e.to_string()))?;
     }
+    // Last, and over the node the edit actually produced: the host's own rules
+    // are the expensive check and the specific one, so a node this crate's own
+    // schema would refuse never reaches them.
+    if let Some(node) = introduced_node(command, &candidate) {
+        offer_to_validator(frontier.node_validator.as_deref(), command, node)?;
+    }
     *graph = candidate;
     Ok(operations)
+}
+
+/// The node one command introduces or whose task it changes, once the command
+/// has been compiled against the candidate graph.
+///
+/// Four ops reach a validator, and they are exactly the ones that put task prose
+/// in front of a dispatch that nothing has checked: `add` and `retry` introduce
+/// a node, `amend` changes the bar an existing one is judged against, and a
+/// `requeue` is only one of them when its amendment touches `task` — a requeue
+/// that raises a turn budget changes nothing a validator has an opinion about.
+/// Every other op moves edges, parks, attests, or reports.
+fn introduced_node<'a>(command: &Command, graph: &'a Graph) -> Option<&'a Node> {
+    let id = match command {
+        Command::Add { node } | Command::Retry { node, .. } => node.id.as_str(),
+        Command::Amend { id, .. } => id.as_str(),
+        Command::Requeue { id, amend } => {
+            amend.as_ref().filter(|a| a.contains_key("task"))?;
+            id.as_str()
+        }
+        _ => return None,
+    };
+    graph.get(id)
+}
+
+/// Offer one node to the validator this run's launch named, if it named one.
+///
+/// The node crosses as JSON on the validator's stdin — the same document a plan
+/// file states it in, so a host that already checks plan files reads one shape
+/// rather than two. Exit 0 accepts the edit; a non-zero exit refuses it, and the
+/// refusal carries the validator's own stderr, because the rules being applied
+/// are the host's and only it can say which one this node broke.
+///
+/// **Fails closed.** A validator that cannot be started at all is a launch
+/// configured wrongly, and accepting the edit anyway would be this crate
+/// deciding that an unenforced rule is no rule — silently, on the path a manager
+/// reaches for under pressure. It is refused instead, naming the command.
+///
+/// The validator's stdout is captured and discarded: this runs inside `reply`,
+/// whose own stdout is the JSON verdict its caller parses.
+fn offer_to_validator(validator: Option<&str>, command: &Command, node: &Node) -> Result<()> {
+    let Some(validator) = validator.filter(|command| !command.is_empty()) else {
+        return Ok(());
+    };
+    let op = crate::channel::op_of(command);
+    let document = serde_json::to_string(node)
+        .map_err(|e| refuse(format!("{op}: node '{}' does not serialize: {e}", node.id)))?;
+    let mut child = std::process::Command::new(validator)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            refuse(format!(
+                "{op}: the node validator '{validator}' this run was launched with could not \
+                 be started ({e}), so node '{}' was checked by nothing and the edit was not \
+                 applied",
+                node.id
+            ))
+        })?;
+    if let Some(mut stdin) = child.stdin.take() {
+        // A validator that refuses without reading its input is answering, not
+        // failing, and the broken pipe that leaves here is not what decides the
+        // edit — the exit status below is.
+        use std::io::Write;
+        let _ = stdin.write_all(document.as_bytes());
+    }
+    let answer = child.wait_with_output().map_err(|e| {
+        refuse(format!(
+            "{op}: the node validator '{validator}' did not answer for node '{}' ({e}), so the \
+             edit was not applied",
+            node.id
+        ))
+    })?;
+    if answer.status.success() {
+        return Ok(());
+    }
+    let said = String::from_utf8_lossy(&answer.stderr).trim().to_string();
+    Err(refuse(format!(
+        "{op}: the node validator refused node '{}': {}",
+        node.id,
+        match said.is_empty() {
+            // Never silent: a refusal nobody can act on is the failure this hook
+            // exists to end, so the exit code is at least something to look at.
+            true => format!(
+                "it exited {} and said nothing on stderr",
+                answer
+                    .status
+                    .code()
+                    .map_or_else(|| "without a status".to_string(), |code| code.to_string())
+            ),
+            false => said,
+        }
+    )))
 }
 
 fn compile_into(
@@ -258,6 +380,7 @@ fn compile_into(
             reason: reason.clone(),
         }]),
         Command::Context { id, note, .. } => compile_context(graph, frontier, id, note, delivery),
+        Command::Amend { id, text } => compile_amend(graph, frontier, id, text),
         Command::Finding {
             message,
             blocking,
@@ -734,6 +857,42 @@ fn compile_context(
     }])
 }
 
+/// Validate one amendment and record it: the node's whole amendment, replacing
+/// whatever it carried.
+///
+/// The three refusals are the three ways an amendment reaches nobody, and each
+/// says which one it was. A node the graph does not hold has no bar to move; a
+/// node that has settled `done` will never be judged again, which is why
+/// `context` refuses one for the same reason; and a blank amendment is a bar
+/// nobody can clear, so it is refused rather than recorded as one.
+fn compile_amend(
+    graph: &mut Graph,
+    frontier: &Frontier,
+    id: &str,
+    text: &str,
+) -> Result<Vec<Operation>> {
+    if !graph.contains(id) {
+        return Err(refuse(format!("amend: no node '{id}'")));
+    }
+    if text.trim().is_empty() {
+        return Err(refuse(format!(
+            "amend: node '{id}': the amendment cannot be blank"
+        )));
+    }
+    if frontier.recorded.get(id) == Some(&NodeStatus::Done) {
+        return Err(refuse(format!(
+            "amend: node '{id}' has settled done, so nothing will read the amendment"
+        )));
+    }
+    if let Some(node) = graph.get_mut(id) {
+        node.amendment = Some(text.to_string());
+    }
+    Ok(vec![Operation::TaskAmended {
+        node: id.to_string(),
+        text: text.to_string(),
+    }])
+}
+
 /// Fold one recorded operation back onto a graph.
 ///
 /// This is replay's half of [`compile`]: the reconciler validated and mutated,
@@ -783,6 +942,13 @@ pub fn apply(graph: &mut Graph, operation: &Operation) {
             }
             if let Ok(amended) = serde_json::from_value::<Node>(merged) {
                 graph.insert(amended);
+            }
+        }
+        // Replace, exactly as the reconciler replaced: the last one recorded is
+        // the node's amendment, so replaying them in order lands on it.
+        Operation::TaskAmended { node, text } => {
+            if let Some(node) = graph.get_mut(node) {
+                node.amendment = Some(text.clone());
             }
         }
         // A live delivery went into a turn rather than onto the graph, so
@@ -848,8 +1014,7 @@ mod tests {
                 .iter()
                 .map(|(id, status)| ((*id).to_string(), *status))
                 .collect(),
-            attestations: BTreeSet::new(),
-            in_flight: BTreeMap::new(),
+            ..Frontier::default()
         }
     }
 
@@ -1557,6 +1722,317 @@ mod tests {
         );
     }
 
+    /// An amendment becomes part of the node's effective task, and a second one
+    /// **replaces** the first rather than joining it.
+    #[test]
+    fn amend_binds_the_node_and_a_second_amendment_replaces_the_first() {
+        let mut graph = graph_of(vec![agent("build", &[])]);
+        let amend = |text: &str| Command::Amend {
+            id: "build".into(),
+            text: text.into(),
+        };
+
+        let first = compile(
+            &mut graph,
+            &Frontier::default(),
+            &amend("leave the comments"),
+        )
+        .expect("a live node takes an amendment");
+        assert_eq!(
+            graph.get("build").expect("build").amendment.as_deref(),
+            Some("leave the comments")
+        );
+        assert!(
+            graph
+                .get("build")
+                .expect("build")
+                .rendered_task()
+                .contains("leave the comments"),
+            "the amendment is not part of the effective task"
+        );
+        assert!(
+            matches!(&first[0], Operation::TaskAmended { node, text }
+                if node == "build" && text == "leave the comments"),
+            "{first:?}"
+        );
+
+        let second = compile(
+            &mut graph,
+            &frontier(&[("build", NodeStatus::Running)]),
+            &amend("restore the comments after all"),
+        )
+        .expect("a running node takes one too");
+        let effective = graph.get("build").expect("build").rendered_task();
+        assert!(
+            effective.contains("restore the comments after all"),
+            "{effective}"
+        );
+        assert!(
+            !effective.contains("leave the comments"),
+            "the replaced ruling is still binding the judge beside its own correction: {effective}"
+        );
+
+        // Replay reconstructs the amended task without re-judging either one.
+        let mut replayed = graph_of(vec![agent("build", &[])]);
+        for operation in first.iter().chain(second.iter()) {
+            apply(&mut replayed, operation);
+        }
+        assert_eq!(
+            replayed.get("build").expect("build").amendment.as_deref(),
+            Some("restore the comments after all")
+        );
+    }
+
+    /// The three ways an amendment reaches nobody, each refused by the one it
+    /// was — and none of them touching the graph.
+    #[test]
+    fn amend_refuses_an_unknown_node_a_settled_one_and_a_blank_ruling() {
+        let mut graph = graph_of(vec![agent("build", &[])]);
+        let before = graph.clone();
+        for (frontier_state, id, text, expected) in [
+            (
+                Frontier::default(),
+                "nowhere",
+                "a ruling",
+                "no node 'nowhere'",
+            ),
+            (
+                frontier(&[("build", NodeStatus::Done)]),
+                "build",
+                "a ruling",
+                "settled done",
+            ),
+            (Frontier::default(), "build", "   \n", "cannot be blank"),
+        ] {
+            let message = compile(
+                &mut graph,
+                &frontier_state,
+                &Command::Amend {
+                    id: id.into(),
+                    text: text.into(),
+                },
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(message.contains(expected), "{message:?} lacks {expected:?}");
+        }
+        assert_eq!(graph, before, "a refused amendment changed the graph");
+    }
+
+    /// A scratch directory of this test process's own, for the validator
+    /// programs the journeys below run.
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("onepipeline-edits-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch root");
+        dir
+    }
+
+    /// One validator program, written and made runnable.
+    ///
+    /// A real executable rather than a double: what the hook promises is that a
+    /// command the host names is *run*, so a stand-in for running it would prove
+    /// nothing. Unix-only because the program is a shell script; the two
+    /// platform-independent halves — a launch that names no validator, and one
+    /// whose validator cannot be started — are tested without one.
+    #[cfg(unix)]
+    fn validator(dir: &std::path::Path, name: &str, body: &str) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}"))
+            .expect("the validator program is written");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .expect("it is runnable");
+        path.to_string_lossy().into_owned()
+    }
+
+    /// A frontier judging edits under one named validator.
+    fn validated_by(command: &str) -> Frontier {
+        Frontier {
+            node_validator: Some(command.to_string()),
+            ..Frontier::default()
+        }
+    }
+
+    /// The four ops that put unchecked task prose in front of a dispatch are the
+    /// four the validator sees, and nothing else is.
+    ///
+    /// Both directions, because each is a way the guard fails silently: an op
+    /// that reaches no validator is the hole this hook exists to close, and an
+    /// op that reaches one it has no opinion about — a requeue raising a turn
+    /// budget — spends a subprocess to be told nothing.
+    #[test]
+    #[cfg(unix)]
+    fn every_op_that_introduces_or_changes_a_task_is_offered_to_the_validator() {
+        let dir = scratch("offered");
+        let seen = dir.join("seen.jsonl");
+        let accept = validator(
+            &dir,
+            "accept.sh",
+            &format!("cat >> {0}\nprintf '\\n' >> {0}\nexit 0\n", seen.display()),
+        );
+        let frontier_state = Frontier {
+            recorded: [("build".to_string(), NodeStatus::Failed)]
+                .into_iter()
+                .collect(),
+            ..validated_by(&accept)
+        };
+
+        let mut graph = graph_of(vec![agent("build", &[]), agent("docs", &[])]);
+        for command in [
+            Command::Add {
+                node: agent("fresh", &[]),
+            },
+            Command::Retry {
+                id: "build".into(),
+                node: agent("build-2", &[]),
+            },
+            Command::Amend {
+                id: "docs".into(),
+                text: "the ruling".into(),
+            },
+            // Offered: its amendment rewrites the task.
+            Command::Cancel { id: "docs".into() },
+            Command::Requeue {
+                id: "docs".into(),
+                amend: Some(
+                    serde_json::json!({"task": "## What\nsomething else"})
+                        .as_object()
+                        .expect("an object")
+                        .clone(),
+                ),
+            },
+            // Not offered: neither changes what a dispatch is asked to do.
+            Command::Cancel { id: "fresh".into() },
+            Command::Requeue {
+                id: "fresh".into(),
+                amend: Some(
+                    serde_json::json!({"max_turns": 32})
+                        .as_object()
+                        .expect("an object")
+                        .clone(),
+                ),
+            },
+            note_for("docs", "a note"),
+        ] {
+            compile(&mut graph, &frontier_state, &command)
+                .unwrap_or_else(|e| panic!("the accepting validator refused {command:?}: {e}"));
+        }
+
+        let offered: Vec<String> = std::fs::read_to_string(&seen)
+            .expect("the validator recorded what it was given")
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| {
+                let node: Node = serde_json::from_str(line)
+                    .unwrap_or_else(|e| panic!("the node crossed as a plan node: {e} in {line}"));
+                node.id
+            })
+            .collect();
+        assert_eq!(
+            offered,
+            vec!["fresh", "build-2", "docs", "docs"],
+            "the validator was offered the wrong edits"
+        );
+
+        // And what crossed is the node the edit *produced*, amendment and all —
+        // so a host checking a node's bar is checking the bar it will be judged
+        // against.
+        let last: Node = serde_json::from_str(
+            std::fs::read_to_string(&seen)
+                .expect("readable")
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .nth(2)
+                .expect("the amend's own offering"),
+        )
+        .expect("it parses");
+        assert_eq!(last.amendment.as_deref(), Some("the ruling"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A validator that refuses is answered with its own words, and the graph is
+    /// left exactly as it was.
+    #[test]
+    #[cfg(unix)]
+    fn an_edit_the_validator_refuses_carries_its_own_words_and_changes_nothing() {
+        let dir = scratch("refused");
+        let refuse = validator(
+            &dir,
+            "refuse.sh",
+            "cat > /dev/null\n             echo \"acceptance criterion 3 names a procedure, not a property\" >&2\nexit 1\n",
+        );
+        let mut graph = graph_of(vec![agent("build", &[])]);
+        let before = graph.clone();
+        let refusal = compile(
+            &mut graph,
+            &validated_by(&refuse),
+            &Command::Add {
+                node: agent("fresh", &[]),
+            },
+        )
+        .expect_err("the validator refused it")
+        .to_string();
+        assert!(
+            refusal.contains("acceptance criterion 3 names a procedure, not a property"),
+            "the refusal does not carry the validator's own words: {refusal}"
+        );
+        assert!(refusal.contains("fresh"), "{refusal}");
+        assert_eq!(graph, before, "a refused edit reached the graph");
+
+        // A validator that refuses without saying anything is still not silent:
+        // it exits without reading its input, and the refusal names the status
+        // so somebody has something to look at.
+        let silent = validator(&dir, "silent.sh", "exit 3\n");
+        let said = compile(
+            &mut graph,
+            &validated_by(&silent),
+            &Command::Add {
+                node: agent("fresh", &[]),
+            },
+        )
+        .expect_err("it refused")
+        .to_string();
+        assert!(said.contains("exited 3"), "{said}");
+        assert_eq!(graph, before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A launch that named no validator judges an edit exactly as it did before
+    /// the hook existed, and one whose validator cannot be started refuses
+    /// rather than letting the node through unchecked.
+    #[test]
+    fn no_validator_changes_nothing_and_an_unstartable_one_fails_closed() {
+        let mut graph = graph_of(vec![agent("build", &[])]);
+        compile(
+            &mut graph,
+            &Frontier::default(),
+            &Command::Add {
+                node: agent("fresh", &[]),
+            },
+        )
+        .expect("a launch that named no validator adds a node as it always did");
+        assert!(graph.contains("fresh"));
+
+        let before = graph.clone();
+        let missing = std::env::temp_dir().join("onepipeline-no-such-node-validator");
+        let refusal = compile(
+            &mut graph,
+            &validated_by(&missing.to_string_lossy()),
+            &Command::Add {
+                node: agent("second", &[]),
+            },
+        )
+        .expect_err("a validator that cannot be started refuses the edit")
+        .to_string();
+        assert!(
+            refusal.contains("could not be started") && refusal.contains("checked by nothing"),
+            "{refusal}"
+        );
+        assert_eq!(graph, before, "an unchecked node reached the graph");
+    }
+
     #[test]
     fn complete_journals_a_reason_without_touching_the_graph() {
         let mut graph = graph_of(vec![agent("a", &[])]);
@@ -1596,6 +2072,10 @@ mod tests {
                 id: "c".into(),
                 amend: None,
             },
+            Command::Amend {
+                id: "b".into(),
+                text: "the ruling".into(),
+            },
             Command::Drop {
                 id: "c".into(),
                 dependents: Dependents::Detach,
@@ -1629,6 +2109,10 @@ mod tests {
             },
             Operation::NodeParked {
                 node: "gone".into(),
+            },
+            Operation::TaskAmended {
+                node: "gone".into(),
+                text: "the ruling".into(),
             },
             Operation::NodeRequeued {
                 node: "gone".into(),

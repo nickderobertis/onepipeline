@@ -732,6 +732,20 @@ pub fn status(survey: &Survey) -> String {
                 waiting_on(&view.state, id)
             ));
         }
+        // What each amended node is currently judged against. Rendered whatever
+        // that node's status is, because the reader this line is for is a
+        // manager about to *replace* an amendment: `amend` replaces rather than
+        // appends, so a ruling that is not readable before the replacement lands
+        // is a ruling nobody can weigh against the one taking its place.
+        for node in view.state.graph.iter() {
+            if let Some(amendment) = &node.amendment {
+                out.push_str(&format!(
+                    "  {}: amended — {}\n",
+                    node.id,
+                    one_line(amendment)
+                ));
+            }
+        }
         // What refused, for the nodes that failed. A failed node otherwise reads
         // the same whether its own gate failed or an identity chain ran out, and
         // the two call for opposite actions from whoever is reading this.
@@ -1542,6 +1556,13 @@ pub fn results(view: &RunView) -> String {
         {
             out.push_str(&format!("      detail: {}\n", one_line(detail)));
         }
+        // What this node is judged against beyond its own task prose. Under the
+        // node rather than beside it, because it is prose rather than a word,
+        // and rendered before the settlement's own reasons because it is what
+        // those reasons were reached against.
+        if let Some(amendment) = &node.amendment {
+            out.push_str(&format!("      amendment: {}\n", one_line(amendment)));
+        }
         // Why the judge failed it, then which chains ran out, then which
         // recovered — in that order, because that is the order they matter in.
         //
@@ -1878,6 +1899,7 @@ mod tests {
             graph_run: String::new(),
             node_graph: String::new(),
             pr_author_graph: String::new(),
+            node_validator: String::new(),
             launcher: "claude-code".into(),
             session: "session-a".into(),
             pid,

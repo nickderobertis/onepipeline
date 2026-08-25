@@ -1600,3 +1600,154 @@ own records and its repository's releases together would let the higher series
 hide the lower one's next record, which is a relayed record lost in silence.
 **Proposal: say in the contract that a relayed stream a producer shares across
 runs is contiguous per producer and not per run.**
+
+## 41. A manager ruling cannot bind a node's judge, and a live-edited node is checked by nothing — OPEN
+
+**Proposal (for the planner who owns the contract): add an `amend` op to the
+reply envelope — and **not** to the `monitor` allowlist — with one optional node
+field, `amendment`, at plan schema 3; and add an optional launch-level node
+validator, named by `--node-validator`, `ONEPIPELINE_NODE_VALIDATOR`, and a
+`node_validator` key at launch-config schema 3.**
+
+Two halves of one seam, and the second is where the first is checked.
+
+**A ruling that reaches the worker reaches nobody else.** A node's judge reviews
+against `base ⊕ persona ⊕ --task`, and the contract's `context` is the only thing
+a manager can send mid-dispatch. It reaches that task declaring itself
+non-binding — "This reports observed state and adds no acceptance criteria" — and
+a `deliver: live` note reaches it not at all: it is an interrupt against the
+agent's control socket, persisted nowhere, so it reaches neither the judge nor a
+later dispatch of the same node. Measured: a manager ruled a change out of scope,
+the worker complied and re-ran its complete gate green, and seven minutes later
+that node's own judge instructed it to **restore** the change — reviewing against
+a task that never mentioned the ruling. The worker then held two contradictory
+instructions with identical authority, and resolving it took a `retry` with an
+amended `task`: killing a live, gate-green dispatch in order to change its bar.
+
+`amend` is that lever. It names a node the graph holds that can still be
+dispatched — a node that has settled `done` is refused for the reason `context`
+refuses one, since nothing will read the amendment — and carries non-blank text,
+a blank one being refused rather than recorded. The text becomes part of the
+node's **effective task** permanently: the worker and its judge read the same
+sentence on this dispatch and on every later dispatch of that node. Repeated
+amendments **replace**, because a bar that can only grow cannot be corrected — a
+ruling issued and then thought better of would go on binding the judge beside its
+own correction, which is the same two-instructions-one-authority failure the op
+exists to end. Because replacing loses a ruling where appending would not, a
+node's current amendment is readable from the run's `status` view and from its
+per-node `results` view before anything replaces it. It is journalled as an
+operation of its own, so replaying a run's journal reconstructs the amended task
+without re-judging it.
+
+It is rendered under a heading of its own, immediately **above** the task's
+`## Additional info` section where the task has one and at the end otherwise, and
+opens with the sentence that states its authority: *where this section and the
+operational notes below disagree, this section wins*. That placement and that
+sentence are the convention that resolved this in practice — both supervisory
+conflicts in the session this comes from traced to an instruction's authority
+being written down nowhere.
+
+It is **not** on the monitor allowlist. What a node is judged against is a
+decomposition decision the monitor's own persona already reserves to the planner,
+and an observer that could move a bar could resolve an ambiguity by editing
+rather than escalating.
+
+The important half is that the **distinction is instructed** rather than merely
+available: `amend` changes what the node is judged against, is permanent, is
+visible to every party, and survives a re-dispatch; `context` steers the worker
+only, says so, is transient, and does not alter the bar. The persona and the
+README state that pairing as the reason both exist.
+
+**And a node introduced by a live edit is validated by nothing.** A plan file is
+checked before launch by a host validator that refuses a node whose acceptance
+criteria name a procedure instead of a property, are silent about a demand its
+resolved review bar makes, or rest on work the dispatch cannot perform. A node
+introduced by `add` or `retry` is dispatched identically and reaches no such
+check: nothing on the reply path invokes one. Every node introduced by live edit
+in one session — three of them — went in unchecked.
+
+Running that validation *inside* this crate is not implementable and that is why
+this is a hook. The validator is hundreds of lines of one operator's
+host-specific rules, reading that host's dispatch appendix, its shared review
+contract, its personas directory, and the personas compiled into the
+`oneagentgraph` this crate links — none of which this crate has or should have.
+So `onepipeline start` gains an optional **command**: the node crosses as JSON on
+its stdin, exit 0 accepts the edit, and a non-zero exit refuses it with the
+command's own stderr as the reason, in the same shape a refused op already gets.
+Four ops are offered to it, and they are exactly the ones that put unchecked task
+prose in front of a dispatch: `add`, `retry`, a `requeue` whose amendment touches
+`task`, and `amend`. A launch that names no validator behaves exactly as it does
+today.
+
+The value is the executable itself, invoked with no arguments of its own: this
+crate names an external program the way it already names `oneagentgraph`, and a
+host needing arguments wraps them in a script — which a host carrying that many
+rules has anyway. A validator that cannot be *started* refuses the edit rather
+than letting it through, because accepting one would be this crate deciding that
+an unenforced rule is no rule, silently, on the path a manager reaches for under
+pressure.
+
+It is nameable three ways, like this crate's other launch-level configuration,
+and the order between them composes the two rules this crate already states
+rather than inventing a third: the contract says of the launch config that *"the
+config is the base and each flag overrides the part of it that it names"*, and
+every `ONEPIPELINE_*` setting is read as an override of a shipped default. So,
+highest first: the flag, then the environment variable, then the launch config
+field, then the shipped default of no validator at all. It is resolved **once**,
+at the launch, and retained in the launch record beside the graphs — so an
+`adopt` replays the validator its launch resolved rather than re-reading an
+environment that has since moved.
+
+`node_validator` is a launch-config key versions 1 and 2 never had, so the
+version this build writes moves to **3**, the versions it reads keep 2 and 1, and
+a document declaring 1 or 2 while carrying it is refused **by that field's name**
+— exactly as a version-1 document carrying `pr_author_graph` is. Each key is
+refused by *its own* arrival version rather than by the schema's current number,
+so a version-2 config naming the drafting graph version 2 introduced is still a
+document this build reads.
+
+`amendment` is at plan schema **3** rather than at a schema 4, by entry 40's own
+argument: it is optional and omitted when absent, so a plan naming it round-trips
+as the file wrote it, there is no document a version-3 reader would refuse, and
+there is no field whose absence means something new. The op and the flag arrive
+with a **minor** version bump, cut by `release-plz` from the `feat` commit that
+introduces them, exactly as entries 39 and 40 did.
+
+**What this crate does today is the block below, and the block is the source.**
+`tests/contract.rs` parses it out of this file and holds it against the types:
+the op named here must be one this build accepts and the contract's own list does
+not, must round-trip as written, and must be allowed for exactly the authors
+named; the node must parse at schema 3 and round-trip exactly as written; the
+heading must be the constant this crate publishes; and the launch config must
+parse at the version stated and carry the key. `tests/e2e/node_validator.rs`
+reads the three spellings out of the same block and drives their precedence
+against a real validator command, so the order is proven rather than asserted in
+prose.
+
+```json
+{
+  "ops": [
+    {
+      "op": "amend",
+      "id": "build",
+      "text": "The redundant comment lines are out of scope for this node: leave them."
+    }
+  ],
+  "monitor_may_issue": [],
+  "node": {
+    "id": "build",
+    "persona": "engineer",
+    "task": "## What\nship it",
+    "amendment": "The redundant comment lines are out of scope for this node: leave them."
+  },
+  "heading": "## Amendment",
+  "validator": {
+    "flag": "--node-validator",
+    "environment": "ONEPIPELINE_NODE_VALIDATOR",
+    "config_key": "node_validator",
+    "config_schema_version": 3,
+    "precedence": ["flag", "environment", "config_key"],
+    "ops_offered": ["add", "retry", "requeue", "amend"]
+  }
+}
+```

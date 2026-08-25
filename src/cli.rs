@@ -117,6 +117,16 @@ pub struct StartArgs {
     /// or with none. Given here it overrides the launch config's own field.
     #[arg(long, value_name = "REF")]
     pub pr_author_graph: Option<String>,
+    /// The command every op that introduces or changes a node's task is offered
+    /// to before it is applied.
+    ///
+    /// The node crosses as JSON on its stdin; exit 0 accepts the edit and a
+    /// non-zero exit refuses it, with the command's own stderr as the reason.
+    /// Naming none is the shipped default and is exactly what a launch did
+    /// before this flag existed. Given here it beats `ONEPIPELINE_NODE_VALIDATOR`
+    /// and the launch config's own field.
+    #[arg(long, value_name = "COMMAND")]
+    pub node_validator: Option<String>,
     /// How often the durable planner-update pacemaker comes due, in seconds.
     #[arg(long, value_name = "SECONDS", default_value_t = DEFAULT_HEARTBEAT_INTERVAL_SECONDS)]
     pub heartbeat_interval: u64,

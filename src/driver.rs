@@ -27,7 +27,7 @@ use crate::cli::{
     StartArgs, StopArgs, SurfaceArgs, TelemetryArgs, TranscriptArgs, DAG_GRAPH_OFF,
 };
 use crate::concurrency::{self, Liveness, State};
-use crate::edits;
+use crate::edits::{self, Frontier};
 use crate::engine;
 use crate::error::{Error, Result, EXIT_NOTHING_DRIVING, EXIT_QUEUED, EXIT_SUCCESS};
 use crate::filter::{self, EventFilter};
@@ -364,6 +364,19 @@ fn start(args: &StartArgs) -> Result<i32> {
         Some(reference) => Some(resolve_graph(reference, &launch_dir)?),
         None => None,
     }; // llmlint: ignore-end[invalid_states_unrepresentable]
+       // And the command a node introduced by a live edit is checked by, resolved
+       // through the three names this crate's launch-level configuration already
+       // composes: the flag overrides the environment, which overrides the config,
+       // beneath which is the shipped default of no validator at all. Not resolved
+       // against the launch directory — it is a command the host names rather than
+       // a document this crate reads, and a name on `PATH` is as legitimate as a
+       // path is.
+    let node_validator: Option<String> = args
+        .node_validator
+        .clone()
+        .or_else(engine::configured_node_validator)
+        .or_else(|| declared.node_validator.clone())
+        .filter(|command| !command.is_empty());
     let node_graph_ref = resolve_graph(&engine::configured_node_graph(), &launch_dir)?;
     resolve_plan_graphs(&mut plan, &launch_dir)?;
     // Before the run directory exists. A spec that could not be honoured is the
@@ -435,6 +448,7 @@ fn start(args: &StartArgs) -> Result<i32> {
         graph_run: String::new(),
         node_graph: node_graph_ref,
         pr_author_graph: pr_author_graph_ref.unwrap_or_default(),
+        node_validator: node_validator.unwrap_or_default(),
         launcher: sys::launcher(),
         session: sys::launching_session(),
         // Claimed by this process immediately below, through the one writer of
@@ -1749,7 +1763,13 @@ fn submit(paths: &RunPaths, envelope: &Reply) -> Result<i32> {
     // through the reconciler's own validator, so the answer is the one the
     // reconciler would give — before anything is queued or sent.
     let mut projected = view.state.graph.clone();
-    let frontier = view.state.frontier();
+    // The validator this run was launched with, off the launch record rather
+    // than out of this process's environment: a `reply` typed in another shell
+    // is judged by the rules the run was started under.
+    let frontier = Frontier {
+        node_validator: view.launch.node_validator().map(str::to_owned),
+        ..view.state.frontier()
+    };
     for command in &envelope.commands {
         edits::compile(&mut projected, &frontier, command)?;
     }
@@ -2233,6 +2253,7 @@ mod tests {
             graph_run: String::new(),
             node_graph: "graphs/node-scope.yaml".into(),
             pr_author_graph: String::new(),
+            node_validator: String::new(),
             launcher: "e2e".into(),
             session: "session-a".into(),
             pid,
