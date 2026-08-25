@@ -403,7 +403,6 @@ behind=()
 # such site, not only at the one that found this. Each element survives whole:
 # the inner expansion is quoted, so a row carrying spaces stays one word.
 
-# Every engine the lock resolves at more than one version, as `name v1 v2 ...`.
 split=()
 
 # One copy of each engine, asked before the registry is asked anything.

@@ -701,26 +701,16 @@ impl World {
 
     /// Tell the `gh` stand-in where the origin behind one identity really is.
     ///
-    /// A host answers `headRefOid` off the branch a change request was opened
-    /// from, and `onevcs` reads every check beside that field so a red one left
-    /// on a head this run replaced cannot decide a merge path. So the stand-in
-    /// has to answer it from the branch too — and the only thing that knows
-    /// where that branch lives is this world, because the identity says
-    /// `github.com/owner/service` while the git remote under it is a bare
-    /// repository in this journey's scratch.
+    /// The stand-in answers `headRefOid` off the branch, because `onevcs` reads
+    /// every check beside that field; only this world knows where the branch
+    /// lives, since the identity says `github.com/owner/service` while the git
+    /// remote under it is a bare repository in this journey's scratch. One file
+    /// per host slug, holding the checkout's own `origin` — read from git so
+    /// what is written down is the remote the publication really pushes to.
     ///
-    /// One file per host slug, which is what `gh` is addressed by, holding the
-    /// checkout's own `origin` remote. Taken from git rather than from the
-    /// caller so what is written down is the remote the publication actually
-    /// pushes to.
-    ///
-    /// Two checkouts write nothing, and both are answered by the placeholder the
-    /// stand-in has always given. An identity on some other host has no `gh`
-    /// under it to tell — those are the journeys about `onevcs` refusing a
-    /// publication before any host is asked anything. A checkout with no
-    /// `origin` remote has no branch to read a head off at all, which is why the
-    /// remote is read without asserting on it rather than through
-    /// [`git`](fn@git).
+    /// A non-GitHub identity or a checkout with no `origin` writes nothing and
+    /// is answered by the stand-in's placeholder, which is why the remote is
+    /// read without asserting on it rather than through [`git`](fn@git).
     fn point_the_host_at(&self, checkout: &Path, origin: &str) {
         let Some((_, slug)) = origin.trim_end_matches(".git").rsplit_once("github.com/") else {
             return;

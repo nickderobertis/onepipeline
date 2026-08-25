@@ -144,18 +144,11 @@ resolver = "2"
 #   `Envelope::phase` is a field `src/vcs.rs` relays arm by arm, so a pin below
 #   0.14.0 does not compile. `tests/e2e/adoption.rs` drives both kinds into the
 #   run's store against the real sibling.
-# - `onevcs` 0.15.0 binds a merge-path verdict to the **commit the publication
-#   just pushed**: a check the host attached to some other head is set aside
-#   rather than acted on, so a red check left over from a head this run replaced
-#   can no longer end a publication with a verdict that predates the check it
-#   claims to have read. The optional `head` and `url` it adds to the public
-#   `Check` carry that and the evidence behind a refusal; this crate reads the
-#   path only through `FailureKind`, which is unchanged, so what moved is the
-#   **host** under it rather than any `src/` type. A requirement rather than a
-#   lock floor because of the pin it must unify with: `onevcs-testing` 0.4.9
-#   requires `onevcs 0.15.0`, and two `onevcs` copies is not a skew but a compile
-#   error — the entry on that pin below says why. `tests/e2e/real_vcs.rs` drives
-#   both merge-path verdicts against a real origin at this release.
+# - `onevcs` 0.15.0 reads a merge-path verdict only off the commit the
+#   publication pushed, so a red check left on a head this run replaced cannot
+#   end one. A requirement because `onevcs-testing` 0.4.9 requires exactly it,
+#   and two `onevcs` copies is a compile error. `tests/e2e/real_vcs.rs` drives
+#   both verdicts against a real origin.
 #
 # **Every pin in this block is declared at the newest release the registry
 # carries**, because this repository resolves no engine at two versions and so
@@ -205,22 +198,18 @@ resolver = "2"
 # `tests/oneagentgraph_liveness.rs` holds both halves of it against the linked
 # library: the bound a dispatch really runs under, read through that library's
 # own launch-time `Bounds::from_env`, and the rule that bound governs, driven
-# over real processes under a bound the environment sets small. 0.3.9's own
-# addition — a script run before a member's turn — this crate names nowhere.
+# over real processes under a bound the environment sets small.
 #
-# `oneagentgraph` 0.3.10 links **one turn engine**: it requires `oneharness-core
-# 0.12` and `onejudge 0.5.3`, and that onejudge requires `oneharness-core 0.12`
-# too, so the graph resolves that engine once. That unification is the reason for
-# the two pins below, and why the split it replaced was invisible: a currency
-# check reads each copy separately and finds both current.
+# `oneagentgraph` 0.3.10 requires `oneharness-core 0.12` and `onejudge 0.5.3`,
+# and that onejudge requires 0.12 too — so the two pins below are stated at
+# exactly those versions and the graph resolves **one** turn engine. A split one
+# is invisible to a currency check, which reads each copy separately and calls
+# both current.
 #
-# `onejudge` 0.5.2 replies with the **text a turn reported** rather than the
-# harness's raw output, which is what `src/report.rs` reads back off
-# `member-settled`; 0.5.3 is the release that links `oneharness-core` 0.12.
-# `oneharness-core` 0.12 is that engine, reached by a single-sided member through
-# the sibling's library and by a two-party member through the process
-# `crates/testfakes`'s double stands at — so the double answers the `work` a
-# report carries (0.11), without which a failing turn reads to onejudge's
+# Two floors inside that unification. `onejudge` 0.5.2, because `src/report.rs`
+# reads the text a turn reported off `member-settled` rather than the harness's
+# raw output. `oneharness-core` 0.11, because `crates/testfakes`'s double must
+# answer the `work` a report states or a failing turn reads to onejudge's
 # fallback as one that never started.
 #
 # `just engines-current` fails when a resolution lags its requirement *or* when

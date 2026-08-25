@@ -1509,7 +1509,7 @@ this was written — pre-1.0 the minor is the breaking position, so `^0.13`
 excluded it and the requirement rather than the lock was what permitted it. The
 requirement now reads `0.15` and `Cargo.lock` resolves `0.15.0`, from
 `registry+https://github.com/rust-lang/crates.io-index`, which is above the floor
-and carries all of it; `Cargo.toml` says what moved the pin. The
+and carries all of it. The
 proposal this entry made — *publish the name* — is **withdrawn**: the scheme
 stays private, which is the outcome it was asking for.
 
