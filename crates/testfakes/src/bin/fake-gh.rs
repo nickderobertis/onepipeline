@@ -362,8 +362,13 @@ fn create(args: &[String], dir: &Path) -> ExitCode {
 /// the pairing down and this reads it back, rather than either side deriving the
 /// other from a directory layout neither owns.
 fn origin_of(dir: &Path, repo: &str) -> Option<PathBuf> {
-    read_if_present(&dir.join("gh").join("origin").join(fake::segment(repo)))
-        .map(|path| PathBuf::from(path.trim()))
+    let recorded = read_if_present(&dir.join("gh").join("origin").join(fake::segment(repo)))?;
+    let origin = PathBuf::from(recorded.trim());
+    // Checked rather than trusted for where it came from: what came back is a
+    // path off a file, and it is handed to `git --git-dir`. An absolute
+    // directory that is there is what the world writes; anything else names no
+    // repository this can read, and the placeholder is the answer for that.
+    (origin.is_absolute() && origin.is_dir()).then_some(origin)
 }
 
 /// A commit id this host reports: forty hexadecimal characters and nothing else.
@@ -390,6 +395,37 @@ impl Sha {
     }
 }
 
+/// A branch name this host will build a ref out of.
+///
+/// `opened.head` is read back off a file rather than off this process's own
+/// command line, and it is interpolated into `refs/heads/…` — so a value
+/// carrying `..` or a separator of its own names a ref somewhere else in the
+/// namespace. Checked on the way in, by git's own branch rules as far as one
+/// component needs them.
+struct Branch(String);
+
+impl Branch {
+    fn parse(named: &str) -> Option<Self> {
+        let usable = !named.is_empty()
+            && !named.starts_with('/')
+            && !named.ends_with('/')
+            && !named.starts_with('.')
+            && !named.ends_with(".lock")
+            && !named.contains("..")
+            && !named.contains("//")
+            && !named.contains("@{")
+            && !named.contains("/.")
+            && named
+                .chars()
+                .all(|c| !c.is_ascii_control() && !" ~^:?*[\\".contains(c));
+        usable.then(|| Self(named.to_owned()))
+    }
+
+    fn as_ref_name(&self) -> String {
+        format!("refs/heads/{}", self.0)
+    }
+}
+
 /// The commit this host reports as a change request's head.
 ///
 /// Read off the branch, because `onevcs` sets aside every check attached to some
@@ -397,9 +433,10 @@ impl Sha {
 /// a commit no publication pushed, so a red one reads as a check that has not
 /// arrived rather than as a check that failed.
 ///
-/// [`HEAD_SHA`] where no origin was written down for the slug, where it carries
-/// no such branch, or where git answers something that is not an object id: a
-/// change request over a branch this host cannot see has no better answer.
+/// [`HEAD_SHA`] where no usable origin was written down for the slug, where the
+/// recorded head is not a branch name a ref can be built from, where the origin
+/// carries no such branch, or where git answers something that is not an object
+/// id: a change request over a branch this host cannot see has no better answer.
 fn head_of(dir: &Path, opened: &Opened) -> Sha {
     // Scripted `gh.head` is a host reporting some commit other than the branch's
     // tip — the state a real host is in for the seconds after a push it has not
@@ -412,14 +449,15 @@ fn head_of(dir: &Path, opened: &Opened) -> Sha {
             ))
         });
     }
-    let Some(origin) = origin_of(dir, &opened.repo) else {
+    let (Some(origin), Some(branch)) = (origin_of(dir, &opened.repo), Branch::parse(&opened.head))
+    else {
         return Sha::placeholder();
     };
     std::process::Command::new("git")
         .arg("--git-dir")
         .arg(&origin)
         .args(["rev-parse", "--verify", "--quiet"])
-        .arg(format!("refs/heads/{}", opened.head))
+        .arg(branch.as_ref_name())
         .output()
         .ok()
         .filter(|answer| answer.status.success())
