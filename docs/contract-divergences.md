@@ -1504,10 +1504,12 @@ to the session whose landing commit it names**, so
 holds — returns that session's releases beside the session's own records. The
 address of the second stream is never handed out, named in a refusal, or
 derivable: the consumer asks about the session it knows and the sibling answers
-about the work. `0.14.0` is the version `Cargo.lock` resolves, from
-`registry+https://github.com/rust-lang/crates.io-index`, and the floor
-`Cargo.toml` requires — pre-1.0 the minor is the breaking position, so `^0.13`
-excluded it and the requirement rather than the lock is what permits it. The
+about the work. `0.14.0` is the floor, and `Cargo.toml` required exactly it when
+this was written — pre-1.0 the minor is the breaking position, so `^0.13`
+excluded it and the requirement rather than the lock was what permitted it. The
+requirement now reads `0.15` and `Cargo.lock` resolves `0.15.0`, from
+`registry+https://github.com/rust-lang/crates.io-index`, which is above the floor
+and carries all of it. The
 proposal this entry made — *publish the name* — is **withdrawn**: the scheme
 stays private, which is the outcome it was asking for.
 

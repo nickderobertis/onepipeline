@@ -8,10 +8,15 @@
 # reports the difference: `--format check` as a gate, `--format notes` as the
 # markdown a release's notes carry.
 #
-# Exits 0 with nothing behind, 1 naming every engine that is, 2 for an argument
-# it cannot use, and 3 for a manifest, lock, or index it could not read — which
-# says nothing about currency either way. `--index` also takes a directory in
-# the sparse index's own layout.
+# It answers a second question first, and offline: **how many** copies of each
+# engine the lock resolves. Currency is about which release is linked; that one
+# is about whether "the release this build links" is a question with one answer
+# at all.
+#
+# Exits 0 with one current copy of each engine, 1 naming every engine the lock
+# splits or holds behind, 2 for an argument it cannot use, and 3 for a manifest,
+# lock, or index it could not read — which says nothing about currency either
+# way. `--index` also takes a directory in the sparse index's own layout.
 #
 # Usage:
 #   linked-engines.sh [--format check|notes] [--manifest PATH] [--lock PATH]
@@ -120,9 +125,9 @@ requirement() {
   ' "$manifest"
 }
 
-# Every version of one package the lock resolves. More than one is ordinary: two
-# crates in the graph can require ranges that do not unify, and this workspace
-# deliberately carries `oneharness-core` twice.
+# Every version of one package the lock resolves. More than one is what the
+# unification refusal below is for: two crates in the graph required ranges that
+# did not unify, so the graph carries the engine twice.
 #
 # The `version = "..."` line is required rather than assumed, so a lock whose
 # shape is not the one cargo writes yields nothing here — which the caller
@@ -398,6 +403,50 @@ behind=()
 # such site, not only at the one that found this. Each element survives whole:
 # the inner expansion is quoted, so a row carrying spaces stays one word.
 
+split=()
+
+# One copy of each engine, asked before the registry is asked anything.
+#
+# Asked first, and off the network, for two reasons. A split graph makes the
+# currency question below ambiguous rather than merely unanswered — "the release
+# this build links" has two answers — so there is nothing worth asking the index
+# until it is one. And the refusal is then reachable with no index at all, which
+# is what lets the deterministic tier drive it.
+for name in "${SIBLINGS[@]}"; do
+  # Captured before it is read, for the reason the same read is below: `die`
+  # inside a process substitution exits that subshell alone, so a loop fed by
+  # one would see an unreadable lock as a lock with nothing in it.
+  resolved="$(lock_versions "$name")" || die "'$lock' could not be read for '$name'" \
+    "make '$lock' readable, or pass '--lock <path to Cargo.lock>'"
+  copies=()
+  while read -r version; do
+    [ -n "$version" ] || continue
+    copies+=("$version")
+  done <<<"$resolved"
+  [ "${#copies[@]}" -le 1 ] || split+=("$name ${copies[*]}")
+done
+
+# The check refuses; `--format notes` reports, for the reason it reports an
+# engine that is behind rather than refusing to compose notes at all — a release
+# whose graph split is the one whose notes should least be silent about it.
+if [ "$format" = check ] && [ "${#split[@]}" -gt 0 ]; then
+  {
+    echo "'$lock' resolves an engine at more than one version:"
+    echo
+    for entry in ${split[@]+"${split[@]}"}; do
+      read -r name versions <<<"$entry"
+      echo "  $name: $versions"
+    done
+    echo
+    echo "ACTION: find the crate whose requirement pins the older copy — 'cargo tree"
+    echo "--invert --package <name>@<version>' names it — and move it, or move the pin in"
+    echo "'$manifest' that no longer unifies with it. A copy of an engine that only one"
+    echo "half of the graph can reach is a fix the other half does not have, and no"
+    echo "currency check can see it: each copy is separately current."
+  } >&2
+  exit 1
+fi
+
 for name in "${SIBLINGS[@]}"; do
   req="$(requirement "$name")"
   [ -n "$req" ] || die "'$name' has no requirement in [workspace.dependencies] of '$manifest'" \
@@ -518,6 +567,18 @@ if [ "$format" = notes ]; then
     esac
   done
   echo
+  if [ "${#split[@]}" -gt 0 ]; then
+    echo "> [!WARNING]"
+    echo "> This release links an engine at **more than one version**, so which copy a"
+    echo "> given crate in the graph reaches is decided by its own requirement rather"
+    echo "> than by anything recorded here:"
+    echo ">"
+    for entry in ${split[@]+"${split[@]}"}; do
+      read -r name versions <<<"$entry"
+      echo "> - \`$name\` links $versions."
+    done
+    echo
+  fi
   if [ "${#behind[@]}" -eq 0 ]; then
     echo "Every linked engine is the newest its own requirement permits."
   else
@@ -555,8 +616,10 @@ fi
   done
   echo
   echo "ACTION: run the update(s) above and commit the lock. The spec is version-qualified"
-  echo "because this workspace carries an engine at two versions, where 'cargo update -p"
-  echo "<name>' is refused as ambiguous. Then ask what is in the gap: if the newer engine"
+  echo "because that is what names the copy this lock actually holds, and it is the only"
+  echo "spelling cargo accepts where a graph carries an engine twice — which is a state"
+  echo "the unification refusal above ends rather than one this has to survive. Then ask"
+  echo "what is in the gap: if the newer engine"
   echo "carries behaviour this crate depends on, record that floor as a test beside"
   echo "'the_linked_oneagentgraph_produces_the_whole_turn_this_crate_relays' in"
   echo "src/agentgraph.rs, which is where this repository writes down *why* a floor matters."

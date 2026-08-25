@@ -35,7 +35,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
-use onepipeline_testfakes::{CLI_BIN_ENV, MEMBER_ENV, SCRIPT_DIR_ENV};
+use onepipeline_testfakes::{segment, CLI_BIN_ENV, MEMBER_ENV, SCRIPT_DIR_ENV};
 use serde_json::Value;
 
 // The exit codes are the crate's own, not a second copy of them. A suite that
@@ -693,9 +693,45 @@ impl World {
         if let Some(origin) = origin {
             argv.push("--origin".to_owned());
             argv.push(origin.to_owned());
+            self.point_the_host_at(checkout, origin);
         }
         let code = onevcs::run(&onevcs::cli::Cli::parse_from(argv));
         assert_eq!(code, 0, "onevcs refused to register {}", checkout.display());
+    }
+
+    /// Tell the `gh` stand-in where the origin behind one identity really is.
+    ///
+    /// The stand-in answers `headRefOid` off the branch, because `onevcs` reads
+    /// every check beside that field; only this world knows where the branch
+    /// lives, since the identity says `github.com/owner/service` while the git
+    /// remote under it is a bare repository in this journey's scratch. One file
+    /// per host slug, holding the checkout's own `origin` — read from git so
+    /// what is written down is the remote the publication really pushes to.
+    ///
+    /// A non-GitHub identity or a checkout with no `origin` writes nothing and
+    /// is answered by the stand-in's placeholder, which is why the remote is
+    /// read without asserting on it rather than through [`git`](fn@git).
+    fn point_the_host_at(&self, checkout: &Path, origin: &str) {
+        let Some((_, slug)) = origin.trim_end_matches(".git").rsplit_once("github.com/") else {
+            return;
+        };
+        let read = Command::new("git")
+            .args(["remote", "get-url", "origin"])
+            .current_dir(checkout)
+            .env("GIT_CONFIG_GLOBAL", self.gitconfig())
+            .output()
+            .expect("git runs");
+        if !read.status.success() {
+            return;
+        }
+        let remote = String::from_utf8_lossy(&read.stdout).trim().to_owned();
+        if remote.is_empty() {
+            return;
+        }
+        let dir = self.fakes.join("gh").join("origin");
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        std::fs::write(dir.join(segment(slug)), &remote)
+            .expect("the origin behind the identity is written");
     }
 
     /// What `onevcs` resolved a repository to, as its own typed identity.

@@ -144,9 +144,18 @@ resolver = "2"
 #   `Envelope::phase` is a field `src/vcs.rs` relays arm by arm, so a pin below
 #   0.14.0 does not compile. `tests/e2e/adoption.rs` drives both kinds into the
 #   run's store against the real sibling.
+# - `onevcs` 0.15.0 reads a merge-path verdict only off the commit the
+#   publication pushed, so a red check left on a head this run replaced cannot
+#   end one. A requirement because `onevcs-testing` 0.4.9 requires exactly it,
+#   and two `onevcs` copies is a compile error. `tests/e2e/real_vcs.rs` drives
+#   both verdicts against a real origin.
 #
-# Four floors are carried by `Cargo.lock` rather than by the requirement below,
-# and deliberately.
+# **Every pin in this block is declared at the newest release the registry
+# carries**, because this repository resolves no engine at two versions and so
+# has no older release for a looser requirement to serve. The `oneagentgraph`
+# floors below stay written down anyway: what a release carries is *why* a
+# resolution beneath it is a build this crate does not work, which no version
+# string says.
 #
 # `oneagentgraph` 0.3.3 carries the **session-conversation producer**: a `session`
 # label naming the conversation a member's turns belong to, and the
@@ -154,12 +163,10 @@ resolver = "2"
 # wrote, with that record as its artifact. Which kinds carry the label is that
 # library's to say — `EventKind::carries_session` — and is not restated here. It
 # is what an operator's conversation view renders an agent's transcript out of,
-# and this crate relays all of it. `^0.3.0` already permits it, so the resolution
-# is the whole of the fix and widening the requirement would buy nothing.
-# `src/agentgraph.rs`'s
+# and this crate relays all of it. `src/agentgraph.rs`'s
 # `the_linked_oneagentgraph_produces_the_session_conversation_this_crate_relays`
-# is what holds the resolution there — below the floor it fails saying the lock
-# is stale — and `tests/e2e/session.rs` drives the relay itself.
+# is what holds the resolution there — below the floor it fails naming the
+# resolution to move — and `tests/e2e/session.rs` drives the relay itself.
 #
 # `oneagentgraph` 0.3.5 corrects the **shipped role bars** so none of them demands
 # anything a dispatch cannot settle inside its own run, and guards the rest
@@ -168,9 +175,8 @@ resolver = "2"
 # to end* — which nothing running inside a dispatch can show now that no gate runs
 # inside the publication and verification is the merge path's, so every
 # implementation node would fail its review. The bar is the *linked library's*
-# file and not anything this crate ships, so the lock is what decides which one a
-# judge is handed. `^0.3.0` already permits it, so again the resolution is the
-# whole of the fix. `src/agentgraph.rs`'s
+# file and not anything this crate ships, so the resolution is what decides which
+# one a judge is handed. `src/agentgraph.rs`'s
 # `the_linked_oneagentgraph_holds_the_engineer_bar_to_what_a_dispatch_can_prove`
 # holds it, and asserts what replaced the demand as well as its absence, so a
 # resolution that softened the bar rather than narrowing it fails there too.
@@ -189,54 +195,57 @@ resolver = "2"
 # member, whose clock that rule stamps on tool events and on live work under the
 # tree and on nothing else — so a member spending a quarter of an hour composing
 # a report reads as silent, and under the old bound was killed mid-report.
-# `^0.3.0` already permits it, so the resolution is the whole of the fix.
 # `tests/oneagentgraph_liveness.rs` holds both halves of it against the linked
 # library: the bound a dispatch really runs under, read through that library's
 # own launch-time `Bounds::from_env`, and the rule that bound governs, driven
-# over real processes under a bound the environment sets small. The lock
-# resolves 0.3.9, the newest the caret permits, whose addition — a script run
-# before a member's turn — this crate names nowhere.
+# over real processes under a bound the environment sets small.
 #
-# `onejudge` 0.5.1 and the `oneharness-core` 0.10.x copy at 0.10.2 move with the
-# lock and carry **no runtime behaviour a dispatch observes** — onejudge 0.5.1
-# changes no `src/` file at all — so they are here to keep the lock current
-# rather than for a fix. The `oneharness-core` 0.8 copy stays where it is, for
-# the reason the entry below gives.
+# `oneagentgraph` 0.3.10 requires `oneharness-core 0.12` and `onejudge 0.5.3`,
+# and that onejudge requires 0.12 too — so the two pins below are stated at
+# exactly those versions and the graph resolves **one** turn engine. A split one
+# is invisible to a currency check, which reads each copy separately and calls
+# both current.
 #
-# What keeps this block's resolutions at what its own requirements permit is no
-# longer whoever thinks to look: `just engines-current` fails when one lags, and
-# every release's notes record what that release links.
+# Two floors inside that unification. `onejudge` 0.5.2, because `src/report.rs`
+# reads the text a turn reported off `member-settled` rather than the harness's
+# raw output. `oneharness-core` 0.11, because `crates/testfakes`'s double must
+# answer the `work` a report states or a failing turn reads to onejudge's
+# fallback as one that never started.
+#
+# `just engines-current` fails when a resolution lags its requirement *or* when
+# the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
+# second with no registry at all.
 [workspace.dependencies]
-oneagentgraph = "0.3.0"
-onevcs = "0.14"
+oneagentgraph = "0.3.10"
+onevcs = "0.15"
 # **Not a third sibling this crate composes** — nothing here launches, calls, or
 # spawns onejudge. It is one vocabulary: the verdicts a two-party member settles
 # on, which `oneagentgraph` copies onto the `member-settled` this crate relays.
 # It adds nothing to the dependency graph, because `oneagentgraph` already builds
 # it — and it must resolve to the version *that* pin does. `src/report.rs` is
 # where the build fails if it ever resolves to two, and why.
-onejudge = "0.5"
+onejudge = "0.5.3"
 # **Test-support only**, and named for one reason: `crates/testfakes`'s
 # `oneharness` double writes the report onejudge reads back, and that report is
 # oneharness's own typed contract. Written by hand it would be fifty fields of
 # copied wire shape that goes on parsing after the producer changed it — which is
 # the failure every other pin in this block is taken to avoid.
 #
-# `"0.8"` rather than the newest, because the reader is **onejudge**: it links
-# `oneharness-core` 0.8 while `oneagentgraph` links 0.10, so the graph already
-# carries both and the double has to write the copy its consumer parses. If
-# onejudge's pin moves, this one no longer unifies with it and
-# `tests/e2e/turns.rs` fails on a report shape onejudge cannot read — which names
-# the drift rather than hiding it. Nothing this crate publishes links it.
-oneharness-core = "0.8"
+# The reader is **onejudge**, so this pin is whatever onejudge links: at 0.5.3 it
+# requires `oneharness-core 0.12`, and so does `oneagentgraph` 0.3.10, so the
+# graph carries one copy and the double writes the one its consumer parses. If
+# onejudge's pin moves and this one does not, `tests/e2e/turns.rs` fails on a
+# report shape onejudge cannot read — which names the drift rather than hiding
+# it. Nothing this crate publishes links it.
+oneharness-core = "0.12"
 # The sibling's own test-support crate, from the **same** revision as the library
 # it implements — here by resolving both from the registry at the releases cut
-# from one commit: `onevcs-testing` v0.4.7 and `onevcs` v0.14.0 are the same tag,
-# and v0.4.7 requires `onevcs = "0.14.0"`, so the build has one copy. Two copies
+# from one commit: `onevcs-testing` v0.4.9 and `onevcs` v0.15.0 are the same tag,
+# and v0.4.9 requires `onevcs = "0.15.0"`, so the build has one copy. Two copies
 # is not a version skew but a compile error: `tests/onevcs_seam.rs` — whose whole
 # job is to drive this crate's seam against those providers — would not build,
 # because the two copies' types are different types.
-onevcs-testing = "0.4.7"
+onevcs-testing = "0.4.9"
 
 [package]
 name = "onepipeline"
