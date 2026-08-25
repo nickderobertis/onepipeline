@@ -526,22 +526,19 @@ impl Said {
     ///
     /// `None` is a host that gave a piped launch no handle back — the same
     /// silence [`Output::Relayed`] records for the other stream — and it is a
-    /// drain that is finished before it starts rather than a second state to
-    /// carry.
-    // llmlint: ignore-block[changed_behavior_has_e2e] the arm below that no journey
-    // reaches is the thread this host would not start, which no plan, flag, or
-    // environment of this crate's decides — and a host that will not start a thread has
-    // already ended every dispatch in the run, each of which is one. What it does when
-    // it is reached is said out loud and is the safe direction: the launch's own message
-    // is missing from its result, which is what a launch that said nothing leaves and
-    // what every journey asserting on a settled node's detail already drives.
+    /// drain with nothing to read rather than a second state to carry.
+    ///
+    /// Nothing here branches on whether the thread started. A [`Drained`] goes
+    /// with the closure either way, and going is what marks the drain finished,
+    /// so a host that would not start the thread takes the path every launch
+    /// takes rather than one of its own.
     fn draining(pipe: Option<std::process::ChildStderr>) -> Self {
         let said = Self {
             bytes: Arc::new(Mutex::new(Vec::new())),
             ended: Arc::new(AtomicBool::new(false)),
         };
-        let drain = said.clone();
-        let started = std::thread::Builder::new()
+        let drain = Drained(said.clone());
+        let _ = std::thread::Builder::new()
             .name(format!("{}-stderr", binary()))
             .spawn(move || {
                 use std::io::Read;
@@ -552,7 +549,7 @@ impl Said {
                             // The end of the pipe, or a host that will not say
                             // more about it. Either way there is nothing further.
                             Ok(0) => break,
-                            Ok(read) => held(&drain.bytes).extend_from_slice(&buffer[..read]),
+                            Ok(read) => held(&drain.0.bytes).extend_from_slice(&buffer[..read]),
                             // A read the signal handling interrupted read nothing
                             // and is not the stream ending; every other failure is.
                             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
@@ -560,18 +557,9 @@ impl Said {
                         }
                     }
                 }
-                drain.ended.store(true, Ordering::Release);
             });
-        if let Err(error) = started {
-            eprintln!(
-                "onepipeline: cannot read what `{} run` says on its stderr: {error}; \
-                 this launch will report having said nothing",
-                binary()
-            );
-            said.ended.store(true, Ordering::Release);
-        }
         said
-    } // llmlint: ignore-end[changed_behavior_has_e2e]
+    }
 
     /// Everything the graph said, once the drain has finished or the patience has
     /// run out.
@@ -586,6 +574,22 @@ impl Said {
             std::thread::sleep(SAID_POLL);
         }
         String::from_utf8_lossy(&held(&self.bytes)).into_owned()
+    }
+}
+
+/// A drain that marks itself finished when it goes, however it went.
+///
+/// The pipe reaching its end and a thread this host would not start are the same
+/// answer to the one question a reader of [`Said`] has — nothing more is coming —
+/// and putting that answer on `Drop` is what makes them one path instead of two,
+/// only one of which any run reaches. The thread body ends and this drops with
+/// it; the thread never starts and the closure holding this is dropped instead.
+/// Every launch takes it, so nothing here is a branch a journey cannot reach.
+struct Drained(Said);
+
+impl Drop for Drained {
+    fn drop(&mut self) {
+        self.0.ended.store(true, Ordering::Release);
     }
 }
 
@@ -632,16 +636,12 @@ fn relayed_lines(
     child: Arc<Mutex<Child>>,
 ) -> impl Iterator<Item = std::io::Result<String>> + Send {
     let (lines, arriving) = mpsc::channel();
-    // Not waited on: the channel closing is what says the stream ended.
-    //
-    // llmlint: ignore-block[changed_behavior_has_e2e] the arm no journey reaches is the
-    // thread this host would not start, which nothing a user types decides — and a host
-    // that will not start a thread has already ended every dispatch in the run, each of
-    // which is one. Reached, it closes the channel as it goes, which is a launch relayed
-    // as silent and settled on its own exit status alone — the ending
-    // `a_dispatch_that_produced_nothing_is_asked_again_and_each_attempt_is_journalled`
-    // drives in `tests/e2e/boundary.rs`, and never a relay that hangs.
-    let started = std::thread::Builder::new()
+    // Not waited on, and not branched on: the channel closing is what says the
+    // stream ended, and the sender goes with the closure whether the thread ran
+    // it or a host refused to start it. So a thread that never started ends the
+    // stream down the same arm every launch ends down — a relay that reported
+    // what the graph said and then finished — rather than down one of its own.
+    let _ = std::thread::Builder::new()
         .name(format!("{}-relay", binary()))
         .spawn(move || {
             for line in reader.lines() {
@@ -650,13 +650,6 @@ fn relayed_lines(
                 }
             }
         });
-    if let Err(error) = started {
-        eprintln!(
-            "onepipeline: cannot read `{} run`'s output: {error}; this launch is relayed \
-             as silent and settles on the exit status alone",
-            binary()
-        );
-    } // llmlint: ignore-end[changed_behavior_has_e2e]
     std::iter::from_fn(move || loop {
         match arriving.recv_timeout(RELAY_POLL) {
             Ok(line) => return Some(line),
