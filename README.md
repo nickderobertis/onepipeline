@@ -87,18 +87,37 @@ for a required check the host reports concluded red, `checks-unsettled` for a bo
 that elapsed with the change still outstanding, `push-rejected` for a push the merge
 path refused, `sync-conflict` for a base that moved under the publication, and
 `pushed-unverified` for a push that reached the remote with the merge path unreadable
-behind it. Each of the five leaves the rejected tree on the branch the session
-handed back, so the node is **dispatched again on that branch**, with no step
+behind it. The first four leave the rejected tree on the branch the session handed
+back, so the node is **dispatched again on that branch**, with no step
 recorded as completed and
 with the failure's reason and the id of every artifact its publication recorded
 delivered as that dispatch's own context — the worker meets the diagnosis, on the
-tree that has to change. Everything else settles `publication-failed` as it always
+tree that has to change. `pushed-unverified` is answered differently, because
+nothing about its tree was rejected: the work is already on the origin, so the
+**merge path is read again** — bounded by `ONEPIPELINE_MERGE_PATH_READS`, three by
+default — rather than the agent re-dispatched for a fresh clone and a fresh gate to
+re-push what the remote already carries. A verdict that arrives during those reads
+settles the node; reads that never get one settle it `failed` saying where the work
+is, what commit it is at, and what stopped the read. Everything else settles
+`publication-failed` as it always
 did and is not retried: the repository's own gate, a request refused at a trust
 boundary, and a seam with no implementation behind it all answer the same way
 however many times they are asked. The loop is bounded by
 `ONEPIPELINE_PUBLICATION_ATTEMPTS`, three by default, and a node that spends it
 settles `failed` under the last failure's word, saying how many attempts were made
 and what each one ended with.
+
+A dispatch that ends for a reason that is **not the agent's verdict on its task**
+settles `dispatch-died` rather than `task-failed`: a rate limit twenty seconds after
+the final report, a harness that lost its credential, a run root deleted underneath
+a live turn. The word is chosen by classifying the failure's own detail and never by
+inspecting the branch, so a dispatch that died holding finished work and one that
+produced nothing at all reach the same word. The settlement carries `cause` — the
+producer's own classification, `rate_limit`, `quota`, `auth`, `spawn-error` — and
+`head`, the commit the node's branch was left at, and `results` and `status` say in
+one sentence that the branch may carry finished work and name that commit. It is not
+`infrastructure-failure`, which is the dispatch layer refusing **before any work
+began** and is retried for exactly that reason.
 
 The planner supervises over the channel:
 

@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "run_id": "golden",
   "state": "complete",
   "ok": true,
@@ -18,6 +18,14 @@
       "landing": "unlanded",
       "branch": "onepipeline/opened",
       "change_url": "https://example.invalid/pull/7"
+    },
+    {
+      "id": "died",
+      "status": "failed",
+      "outcome": "dispatch-died",
+      "branch": "onepipeline/died",
+      "cause": "rate_limit",
+      "head": "0123456789abcdef0123456789abcdef01234567"
     },
     {
       "id": "built",

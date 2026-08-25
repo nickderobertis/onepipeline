@@ -36,6 +36,9 @@ pub const PLANTED: &str = r#"{"transcript":{"messages":[{"role":"assistant",
 /// for a conversation nothing has.
 const SAID: &str = "Ran what the task asked for.";
 
+/// The member a node's dispatch runs as, which every record of one names.
+const WORKER: &str = "worker";
+
 /// The most a scripted turn may be made to say: twice the bound a payload text
 /// field carries, which is past it by any margin a journey needs.
 const SAYABLE: usize = 2 * oneagentgraph::event::MAX_PAYLOAD_TEXT_BYTES;
@@ -388,6 +391,21 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     let redirected = fake::node_script(dir, &key, "redirect");
     close_turn(dir);
 
+    // A dispatch that never opened a turn and then died for a reason that is not
+    // its verdict on its task: its identities refused it one after another and
+    // none of them ran, which is what a run root deleted underneath a live
+    // dispatch leaves behind. The refusals go on the record and the turn never
+    // does, so what the crate under test meets is a dispatch that spoke, produced
+    // no turn, and left no branch.
+    if silent {
+        if let Some(reason) = fake::node_script(dir, &key, "died") {
+            if let Some(script) = fake::node_script(dir, &key, "refused") {
+                refuse_candidates(args, &node, step.as_deref(), &script);
+            }
+            return died(&reason);
+        }
+    }
+
     // A dispatch that produces nothing and fails is the case boundary retry
     // exists for: the failure carries no work to lose.
     if silent {
@@ -490,6 +508,15 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         refuse_candidates(args, &node, step.as_deref(), &script);
     }
 
+    // The same death, after a turn that ran: a worker that wrote its work, said
+    // what it did, and was then ended by something that is not its own verdict.
+    // Scripted apart from `<key>.fail` because that one is the *agent's* verdict —
+    // "the node failed its gate" — and telling the two apart is the whole of what
+    // the crate under test does with this stderr.
+    if let Some(reason) = fake::node_script(dir, &key, "died") {
+        return died(&reason);
+    }
+
     if let Some(code) = fake::node_script(dir, &key, "fail") {
         // A scripted code that is not a code is a test that means something
         // other than what it says. Defaulting it to 1 would quietly pass the
@@ -503,6 +530,33 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         return ExitCode::from(code);
     }
     ExitCode::SUCCESS
+}
+
+/// A dispatch that ended for a reason that is **not this agent's verdict on its
+/// task**: the identity was rate-limited, the credential went, the harness could
+/// not be started at all.
+///
+/// The distinction the crate under test classifies, and it classifies it off the
+/// dispatch's **stderr** — so what this writes is the sentence the real CLI
+/// writes and not one spelled here. It is composed through `oneagentgraph`'s own
+/// [`Error`](oneagentgraph::error::Error), which renders `member 'X' failed: Y`,
+/// under the same rule every other shape in this program is taken rather than
+/// restated: a double that hand-wrote the line would be an oracle for prose
+/// nothing produces, and the journey would pass having proved the fixture. The
+/// `oneagentgraph: ` prefix and the exit code are that binary's own, and both are
+/// taken from it too.
+///
+/// `reason` is the journey's: it is the *harness's* classification, and which
+/// classifications exist is that layer's business rather than this program's.
+fn died(reason: &str) -> ExitCode {
+    eprintln!(
+        "oneagentgraph: {}",
+        oneagentgraph::error::Error::MemberFailed {
+            member: WORKER.to_owned(),
+            reason: reason.to_owned(),
+        }
+    );
+    ExitCode::from(u8::try_from(oneagentgraph::error::EXIT_MEMBER_FAILED).unwrap_or(1))
 }
 
 /// Publish one `fallback-advanced` per candidate an identity chain stepped past.
@@ -1024,7 +1078,7 @@ fn open_turn(args: &[String], dir: &std::path::Path, key: &str, node: &str, step
     }
     if let Err(error) = std::fs::write(
         &record,
-        serde_json::json!({"key": key, "member": "worker"}).to_string(),
+        serde_json::json!({"key": key, "member": WORKER}).to_string(),
     ) {
         fake::fail(&format!(
             "cannot open a turn at {}: {error}",
@@ -1188,7 +1242,7 @@ fn member_labels(
     step: Option<&str>,
 ) -> serde_json::Map<String, serde_json::Value> {
     let mut labels = stamped(args);
-    labels.insert("member".to_string(), "worker".into());
+    labels.insert("member".to_string(), WORKER.into());
     labels.insert("onepipeline.node".to_string(), node.into());
     if let Some(step) = step {
         labels.insert("onepipeline.step".to_string(), step.into());

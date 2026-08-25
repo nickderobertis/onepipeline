@@ -107,6 +107,33 @@ pub const PUBLICATION_ATTEMPTS_ENV: &str = "ONEPIPELINE_PUBLICATION_ATTEMPTS";
 /// at the boundary the value is read in from, not at the arithmetic downstream.
 pub const DEFAULT_PUBLICATION_ATTEMPTS: NonZeroU32 = NonZeroU32::new(3).unwrap();
 
+/// The environment variable setting how many times the merge path behind a push
+/// that reached the remote is read before the node settles unverified.
+pub const MERGE_PATH_READS_ENV: &str = "ONEPIPELINE_MERGE_PATH_READS";
+
+/// The environment variable setting the first backoff between those reads.
+pub const MERGE_PATH_BACKOFF_ENV: &str = "ONEPIPELINE_MERGE_PATH_BACKOFF_SECONDS";
+
+/// How many times the merge path behind a push that reached the remote is read.
+///
+/// The **whole** budget and not the re-reads beside it: `1` is reading it once
+/// and settling on whatever that said, which is the behaviour before there was a
+/// re-read at all.
+///
+/// Three, because what this answers is a host that was briefly unreachable — an
+/// API outage, a 503 — and the cost of another go is one call rather than a fresh
+/// clone and a fresh gate. It is deliberately not the publication budget beside
+/// it: that one spends whole dispatches, so it is small for a different reason.
+///
+/// A [`NonZeroU32`] for the reason [`DEFAULT_PUBLICATION_ATTEMPTS`] is: a budget
+/// of zero is not a smaller budget, it is a node settled having never read the
+/// path it is reporting on.
+pub const DEFAULT_MERGE_PATH_READS: NonZeroU32 = NonZeroU32::new(3).unwrap();
+
+/// The first backoff between those reads, in seconds. It doubles, to the same
+/// two-minute ceiling every backoff in this crate doubles up to.
+pub const DEFAULT_MERGE_PATH_BACKOFF_SECONDS: u64 = 5;
+
 /// The environment variable setting how long a cancelled dispatch has to stop
 /// itself before it is torn down.
 pub const CANCEL_GRACE_ENV: &str = "ONEPIPELINE_CANCEL_GRACE_SECONDS";
@@ -139,12 +166,17 @@ const POLL: Duration = Duration::from_millis(25);
 /// back**, so the number is a statement to its consumers rather than to a reader
 /// here.
 ///
-/// `3` is this document: one result per run, carrying no round and every node's
-/// [`landing`](NodeResult::landing). `2` and `1` were the per-round
-/// `round-NN/result.json` — `1` unversioned and saying only that a node had
-/// settled, `2` where a landing was first recorded — and both named a round that
-/// continuous execution does not have.
-pub const RUN_RESULT_SCHEMA_VERSION: u32 = 3;
+/// `4` is this document: `3` plus every node's [`cause`](NodeResult::cause) and
+/// [`head`](NodeResult::head), the two a settlement carries when a dispatch ended
+/// for a reason that is not the agent's verdict on its task. Both are omitted
+/// when they are empty, so a `4` node states nothing extra to a consumer whose
+/// nodes carry neither — but the number moves anyway, because the document now
+/// states something a `3` reader has no field for. `3` was one result per run,
+/// carrying no round and every node's [`landing`](NodeResult::landing). `2` and
+/// `1` were the per-round `round-NN/result.json` — `1` unversioned and saying
+/// only that a node had settled, `2` where a landing was first recorded — and
+/// both named a round that continuous execution does not have.
+pub const RUN_RESULT_SCHEMA_VERSION: u32 = 4;
 
 /// Read the version, refusing every number this build did not write.
 ///
@@ -269,7 +301,7 @@ pub struct NodeResult {
     /// change of its own reads as one making no claim — and a consumer branches
     /// on the key's presence instead of on a field that is there for every node
     /// and meaningless for most. This field is what
-    /// [`RUN_RESULT_SCHEMA_VERSION`] `2` first recorded, and `3` carries into
+    /// [`RUN_RESULT_SCHEMA_VERSION`] `2` first recorded, and `3` carried into
     /// the run's own document.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub landing: Option<Landing>,
@@ -288,15 +320,34 @@ pub struct NodeResult {
     /// Where a human reads the change it published.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub change_url: Option<String>,
+    /// Why a dispatch that ended for a reason other than the agent's verdict
+    /// ended, in the words its producer classified it with.
+    ///
+    /// Absent on every settlement that carries no classification, which is most
+    /// of them: an agent that failed its own task was classified by nobody.
+    /// [`RUN_RESULT_SCHEMA_VERSION`] `4` is what first recorded it, beside
+    /// [`head`](Self::head).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause: Option<String>,
+    /// The commit the node's branch was left at, when `onevcs` recorded one.
+    ///
+    /// Beside [`branch`](Self::branch) rather than folded into it, because the
+    /// two answer different questions: the branch is where the work is, and this
+    /// is what is on it. Absent where nothing recorded a commit — a node that
+    /// produced no branch at all, and one whose branch nothing committed to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<String>,
 }
 
 /// How one node settled, as its dispatch reports it.
 ///
-// llmlint: ignore-block[invalid_states_unrepresentable] `outcome`, `branch`, and
-// `change_url` are optional strings because they are exactly what goes into the journal
-// payload, and the journal is read by builds other than this one. An outcome enum here
-// would make a record written by a newer build unreadable by an older one, which is the
-// failure the schema-skipping rule elsewhere in this crate exists to prevent. `status` is
+// llmlint: ignore-block[invalid_states_unrepresentable] `outcome`, `branch`, `change_url`,
+// `cause`, and `head` are optional strings because they are exactly what goes into the
+// journal payload, and the journal is read by builds other than this one. An outcome enum
+// here would make a record written by a newer build unreadable by an older one, which is
+// the failure the schema-skipping rule elsewhere in this crate exists to prevent. `cause`
+// is a string for one more reason: the word is the *harness's*, and a set declared here
+// would refuse a classification that layer added and report it as none at all. `status` is
 // the part that *is* narrowed, because scheduling depends on it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settlement {
@@ -320,6 +371,16 @@ pub struct Settlement {
     pub branch: Option<String>,
     /// Where a human reads the change it published.
     pub change_url: Option<String>,
+    /// Why a dispatch that ended for a reason other than the agent's verdict
+    /// ended, as its producer classified it.
+    ///
+    /// The producer's own word, carried rather than re-vocabularised here: which
+    /// classifications a harness draws is that layer's business, and a mapping in
+    /// this one would rename a cause an operator has to look up in the harness's
+    /// own documentation. See [`dispatch_death_cause`].
+    pub cause: Option<String>,
+    /// The commit the node's branch was left at, when `onevcs` recorded one.
+    pub head: Option<String>,
     /// The declared steps this attempt finished, for a continuation to skip.
     pub completed_steps: Vec<String>,
 }
@@ -337,6 +398,8 @@ impl Settlement {
             detail: None,
             branch: None,
             change_url: None,
+            cause: None,
+            head: None,
             completed_steps: Vec::new(),
         }
     }
@@ -1302,7 +1365,7 @@ fn start_ready(
             settle(
                 paths,
                 journal,
-                &Settlement::plain(&node.id, NodeStatus::Done, Some("no-changes")),
+                &Settlement::plain(&node.id, NodeStatus::Done, Some(NO_CHANGES)),
             )?;
             settled_here = true;
             continue;
@@ -1466,7 +1529,7 @@ fn execute_direct(
         Err(why) => {
             return Settlement {
                 detail: Some(why),
-                ..Settlement::plain(&node.id, NodeStatus::Failed, Some("invalid-node"))
+                ..Settlement::plain(&node.id, NodeStatus::Failed, Some(INVALID_NODE))
             }
         }
     }; // llmlint: ignore-end[changed_behavior_has_e2e]
@@ -1530,7 +1593,7 @@ pub(crate) fn attempt(
     let attempts = boundary_attempts();
     let mut backoff = Duration::from_secs(boundary_backoff_seconds());
     let mut last = Drained {
-        settlement: failed(node, "infrastructure-failure"),
+        settlement: failed(node, INFRASTRUCTURE_FAILURE),
         reached: Reached::NotStarted,
         session: None,
         branch: None,
@@ -1548,7 +1611,7 @@ pub(crate) fn attempt(
                     // still retried below, and this is the case retrying is
                     // most likely to recover — an executor that was
                     // momentarily unable to start anything.
-                    ..failed(node, "infrastructure-failure")
+                    ..failed(node, INFRASTRUCTURE_FAILURE)
                 },
                 reached: Reached::NotStarted,
                 session: None,
@@ -1571,7 +1634,7 @@ pub(crate) fn attempt(
             if last.reached != Reached::NotStarted {
                 last.settlement = Settlement {
                     detail: last.settlement.detail.clone(),
-                    ..failed(node, "no-agent-progress")
+                    ..failed(node, NO_AGENT_PROGRESS)
                 };
             }
             break;
@@ -1711,7 +1774,7 @@ pub(crate) fn drain(
         Ok(outcome) => failed_task(node, &outcome, session.as_ref()),
         Err(error) => Settlement {
             detail: Some(error.to_string()),
-            ..failed(node, "infrastructure-failure")
+            ..failed(node, INFRASTRUCTURE_FAILURE)
         },
     };
     Drained {
@@ -1820,35 +1883,177 @@ fn cancelling_surface(step: &Cancelling) -> Surface {
     }
 }
 
-/// How a dispatch that failed its own verdict settles.
+/// The word a dispatch that ended for a reason that is not the agent's verdict
+/// on its task settles under.
 ///
-/// The agent-graph outcome is not the whole answer. A dispatch can fail its
-/// judge having *already* opened a change request from the session it worked in
-/// — `onevcs publish` in its own final turn — and a node reported `task-failed`
-/// over a change that is open for review sends a planner to re-run work that is
-/// waiting to be read. So the session is asked what became of its branch, and a
-/// node that left a change behind settles under an outcome of its own, carrying
-/// the URL a reviewer opens.
+/// Deliberately **not** `dispatch-failed`: that spelling is already taken in this
+/// crate, by [`crate::lifecycle::Undrafted::ending`], for a drafting dispatch
+/// that could not be run or that ran without succeeding. One spelling meaning two
+/// things is the confusion this word exists to end, so it is checked against the
+/// vocabulary already published rather than assumed free — by
+/// [`tests::the_words_this_crate_publishes_are_one_vocabulary`].
+///
+/// And deliberately not `infrastructure-failure`, which is the line a reader will
+/// get wrong. That one is the dispatch layer refusing **before any work began** —
+/// an executor that could not start anything, or a session the sibling refused to
+/// open — which is exactly why [`attempt`] retries it: none of it is the agent's,
+/// and the failure carries no work to lose. This is the opposite case. The
+/// dispatch started, the agent worked, and the thing that ended it is not the
+/// agent's verdict — a rate limit twenty seconds after the final report, a
+/// harness that lost its credential, a run root deleted underneath a live turn.
+/// Retrying it is what [`attempt`] declines to do, because another budget on work
+/// that is already done is waste.
+///
+/// The branch is a **field** on it and not the thing that defines it, so a
+/// dispatch that died holding thirteen gate-green commits and one that produced
+/// nothing at all settle under the same word. "The agent failed its task" is
+/// wrong about both.
+pub const DISPATCH_DIED: &str = "dispatch-died";
+
+/// A node whose declaration no dispatch could be composed from.
+pub const INVALID_NODE: &str = "invalid-node";
+
+/// A node whose work its base branch already carries — or that wrote none.
+///
+/// Deliberately the same word `crate::vcs::outcome_of` gives a publication with
+/// nothing to publish: the two are one fact about the node, and a second spelling
+/// would be a distinction no reader could act on. It is the one word this crate
+/// publishes twice, and [`tests::the_words_this_crate_publishes_are_one_vocabulary`]
+/// names it as such rather than letting the next sharing in unnoticed.
+pub const NO_CHANGES: &str = "no-changes";
+
+/// The dispatch layer refused **before any work began**.
+///
+/// The word [`DISPATCH_DIED`] is deliberately not: see the reasoning there.
+pub const INFRASTRUCTURE_FAILURE: &str = "infrastructure-failure";
+
+/// The dispatch budget was spent without the agent producing anything.
+pub const NO_AGENT_PROGRESS: &str = "no-agent-progress";
+
+/// The agent's own verdict on its task was that it failed.
+pub const TASK_FAILED: &str = "task-failed";
+
+/// The same, over a session that had already opened a change request.
+pub const TASK_FAILED_CHANGE_OPEN: &str = "task-failed-change-open";
+
+/// The words the machinery below this crate names *itself* with.
+///
+/// A detail carrying none of them is the agent's own verdict on its task, and
+/// settles as one. This is the guard on the lift below rather than a vocabulary:
+/// a parenthesised word is no evidence of anything on its own — an agent's own
+/// verdict may carry one — and reading `the gate failed (clippy)` as a dispatch
+/// that died would report a node whose *work* is wrong as a node whose harness
+/// broke.
+const MACHINERY: [&str; 3] = ["harness", "provider", "spawn"];
+
+/// The bare classifications a fallback chain names a candidate it stepped past
+/// with, which it writes without parentheses.
+///
+/// `oneharness`'s own spellings, and the only two that reach a detail as a word
+/// rather than inside a parenthesis. They are matched rather than enumerated as
+/// the vocabulary: everything else is lifted out of the parentheses the producer
+/// put it in, whatever it spelled there.
+const BARE_CLASSIFICATIONS: [&str; 2] = ["spawn-error", "not-installed"];
+
+/// The classification a dispatch death carries, lifted out of the failure's own
+/// detail — or `None` where that detail is the agent's own verdict on its task.
+///
+/// Two shapes, because those are the two the machinery below this crate writes.
+/// A harness's word for why a turn could not be run reaches here **in
+/// parentheses**, through `oneagentgraph`'s `member-died` detail and the sentence
+/// its CLI puts on stderr: `provider error (respond): harness failed
+/// (rate_limit)`, whose classification is the **last** of the two. And a fallback
+/// chain that stepped past every candidate names its reason **bare**:
+/// `spawn-error`, with no parentheses at all.
+///
+/// Read only where the detail names the machinery — see [`MACHINERY`] — and the
+/// word taken is the producer's, whatever it spelled. This crate holds no list of
+/// causes to check one against: which classifications exist is the harness's
+/// business and the set grows there, so a list here would report a cause that
+/// layer added as no cause at all.
+fn dispatch_death_cause(detail: &str) -> Option<String> {
+    let lowered = detail.to_ascii_lowercase();
+    if !MACHINERY.iter().any(|word| lowered.contains(word)) {
+        return None;
+    }
+    parenthesised(detail).or_else(|| {
+        BARE_CLASSIFICATIONS
+            .into_iter()
+            .find(|bare| lowered.contains(bare))
+            .map(str::to_owned)
+    })
+}
+
+/// The last parenthesised classification in a detail, when it holds one.
+///
+/// A classification is one **bare token** — no whitespace, and something in it —
+/// which is what keeps a parenthetical clause a producer wrote in prose from
+/// being read as one. The last rather than the first, because a producer that
+/// carries two puts the operation it was performing in front of the reason it
+/// stopped.
+fn parenthesised(detail: &str) -> Option<String> {
+    let mut found = None;
+    let mut rest = detail;
+    while let Some(open) = rest.find('(') {
+        let after = &rest[open + 1..];
+        let Some(close) = after.find(')') else { break };
+        let inside = &after[..close];
+        if !inside.is_empty() && !inside.chars().any(char::is_whitespace) {
+            found = Some(inside.to_owned());
+        }
+        rest = &after[close + 1..];
+    }
+    found
+}
+
+/// How a dispatch that did not succeed settles.
+///
+/// The agent-graph outcome is not the whole answer, and it is read twice.
+///
+/// A dispatch can fail its judge having *already* opened a change request from
+/// the session it worked in — `onevcs publish` in its own final turn — and a node
+/// reported `task-failed` over a change that is open for review sends a planner
+/// to re-run work that is waiting to be read. So the session is asked what became
+/// of its branch, and a node that left a change behind settles under an outcome
+/// of its own, carrying the URL a reviewer opens. That one wins outright: a
+/// change request is a thing a reviewer opens whatever ended the dispatch that
+/// left it.
+///
+/// Failing that, the detail is **classified**: a dispatch that ended for a reason
+/// that is not the agent's verdict settles [`DISPATCH_DIED`], carrying the
+/// producer's own word for it and the commit its branch was left at. Classified
+/// out of the detail and never out of the branch, so a dispatch that died holding
+/// finished work and one whose workspace disappeared underneath it — no branch,
+/// no turns — reach the same word.
 ///
 /// Every unknown degrades to the plain failure this arm always produced: a
-/// dispatch with no session, a stream that cannot be read, and one that records
-/// no change request are all answered exactly as before.
+/// dispatch with no session, a stream that cannot be read, one that records no
+/// change request, and one whose detail names no classification are all answered
+/// exactly as before.
 fn failed_task(
     node: &str,
     outcome: &DispatchOutcome,
     session: Option<&onevcs::SessionToken>,
 ) -> Settlement {
     let detail = (!outcome.detail.is_empty()).then(|| outcome.detail.clone());
-    let Some(url) = session.and_then(crate::vcs::change_opened_in) else {
+    if let Some(url) = session.and_then(crate::vcs::change_opened_in) {
         return Settlement {
             detail,
-            ..failed(node, "task-failed")
+            change_url: Some(url),
+            ..failed(node, TASK_FAILED_CHANGE_OPEN)
+        };
+    }
+    let Some(cause) = dispatch_death_cause(&outcome.detail) else {
+        return Settlement {
+            detail,
+            ..failed(node, TASK_FAILED)
         };
     };
     Settlement {
         detail,
-        change_url: Some(url),
-        ..failed(node, "task-failed-change-open")
+        cause: Some(cause),
+        head: session.and_then(crate::vcs::branch_head_in),
+        ..failed(node, DISPATCH_DIED)
     }
 }
 
@@ -1891,6 +2096,32 @@ pub(crate) fn publication_attempts() -> NonZeroU32 {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(DEFAULT_PUBLICATION_ATTEMPTS)
+}
+
+/// How many times the merge path behind a push that reached the remote is read.
+///
+/// A [`NonZeroU32`] for the reason [`publication_attempts`] gives, and the parse
+/// *is* the `> 0` filter: a zero here would settle a node on a read nobody made.
+pub(crate) fn merge_path_reads() -> NonZeroU32 {
+    std::env::var(MERGE_PATH_READS_ENV)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(DEFAULT_MERGE_PATH_READS)
+}
+
+/// The first backoff between those reads. It doubles, to [`BOUNDARY_BACKOFF_CEILING`].
+pub(crate) fn merge_path_backoff() -> Duration {
+    Duration::from_secs(
+        std::env::var(MERGE_PATH_BACKOFF_ENV)
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(DEFAULT_MERGE_PATH_BACKOFF_SECONDS),
+    )
+}
+
+/// The next backoff after one, doubled to the ceiling every wait here shares.
+pub(crate) fn doubled(backoff: Duration) -> Duration {
+    (backoff * 2).min(BOUNDARY_BACKOFF_CEILING)
 }
 
 fn boundary_backoff_seconds() -> u64 {
@@ -1982,6 +2213,12 @@ fn settle(paths: &RunPaths, journal: &mut Journal, settlement: &Settlement) -> R
     }
     if let Some(url) = &settlement.change_url {
         payload.insert("change_url".into(), json!(url));
+    }
+    if let Some(cause) = &settlement.cause {
+        payload.insert(journal::SETTLED_CAUSE.into(), json!(cause));
+    }
+    if let Some(head) = &settlement.head {
+        payload.insert(journal::SETTLED_HEAD.into(), json!(head));
     }
     if let Some(landing) = settlement.landing {
         payload.insert(journal::SETTLED_LANDING.into(), json!(landing.as_str()));
@@ -2175,6 +2412,8 @@ fn record_result(paths: &RunPaths, state: &RunState, settled: GraphState) -> Res
                     .cloned()
                     .or_else(|| node.branch.clone()),
                 change_url: state.change_urls.get(&node.id).cloned(),
+                cause: state.causes.get(&node.id).cloned(),
+                head: state.heads.get(&node.id).cloned(),
             }
         })
         .collect();
@@ -2271,8 +2510,226 @@ mod tests {
         );
     }
 
-    /// The checked-in shape of a schema-3 run result.
-    const RUN_RESULT_GOLDEN: &str = include_str!("../tests/golden/run-result-v3.json");
+    /// The bound on re-reading a merge path that went dark is the one the
+    /// contract and the README publish, under the spelling an operator sets.
+    ///
+    /// A knob is a promise, for the reason the publication budget's own gate
+    /// gives: it is set from outside this crate, by a name nothing compiles. The
+    /// default travels with it, and so does the one thing an operator plans
+    /// around — that spending it settles the node rather than sending a worker
+    /// back to a tree nothing rejected.
+    #[test]
+    fn the_merge_path_read_budget_is_the_one_the_contract_and_the_readme_publish() {
+        let contract = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/contract.md"),
+        )
+        .expect("the contract ships");
+        assert!(
+            contract.contains(&format!("`{MERGE_PATH_READS_ENV}`")),
+            "docs/contract.md does not name the {MERGE_PATH_READS_ENV} bound"
+        );
+        assert_eq!(DEFAULT_MERGE_PATH_READS.get(), 3);
+        assert_eq!(merge_path_reads(), DEFAULT_MERGE_PATH_READS);
+        assert!(
+            contract.contains(&format!(
+                "`{MERGE_PATH_READS_ENV}`, three by default and the whole budget"
+            )),
+            "docs/contract.md does not state the default this build ships"
+        );
+
+        let readme = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md"),
+        )
+        .expect("the README ships");
+        let prose = readme.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            prose.contains(&format!("`{MERGE_PATH_READS_ENV}`, three by default")),
+            "the README does not state the {MERGE_PATH_READS_ENV} bound and its default"
+        );
+        assert!(
+            prose.contains("reads that never get one settle it `failed`"),
+            "the README does not say what spending the read budget settles the node as"
+        );
+    }
+
+    /// Every word this crate publishes for how something ended is spelled once.
+    ///
+    /// Three vocabularies reach an operator through the same views and the same
+    /// documents — a node's settlement outcome, a publication's own ending, and
+    /// the ending of a drafting dispatch that produced no body — and a word in two
+    /// of them means two things to a reader who has no way to tell which. That is
+    /// not hypothetical: `dispatch-failed` was already taken by a drafting
+    /// dispatch when a settlement for a dispatch that died was being named, which
+    /// is why the word is [`DISPATCH_DIED`] and not that.
+    ///
+    /// The one deliberate sharing is named rather than excluded by a rule, so the
+    /// next one has to be argued for here instead of arriving unnoticed.
+    #[test]
+    fn the_words_this_crate_publishes_are_one_vocabulary() {
+        use crate::lifecycle::Undrafted;
+        use crate::vcs::outcome_of;
+        use onevcs::PublishOutcome;
+
+        let publications: std::collections::BTreeSet<&str> = [
+            PublishOutcome::Merged(onevcs::Sha("abc".into())),
+            PublishOutcome::ChangeOpen(url()),
+            PublishOutcome::Queued(url()),
+            PublishOutcome::NothingToPublish,
+        ]
+        .iter()
+        .map(outcome_of)
+        .chain(EVERY_PUBLICATION_FAILURE.iter().map(|kind| {
+            outcome_of(&PublishOutcome::Failed {
+                kind: *kind,
+                reason: String::new(),
+                retained: None,
+            })
+        }))
+        .collect();
+        let draftings: std::collections::BTreeSet<&str> = [
+            Undrafted::Dispatch(String::new()),
+            Undrafted::SchemaRefused,
+            Undrafted::Bodyless,
+        ]
+        .iter()
+        .map(Undrafted::ending)
+        .collect();
+
+        // Deduplicated inside each vocabulary before the three are compared, so
+        // what this measures is a word meaning two things rather than one word
+        // reached twice the same way: `publication-failed` is the **residual**,
+        // and three kinds settling on it is the whole point of a residual.
+        //
+        // `no-changes` is one fact reached two ways — a node whose steps all
+        // declared no diff, and a publication whose base already carried the
+        // branch — and both settle a node under the one word on purpose. It is
+        // the only word allowed in two of the three lists, and taking it out here
+        // is what makes every other collision fail.
+        let mut seen: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+        let settlements: std::collections::BTreeSet<&str> =
+            SETTLEMENT_OUTCOMES.iter().copied().collect();
+        assert_eq!(
+            settlements.len(),
+            SETTLEMENT_OUTCOMES.len(),
+            "one settlement outcome is spelled twice in the list itself"
+        );
+        for word in settlements
+            .iter()
+            .copied()
+            .chain(publications.iter().copied())
+            .chain(draftings.iter().copied())
+        {
+            *seen.entry(word).or_default() += 1;
+        }
+        assert_eq!(
+            seen.remove(NO_CHANGES),
+            Some(2),
+            "`{NO_CHANGES}` is documented as the one word two vocabularies share"
+        );
+        let collided: Vec<&str> = seen
+            .iter()
+            .filter(|(_, times)| **times > 1)
+            .map(|(word, _)| *word)
+            .collect();
+        assert!(
+            collided.is_empty(),
+            "these words mean two things to a reader who cannot tell which: {collided:?}"
+        );
+        // And the new word is in the vocabulary at all, so a rename that emptied
+        // the list would not pass this by saying nothing.
+        assert!(SETTLEMENT_OUTCOMES.contains(&DISPATCH_DIED));
+        assert!(draftings.contains(&"dispatch-failed"));
+    }
+
+    /// Every word this crate settles a node under that a publication does not
+    /// bring with it.
+    ///
+    /// A list beside the constants rather than a derivation, for the reason
+    /// `crate::vcs`'s own `EVERY_PRESERVING` is one: nothing enumerates a set of
+    /// `const`s. It does not stand alone either — every settlement in this crate
+    /// names one of those constants, so a **rename** fails to compile — and what
+    /// this carries is the other half: a word *added* is a deliberate edit here,
+    /// and the gate below is what stops it colliding with a vocabulary an
+    /// operator reads through the same views.
+    const SETTLEMENT_OUTCOMES: [&str; 7] = [
+        INVALID_NODE,
+        NO_CHANGES,
+        INFRASTRUCTURE_FAILURE,
+        NO_AGENT_PROGRESS,
+        TASK_FAILED,
+        TASK_FAILED_CHANGE_OPEN,
+        DISPATCH_DIED,
+    ];
+
+    /// Every `FailureKind` the sibling distinguishes, for the vocabulary gate.
+    ///
+    /// Written out because the sibling's enum offers no enumeration of itself —
+    /// the same list `crate::vcs`'s own tests keep, and for the same reason:
+    /// `vcs::failure_of` matches arm by arm, so a variant added there fails
+    /// *that* to compile and this list is what carries it into the gate.
+    const EVERY_PUBLICATION_FAILURE: &[onevcs::FailureKind] = &[
+        onevcs::FailureKind::Gate,
+        onevcs::FailureKind::Invalid,
+        onevcs::FailureKind::SyncConflict,
+        onevcs::FailureKind::NotImplemented,
+        onevcs::FailureKind::ChecksFailed,
+        onevcs::FailureKind::ChecksUnsettled,
+        onevcs::FailureKind::PushRejected,
+        onevcs::FailureKind::PushedUnverified,
+    ];
+
+    /// A change request URL, for the publication outcomes that carry one.
+    fn url() -> onevcs::Url {
+        "https://example.invalid/pull/7".parse().expect("a URL")
+    }
+
+    /// What a dispatch death's detail is classified as, and what is left alone.
+    ///
+    /// The two shapes the machinery writes, and — the half that matters more —
+    /// the details that are the agent's own verdict and must keep settling as
+    /// one. A classifier that read a parenthesis anywhere would turn a node whose
+    /// *work* is wrong into a node whose harness broke, and send whoever read it
+    /// to restore a subscription that was never the problem.
+    #[test]
+    fn a_dispatch_death_is_classified_out_of_the_detail_and_a_task_failure_is_not() {
+        for (detail, cause) in [
+            (
+                "oneagentgraph: member 'worker' failed: provider error (respond): harness                  failed (rate_limit)",
+                "rate_limit",
+            ),
+            ("harness failed (auth)", "auth"),
+            ("provider error (quota)", "quota"),
+            // A chain that stepped past every candidate names its reasons bare,
+            // in oneharness's own words and with no parentheses at all.
+            (
+                "no candidate ran the turn: claude-code [spawn-error], codex [spawn-error]",
+                "spawn-error",
+            ),
+        ] {
+            assert_eq!(
+                dispatch_death_cause(detail).as_deref(),
+                Some(cause),
+                "{detail:?} was not classified as the machinery stopping"
+            );
+        }
+        for verdict in [
+            "the node failed its gate",
+            "the judge refused the report form",
+            // A parenthesis in an agent's own verdict. Nothing here names the
+            // machinery, so nothing here is a dispatch that died.
+            "the gate failed (clippy)",
+            "",
+        ] {
+            assert_eq!(
+                dispatch_death_cause(verdict),
+                None,
+                "{verdict:?} was read as a dispatch that died rather than a task that failed"
+            );
+        }
+    }
+
+    /// The checked-in shape of a schema-4 run result.
+    const RUN_RESULT_GOLDEN: &str = include_str!("../tests/golden/run-result-v4.json");
 
     use serde_json::Value;
 
@@ -2288,15 +2745,20 @@ mod tests {
             blocked_by: Vec::new(),
             branch: None,
             change_url: None,
+            cause: None,
+            head: None,
         }
     }
 
     /// The document the golden pins, built through the types.
     ///
-    /// Three nodes because the landing has three cases on the wire and a golden
-    /// carrying one of them would pin a third of the change: a change observed on
-    /// its base, one that had not reached it, and a node with no change of its
-    /// own — which carries no `landing` key at all.
+    /// Four nodes because each pins a case the wire has and the others do not.
+    /// The landing has three — a change observed on its base, one that had not
+    /// reached it, and a node with no change of its own, which carries no
+    /// `landing` key at all — and a golden carrying one of them would pin a third
+    /// of that change. The fourth is a dispatch that died: the one node carrying a
+    /// `cause` and a `head`, which is what schema `4` added and what every other
+    /// node here omits.
     fn run_result_golden() -> RunResult {
         RunResult {
             run_id: "golden".into(),
@@ -2319,6 +2781,15 @@ mod tests {
                     change_url: Some("https://example.invalid/pull/7".into()),
                     ..settled("opened")
                 },
+                NodeResult {
+                    id: "died".into(),
+                    status: NodeStatus::Failed,
+                    outcome: Some(DISPATCH_DIED.into()),
+                    branch: Some("onepipeline/died".into()),
+                    cause: Some("rate_limit".into()),
+                    head: Some("0123456789abcdef0123456789abcdef01234567".into()),
+                    ..settled("died")
+                },
                 settled("built"),
             ],
         }
@@ -2326,13 +2797,13 @@ mod tests {
 
     /// The shape a run result is written as, pinned to the checked-in golden.
     #[test]
-    fn a_schema_3_run_result_is_the_shape_the_golden_pins() {
+    fn a_schema_4_run_result_is_the_shape_the_golden_pins() {
         let rendered = serde_json::to_string_pretty(&run_result_golden()).expect("it serialises");
         assert_eq!(
             rendered.trim(),
             RUN_RESULT_GOLDEN.trim(),
             "the run result changed shape. If that was deliberate, bump \
-             RUN_RESULT_SCHEMA_VERSION and update tests/golden/run-result-v3.json together"
+             RUN_RESULT_SCHEMA_VERSION and update tests/golden/run-result-v4.json together"
         );
     }
 
@@ -2344,7 +2815,7 @@ mod tests {
     /// published nothing would have every consumer branching on a field that is
     /// always present and usually meaningless.
     #[test]
-    fn a_schema_3_run_result_round_trips_and_omits_a_landing_it_does_not_have() {
+    fn a_schema_4_run_result_round_trips_and_omits_what_it_does_not_have() {
         let value = run_result_golden();
         let read: RunResult =
             serde_json::from_str(RUN_RESULT_GOLDEN).expect("the golden reads back into the types");
@@ -2370,7 +2841,7 @@ mod tests {
     /// and the golden is named for the one it pins.
     #[test]
     fn the_run_result_schema_version_and_the_golden_name_the_same_number() {
-        assert_eq!(RUN_RESULT_SCHEMA_VERSION, 3);
+        assert_eq!(RUN_RESULT_SCHEMA_VERSION, 4);
         let document: Value = serde_json::from_str(RUN_RESULT_GOLDEN).expect("the golden is JSON");
         assert_eq!(document["schema_version"], RUN_RESULT_SCHEMA_VERSION);
         assert!(
@@ -2402,10 +2873,11 @@ mod tests {
             copy
         };
 
-        // Above is a build that knows more than this one. `2` and `1` are the
-        // per-round document this shape replaced, and `0` a number this crate has
-        // never written, so each came from somewhere that is not this contract.
-        for outside in [RUN_RESULT_SCHEMA_VERSION + 1, 2, 1, 0] {
+        // Above is a build that knows more than this one. `3` is this document
+        // before it carried a cause, `2` and `1` the per-round document that shape
+        // replaced, and `0` a number this crate has never written, so each came
+        // from somewhere that is not this contract.
+        for outside in [RUN_RESULT_SCHEMA_VERSION + 1, 3, 2, 1, 0] {
             let claimed = edit(&document, &|object| {
                 object.insert("schema_version".into(), json!(outside));
             });

@@ -78,6 +78,25 @@ pub struct RunState {
     pub abandoned: BTreeMap<String, crate::vcs::DispatchSession>,
     /// Where a human reads the change each published node opened.
     pub change_urls: BTreeMap<String, String>,
+    /// Why each dispatch that ended for a reason other than the agent's verdict
+    /// ended, in the words its producer classified it with.
+    ///
+    /// Written only by a settlement that carried one, like
+    /// [`branches`](Self::branches) and [`change_urls`](Self::change_urls): most
+    /// settlements carry none, and an entry cleared on any other event would turn
+    /// a dispatch that died into one whose agent failed its task.
+    pub causes: BTreeMap<String, String>,
+    /// The commit each node's branch was left at, as its settlement recorded it.
+    ///
+    /// Not the same thing as [`landing_commits`](Self::landing_commits): that one
+    /// is where a change *reached its base*, and this is what the node's own
+    /// branch carries — which for work that never landed is the only commit
+    /// anybody can go and read.
+    //
+    // llmlint: ignore[invalid_states_unrepresentable] a commit is the plain string every
+    // identifier in this crate is, for the reason `landing_commits` records. What could go
+    // wrong with an unchecked one is checked where it enters, by `vcs::branch_head_in`.
+    pub heads: BTreeMap<String, String>,
     /// The commit each node's change reached its base at, as `onevcs` reported
     /// it on the session's own stream.
     ///
@@ -633,6 +652,16 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
             }
             if let Some(url) = payload.get("change_url").and_then(Value::as_str) {
                 state.change_urls.insert(node.clone(), url.to_string());
+            }
+            // The classification the dispatch died under, and the commit its
+            // branch was left at. Both are the settlement's own — nothing else in
+            // the journal says either — so a fold that dropped them would leave a
+            // reader of the result with the word and none of its evidence.
+            if let Some(cause) = payload.get(journal::SETTLED_CAUSE).and_then(Value::as_str) {
+                state.causes.insert(node.clone(), cause.to_string());
+            }
+            if let Some(head) = payload.get(journal::SETTLED_HEAD).and_then(Value::as_str) {
+                state.heads.insert(node.clone(), head.to_string());
             }
             // Only a word this build can interpret: an unreadable landing leaves
             // the node with none, which reads as nothing observed.

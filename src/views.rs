@@ -743,6 +743,21 @@ pub fn status(survey: &Survey) -> String {
             if *node_status != NodeStatus::Failed {
                 continue;
             }
+            // A dispatch that died is not a node whose agent failed, and this
+            // view is where somebody decides whether to re-run one. Said here as
+            // well as in `results` for the reason the unlanded line below is:
+            // deciding there is nothing left to do is a decision made from this
+            // view, and a node reported as a plain failure over finished work is
+            // what that decision used to be made on.
+            let branch = view.state.branches.get(id).cloned().or_else(|| {
+                view.state
+                    .graph
+                    .get(id)
+                    .and_then(|node| node.branch.clone())
+            });
+            if let Some(died) = dispatch_died_phrase(&view.state, id, branch.as_deref()) {
+                out.push_str(&format!("  {id}: {died}\n"));
+            }
             for record in chain_records(&view.state, id) {
                 out.push_str(&format!(
                     "  {id}: {} — {}\n",
@@ -776,6 +791,54 @@ pub fn status(survey: &Survey) -> String {
     }
     out.push_str(&skipped_lines(&survey.skipped));
     out
+}
+
+/// What a node that settled [`DISPATCH_DIED`] says, in one sentence.
+///
+/// Named once because `results` and `status` both say it, and a manager reading
+/// one after the other must not meet two accounts of the same node.
+///
+/// It names the producer's own classification first, because that is what decides
+/// whether anything is worth re-running: a rate limit twenty seconds after the
+/// final report and a workspace deleted underneath a live turn call for opposite
+/// next moves. Then — where the node left a branch, and where `onevcs` recorded
+/// what that branch is at — it says the branch may carry finished work and names
+/// the commit, which is the half that otherwise has to be dug out of the run's
+/// journal by hand.
+///
+/// It says **may**, deliberately. This crate cannot tell a worker's prose report
+/// from a gate verdict, and a sentence that was sometimes wrong about "the gate
+/// passed" would be worse than no sentence at all. So it points at the branch and
+/// at the node's own transcript and lets a person read them.
+///
+/// `None` for every node that settled any other way, which is what keeps this out
+/// of the line of a node whose agent really did fail its task.
+///
+/// [`DISPATCH_DIED`]: crate::engine::DISPATCH_DIED
+fn dispatch_died_phrase(state: &RunState, id: &str, branch: Option<&str>) -> Option<String> {
+    if state.outcomes.get(id).map(String::as_str) != Some(crate::engine::DISPATCH_DIED) {
+        return None;
+    }
+    let classified = match state.causes.get(id) {
+        Some(cause) => format!(" ({cause})"),
+        // A settlement an older build wrote, or one whose producer classified
+        // nothing. The word still says what happened; only the why is missing,
+        // and inventing one would be this view deciding what the harness meant.
+        None => String::new(),
+    };
+    let where_the_work_is = match (branch, state.heads.get(id)) {
+        (Some(branch), Some(head)) => {
+            format!("{branch} may carry finished work, at {head}")
+        }
+        (Some(branch), None) => format!("{branch} may carry finished work"),
+        // The workspace went with the dispatch. Said outright, because the
+        // absence of a branch here is the difference between work to recover and
+        // work to redo.
+        (None, _) => "it left no branch, so nothing of it survived".to_owned(),
+    };
+    Some(format!(
+        "the dispatch died{classified} rather than failing its task; {where_the_work_is}"
+    ))
 }
 
 /// How long a node's cancellation has been waiting on the dispatch it asked to
@@ -1529,6 +1592,13 @@ pub fn results(view: &RunView) -> String {
             out.push_str(&format!(" — {url}"));
         }
         out.push('\n');
+        // Before the detail, because it is what the detail is evidence *for*: the
+        // detail is the producer's own sentence about how the dispatch ended, and
+        // this says what that means for the node — which used to be a thing a
+        // manager derived by opening `events.jsonl` and counting commits.
+        if let Some(died) = dispatch_died_phrase(&view.state, &node.id, branch.as_deref()) {
+            out.push_str(&format!("      died: {died}\n"));
+        }
         if let Some(detail) = view
             .events
             .iter()
@@ -2559,6 +2629,83 @@ mod tests {
         };
         envelope.labels.extra.insert("member".into(), member.into());
         envelope
+    }
+
+    /// What a dispatch that died says about where its work is, in each of the
+    /// three shapes a settlement of that kind comes in.
+    ///
+    /// The e2e journeys drive the two ends of this — a dispatch that left a
+    /// branch and a commit, and one that left neither — because those are the two
+    /// a run can actually reach. The middle one is a branch `onevcs` recorded no
+    /// commit for, which is a settlement rather than a scenario: it is what a
+    /// dispatch that opened a session and committed nothing leaves, and the
+    /// sentence has to stay true of it. The fourth is a record an **older build**
+    /// wrote, carrying the word and no classification, which no run this build
+    /// drives can produce at all.
+    #[test]
+    fn a_dispatch_that_died_says_where_its_work_is_in_every_shape_a_settlement_has() {
+        let root = scratch("died");
+        let died = |node: &str, fields: &[(&str, serde_json::Value)]| {
+            let mut all = vec![
+                ("status", json!("failed")),
+                ("outcome", json!(crate::engine::DISPATCH_DIED)),
+            ];
+            all.extend(fields.iter().cloned());
+            event(crate::journal::PipelineKind::NodeSettled, Some(node), &all)
+        };
+        let mut plan = plan();
+        for id in ["branchless", "uncommitted", "unclassified"] {
+            plan.tasks.push(Node {
+                id: id.into(),
+                task: Some("## What\ndo it".into()),
+                ..Node::default()
+            });
+        }
+        write_run(
+            &root,
+            "died",
+            sys::pid(),
+            &[
+                event(
+                    crate::journal::PipelineKind::RunStarted,
+                    None,
+                    &[("plan", json!(plan))],
+                ),
+                died(
+                    "build",
+                    &[
+                        ("cause", json!("rate_limit")),
+                        ("branch", json!("b/one")),
+                        ("head", json!("abc123")),
+                    ],
+                ),
+                died("branchless", &[("cause", json!("spawn-error"))]),
+                died(
+                    "uncommitted",
+                    &[("cause", json!("auth")), ("branch", json!("b/two"))],
+                ),
+                died("unclassified", &[("branch", json!("b/three"))]),
+            ],
+        );
+
+        let survey = Survey::of(&root);
+        let rendered = results(&survey.views[0]);
+        for said in [
+            "(rate_limit) rather than failing its task; b/one may carry finished work, at abc123",
+            "(spawn-error) rather than failing its task; it left no branch",
+            "(auth) rather than failing its task; b/two may carry finished work",
+            // No classification at all: the word still says what happened, and
+            // nothing here invents a reason the producer did not give.
+            "the dispatch died rather than failing its task; b/three may carry finished work",
+        ] {
+            assert!(rendered.contains(said), "{said:?} is not in:{rendered}");
+        }
+        // And the same sentences reach the view a supervisor decides from.
+        let standing = status(&survey);
+        assert!(
+            standing.contains("the dispatch died (rate_limit) rather than failing its task"),
+            "{standing}"
+        );
     }
 
     /// A node that failed says which chain **ran out** and which merely fell

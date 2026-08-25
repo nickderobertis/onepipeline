@@ -130,15 +130,21 @@ pub fn outcome_of(outcome: &PublishOutcome) -> &'static str {
     }
 }
 
-/// A publication failure a further attempt on the same branch could answer.
+/// A publication failure a further attempt **by the agent** on the same branch
+/// could answer.
 ///
-/// A closed set and not a word, because these five *are* the vocabulary: each
+/// A closed set and not a word, because these four *are* the vocabulary: each
 /// one is a settlement the contract publishes, a routing decision this crate
 /// makes, and a case a reader of a preserved failure switches on. Carried as a
-/// string, a sixth spelling would be constructible everywhere one of these is —
+/// string, a fifth spelling would be constructible everywhere one of these is —
 /// in a settlement, in a re-dispatch's reason, in the roll-up a spent budget
 /// writes — and every one of those is a word the contract does not name reaching
 /// an operator as though it did.
+///
+/// Every one of them is the **tree** being rejected, which is why the answer to
+/// each is a worker sent back to the branch that carries it. A push that reached
+/// the remote and left only the read behind it unanswered is not one of those and
+/// is [`Failure::Unread`] instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Preserving {
     /// A required check the host reports concluded red.
@@ -150,10 +156,6 @@ pub enum Preserving {
     /// The base moved under the publication and the bounded resolve-and-requeue
     /// did not converge.
     SyncConflict,
-    /// The publishing push reached the remote and the merge path could not then
-    /// be read. The one whose work is already **on the origin**, so what a
-    /// further attempt re-reads is that path rather than the push.
-    PushedUnverified,
 }
 
 impl Preserving {
@@ -165,7 +167,6 @@ impl Preserving {
             Self::ChecksUnsettled => "checks-unsettled",
             Self::PushRejected => "push-rejected",
             Self::SyncConflict => "sync-conflict",
-            Self::PushedUnverified => "pushed-unverified",
         }
     }
 }
@@ -184,6 +185,16 @@ pub enum Failure {
     /// failure's own word. The tree that was rejected is still there, so a
     /// worker sent back to it meets the thing that rejected it.
     Preserving(Preserving),
+    /// The publishing push **reached the remote** and only the merge path behind
+    /// it could not be read.
+    ///
+    /// Apart from [`Preserving`](Self::Preserving) because the fix is not more
+    /// work: nothing about the tree was rejected, and a worker sent back to it
+    /// would pay for a fresh clone and a fresh gate to re-push what the origin
+    /// already carries. What is missing is one more **read of the host**, so this
+    /// one is answered by a bounded re-read and settles under
+    /// [`Failure::UNREAD`] only when that read is spent.
+    Unread,
     /// Nothing a further attempt could answer: a request `onevcs` refused at its
     /// trust boundary, a seam with no implementation, and a gate that ran on the
     /// tree as it stands all answer the same way however many times they are
@@ -199,11 +210,19 @@ impl Failure {
     /// from — so no reader of it has to relearn anything.
     pub const RESIDUAL: &'static str = "publication-failed";
 
+    /// The word a push that reached the remote settles on once the re-read of
+    /// the merge path behind it is spent.
+    ///
+    /// The spelling it has always had: what changed is how the node is recovered,
+    /// not what a reader of the settled node reads.
+    pub const UNREAD: &'static str = "pushed-unverified";
+
     /// The word the node settles on.
     #[must_use]
     pub fn outcome(self) -> &'static str {
         match self {
             Self::Preserving(preserving) => preserving.outcome(),
+            Self::Unread => Self::UNREAD,
             Self::Terminal => Self::RESIDUAL,
         }
     }
@@ -223,9 +242,10 @@ pub fn failure_of(kind: onevcs::FailureKind) -> Failure {
         FailureKind::PushRejected => Failure::Preserving(Preserving::PushRejected),
         FailureKind::SyncConflict => Failure::Preserving(Preserving::SyncConflict),
         // The push landed and only the *read* behind it did not, which is the
-        // opposite of "nothing a further attempt could answer" — so preserving,
-        // and under a word of its own rather than the residual.
-        FailureKind::PushedUnverified => Failure::Preserving(Preserving::PushedUnverified),
+        // opposite of "nothing a further attempt could answer" — and equally not
+        // one of the four above: the tree was never rejected, so what answers it
+        // is another read of the host rather than another dispatch of the agent.
+        FailureKind::PushedUnverified => Failure::Unread,
         // `Gate` is a kind no publication produces any more — `onevcs` 0.11.0
         // runs no gate — and it is routed rather than dropped because the
         // sibling still names it: an arm removed here would be a wildcard by
@@ -374,6 +394,39 @@ pub fn working_session(token: &SessionToken) -> Option<Session> {
 /// not be reported as a different failure because its cleanup also failed.
 pub fn session_close(token: &SessionToken) -> Result<Session> {
     onevcs::close_session(&providers(), token).map_err(refusal)
+}
+
+/// The commit one session's branch was last recorded at, when `onevcs` recorded
+/// one.
+///
+/// Read off the session's **own stream**, and off nothing else, for the reason
+/// [`change_opened_in`] gives: what a branch is at is the repository side's
+/// business, and a second route to it here would be git regrown in the
+/// composition layer. `commit-preserved` is the record that carries it —
+/// `onevcs` emits one, holding the branch and the `sha`, wherever it commits a
+/// session's worktree onto the branch that outlives it.
+///
+/// It is what a settlement names when it says the branch may carry finished
+/// work: a branch alone sends a reader to a ref, and the commit sends them to the
+/// tree.
+///
+/// `None` when nothing recorded one, when the record names no usable commit, and
+/// equally when the stream cannot be read — the caller settles exactly as it
+/// would have, because an unreadable record is not evidence of a branch nobody
+/// committed to. The value is checked where it enters, by [`usable`], for the
+/// reason [`landing_commit_of`] is: a commit is rendered into a settlement, a
+/// view, and an event payload, and one carrying a control character forges a row
+/// wherever it lands.
+pub fn branch_head_in(token: &SessionToken) -> Option<String> {
+    let preserved = kind_of(onevcs::EventKind::CommitPreserved);
+    // The last one wins: a session that committed twice was left at the second.
+    events(token, None)
+        .iter()
+        .rev()
+        .find(|envelope| envelope.kind == preserved)
+        .and_then(|envelope| envelope.payload.get("sha"))
+        .and_then(|sha| sha.as_str())
+        .and_then(usable)
 }
 
 /// The change request one session's work reached, when it reached one.
@@ -1104,7 +1157,6 @@ mod tests {
         Preserving::ChecksUnsettled,
         Preserving::PushRejected,
         Preserving::SyncConflict,
-        Preserving::PushedUnverified,
     ];
 
     /// The words this crate settles a failed publication on and the words the
@@ -1143,7 +1195,7 @@ mod tests {
         let vocabulary: BTreeSet<&str> = EVERY_PRESERVING
             .iter()
             .map(|preserving| preserving.outcome())
-            .chain(std::iter::once(Failure::RESIDUAL))
+            .chain([Failure::UNREAD, Failure::RESIDUAL])
             .collect();
         let produced: BTreeSet<&str> = EVERY_KIND
             .iter()
@@ -1200,17 +1252,30 @@ mod tests {
             .split_once("settle under a word of their own")
             .expect("the README names the failures that settle under a word of their own")
             .1
-            .split_once("leaves the rejected tree")
+            .split_once("The first four leave the rejected tree")
             .expect("that clause ends where the README says what those failures share")
             .0;
         let listed: BTreeSet<&str> = clause.split('`').skip(1).step_by(2).collect();
         let routed: BTreeSet<&str> = EVERY_PRESERVING
             .iter()
             .map(|preserving| preserving.outcome())
+            .chain(std::iter::once(Failure::UNREAD))
             .collect();
         assert_eq!(
             listed, routed,
-            "the README's re-dispatched failures are not the ones this crate re-dispatches"
+            "the README's named failures are not the ones this crate gives a word of its own"
+        );
+        // And that the one whose work is on the origin is recovered by reading
+        // the host rather than by dispatching the agent, which is the whole of
+        // what tells it from the four above it.
+        assert!(
+            readme.contains(&format!("`{}` is answered differently", Failure::UNREAD)),
+            "the README does not say that `{}` is recovered by a re-read",
+            Failure::UNREAD
+        );
+        assert!(
+            readme.contains(crate::engine::MERGE_PATH_READS_ENV),
+            "the README does not name what bounds that re-read"
         );
         assert!(
             readme.contains(&format!("Everything else settles `{}`", Failure::RESIDUAL)),
@@ -1219,15 +1284,17 @@ mod tests {
         );
     }
 
-    /// Which kinds a further attempt can answer, said kind by kind.
+    /// Which kinds a further attempt can answer, said kind by kind — and which
+    /// one a further **read** answers instead.
     ///
     /// That a word of its own *is* a routing decision is no longer assertable —
     /// [`Failure`] makes the two one value, so the inconsistent state has no
-    /// spelling. What still needs saying is which side of the line each kind
-    /// falls on, because that is a judgement about the failure rather than about
-    /// the type: a refused request and an unimplemented seam answer the same way
-    /// however many times they are asked, and a gate that ran on the tree as it
-    /// stands is not the host's report on a change request.
+    /// spelling. What still needs saying is which side of each line a kind falls
+    /// on, because that is a judgement about the failure rather than about the
+    /// type: a refused request and an unimplemented seam answer the same way
+    /// however many times they are asked, a gate that ran on the tree as it
+    /// stands is not the host's report on a change request, and a push that
+    /// reached the remote has nothing about its tree left to fix.
     #[test]
     fn each_kind_is_on_the_side_of_the_line_the_contract_puts_it() {
         let terminal = [
@@ -1242,12 +1309,23 @@ mod tests {
                 "{kind:?} is retried, and asking again would reproduce the diagnosis"
             );
         }
+        // The one kind whose work is already on the origin. It is deliberately
+        // not preserving: sending a worker back to that tree pays for a fresh
+        // clone and a fresh gate to re-push what the remote already has.
+        assert_eq!(
+            failure_of(onevcs::FailureKind::PushedUnverified),
+            Failure::Unread,
+            "a push that reached the remote is answered by re-dispatching the agent"
+        );
         let preserving: BTreeSet<&str> = EVERY_KIND
             .iter()
             .filter(|kind| !terminal.contains(kind))
+            .filter(|kind| **kind != onevcs::FailureKind::PushedUnverified)
             .map(|kind| match failure_of(*kind) {
                 Failure::Preserving(preserving) => preserving.outcome(),
-                Failure::Terminal => panic!("{kind:?} is terminal, so nothing continues it"),
+                Failure::Unread | Failure::Terminal => {
+                    panic!("{kind:?} is not the tree being rejected, so nothing re-dispatches it")
+                }
             })
             .collect();
         assert_eq!(
@@ -1256,14 +1334,16 @@ mod tests {
                 "checks-failed",
                 "checks-unsettled",
                 "push-rejected",
-                "pushed-unverified",
                 "sync-conflict"
             ]),
-            "the failures a further attempt can answer are not the five the contract names"
+            "the failures a further attempt can answer are not the four the contract names"
         );
         // And the residual is one word for all of them, which is what keeps it a
         // residual rather than a fifth name.
         assert_eq!(Failure::Terminal.outcome(), Failure::RESIDUAL);
+        // The word an unread merge path settles on is the one it always was:
+        // what changed is how the node is recovered, not what a reader reads.
+        assert_eq!(Failure::Unread.outcome(), "pushed-unverified");
     }
 
     /// The payload of a session opening, as one of the two producers writes it.
