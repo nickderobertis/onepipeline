@@ -2069,7 +2069,9 @@ mod tests {
         let refuse = validator(
             &dir,
             "refuse.sh",
-            "cat > /dev/null\n             echo \"acceptance criterion 3 names a procedure, not a property\" >&2\nexit 1\n",
+            "cat > /dev/null\n\
+             echo \"acceptance criterion 3 names a procedure, not a property\" >&2\n\
+             exit 1\n",
         );
         let mut graph = graph_of(vec![agent("build", &[])]);
         let before = graph.clone();

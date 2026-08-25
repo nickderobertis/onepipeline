@@ -56,6 +56,28 @@ impl<'de> Deserialize<'de> for NodeId {
     }
 }
 
+/// A node's amendment, as this boundary accepts one.
+///
+/// The crate under test refuses a blank amendment at the reply path, so a blank
+/// one arriving here is that refusal having failed — not an amendment this
+/// validator could judge. A `String` would hold it and the journeys would pass
+/// on a bar nothing states, so the type does not have the value.
+#[derive(Debug)]
+struct Amendment(String);
+
+impl<'de> Deserialize<'de> for Amendment {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let written = String::deserialize(deserializer)?;
+        match written.trim().is_empty() {
+            true => Err(serde::de::Error::custom(
+                "a node crossed carrying a blank amendment, which states no bar this validator \
+                 could judge",
+            )),
+            false => Ok(Self(written)),
+        }
+    }
+}
+
 /// The node as it crosses the validator's stdin.
 ///
 /// A **shape** rather than a bare JSON value: the contract says a plan node
@@ -71,7 +93,7 @@ struct OfferedNode {
     #[serde(default)]
     task: Option<String>,
     #[serde(default)]
-    amendment: Option<String>,
+    amendment: Option<Amendment>,
     #[serde(flatten)]
     rest: serde_json::Map<String, serde_json::Value>,
 }
@@ -81,7 +103,8 @@ impl OfferedNode {
     fn recorded(&self) -> serde_json::Value {
         let mut document = serde_json::Map::new();
         document.insert("id".into(), serde_json::Value::from(self.id.0.clone()));
-        for (key, value) in [("task", &self.task), ("amendment", &self.amendment)] {
+        let amendment = self.amendment.as_ref().map(|held| held.0.clone());
+        for (key, value) in [("task", &self.task), ("amendment", &amendment)] {
             if let Some(value) = value {
                 document.insert(key.into(), serde_json::Value::from(value.clone()));
             }

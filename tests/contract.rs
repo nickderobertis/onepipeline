@@ -1674,7 +1674,8 @@ fn the_amendment_and_validator_surface_is_what_the_divergence_record_names() {
     for heading in [AMENDMENT_HEADING, PLANNER_CONTEXT_HEADING] {
         assert!(
             prose.contains(heading),
-            "the README does not name `{heading}`, which is where this crate renders one of              the two levers"
+            "the README does not name `{heading}`, which is where this crate renders one of \
+             the two levers"
         );
     }
     // And the distinction itself, which is the whole reason both exist: the
@@ -1682,7 +1683,8 @@ fn the_amendment_and_validator_surface_is_what_the_divergence_record_names() {
     assert!(
         prose.contains("adds no acceptance criteria")
             && prose.contains("the worker and the judge reviewing it read the same ruling"),
-        "the README no longer states which lever changes what a node is judged against and          which one only steers its worker"
+        "the README no longer states which lever changes what a node is judged against \
+         and which one only steers its worker"
     );
     // And *when* it binds, which is where the two levers differ in practice and
     // where a paraphrase drifts: the journeys establish that a turn already in

@@ -493,7 +493,8 @@ pub fn validate_node(node: &Node) -> Result<()> {
         .is_some_and(|text| text.trim().is_empty())
     {
         return Err(named(
-            "`amendment` is present and says nothing — give it the ruling it              carries, or leave it out",
+            "`amendment` is present and says nothing — give it the ruling it carries, or leave \
+             it out",
         ));
     }
 
