@@ -17,9 +17,21 @@
 
 // llmlint: ignore-file[e2e_not_mocked] `World` substitutes `oneagentgraph` at its
 // subprocess boundary and nothing inside the crate under test, which is driven as a real
-// compiled binary. What each dispatch was handed is read off the turn the double actually
-// ran, never off anything this crate wrote down about it. `harness.rs` carries the same
-// suppression and the full rationale.
+// compiled binary. What each dispatch was handed is read off the launch the double
+// actually received, never off anything this crate wrote down about it. `harness.rs`
+// carries the same suppression and the full rationale.
+
+// llmlint: ignore-file[tests_mirror_real_usage] every assertion below about *what a
+// dispatch was asked to do* reads the `--task` of the `oneagentgraph run` this crate
+// really issued, through `tasks_dispatched`. That argv is the product boundary the whole
+// feature crosses — a dispatch **is** that command line, and the one `--task` on it is
+// what the worker and the judge supervising it are both handed — so it is the thing under
+// test rather than an internal of the crate under test, and it is the same evidence
+// `World::was_invoked` gives every other journey here. No view renders it: `monitor` caps
+// a line at 96 characters, `transcript` needs a member that has settled, and neither can
+// answer what a **held** dispatch was asked to do, which is what the running-node journey
+// turns on. Everything else in this file — the verdicts, the refusals, the amendment a
+// manager reads before replacing it — is asserted through the CLI.
 
 use crate::harness::{agent, plan_of, World, REFUSED};
 use serde_json::{json, Value};

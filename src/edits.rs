@@ -124,7 +124,8 @@ pub enum Operation {
     /// amendment — and so a reader of the record can see what a node was told,
     /// and when, after a later amendment has replaced it.
     TaskAmended {
-        /// The node.
+        /// The node whose bar this moves — a node the graph still holds and can
+        /// still dispatch, which is what `compile_amend` established.
         node: String,
         /// The binding text, which **replaces** whatever the node carried.
         text: String,
