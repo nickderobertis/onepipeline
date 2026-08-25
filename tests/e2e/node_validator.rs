@@ -104,10 +104,24 @@ fn live_run(world: &World, name: &str, extra: &[&str]) -> String {
     args.push("--detach".to_string());
     let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
     world.run(&borrowed).exited(0);
-    world.until("the held node to be dispatched", |world| {
-        !world.events_of(name, "node-dispatched").is_empty()
+    // Waited out on the view a supervisor watches a run through: `status`
+    // reports a node that is running and how long it has been.
+    world.until("the held node to be running", |world| {
+        world
+            .run(&["status", name])
+            .stdout
+            .contains("slow: running")
     });
     name.to_string()
+}
+
+/// Whether a node has settled, as the view a planner reads an outcome from says.
+fn settled(world: &World, run: &str, node: &str, status: &str) -> bool {
+    world
+        .run(&["results", run])
+        .stdout
+        .lines()
+        .any(|line| line.trim_start().starts_with(node) && line.contains(status))
 }
 
 /// The journey the hook exists for: a node the host's rules refuse never reaches
@@ -149,16 +163,10 @@ fn a_node_the_validator_refuses_is_refused_with_its_own_words_and_never_joins_th
         "{seen:?}"
     );
 
-    // And the graph is unchanged: nothing was committed and nothing dispatched.
+    // And the graph is unchanged: the node the edit would have added is in
+    // neither view a supervisor reads the graph from.
     world.run(&["results", &run]).exited(0).out_lacks("fresh");
-    assert!(
-        world
-            .events_of(&run, "edit-committed")
-            .iter()
-            .all(|event| event["payload"]["command"]["op"] != "add"),
-        "a refused node reached the graph: {:?}",
-        world.events_of(&run, "edit-committed")
-    );
+    world.run(&["status", &run]).exited(0).out_lacks("fresh");
 
     // With the rules satisfied, the same edit goes through and the node runs.
     //
@@ -181,10 +189,7 @@ fn a_node_the_validator_refuses_is_refused_with_its_own_words_and_never_joins_th
         .unwrap_or_else(|e| panic!("`reply` printed something other than its verdict: {e}"));
     assert_eq!(verdict["state"], json!("applied"), "{verdict}");
     world.until("the accepted node to settle", |world| {
-        world
-            .events_of(&run, "node-settled")
-            .iter()
-            .any(|event| event["labels"]["node"] == "fresh")
+        settled(world, &run, "fresh", "done")
     });
     world.release("slow.go");
 }
@@ -225,10 +230,7 @@ fn every_op_that_introduces_or_changes_a_task_is_offered_and_nothing_else_is() {
         .exited(0);
     let run = "validatoroffered".to_string();
     world.until("the node that fails to settle", |world| {
-        world
-            .events_of(&run, "node-settled")
-            .iter()
-            .any(|event| event["labels"]["node"] == "build")
+        settled(world, &run, "build", "failed")
     });
 
     for command in [
@@ -326,6 +328,10 @@ fn the_flag_beats_the_environment_which_beats_the_config_and_naming_none_runs_no
     ] {
         let name = format!("precedence-{which}");
         let path = world.plan(&name, &plan_of(&name, vec![agent("slow", &[])]));
+        // A fresh hold each time: the rendezvous the previous iteration released
+        // is a file, and left in place it satisfies this run's hold the instant
+        // the dispatch reaches it.
+        let _ = std::fs::remove_file(world.fakes.join("slow.go"));
         world.script("slow.wait", "hold");
         let mut args = vec![
             "start".to_string(),
@@ -342,8 +348,11 @@ fn the_flag_beats_the_environment_which_beats_the_config_and_naming_none_runs_no
             None => command.env_remove(spelling("environment")),
         };
         world.run_on(command, "start").exited(0);
-        world.until("the held node to be dispatched", |world| {
-            !world.events_of(&name, "node-dispatched").is_empty()
+        world.until("the held node to be running", |world| {
+            world
+                .run(&["status", &name])
+                .stdout
+                .contains("slow: running")
         });
 
         // A `reply` typed with *no* environment at all is judged by the rules
@@ -389,6 +398,7 @@ fn the_flag_beats_the_environment_which_beats_the_config_and_naming_none_runs_no
         let before = offered(&world).len();
         let name = format!("precedence-none-{at}");
         let path = world.plan(&name, &plan_of(&name, vec![agent("slow", &[])]));
+        let _ = std::fs::remove_file(world.fakes.join("slow.go"));
         world.script("slow.wait", "hold");
         let mut args = vec!["start".to_string(), path.to_string_lossy().into_owned()];
         if names_a_config {
@@ -404,8 +414,11 @@ fn the_flag_beats_the_environment_which_beats_the_config_and_naming_none_runs_no
             None => command.env_remove(spelling("environment")),
         };
         world.run_on(command, "start").exited(0);
-        world.until("the held node to be dispatched", |world| {
-            !world.events_of(&name, "node-dispatched").is_empty()
+        world.until("the held node to be running", |world| {
+            world
+                .run(&["status", &name])
+                .stdout
+                .contains("slow: running")
         });
         // Every validator this journey placed refuses, so an edit that is
         // *applied* is one nothing was asked about.
@@ -539,10 +552,11 @@ fn a_validator_that_says_nothing_and_one_that_cannot_be_started_both_refuse_loud
             "--detach",
         ])
         .exited(0);
-    world.until("the held node to be dispatched", |world| {
-        !world
-            .events_of("validatormissing", "node-dispatched")
-            .is_empty()
+    world.until("the held node to be running", |world| {
+        world
+            .run(&["status", "validatormissing"])
+            .stdout
+            .contains("slow: running")
     });
     world
         .run_with_stdin(
@@ -724,9 +738,15 @@ fn a_config_carrying_a_blank_drafting_graph_still_launches_a_run() {
             ])
             .exited(0)
             .settled();
-        assert_eq!(
-            world.run_json(&name, "result.json")["state"],
-            "complete",
+        // Read from the view a planner reads an outcome from, which is where a
+        // run saying it is complete has to say so.
+        world
+            .run(&["results", &name])
+            .exited(0)
+            .out_has("complete")
+            .out_has("only");
+        assert!(
+            settled(&world, &name, "only", "done"),
             "a config carrying a blank drafting graph no longer runs its plan"
         );
     }

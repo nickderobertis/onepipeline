@@ -308,14 +308,28 @@ fn node_whose_task_is_new<'a>(command: &Command, graph: &'a Graph) -> Option<&'a
     graph.get(id)
 }
 
+/// How much of a validator's stderr reaches the refusal it becomes.
+///
+/// A validator is an external program and its stderr is **external input**: it
+/// is read into this process, rendered into a refusal, surfaced to the planner,
+/// and written to the journal, where every payload text this crate writes is
+/// already bounded. So it is bounded on the way in rather than after it has been
+/// held whole — a validator that printed a gigabyte would otherwise be a
+/// gigabyte in the memory of every `reply` that ran it.
+const MAX_VALIDATOR_STDERR: u64 = crate::event::MAX_PAYLOAD_TEXT_BYTES as u64;
+
 /// Offer one node to the validator this run's launch named, if it named one.
 ///
 /// The node crosses as JSON on the validator's stdin — the same document a plan
 /// file states it in, so a host that already checks plan files reads one shape.
 /// Exit 0 accepts the edit; a non-zero exit refuses it carrying the validator's
 /// own stderr, because the rules are the host's and only it can say which one
-/// this node broke. Its stdout is captured and discarded: this runs inside
-/// `reply`, whose own stdout is the JSON verdict its caller parses.
+/// this node broke. That stderr is external input and is treated as such: read
+/// to [`MAX_VALIDATOR_STDERR`] and no further, and stripped of control
+/// characters, because it is about to be a refusal on a terminal, a surface in a
+/// planner's queue, and a line in the journal. Its stdout goes nowhere at all:
+/// this runs inside `reply`, whose own stdout is the JSON verdict its caller
+/// parses.
 ///
 /// **Fails closed.** A validator that cannot be run is a launch configured
 /// wrongly; accepting the edit anyway would decide that an unenforced rule is no
@@ -333,7 +347,9 @@ fn offer_to_validator(validator: Option<&str>, command: &Command, node: &Node) -
         .map_err(|e| refuse(format!("{op}: node '{}' does not serialize: {e}", node.id)))?;
     let mut child = std::process::Command::new(validator)
         .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
+        // Never inherited and never held: a validator's narration is not the
+        // caller's answer, and this process's own stdout is a parsed verdict.
+        .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| {
@@ -351,22 +367,36 @@ fn offer_to_validator(validator: Option<&str>, command: &Command, node: &Node) -
         use std::io::Write;
         let _ = stdin.write_all(document.as_bytes());
     }
-    // llmlint: ignore[changed_behavior_has_e2e] this arm is the parent's own pipe read
-    // failing while the child is collected — an I/O failure of this process, which no
-    // journey can provoke without breaking the harness that runs it. It is here so the
-    // failure is reported rather than read as a verdict, which is the same fail-closed
-    // rule the spawn above is driven for end to end.
-    let answer = child.wait_with_output().map_err(|e| {
+    // Bounded on the way in, and the rest of the pipe drained so the child is
+    // never left blocked on a reader that stopped reading.
+    let mut stderr = Vec::new();
+    if let Some(pipe) = child.stderr.take() {
+        use std::io::Read;
+        let mut bounded = pipe.take(MAX_VALIDATOR_STDERR);
+        let _ = bounded.read_to_end(&mut stderr);
+        let _ = std::io::copy(&mut bounded.into_inner(), &mut std::io::sink());
+    }
+    // llmlint: ignore[changed_behavior_has_e2e] this arm is this process failing to
+    // collect a child it started — an I/O failure of the parent, which no journey can
+    // provoke without breaking the harness that runs it. It is here so the failure is
+    // reported rather than read as a verdict, which is the same fail-closed rule the
+    // spawn above is driven for end to end.
+    let status = child.wait().map_err(|e| {
         refuse(format!(
             "{op}: the node validator '{validator}' did not answer for node '{}' ({e}), so the \
              edit was not applied",
             node.id
         ))
     })?;
-    if answer.status.success() {
+    if status.success() {
         return Ok(());
     }
-    let said = String::from_utf8_lossy(&answer.stderr).trim().to_string();
+    // Control characters stripped and the whole thing kept to one line: this
+    // reaches a terminal, a planner's queue, and the journal, and a validator
+    // that emitted escape sequences would be writing into all three.
+    let said = crate::views::one_line(&String::from_utf8_lossy(&stderr))
+        .trim()
+        .to_string();
     Err(refuse(format!(
         "{op}: the node validator refused node '{}': {}",
         node.id,
@@ -375,8 +405,7 @@ fn offer_to_validator(validator: Option<&str>, command: &Command, node: &Node) -
             // exists to end, so the exit code is at least something to look at.
             true => format!(
                 "it exited {} and said nothing on stderr",
-                answer
-                    .status
+                status
                     .code()
                     .map_or_else(|| "without a status".to_string(), |code| code.to_string())
             ),
@@ -1963,16 +1992,57 @@ mod tests {
         // And what crossed is the node the edit *produced*, amendment and all —
         // so a host checking a node's bar is checking the bar it will be judged
         // against.
-        let last: Node = serde_json::from_str(
+        let amended: Node = serde_json::from_str(
             std::fs::read_to_string(&seen)
                 .expect("readable")
                 .lines()
                 .filter(|line| !line.trim().is_empty())
                 .nth(2)
-                .expect("the amend's own offering"),
+                .expect("the amend's own offering, third of the four"),
         )
         .expect("it parses");
-        assert_eq!(last.amendment.as_deref(), Some("the ruling"));
+        assert_eq!(amended.amendment.as_deref(), Some("the ruling"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A validator's stderr is external input: bounded on the way in, and stripped
+    /// of the control characters that would otherwise reach a terminal, a
+    /// planner's queue, and the journal.
+    #[test]
+    #[cfg(unix)]
+    fn a_validators_stderr_is_bounded_and_stripped_before_it_becomes_a_refusal() {
+        let dir = scratch("loud");
+        // An escape sequence, then far more output than any payload this crate
+        // writes may carry.
+        let loud = validator(
+            &dir,
+            "loud.sh",
+            "cat > /dev/null\n\
+             printf '\\033[31mrule 3\\033[0m failed\\n' >&2\n\
+             head -c 100000 /dev/zero | tr '\\0' 'x' >&2\n\
+             exit 1\n",
+        );
+        let mut graph = graph_of(vec![agent("build", &[])]);
+        let refusal = compile(
+            &mut graph,
+            &validated_by(&loud),
+            &Command::Add {
+                node: agent("fresh", &[]),
+            },
+        )
+        .expect_err("the validator refused it")
+        .to_string();
+
+        assert!(refusal.contains("rule 3"), "the words were lost: {refusal}");
+        assert!(
+            !refusal.contains('\u{1b}') && !refusal.contains('\n'),
+            "a validator wrote control characters into a refusal: {refusal:?}"
+        );
+        assert!(
+            refusal.len() <= MAX_VALIDATOR_STDERR as usize + 200,
+            "an unbounded validator wrote {} bytes into a refusal",
+            refusal.len()
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
