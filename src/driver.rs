@@ -371,6 +371,13 @@ fn start(args: &StartArgs) -> Result<i32> {
        // against the launch directory — it is a command the host names rather than
        // a document this crate reads, and a name on `PATH` is as legitimate as a
        // path is.
+       // The *presence* of a rung is what decides which one answers; whether what
+       // it holds names a command is settled once, below, for all three alike. So a
+       // flag or a variable that is there and blank means "this launch names none"
+       // rather than falling through to the rung under it — which is what a host
+       // exporting an empty variable to turn the hook off is saying, and what a
+       // `--node-validator "$UNSET"` is saying too. A blank config key never
+       // reaches here: `LaunchConfig::load` refuses one by name.
     let node_validator: Option<String> = args
         .node_validator
         .clone()

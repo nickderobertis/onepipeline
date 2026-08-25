@@ -124,7 +124,9 @@ pub struct StartArgs {
     /// non-zero exit refuses it, with the command's own stderr as the reason.
     /// Naming none is the shipped default and is exactly what a launch did
     /// before this flag existed. Given here it beats `ONEPIPELINE_NODE_VALIDATOR`
-    /// and the launch config's own field.
+    /// and the launch config's own field — including when what it names is
+    /// blank, which is this launch saying it has none rather than a fall-through
+    /// to the rung below.
     #[arg(long, value_name = "COMMAND")]
     pub node_validator: Option<String>,
     /// How often the durable planner-update pacemaker comes due, in seconds.

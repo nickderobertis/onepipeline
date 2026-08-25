@@ -1955,16 +1955,16 @@ pub(crate) fn node_graph(
         .unwrap_or_else(|| oneagentgraph::config::ConfigRef(default_graph.to_string()))
 }
 
-/// The node validator [`NODE_VALIDATOR_ENV`] names, when it names a usable one.
+/// What [`NODE_VALIDATOR_ENV`] says, when it says anything at all.
 ///
-/// An empty value is no validator, not a validator spelled as the empty string:
-/// asked as "is the variable set", a host that exported it empty to *turn the
-/// hook off* would instead get every edit refused by a command that cannot be
-/// started.
+/// *Set* rather than *usable*, which is the whole of what this rung decides: a
+/// variable that is there answers the question, and whether what it holds names
+/// a command is settled once, by the caller, for every rung alike. Set and
+/// blank therefore means "this launch names none" and stops the search rather
+/// than falling through to the config — a host that exported it empty to turn
+/// the hook off would otherwise get whichever validator its config file names.
 pub(crate) fn configured_node_validator() -> Option<String> {
-    std::env::var(NODE_VALIDATOR_ENV)
-        .ok()
-        .filter(|value| !value.is_empty())
+    std::env::var(NODE_VALIDATOR_ENV).ok()
 }
 
 pub(crate) fn configured_node_graph() -> String {

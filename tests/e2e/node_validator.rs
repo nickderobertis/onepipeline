@@ -345,32 +345,69 @@ fn the_flag_beats_the_environment_which_beats_the_config_and_naming_none_runs_no
         world.release("slow.go");
     }
 
-    // And a launch naming none of the three runs no validator at all: the edit
-    // is judged exactly as it was before this hook existed.
-    let before = offered(&world).len();
-    let name = "precedence-none".to_string();
-    let path = world.plan(&name, &plan_of(&name, vec![agent("slow", &[])]));
-    world.script("slow.wait", "hold");
-    let mut command = world.cmd(&["start", &path.to_string_lossy(), "--detach"]);
-    command.env_remove(spelling("environment"));
-    world.run_on(command, "start").exited(0);
-    world.until("the held node to be dispatched", |world| {
-        !world.events_of(&name, "node-dispatched").is_empty()
-    });
-    let mut reply = world.cmd(&["reply", &name]);
-    reply.env_remove(spelling("environment"));
-    world
-        .run_with_stdin_on(
-            reply,
-            &envelope(json!([{"op": "add", "node": agent("fresh", &[])}])),
-        )
-        .exited(0);
-    assert_eq!(
-        offered(&world).len(),
-        before,
-        "a launch that named no validator ran one"
-    );
-    world.release("slow.go");
+    // And three launches that name none: no rung at all, a blank flag, and a
+    // blank variable. The last two are a rung that is *there* and names nothing,
+    // which is a launch saying it has none — not a fall-through to the config,
+    // which names one throughout this journey. A host that exported the variable
+    // empty to turn the hook off would otherwise get the config's validator.
+    for (at, (which, names_a_config, extra, environment)) in [
+        ("no rung at all", false, vec![], None),
+        (
+            "a blank flag",
+            true,
+            vec![spelling("flag"), "   ".to_string()],
+            None,
+        ),
+        ("a blank variable", true, vec![], Some(String::new())),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let before = offered(&world).len();
+        let name = format!("precedence-none-{at}");
+        let path = world.plan(&name, &plan_of(&name, vec![agent("slow", &[])]));
+        world.script("slow.wait", "hold");
+        let mut args = vec!["start".to_string(), path.to_string_lossy().into_owned()];
+        if names_a_config {
+            args.push("--launch-config".to_string());
+            args.push(config.to_string_lossy().into_owned());
+        }
+        args.extend(extra);
+        args.push("--detach".to_string());
+        let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+        let mut command = world.cmd(&borrowed);
+        match &environment {
+            Some(value) => command.env(spelling("environment"), value),
+            None => command.env_remove(spelling("environment")),
+        };
+        world.run_on(command, "start").exited(0);
+        world.until("the held node to be dispatched", |world| {
+            !world.events_of(&name, "node-dispatched").is_empty()
+        });
+        assert_eq!(
+            world.run_json(&name, "launch.json")["node_validator"],
+            Value::Null,
+            "{which} resolved a validator"
+        );
+
+        let mut reply = world.cmd(&["reply", &name]);
+        match &environment {
+            Some(value) => reply.env(spelling("environment"), value),
+            None => reply.env_remove(spelling("environment")),
+        };
+        world
+            .run_with_stdin_on(
+                reply,
+                &envelope(json!([{"op": "add", "node": agent("fresh", &[])}])),
+            )
+            .exited(0);
+        assert_eq!(
+            offered(&world).len(),
+            before,
+            "a launch naming {which} ran a validator"
+        );
+        world.release("slow.go");
+    }
 }
 
 /// The validator a launch resolved is in the launch record, and an `adopt`
@@ -509,6 +546,27 @@ fn a_config_naming_the_key_at_a_version_that_never_had_it_is_refused_by_that_nam
         .exited(REFUSED)
         .err_has(&format!("`{key}`"))
         .err_has(&format!("schema {arrived} key"));
+
+    // A key present and naming nothing is a decision half-written: everything
+    // downstream would read it as a launch that named one, and resolve it to a
+    // command nothing can start. Refused where the document is read.
+    let blank = world.root.join("blank.yaml");
+    std::fs::write(
+        &blank,
+        format!("schema_version: {arrived}\n{key}: \"   \"\n"),
+    )
+    .expect("the config is written");
+    world
+        .run(&[
+            "start",
+            &path.to_string_lossy(),
+            "--launch-config",
+            &blank.to_string_lossy(),
+            "--detach",
+        ])
+        .exited(REFUSED)
+        .err_has(&format!("`{key}`"))
+        .err_has("names nothing");
 
     // The version before this one is still a whole document: it says nothing
     // about validating, which is what a launch naming no validator means, and it

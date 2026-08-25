@@ -358,6 +358,77 @@ fn an_amendment_nothing_will_read_is_refused_by_the_reason_it_was() {
     world.run(&["results", &run]).exited(0).out_lacks(RULING);
 }
 
+/// A plan that states an amendment on a node is a plan whose dispatch is
+/// measured against it — and so is every step of a lifecycle node that carries
+/// one.
+///
+/// The field is on the node rather than only on the op, the way `context` is, so
+/// a planner who already knows the ruling writes it once. And the ruling belongs
+/// to the **node**: every step of one workstream shares one branch and one bar,
+/// so a step dispatched under an amended node is handed it too.
+#[test]
+fn a_plan_may_state_an_amendment_and_every_step_of_an_amended_node_is_handed_it() {
+    let world = World::new("amend-in-plan");
+    world.repository("local-direct", &[]);
+
+    let node = json!({
+        "id": "service",
+        "repo": "service",
+        "title": "feat: land the workstream",
+        "amendment": RULING,
+        "steps": [
+            {"id": "implement", "persona": "engineer",
+             "task": "## What\nimplement\n\n## Additional info\n\nrun the gate.\n"},
+            {"id": "review", "persona": "reviewer", "task": "## What\nreview",
+             "deps": ["implement"]},
+        ],
+    });
+    let path = world.plan("amendplan", &plan_of("amendplan", vec![node]));
+    world
+        .run(&["start", &path.to_string_lossy(), "--attach"])
+        .exited(0)
+        .settled();
+
+    // Every step's own dispatch, read off the `--task` the sibling's launch
+    // carried. A step that never saw the ruling is a step judged against a bar
+    // its node does not have.
+    let dispatched: Vec<String> = world
+        .invocations()
+        .into_iter()
+        .filter(|call| call["tool"] == "oneagentgraph")
+        .filter_map(|call| {
+            let args = call["args"].as_array()?.clone();
+            let at = args.iter().position(|arg| arg == "--task")?;
+            args.get(at + 1)?.as_str().map(str::to_owned)
+        })
+        .filter(|task| {
+            task.starts_with("## What\nimplement") || task.starts_with("## What\nreview")
+        })
+        .collect();
+    assert_eq!(dispatched.len(), 2, "{dispatched:?}");
+    for task in &dispatched {
+        assert!(
+            task.contains(RULING) && task.contains("this section wins"),
+            "a step of an amended node was dispatched without its bar: {task}"
+        );
+    }
+    // And where the step states operational notes, the ruling sits above them.
+    let implement = dispatched
+        .iter()
+        .find(|task| task.starts_with("## What\nimplement"))
+        .expect("the implementing step ran");
+    assert!(
+        implement.find("## Amendment") < implement.find("## Additional info"),
+        "{implement}"
+    );
+
+    // The view a manager reads says the same thing the dispatches were given.
+    world
+        .run(&["results", "amendplan"])
+        .exited(0)
+        .out_has(RULING);
+}
+
 /// An observer may not move a bar, and the refusal names the op it refused.
 ///
 /// What a node is judged against is a decomposition decision the monitor's own
