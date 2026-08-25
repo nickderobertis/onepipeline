@@ -159,17 +159,37 @@ fn main() -> std::process::ExitCode {
 
     // A validator that narrates on stdout is ordinary — a host's rules engine
     // prints what it checked — and none of it is the caller's answer.
-    if let Ok(chatter) = std::fs::read_to_string(dir.join("validator.chatter")) {
+    if let Some(chatter) = scenario(&dir.join("validator.chatter")) {
         println!("{}", chatter.trim());
     }
 
-    match std::fs::read_to_string(dir.join("validator.refuse")) {
-        Ok(reason) => {
+    match scenario(&dir.join("validator.refuse")) {
+        Some(reason) => {
             eprintln!("{invoked_as}: {}", reason.trim());
             flood(&dir);
             std::process::ExitCode::from(1)
         }
-        Err(_) => std::process::ExitCode::SUCCESS,
+        None => std::process::ExitCode::SUCCESS,
+    }
+}
+
+/// What one scenario file states, or `None` when that scenario is simply not set.
+///
+/// A scenario file is this program's input and it is read as one: the file not
+/// being there is the scenario being off, and every *other* way a read can fail
+/// — a directory in its place, a permission, bytes that are not text — is a
+/// scenario that is set to something unreadable, which is not the same answer.
+/// Folded together they would be, and the fold is fail-open: an unreadable
+/// `validator.refuse` would fall through to accepting the node, so a journey
+/// about refusal would pass having proved the opposite.
+fn scenario(path: &std::path::Path) -> Option<String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Some(text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => fake::fail(&format!(
+            "{} is there and this validator cannot read it ({error}), so what it scripts is              unknown rather than unset",
+            path.display()
+        )),
     }
 }
 
@@ -180,7 +200,7 @@ fn main() -> std::process::ExitCode {
 /// in front of a manager. A count this file cannot read as a number of bytes is
 /// a misconfigured scenario rather than a run of zero, so it is reported.
 fn flood(dir: &std::path::Path) {
-    let Ok(asked) = std::fs::read_to_string(dir.join("validator.flood")) else {
+    let Some(asked) = scenario(&dir.join("validator.flood")) else {
         return;
     };
     let Ok(bytes) = asked.trim().parse::<usize>() else {
