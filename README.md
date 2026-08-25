@@ -113,6 +113,39 @@ Every edit is applied or rejected with a reason: `reply` exits `0` when the
 reconciler applied it, `1` when it is queued but not yet reconciled, and `2` when
 it was refused.
 
+Two of those ops reach a node that is already running, and they are deliberately
+not the same lever:
+
+```bash
+onepipeline reply run-1 <<<'{"version":1,"commands":[    # steer the worker
+  {"op":"context","id":"build","note":"the fixture moved to tests/data"}]}'
+onepipeline reply run-1 <<<'{"version":1,"commands":[    # move the bar
+  {"op":"amend","id":"build","text":"The comment lines are out of scope: leave them."}]}'
+```
+
+A `context` note **steers the worker only**. It is rendered under
+`## Planner context` saying of itself that it reports observed state and adds no
+acceptance criteria, it carries exactly one dispatch, and it does not change what
+the node is judged against. An `amend` **does** change that: its text becomes part
+of the node's effective task, rendered under `## Amendment` above the task's
+operational notes and claiming precedence over them, so the worker and the judge
+reviewing it read the same ruling — on that dispatch and on every later one,
+until another `amend` replaces it. A node's current amendment is readable from
+`status` and from `results` before anything replaces it. Without the second lever
+a manager's mid-dispatch ruling reaches the worker and not its judge, and the
+node's own judge can tell it to undo what the manager decided.
+
+`amend` is the planner's; an observing monitor may not issue one, because moving a
+bar is a decomposition decision rather than an observation.
+
+A launch may also name a **node validator** — a command of the host's own, which
+every op that introduces or changes a node's task (`add`, `retry`, a `requeue`
+whose amendment touches `task`, and `amend`) is offered the resulting node to, as
+JSON on its stdin. Exit `0` accepts the edit; a non-zero exit refuses it with the
+command's own stderr as the reason. It is named by `--node-validator COMMAND`, by
+`ONEPIPELINE_NODE_VALIDATOR`, or by a launch config's `node_validator`, in that
+order of precedence; naming none is the default and runs no validator at all.
+
 Read-only views — `runs`, `status`, `host`, `monitor`, `results`, `goals`,
 `transcript`, `telemetry` — report unread surfaces, driver liveness, and
 provider health without touching a run. `status` says what each in-flight node

@@ -1679,6 +1679,14 @@ prose in front of a dispatch: `add`, `retry`, a `requeue` whose amendment touche
 `task`, and `amend`. A launch that names no validator behaves exactly as it does
 today.
 
+An accepted edit is offered to it **twice** — once by the submission check and
+once by the reconciler — because those two run one validator between them, which
+is what makes "applied or rejected with a reason" true: an envelope reaching the
+loop may have been written by a build or a caller that did not check. A node
+validator is a read-only check of one node, so asking it twice asks the same
+question; a refused edit is asked once, because the submission check turns it
+away before anything is queued.
+
 The value is the executable itself, invoked with no arguments of its own: this
 crate names an external program the way it already names `oneagentgraph`, and a
 host needing arguments wraps them in a script — which a host carrying that many

@@ -306,6 +306,15 @@ fn introduced_node<'a>(command: &Command, graph: &'a Graph) -> Option<&'a Node> 
 ///
 /// The validator's stdout is captured and discarded: this runs inside `reply`,
 /// whose own stdout is the JSON verdict its caller parses.
+///
+/// An accepted edit is offered **twice** — once by the submission check and once
+/// by the reconciler — because [`compile`] is the one validator both run, which
+/// is what makes "applied or rejected with a reason" true: an envelope reaching
+/// the loop may have been written by a build or a caller that did not check, and
+/// the reconciler is the last place a refusal still means something. A validator
+/// is a read-only check of one node, so asking it twice asks the same question;
+/// a refused edit is asked once, because the submission check turns it away
+/// before anything is queued.
 fn offer_to_validator(validator: Option<&str>, command: &Command, node: &Node) -> Result<()> {
     let Some(validator) = validator.filter(|command| !command.is_empty()) else {
         return Ok(());

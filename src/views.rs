@@ -3575,6 +3575,62 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// A manager about to replace an amendment can read the one they are
+    /// replacing, from either view.
+    ///
+    /// `amend` replaces rather than appends, so a ruling that is not readable
+    /// *before* the replacement lands is a ruling nobody can weigh against the
+    /// one taking its place. Both views, because deciding to replace one is made
+    /// from either.
+    #[test]
+    fn both_views_render_the_amendment_a_node_is_currently_judged_against() {
+        let root = scratch("amendment");
+        let mut amended = plan();
+        amended.tasks[0].amendment =
+            Some("The four comment lines are out of scope: leave them.".into());
+        write_run(
+            &root,
+            "demo",
+            sys::pid(),
+            &[event(
+                crate::journal::PipelineKind::RunStarted,
+                None,
+                &[("plan", json!(amended))],
+            )],
+        );
+        let paths = RunPaths::under(&root, "demo");
+        let view = RunView::open(&paths).expect("the run reads");
+        let survey = Survey::of(&root);
+        for (which, rendered) in [("status", status(&survey)), ("results", results(&view))] {
+            assert!(
+                rendered.contains("The four comment lines are out of scope: leave them."),
+                "`{which}` does not say what `build` is judged against:\n{rendered}"
+            );
+            assert!(
+                rendered.contains("amend"),
+                "`{which}` renders the text without naming it an amendment:\n{rendered}"
+            );
+        }
+
+        // A node carrying none says nothing, so the absence reads as the absence
+        // rather than as a blank line somebody has to interpret.
+        let plain = scratch("amendment-none");
+        write_run(
+            &plain,
+            "demo",
+            sys::pid(),
+            &[event(
+                crate::journal::PipelineKind::RunStarted,
+                None,
+                &[("plan", json!(plan()))],
+            )],
+        );
+        let view = RunView::open(&RunPaths::under(&plain, "demo")).expect("the run reads");
+        assert!(!results(&view).contains("amendment:"), "{}", results(&view));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&plain).ok();
+    }
+
     #[test]
     fn a_summary_line_is_capped_and_control_stripped() {
         let long = "x".repeat(500);
