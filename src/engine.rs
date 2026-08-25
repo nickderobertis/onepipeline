@@ -15,7 +15,7 @@
 //! would interleave with this loop and corrupt the ledger.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroU64};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
@@ -2120,18 +2120,21 @@ pub(crate) fn merge_path_reads() -> NonZeroU32 {
 
 /// The first backoff between those reads. It doubles, to [`BOUNDARY_BACKOFF_CEILING`].
 ///
-/// Held to that ceiling on the way in as well as on the way up, because this is a
-/// value a *run* waits out: an operator's stray zero, or a value meant as
-/// milliseconds, would otherwise hold a node open for as long as the number says
-/// while a host that answered in a second sat there answering. The ceiling is the
-/// same one every backoff in this crate doubles to, so nothing here waits longer
-/// than anything else does.
+/// Bounded at both ends, because this is a value a *run* waits out. A value meant
+/// as milliseconds would hold a node open for as long as the number says while a
+/// host that answered in a second sat there answering, so it is held to the
+/// ceiling on the way in as well as on the way up — the same one every backoff in
+/// this crate doubles to, so nothing here waits longer than anything else does.
+/// And a stray zero is not a shorter wait but no wait at all: a run that read a
+/// host that had gone dark as fast as the process could ask it, so the
+/// [`NonZeroU64`] parse falls it back to the default for the reason
+/// [`merge_path_reads`] gives about its own zero.
 pub(crate) fn merge_path_backoff() -> Duration {
     Duration::from_secs(
         std::env::var(MERGE_PATH_BACKOFF_ENV)
             .ok()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(DEFAULT_MERGE_PATH_BACKOFF_SECONDS),
+            .and_then(|value| value.parse::<NonZeroU64>().ok())
+            .map_or(DEFAULT_MERGE_PATH_BACKOFF_SECONDS, NonZeroU64::get),
     )
     // llmlint: ignore[changed_behavior_has_e2e] the ceiling's only effect is to make a
     // wait *shorter*, so observing it end to end means a journey that waits two minutes
@@ -2545,7 +2548,7 @@ mod tests {
             merge_path_backoff(),
             Duration::from_secs(DEFAULT_MERGE_PATH_BACKOFF_SECONDS)
         );
-        for unusable in ["", "not a number", "-1", "5.5"] {
+        for unusable in ["", "not a number", "-1", "5.5", "0"] {
             std::env::set_var(MERGE_PATH_BACKOFF_ENV, unusable);
             assert_eq!(
                 merge_path_backoff(),
