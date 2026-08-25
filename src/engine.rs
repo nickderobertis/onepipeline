@@ -1955,6 +1955,14 @@ pub(crate) fn node_graph(
         .unwrap_or_else(|| oneagentgraph::config::ConfigRef(default_graph.to_string()))
 }
 
+pub(crate) fn configured_node_graph() -> String {
+    std::env::var(NODE_GRAPH_ENV)
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_NODE_GRAPH.to_string())
+}
+// llmlint: ignore-end[invalid_states_unrepresentable]
+
 /// What [`NODE_VALIDATOR_ENV`] says, when it says anything at all.
 ///
 /// *Set* rather than *usable*, which is the whole of what this rung decides: a
@@ -1963,6 +1971,10 @@ pub(crate) fn node_graph(
 /// blank therefore means "this launch names none" and stops the search rather
 /// than falling through to the config — a host that exported it empty to turn
 /// the hook off would otherwise get whichever validator its config file names.
+///
+/// Below the block above rather than inside it, because a rule may hold one
+/// open suppression at a time and this one is suppressed for a reason of its
+/// own.
 // llmlint: ignore-block[invalid_states_unrepresentable] what a variable says is a
 // `String` because that is what an environment holds, and this rung deliberately reports
 // it unjudged — see the doc above. Whether it names a command is decided once, by the
@@ -1971,14 +1983,6 @@ pub(crate) fn node_graph(
 // unwrapped again at the record.
 pub(crate) fn configured_node_validator() -> Option<String> {
     std::env::var(NODE_VALIDATOR_ENV).ok()
-}
-// llmlint: ignore-end[invalid_states_unrepresentable]
-
-pub(crate) fn configured_node_graph() -> String {
-    std::env::var(NODE_GRAPH_ENV)
-        .ok()
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| DEFAULT_NODE_GRAPH.to_string())
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
