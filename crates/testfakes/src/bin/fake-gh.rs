@@ -375,14 +375,12 @@ fn origin_of(dir: &Path, repo: &str) -> Option<PathBuf> {
 struct Sha(String);
 
 impl Sha {
-    /// The object id `reported` is, or nothing if it is not one.
     fn parse(reported: &str) -> Option<Self> {
         let reported = reported.trim();
         (reported.len() == 40 && reported.chars().all(|c| c.is_ascii_hexdigit()))
             .then(|| Self(reported.to_ascii_lowercase()))
     }
 
-    /// [`HEAD_SHA`], which is an object id like any other.
     fn placeholder() -> Self {
         Self::parse(HEAD_SHA).unwrap_or_else(|| fake::fail("HEAD_SHA is not an object id"))
     }
@@ -403,6 +401,17 @@ impl Sha {
 /// no such branch, or where git answers something that is not an object id: a
 /// change request over a branch this host cannot see has no better answer.
 fn head_of(dir: &Path, opened: &Opened) -> Sha {
+    // Scripted `gh.head` is a host reporting some commit other than the branch's
+    // tip — the state a real host is in for the seconds after a push it has not
+    // processed, and the one a journey cannot reach by pushing, because every
+    // commit it makes is the tip by the time it asks.
+    if let Some(scripted) = fake::node_script(dir, "gh", "head") {
+        return Sha::parse(&scripted).unwrap_or_else(|| {
+            fake::fail(&format!(
+                "scripted `gh.head` {scripted:?} is not an object id"
+            ))
+        });
+    }
     let Some(origin) = origin_of(dir, &opened.repo) else {
         return Sha::placeholder();
     };

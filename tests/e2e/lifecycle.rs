@@ -1585,6 +1585,10 @@ fn tasks_dispatched_to(world: &World, run: &str, node: &str) -> Vec<String> {
 /// to a change request the host was asked to land.
 const RED: &str = "llmlint completed failure required";
 
+/// A commit this suite never makes, so a host reporting it as a change request's
+/// head is reporting one no publication here pushed.
+const REPLACED_HEAD: &str = "0123456789abcdef0123456789abcdef01234567";
+
 /// The journey the whole change exists for: the host's checks reject a change
 /// the node published, and the node goes back to work on the branch it left
 /// behind instead of failing with nobody to fix it.
@@ -2519,6 +2523,72 @@ fn a_change_auto_publication_the_host_never_lands_settles_checks_unsettled() {
     assert!(
         repo.has_branch(&world, branch),
         "the branch the unlanded change is on was not handed back"
+    );
+}
+
+/// A red required check the host attached to a head this run **replaced** cannot
+/// end the publication.
+///
+/// The whole of what `onevcs` 0.15.0 moved, driven from this crate's own end: a
+/// check is read as being about the commit the publication pushed, so one the
+/// host reports against some other commit is set aside rather than acted on.
+/// Before that binding, a red check left over from a head this run replaced
+/// settled the node `checks-failed` on a verdict that predates the check it
+/// claims to have read.
+///
+/// The contrast with
+/// [`a_node_that_spends_its_publication_budget_settles_naming_every_attempt`] is
+/// the assertion: the same `RED` script, the same required check, and the
+/// opposite ending — because the only thing that differs is which commit this
+/// host says the check belongs to. It settles `checks-unsettled`, which is the
+/// run saying nobody answered about the commit it pushed rather than that CI
+/// said no.
+#[test]
+fn a_red_required_check_on_a_replaced_head_cannot_end_the_publication() {
+    let world = World::new("lifecycle-stalehead").with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "1");
+    let repo = world.repository("change-auto", &[]);
+    world.script(
+        "service.work",
+        "the worker wrote this
+",
+    );
+    world.script("gh.checks", RED);
+    // A commit no publication ever pushed, so every check this host reports is
+    // about a head this run replaced.
+    world.script("gh.head", REPLACED_HEAD);
+    let run = settle(&world, "stalehead", vec![lifecycle("service", &[])]);
+
+    let node = world.run_json(&run, "result.json")["nodes"][0].clone();
+    assert_eq!(node["status"], "failed", "{node}\n{}", why(&world, &run));
+    assert_eq!(
+        node["outcome"],
+        "checks-unsettled",
+        "a red check about a commit this run replaced decided the merge path\n{}",
+        why(&world, &run)
+    );
+    assert_eq!(node["landing"], json!(null), "{node}");
+
+    // The word the operator reads, and the one it is not: a run that waited out
+    // its bound must not report the host as having failed it.
+    let detail = world.events_of(&run, "node-settled")[0]["payload"]["detail"]
+        .as_str()
+        .expect("the settlement says why")
+        .to_string();
+    assert!(
+        detail.contains("1 checks-unsettled"),
+        "the settlement does not name the bound it stopped on: {detail}"
+    );
+    assert!(
+        !detail.contains("checks-failed"),
+        "a check about a replaced head was reported as a check that failed: {detail}"
+    );
+
+    // And the branch is handed back, because this ending preserves like the
+    // other bounded one.
+    let branch = node["branch"].as_str().expect("the node names its branch");
+    assert!(
+        repo.has_branch(&world, branch),
+        "the branch the unsettled change is on was not handed back"
     );
 }
 
