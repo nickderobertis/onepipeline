@@ -469,10 +469,6 @@ struct ProcessGraphRun {
     pid: u32,
     /// Where this launch's output went, and what reads it back.
     output: Output,
-    /// The graph's stderr, drained as it arrives.
-    ///
-    /// `None` for a launch that logs, whose stderr is the file rather than a pipe.
-    stderr: Option<Said>,
     /// Everything the handshake read on its way to an answer. These are the
     /// graph's own lines — its announcement, and anything it wrote before one —
     /// so they are put back at the head of the stream rather than spent on the
@@ -528,41 +524,54 @@ struct Said {
 impl Said {
     /// Start draining `pipe` on a thread of its own.
     ///
-    /// A thread this host will not start leaves the drain finished and empty,
-    /// which reads as a launch that said nothing — the same answer a launch with
-    /// nothing on its stderr gives, and never a wait.
-    fn draining(pipe: std::process::ChildStderr) -> Self {
+    /// `None` is a host that gave a piped launch no handle back — the same
+    /// silence [`Output::Relayed`] records for the other stream — and it is a
+    /// drain that is finished before it starts rather than a second state to
+    /// carry.
+    // llmlint: ignore-block[changed_behavior_has_e2e] the arm below that no journey
+    // reaches is the thread this host would not start, which no plan, flag, or
+    // environment of this crate's decides — and a host that will not start a thread has
+    // already ended every dispatch in the run, each of which is one. What it does when
+    // it is reached is said out loud and is the safe direction: the launch's own message
+    // is missing from its result, which is what a launch that said nothing leaves and
+    // what every journey asserting on a settled node's detail already drives.
+    fn draining(pipe: Option<std::process::ChildStderr>) -> Self {
         let said = Self {
             bytes: Arc::new(Mutex::new(Vec::new())),
             ended: Arc::new(AtomicBool::new(false)),
         };
         let drain = said.clone();
-        if std::thread::Builder::new()
+        let started = std::thread::Builder::new()
             .name(format!("{}-stderr", binary()))
             .spawn(move || {
                 use std::io::Read;
-                let mut pipe = pipe;
                 let mut buffer = [0u8; 4096];
-                loop {
-                    match pipe.read(&mut buffer) {
-                        // The end of the pipe, or a host that will not say more
-                        // about it. Either way there is nothing further to read.
-                        Ok(0) => break,
-                        Ok(read) => held(&drain.bytes).extend_from_slice(&buffer[..read]),
-                        // A read the signal handling interrupted read nothing and
-                        // is not the stream ending; every other failure is.
-                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-                        Err(_) => break,
+                if let Some(mut pipe) = pipe {
+                    loop {
+                        match pipe.read(&mut buffer) {
+                            // The end of the pipe, or a host that will not say
+                            // more about it. Either way there is nothing further.
+                            Ok(0) => break,
+                            Ok(read) => held(&drain.bytes).extend_from_slice(&buffer[..read]),
+                            // A read the signal handling interrupted read nothing
+                            // and is not the stream ending; every other failure is.
+                            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                            Err(_) => break,
+                        }
                     }
                 }
                 drain.ended.store(true, Ordering::Release);
-            })
-            .is_err()
-        {
+            });
+        if let Err(error) = started {
+            eprintln!(
+                "onepipeline: cannot read what `{} run` says on its stderr: {error}; \
+                 this launch will report having said nothing",
+                binary()
+            );
             said.ended.store(true, Ordering::Release);
         }
         said
-    }
+    } // llmlint: ignore-end[changed_behavior_has_e2e]
 
     /// Everything the graph said, once the drain has finished or the patience has
     /// run out.
@@ -623,10 +632,16 @@ fn relayed_lines(
     child: Arc<Mutex<Child>>,
 ) -> impl Iterator<Item = std::io::Result<String>> + Send {
     let (lines, arriving) = mpsc::channel();
-    // Not waited on, and a thread this host will not start closes the channel as
-    // it goes — which is a launch relayed as silent rather than a relay that
-    // hangs.
-    let _ = std::thread::Builder::new()
+    // Not waited on: the channel closing is what says the stream ended.
+    //
+    // llmlint: ignore-block[changed_behavior_has_e2e] the arm no journey reaches is the
+    // thread this host would not start, which nothing a user types decides — and a host
+    // that will not start a thread has already ended every dispatch in the run, each of
+    // which is one. Reached, it closes the channel as it goes, which is a launch relayed
+    // as silent and settled on its own exit status alone — the ending
+    // `a_dispatch_that_produced_nothing_is_asked_again_and_each_attempt_is_journalled`
+    // drives in `tests/e2e/boundary.rs`, and never a relay that hangs.
+    let started = std::thread::Builder::new()
         .name(format!("{}-relay", binary()))
         .spawn(move || {
             for line in reader.lines() {
@@ -635,6 +650,13 @@ fn relayed_lines(
                 }
             }
         });
+    if let Err(error) = started {
+        eprintln!(
+            "onepipeline: cannot read `{} run`'s output: {error}; this launch is relayed \
+             as silent and settles on the exit status alone",
+            binary()
+        );
+    } // llmlint: ignore-end[changed_behavior_has_e2e]
     std::iter::from_fn(move || loop {
         match arriving.recv_timeout(RELAY_POLL) {
             Ok(line) => return Some(line),
@@ -712,11 +734,19 @@ pub struct Launch<'a> {
 /// refusal already sitting on its pipe.
 #[derive(Debug)]
 enum Output {
-    /// Piped here. The reader lives on this side rather than on the child
-    /// because the handshake reads the first line off it and
-    /// [`events`](GraphRun::events) reads the rest; `None` is that stream handed
-    /// on, not a relayed launch that never had one.
-    Relayed(Option<BufReader<std::process::ChildStdout>>),
+    /// Piped here, and read on this side: both streams belong to the arm that
+    /// has them, so a logged launch cannot be holding a drain of a pipe it was
+    /// never given.
+    Relayed {
+        /// The reader lives on this side rather than on the child because the
+        /// handshake reads the first line off it and
+        /// [`events`](GraphRun::events) reads the rest; `None` is that stream
+        /// handed on, not a relayed launch that never had one.
+        stdout: Option<BufReader<std::process::ChildStdout>>,
+        /// This launch's stderr, drained as it arrives rather than read when
+        /// somebody asks — see [`Said`].
+        stderr: Said,
+    },
     /// Appended to this file. It is the only place a refusal's message exists
     /// for a launch that logs, and it holds one launch's output and no other:
     /// the only caller that logs is `start --detach`, into a run directory
@@ -842,19 +872,21 @@ impl ProcessGraphRun {
         // cannot come apart: a relayed launch reads its pipe even on the host
         // where taking the handle back off the child somehow gave nothing, and
         // reports that silence as the launch failing to answer.
+        //
+        // The stderr drain starts here rather than reading when somebody asks:
+        // the reader of a pipe waits for every writing handle to close, and what
+        // this launch is owed is what *its* process said.
         let output = match output {
-            GraphOutput::Relayed => Output::Relayed(child.stdout.take().map(BufReader::new)),
+            GraphOutput::Relayed => Output::Relayed {
+                stdout: child.stdout.take().map(BufReader::new),
+                stderr: Said::draining(child.stderr.take()),
+            },
             GraphOutput::Logged(path) => Output::Logged(path.to_path_buf()),
         };
-        // Drained from here rather than read when somebody asks: the reader of a
-        // pipe waits for every writing handle to close, and what this launch is
-        // owed is what *its* process said. A logged launch has no pipe to drain.
-        let stderr = child.stderr.take().map(Said::draining);
         Ok(Self {
             child: Arc::new(Mutex::new(child)),
             pid,
             output,
-            stderr,
             started_with: Vec::new(),
             run_id: None,
         })
@@ -891,7 +923,7 @@ impl ProcessGraphRun {
         // On where the output went, not on whether a stream happens to be in
         // hand: those are the same question only as long as they agree.
         let piped = match &mut self.output {
-            Output::Relayed(stdout) => stdout.take(),
+            Output::Relayed { stdout, .. } => stdout.take(),
             // Written to a file, so the answer is read from there.
             Output::Logged(_) => return self.await_logged_line(),
         };
@@ -944,7 +976,12 @@ impl ProcessGraphRun {
                 let announcement = read.last().and_then(|line| envelope_of(line));
                 let announced = announcement.is_some();
                 self.run_id = announcement.as_ref().and_then(announced_run);
-                self.output = Output::Relayed(Some(reader));
+                // Put back rather than reassigned: this arm is the one the
+                // reader came off a moment ago, and its drain of the other
+                // stream has been running since the launch.
+                if let Output::Relayed { stdout, .. } = &mut self.output {
+                    *stdout = Some(reader);
+                }
                 self.started_with = read;
                 match error {
                     Some(error) => Err(sibling(format!(
@@ -1066,7 +1103,7 @@ impl ProcessGraphRun {
     fn evidence(&mut self) -> String {
         let text = match &self.output {
             Output::Logged(path) => std::fs::read_to_string(path).unwrap_or_default(),
-            Output::Relayed(_) => self.said(),
+            Output::Relayed { .. } => self.said(),
         };
         let trimmed = text.trim();
         if trimmed.is_empty() {
@@ -1089,7 +1126,7 @@ impl ProcessGraphRun {
     pub fn events(&mut self) -> Box<dyn Iterator<Item = Result<Envelope>> + Send> {
         let piped = match &mut self.output {
             // Taken for good: the stream is the caller's from here.
-            Output::Relayed(stdout) => stdout.take(),
+            Output::Relayed { stdout, .. } => stdout.take(),
             // A logged launch's envelopes are in its file, which stays named —
             // its refusal is still read from there.
             Output::Logged(_) => None,
@@ -1138,8 +1175,14 @@ impl ProcessGraphRun {
     }
 
     /// Everything this launch said on its stderr, as the drain has it.
+    ///
+    /// A logged launch has no drain — its stderr is the file — and its own
+    /// reader of that file is [`evidence`](Self::evidence).
     fn said(&self) -> String {
-        self.stderr.as_ref().map(Said::settled).unwrap_or_default()
+        match &self.output {
+            Output::Relayed { stderr, .. } => stderr.settled(),
+            Output::Logged(_) => String::new(),
+        }
     }
 
     /// The started process's id, for the ledger's record of what is running.
