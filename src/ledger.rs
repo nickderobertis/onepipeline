@@ -20,10 +20,9 @@
 //! build that is not this one, which is a fact about versions and not a typo to
 //! catch. Refusing it takes away the *whole* record over one key, and a run root
 //! whose launch record cannot be read is a run that vanishes from the view an
-//! operator opens to see what is running on their host. That is not
-//! hypothetical: on one host on 2026-08-24 the whole-host view refused 148 run
-//! roots this way. Read permissively, adding a field can never break a reader
-//! again — no per-version migration, no compatibility shim.
+//! operator opens to see what is running on their host. Read permissively,
+//! adding a field can never break a reader again — no per-version migration, no
+//! compatibility shim.
 //!
 //! This is the opposite rule from the one that governs a **plan**, an
 //! **executor-rules file**, a **launch config**, or a **reply envelope**. Those
@@ -43,11 +42,10 @@
 //! dropped on the floor.
 //!
 //! **So retire a field or a variant, never delete one.** Permissive parsing
-//! fixes the additive half only. A record naming something whose *meaning* this
-//! build removed is one it cannot act on however leniently it parses — which is
-//! the second field the 148 above divided into, and an accepted one-off loss
-//! rather than something to engineer around. What stops the next one is keeping
-//! a retired field or variant recognised and **inert**: leave it declared, stop
+//! fixes the additive half only: a record naming something whose *meaning* this
+//! build removed is one it cannot act on however leniently it parses, and that
+//! loss is accepted rather than engineered around. What stops it is keeping a
+//! retired field or variant recognised and **inert**: leave it declared, stop
 //! writing it, `#[serde(default, skip_serializing_if = …)]` so it is omitted
 //! from anything written now, and say in its doc comment that it is retired.
 //! A build that reads it then goes on reading every record already on disk.

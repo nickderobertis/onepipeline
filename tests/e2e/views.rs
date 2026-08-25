@@ -1730,12 +1730,11 @@ fn a_run_root_the_views_refuse_is_named_with_its_reason() {
 /// A run whose launch record carries a field this build has never had is **read**,
 /// and the whole-host view reports the run.
 ///
-/// The defect this replaces, measured on one host on 2026-08-24: the launch
-/// record was deserialized strictly, so a key another build of this crate wrote
-/// — `channel_id`, a field later removed — took the *whole* record with it, and
-/// 148 run roots were invisible to the view an operator opens to see what is
-/// running on their machine. The refusal even named the field, which is what
-/// makes it the wrong answer: this build knew exactly what it was refusing over.
+/// The defect this replaces: the launch record was deserialized strictly, so a
+/// key another build of this crate wrote took the *whole* record with it, and
+/// the run vanished from the view an operator opens to see what is running on
+/// their machine. The refusal even named the field, which is what makes it the
+/// wrong answer: this build knew exactly what it was refusing over.
 ///
 /// The record here is the one this build wrote for a real run driven through the
 /// CLI, with the stranger's key added to it — so what is proved is a record that
@@ -1763,7 +1762,6 @@ fn a_run_whose_record_carries_a_field_this_build_never_had_is_still_reported() {
         rendered.out_lacks("run root(s) skipped");
         rendered.out_lacks("channel_id");
     }
-    // And the run still opens by name, with everything the record says about it.
     world.run(&["results", &run]).exited(0).out_has(&run);
 }
 
@@ -2058,6 +2056,46 @@ fn host_renders_a_live_dispatch_read_from_a_different_zone_than_its_driver_recor
         "a live dispatch was reported dead to a reader standing in another zone:\n{}",
         rendered.stdout
     );
+    world.release("build.go");
+}
+
+/// And a live dispatch whose ownership lock another build wrote is one too.
+///
+/// The lock is what proves a *dispatch* is being driven, so a key this build
+/// does not know used to answer `the run's ownership lock cannot be read` — the
+/// run reads as one nothing can prove is running, on a host where it plainly is.
+/// A field it does not know is now ignored, and the row is the row.
+#[test]
+fn host_renders_a_live_dispatch_whose_lock_another_build_wrote() {
+    let world = World::new("views-newer-lock");
+    world.script("build.wait", "hold");
+    let path = world.plan(
+        "newer-lock",
+        &plan_of("newer-lock", vec![agent("build", &[])]),
+    );
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+    world.until("the dispatch to be in flight", |world| {
+        !world.events_of("newer-lock", "node-dispatched").is_empty()
+    });
+
+    // llmlint: ignore-block[tests_mirror_real_usage] no verb of this build writes a key
+    // this build does not have, so the only way to hold a lock another build took is to
+    // put the key on the one this build's own driver took. The run, the dispatch, and the
+    // claim below are the real binary end to end.
+    let lock = world.run_file("newer-lock", "owner.lock");
+    let mut written: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&lock).expect("the run's ownership lock"))
+            .expect("an ownership lock");
+    written["claimed_for"] = serde_json::json!("a build that came later");
+    std::fs::write(&lock, written.to_string()).expect("a lock another build took");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    let rendered = world.run(&["host"]);
+    rendered.exited(0).out_has("newer-lock").out_has("build");
+    rendered.out_lacks("ownership lock cannot be read");
+    rendered.out_lacks("no live dispatches");
     world.release("build.go");
 }
 

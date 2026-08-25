@@ -868,6 +868,54 @@ fn a_record_whose_terminator_never_landed_is_not_a_record_yet() {
     assert_eq!(recorded[0]["offset"], json!(offset));
 }
 
+/// A loss another build of this crate recorded is still reported.
+///
+/// The loss log is read line by line and a line this build cannot read is
+/// dropped, so a key another build wrote used to cost exactly the thing the file
+/// exists for: the loss goes unmentioned, and the run reads as one whose record
+/// of itself is whole. A field it does not know is now ignored instead, and the
+/// loss is on the view.
+#[test]
+fn a_loss_another_build_recorded_is_still_reported() {
+    let (world, run) = settled_run("journal-newer-loss");
+    let journal = world.run_file(&run, "events.jsonl");
+    let whole = std::fs::read_to_string(&journal).expect("the journal reads");
+    let fragment = leave_a_fragment(&journal, 120);
+    world
+        .run(&[
+            "surface",
+            &run,
+            "--kind",
+            "check-in",
+            "--message",
+            "the run is still going",
+        ])
+        .exited(0)
+        .err_has("discarded a");
+
+    // llmlint: ignore-block[tests_mirror_real_usage] no append this build makes writes a
+    // key this build does not have, so the only way to hold a loss another build recorded
+    // is to put the key on the one this build wrote. The loss itself is real — a fragment
+    // healed by the running binary — and the claim below is read off the CLI.
+    let losses = world.run_file(&run, "events.jsonl.torn");
+    let recorded = read_torn_log(&losses);
+    assert_eq!(recorded.len(), 1, "{recorded:?}");
+    let mut written = recorded[0].clone();
+    written["healed_by_build"] = json!("a build that came later");
+    std::fs::write(&losses, format!("{written}\n")).expect("a loss another build recorded");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    world.run(&["status", &run]).exited(0).out_has(&format!(
+        "1 fragment discarded at append: byte {} ({} bytes)",
+        whole.len(),
+        fragment.len()
+    ));
+    world
+        .run(&["results", &run])
+        .exited(0)
+        .out_has("this run's record of itself is incomplete");
+}
+
 /// The fragments an append healed out of one store, as it recorded them.
 fn read_torn_log(path: &std::path::Path) -> Vec<Value> {
     std::fs::read_to_string(path)

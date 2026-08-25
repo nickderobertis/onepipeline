@@ -2443,8 +2443,7 @@ fn stopping_a_run_whose_registry_cannot_be_read_refuses_and_leaves_the_run_retry
 /// back by another, so a key one of them does not know is a fact about versions
 /// rather than a typo to catch — and refusing the registry over it makes the
 /// verb that ends a run answer `cannot establish what it is running` about a
-/// dispatch it can see perfectly well. The same strictness, on the launch record
-/// beside this one, hid 148 run roots from one host's whole-host view.
+/// dispatch it can see perfectly well.
 ///
 /// The entry is the one the **live dispatch itself wrote**, with a stranger's key
 /// put on it, so what is proved is an otherwise entirely ordinary record — which
@@ -2467,7 +2466,6 @@ fn a_registry_entry_from_another_build_is_read_and_its_work_is_still_stopped() {
     });
     let tree: Vec<u32> = std::iter::once(driver).chain(descendants(driver)).collect();
 
-    // Every entry the run's own dispatches recorded, given the key.
     let registry = world.run_file(&run, "dispatches");
     let entries: Vec<std::path::PathBuf> = std::fs::read_dir(&registry)
         .expect("the registry the run created")

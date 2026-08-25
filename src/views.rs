@@ -2248,7 +2248,6 @@ mod tests {
         .expect("a launch record");
         written["channel_id"] = json!("a field a later build removed");
         std::fs::write(newer.launch(), written.to_string()).expect("a launch record");
-        // A directory that records no launch at all.
         std::fs::create_dir_all(root.join("no-launch")).expect("a directory with no launch");
         // And one whose launch record is not a launch record: a document with
         // none of what this build needs to say anything about the run.
@@ -2261,7 +2260,6 @@ mod tests {
         assert_eq!(survey.views.len(), 2, "{:?}", survey.skipped);
         assert_eq!(survey.skipped.len(), 2, "{:?}", survey.skipped);
 
-        // Both runs that read are listed, beside the two roots that did not.
         for rendered in [
             runs(&root, false, "session-a"),
             status(&survey),

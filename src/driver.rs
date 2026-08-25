@@ -2462,7 +2462,6 @@ mod tests {
         // running, and the stop proceeds on the records that remain.
         assert!(roots_to_stop(&paths, &launch).is_ok());
 
-        // An entry from another build of this crate: read, and aimed at.
         std::fs::write(
             paths.dispatch(usable.pid, 0),
             serde_json::to_string(&serde_json::json!({

@@ -1943,11 +1943,9 @@ mod tests {
     #[cfg(windows)]
     const SHELL_IMAGE: &str = "cmd.exe";
 
-    /// The leaf every fixture tree ends in.
     #[cfg(windows)]
     const LEAF_IMAGE: &str = "PING.EXE";
 
-    /// How long a fixture waits for the level below one to appear.
     #[cfg(windows)]
     const LEVEL_PATIENCE: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -2455,9 +2453,7 @@ mod tests {
     /// aimed at one of them meets a process that is terminated and not yet gone,
     /// which is `PartlySignalled` — and `stop_and_confirm` returned that
     /// *immediately*, skipping the bounded confirmation written for exactly this
-    /// race. `onepipeline stop` then refused a teardown it had completed, which
-    /// on the `cross (windows-latest)` leg is three `adoption::` journeys failing
-    /// on a stop that exited 2, and a release blocked behind them.
+    /// race, so `onepipeline stop` refused a teardown it had completed.
     ///
     /// The probe is substituted and the decision is not: what a host says about
     /// a process is the platform's, and what a teardown concludes from it is
