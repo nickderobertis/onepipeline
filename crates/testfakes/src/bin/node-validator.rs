@@ -187,18 +187,29 @@ fn scenario(path: &std::path::Path) -> Option<String> {
         Ok(text) => Some(text),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => fake::fail(&format!(
-            "{} is there and this validator cannot read it ({error}), so what it scripts is              unknown rather than unset",
+            "{} is there and this validator cannot read it ({error}), so what it scripts \
+             is unknown rather than unset",
             path.display()
         )),
     }
 }
 
+/// The largest trace a scenario may ask this validator to dump.
+///
+/// Two orders of magnitude past the loudest journey and three past the caller's
+/// own `MAX_VALIDATOR_STDERR`, so every scenario worth writing fits under it —
+/// and a file asking for more is a typo rather than a louder validator, which is
+/// worth saying before this program allocates it.
+const MAX_FLOOD_BYTES: usize = 1 << 20;
+
 /// Write as much further stderr as the scenario asks for.
 ///
 /// A rules engine that dumps its whole trace after the sentence that matters is
 /// ordinary, and what the caller must not do is hold all of it or put all of it
-/// in front of a manager. A count this file cannot read as a number of bytes is
-/// a misconfigured scenario rather than a run of zero, so it is reported.
+/// in front of a manager. The count is this program's input and is read as one:
+/// a value that is not a number of bytes, or one past [`MAX_FLOOD_BYTES`], is a
+/// misconfigured scenario rather than a run of zero, so it is reported instead
+/// of allocated.
 fn flood(dir: &std::path::Path) {
     let Some(asked) = scenario(&dir.join("validator.flood")) else {
         return;
@@ -209,5 +220,11 @@ fn flood(dir: &std::path::Path) {
             asked.trim()
         ));
     };
+    if bytes > MAX_FLOOD_BYTES {
+        fake::fail(&format!(
+            "validator.flood asks for {bytes} bytes of trace, past the {MAX_FLOOD_BYTES} this \
+             validator will write; a scenario needs far less to prove a refusal stays bounded"
+        ));
+    }
     eprintln!("{}", "x".repeat(bytes));
 }
