@@ -373,6 +373,51 @@ fn the_flag_beats_the_environment_which_beats_the_config_and_naming_none_runs_no
     world.release("slow.go");
 }
 
+/// The validator a launch resolved is in the launch record, and an `adopt`
+/// replays it rather than re-reading an environment that has since moved.
+///
+/// It is resolved **once**, before the run exists, out of three names a later
+/// process has no way to resolve the same way: a fresh driver started from
+/// another shell — with another `ONEPIPELINE_NODE_VALIDATOR`, or none — would
+/// otherwise judge the run's edits by rules its launch never chose.
+#[test]
+fn the_resolved_validator_is_in_the_launch_record_and_survives_an_adoption() {
+    let world = World::new("validator-adopt");
+    let chosen = validator_named(&world, "by-flag");
+    let elsewhere = validator_named(&world, "somewhere-else");
+    let name = "validatoradopt";
+    let path = world.plan(name, &plan_of(name, vec![agent("only", &[])]));
+
+    // Launched under an environment naming a *different* validator, so what the
+    // record carries is what the launch resolved rather than what was ambient.
+    let mut launch = world.cmd(&[
+        "start",
+        &path.to_string_lossy(),
+        &spelling("flag"),
+        &chosen,
+        "--attach",
+    ]);
+    launch.env(spelling("environment"), &elsewhere);
+    world.run_on(launch, "start").exited(0).settled();
+    assert_eq!(
+        world.run_json(name, "launch.json")["node_validator"],
+        json!(chosen),
+        "the launch record does not carry the validator the launch resolved"
+    );
+
+    // And a fresh driver takes up what its launch chose. Adopted from a shell
+    // whose environment names the other one, which is exactly the drift this
+    // guards against.
+    let mut adopt = world.cmd(&["adopt", name]);
+    adopt.env(spelling("environment"), &elsewhere);
+    world.run_on(adopt, "adopt").exited(0);
+    assert_eq!(
+        world.run_json(name, "launch.json")["node_validator"],
+        json!(chosen),
+        "the adoption replaced the validator its launch resolved"
+    );
+}
+
 /// A validator that refuses without saying anything is still not silent, and one
 /// that cannot be started refuses the edit rather than letting the node through.
 ///
