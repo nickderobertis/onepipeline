@@ -1914,8 +1914,8 @@ mod tests {
                 id: "docs".into(),
                 text: "the ruling".into(),
             },
-            // Offered: its amendment rewrites the task.
             Command::Cancel { id: "docs".into() },
+            // Offered: this requeue's amendment rewrites the task.
             Command::Requeue {
                 id: "docs".into(),
                 amend: Some(
@@ -1925,8 +1925,9 @@ mod tests {
                         .clone(),
                 ),
             },
-            // Not offered: neither changes what a dispatch is asked to do.
             Command::Cancel { id: "fresh".into() },
+            // Not offered: this one raises a turn budget, which changes nothing
+            // a dispatch is asked to do — and neither does a cancel or a note.
             Command::Requeue {
                 id: "fresh".into(),
                 amend: Some(

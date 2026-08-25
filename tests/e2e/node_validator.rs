@@ -157,14 +157,25 @@ fn a_node_the_validator_refuses_is_refused_with_its_own_words_and_never_joins_th
     );
 
     // With the rules satisfied, the same edit goes through and the node runs.
+    //
+    // The validator narrates on stdout while it does, the way a host's rules
+    // engine does — and none of it reaches `reply`'s own stdout, which is a
+    // machine-readable verdict its caller parses. A validator that could write
+    // into it could make an applied edit unreadable, or read as a different one.
     std::fs::remove_file(world.fakes.join("validator.refuse")).expect("the rule is lifted");
-    world
-        .run_with_stdin(
-            &["reply", &run],
-            &envelope(json!([{"op": "add", "node": agent("fresh", &[])}])),
-        )
+    let narration = "checked 14 rules against the resolved review bar";
+    world.script("validator.chatter", narration);
+    let applied = world.run_with_stdin(
+        &["reply", &run],
+        &envelope(json!([{"op": "add", "node": agent("fresh", &[])}])),
+    );
+    applied
         .exited(0)
-        .out_has("\"applied\"");
+        .out_has("\"applied\"")
+        .out_lacks(narration);
+    let verdict: Value = serde_json::from_str(applied.stdout.trim())
+        .unwrap_or_else(|e| panic!("`reply` printed something other than its verdict: {e}"));
+    assert_eq!(verdict["state"], json!("applied"), "{verdict}");
     world.until("the accepted node to settle", |world| {
         world
             .events_of(&run, "node-settled")
@@ -220,11 +231,12 @@ fn every_op_that_introduces_or_changes_a_task_is_offered_and_nothing_else_is() {
         json!({"op": "add", "node": agent("fresh", &[])}),
         json!({"op": "retry", "id": "build", "node": agent("build-2", &[])}),
         json!({"op": "amend", "id": "spare", "text": "the ruling"}),
-        // Offered: its amendment rewrites the task.
         json!({"op": "cancel", "id": "spare"}),
+        // Offered: this requeue's amendment rewrites the task.
         json!({"op": "requeue", "id": "spare", "amend": {"task": "## What\nsomething else"}}),
-        // Not offered: neither changes what a dispatch is asked to do.
         json!({"op": "cancel", "id": "spare"}),
+        // Not offered: this one raises a turn budget, which changes nothing a
+        // dispatch is asked to do — and neither does a cancel or a note.
         json!({"op": "requeue", "id": "spare", "amend": {"max_turns": 9}}),
         json!({"op": "context", "id": "spare", "note": "the fixture moved"}),
     ] {

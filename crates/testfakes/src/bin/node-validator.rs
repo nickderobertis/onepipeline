@@ -15,6 +15,9 @@
 //!   `validator.silent`   present → refuse without reading stdin and without
 //!                        saying anything, which is the answer a caller still
 //!                        has to be able to act on
+//!   `validator.chatter`  present → write this file's text to **stdout** before
+//!                        answering, the way a host's rules engine narrates what
+//!                        it checked
 //!
 //! Every invocation is recorded to `validator.jsonl`, each line carrying the
 //! **name the validator was invoked as** and the node it was given — so a
@@ -70,6 +73,12 @@ fn main() -> std::process::ExitCode {
         &dir.join("validator.jsonl"),
         &serde_json::json!({"as": invoked_as, "node": node}).to_string(),
     );
+
+    // A validator that narrates on stdout is ordinary — a host's rules engine
+    // prints what it checked — and none of it is the caller's answer.
+    if let Ok(chatter) = std::fs::read_to_string(dir.join("validator.chatter")) {
+        println!("{}", chatter.trim());
+    }
 
     match std::fs::read_to_string(dir.join("validator.refuse")) {
         Ok(reason) => {
