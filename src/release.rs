@@ -81,8 +81,12 @@ pub const WAIT_SURFACE_KIND: &str = "release-wait";
 /// it is waiting on.
 type Key = (String, String);
 
-/// One answer, on its way back from the asker to the reconcile loop.
-type Answered = (Key, Answer);
+/// One answer, on its way back from the asker to the reconcile loop, and every
+/// wait [`questions_of`] put the question on behalf of.
+///
+/// One message for all of them, so the loop applies them in one go and two nodes
+/// awaiting one release are never caught disagreeing about it.
+type Answered = (Vec<Key>, Answer);
 
 /// Which rung of the adoption chain one node resolves to.
 ///
@@ -139,6 +143,18 @@ pub(crate) enum Answer {
     /// The work has not reached its base, so there is no release to ask about.
     NotLanded,
 }
+
+/// How a wait names an awaited release **nothing has answered yet**.
+///
+/// Deliberately not [`Answer::NotAnswered`], which is a probe this host *ran*
+/// and got no usable answer out of and which sends its reader to go and look at
+/// that probe. This one is a question still out, which is the state every wait
+/// is in before its first probe completes.
+///
+/// A wait with no question to put at all — no reference the sibling resolves work
+/// by, or no target that answers — is neither: nothing will ever answer it, and
+/// [`Answer::NotAnswered`] is what that is.
+const NO_ANSWER_YET: &str = "no-answer-yet";
 
 impl Answer {
     /// The word an event payload and a rendering name this answer with.
@@ -228,6 +244,17 @@ impl Dependency {
         self.branch.as_deref().or(self.commit.as_deref())
     }
 
+    /// Whether there is a question about this dependency to put at all.
+    ///
+    /// Both halves are needed to ask one: the reference the sibling resolves the
+    /// work by, and the style that says where the answer comes from. A dependency
+    /// missing either is one no probe is ever run for, so its wait is not one
+    /// still expecting a first answer — it is [`Answer::NotAnswered`], which is
+    /// what a question that could not be put is.
+    fn askable(&self) -> bool {
+        self.reference().is_some() && self.style.is_some()
+    }
+
     /// The row this dependency renders as in a fast-adoption node's task.
     fn row(&self) -> CrossRepoReference {
         CrossRepoReference {
@@ -274,11 +301,12 @@ impl Repositories {
     }
 }
 
-/// One question the asker puts to `onevcs`.
+/// One question the asker puts to `onevcs`, and every wait it answers — see
+/// [`questions_of`] for why those are not the same count.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Question {
-    /// The node and dependency the answer belongs to.
-    key: Key,
+    /// Every node-and-dependency pair this one answer belongs to.
+    keys: Vec<Key>,
     /// What the landed work is named by.
     reference: String,
     /// The target, or `None` for the repository's own default.
@@ -387,7 +415,7 @@ fn ask_until_dropped(asked: &Receiver<Vec<Question>>, answered: &Sender<Answered
                 &question.reference,
                 question.target.as_ref(),
             ));
-            if answered.send((question.key.clone(), answer)).is_err() {
+            if answered.send((question.keys.clone(), answer)).is_err() {
                 return;
             }
         }
@@ -514,34 +542,21 @@ impl Watch {
     /// is ready to start, and every fast-adoption node still running. Neither
     /// blocks on anything.
     pub(crate) fn refresh(&mut self, paths: &RunPaths, state: &RunState, watching: &[Node]) {
-        for (key, answer) in self.asker.answered() {
-            self.answers.insert(key, answer);
-        }
-        let now = crate::sys::now_millis();
-        let mut questions: Vec<Question> = Vec::new();
-        for node in watching {
-            let dependencies = self.resolve(paths, state, node);
-            for dependency in dependencies {
-                let key = (node.id.clone(), dependency.dep.clone());
-                self.since.entry(key.clone()).or_insert(now);
-                let Some(reference) = dependency.reference() else {
-                    continue;
-                };
-                let Some(style) = dependency.style else {
-                    // The repository declares no target that answers, so there is
-                    // nothing to ask. The wait stands: an unanswerable question is
-                    // not an answer that the release has happened.
-                    continue;
-                };
-                questions.push(Question {
-                    key,
-                    reference: reference.to_owned(),
-                    target: dependency.target.clone(),
-                    style,
-                });
+        for (keys, answer) in self.asker.answered() {
+            for key in keys {
+                self.answers.insert(key, answer.clone());
             }
         }
-        self.asker.ask(questions);
+        let now = crate::sys::now_millis();
+        let mut waits: Vec<(Key, Dependency)> = Vec::new();
+        for node in watching {
+            for dependency in self.resolve(paths, state, node) {
+                let key = (node.id.clone(), dependency.dep.clone());
+                self.since.entry(key.clone()).or_insert(now);
+                waits.push((key, dependency));
+            }
+        }
+        self.asker.ask(questions_of(&waits));
     }
 
     /// Whether every release one node awaits has arrived.
@@ -626,13 +641,19 @@ impl Watch {
                 continue;
             }
             self.surfaced.insert(node.clone(), Instant::now());
+            // The surface first and the record second. They are two appends
+            // saying one thing, so a reader holding the record and reading the
+            // surface beside it gets whichever surface was there when it looked:
+            // raised second, that is the previous one, carrying the previous
+            // answer about a probe that has since stopped answering. This way
+            // round the surface is never older than the record beside it.
+            crate::engine::raise(paths, journal, self.wait_surface(node))?;
             let awaiting = self.awaiting(node);
             journal.emit(
                 journal::PipelineKind::ReleaseWait,
                 journal::labels(&paths.run, Some(node)),
                 journal::payload(&[("node", json!(node)), ("awaiting", json!(awaiting))]),
             )?;
-            crate::engine::raise(paths, journal, self.wait_surface(node))?;
         }
         // A node that is no longer held says nothing more: the arrival is
         // reported by `release-arrived`, and repeating the wait after it ended
@@ -729,6 +750,22 @@ impl Watch {
         Ok(())
     } // llmlint: ignore-end[changed_behavior_has_e2e]
 
+    /// The word a payload and a surface name one awaited release's last answer
+    /// by.
+    ///
+    /// Three states and not two, because a reader acts differently on each: the
+    /// answer this run has, a question still out ([`NO_ANSWER_YET`]), and a
+    /// question that could never be put — no reference to ask about or no target
+    /// that answers — which is [`Answer::NotAnswered`] and never
+    /// [`Answer::NotReleased`].
+    fn last_answer(&self, key: &Key, dependency: &Dependency) -> &'static str {
+        match self.answers.get(key) {
+            Some(answer) => answer.as_str(),
+            None if dependency.askable() => NO_ANSWER_YET,
+            None => Answer::NotAnswered.as_str(),
+        }
+    }
+
     /// The `awaiting` list one held node's wait carries.
     fn awaiting(&self, node: &str) -> Vec<Value> {
         let now = crate::sys::now_millis();
@@ -770,10 +807,7 @@ impl Watch {
                 );
                 entry.insert(
                     "last_answer".to_owned(),
-                    json!(self
-                        .answers
-                        .get(&key)
-                        .map_or(Answer::NotAnswered.as_str(), Answer::as_str)),
+                    json!(self.last_answer(&key, dependency)),
                 );
                 Value::Object(entry)
             })
@@ -802,10 +836,7 @@ impl Watch {
             let waited = crate::telemetry::duration(
                 now.saturating_sub(self.since.get(&key).copied().unwrap_or(now)),
             );
-            let answered = self
-                .answers
-                .get(&key)
-                .map_or(Answer::NotAnswered.as_str(), Answer::as_str);
+            let answered = self.last_answer(&key, dependency);
             // The style is named in the sentence itself, so an automated wait
             // and a wait on a person are tellable apart from this text alone —
             // without the reader opening the release-targets file to find out
@@ -1134,6 +1165,50 @@ pub(crate) fn arrival_note(released: &[Released]) -> String {
     )
 }
 
+/// The distinct questions one pass has to put, and every wait each one answers.
+///
+/// [`onevcs::release_status`] is answered by the reference and the target alone,
+/// so two waits naming the same pair are asking the **identical** question: it is
+/// put once and its answer belongs to both. Put once per waiting node instead,
+/// each copy runs the probe subprocess again on every poll and the last node in
+/// the list waits out every probe before it — which is how it comes to read as a
+/// release nothing has answered while a node beside it reads as answered.
+///
+/// A wait with nothing to ask — no reference the sibling resolves work by, or no
+/// target that answers — puts no question and joins none. The wait stands: an
+/// unanswerable question is not an answer that the release has happened.
+fn questions_of(waits: &[(Key, Dependency)]) -> Vec<Question> {
+    let mut questions: Vec<Question> = Vec::new();
+    // Where the question about one release already stands, so the next wait
+    // naming it joins that one. Keyed by everything the answer depends on — the
+    // reference and the target — with the style beside them, so a pairing this
+    // crate has not foreseen joins nothing rather than taking an answer obtained
+    // another way.
+    let mut asked: BTreeMap<(&str, Option<&TargetName>, &'static str), usize> = BTreeMap::new();
+    for (key, dependency) in waits {
+        let Some(reference) = dependency.reference() else {
+            continue;
+        };
+        let Some(style) = dependency.style else {
+            continue;
+        };
+        let about = (reference, dependency.target.as_ref(), style.as_str());
+        match asked.get(&about) {
+            Some(&already) => questions[already].keys.push(key.clone()),
+            None => {
+                asked.insert(about, questions.len());
+                questions.push(Question {
+                    keys: vec![key.clone()],
+                    reference: reference.to_owned(),
+                    target: dependency.target.clone(),
+                    style,
+                });
+            }
+        }
+    }
+    questions
+}
+
 /// The nodes whose releases matter on this pass.
 ///
 /// Every node that is ready to start — which is where a hold applies and where a
@@ -1395,6 +1470,116 @@ mod tests {
                 "{unreadable} was read as a release"
             );
         }
+    }
+
+    /// Which waits share a question and which do not, arm by arm. What sharing
+    /// one *costs* a run is driven end to end by `tests/e2e/adoption.rs`'s
+    /// `nodes_awaiting_one_release_put_one_question_and_are_answered_together`.
+    #[test]
+    fn waits_naming_one_release_put_one_question_between_them() {
+        let wait = |node: &str, dependency: Dependency| {
+            ((node.to_owned(), dependency.dep.clone()), dependency)
+        };
+        let automated = || dependency(Some("crate"), Some(ReleaseStyle::Automated));
+
+        let questions = questions_of(&[
+            wait("first", automated()),
+            wait("second", automated()),
+            wait("third", automated()),
+        ]);
+        assert_eq!(questions.len(), 1, "{questions:?}");
+        assert_eq!(
+            questions[0].keys,
+            vec![
+                ("first".to_owned(), "engine".to_owned()),
+                ("second".to_owned(), "engine".to_owned()),
+                ("third".to_owned(), "engine".to_owned()),
+            ],
+        );
+        assert_eq!(questions[0].reference, "onevcs/s-1");
+        assert_eq!(questions[0].style, ReleaseStyle::Automated);
+
+        // One target's answer says nothing about another's.
+        let mut wheel = automated();
+        wheel.target = Some("wheel".parse().expect("a target name"));
+        wheel.style = Some(ReleaseStyle::HumanStep);
+        let questions = questions_of(&[wait("first", automated()), wait("second", wheel.clone())]);
+        assert_eq!(questions.len(), 2, "{questions:?}");
+        assert_eq!(questions[1].style, ReleaseStyle::HumanStep);
+
+        // And one landing's says nothing about another's.
+        let mut other_branch = automated();
+        other_branch.branch = Some("onevcs/s-2".to_owned());
+        let questions = questions_of(&[
+            wait("first", automated()),
+            wait("second", other_branch.clone()),
+        ]);
+        assert_eq!(questions.len(), 2, "{questions:?}");
+
+        let mut styleless = automated();
+        styleless.style = None;
+        let mut referenceless = automated();
+        referenceless.branch = None;
+        referenceless.commit = None;
+        let questions = questions_of(&[
+            wait("unanswerable", styleless),
+            wait("unnameable", referenceless),
+            wait("asked", automated()),
+        ]);
+        assert_eq!(questions.len(), 1, "{questions:?}");
+        assert_eq!(
+            questions[0].keys,
+            vec![("asked".to_owned(), "engine".to_owned())]
+        );
+        assert!(questions_of(&[]).is_empty());
+    }
+
+    /// The three states of a wait with no version yet, read off both places the
+    /// distinction has to exist: the payload and the surface a person reads.
+    #[test]
+    fn a_wait_still_expecting_its_first_answer_is_not_a_probe_that_could_not_answer() {
+        let mut watch = Watch::of_run(&RunPaths::under(std::path::Path::new("/nowhere"), "demo"));
+        watch.dependencies.insert(
+            "asked".to_owned(),
+            vec![dependency(Some("crate"), Some(ReleaseStyle::Automated))],
+        );
+        // A target this host declares nothing for: no question can be put, so
+        // nothing will ever answer it.
+        watch
+            .dependencies
+            .insert("unanswerable".to_owned(), vec![dependency(None, None)]);
+
+        assert_eq!(
+            watch.awaiting("asked")[0]["last_answer"],
+            json!("no-answer-yet"),
+            "a probe that has not come back yet was reported as one that failed"
+        );
+        assert!(watch
+            .wait_surface("asked")
+            .message
+            .contains("last answer: no-answer-yet"));
+        assert_eq!(
+            watch.awaiting("unanswerable")[0]["last_answer"],
+            json!("not-answered"),
+            "a question that could not be put was reported as one still in flight"
+        );
+
+        watch.answers.insert(
+            ("asked".to_owned(), "engine".to_owned()),
+            Answer::NotAnswered,
+        );
+        assert_eq!(
+            watch.awaiting("asked")[0]["last_answer"],
+            json!("not-answered")
+        );
+        watch.answers.insert(
+            ("asked".to_owned(), "engine".to_owned()),
+            Answer::NotReleased,
+        );
+        assert_eq!(
+            watch.awaiting("asked")[0]["last_answer"],
+            json!("not-released")
+        );
     }
 
     /// The surface a held node raises names the **style** of each release it

@@ -2084,6 +2084,120 @@ fn stopping_a_run_reaches_a_dispatch_whose_driver_and_lock_holder_are_dead() {
     world.release("build.go");
 }
 
+/// A node settles when its **dispatch** ends, not when everything that inherited
+/// its output has gone.
+///
+/// The two were one condition. A dispatch's envelopes come back over a pipe, and
+/// a pipe reaches its end when every handle that may write to it is closed — so
+/// the relay read to the end of the stream and the node settled when the *last*
+/// holder of that handle exited. A process the dispatch left behind is one of
+/// those holders, and on Windows so is a `conhost` or a `cmd` the host attaches
+/// to a console process, neither of which this run started and neither of which
+/// it can wait for. A run whose nodes settle only once those are reaped is a run
+/// whose settlement is a fact about how quickly this host reaps a process, which
+/// is not the same on two platforms and is not what settling a node means.
+///
+/// So the journey leaves one behind on purpose and holds it there: the dispatch
+/// exits, the process it started keeps the dispatch's stdout and stderr open, and
+/// nothing releases it until after the run has settled. What is asserted is the
+/// order — the node settled and the run recorded its result while that process
+/// was still running — rather than how long either took, which is the one thing
+/// a slow host could disagree about.
+#[test]
+fn a_node_settles_when_its_dispatch_ends_and_not_when_what_outlived_it_does() {
+    let world = World::new("driver-outlived");
+    // Presence is the whole script: the double leaves a process behind holding
+    // the streams it was given, waiting on a rendezvous only this journey writes.
+    world.script("build.outlived-by", "");
+    let gone = world.fakes.join("build.outlived-by.gone");
+    let run = start_detached(&world, "outlived", vec![agent("build", &[])]);
+
+    world.until("the node to settle", |world| {
+        !world.events_of(&run, "node-settled").is_empty()
+    });
+    world.until("the run to record its result", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+    assert!(
+        !gone.is_file(),
+        "the process that outlived the dispatch had already gone, so this proved nothing \
+         about what the run waited for"
+    );
+    let settled = world.events_of(&run, "node-settled");
+    assert_eq!(
+        settled[0]["payload"]["status"],
+        json!("done"),
+        "a dispatch that exited cleanly settled as something else:\n{}",
+        settled[0]
+    );
+
+    // Released here, so what held the run's stream open goes with the journey
+    // rather than being left on the host — its parent is gone, so no teardown of
+    // this run's tree can still reach it.
+    world.release("build.outlived-by.go");
+    world.until("the process that outlived the dispatch to go", |_| {
+        gone.is_file()
+    });
+}
+
+/// And what the dispatch **said** survives the same condition: a node that failed
+/// carries its graph's own words even while a process is still holding the pipe
+/// they came over.
+///
+/// The other half of the stream, and it broke the same way. A launch's stderr was
+/// read to the end of its pipe, so a failure's message was only available once
+/// every holder of that handle had gone — which is the very thing the settlement
+/// above no longer waits for. Read that way with a process still holding it, the
+/// node either never settled or settled saying nothing about why, and "why" is
+/// the whole of what a failed node is for.
+///
+/// So the dispatch here fails *and* leaves a holder behind, and the journey reads
+/// the settled node the way an operator does: the outcome, the detail, and the
+/// rendered result. All three while that holder is still running.
+#[test]
+fn a_failed_dispatch_says_why_while_something_still_holds_the_stream_it_said_it_on() {
+    let world = World::new("driver-outlived-failure");
+    // It speaks, then fails its gate on stderr, and leaves a process holding both
+    // of the streams it did that on.
+    world.script("build.fail", "3");
+    world.script("build.outlived-by", "");
+    let gone = world.fakes.join("build.outlived-by.gone");
+    let run = start_detached(&world, "outlivedfail", vec![agent("build", &[])]);
+
+    world.until("the node to settle", |world| {
+        !world.events_of(&run, "node-settled").is_empty()
+    });
+    assert!(
+        !gone.is_file(),
+        "the process that outlived the dispatch had already gone, so this proved nothing \
+         about what the failure was read past"
+    );
+    let settled = world.events_of(&run, "node-settled");
+    assert_eq!(
+        settled[0]["payload"]["outcome"],
+        json!("task-failed"),
+        "a dispatch that failed its gate settled as something else:\n{}",
+        settled[0]
+    );
+    let said = settled[0]["payload"]["detail"].as_str().unwrap_or_default();
+    assert!(
+        said.contains("failed its gate"),
+        "the settlement does not carry what the graph said on the stream something \
+         was still holding:\n{}",
+        settled[0]
+    );
+    // And where an operator reads it, not only in the store.
+    world
+        .run(&["results", &run])
+        .exited(0)
+        .out_has("failed its gate");
+
+    world.release("build.outlived-by.go");
+    world.until("the process that outlived the dispatch to go", |_| {
+        gone.is_file()
+    });
+}
+
 /// A stop that found nothing running says that, rather than claiming it reached
 /// a tree.
 ///
