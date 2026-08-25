@@ -114,8 +114,31 @@ fn engine() -> Value {
 }
 
 /// Say what the probe answers from now on.
+///
+/// Whole or not at all, because the probe reads this file while a journey writes
+/// it: a plain write truncates and then fills, and a probe that opens it in
+/// between finds it there and holding nothing — which is neither the answer just
+/// given nor the absent file that means no release. A rename is one step to every
+/// reader, so a probe run gets the answer before or the answer after and never
+/// half of either.
 fn releases_at(answer: &Path, version: &str) {
-    std::fs::write(answer, format!("{version}\n")).expect("the probe's answer is written");
+    let half_written = answer.with_extension("next");
+    std::fs::write(&half_written, format!("{version}\n")).expect("the probe's answer is written");
+    // Replacing a file another process holds open is refused rather than queued on
+    // one of the two platforms this suite runs on, and a probe here opens this one
+    // every poll. So the replacement is retried for longer than a probe run can
+    // hold it, and says which file it could not replace if it never gets in.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        match std::fs::rename(&half_written, answer) {
+            Ok(()) => return,
+            Err(failure) if std::time::Instant::now() >= deadline => panic!(
+                "the probe's answer {} could not replace the one before it: {failure}",
+                answer.display()
+            ),
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
+        }
+    }
 }
 
 /// The three kinds this crate emits reach a planner through the **shipped
@@ -855,6 +878,96 @@ fn a_probe_that_could_not_answer_holds_the_node_and_is_never_read_as_not_release
             event["payload"]["status"],
             json!("failed"),
             "a probe that could not answer failed a node: {event}"
+        );
+    }
+}
+
+/// An answer this host **cannot read** is never read as a release that has not
+/// happened — driven at the one state of the probe where the two readings meet.
+///
+/// The sibling journey to
+/// [`a_probe_that_could_not_answer_holds_the_node_and_is_never_read_as_not_released`],
+/// and the reason it exists is that this is where the distinction is *lossy*. A
+/// probe that prints something unusable is unanswered all the way down; a probe
+/// that prints **nothing** on exit 0 is `onevcs`'s spelling of "this target has no
+/// release", and a host holding a baseline reports that as **not released**. So an
+/// answer file that is there and empty — which is exactly what a write caught half
+/// done leaves behind, on every platform, and which the slowest one loses most
+/// often — would arrive at a reader as a release that has not happened rather than
+/// as a question this host got nothing back from.
+///
+/// Nothing here needs a particular platform to reach it: the state is put there
+/// outright rather than raced for, so the verdict lands the same everywhere the
+/// suite runs.
+#[test]
+fn an_answer_this_host_cannot_read_is_never_read_as_a_release_that_has_not_happened() {
+    let world = watching("adoption-unreadable");
+    world.write_graphs();
+    let (engine_repo, _consumer) = two_repositories(&world);
+    let (script, answer) = world.probe_in(&engine_repo, ENGINE);
+    world.releases(&automated(&script));
+    // A version at the landing, so the baseline the publication captures is one a
+    // later answer is compared against — which is the whole condition: with no
+    // baseline there is nothing for "no release" to be reported as not past.
+    releases_at(&answer, "0.1.0");
+
+    let run = start(
+        &world,
+        "adoption-unreadable",
+        vec![engine(), consumer(Some("published"))],
+    );
+    world.until("the probe's answer to reach the wait", |world| {
+        answered(world, &run, "consumer") == Some("not-released".to_owned())
+    });
+
+    // The answer file, there and holding nothing. No release is spelled by the
+    // file not being there at all, so this is a probe with nothing to say rather
+    // than a target with nothing released.
+    std::fs::write(&answer, "").expect("the half-written answer is left behind");
+    world.until("the probe's failure to reach the wait", |world| {
+        answered(world, &run, "consumer") == Some("not-answered".to_owned())
+    });
+    assert!(
+        !dispatched(&world, &run, "consumer"),
+        "a probe with no answer to give started a node"
+    );
+    let surface = wait_surface(&world, &run, "consumer");
+    assert!(
+        surface.contains("last answer: not-answered"),
+        "the surface reports an answer this host cannot read as something else:\n{surface}"
+    );
+    assert!(
+        !surface.contains("last answer: not-released"),
+        "an answer this host cannot read was reported as a release that has not \
+         happened:\n{surface}"
+    );
+    // And no record of this wait ever said it either, at any moment of the run —
+    // the reading this journey refuses is one a reader's timing must not be able
+    // to catch.
+    every_wait_was_surfaced_before_it_was_recorded(&world, &run, "consumer");
+    for event in world.events_of(&run, "release-wait") {
+        for entry in event["payload"]["awaiting"]
+            .as_array()
+            .unwrap_or(&Vec::new())
+        {
+            assert_ne!(
+                entry["last_answer"],
+                json!("released"),
+                "a probe with no answer to give released a hold: {event}"
+            );
+        }
+    }
+
+    // And the hold was the hold: a readable answer past the baseline starts it.
+    releases_at(&answer, "0.2.0");
+    world.until("the release to start the held node", |world| {
+        world.events_of(&run, "node-settled").len() == 2
+    });
+    for event in world.events_of(&run, "node-settled") {
+        assert_ne!(
+            event["payload"]["status"],
+            json!("failed"),
+            "a probe with no answer to give failed a node: {event}"
         );
     }
 }
