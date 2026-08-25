@@ -1917,58 +1917,117 @@ mod tests {
     /// where the leaf was would be asking the code under test to grade itself.
     #[cfg(windows)]
     fn console_tree() -> (std::process::Child, u32) {
-        let mut root = std::process::Command::new("cmd")
+        let root = std::process::Command::new("cmd")
             .args(["/C", "ping -n 120 127.0.0.1"])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
             .expect("a console process tree");
-        match awaited_child_of(root.id()) {
-            Some(leaf) => (root, leaf),
-            None => {
-                let pid = root.id();
-                let _ = root.kill();
-                let _ = root.wait();
-                panic!("the tree under {pid} never started its leaf");
-            }
+        match awaited_child_of(root.id(), LEAF_IMAGE) {
+            Ok(leaf) => (root, leaf),
+            Err(why) => abandon(root, &why),
         }
     }
 
-    /// The pid of one child of `parent`, once it has one.
+    /// The image each level of a fixture tree runs, so the level below one is
+    /// asked for by **what it is** rather than as "some child of it".
+    ///
+    /// The distinction the `cross (windows-latest)` leg turned on. A console
+    /// process started where the runner's own step has no console gets a
+    /// `conhost.exe` of its own, and that helper is a child of the level that
+    /// started it — so "some child of the root" is two processes, the listing
+    /// orders them as it pleases, and a fixture that followed the wrong one then
+    /// waited out its whole patience for a grandchild `conhost` never has. What
+    /// it reported was `never started all three of its levels`, about a tree that
+    /// was running the entire time and that nextest went on to count as a leak.
+    #[cfg(windows)]
+    const SHELL_IMAGE: &str = "cmd.exe";
+
+    /// The leaf every fixture tree ends in.
+    #[cfg(windows)]
+    const LEAF_IMAGE: &str = "PING.EXE";
+
+    /// How long a fixture waits for the level below one to appear.
+    #[cfg(windows)]
+    const LEVEL_PATIENCE: std::time::Duration = std::time::Duration::from_secs(30);
+
+    /// End a fixture's whole tree and fail with what went wrong.
+    ///
+    /// The tree and not just its root: `Child::kill` ends one process, so a
+    /// fixture that gave up on its root left the levels under it running — which
+    /// is the `FAIL + LEAK` beside the failure on the leg this comes from, and a
+    /// `ping` left on the runner for two minutes. `stop` is the crate's own code
+    /// and is used here only to *clean up*, never as the oracle any assertion
+    /// reads.
+    #[cfg(windows)]
+    fn abandon(mut root: std::process::Child, why: &str) -> ! {
+        stop(root.id(), Stop::Now);
+        let _ = root.kill();
+        let _ = root.wait();
+        panic!("{why}");
+    }
+
+    /// The pid of `parent`'s child running `image`, once it has one.
     ///
     /// A level appears a moment after the one above it starts, so this waits
     /// rather than asking once — and gives up rather than waiting for ever, so a
     /// tree that never grew is a named failure instead of a suite that hangs.
+    ///
+    /// A listing this host would not give is retried and then **reported**,
+    /// rather than read as "no such child yet": those are opposite facts, and
+    /// folding them together is what let a `Get-CimInstance` that failed for its
+    /// own reasons come back as a tree that never started.
     #[cfg(windows)]
-    fn awaited_child_of(parent: u32) -> Option<u32> {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    fn awaited_child_of(parent: u32, image: &str) -> std::result::Result<u32, String> {
+        let deadline = std::time::Instant::now() + LEVEL_PATIENCE;
+        let mut unanswered: Option<String> = None;
         loop {
-            if let Some(child) = child_of(parent) {
-                return Some(child);
+            match child_of(parent, image) {
+                Ok(Some(child)) => return Ok(child),
+                Ok(None) => {}
+                Err(why) => unanswered = Some(why),
             }
             if std::time::Instant::now() >= deadline {
-                return None;
+                return Err(unanswered.map_or_else(
+                    || {
+                        format!(
+                            "this host listed no {image} under {parent} within {}s, so that \
+                             level of the tree never started",
+                            LEVEL_PATIENCE.as_secs()
+                        )
+                    },
+                    |why| format!("this host would not list the processes under {parent}: {why}"),
+                ));
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
     }
 
-    /// The pid of one child of `parent`, or `None` while it has none.
+    /// The pid of `parent`'s child running `image`, `Ok(None)` while it has
+    /// none, and `Err` when this host would not say.
     #[cfg(windows)]
-    fn child_of(parent: u32) -> Option<u32> {
+    fn child_of(parent: u32, image: &str) -> std::result::Result<Option<u32>, String> {
         let listed = std::process::Command::new("powershell")
             .args([
                 "-NoProfile",
                 "-Command",
                 &format!(
-                    "(Get-CimInstance Win32_Process -Filter 'ParentProcessId={parent}').ProcessId"
+                    "(Get-CimInstance Win32_Process -Filter 'ParentProcessId={parent} AND \
+                     Name=\"{image}\"').ProcessId"
                 ),
             ])
             .output()
             .expect("this host lists its processes");
-        String::from_utf8_lossy(&listed.stdout)
+        let complained = String::from_utf8_lossy(&listed.stderr).trim().to_owned();
+        // Either half is this host declining to answer. `Get-CimInstance` reports
+        // most of its failures without failing the shell, so the status alone
+        // would read a refused listing as an empty one.
+        if !listed.status.success() || !complained.is_empty() {
+            return Err(format!("exited {} saying {complained:?}", listed.status));
+        }
+        Ok(String::from_utf8_lossy(&listed.stdout)
             .lines()
-            .find_map(|line| line.trim().parse::<u32>().ok())
+            .find_map(|line| line.trim().parse::<u32>().ok()))
     }
 
     /// Whether every pid in `tree` is gone inside `patience`.
@@ -2266,22 +2325,21 @@ mod tests {
     /// of: `cmd` starting `cmd` starting `ping`.
     #[cfg(windows)]
     fn a_tree_and_what_it_started() -> (std::process::Child, Vec<u32>) {
-        let mut root = std::process::Command::new("cmd")
+        let root = std::process::Command::new("cmd")
             .args(["/C", "cmd /C ping -n 120 127.0.0.1"])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
             .expect("a process tree");
-        let below = awaited_child_of(root.id())
-            .and_then(|middle| awaited_child_of(middle).map(|leaf| vec![middle, leaf]));
+        // Each level named by the image it runs, for the reason [`SHELL_IMAGE`]
+        // gives: the console helper a level may start is a child of it too, and
+        // descending into that one is a fixture waiting out its patience under a
+        // process that will never have a child.
+        let below = awaited_child_of(root.id(), SHELL_IMAGE)
+            .and_then(|middle| awaited_child_of(middle, LEAF_IMAGE).map(|leaf| vec![middle, leaf]));
         match below {
-            Some(below) => (root, below),
-            None => {
-                let pid = root.id();
-                let _ = root.kill();
-                let _ = root.wait();
-                panic!("the tree under {pid} never started all three of its levels");
-            }
+            Ok(below) => (root, below),
+            Err(why) => abandon(root, &why),
         }
     }
 
