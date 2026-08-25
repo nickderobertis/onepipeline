@@ -1937,6 +1937,63 @@ fn a_verdict_that_arrives_on_a_later_read_routes_exactly_as_it_always_has() {
     );
 }
 
+/// A later read that answers with the change **open** settles the node done and
+/// unlanded, carrying the URL that read produced.
+///
+/// The other side of the routing above. `merged` is the answer that lands, and a
+/// journey that only ever proved that one would leave the re-read looking like a
+/// recovery *to* a merge — so here the host comes back with a change request left
+/// for a person, which is `done` with the work not yet at its base. The evidence
+/// is the same evidence a first-read publication produces: the outcome names it,
+/// the landing qualifies the status, and the change URL is the thing a reviewer
+/// opens.
+#[test]
+fn a_later_read_that_answers_with_the_change_open_settles_it_done_and_unlanded() {
+    let world = World::new("lifecycle-rereadopen")
+        .with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "2")
+        .with_env("ONEPIPELINE_MERGE_PATH_BACKOFF_SECONDS", "0");
+    // `change-open` leaves the change for a person, so what the recovered read
+    // answers is an outcome that is not `merged`.
+    let repo = world.repository("change-open", &[]);
+    world.script("service.work", "the worker wrote this\n");
+    // Out for one call, which is the outage that ends: the push reaches the
+    // origin and the path behind it goes unread, and the read after it answers.
+    world.script("gh.outage", "1");
+
+    let run = settle(&world, "rereadopen", vec![lifecycle("service", &[])]);
+    let result = world.run_json(&run, "result.json");
+    let node = result["nodes"][0].clone();
+
+    assert_eq!(node["status"], "done", "{result}\n{}", why(&world, &run));
+    assert_eq!(node["outcome"], "change-open", "{result}");
+    assert_eq!(node["landing"], json!("unlanded"), "{result}");
+    let published = node["change_url"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{node}\n{}", why(&world, &run)))
+        .to_string();
+    assert!(
+        published.contains("/pull/"),
+        "the recovered read handed back no change a reviewer can open: {published}"
+    );
+
+    // And it cost one dispatch, which is the whole point of re-reading: the work
+    // was already on the origin.
+    let dispatched = dispatches_of(&world, &run, "service");
+    assert_eq!(
+        dispatched.len(),
+        1,
+        "the agent was dispatched again for work that was already on the remote\n{}",
+        why(&world, &run)
+    );
+    let branch = node["branch"].as_str().expect("the node names its branch");
+    assert!(
+        !git(&world, &repo.origin, &["branch", "--list", branch])
+            .trim()
+            .is_empty(),
+        "the branch the publication pushed is not on the origin"
+    );
+}
+
 /// An unusable read budget falls back rather than disabling the recovery it
 /// configures, and so does an unusable wait between reads.
 ///
