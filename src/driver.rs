@@ -364,20 +364,30 @@ fn start(args: &StartArgs) -> Result<i32> {
         Some(reference) => Some(resolve_graph(reference, &launch_dir)?),
         None => None,
     }; // llmlint: ignore-end[invalid_states_unrepresentable]
-       // And the command a node introduced by a live edit is checked by, resolved
-       // through the three names this crate's launch-level configuration already
-       // composes: the flag overrides the environment, which overrides the config,
-       // beneath which is the shipped default of no validator at all. Not resolved
-       // against the launch directory — it is a command the host names rather than
-       // a document this crate reads, and a name on `PATH` is as legitimate as a
-       // path is.
-       // The *presence* of a rung is what decides which one answers; whether what
-       // it holds names a command is settled once, below, for all three alike. So a
-       // flag or a variable that is there and blank means "this launch names none"
-       // rather than falling through to the rung under it — which is what a host
-       // exporting an empty variable to turn the hook off is saying, and what a
-       // `--node-validator "$UNSET"` is saying too. A blank config key never
-       // reaches here: `LaunchConfig::load` refuses one by name.
+
+    // llmlint: ignore-block[invalid_states_unrepresentable] the resolved command stays
+    // the `String` the launch record carries, for the reason `pr_author_graph_ref` above
+    // gives: `LaunchRecord` is the durable schema and the value goes from here into it
+    // and back out of it unchanged. The one invariant a newtype could carry — non-blank
+    // — is established by the `filter` below and, for a config file, refused by name at
+    // `LaunchConfig::load`; the property a command actually has to have is that it
+    // *runs*, which nothing but running it can establish. `edits::offer_to_validator`
+    // establishes it, and fails closed where it does not.
+    //
+    // The command a node introduced by a live edit is checked by, resolved through the
+    // three names this crate's launch-level configuration already composes: the flag
+    // overrides the environment, which overrides the config, beneath which is the
+    // shipped default of no validator at all. Not resolved against the launch directory
+    // — it is a command the host names rather than a document this crate reads, and a
+    // name on `PATH` is as legitimate as a path is.
+    //
+    // The *presence* of a rung is what decides which one answers; whether what it holds
+    // names a command is settled once, below, for all three alike. So a flag or a
+    // variable that is there and blank means "this launch names none" rather than
+    // falling through to the rung under it — which is what a host exporting an empty
+    // variable to turn the hook off is saying, and what a `--node-validator "$UNSET"` is
+    // saying too. A blank config key never reaches here: `LaunchConfig::load` refuses
+    // one by name.
     let node_validator: Option<String> = args
         .node_validator
         .clone()
@@ -385,6 +395,7 @@ fn start(args: &StartArgs) -> Result<i32> {
         .or_else(|| declared.node_validator.clone())
         .map(|command| command.trim().to_string())
         .filter(|command| !command.is_empty());
+    // llmlint: ignore-end[invalid_states_unrepresentable]
     let node_graph_ref = resolve_graph(&engine::configured_node_graph(), &launch_dir)?;
     resolve_plan_graphs(&mut plan, &launch_dir)?;
     // Before the run directory exists. A spec that could not be honoured is the

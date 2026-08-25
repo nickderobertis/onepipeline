@@ -501,7 +501,9 @@ pub struct Node {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<String>,
     /// The manager's binding ruling on this node, part of its effective task
-    /// until something replaces it.
+    /// until something replaces it. Present and blank is refused by
+    /// [`validate_node`](crate::graph::validate_node), the way `amend` refuses
+    /// a blank ruling: a bar nobody can clear is not one.
     ///
     /// The other half of the pair [`context`](Self::context) is one of, and the
     /// distinction is the point of both: a note steers the worker for one

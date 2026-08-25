@@ -1635,6 +1635,62 @@ fn the_amendment_and_validator_surface_is_what_the_divergence_record_names() {
             .map(str::to_string)
             .collect::<BTreeSet<String>>()
     );
+
+    // The README is a **second copy** of all of this, in the prose an operator
+    // meets it in, and nothing compiles that. So the entry is held against it
+    // here: every name and every op above has to appear there, and the two
+    // headings the guidance turns on have to be the constants this crate
+    // publishes rather than prose that drifted away from them.
+    let readme = std::fs::read_to_string(repo_root().join("README.md")).expect("the README ships");
+    let prose = readme.split_whitespace().collect::<Vec<_>>().join(" ");
+    let precedence: Vec<String> = serde_json::from_value(validator["precedence"].clone())
+        .expect("entry 41 states the order it proposes");
+    let mut at: Vec<usize> = Vec::new();
+    for named in &precedence {
+        let spelling = validator[named.as_str()]
+            .as_str()
+            .expect("entry 41 names it");
+        let found = prose.find(spelling).unwrap_or_else(|| {
+            panic!("the README does not name the validator's {named}, `{spelling}`")
+        });
+        at.push(found);
+    }
+    // And in the order the entry proposes: a README listing them the other way
+    // round would read as a different rule while naming the same three things.
+    assert!(
+        at.windows(2).all(|pair| pair[0] < pair[1]),
+        "the README names the three spellings in an order entry 41 does not propose: \
+         {precedence:?} at {at:?}"
+    );
+    for op in offered
+        .iter()
+        .chain(std::iter::once(&"context".to_string()))
+    {
+        assert!(
+            prose.contains(&format!("`{op}`")),
+            "the README's live-edit guidance does not name `{op}`"
+        );
+    }
+    for heading in [AMENDMENT_HEADING, PLANNER_CONTEXT_HEADING] {
+        assert!(
+            prose.contains(heading),
+            "the README does not name `{heading}`, which is where this crate renders one of              the two levers"
+        );
+    }
+    // And the distinction itself, which is the whole reason both exist: the
+    // README has to say which one moves the bar and which one only steers.
+    assert!(
+        prose.contains("adds no acceptance criteria")
+            && prose.contains("the worker and the judge reviewing it read the same ruling"),
+        "the README no longer states which lever changes what a node is judged against and          which one only steers its worker"
+    );
+    // The refusal it promises for a rejected edit, and the default it promises
+    // for a launch that names none.
+    assert!(
+        prose.contains("a non-zero exit refuses it with the command's own stderr as the reason")
+            && prose.contains("naming none is the default and runs no validator at all"),
+        "the README no longer states what a validator's answers mean"
+    );
 }
 
 #[test]

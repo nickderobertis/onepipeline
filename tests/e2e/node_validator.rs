@@ -550,23 +550,29 @@ fn a_config_naming_the_key_at_a_version_that_never_had_it_is_refused_by_that_nam
     // A key present and naming nothing is a decision half-written: everything
     // downstream would read it as a launch that named one, and resolve it to a
     // command nothing can start. Refused where the document is read.
-    let blank = world.root.join("blank.yaml");
-    std::fs::write(
-        &blank,
-        format!("schema_version: {arrived}\n{key}: \"   \"\n"),
-    )
-    .expect("the config is written");
-    world
-        .run(&[
-            "start",
-            &path.to_string_lossy(),
-            "--launch-config",
-            &blank.to_string_lossy(),
-            "--detach",
-        ])
-        .exited(REFUSED)
-        .err_has(&format!("`{key}`"))
-        .err_has("names nothing");
+    // Both keys, because the rule is the schema's rather than this one key's: it
+    // reaches a `pr_author_graph` an operator already had in a file, and a launch
+    // that had it silently dropped would find out from a change request nobody
+    // drafted a body for.
+    for blank_key in [key.as_str(), "pr_author_graph"] {
+        let blank = world.root.join(format!("blank-{blank_key}.yaml"));
+        std::fs::write(
+            &blank,
+            format!("schema_version: {arrived}\n{blank_key}: \"   \"\n"),
+        )
+        .expect("the config is written");
+        world
+            .run(&[
+                "start",
+                &path.to_string_lossy(),
+                "--launch-config",
+                &blank.to_string_lossy(),
+                "--detach",
+            ])
+            .exited(REFUSED)
+            .err_has(&format!("`{blank_key}`"))
+            .err_has("names nothing");
+    }
 
     // The version before this one is still a whole document: it says nothing
     // about validating, which is what a launch naming no validator means, and it

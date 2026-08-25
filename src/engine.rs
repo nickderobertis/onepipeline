@@ -1963,9 +1963,16 @@ pub(crate) fn node_graph(
 /// blank therefore means "this launch names none" and stops the search rather
 /// than falling through to the config — a host that exported it empty to turn
 /// the hook off would otherwise get whichever validator its config file names.
+// llmlint: ignore-block[invalid_states_unrepresentable] what a variable says is a
+// `String` because that is what an environment holds, and this rung deliberately reports
+// it unjudged — see the doc above. Whether it names a command is decided once, by the
+// caller, for all three rungs alike, and it reaches `LaunchRecord` as the string that
+// record's schema declares; a newtype here would carry no invariant and would have to be
+// unwrapped again at the record.
 pub(crate) fn configured_node_validator() -> Option<String> {
     std::env::var(NODE_VALIDATOR_ENV).ok()
 }
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 pub(crate) fn configured_node_graph() -> String {
     std::env::var(NODE_GRAPH_ENV)

@@ -429,6 +429,25 @@ fn a_plan_may_state_an_amendment_and_every_step_of_an_amended_node_is_handed_it(
         .out_has(RULING);
 }
 
+/// A plan stating an amendment that says nothing is refused by that field's name,
+/// exactly as the op refuses a blank ruling.
+///
+/// The two are the same input by two routes, and the failure they share is a bar
+/// nobody can clear: accepted, it would be left silently out of the very task it
+/// was written to change.
+#[test]
+fn a_plan_amendment_that_says_nothing_is_refused_at_the_plan_boundary() {
+    let world = World::new("amend-blank-plan");
+    let mut node = agent("build", &[]);
+    node["amendment"] = json!("   \n");
+    let path = world.plan("amendblank", &plan_of("amendblank", vec![node]));
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(REFUSED)
+        .err_has("`amendment`")
+        .err_has("says nothing");
+}
+
 /// An observer may not move a bar, and the refusal names the op it refused.
 ///
 /// What a node is judged against is a decomposition decision the monitor's own
