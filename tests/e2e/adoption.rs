@@ -1852,7 +1852,6 @@ fn nodes_awaiting_one_release_put_one_question_and_are_answered_together() {
             .all(|node| answered(world, &run, node) == Some("not-released".to_owned()))
     });
 
-    // Nothing was dispatched by an answer that is not a release.
     for node in waiters {
         assert!(!dispatched(&world, &run, node), "{node} was dispatched");
     }
@@ -1946,9 +1945,6 @@ fn nodes_awaiting_one_release_put_one_question_and_are_answered_together() {
          one answer"
     );
 
-    // The release arrives once, for all of them: the pass that takes the answer
-    // takes it for every node awaiting it, so none of them raises a wait after
-    // the first arrival is reported.
     releases_at(&answer, "0.2.0");
     world.until("every node to settle", |world| {
         world.events_of(&run, "node-settled").len() == 4

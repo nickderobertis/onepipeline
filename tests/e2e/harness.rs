@@ -661,13 +661,24 @@ impl World {
     ///
     /// A file that is not there yet is a probe that has not run, which is a count
     /// of none rather than a failure: every journey reads this before the first
-    /// ask. A line that is not a whole record is not one either: this is polled
+    /// ask. **Only** that one, because every other way a read fails — a
+    /// permission this host does not have, bytes that are not text, a directory
+    /// where the tally should be — is a tally this journey cannot count, and
+    /// reading one as zero would let a journey pass having counted a host that
+    /// ran nothing. A line that is not a whole record is neither: this is polled
     /// while a probe is appending to it, so a line the write has not finished is
     /// a run still in flight rather than one to count.
     pub fn probe_runs(&self, name: &str) -> usize {
-        std::fs::read_to_string(self.probe_runs_file(name))
-            .map(|tally| tally.lines().filter(|line| line.trim() == "run").count())
-            .unwrap_or(0)
+        let path = self.probe_runs_file(name);
+        match std::fs::read_to_string(&path) {
+            Ok(tally) => tally.lines().filter(|line| line.trim() == "run").count(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(error) => panic!(
+                "the probe tally {} is there and cannot be read, so no journey can count what \
+                 this host asked: {error}",
+                path.display()
+            ),
+        }
     }
 
     /// Where the probe committed for `name` records its runs.
@@ -2751,8 +2762,7 @@ fn both_probe_scripts_fill_in_the_same_placeholders() {
         placeholders(include_str!("probe.bat")),
         "the probe scripts have drifted: one platform fills in a placeholder the other does not"
     );
-    // Only a drift gate while it still finds anything, and only the truth while
-    // it names what the harness actually substitutes.
+    // A drift gate comparing two empty lists finds nothing and passes.
     assert_eq!(shell, ["@RUNS_FILE@", "@VERSION_FILE@"]);
 } // llmlint: ignore-end[tests_mirror_real_usage]
 

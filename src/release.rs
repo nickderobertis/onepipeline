@@ -1494,8 +1494,6 @@ mod tests {
         };
         let automated = || dependency(Some("crate"), Some(ReleaseStyle::Automated));
 
-        // Three nodes awaiting the identical release: one question, and its keys
-        // are all three, in the order the waits were put.
         let questions = questions_of(&[
             wait("first", automated()),
             wait("second", automated()),
@@ -1513,8 +1511,7 @@ mod tests {
         assert_eq!(questions[0].reference, "onevcs/s-1");
         assert_eq!(questions[0].style, ReleaseStyle::Automated);
 
-        // A different target of the same repository is a different question:
-        // nothing about one target's answer says anything about another's.
+        // One target's answer says nothing about another's.
         let mut wheel = automated();
         wheel.target = Some("wheel".parse().expect("a target name"));
         wheel.style = Some(ReleaseStyle::HumanStep);
@@ -1522,7 +1519,7 @@ mod tests {
         assert_eq!(questions.len(), 2, "{questions:?}");
         assert_eq!(questions[1].style, ReleaseStyle::HumanStep);
 
-        // So is the same target of a different landing.
+        // And one landing's says nothing about another's.
         let mut other_branch = automated();
         other_branch.branch = Some("onevcs/s-2".to_owned());
         let questions = questions_of(&[
@@ -1531,8 +1528,6 @@ mod tests {
         ]);
         assert_eq!(questions.len(), 2, "{questions:?}");
 
-        // A wait with nothing to ask puts no question and joins none — and the
-        // wait beside it is still asked about.
         let mut styleless = automated();
         styleless.style = None;
         let mut referenceless = automated();
@@ -1581,7 +1576,6 @@ mod tests {
             "a question that could not be put was reported as one still in flight"
         );
 
-        // And once the probe does come back, it is the probe's own word.
         watch.answers.insert(
             ("asked".to_owned(), "engine".to_owned()),
             Answer::NotAnswered,
