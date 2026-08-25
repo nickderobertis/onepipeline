@@ -111,6 +111,12 @@ pub enum Operation {
         blocking: bool,
     },
     // llmlint: ignore-end[invalid_states_unrepresentable]
+    // llmlint: ignore-block[invalid_states_unrepresentable] both fields are spelled as the
+    // wire spells them, as every neighbouring variant is, and the narrowable one is
+    // narrowed where it is judged: `compile_amend` refuses a node the graph does not have
+    // and a ruling that is blank, and `graph::validate_node` refuses a blank one arriving
+    // in a plan file. A newtype here would have to deserialize a record this build did not
+    // write, which is the one place the invariant cannot hold.
     /// A node's effective task gained a binding amendment.
     ///
     /// Its own operation rather than a `requeue`-shaped merge, so replaying a
@@ -123,6 +129,7 @@ pub enum Operation {
         /// The binding text, which **replaces** whatever the node carried.
         text: String,
     },
+    // llmlint: ignore-end[invalid_states_unrepresentable]
     /// A planner note reached a node.
     ContextAdded {
         /// The node.
@@ -303,27 +310,19 @@ fn node_whose_task_is_new<'a>(command: &Command, graph: &'a Graph) -> Option<&'a
 /// Offer one node to the validator this run's launch named, if it named one.
 ///
 /// The node crosses as JSON on the validator's stdin — the same document a plan
-/// file states it in, so a host that already checks plan files reads one shape
-/// rather than two. Exit 0 accepts the edit; a non-zero exit refuses it, and the
-/// refusal carries the validator's own stderr, because the rules being applied
-/// are the host's and only it can say which one this node broke.
+/// file states it in, so a host that already checks plan files reads one shape.
+/// Exit 0 accepts the edit; a non-zero exit refuses it carrying the validator's
+/// own stderr, because the rules are the host's and only it can say which one
+/// this node broke. Its stdout is captured and discarded: this runs inside
+/// `reply`, whose own stdout is the JSON verdict its caller parses.
 ///
-/// **Fails closed.** A validator that cannot be started at all is a launch
-/// configured wrongly, and accepting the edit anyway would be this crate
-/// deciding that an unenforced rule is no rule — silently, on the path a manager
-/// reaches for under pressure. It is refused instead, naming the command.
+/// **Fails closed.** A validator that cannot be run is a launch configured
+/// wrongly; accepting the edit anyway would decide that an unenforced rule is no
+/// rule, silently, on the path a manager reaches for under pressure.
 ///
-/// The validator's stdout is captured and discarded: this runs inside `reply`,
-/// whose own stdout is the JSON verdict its caller parses.
-///
-/// An accepted edit is offered **twice** — once by the submission check and once
-/// by the reconciler — because [`compile`] is the one validator both run, which
-/// is what makes "applied or rejected with a reason" true: an envelope reaching
-/// the loop may have been written by a build or a caller that did not check, and
-/// the reconciler is the last place a refusal still means something. A validator
-/// is a read-only check of one node, so asking it twice asks the same question;
-/// a refused edit is asked once, because the submission check turns it away
-/// before anything is queued.
+/// An accepted edit is offered **twice**, by the submission check and again by
+/// the reconciler, because [`compile`] is the one validator both run. Asking a
+/// read-only check twice asks the same question; a refused edit is asked once.
 fn offer_to_validator(validator: Option<&str>, command: &Command, node: &Node) -> Result<()> {
     let Some(validator) = validator.filter(|command| !command.trim().is_empty()) else {
         return Ok(());
@@ -351,6 +350,11 @@ fn offer_to_validator(validator: Option<&str>, command: &Command, node: &Node) -
         use std::io::Write;
         let _ = stdin.write_all(document.as_bytes());
     }
+    // llmlint: ignore[changed_behavior_has_e2e] this arm is the parent's own pipe read
+    // failing while the child is collected — an I/O failure of this process, which no
+    // journey can provoke without breaking the harness that runs it. It is here so the
+    // failure is reported rather than read as a verdict, which is the same fail-closed
+    // rule the spawn above is driven for end to end.
     let answer = child.wait_with_output().map_err(|e| {
         refuse(format!(
             "{op}: the node validator '{validator}' did not answer for node '{}' ({e}), so the \

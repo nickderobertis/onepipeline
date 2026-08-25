@@ -514,6 +514,49 @@ fn a_validator_that_says_nothing_and_one_that_cannot_be_started_both_refuse_loud
     world.release("slow.go");
 }
 
+/// A variable this build cannot read as text is a rung that is *there* and names
+/// something unusable, and the launch is refused by that variable's name.
+///
+/// Discarded instead, it would read as an unset rung and hand the run whichever
+/// validator the config file names — a launch judged by rules its operator did
+/// not choose, with nothing said about why.
+///
+/// Unix-only for the provocation, not for the rule: an environment value that is
+/// not text is bytes, and only this platform lets a caller hand one over.
+#[test]
+#[cfg(unix)]
+fn a_validator_variable_this_build_cannot_read_refuses_the_launch_by_its_name() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let world = World::new("validator-not-text");
+    let chosen = validator_named(&world, "check-node");
+    let name = "validatornottext";
+    let path = world.plan(name, &plan_of(name, vec![agent("only", &[])]));
+    let variable = spelling("environment");
+    let not_text = OsString::from_vec(vec![0x63, 0x68, 0xff, 0x6b]);
+
+    let mut refused = world.cmd(&["start", &path.to_string_lossy(), "--detach"]);
+    refused.env(&variable, &not_text);
+    world
+        .run_on(refused, "start")
+        .exited(REFUSED)
+        .err_has(&variable)
+        .err_has("cannot read as text");
+
+    // And a launch whose flag names one never consults the variable at all: it
+    // was not going to use it, so an unreadable one is not its problem.
+    let mut named = world.cmd(&[
+        "start",
+        &path.to_string_lossy(),
+        &spelling("flag"),
+        &chosen,
+        "--attach",
+    ]);
+    named.env(&variable, &not_text);
+    world.run_on(named, "start").exited(0).settled();
+}
+
 /// A launch config carrying the key while declaring a version that never had it
 /// is refused by that key's own name, and a config written at an earlier version
 /// this build reads still loads.

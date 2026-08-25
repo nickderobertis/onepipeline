@@ -1965,24 +1965,31 @@ pub(crate) fn configured_node_graph() -> String {
 
 /// What [`NODE_VALIDATOR_ENV`] says, when it says anything at all.
 ///
-/// *Set* rather than *usable*, which is the whole of what this rung decides: a
-/// variable that is there answers the question, and whether what it holds names
-/// a command is settled once, by the caller, for every rung alike. Set and
-/// blank therefore means "this launch names none" and stops the search rather
-/// than falling through to the config — a host that exported it empty to turn
-/// the hook off would otherwise get whichever validator its config file names.
+/// *Set* rather than *usable*: a variable that is there answers this rung, and
+/// whether what it holds names a command is settled once, by the caller, for
+/// all three rungs alike. So set-and-blank means "this launch names none" and
+/// stops the search rather than falling through to a config file that names
+/// one — which is what a host exporting it empty to turn the hook off is saying.
 ///
-/// Below the block above rather than inside it, because a rule may hold one
-/// open suppression at a time and this one is suppressed for a reason of its
-/// own.
-// llmlint: ignore-block[invalid_states_unrepresentable] what a variable says is a
-// `String` because that is what an environment holds, and this rung deliberately reports
-// it unjudged — see the doc above. Whether it names a command is decided once, by the
-// caller, for all three rungs alike, and it reaches `LaunchRecord` as the string that
-// record's schema declares; a newtype here would carry no invariant and would have to be
-// unwrapped again at the record.
-pub(crate) fn configured_node_validator() -> Option<String> {
-    std::env::var(NODE_VALIDATOR_ENV).ok()
+/// # Errors
+///
+/// [`Error::Invalid`] for a value this build cannot read as text. That is a
+/// rung that is *there* and names something unusable, and it is external input
+/// like any other: refused at the boundary rather than discarded, which would
+/// silently hand the run whichever validator the config file names.
+// llmlint: ignore-block[invalid_states_unrepresentable] the value is a `String` because
+// that is what an environment holds and what `LaunchRecord`'s schema declares; the one
+// invariant a newtype could carry is applied by the caller, for all three rungs at once.
+pub(crate) fn configured_node_validator() -> Result<Option<String>> {
+    match std::env::var(NODE_VALIDATOR_ENV) {
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(Error::Invalid(format!(
+            "{NODE_VALIDATOR_ENV} holds something this build cannot read as text, so the \
+             command it names cannot be resolved — set it to the command, or unset it to \
+             declare that this launch has none"
+        ))),
+    }
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
