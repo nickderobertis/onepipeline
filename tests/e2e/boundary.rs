@@ -120,3 +120,99 @@ fn an_unusable_attempt_budget_falls_back_rather_than_disabling_the_recovery() {
         "complete"
     );
 }
+
+/// A dispatch that died for a reason that is **not the agent's verdict** settles
+/// under a word of its own, having produced nothing at all.
+///
+/// The incident with no branch to recover: a node's run root was deleted
+/// underneath a live dispatch, so every identity in both its chains refused to
+/// start and none of them ran a turn. Reported `task-failed`, it says the agent
+/// tried this task and could not do it — which is a lie about a dispatch that
+/// never reached the task, and it sends whoever reads it to re-run work rather
+/// than to look at the host.
+///
+/// Everything the classification is made from is on the dispatch's own stderr,
+/// which is where `oneagentgraph` writes what ended a member, and the word is
+/// chosen from that and never from the branch: this node has none.
+#[test]
+fn a_dispatch_that_died_producing_nothing_is_not_reported_as_an_agent_that_failed() {
+    let world = World::new("boundary-diednothing");
+    world.script("build.silent", "");
+    world.script(
+        "build.refused",
+        "- - claude-code spawn-error\n- - codex spawn-error\n",
+    );
+    world.script(
+        "build.died",
+        "no candidate ran the turn: claude-code [spawn-error], codex [spawn-error]",
+    );
+    let run = settle(&world, "diednothing", vec![agent("build", &[])]);
+
+    // Not retried: the dispatch answered — those refusals are on the record — so
+    // another budget would go the same way. That is the policy this word was
+    // added *beside* rather than instead of.
+    assert_eq!(
+        world.events_of(&run, "node-dispatched").len(),
+        1,
+        "a dispatch that answered was retried"
+    );
+    assert!(
+        world
+            .journal(&run)
+            .iter()
+            .all(|event| event["kind"] != "turn-started"),
+        "this journey's dispatch opened a turn"
+    );
+
+    let node = world.run_json(&run, "result.json")["nodes"][0].clone();
+    assert_eq!(node["status"], "failed", "{node}");
+    assert_eq!(
+        node["outcome"], "dispatch-died",
+        "a dispatch that never reached its task was reported as one that failed it: {node}"
+    );
+    assert_eq!(node["cause"], "spawn-error", "{node}");
+    // No branch and no commit, because there was neither — which is exactly how
+    // this case has to read. The word does not depend on them.
+    assert!(node["branch"].is_null(), "{node}");
+    assert!(node["head"].is_null(), "{node}");
+
+    // And a manager reads all of that without opening the store.
+    world
+        .run(&["results", &run])
+        .exited(0)
+        .out_has("dispatch-died")
+        .out_has("the dispatch died (spawn-error) rather than failing its task")
+        .out_has("it left no branch, so nothing of it survived");
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("the dispatch died (spawn-error) rather than failing its task");
+}
+
+/// The same failure with a verdict of the agent's own settles exactly as it did.
+///
+/// The pair is the point: a word that is *distinct* is only distinct if the
+/// ordinary case still reads the way it always has. A classifier that answered
+/// the same way for both would have relabelled every failure in the run and told
+/// a manager to go and look at a harness that was never the problem.
+#[test]
+fn a_dispatch_whose_agent_failed_its_task_still_settles_as_a_task_failure() {
+    let world = World::new("boundary-diedverdict");
+    // The double's `.fail` is the agent's own verdict — "the node failed its
+    // gate" — which names no machinery and carries no classification.
+    world.script("build.fail", "1");
+    let run = settle(&world, "diedverdict", vec![agent("build", &[])]);
+
+    let node = world.run_json(&run, "result.json")["nodes"][0].clone();
+    assert_eq!(node["status"], "failed", "{node}");
+    assert_eq!(node["outcome"], "task-failed", "{node}");
+    assert!(
+        node["cause"].is_null(),
+        "a task failure was classified as a dispatch that died: {node}"
+    );
+    world
+        .run(&["results", &run])
+        .exited(0)
+        .out_has("task-failed")
+        .out_lacks("the dispatch died");
+}

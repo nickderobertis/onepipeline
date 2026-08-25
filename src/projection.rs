@@ -78,6 +78,25 @@ pub struct RunState {
     pub abandoned: BTreeMap<String, crate::vcs::DispatchSession>,
     /// Where a human reads the change each published node opened.
     pub change_urls: BTreeMap<String, String>,
+    /// Why each dispatch that ended for a reason other than the agent's verdict
+    /// ended, in the words its producer classified it with.
+    ///
+    /// Written only by a settlement that carried one, like
+    /// [`branches`](Self::branches) and [`change_urls`](Self::change_urls): most
+    /// settlements carry none, and an entry cleared on any other event would turn
+    /// a dispatch that died into one whose agent failed its task.
+    pub causes: BTreeMap<String, String>,
+    /// The commit each node's branch was left at, as its settlement recorded it.
+    ///
+    /// Not the same thing as [`landing_commits`](Self::landing_commits): that one
+    /// is where a change *reached its base*, and this is what the node's own
+    /// branch carries — which for work that never landed is the only commit
+    /// anybody can go and read.
+    //
+    // llmlint: ignore[invalid_states_unrepresentable] a commit is the plain string every
+    // identifier in this crate is, for the reason `landing_commits` records. What could go
+    // wrong with an unchecked one is checked where it enters, by `vcs::branch_head_in`.
+    pub heads: BTreeMap<String, String>,
     /// The commit each node's change reached its base at, as `onevcs` reported
     /// it on the session's own stream.
     ///
@@ -634,13 +653,45 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
             if let Some(url) = payload.get("change_url").and_then(Value::as_str) {
                 state.change_urls.insert(node.clone(), url.to_string());
             }
-            // Only a word this build can interpret: an unreadable landing leaves
-            // the node with none, which reads as nothing observed.
+            // The classification the dispatch died under, and the commit its
+            // branch was left at. Both are the settlement's own — nothing else in
+            // the journal says either — so a fold that dropped them would leave a
+            // reader of the result with the word and none of its evidence.
             //
-            // llmlint: ignore-block[changed_behavior_has_e2e] no invocation a user can type
-            // reaches this half: an unreadable value needs a journal a *newer build* wrote.
-            // Held by this module's fold test instead; what a user can reach is held in
-            // `tests/e2e/lifecycle.rs`.
+            // Checked here as well as where each was produced, because *this* is
+            // the boundary they cross: a journal is a file on disk that another
+            // build wrote and a person can edit, and both of these are rendered
+            // onto a line and written back into the run's own result document. A
+            // value that is not one is folded as none at all rather than carried,
+            // which reads as the settlement saying nothing — what a record written
+            // before either field existed already reads as.
+            //
+            // llmlint: ignore-block[changed_behavior_has_e2e] neither refusal has an
+            // invocation a user can type behind it: this crate's own writers are the only
+            // producers of these two fields and both check what they write, so reaching a
+            // refusal means a journal edited by hand, which would prove the fixture. Held
+            // by this module's fold test, exactly as the unreadable landing below it is.
+            if let Some(cause) = payload
+                .get(journal::SETTLED_CAUSE)
+                .and_then(Value::as_str)
+                .filter(|cause| crate::engine::is_a_classification(cause))
+            {
+                state.causes.insert(node.clone(), cause.to_string());
+            }
+            if let Some(head) = payload
+                .get(journal::SETTLED_HEAD)
+                .and_then(Value::as_str)
+                .and_then(crate::vcs::usable)
+            {
+                state.heads.insert(node.clone(), head);
+            } // llmlint: ignore-end[changed_behavior_has_e2e]
+              // Only a word this build can interpret: an unreadable landing leaves
+              // the node with none, which reads as nothing observed.
+              //
+              // llmlint: ignore-block[changed_behavior_has_e2e] no invocation a user can type
+              // reaches this half: an unreadable value needs a journal a *newer build* wrote.
+              // Held by this module's fold test instead; what a user can reach is held in
+              // `tests/e2e/lifecycle.rs`.
             if let Some(landing) = payload
                 .get(journal::SETTLED_LANDING)
                 .and_then(Value::as_str)
@@ -1351,6 +1402,72 @@ mod tests {
         assert!(millis_of("2024-02-29T00:00:00.000Z").is_some(), "2024 is");
         assert_eq!(millis_of("2100-02-29T00:00:00.000Z"), None, "2100 is not");
         assert!(millis_of("2000-02-29T00:00:00.000Z").is_some(), "2000 is");
+    }
+
+    /// A dispatch death's own two fields are folded where they are usable and
+    /// dropped where they are not.
+    ///
+    /// The journal is a file on disk that another build wrote and a person can
+    /// edit, and both of these are rendered onto an operator's line and written
+    /// back into the run's result document. A classification that is a paragraph,
+    /// or a commit carrying a newline, forges a row wherever it lands — so what
+    /// this build cannot use it folds as nothing said, which is what a record
+    /// written before either field existed already reads as.
+    #[test]
+    fn a_dispatch_deaths_cause_and_commit_are_folded_only_where_they_are_usable() {
+        let plan = plan_of_nodes(vec![agent("good", &[]), agent("forged", &[])]);
+        let settled = |seq: u64, node: &str, cause: Value, head: Value| {
+            pipeline(
+                journal::PipelineKind::NodeSettled,
+                seq,
+                Some(node),
+                &[
+                    ("status", json!("failed")),
+                    ("outcome", json!(crate::engine::DISPATCH_DIED)),
+                    (journal::SETTLED_CAUSE, cause),
+                    (journal::SETTLED_HEAD, head),
+                ],
+            )
+        };
+        let state = fold(&[
+            pipeline(
+                journal::PipelineKind::RunStarted,
+                0,
+                None,
+                &[("plan", json!(plan))],
+            ),
+            settled(1, "good", json!("rate_limit"), json!("abc123")),
+            // A classification that is a sentence, and a commit carrying a line
+            // of its own — the two ways a hand-edited record forges a row.
+            settled(
+                2,
+                "forged",
+                json!("the harness said a great many things about this"),
+                json!("abc123\n  ship        done"),
+            ),
+        ]);
+
+        assert_eq!(
+            state.causes.get("good").map(String::as_str),
+            Some("rate_limit")
+        );
+        assert_eq!(state.heads.get("good").map(String::as_str), Some("abc123"));
+        assert_eq!(
+            state.causes.get("forged"),
+            None,
+            "a classification this build cannot use was folded anyway"
+        );
+        assert_eq!(
+            state.heads.get("forged"),
+            None,
+            "a commit carrying a line of its own was folded onto a view"
+        );
+        // The word itself is not conditional on either: what the dispatch was is
+        // still what it was.
+        assert_eq!(
+            state.outcomes.get("forged").map(String::as_str),
+            Some(crate::engine::DISPATCH_DIED)
+        );
     }
 
     /// A landing outlives the dispatch that recorded it, only a re-settlement
