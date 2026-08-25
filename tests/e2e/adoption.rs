@@ -114,8 +114,34 @@ fn engine() -> Value {
 }
 
 /// Say what the probe answers from now on.
+///
+/// Whole or not at all, because the probe reads this file while a journey writes
+/// it: a plain write truncates and then fills, and a probe that opens it in
+/// between finds it there and holding nothing — which is neither the answer just
+/// given nor the absent file that means no release. A rename is one step to every
+/// reader, so a probe run gets the answer before or the answer after and never
+/// half of either.
 fn releases_at(answer: &Path, version: &str) {
-    std::fs::write(answer, format!("{version}\n")).expect("the probe's answer is written");
+    // Written whole, under a name no probe reads, and then moved onto the one
+    // every probe does: what this avoids is a *reader* seeing half an answer, so
+    // the file here is the complete one and the rename is the single step.
+    let whole = answer.with_extension("next");
+    std::fs::write(&whole, format!("{version}\n")).expect("the probe's answer is written");
+    // Replacing a file another process holds open is refused rather than queued on
+    // one of the two platforms this suite runs on, and a probe here opens this one
+    // every poll. So the replacement is retried for longer than a probe run can
+    // hold it, and says which file it could not replace if it never gets in.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        match std::fs::rename(&whole, answer) {
+            Ok(()) => return,
+            Err(failure) if std::time::Instant::now() >= deadline => panic!(
+                "the probe's answer {} could not replace the one before it: {failure}",
+                answer.display()
+            ),
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
+        }
+    }
 }
 
 /// The three kinds this crate emits reach a planner through the **shipped
@@ -785,6 +811,10 @@ fn a_target_this_host_cannot_name_holds_the_node_rather_than_releasing_it() {
         surface.contains("no release target this host can name"),
         "the surface does not say why nothing can answer:\n{surface}"
     );
+    // A question that can never be put is the other shape a wait takes, and a
+    // reader is owed the same thing about it: no record of this wait was written
+    // before a surface had told somebody the same.
+    every_wait_was_surfaced_before_it_was_recorded(&world, &run, "consumer");
     world.run(&["stop", &run]).exited(0);
 }
 
@@ -834,6 +864,11 @@ fn a_probe_that_could_not_answer_holds_the_node_and_is_never_read_as_not_release
         !surface.contains("last answer: not-released"),
         "a probe that could not answer was read as a release that has not happened:\n{surface}"
     );
+    // And the surface beside *every* record this run wrote said what that record
+    // said — which is the same promise, held where a reader's timing cannot
+    // decide whether it holds. The two asserts above read the newest of each and
+    // agree only if the store is caught between the two appends of one report.
+    every_wait_was_surfaced_before_it_was_recorded(&world, &run, "consumer");
 
     // And only a release starts it, which is what says the hold was the hold and
     // not the probe being broken.
@@ -846,6 +881,96 @@ fn a_probe_that_could_not_answer_holds_the_node_and_is_never_read_as_not_release
             event["payload"]["status"],
             json!("failed"),
             "a probe that could not answer failed a node: {event}"
+        );
+    }
+}
+
+/// An answer this host **cannot read** is never read as a release that has not
+/// happened — driven at the one state of the probe where the two readings meet.
+///
+/// The sibling journey to
+/// [`a_probe_that_could_not_answer_holds_the_node_and_is_never_read_as_not_released`],
+/// and the reason it exists is that this is where the distinction is *lossy*. A
+/// probe that prints something unusable is unanswered all the way down; a probe
+/// that prints **nothing** on exit 0 is `onevcs`'s spelling of "this target has no
+/// release", and a host holding a baseline reports that as **not released**. So an
+/// answer file that is there and empty — which is exactly what a write caught half
+/// done leaves behind, on every platform, and which the slowest one loses most
+/// often — would arrive at a reader as a release that has not happened rather than
+/// as a question this host got nothing back from.
+///
+/// Nothing here needs a particular platform to reach it: the state is put there
+/// outright rather than raced for, so the verdict lands the same everywhere the
+/// suite runs.
+#[test]
+fn an_answer_this_host_cannot_read_is_never_read_as_a_release_that_has_not_happened() {
+    let world = watching("adoption-unreadable");
+    world.write_graphs();
+    let (engine_repo, _consumer) = two_repositories(&world);
+    let (script, answer) = world.probe_in(&engine_repo, ENGINE);
+    world.releases(&automated(&script));
+    // A version at the landing, so the baseline the publication captures is one a
+    // later answer is compared against — which is the whole condition: with no
+    // baseline there is nothing for "no release" to be reported as not past.
+    releases_at(&answer, "0.1.0");
+
+    let run = start(
+        &world,
+        "adoption-unreadable",
+        vec![engine(), consumer(Some("published"))],
+    );
+    world.until("the probe's answer to reach the wait", |world| {
+        answered(world, &run, "consumer") == Some("not-released".to_owned())
+    });
+
+    // The answer file, there and holding nothing. No release is spelled by the
+    // file not being there at all, so this is a probe with nothing to say rather
+    // than a target with nothing released.
+    std::fs::write(&answer, "").expect("the half-written answer is left behind");
+    world.until("the probe's failure to reach the wait", |world| {
+        answered(world, &run, "consumer") == Some("not-answered".to_owned())
+    });
+    assert!(
+        !dispatched(&world, &run, "consumer"),
+        "a probe with no answer to give started a node"
+    );
+    let surface = wait_surface(&world, &run, "consumer");
+    assert!(
+        surface.contains("last answer: not-answered"),
+        "the surface reports an answer this host cannot read as something else:\n{surface}"
+    );
+    assert!(
+        !surface.contains("last answer: not-released"),
+        "an answer this host cannot read was reported as a release that has not \
+         happened:\n{surface}"
+    );
+    // And no record of this wait ever said it either, at any moment of the run —
+    // the reading this journey refuses is one a reader's timing must not be able
+    // to catch.
+    every_wait_was_surfaced_before_it_was_recorded(&world, &run, "consumer");
+    for event in world.events_of(&run, "release-wait") {
+        for entry in event["payload"]["awaiting"]
+            .as_array()
+            .unwrap_or(&Vec::new())
+        {
+            assert_ne!(
+                entry["last_answer"],
+                json!("released"),
+                "a probe with no answer to give released a hold: {event}"
+            );
+        }
+    }
+
+    // And the hold was the hold: a readable answer past the baseline starts it.
+    releases_at(&answer, "0.2.0");
+    world.until("the release to start the held node", |world| {
+        world.events_of(&run, "node-settled").len() == 2
+    });
+    for event in world.events_of(&run, "node-settled") {
+        assert_ne!(
+            event["payload"]["status"],
+            json!("failed"),
+            "a probe with no answer to give failed a node: {event}"
         );
     }
 }
@@ -997,6 +1122,60 @@ fn wait_surface(world: &World, run: &str, node: &str) -> String {
         .unwrap_or_default()
 }
 
+/// Every wait this run **recorded** about one node had already been surfaced,
+/// saying the same thing, by the time the record was written.
+///
+/// Which is the promise held where a reader's timing cannot decide whether it
+/// holds. The record and the surface are two appends saying one thing, so a
+/// journey that reads the newest of each and hopes they agree only fails on a
+/// host slow enough between the two to be caught in the middle. The order they
+/// were written in is in the store afterwards, at any speed.
+fn every_wait_was_surfaced_before_it_was_recorded(world: &World, run: &str, node: &str) {
+    let mut surface = String::new();
+    let mut recorded = 0usize;
+    for event in world.journal(run) {
+        if event["labels"]["node"] != json!(node) {
+            continue;
+        }
+        match event["kind"].as_str().unwrap_or_default() {
+            "planner-surface-queued" if event["payload"]["kind"] == json!("release-wait") => {
+                surface = event["payload"]["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned();
+            }
+            "release-wait" => {
+                recorded += 1;
+                for entry in event["payload"]["awaiting"]
+                    .as_array()
+                    .unwrap_or(&Vec::new())
+                {
+                    let identity = entry["identity"].as_str().unwrap_or_default();
+                    let named = match entry["target"].as_str() {
+                        Some(target) => format!("{identity} {target}"),
+                        None => identity.to_owned(),
+                    };
+                    let said = entry["last_answer"].as_str().unwrap_or_default();
+                    let line = surface
+                        .lines()
+                        .find(|line| line.starts_with(&format!("- {named} ")))
+                        .unwrap_or_default();
+                    assert!(
+                        line.ends_with(&format!("last answer: {said}")),
+                        "'{node}' recorded {named} at '{said}', and the surface a reader had \
+                         beside that record said something else:\n{surface}"
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        recorded > 0,
+        "no wait was recorded about '{node}' at all, so this proved nothing"
+    );
+}
+
 /// Start a run detached, so the journey can move the world under a live loop.
 ///
 /// Every node writes a file, because a lifecycle node whose dispatch changed
@@ -1030,6 +1209,20 @@ fn start_with(world: &World, name: &str, nodes: Vec<Value>, extra: &[&str]) -> S
     name.to_string()
 }
 
+/// How often a journey here lets this host run **one** release's probe.
+///
+/// [`watching`] is what sets it, from here rather than beside it: a journey that
+/// counts probe runs against this bound and a world that ran under another one
+/// would agree on nothing.
+const POLL_SECONDS: u64 = 1;
+
+/// How many asks
+/// [`nodes_awaiting_one_release_put_one_question_and_are_answered_together`]
+/// counts before it judges the rate. Enough that a host spending the poll budget
+/// once per waiting node has to have spent it faster than the budget allows, and
+/// small enough that the window is a few seconds.
+const ASKS: usize = 5;
+
 /// A world whose release watch answers on this journey's timescale rather than on
 /// an operator's.
 ///
@@ -1039,7 +1232,10 @@ fn start_with(world: &World, name: &str, nodes: Vec<Value>, extra: &[&str]) -> S
 /// changes: one hold, indefinite, released only by an answer of released.
 fn watching(name: &str) -> World {
     World::new(name)
-        .with_env("ONEPIPELINE_RELEASE_POLL_SECONDS", "1")
+        .with_env(
+            "ONEPIPELINE_RELEASE_POLL_SECONDS",
+            &POLL_SECONDS.to_string(),
+        )
         .with_env("ONEPIPELINE_RELEASE_SURFACE_SECONDS", "1")
 }
 
@@ -1722,6 +1918,155 @@ fn a_published_node_is_held_until_the_release_answers_and_by_nothing_else() {
     );
     let settled = world.events_of(&run, "node-settled");
     for event in &settled {
+        assert_ne!(
+            event["payload"]["status"],
+            json!("failed"),
+            "a node the wait held was failed: {event}"
+        );
+    }
+}
+
+/// Nodes awaiting **one** release put one question between them, are answered
+/// together, and say so while they wait.
+///
+/// Three promises, against the real probe: a wait still expecting its first
+/// answer reads `no-answer-yet` and never `not-answered`, no node is left
+/// reporting no answer once a node beside it has one, and the three of them cost
+/// one probe run a poll between them — the count that says the first two are
+/// structural rather than luck.
+#[test]
+fn nodes_awaiting_one_release_put_one_question_and_are_answered_together() {
+    let world = watching("adoption-one-question");
+    world.write_graphs();
+    let (engine_repo, _consumer) = two_repositories(&world);
+    let (script, answer) = world.probe_in(&engine_repo, ENGINE);
+    world.releases(&automated(&script));
+    releases_at(&answer, "0.1.0");
+
+    // Three of them, because two can straddle a round by luck and three cannot:
+    // asked one at a time, the third waits out both of the others.
+    let waiters = ["first", "second", "third"];
+    let mut nodes = vec![engine()];
+    for id in waiters {
+        let mut node = crate::harness::agent(id, &[ENGINE]);
+        node["adoption"] = json!("published");
+        nodes.push(node);
+    }
+    let run = start(&world, "adoption-one-question", nodes);
+    world.until("every wait to carry the probe's answer", |world| {
+        waiters
+            .iter()
+            .all(|node| answered(world, &run, node) == Some("not-released".to_owned()))
+    });
+
+    for node in waiters {
+        assert!(!dispatched(&world, &run, node), "{node} was dispatched");
+    }
+    // What every wait said, in the order the store holds it, because both of the
+    // next two promises are about a *sequence*: a node reading `no-answer-yet` is
+    // right until the first answer lands and wrong from that moment on.
+    let mut waited: Vec<(String, String)> = Vec::new();
+    for event in world.journal(&run) {
+        if event["kind"] != "release-wait" {
+            continue;
+        }
+        let node = event["labels"]["node"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        for entry in event["payload"]["awaiting"]
+            .as_array()
+            .unwrap_or(&Vec::new())
+        {
+            waited.push((
+                node.clone(),
+                entry["last_answer"].as_str().unwrap_or_default().to_owned(),
+            ));
+        }
+    }
+    // Each node's first wait is raised before anything can have answered it, and
+    // says so — `no-answer-yet`, and never `not-answered`, which is the word for
+    // a probe that ran and could not answer. This probe answers.
+    for node in waiters {
+        let first = waited.iter().find(|(who, _)| who == node);
+        assert_eq!(
+            first.map(|(_, said)| said.as_str()),
+            Some("no-answer-yet"),
+            "'{node}' reported its first wait as something other than a question still out",
+        );
+    }
+    assert!(
+        !wait_surface(&world, &run, "first").is_empty()
+            && world
+                .events_of(&run, "planner-surface-queued")
+                .iter()
+                .any(|event| event["payload"]["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("last answer: no-answer-yet")),
+        "no surface told a reader the probe was still out rather than broken"
+    );
+    // And no node was left reporting no answer after a node beside it had one.
+    let mut answered_yet = false;
+    for (node, said) in &waited {
+        assert_ne!(
+            said, "not-answered",
+            "'{node}' reported a probe that answers as one that could not"
+        );
+        let carries = said == "not-released" || said == "released";
+        assert!(
+            carries || !answered_yet,
+            "'{node}' still reports '{said}' for a release a node beside it has already been \
+             answered about"
+        );
+        answered_yet |= carries;
+    }
+    assert!(
+        answered_yet,
+        "no wait carried the probe's answer at all, so this proved nothing"
+    );
+
+    // Counted over a window the probe's own tally marks out rather than over the
+    // journey's elapsed time, because what is held is a **rate**: one probe run
+    // for this release every `ONEPIPELINE_RELEASE_POLL_SECONDS`, however fast the
+    // host is. One question per waiting node spends that budget three times over.
+    world.until("the release to be asked about", |world| {
+        world.probe_runs(ENGINE) >= 1
+    });
+    let before = world.probe_runs(ENGINE);
+    let from = std::time::Instant::now();
+    world.until(
+        "the release to be asked about several times over",
+        |world| world.probe_runs(ENGINE) >= before + ASKS,
+    );
+    let asked = world.probe_runs(ENGINE) - before;
+    let over = from.elapsed().as_secs_f64();
+    assert!(
+        asked as f64 <= over / POLL_SECONDS as f64 + 2.0,
+        "{asked} probes were run for one release in {over:.1}s, which is oftener than one \
+         every {POLL_SECONDS}s — the nodes awaiting it are each buying their own copy of \
+         one answer"
+    );
+
+    releases_at(&answer, "0.2.0");
+    world.until("every node to settle", |world| {
+        world.events_of(&run, "node-settled").len() == 4
+    });
+    let mut arrived = false;
+    for event in world.journal(&run) {
+        match event["kind"].as_str().unwrap_or_default() {
+            "release-arrived" => arrived = true,
+            "release-wait" => assert!(
+                !arrived,
+                "'{}' was still waiting on a release another node had already been handed: \
+                 {event}",
+                event["labels"]["node"],
+            ),
+            _ => {}
+        }
+    }
+    assert!(arrived, "no release ever arrived, so this proved nothing");
+    for event in world.events_of(&run, "node-settled") {
         assert_ne!(
             event["payload"]["status"],
             json!("failed"),

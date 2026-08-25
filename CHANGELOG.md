@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.2](https://github.com/nickderobertis/onepipeline/compare/v0.14.1...v0.14.2) - 2026-08-25
+
+### Added
+
+- pin every engine at its newest release, refuse a split lock, and stop a stale check ending a publication ([#122](https://github.com/nickderobertis/onepipeline/pull/122))
+
 ## [0.14.1](https://github.com/nickderobertis/onepipeline/compare/v0.14.0...v0.14.1) - 2026-08-25
 
 ### Fixed

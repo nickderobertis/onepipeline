@@ -70,7 +70,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::error::{Error, Result};
@@ -456,7 +456,17 @@ struct LibraryGraphRun {
 /// launch whose caller deliberately exits immediately afterward.
 #[derive(Debug)]
 struct ProcessGraphRun {
-    child: Child,
+    /// The graph process, shared because the relayed stream asks it a question
+    /// of its own: whether the process this launch started is over, which is what
+    /// ends that stream when the pipe does not. Every other holder takes the lock
+    /// for one call, and the stream never blocks on it — see [`over`].
+    child: Arc<Mutex<Child>>,
+    /// The graph process's id, kept beside the process rather than read off it.
+    ///
+    /// [`cancel`](GraphRun::cancel) takes `&self` and is called from the engine's
+    /// drain while other holders have the lock, so the one thing a teardown needs
+    /// is the one thing that must never wait for it.
+    pid: u32,
     /// Where this launch's output went, and what reads it back.
     output: Output,
     /// Everything the handshake read on its way to an answer. These are the
@@ -466,6 +476,190 @@ struct ProcessGraphRun {
     started_with: Vec<String>,
     /// The graph run's own id, read off its announcement.
     run_id: Option<GraphRunId>,
+}
+
+/// How long the relayed stream goes quiet before it asks whether the graph
+/// process is still there.
+///
+/// It is asked *only* on a silence, so a launch whose pipe closes the moment its
+/// graph exits — every launch on a host that leaves nothing holding it — ends on
+/// the pipe as it always did and pays nothing for this. What the interval bounds
+/// is the other case: how long after the graph is gone a stream held open by
+/// something else waits before it ends. Long enough that a burst still in the
+/// pipe is delivered before the silence is read as one, and short enough that a
+/// node's settlement is not held on an interval's convenience.
+const RELAY_POLL: Duration = Duration::from_millis(250);
+
+/// How long a reader of a graph's stderr waits for the drain to reach the end of
+/// the pipe before taking what has arrived.
+///
+/// Every caller asks after the process has exited, so what is left is whatever
+/// it flushed on its way out — already in the pipe, and read by the drain as soon
+/// as that thread is scheduled. The bound is what makes this a read rather than a
+/// wait: a pipe something else is holding open never reaches its end, and a
+/// launch's message is not worth hanging a run on.
+const SAID_PATIENCE: Duration = Duration::from_secs(2);
+
+/// How often [`Said::settled`] looks again while it waits out that bound.
+const SAID_POLL: Duration = Duration::from_millis(10);
+
+/// What a launch has said on its stderr, drained off the pipe as it arrives.
+///
+/// A pipe is read to its end, and its end is every writing handle closed — not
+/// the process this launch started exiting. Anything that inherited that handle
+/// holds the stream open after the graph is gone, and on Windows that is a wider
+/// set than the graph's own children: a console process is given a `conhost` and
+/// a `.bat` a `cmd`, and either can outlive what it was started for. So the
+/// stream is drained on a thread of its own and read here as a snapshot, rather
+/// than read to its end by whoever is asking what the graph said.
+#[derive(Debug, Clone)]
+struct Said {
+    /// Everything the drain has read so far, as it was read.
+    bytes: Arc<Mutex<Vec<u8>>>,
+    /// Set once the pipe reached its end, so a reader can tell a stream that has
+    /// finished from one that has merely said nothing yet.
+    ended: Arc<AtomicBool>,
+}
+
+impl Said {
+    /// Start draining `pipe` on a thread of its own.
+    ///
+    /// `None` is a host that gave a piped launch no handle back — the same
+    /// silence [`Output::Relayed`] records for the other stream — and it is a
+    /// drain with nothing to read rather than a second state to carry.
+    ///
+    /// Nothing here branches on whether the thread started. A [`Drained`] goes
+    /// with the closure either way, and going is what marks the drain finished,
+    /// so a host that would not start the thread takes the path every launch
+    /// takes rather than one of its own.
+    fn draining(pipe: Option<std::process::ChildStderr>) -> Self {
+        let said = Self {
+            bytes: Arc::new(Mutex::new(Vec::new())),
+            ended: Arc::new(AtomicBool::new(false)),
+        };
+        let drain = Drained(said.clone());
+        let _ = std::thread::Builder::new()
+            .name(format!("{}-stderr", binary()))
+            .spawn(move || {
+                use std::io::Read;
+                let mut buffer = [0u8; 4096];
+                if let Some(mut pipe) = pipe {
+                    loop {
+                        match pipe.read(&mut buffer) {
+                            // The end of the pipe, or a host that will not say
+                            // more about it. Either way there is nothing further.
+                            Ok(0) => break,
+                            Ok(read) => held(&drain.0.bytes).extend_from_slice(&buffer[..read]),
+                            // A read the signal handling interrupted read nothing
+                            // and is not the stream ending; every other failure is.
+                            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                            Err(_) => break,
+                        }
+                    }
+                }
+            });
+        said
+    }
+
+    /// Everything the graph said, once the drain has finished or the patience has
+    /// run out.
+    ///
+    /// Decoded here rather than as it arrives: a read ends wherever the pipe
+    /// filled, which is not where a character does, so converting each chunk
+    /// would put a replacement character in the middle of every message that
+    /// crossed one.
+    fn settled(&self) -> String {
+        let deadline = Instant::now() + SAID_PATIENCE;
+        while !self.ended.load(Ordering::Acquire) && Instant::now() < deadline {
+            std::thread::sleep(SAID_POLL);
+        }
+        String::from_utf8_lossy(&held(&self.bytes)).into_owned()
+    }
+}
+
+/// A drain that marks itself finished when it goes, however it went.
+///
+/// The pipe reaching its end and a thread this host would not start are the same
+/// answer to the one question a reader of [`Said`] has — nothing more is coming —
+/// and putting that answer on `Drop` is what makes them one path instead of two,
+/// only one of which any run reaches. The thread body ends and this drops with
+/// it; the thread never starts and the closure holding this is dropped instead.
+/// Every launch takes it, so nothing here is a branch a journey cannot reach.
+struct Drained(Said);
+
+impl Drop for Drained {
+    fn drop(&mut self) {
+        self.0.ended.store(true, Ordering::Release);
+    }
+}
+
+/// A lock taken past a holder that panicked while it had it.
+///
+/// Nothing guarded here has an invariant a panic could break — one is a buffer
+/// being appended to and the other a `Child` — so a poisoned lock is a thread
+/// that died, not state to refuse. Refusing would turn a panic in a relay into a
+/// run that cannot say what its graph said.
+fn held<T>(lock: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    lock.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Whether the graph process is over, without ever waiting to find out.
+///
+/// `try_lock`, because the only other holders are this launch's own `wait` and
+/// its handshake — and a relay that blocked on `wait` would be waiting on
+/// precisely the answer it is asking for. A lock it could not take is *not
+/// known to be over*, which is the same safe direction an unanswerable liveness
+/// question takes everywhere else in this crate.
+fn over(child: &Mutex<Child>) -> bool {
+    child
+        .try_lock()
+        .is_ok_and(|mut child| matches!(child.try_wait(), Ok(Some(_))))
+}
+
+/// The lines a relayed launch wrote, as a stream that ends when the **graph
+/// process** ends.
+///
+/// The pipe's own end is not that question. A pipe reaches its end when every
+/// handle that may write to it is closed, and a process that inherited one holds
+/// it open long after the graph that was given it has exited — so a relay that
+/// read to the end waited on processes this run never started, and the node whose
+/// dispatch it was never settled. Reading on a thread of its own is what
+/// separates the two: what has arrived is yielded as it arrives, and a silence is
+/// the moment to ask whether there is still anything that could write.
+///
+/// Nothing is lost by ending there. What the graph wrote before it exited is in
+/// the pipe and read before the first silence; what could arrive afterwards is
+/// another process's output on a stream this run has finished with.
+fn relayed_lines(
+    reader: BufReader<std::process::ChildStdout>,
+    child: Arc<Mutex<Child>>,
+) -> impl Iterator<Item = std::io::Result<String>> + Send {
+    let (lines, arriving) = mpsc::channel();
+    // Not waited on, and not branched on: the channel closing is what says the
+    // stream ended, and the sender goes with the closure whether the thread ran
+    // it or a host refused to start it. So a thread that never started ends the
+    // stream down the same arm every launch ends down — a relay that reported
+    // what the graph said and then finished — rather than down one of its own.
+    let _ = std::thread::Builder::new()
+        .name(format!("{}-relay", binary()))
+        .spawn(move || {
+            for line in reader.lines() {
+                if lines.send(line).is_err() {
+                    return;
+                }
+            }
+        });
+    std::iter::from_fn(move || loop {
+        match arriving.recv_timeout(RELAY_POLL) {
+            Ok(line) => return Some(line),
+            // The pipe reached its end, which is the stream ending as it always
+            // did on a host that leaves nothing holding it.
+            Err(mpsc::RecvTimeoutError::Disconnected) => return None,
+            Err(mpsc::RecvTimeoutError::Timeout) if over(&child) => return None,
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+    })
 }
 
 /// Where a started graph's own stdout and stderr go.
@@ -533,11 +727,19 @@ pub struct Launch<'a> {
 /// refusal already sitting on its pipe.
 #[derive(Debug)]
 enum Output {
-    /// Piped here. The reader lives on this side rather than on the child
-    /// because the handshake reads the first line off it and
-    /// [`events`](GraphRun::events) reads the rest; `None` is that stream handed
-    /// on, not a relayed launch that never had one.
-    Relayed(Option<BufReader<std::process::ChildStdout>>),
+    /// Piped here, and read on this side: both streams belong to the arm that
+    /// has them, so a logged launch cannot be holding a drain of a pipe it was
+    /// never given.
+    Relayed {
+        /// The reader lives on this side rather than on the child because the
+        /// handshake reads the first line off it and
+        /// [`events`](GraphRun::events) reads the rest; `None` is that stream
+        /// handed on, not a relayed launch that never had one.
+        stdout: Option<BufReader<std::process::ChildStdout>>,
+        /// This launch's stderr, drained as it arrives rather than read when
+        /// somebody asks — see [`Said`].
+        stderr: Said,
+    },
     /// Appended to this file. It is the only place a refusal's message exists
     /// for a launch that logs, and it holds one launch's output and no other:
     /// the only caller that logs is `start --detach`, into a run directory
@@ -658,16 +860,25 @@ impl ProcessGraphRun {
         let mut child = command
             .spawn()
             .map_err(|e| sibling(format!("cannot start `{} run`: {e}", binary())))?;
+        let pid = child.id();
         // The destination asked for is the destination recorded, so the two
         // cannot come apart: a relayed launch reads its pipe even on the host
         // where taking the handle back off the child somehow gave nothing, and
         // reports that silence as the launch failing to answer.
+        //
+        // The stderr drain starts here rather than reading when somebody asks:
+        // the reader of a pipe waits for every writing handle to close, and what
+        // this launch is owed is what *its* process said.
         let output = match output {
-            GraphOutput::Relayed => Output::Relayed(child.stdout.take().map(BufReader::new)),
+            GraphOutput::Relayed => Output::Relayed {
+                stdout: child.stdout.take().map(BufReader::new),
+                stderr: Said::draining(child.stderr.take()),
+            },
             GraphOutput::Logged(path) => Output::Logged(path.to_path_buf()),
         };
         Ok(Self {
-            child,
+            child: Arc::new(Mutex::new(child)),
+            pid,
             output,
             started_with: Vec::new(),
             run_id: None,
@@ -705,7 +916,7 @@ impl ProcessGraphRun {
         // On where the output went, not on whether a stream happens to be in
         // hand: those are the same question only as long as they agree.
         let piped = match &mut self.output {
-            Output::Relayed(stdout) => stdout.take(),
+            Output::Relayed { stdout, .. } => stdout.take(),
             // Written to a file, so the answer is read from there.
             Output::Logged(_) => return self.await_logged_line(),
         };
@@ -758,7 +969,12 @@ impl ProcessGraphRun {
                 let announcement = read.last().and_then(|line| envelope_of(line));
                 let announced = announcement.is_some();
                 self.run_id = announcement.as_ref().and_then(announced_run);
-                self.output = Output::Relayed(Some(reader));
+                // Put back rather than reassigned: this arm is the one the
+                // reader came off a moment ago, and its drain of the other
+                // stream has been running since the launch.
+                if let Output::Relayed { stdout, .. } = &mut self.output {
+                    *stdout = Some(reader);
+                }
                 self.started_with = read;
                 match error {
                     Some(error) => Err(sibling(format!(
@@ -790,7 +1006,8 @@ impl ProcessGraphRun {
                 self.run_id = announced_run(&announcement);
                 return Ok(());
             }
-            match self.child.try_wait() {
+            let waited = held(&self.child).try_wait();
+            match waited {
                 Err(error) => {
                     return Err(sibling(format!(
                         "cannot tell whether `{} run` started: {error}",
@@ -829,7 +1046,8 @@ impl ProcessGraphRun {
     fn settle_unstarted(&mut self) -> Result<()> {
         let deadline = Instant::now() + startup_timeout();
         loop {
-            match self.child.try_wait() {
+            let waited = held(&self.child).try_wait();
+            match waited {
                 Err(error) => {
                     return Err(sibling(format!(
                         "cannot tell whether `{} run` started: {error}",
@@ -857,8 +1075,11 @@ impl ProcessGraphRun {
     /// A launch that neither started nor ended. It is not left running: nothing
     /// would ever collect it, and the caller is being told it did not start.
     fn gave_no_answer(&mut self) -> Result<()> {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        {
+            let mut child = held(&self.child);
+            let _ = child.kill();
+            let _ = child.wait();
+        }
         Err(sibling(format!(
             "`{} run` neither started nor exited within {}s, so nothing is driving the run: {}",
             binary(),
@@ -875,17 +1096,7 @@ impl ProcessGraphRun {
     fn evidence(&mut self) -> String {
         let text = match &self.output {
             Output::Logged(path) => std::fs::read_to_string(path).unwrap_or_default(),
-            Output::Relayed(_) => self
-                .child
-                .stderr
-                .take()
-                .map(|mut pipe| {
-                    use std::io::Read;
-                    let mut text = String::new();
-                    let _ = pipe.read_to_string(&mut text);
-                    text
-                })
-                .unwrap_or_default(),
+            Output::Relayed { .. } => self.said(),
         };
         let trimmed = text.trim();
         if trimmed.is_empty() {
@@ -908,7 +1119,7 @@ impl ProcessGraphRun {
     pub fn events(&mut self) -> Box<dyn Iterator<Item = Result<Envelope>> + Send> {
         let piped = match &mut self.output {
             // Taken for good: the stream is the caller's from here.
-            Output::Relayed(stdout) => stdout.take(),
+            Output::Relayed { stdout, .. } => stdout.take(),
             // A logged launch's envelopes are in its file, which stays named —
             // its refusal is still read from there.
             Output::Logged(_) => None,
@@ -921,7 +1132,7 @@ impl ProcessGraphRun {
             announced
                 .into_iter()
                 .map(Ok)
-                .chain(stdout.lines())
+                .chain(relayed_lines(stdout, Arc::clone(&self.child)))
                 .filter_map(|line| match line {
                     // A stream that broke is not a stream that ended. Read as the same
                     // thing, a relay stops mid-run and reports a clean finish, and the
@@ -947,30 +1158,29 @@ impl ProcessGraphRun {
 
     /// Block until the graph settles, and report whether it succeeded.
     pub fn wait(&mut self) -> Result<Settled> {
-        let status = self
-            .child
+        let status = held(&self.child)
             .wait()
             .map_err(|e| sibling(format!("waiting for `{} run`: {e}", binary())))?;
-        let stderr = self
-            .child
-            .stderr
-            .take()
-            .map(|mut pipe| {
-                use std::io::Read;
-                let mut text = String::new();
-                let _ = pipe.read_to_string(&mut text);
-                text
-            })
-            .unwrap_or_default();
         Ok(Settled {
             code: status.code(),
-            stderr,
+            stderr: self.said(),
         })
+    }
+
+    /// Everything this launch said on its stderr, as the drain has it.
+    ///
+    /// A logged launch has no drain — its stderr is the file — and its own
+    /// reader of that file is [`evidence`](Self::evidence).
+    fn said(&self) -> String {
+        match &self.output {
+            Output::Relayed { stderr, .. } => stderr.settled(),
+            Output::Logged(_) => String::new(),
+        }
     }
 
     /// The started process's id, for the ledger's record of what is running.
     pub fn pid(&self) -> u32 {
-        self.child.id()
+        self.pid
     }
 
     /// The graph run's own id, once its announcement has been read.
@@ -985,7 +1195,7 @@ impl ProcessGraphRun {
     /// collected its driver would report a run as driven long after nothing
     /// was driving it.
     pub fn has_exited(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(Some(_)))
+        matches!(held(&self.child).try_wait(), Ok(Some(_)))
     }
 }
 
@@ -1896,10 +2106,9 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some(conversation.as_str()),
             "the linked oneagentgraph stamps no `session` on a turn it names: the \
-             session-conversation producer ships in 0.3.3, `Cargo.toml`'s `^0.3.0` has \
-             permitted that release all along, so `Cargo.lock` is stale and \
-             `cargo update -p oneagentgraph` is the whole of the fix — editing the \
-             requirement changes nothing"
+             session-conversation producer ships in 0.3.3, and `Cargo.toml` requires the \
+             newest release, which is above that floor — so `Cargo.lock` is behind the \
+             manifest too and `cargo update -p oneagentgraph` is the whole of the fix"
         );
         assert!(
             serde_json::from_value::<oneagentgraph::event::EventKind>(serde_json::Value::String(
@@ -1933,9 +2142,10 @@ mod tests {
     fn the_linked_oneagentgraph_produces_the_whole_turn_this_crate_relays() {
         /// What every assertion here has to say, because it is the only thing
         /// that fixes any of them.
-        const MOVE_THE_LOCK: &str = "`Cargo.toml`'s `^0.3.0` has permitted 0.3.6 all along, \
-             so `Cargo.lock` is what is behind and `cargo update -p oneagentgraph` is the \
-             whole of the fix — editing the requirement changes nothing";
+        const MOVE_THE_LOCK: &str = "`Cargo.toml` requires the newest release, which is \
+             above this floor, so a resolution that fails here is behind the manifest too and \
+             `cargo update -p oneagentgraph` is the whole of the fix; `just engines-current` \
+             names it without running the suite";
 
         assert!(
             serde_json::from_value::<oneagentgraph::event::EventKind>(serde_json::Value::String(
@@ -1994,8 +2204,8 @@ mod tests {
     /// 0.3.5 that bar refused "done" until the behaviour was *proven end to
     /// end* — a demand no dispatch can meet now that no gate runs inside the
     /// publication and verification is the merge path's, so every node would
-    /// fail its review. The floor is carried by `Cargo.lock`: `^0.3.0` has
-    /// permitted 0.3.5 all along, so the resolution is the whole of the fix.
+    /// fail its review. The requirement is above that floor, so a resolution
+    /// below it is behind the manifest too and moving the lock is the fix.
     ///
     /// Read through [`merge`] rather than off the YAML, because the merged
     /// config is what a judge is handed; a bar that arrived some other way is
@@ -2028,9 +2238,9 @@ mod tests {
             !stance.contains("proven end to end"),
             "the linked oneagentgraph's `engineer` bar still refuses to accept work until it is \
              proven end to end, which no dispatch can satisfy from inside its own run: the \
-             correction ships in 0.3.5, `Cargo.toml`'s `^0.3.0` has permitted that release all \
-             along, so `Cargo.lock` is stale and `cargo update -p oneagentgraph` is the whole of \
-             the fix — editing the requirement changes nothing:\n{stance}"
+             correction ships in 0.3.5, and `Cargo.toml` requires the newest release, which is \
+             above that floor — so `Cargo.lock` is behind the manifest too and \
+             `cargo update -p oneagentgraph` is the whole of the fix:\n{stance}"
         );
         for demand in [
             "the task's acceptance criteria are met",

@@ -52,10 +52,10 @@ fn the_linked_default_bound_outlasts_a_member_writing_its_report() {
     assert!(
         bounds.stall > KILLED_REPORTS,
         "the linked oneagentgraph condemns a silent member after {:?}, which is inside the \
-         window a dispatch spends writing its report: the correction ships in 0.3.8, \
-         `Cargo.toml`'s `^0.3.0` has permitted that release all along, so `Cargo.lock` is stale \
-         and `cargo update -p oneagentgraph` is the whole of the fix — editing the requirement \
-         changes nothing",
+         window a dispatch spends writing its report: the correction ships in 0.3.8, and \
+         `Cargo.toml` requires the newest release, which is above that floor — so `Cargo.lock` \
+         is behind the manifest too and `cargo update -p oneagentgraph` is the whole of the \
+         fix",
         bounds.stall
     );
 }
@@ -80,6 +80,11 @@ fn the_linked_default_bound_outlasts_a_member_writing_its_report() {
 /// outside has no tree there to read.
 ///
 /// [`SCRATCH_ENV`]: oneagentgraph::scratch::SCRATCH_ENV
+// llmlint: ignore-block[live_tier_compiles_and_requires_credential] that rule's
+// `**/*live*` glob matches this file on the word "liveness", but this is not the
+// credentialled tier — that is the `smoke` binary. The POSIX gate is the
+// paragraph above, not a skip: compiled everywhere with an early return, this
+// would report a platform green for a mechanism it never exercised.
 #[cfg(unix)]
 #[test]
 fn the_activity_rule_condemns_a_silent_member_only_once_its_bound_elapses() {
@@ -202,3 +207,5 @@ impl Drop for Tree {
         let _ = std::fs::remove_dir_all(&self.scratch);
     }
 }
+
+// llmlint: ignore-end[live_tier_compiles_and_requires_credential]
