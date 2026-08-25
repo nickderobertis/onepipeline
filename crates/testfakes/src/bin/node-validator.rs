@@ -173,15 +173,6 @@ fn main() -> std::process::ExitCode {
     }
 }
 
-/// What one scenario file states, or `None` when that scenario is simply not set.
-///
-/// A scenario file is this program's input and it is read as one: the file not
-/// being there is the scenario being off, and every *other* way a read can fail
-/// — a directory in its place, a permission, bytes that are not text — is a
-/// scenario that is set to something unreadable, which is not the same answer.
-/// Folded together they would be, and the fold is fail-open: an unreadable
-/// `validator.refuse` would fall through to accepting the node, so a journey
-/// about refusal would pass having proved the opposite.
 /// Whether one scenario marker is set.
 ///
 /// Set is a file that is there and absent is `NotFound`, and nothing else is
@@ -190,7 +181,14 @@ fn main() -> std::process::ExitCode {
 /// journey asked for a crash or a silent refusal.
 fn marker(path: &std::path::Path) -> bool {
     match std::fs::metadata(path) {
-        Ok(found) => found.is_file(),
+        Ok(found) if found.is_file() => true,
+        // A marker is a file that is there or nothing at all. A directory in its
+        // place scripts nothing this program can act out, and reading it as unset
+        // would run the ordinary path under a name that says otherwise.
+        Ok(_) => fake::fail(&format!(
+            "{} is not a file, so what it scripts cannot be read",
+            path.display()
+        )),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
         Err(error) => fake::fail(&format!(
             "{} is there and this validator cannot read its state ({error}), so whether it \
@@ -200,6 +198,15 @@ fn marker(path: &std::path::Path) -> bool {
     }
 }
 
+/// What one scenario file states, or `None` when that scenario is simply not set.
+///
+/// A scenario file is this program's input and it is read as one: the file not
+/// being there is the scenario being off, and every *other* way a read can fail
+/// — a directory in its place, a permission, bytes that are not text — is a
+/// scenario that is set to something unreadable, which is not the same answer.
+/// Folded together they would be, and the fold is fail-open: an unreadable
+/// `validator.refuse` would fall through to accepting the node, so a journey
+/// about refusal would pass having proved the opposite.
 fn scenario(path: &std::path::Path) -> Option<String> {
     match std::fs::read_to_string(path) {
         Ok(text) => Some(text),

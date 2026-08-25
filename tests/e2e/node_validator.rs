@@ -72,8 +72,20 @@ fn validator_named(world: &World, name: &str) -> String {
 /// validator was invoked as.
 fn offered(world: &World) -> Vec<(String, Value)> {
     let path = world.fakes.join("validator.jsonl");
-    std::fs::read_to_string(path)
-        .unwrap_or_default()
+    // Absent is a validator that has not been invoked yet, and nothing else is:
+    // this file is the only witness to what crossed the stdin, so a journey that
+    // could not read it would report "nothing was offered" — which is exactly
+    // what several of the assertions below take as a pass.
+    let recorded = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => panic!(
+            "the validator's record at {} cannot be read ({error}), so what it was offered is \
+             unknown rather than nothing",
+            path.display()
+        ),
+    };
+    recorded
         .lines()
         .filter(|line| !line.trim().is_empty())
         .map(|line| {
