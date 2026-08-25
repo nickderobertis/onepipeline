@@ -821,9 +821,12 @@ fn dispatch_died_phrase(state: &RunState, id: &str, branch: Option<&str>) -> Opt
     }
     let classified = match state.causes.get(id) {
         Some(cause) => format!(" ({cause})"),
-        // A settlement an older build wrote, or one whose producer classified
-        // nothing. The word still says what happened; only the why is missing,
-        // and inventing one would be this view deciding what the harness meant.
+        // llmlint: ignore[changed_behavior_has_e2e] no invocation a user can type reaches
+        // this arm: `engine::failed_task` settles this word only where it lifted a
+        // classification, so a settlement carrying it without one is a journal an *older
+        // build* wrote. Reaching it end to end means writing that journal by hand, which
+        // would prove the fixture, and dropping the arm would put the run's own word behind
+        // an unwrap. Held by this module's unit test instead, which folds that record.
         None => String::new(),
     };
     let where_the_work_is = match (branch, state.heads.get(id)) {

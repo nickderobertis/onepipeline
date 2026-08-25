@@ -379,8 +379,8 @@ fn publish(
         })
     };
 
-    let read = read_the_merge_path(node, token, body.as_deref(), cancel);
-    match read.answered {
+    let publication = publish_rereading_the_merge_path(node, token, body.as_deref(), cancel);
+    match publication.answered {
         Ok(published) => {
             // A publication that did not land is an ending of the publication,
             // not a refused request: `onevcs` draws that line itself, in
@@ -405,7 +405,7 @@ fn publish(
                         token,
                         branch.or_else(|| Some(published.branch.clone())),
                         reason,
-                        read.reads,
+                        publication.reads,
                         undrafted.clone(),
                     );
                 }
@@ -485,7 +485,7 @@ fn publish(
 }
 
 /// One publication, and how many reads of the merge path it took to answer.
-struct Read {
+struct Published {
     /// What the last read answered, which is the publication the node settles on.
     answered: crate::error::Result<onevcs::Publication>,
     /// How many reads were made, for the settlement a spent budget writes. One
@@ -497,54 +497,69 @@ struct Read {
 /// Publish, and where the push reached the remote with the merge path unread,
 /// **re-read that path** rather than sending the agent back to the tree.
 ///
-/// The one publication failure whose fix is not more work. `checks-failed`,
-/// `checks-unsettled`, `push-rejected`, and `sync-conflict` are each the tree
-/// being rejected, so each is answered by a worker on the branch that carries it.
-/// `pushed-unverified` is the opposite: the push landed, the work is on the
-/// origin, and the only thing missing is one more read of the host. Re-dispatching
-/// the agent for it buys a fresh clone and a fresh complete gate to re-push what
-/// the remote already carries — which on this crate's own PR #117 is exactly what
-/// happened, while the change request the read could not reach merged on its own
-/// seventeen minutes later.
+/// The one publication failure whose fix is not more work: the push landed, and
+/// re-dispatching the agent buys a fresh clone and a fresh gate to re-push what
+/// the remote already carries.
 ///
 /// The re-read is [`crate::vcs::publish`] on the **same session**, which for a
-/// branch already on the remote is what `onevcs`'s own guidance for this state
-/// says to do — *read the change request on the host, and land the branch* — and
-/// is a read of the merge path rather than a second push: the ref the origin has
-/// is the ref this would send it. Nothing here asks the host anything itself; a
-/// second route to a change request's state would be host knowledge regrown in
-/// the composition layer.
+/// branch already on the remote is `onevcs`'s own guidance for this state and is a
+/// read of the host rather than a second push. Nothing here asks a host anything
+/// itself: a second route to a change request's state would be host knowledge
+/// regrown in the composition layer.
 ///
-/// Bounded by [`engine::merge_path_reads`], and stopped early by a cancellation:
-/// a run being torn down must not be held open by a poll of somebody else's API.
-/// A verdict that arrives on any read — the change request merged, opened,
-/// queued, or a check the host reports red — is what the node settles on, exactly
-/// as though the first read had answered it.
-fn read_the_merge_path(
+/// Bounded by [`engine::merge_path_reads`]. Whatever a read answers is what the
+/// node settles on, and the routing that follows is the one that word has always
+/// had.
+fn publish_rereading_the_merge_path(
     node: &Node,
     token: &onevcs::SessionToken,
     body: Option<&str>,
     cancel: &crate::executor::CancellationToken,
-) -> Read {
+) -> Published {
     let publish = || crate::vcs::publish(token, node.merge_policy, node.title.as_deref(), body);
     let budget = engine::merge_path_reads();
     let mut backoff = engine::merge_path_backoff();
     let mut reads = std::num::NonZeroU32::MIN;
     let mut answered = publish();
-    while reads < budget && !cancel.is_cancelled() && still_unread(&answered) {
-        std::thread::sleep(backoff);
+    while reads < budget && still_unread(&answered) && waited(backoff, cancel) {
         backoff = engine::doubled(backoff);
-        if cancel.is_cancelled() {
-            break;
-        }
         reads = reads.saturating_add(1);
         answered = publish();
     }
-    Read { answered, reads }
+    Published { answered, reads }
+}
+
+/// Wait out one backoff, answering `false` if the run was stopped instead.
+///
+/// In steps rather than one sleep because the backoff doubles to two minutes, and
+/// a teardown held open that long by a poll of somebody else's API is the thing
+/// the cancellation is for.
+fn waited(backoff: std::time::Duration, cancel: &crate::executor::CancellationToken) -> bool {
+    /// How often the wait looks up. Short enough that a stop is not felt as a
+    /// pause, long enough that waiting out a two-minute backoff is not a spin.
+    const STEP: std::time::Duration = std::time::Duration::from_millis(50);
+
+    let until = std::time::Instant::now() + backoff;
+    loop {
+        if cancel.is_cancelled() {
+            return false;
+        }
+        let left = until.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return true;
+        }
+        std::thread::sleep(left.min(STEP));
+    }
 }
 
 /// Whether a publication ended with its push on the remote and the path behind it
 /// unread — the one ending another read of the host could answer.
+///
+/// A publication `onevcs` **refused** is not one: the sibling draws the line
+/// between a request it would not take and a publication that ran and did not
+/// land, and a refusal is the first of those. Nothing about it says a push reached
+/// anything, so re-reading it would ask the host about work that may never have
+/// left this machine. It settles as the residual, exactly as it always did.
 fn still_unread(answered: &crate::error::Result<onevcs::Publication>) -> bool {
     let Ok(published) = answered else {
         return false;
@@ -559,16 +574,10 @@ fn still_unread(answered: &crate::error::Result<onevcs::Publication>) -> bool {
 /// The settlement of a node whose work reached the remote and whose merge path
 /// the reads never answered.
 ///
-/// It says the three things a person needs and nothing they have to infer: where
-/// the work is, what commit it is at, and what stopped the read — the last of
-/// which is `onevcs`'s own sentence, which already names the branch, the commit,
-/// and the failure, and which also carries the `publish-branch` that lands it
-/// once the host is back.
-///
-/// **Not re-dispatched.** The tree was never rejected, so there is nothing for a
-/// worker to change; asking again would republish what the origin already carries.
-/// The node settles `failed` under the word it always settled this failure on, and
-/// the commit rides the settlement so a manager reads it without opening a journal.
+/// **Not re-dispatched**: nothing rejected the tree, so asking a worker again
+/// would republish what the origin already carries. `reason` is `onevcs`'s own
+/// sentence, which names the branch, the commit, what stopped the read, and the
+/// `publish-branch` that lands it once the host is back.
 fn unread_merge_path(
     node: &str,
     token: &onevcs::SessionToken,

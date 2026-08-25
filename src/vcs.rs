@@ -1064,7 +1064,7 @@ fn token_of(value: &str) -> Option<SessionToken> {
 ///   carries whitespace or a control character, and both are rendered into
 ///   line-oriented views where a value carrying a newline forges a line — a
 ///   record that appears to be about a node nobody dispatched.
-fn usable(value: &str) -> Option<String> {
+pub(crate) fn usable(value: &str) -> Option<String> {
     if value.is_empty() || value.len() >= crate::event::MAX_PAYLOAD_TEXT_BYTES {
         return None;
     }

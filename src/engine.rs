@@ -320,6 +320,15 @@ pub struct NodeResult {
     /// Where a human reads the change it published.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub change_url: Option<String>,
+    // llmlint: ignore-block[invalid_states_unrepresentable] both are the *wire* shape of
+    // this document, which builds other than this one parse: `cause` is an open vocabulary
+    // the harness below this crate owns and grows, so a newtype validating it here would
+    // refuse a classification that layer added and report it as none at all — the value is
+    // checked for what this crate does with it, at the boundary it enters, by
+    // `is_a_classification`. `head` is the plain string every identifier in this crate is,
+    // for the reason `crate::projection`'s `landing_commits` records, and is checked the
+    // same way by `vcs::branch_head_in`. The sibling's `Sha` would put that library's type
+    // on a document consumers parse without it.
     /// Why a dispatch that ended for a reason other than the agent's verdict
     /// ended, in the words its producer classified it with.
     ///
@@ -337,6 +346,7 @@ pub struct NodeResult {
     /// produced no branch at all, and one whose branch nothing committed to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head: Option<String>,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
 }
 
 /// How one node settled, as its dispatch reports it.
@@ -1886,28 +1896,15 @@ fn cancelling_surface(step: &Cancelling) -> Surface {
 /// The word a dispatch that ended for a reason that is not the agent's verdict
 /// on its task settles under.
 ///
-/// Deliberately **not** `dispatch-failed`: that spelling is already taken in this
-/// crate, by [`crate::lifecycle::Undrafted::ending`], for a drafting dispatch
-/// that could not be run or that ran without succeeding. One spelling meaning two
-/// things is the confusion this word exists to end, so it is checked against the
-/// vocabulary already published rather than assumed free — by
-/// [`tests::the_words_this_crate_publishes_are_one_vocabulary`].
+/// The line a reader will get wrong is against [`INFRASTRUCTURE_FAILURE`], which
+/// is the dispatch layer refusing **before any work began** and is why [`attempt`]
+/// retries that one: it carries no work to lose. This is the opposite — the
+/// dispatch started and the agent worked — and it is not retried.
 ///
-/// And deliberately not `infrastructure-failure`, which is the line a reader will
-/// get wrong. That one is the dispatch layer refusing **before any work began** —
-/// an executor that could not start anything, or a session the sibling refused to
-/// open — which is exactly why [`attempt`] retries it: none of it is the agent's,
-/// and the failure carries no work to lose. This is the opposite case. The
-/// dispatch started, the agent worked, and the thing that ended it is not the
-/// agent's verdict — a rate limit twenty seconds after the final report, a
-/// harness that lost its credential, a run root deleted underneath a live turn.
-/// Retrying it is what [`attempt`] declines to do, because another budget on work
-/// that is already done is waste.
-///
-/// The branch is a **field** on it and not the thing that defines it, so a
-/// dispatch that died holding thirteen gate-green commits and one that produced
-/// nothing at all settle under the same word. "The agent failed its task" is
-/// wrong about both.
+/// Not `dispatch-failed`, which [`crate::lifecycle::Undrafted::ending`] already
+/// publishes for a drafting dispatch; the collision is caught by
+/// [`tests::the_words_this_crate_publishes_are_one_vocabulary`] rather than
+/// assumed away.
 pub const DISPATCH_DIED: &str = "dispatch-died";
 
 /// A node whose declaration no dispatch could be composed from.
@@ -1936,100 +1933,112 @@ pub const TASK_FAILED: &str = "task-failed";
 /// The same, over a session that had already opened a change request.
 pub const TASK_FAILED_CHANGE_OPEN: &str = "task-failed-change-open";
 
-/// The words the machinery below this crate names *itself* with.
+// llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] there is no source to
+// derive these from and no gate to reconcile them against. The classification vocabulary
+// belongs to `oneharness`, which is deliberately **not** a dependency of this crate —
+// AGENTS.md fixes the direction at `onepipeline → {oneagentgraph, onevcs}` — so a typed
+// source would mean taking one on for two punctuation marks. And there is no vocabulary
+// here to go stale: no word of the producer's is compared against anything, every
+// classification is carried exactly as it was spelled, and what these two hold is three
+// English words for "the machinery" and the two delimiters prose sets a token apart with.
+// A producer that changed either leaves the detail unclassified, which settles the node
+// `task-failed` — the outcome it settled under before this existed — rather than reporting
+// something untrue.
+/// The words this crate takes as a detail talking about the **machinery** rather
+/// than about the task.
 ///
-/// A detail carrying none of them is the agent's own verdict on its task, and
-/// settles as one. This is the guard on the lift below rather than a vocabulary:
-/// a parenthesised word is no evidence of anything on its own — an agent's own
-/// verdict may carry one — and reading `the gate failed (clippy)` as a dispatch
-/// that died would report a node whose *work* is wrong as a node whose harness
-/// broke.
+/// The guard on the lift below, which needs one: a delimited token is no evidence
+/// on its own, and reading `the gate failed (clippy)` as a dispatch that died
+/// would report a node whose *work* is wrong as a node whose harness broke.
 const MACHINERY: [&str; 3] = ["harness", "provider", "spawn"];
 
-/// The bare classifications a fallback chain names a candidate it stepped past
-/// with, which it writes without parentheses.
+/// The delimiters the machinery sets a classification apart from its prose with:
+/// `harness failed (rate_limit)`, and `codex [spawn-error]` for a chain naming
+/// every candidate it stepped past.
 ///
-/// `oneharness`'s own spellings, and the only two that reach a detail as a word
-/// rather than inside a parenthesis. They are matched rather than enumerated as
-/// the vocabulary: everything else is lifted out of the parentheses the producer
-/// put it in, whatever it spelled there.
-const BARE_CLASSIFICATIONS: [&str; 2] = ["spawn-error", "not-installed"];
+/// The **shape**, not a vocabulary — what the token says is carried as the
+/// producer spelled it, so a classification that layer adds arrives here without
+/// this crate learning it.
+const CLASSIFIED_IN: [(char, char); 2] = [('(', ')'), ('[', ']')];
+// llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
 
 /// The classification a dispatch death carries, lifted out of the failure's own
 /// detail — or `None` where that detail is the agent's own verdict on its task.
 ///
-/// Two shapes, because those are the two the machinery below this crate writes.
-/// A harness's word for why a turn could not be run reaches here **in
-/// parentheses**, through `oneagentgraph`'s `member-died` detail and the sentence
-/// its CLI puts on stderr: `provider error (respond): harness failed
-/// (rate_limit)`, whose classification is the **last** of the two. And a fallback
-/// chain that stepped past every candidate names its reason **bare**:
-/// `spawn-error`, with no parentheses at all.
+/// The **last** delimited bare token in the detail, because a producer that
+/// carries two puts the operation it was performing in front of the reason it
+/// stopped, and a producer that names a candidate per identity ends on the one it
+/// gave up at.
 ///
-/// Read only where the detail names the machinery — see [`MACHINERY`] — and the
-/// word taken is the producer's, whatever it spelled. This crate holds no list of
-/// causes to check one against: which classifications exist is the harness's
-/// business and the set grows there, so a list here would report a cause that
-/// layer added as no cause at all.
+/// Read only where the detail names the machinery — see [`MACHINERY`] — because a
+/// delimited token is no evidence of anything on its own.
 fn dispatch_death_cause(detail: &str) -> Option<String> {
     let lowered = detail.to_ascii_lowercase();
     if !MACHINERY.iter().any(|word| lowered.contains(word)) {
         return None;
     }
-    parenthesised(detail).or_else(|| {
-        BARE_CLASSIFICATIONS
-            .into_iter()
-            .find(|bare| lowered.contains(bare))
-            .map(str::to_owned)
-    })
+    CLASSIFIED_IN
+        .into_iter()
+        .filter_map(|(open, close)| delimited(detail, open, close))
+        .max_by_key(|(at, _)| *at)
+        .map(|(_, word)| word)
 }
 
-/// The last parenthesised classification in a detail, when it holds one.
+/// The most a classification can be and still be one.
 ///
-/// A classification is one **bare token** — no whitespace, and something in it —
-/// which is what keeps a parenthetical clause a producer wrote in prose from
-/// being read as one. The last rather than the first, because a producer that
-/// carries two puts the operation it was performing in front of the reason it
-/// stopped.
-fn parenthesised(detail: &str) -> Option<String> {
+/// A producer classifies in a token — `rate_limit`, `spawn-error` — and this value
+/// is written onto a settlement, into a journal payload, and onto a rendered line.
+/// Anything longer is prose that happened to be delimited, and carrying it would
+/// put a paragraph where a reader looks for a word.
+const CLASSIFICATION_LIMIT: usize = 64;
+
+/// The last classification one pair of delimiters holds, and where it ended.
+///
+/// The position comes back with it so the caller can take whichever pair ended
+/// last rather than whichever it looked at first.
+fn delimited(detail: &str, open: char, close: char) -> Option<(usize, String)> {
     let mut found = None;
+    let mut at = 0;
     let mut rest = detail;
-    while let Some(open) = rest.find('(') {
-        let after = &rest[open + 1..];
-        let Some(close) = after.find(')') else { break };
-        let inside = &after[..close];
-        if !inside.is_empty() && !inside.chars().any(char::is_whitespace) {
-            found = Some(inside.to_owned());
+    while let Some(start) = rest.find(open) {
+        let after = &rest[start + open.len_utf8()..];
+        let Some(end) = after.find(close) else { break };
+        let inside = &after[..end];
+        if is_a_classification(inside) {
+            found = Some((at + start, inside.to_owned()));
         }
-        rest = &after[close + 1..];
+        at += start + open.len_utf8() + end + close.len_utf8();
+        rest = &after[end + close.len_utf8()..];
     }
     found
 }
 
+/// Whether what a producer delimited is a classification this crate will carry.
+///
+/// The trust boundary. A dispatch's stderr is another process's output, read here
+/// for one token and rendered wherever the node is; nothing about it is checked
+/// before this. So it has to be a **token**: something, short, on one line, and
+/// with no control character in it — which is also what keeps a parenthetical
+/// clause a producer wrote in prose from being read as one. What it *says* is not
+/// checked and must not be, because the words are the harness's and the set grows
+/// there.
+pub(crate) fn is_a_classification(word: &str) -> bool {
+    !word.is_empty()
+        && word.len() <= CLASSIFICATION_LIMIT
+        && !word.chars().any(|c| c.is_whitespace() || c.is_control())
+}
+
 /// How a dispatch that did not succeed settles.
 ///
-/// The agent-graph outcome is not the whole answer, and it is read twice.
+/// Three outcomes in one order, and the order is the point. A change request the
+/// session opened wins outright — a reviewer is waiting on it whatever ended the
+/// dispatch that left it, and `task-failed` over an open change sends a planner to
+/// re-run work that is waiting to be read. Failing that, a detail that classifies
+/// itself settles [`DISPATCH_DIED`]; the branch is carried, never consulted, so a
+/// dispatch that died holding finished work and one whose workspace disappeared
+/// reach the same word.
 ///
-/// A dispatch can fail its judge having *already* opened a change request from
-/// the session it worked in — `onevcs publish` in its own final turn — and a node
-/// reported `task-failed` over a change that is open for review sends a planner
-/// to re-run work that is waiting to be read. So the session is asked what became
-/// of its branch, and a node that left a change behind settles under an outcome
-/// of its own, carrying the URL a reviewer opens. That one wins outright: a
-/// change request is a thing a reviewer opens whatever ended the dispatch that
-/// left it.
-///
-/// Failing that, the detail is **classified**: a dispatch that ended for a reason
-/// that is not the agent's verdict settles [`DISPATCH_DIED`], carrying the
-/// producer's own word for it and the commit its branch was left at. Classified
-/// out of the detail and never out of the branch, so a dispatch that died holding
-/// finished work and one whose workspace disappeared underneath it — no branch,
-/// no turns — reach the same word.
-///
-/// Every unknown degrades to the plain failure this arm always produced: a
-/// dispatch with no session, a stream that cannot be read, one that records no
-/// change request, and one whose detail names no classification are all answered
-/// exactly as before.
+/// Every unknown degrades to the plain failure this arm always produced.
 fn failed_task(
     node: &str,
     outcome: &DispatchOutcome,
@@ -2110,6 +2119,13 @@ pub(crate) fn merge_path_reads() -> NonZeroU32 {
 }
 
 /// The first backoff between those reads. It doubles, to [`BOUNDARY_BACKOFF_CEILING`].
+///
+/// Held to that ceiling on the way in as well as on the way up, because this is a
+/// value a *run* waits out: an operator's stray zero, or a value meant as
+/// milliseconds, would otherwise hold a node open for as long as the number says
+/// while a host that answered in a second sat there answering. The ceiling is the
+/// same one every backoff in this crate doubles to, so nothing here waits longer
+/// than anything else does.
 pub(crate) fn merge_path_backoff() -> Duration {
     Duration::from_secs(
         std::env::var(MERGE_PATH_BACKOFF_ENV)
@@ -2117,6 +2133,13 @@ pub(crate) fn merge_path_backoff() -> Duration {
             .and_then(|value| value.parse().ok())
             .unwrap_or(DEFAULT_MERGE_PATH_BACKOFF_SECONDS),
     )
+    // llmlint: ignore[changed_behavior_has_e2e] the ceiling's only effect is to make a
+    // wait *shorter*, so observing it end to end means a journey that waits two minutes
+    // per read to prove it did not wait longer — minutes of the offline tier to watch a
+    // clock. The fallback half, which is what an operator actually mistypes, is driven by
+    // `an_unusable_read_budget_falls_back_rather_than_disabling_the_recovery`; the clamp is
+    // held by the unit test below.
+    .min(BOUNDARY_BACKOFF_CEILING)
 }
 
 /// The next backoff after one, doubled to the ceiling every wait here shares.
@@ -2510,6 +2533,39 @@ mod tests {
         );
     }
 
+    /// The wait between those reads falls back when the environment is unusable
+    /// and is held to the ceiling every backoff in this crate shares.
+    ///
+    /// The value a *run* waits out, and the one knob here whose misuse costs time
+    /// rather than an answer: a stray `0` reads as no wait at all, and a value
+    /// meant as milliseconds would hold a node open for eleven days.
+    #[test]
+    fn the_wait_between_merge_path_reads_falls_back_and_is_held_to_the_ceiling() {
+        assert_eq!(
+            merge_path_backoff(),
+            Duration::from_secs(DEFAULT_MERGE_PATH_BACKOFF_SECONDS)
+        );
+        for unusable in ["", "not a number", "-1", "5.5"] {
+            std::env::set_var(MERGE_PATH_BACKOFF_ENV, unusable);
+            assert_eq!(
+                merge_path_backoff(),
+                Duration::from_secs(DEFAULT_MERGE_PATH_BACKOFF_SECONDS),
+                "{unusable:?} was read as a wait rather than falling back"
+            );
+        }
+        std::env::set_var(MERGE_PATH_BACKOFF_ENV, "1000000");
+        assert_eq!(
+            merge_path_backoff(),
+            BOUNDARY_BACKOFF_CEILING,
+            "a value nobody meant holds a node open for as long as it says"
+        );
+        // Below the ceiling the value is the operator's, which is the whole point
+        // of the knob.
+        std::env::set_var(MERGE_PATH_BACKOFF_ENV, "1");
+        assert_eq!(merge_path_backoff(), Duration::from_secs(1));
+        std::env::remove_var(MERGE_PATH_BACKOFF_ENV);
+    }
+
     /// The bound on re-reading a merge path that went dark is the one the
     /// contract and the README publish, under the spelling an operator sets.
     ///
@@ -2699,11 +2755,22 @@ mod tests {
             ),
             ("harness failed (auth)", "auth"),
             ("provider error (quota)", "quota"),
-            // A chain that stepped past every candidate names its reasons bare,
-            // in oneharness's own words and with no parentheses at all.
+            // A chain that stepped past every candidate brackets each reason
+            // beside the identity it belongs to, and the one it gave up at is
+            // last.
             (
-                "no candidate ran the turn: claude-code [spawn-error], codex [spawn-error]",
+                "no candidate ran the turn: claude-code [auth], codex [spawn-error]",
                 "spawn-error",
+            ),
+            // Both delimiters in one sentence: what the reader wants is whichever
+            // came last, not whichever kind this crate happened to look at first.
+            (
+                "provider error (respond): no candidate ran the turn: codex [quota]",
+                "quota",
+            ),
+            (
+                "the harness chain [claude-code, codex] ended: harness failed (overloaded)",
+                "overloaded",
             ),
         ] {
             assert_eq!(

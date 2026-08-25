@@ -137,16 +137,11 @@ fn an_unusable_attempt_budget_falls_back_rather_than_disabling_the_recovery() {
 #[test]
 fn a_dispatch_that_died_producing_nothing_is_not_reported_as_an_agent_that_failed() {
     let world = World::new("boundary-diednothing");
-    // No turn is opened at all, which is what a dispatch that could not start
-    // leaves behind.
     world.script("build.silent", "");
-    // What it did leave: one refusal per candidate, in the sibling's own shape.
     world.script(
         "build.refused",
         "- - claude-code spawn-error\n- - codex spawn-error\n",
     );
-    // And the sentence the CLI exits on, in oneharness's own words for a chain
-    // where nothing ran.
     world.script(
         "build.died",
         "no candidate ran the turn: claude-code [spawn-error], codex [spawn-error]",
@@ -161,7 +156,6 @@ fn a_dispatch_that_died_producing_nothing_is_not_reported_as_an_agent_that_faile
         1,
         "a dispatch that answered was retried"
     );
-    // And no turn: this is the case with nothing to recover.
     assert!(
         world
             .journal(&run)
@@ -176,7 +170,6 @@ fn a_dispatch_that_died_producing_nothing_is_not_reported_as_an_agent_that_faile
         node["outcome"], "dispatch-died",
         "a dispatch that never reached its task was reported as one that failed it: {node}"
     );
-    // The producer's own classification, carried as it spelled it.
     assert_eq!(node["cause"], "spawn-error", "{node}");
     // No branch and no commit, because there was neither — which is exactly how
     // this case has to read. The word does not depend on them.

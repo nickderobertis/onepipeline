@@ -1829,11 +1829,7 @@ fn a_push_the_merge_path_refuses_is_redispatched_carrying_what_the_remote_wrote(
 /// above published nothing, so the branch handed back to the checkout is the only
 /// copy of the work and the tree is what has to change — a worker goes back to it.
 /// Here the push landed: the work is on the origin, nothing about the tree was
-/// rejected, and the only thing missing is one more read of the merge path. This
-/// crate's own PR #117 is the incident — the read failed on a `503`, the engine
-/// opened a second session and began another complete gate, and the change
-/// request merged on its own seventeen minutes later while that dispatch was
-/// still cloning.
+/// rejected, and the only thing missing is one more read of the merge path.
 ///
 /// The host is scripted to refuse **one** invocation and answer afterwards, which
 /// is the outage that ends; nothing on the repository side is scripted at all, so
@@ -1850,16 +1846,12 @@ fn a_merge_path_that_goes_dark_and_comes_back_is_answered_by_reading_it_again() 
     let repo = world.repository("change-auto", &[]);
     world.script("service.work", "the worker wrote this\n");
     world.script("gh.merged", "");
-    // One invocation refused. Whichever call the publication makes first, that
-    // one fails, so the first publication ends with its push on the origin and
-    // the merge path behind it unread — and every call after it is answered.
     world.script("gh.outage", "1");
 
     let run = settle(&world, "rereadhost", vec![lifecycle("service", &[])]);
     let result = world.run_json(&run, "result.json");
     let node = result["nodes"][0].clone();
 
-    // The verdict that arrived during the re-read is what the node settled on.
     assert_eq!(node["status"], "done", "{result}\n{}", why(&world, &run));
     assert_eq!(node["outcome"], "merged", "{result}");
     assert_eq!(node["landing"], json!("landed"), "{result}");
@@ -1891,6 +1883,161 @@ fn a_merge_path_that_goes_dark_and_comes_back_is_answered_by_reading_it_again() 
             .trim()
             .is_empty(),
         "the branch the publication pushed is not on the origin"
+    );
+}
+
+/// A verdict that arrives on a later read is what the node settles on, and where
+/// that verdict is the tree being rejected the agent is dispatched again.
+///
+/// The re-read is a **read**, not a second opinion: whatever the host says when it
+/// comes back is the publication's answer, and the routing that follows is the one
+/// that word has always had. Here it comes back with a required check red, which
+/// is the tree being rejected — so the four preserving failures keep their
+/// recovery unchanged, and the node goes back to the branch that carries the tree
+/// that has to change.
+#[test]
+fn a_verdict_that_arrives_on_a_later_read_routes_exactly_as_it_always_has() {
+    let world = World::new("lifecycle-rereadverdict")
+        .with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "2")
+        .with_env("ONEPIPELINE_MERGE_PATH_BACKOFF_SECONDS", "0");
+    let repo = world.repository("change-auto", &[]);
+    world.script("service.work", "the worker wrote this\n");
+    // The host is out for one call — so the first publication ends with its push
+    // on the origin and the path behind it unread — and reports the check red
+    // once it is back.
+    world.script("gh.outage", "1");
+    world.script("gh.checks", RED);
+
+    let run = settle(&world, "rereadverdict", vec![lifecycle("service", &[])]);
+    let result = world.run_json(&run, "result.json");
+    let node = result["nodes"][0].clone();
+
+    // Not `pushed-unverified`: the read answered, and what it answered is what
+    // the node settles on.
+    assert_eq!(node["status"], "failed", "{result}\n{}", why(&world, &run));
+    assert_eq!(node["outcome"], "checks-failed", "{result}");
+
+    // And the recovery for *that* word is the one it has always had: the agent
+    // goes back to the branch carrying the tree the checks rejected.
+    let dispatched = dispatches_of(&world, &run, "service");
+    assert_eq!(
+        dispatched.len(),
+        2,
+        "a tree the host's checks rejected was not sent back to a worker\n{}",
+        why(&world, &run)
+    );
+    let branch = node["branch"].as_str().expect("the node names its branch");
+    assert!(
+        repo.has_branch(&world, branch),
+        "the branch the rejected tree is on was not handed back"
+    );
+}
+
+/// An unusable read budget falls back rather than disabling the recovery it
+/// configures, and so does an unusable wait between reads.
+///
+/// Both knobs are external input and `0` most of all: a budget read literally
+/// that way would settle a node on a merge path nobody read. The parse is the
+/// boundary for each, so a value that is not a number takes the default and the
+/// recovery still happens — which is what an operator who mistyped one meets.
+#[test]
+fn an_unusable_read_budget_falls_back_rather_than_disabling_the_recovery() {
+    let world = World::new("lifecycle-rereadunusable")
+        .with_env("ONEPIPELINE_MERGE_PATH_READS", "not a number")
+        .with_env("ONEPIPELINE_MERGE_PATH_BACKOFF_SECONDS", "not a number");
+    world.repository("change-auto", &[]);
+    world.script("service.work", "the worker wrote this\n");
+    world.script("gh.merged", "");
+    world.script("gh.outage", "1");
+
+    let run = settle(&world, "rereadunusable", vec![lifecycle("service", &[])]);
+    let result = world.run_json(&run, "result.json");
+    let node = result["nodes"][0].clone();
+    assert_eq!(node["status"], "done", "{result}\n{}", why(&world, &run));
+    assert_eq!(
+        node["outcome"], "merged",
+        "an unusable budget disabled the re-read it configures: {result}"
+    );
+}
+
+/// A run being torn down stops the re-read where it stands.
+///
+/// The bound is not the only thing that ends these reads. A cancelled run must
+/// not be held open polling somebody else's API — the teardown is on its way to
+/// reap this dispatch — so the loop stops on the cancellation and the node settles
+/// on the reading it had.
+///
+/// The window is held open rather than raced for, the way
+/// `a_cancel_that_lands_before_the_next_attempt_settles_on_the_publication_failure`
+/// holds its own: the repository's `pre-push` hook blocks until this test releases
+/// it, so the cancel lands before the push completes and everything after the
+/// release — the push reaching the origin, the host refusing the read — happens
+/// with the cancellation already set.
+#[test]
+fn a_cancelled_run_stops_re_reading_the_merge_path_where_it_stands() {
+    let world = World::new("lifecycle-rereadcancelled")
+        // Long enough that a loop which ignored the cancellation would be
+        // obvious: three reads a minute apart rather than one and done.
+        .with_env("ONEPIPELINE_MERGE_PATH_BACKOFF_SECONDS", "60");
+    let go = world.fakes.join("push.go");
+    let held = held_merge_path(&world, &go);
+    world.repository("change-auto", &held.argv());
+    world.script("service.work", "the worker wrote this\n");
+    // The host never comes back, so every read this loop is allowed would fail.
+    world.script("gh.outage", "");
+
+    let path = world.plan(
+        "rereadcancelled",
+        &plan_of("rereadcancelled", vec![lifecycle("service", &[])]),
+    );
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+    let run = "rereadcancelled".to_string();
+
+    // The publication has committed and is held at the merge path, which is
+    // before the push and therefore before any read of the host.
+    world.until("the publication to reach its merge path", |world| {
+        world
+            .journal(&run)
+            .iter()
+            .any(|event| event["source"] == "vcs" && event["kind"] == "commit-preserved")
+    });
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({"version": 1, "commands": [{"op": "cancel", "id": "service"}]}).to_string(),
+        )
+        .exited(0);
+    world.until("the cancel to be committed", |world| {
+        !world.events_of(&run, "edit-committed").is_empty()
+    });
+    held.release();
+
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+    let settled = &world.events_of(&run, "node-settled")[0]["payload"];
+    // It settles on the reading it had, under the word that reading earned.
+    assert_eq!(settled["outcome"], "pushed-unverified", "{settled}");
+    let detail = settled["detail"]
+        .as_str()
+        .expect("the settlement says why")
+        .to_string();
+    assert!(
+        detail.contains("the merge path was read 1 time and never answered"),
+        "the cancelled run kept re-reading the host: {detail}"
+    );
+    // And the host was asked exactly once, which is the same fact from the far
+    // side: each of these publications fails on its first call to `gh`.
+    let asked = world
+        .invocations()
+        .into_iter()
+        .filter(|invocation| invocation["tool"] == "gh")
+        .count();
+    assert_eq!(
+        asked, 1,
+        "a run being torn down went on polling the host {asked} times"
     );
 }
 
@@ -3347,6 +3494,56 @@ fn a_dispatch_that_failed_after_opening_a_change_settles_carrying_that_change() 
         .out_has(&url);
 }
 
+/// A change request open for review outranks the word for a dispatch that died.
+///
+/// The precedence, and it goes the way it does because of what a reader would
+/// *do*. Both facts are true of this node — its harness killed it, and it left a
+/// change request somebody can open — but only one of them has a person on the
+/// other end of it. Reported as a dispatch that died, the change request is not on
+/// the settlement at all and the review nobody knows about waits; reported as the
+/// outcome that carries it, the classification is still on the detail for anyone
+/// who wants it.
+#[test]
+fn a_change_request_open_for_review_outranks_the_word_for_a_dispatch_that_died() {
+    let world = World::new("lifecycle-diedopen");
+    world.repository("change-open", &[]);
+    world.script("service.work", "the work its harness never got to judge\n");
+    world.script(
+        "service.publishes",
+        "chore: the change the dispatch opened itself",
+    );
+    world.script(
+        "service.died",
+        "provider error (respond): harness failed (rate_limit)",
+    );
+    let run = settle(&world, "diedopen", vec![lifecycle("service", &[])]);
+
+    let opened = world
+        .journal(&run)
+        .into_iter()
+        .find(|event| event["kind"] == "change-opened")
+        .unwrap_or_else(|| panic!("no change request was opened\n{}", why(&world, &run)));
+    let url = opened["payload"]["url"]
+        .as_str()
+        .expect("the change request names where it is read")
+        .to_owned();
+
+    let node = world.run_json(&run, "result.json")["nodes"][0].clone();
+    assert_eq!(node["status"], "failed", "{node}");
+    assert_eq!(
+        node["outcome"], "task-failed-change-open",
+        "a change request open for review was lost to the word for how the dispatch ended: \
+         {node}"
+    );
+    assert_eq!(node["change_url"], url, "{node}");
+    // And a reader is still shown the review, which is the whole of the ranking.
+    world
+        .run(&["results", &run])
+        .exited(0)
+        .out_has("task-failed-change-open")
+        .out_has(&url);
+}
+
 /// A dispatch that died for a reason that is **not the agent's verdict** settles
 /// under a word of its own, naming what killed it and where its work is.
 ///
@@ -3429,6 +3626,37 @@ fn a_dispatch_that_died_rather_than_failing_its_task_settles_naming_what_killed_
     );
     world.run(&["results", &run]).exited(0).out_has(&said);
     world.run(&["status", &run]).exited(0).out_has(&said);
+}
+
+/// A dispatch that died having committed nothing names its branch and no commit.
+///
+/// The middle of the three shapes, and the commonest: the worker was still working
+/// when its harness went, so a session and a branch exist and `onevcs` has recorded
+/// no commit on that branch. The sentence has to stay true of it — the branch is
+/// still where to look — without naming a commit nobody wrote.
+#[test]
+fn a_dispatch_that_died_before_anything_was_committed_names_its_branch_and_no_commit() {
+    let world = World::new("lifecycle-diednocommit");
+    published_locally(&world);
+    world.script("service.work", "the work its harness never got to judge\n");
+    world.script(
+        "service.died",
+        "provider error (respond): harness failed (auth)",
+    );
+    let run = settle(&world, "diednocommit", vec![lifecycle("service", &[])]);
+
+    let node = world.run_json(&run, "result.json")["nodes"][0].clone();
+    assert_eq!(node["outcome"], "dispatch-died", "{node}");
+    assert_eq!(node["cause"], "auth", "{node}");
+    let branch = node["branch"].as_str().expect("the node names its branch");
+    assert!(
+        node["head"].is_null(),
+        "a branch nothing committed to names a commit anyway: {node}"
+    );
+    let said = format!(
+        "the dispatch died (auth) rather than failing its task; {branch} may carry finished work"
+    );
+    world.run(&["results", &run]).exited(0).out_has(&said);
 }
 
 /// The same failure with nothing published settles exactly as it always did.
