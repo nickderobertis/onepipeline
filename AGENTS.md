@@ -91,11 +91,16 @@ consuming `project.json` — an undeclared one silently drops that project out o
 - **Validate external input at its trust boundary.** Plan files, executor-rules
   files, and reply envelopes are external input: the schema structs reject
   unknown fields, so a typo fails loudly instead of being silently dropped.
-- **The lock may not lag what the manifest already permits.**
-  `just engines-current` fails when a sibling engine resolves older than its own
-  requirement allows, and
-  every release's notes record what that release links. Neither a tag, a
-  changelog, nor a requirement says what a build contains; only the lock does.
+- **The lock may not lag what the manifest already permits, and it resolves each
+  engine once.** `just engines-current` fails when a sibling engine resolves
+  older than its own requirement allows *or* when the graph carries one engine at
+  two versions, and every release's notes record what that release links. Neither
+  a tag, a changelog, nor a requirement says what a build contains; only the lock
+  does — and where it carries an engine twice it does not say that either, because
+  each copy is separately the newest its own requirement permits. Every pin in
+  `[workspace.dependencies]` is declared at the newest release the registry
+  carries; `tests/linked_engines.rs` counts the copies with no registry at all, so
+  the deterministic tier reaches that rule.
 - **Secrets never enter the tree.** `gh-secrets.json` names the required secrets
   and where they come from; the values live in the platform secret store.
 

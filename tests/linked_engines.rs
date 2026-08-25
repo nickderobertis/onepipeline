@@ -460,9 +460,9 @@ fn this_build_resolves_one_copy_of_every_engine_it_links() {
 /// saying so.
 ///
 /// The second run is the offline half of the claim: pointed at a registry that
-/// does not exist, the refusal still arrives as a refusal about the lock (exit
-/// 1) rather than as an unreadable index (exit 3). That is what lets the
-/// deterministic tier reach this rule at all.
+/// does not exist, the refusal still arrives as a refusal about the lock — exit
+/// 1 — rather than as an unreadable index, which is exit 3. That is what lets
+/// the deterministic tier reach this rule at all.
 #[test]
 fn the_check_refuses_a_lock_that_resolves_one_engine_at_two_versions() {
     let split = but(Engine {

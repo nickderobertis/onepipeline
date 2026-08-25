@@ -52,10 +52,10 @@ fn the_linked_default_bound_outlasts_a_member_writing_its_report() {
     assert!(
         bounds.stall > KILLED_REPORTS,
         "the linked oneagentgraph condemns a silent member after {:?}, which is inside the \
-         window a dispatch spends writing its report: the correction ships in 0.3.8, \
-         `Cargo.toml`'s `^0.3.0` has permitted that release all along, so `Cargo.lock` is stale \
-         and `cargo update -p oneagentgraph` is the whole of the fix — editing the requirement \
-         changes nothing",
+         window a dispatch spends writing its report: the correction ships in 0.3.8, and \
+         `Cargo.toml` requires the newest release, which is above that floor — so `Cargo.lock` \
+         is behind the manifest too and `cargo update -p oneagentgraph` is the whole of the \
+         fix",
         bounds.stall
     );
 }

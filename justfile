@@ -224,8 +224,10 @@ deps-check:
 # deleting them empties the index rather than tightening it.
 
 # Both are outside `check` for the reason `deps-check` is: they read the
-# crates.io index, and the deterministic gate stays offline.
-# Fail when Cargo.lock resolves a sibling engine older than Cargo.toml permits.
+# crates.io index, and the deterministic gate stays offline. The split half of
+# this check needs no index and `tests/linked_engines.rs` reaches it there, so
+# `check` covers that rule without the network.
+# Fail when Cargo.lock resolves a sibling engine older than Cargo.toml permits, or twice.
 engines-current:
     @bash scripts/linked-engines.sh --format check
 

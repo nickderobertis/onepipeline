@@ -144,9 +144,43 @@ resolver = "2"
 #   `Envelope::phase` is a field `src/vcs.rs` relays arm by arm, so a pin below
 #   0.14.0 does not compile. `tests/e2e/adoption.rs` drives both kinds into the
 #   run's store against the real sibling.
+# - `onevcs` 0.15.0 binds a merge-path verdict to the **commit the publication
+#   just pushed**: a check the host attached to some other head is set aside
+#   rather than acted on, so a red check left over from a head this run replaced
+#   can no longer end a publication with a verdict that predates the check it
+#   claims to have read. The optional `head` and `url` it adds to the public
+#   `Check` are what carry that and the evidence behind a refusal. This crate
+#   reads the path only through `FailureKind`, which is unchanged, so no `src/`
+#   type is written against the new fields — what moved is the **host** under
+#   it, and both halves of the move were found by this repository's own journeys
+#   rather than by reading. Reading a rollup and the commit it was reported
+#   against is one `gh pr view --json headRefOid,statusCheckRollup`, a query
+#   `crates/testfakes`'s `gh` double had no answer written for and refuses rather
+#   than answering with the wrong object; and `headRefOid` then has to be the
+#   branch's real tip, because a head answered from a constant names a commit no
+#   publication ever pushed and every scripted check reads as one the host has
+#   not got to yet. Until both landed, four `tests/e2e/lifecycle.rs` journeys
+#   settled `pushed-unverified` or `checks-unsettled` where they state
+#   `checks-failed`. What makes the move a **requirement** rather than a lock
+#   floor is the pin it has to unify with: `onevcs-testing` 0.4.9 requires
+#   `onevcs 0.15.0`, and a graph carrying two `onevcs` copies is not a skew but a
+#   compile error in `tests/onevcs_seam.rs` — the entry on that pin below says
+#   why. So what rules out staying at `^0.14` here is the test-support pin as
+#   much as the pre-1.0 breaking position. `tests/e2e/real_vcs.rs` drives both
+#   merge-path verdicts against a real origin at this release.
 #
-# Four floors are carried by `Cargo.lock` rather than by the requirement below,
-# and deliberately.
+# Five more `oneagentgraph` floors, and one rule about all of them. The first
+# four were carried by `Cargo.lock` alone while the requirement read `0.3.0`,
+# because `^0.3.0` already permitted each of them and widening a requirement that
+# already reached the release would have bought nothing. **Every pin in this
+# block is now declared at the newest release the registry carries**: this
+# repository does not resolve a graph at two versions of anything, so there is no
+# older release left for a looser requirement to serve, and the declaration
+# carries all five. They stay written down because what a release carries is
+# *why* a resolution below it is a build this crate does not work, which no
+# version string says — and the distinction the `onevcs` entries above draw,
+# between a floor a requirement carries and one only the lock did, is now a
+# record of how each was found rather than a live difference.
 #
 # `oneagentgraph` 0.3.3 carries the **session-conversation producer**: a `session`
 # label naming the conversation a member's turns belong to, and the
@@ -154,12 +188,10 @@ resolver = "2"
 # wrote, with that record as its artifact. Which kinds carry the label is that
 # library's to say — `EventKind::carries_session` — and is not restated here. It
 # is what an operator's conversation view renders an agent's transcript out of,
-# and this crate relays all of it. `^0.3.0` already permits it, so the resolution
-# is the whole of the fix and widening the requirement would buy nothing.
-# `src/agentgraph.rs`'s
+# and this crate relays all of it. `src/agentgraph.rs`'s
 # `the_linked_oneagentgraph_produces_the_session_conversation_this_crate_relays`
-# is what holds the resolution there — below the floor it fails saying the lock
-# is stale — and `tests/e2e/session.rs` drives the relay itself.
+# is what holds the resolution there — below the floor it fails naming the
+# resolution to move — and `tests/e2e/session.rs` drives the relay itself.
 #
 # `oneagentgraph` 0.3.5 corrects the **shipped role bars** so none of them demands
 # anything a dispatch cannot settle inside its own run, and guards the rest
@@ -168,9 +200,8 @@ resolver = "2"
 # to end* — which nothing running inside a dispatch can show now that no gate runs
 # inside the publication and verification is the merge path's, so every
 # implementation node would fail its review. The bar is the *linked library's*
-# file and not anything this crate ships, so the lock is what decides which one a
-# judge is handed. `^0.3.0` already permits it, so again the resolution is the
-# whole of the fix. `src/agentgraph.rs`'s
+# file and not anything this crate ships, so the resolution is what decides which
+# one a judge is handed. `src/agentgraph.rs`'s
 # `the_linked_oneagentgraph_holds_the_engineer_bar_to_what_a_dispatch_can_prove`
 # holds it, and asserts what replaced the demand as well as its absence, so a
 # resolution that softened the bar rather than narrowing it fails there too.
@@ -189,23 +220,47 @@ resolver = "2"
 # member, whose clock that rule stamps on tool events and on live work under the
 # tree and on nothing else — so a member spending a quarter of an hour composing
 # a report reads as silent, and under the old bound was killed mid-report.
-# `^0.3.0` already permits it, so the resolution is the whole of the fix.
 # `tests/oneagentgraph_liveness.rs` holds both halves of it against the linked
 # library: the bound a dispatch really runs under, read through that library's
 # own launch-time `Bounds::from_env`, and the rule that bound governs, driven
-# over real processes under a bound the environment sets small. The lock
-# resolves 0.3.9, the newest the caret permits, whose addition — a script run
-# before a member's turn — this crate names nowhere.
+# over real processes under a bound the environment sets small. 0.3.9's own
+# addition — a script run before a member's turn — this crate names nowhere.
 #
-# `onejudge` 0.5.1 and the `oneharness-core` 0.10.x copy at 0.10.2 move with the
-# lock and carry **no runtime behaviour a dispatch observes** — onejudge 0.5.1
-# changes no `src/` file at all — so they are here to keep the lock current
-# rather than for a fix. The `oneharness-core` 0.8 copy stays where it is, for
-# the reason the entry below gives.
+# `oneagentgraph` 0.3.10 links **one turn engine**. It requires `oneharness-core
+# 0.12` and `onejudge 0.5.3`, and that onejudge requires `oneharness-core 0.12`
+# too, so the graph resolves that engine once. Below it the two halves disagreed
+# — `oneagentgraph` linked `oneharness-core` 0.10 while `onejudge` linked 0.8 —
+# and which copy a member's turn reached was decided by whichever half of the
+# graph it came through, so a fix landing in 0.10.x was unreachable by the member
+# that needed it for a whole release cycle, invisibly: a currency check reads
+# each copy separately and finds each of them current. That is what the two pins
+# below are now at, and what `tests/linked_engines.rs` counts —
+# `this_build_resolves_one_copy_of_every_engine_it_links` is the claim about this
+# tree and `the_check_refuses_a_lock_that_resolves_one_engine_at_two_versions` is
+# the refusal that keeps it true. Both run offline, so the deterministic tier
+# reaches them.
 #
-# What keeps this block's resolutions at what its own requirements permit is no
-# longer whoever thinks to look: `just engines-current` fails when one lags, and
-# every release's notes record what that release links.
+# `onejudge` 0.5.2 replies with the **text a turn reported** rather than the
+# harness's raw output, which is what a two-party member's verdict is composed
+# out of and therefore what `src/report.rs` reads back off `member-settled`;
+# 0.5.3 is the release that links `oneharness-core` 0.12, and so the one
+# `oneagentgraph` 0.3.10 requires. `oneharness-core` 0.12 is that engine —
+# reached by a single-sided member through the sibling's library and by a
+# two-party member through the process `crates/testfakes`'s double stands at. Two
+# of its releases are why the double had to move with it: 0.11 stops an
+# unrecognised startup refusal reading as a **completed run**, which is the
+# `work` a report now carries and which
+# `crates/testfakes/src/bin/fake-oneharness.rs` has to answer so a failing turn
+# reads to onejudge's fallback as a turn that ran; and 0.12 refuses to resume a
+# named session unless the control mechanism can drive a turn, rather than
+# resuming one that then never continues.
+#
+# What keeps this block's resolutions at what its own requirements permit, and
+# each engine at one copy, is no longer whoever thinks to look: `just
+# engines-current` fails when a resolution lags its requirement *or* when the
+# lock carries one engine twice, `tests/linked_engines.rs` reaches the second of
+# those with no registry at all, and every release's notes record what that
+# release links.
 [workspace.dependencies]
 oneagentgraph = "0.3.10"
 onevcs = "0.15"
@@ -222,17 +277,20 @@ onejudge = "0.5.3"
 # copied wire shape that goes on parsing after the producer changed it — which is
 # the failure every other pin in this block is taken to avoid.
 #
-# `"0.8"` rather than the newest, because the reader is **onejudge**: it links
-# `oneharness-core` 0.8 while `oneagentgraph` links 0.10, so the graph already
-# carries both and the double has to write the copy its consumer parses. If
-# onejudge's pin moves, this one no longer unifies with it and
-# `tests/e2e/turns.rs` fails on a report shape onejudge cannot read — which names
-# the drift rather than hiding it. Nothing this crate publishes links it.
+# The reader is **onejudge**, so this pin is whatever onejudge links: at 0.5.3 it
+# requires `oneharness-core 0.12`, and so does `oneagentgraph` 0.3.10, so the
+# graph carries one copy and the double writes the one its consumer parses. It
+# read `"0.8"` for a release cycle, when onejudge linked 0.8 and `oneagentgraph`
+# linked 0.10 and the graph really did carry both — a split nothing here was
+# counting, and the reason `tests/linked_engines.rs` now counts. If onejudge's
+# pin moves again, this one no longer unifies with it and `tests/e2e/turns.rs`
+# fails on a report shape onejudge cannot read — which names the drift rather
+# than hiding it. Nothing this crate publishes links it.
 oneharness-core = "0.12"
 # The sibling's own test-support crate, from the **same** revision as the library
 # it implements — here by resolving both from the registry at the releases cut
-# from one commit: `onevcs-testing` v0.4.7 and `onevcs` v0.14.0 are the same tag,
-# and v0.4.7 requires `onevcs = "0.14.0"`, so the build has one copy. Two copies
+# from one commit: `onevcs-testing` v0.4.9 and `onevcs` v0.15.0 are the same tag,
+# and v0.4.9 requires `onevcs = "0.15.0"`, so the build has one copy. Two copies
 # is not a version skew but a compile error: `tests/onevcs_seam.rs` — whose whole
 # job is to drive this crate's seam against those providers — would not build,
 # because the two copies' types are different types.
