@@ -617,6 +617,11 @@ impl World {
     /// released", "0.1.0 is", and "0.2.0 is" as a journey moves through them; an
     /// absent file is a target with no release, which is an answer.
     ///
+    /// Every run of it also leaves a line in the file
+    /// [`probe_runs`](World::probe_runs) counts, so a journey about *how often*
+    /// this host asks has something to assert on: a probe is a subprocess, and
+    /// how many of them one release costs is behaviour rather than an internal.
+    ///
     /// Returns the script's name relative to the repository root — which is what
     /// the release-targets document names it by — and the file its answer is
     /// written to.
@@ -626,7 +631,8 @@ impl World {
         let path = repository.checkout.join(script);
         std::fs::write(
             &path,
-            body.replace("@VERSION_FILE@", &answer.to_string_lossy()),
+            body.replace("@VERSION_FILE@", &answer.to_string_lossy())
+                .replace("@RUNS_FILE@", &self.probe_runs_file(name).to_string_lossy()),
         )
         .expect("the probe script is written");
         #[cfg(unix)]
@@ -643,6 +649,30 @@ impl World {
         );
         git(self, &repository.checkout, &["push", "origin", "main"]);
         (script.to_owned(), answer)
+    }
+
+    /// How many times the probe [`probe_in`](World::probe_in) committed for
+    /// `name` has been run.
+    ///
+    /// The probe appends a line per run, so this is a count of subprocesses this
+    /// host actually started — the only evidence a journey has for how often a
+    /// release was asked about, because the sibling records a probe against the
+    /// identity's own release stream rather than against this run's store.
+    ///
+    /// A file that is not there yet is a probe that has not run, which is a count
+    /// of none rather than a failure: every journey reads this before the first
+    /// ask. A line that is not a whole record is not one either: this is polled
+    /// while a probe is appending to it, so a line the write has not finished is
+    /// a run still in flight rather than one to count.
+    pub fn probe_runs(&self, name: &str) -> usize {
+        std::fs::read_to_string(self.probe_runs_file(name))
+            .map(|tally| tally.lines().filter(|line| line.trim() == "run").count())
+            .unwrap_or(0)
+    }
+
+    /// Where the probe committed for `name` records its runs.
+    fn probe_runs_file(&self, name: &str) -> PathBuf {
+        self.root.join(format!("{name}.probe-runs"))
     }
 
     /// Write this host's release-targets document.
@@ -2678,6 +2708,53 @@ fn both_hook_scripts_answer_the_same_verbs() {
         }
     }
 } // llmlint: ignore-end[tests_mirror_real_usage]
+
+/// The two halves of the release probe fill in the same placeholders.
+///
+/// Same reason the hook's halves are held in step, and the same shape: no
+/// platform runs both, so a placeholder added to one and not the other is a
+/// journey that passes here and answers nothing on the other leg — a probe
+/// writing the literal text `@RUNS_FILE@` into the tree instead of a tally, or
+/// reading an answer nobody wrote. [`World::probe_in`] substitutes exactly this
+/// set, so a placeholder in neither script would also be a substitution nothing
+/// applies.
+// llmlint: ignore-block[tests_mirror_real_usage] a drift gate over the suite's own
+// scaffolding rather than a journey, exactly as
+// [`both_hook_scripts_answer_the_same_verbs`] is: the probe halves are fixtures no user
+// of this crate can reach, no platform executes both, and reading them is the only way
+// to compare them. The probe itself is driven as a real subprocess throughout
+// `tests/e2e/adoption.rs`.
+#[test]
+fn both_probe_scripts_fill_in_the_same_placeholders() {
+    // `@NAME@`, and nothing else that holds an `@` — `cmd`'s own `@echo off` is
+    // the first line of one of these two files.
+    let placeholders = |source: &str| -> Vec<String> {
+        let mut found: Vec<String> = source
+            .match_indices('@')
+            .filter_map(|(at, _)| {
+                let rest = &source[at + 1..];
+                let name: String = rest
+                    .chars()
+                    .take_while(|c| c.is_ascii_uppercase() || *c == '_')
+                    .collect();
+                (!name.is_empty() && rest[name.len()..].starts_with('@'))
+                    .then(|| format!("@{name}@"))
+            })
+            .collect();
+        found.sort();
+        found.dedup();
+        found
+    };
+    let shell = placeholders(include_str!("probe.sh"));
+    assert_eq!(
+        shell,
+        placeholders(include_str!("probe.bat")),
+        "the probe scripts have drifted: one platform fills in a placeholder the other does not"
+    );
+    // Only a drift gate while it still finds anything, and only the truth while
+    // it names what the harness actually substitutes.
+    assert_eq!(shell, ["@RUNS_FILE@", "@VERSION_FILE@"]);
+}
 
 /// The other half of that contract — what the hook *refuses*, and with what —
 /// held by pushing at a repository that has it installed.

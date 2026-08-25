@@ -1030,6 +1030,17 @@ fn start_with(world: &World, name: &str, nodes: Vec<Value>, extra: &[&str]) -> S
     name.to_string()
 }
 
+/// The poll bound every journey here runs under, as [`watching`] sets it: how
+/// often this host may run **one** release's probe.
+const POLL_SECONDS: f64 = 1.0;
+
+/// How many asks
+/// [`nodes_awaiting_one_release_put_one_question_and_are_answered_together`]
+/// counts before it judges the rate. Enough that a host spending the poll budget
+/// once per waiting node has to have spent it faster than the budget allows, and
+/// small enough that the window is a few seconds.
+const ASKS: usize = 5;
+
 /// A world whose release watch answers on this journey's timescale rather than on
 /// an operator's.
 ///
@@ -1722,6 +1733,134 @@ fn a_published_node_is_held_until_the_release_answers_and_by_nothing_else() {
     );
     let settled = world.events_of(&run, "node-settled");
     for event in &settled {
+        assert_ne!(
+            event["payload"]["status"],
+            json!("failed"),
+            "a node the wait held was failed: {event}"
+        );
+    }
+}
+
+/// Nodes awaiting **one** release put one question between them, and are
+/// answered together.
+///
+/// The question `onevcs` is put is the reference and the target, so every node
+/// waiting on one dependency's release is asking the identical thing. Asked once
+/// per node, the same probe subprocess runs once per node on every poll — and
+/// because they are asked in turn, the last node hears nothing until every other
+/// node's copy of its own question has been run. That is what a person reads as
+/// one node holding on a release nothing has answered while the node beside it,
+/// awaiting the very same release, has an answer: not a broken probe, a queue.
+///
+/// Driven against the real probe, and asserted on what a reader can actually see:
+/// no node awaiting this release is ever left reporting no answer once a node
+/// beside it has one, and when the release lands none of them is still waiting.
+#[test]
+fn nodes_awaiting_one_release_put_one_question_and_are_answered_together() {
+    let world = watching("adoption-one-question");
+    world.write_graphs();
+    let (engine_repo, _consumer) = two_repositories(&world);
+    let (script, answer) = world.probe_in(&engine_repo, ENGINE);
+    world.releases(&automated(&script));
+    releases_at(&answer, "0.1.0");
+
+    // Three of them, because two can straddle a round by luck and three cannot:
+    // asked one at a time, the third waits out both of the others.
+    let waiters = ["first", "second", "third"];
+    let mut nodes = vec![engine()];
+    for id in waiters {
+        let mut node = crate::harness::agent(id, &[ENGINE]);
+        node["adoption"] = json!("published");
+        nodes.push(node);
+    }
+    let run = start(&world, "adoption-one-question", nodes);
+    world.until("every wait to carry the probe's answer", |world| {
+        waiters
+            .iter()
+            .all(|node| answered(world, &run, node) == Some("not-released".to_owned()))
+    });
+
+    // Nothing was dispatched by an answer that is not a release.
+    for node in waiters {
+        assert!(!dispatched(&world, &run, node), "{node} was dispatched");
+    }
+    // And no node was left reporting no answer after a node beside it had one.
+    // Read over the store in order, because the defect is a *sequence*: the third
+    // node reading `no-answer-yet` is right until the first node's answer lands,
+    // and wrong from that moment on.
+    let mut answered_yet = false;
+    for event in world.journal(&run) {
+        if event["kind"] != "release-wait" {
+            continue;
+        }
+        let Some(entries) = event["payload"]["awaiting"].as_array() else {
+            continue;
+        };
+        for entry in entries {
+            let last = entry["last_answer"].as_str().unwrap_or_default().to_owned();
+            let carries = last == "not-released" || last == "released";
+            assert!(
+                carries || !answered_yet,
+                "'{}' still reports '{last}' for a release a node beside it has already been \
+                 answered about: {event}",
+                event["labels"]["node"],
+            );
+            answered_yet |= carries;
+        }
+    }
+    assert!(
+        answered_yet,
+        "no wait carried the probe's answer at all, so this proved nothing"
+    );
+
+    // And the three of them cost one probe a poll between them, not one each.
+    //
+    // Counted over a window the probe's own tally marks out rather than over the
+    // journey's elapsed time, because what is being held is a **rate**: this host
+    // may run a probe for this release once every `ONEPIPELINE_RELEASE_POLL_SECONDS`
+    // and no oftener, however fast or slow it is. One question per waiting node
+    // spends that budget three times over, which is what leaves the third node
+    // with no answer while the first has one.
+    world.until("the release to be asked about", |world| {
+        world.probe_runs(ENGINE) >= 1
+    });
+    let before = world.probe_runs(ENGINE);
+    let from = std::time::Instant::now();
+    world.until(
+        "the release to be asked about several times over",
+        |world| world.probe_runs(ENGINE) >= before + ASKS,
+    );
+    let asked = world.probe_runs(ENGINE) - before;
+    let over = from.elapsed().as_secs_f64();
+    assert!(
+        asked as f64 <= over / POLL_SECONDS + 2.0,
+        "{asked} probes were run for one release in {over:.1}s, which is oftener than one \
+         every {POLL_SECONDS}s — the nodes awaiting it are each buying their own copy of \
+         one answer"
+    );
+
+    // The release arrives once, for all of them: the pass that takes the answer
+    // takes it for every node awaiting it, so none of them raises a wait after
+    // the first arrival is reported.
+    releases_at(&answer, "0.2.0");
+    world.until("every node to settle", |world| {
+        world.events_of(&run, "node-settled").len() == 4
+    });
+    let mut arrived = false;
+    for event in world.journal(&run) {
+        match event["kind"].as_str().unwrap_or_default() {
+            "release-arrived" => arrived = true,
+            "release-wait" => assert!(
+                !arrived,
+                "'{}' was still waiting on a release another node had already been handed: \
+                 {event}",
+                event["labels"]["node"],
+            ),
+            _ => {}
+        }
+    }
+    assert!(arrived, "no release ever arrived, so this proved nothing");
+    for event in world.events_of(&run, "node-settled") {
         assert_ne!(
             event["payload"]["status"],
             json!("failed"),
