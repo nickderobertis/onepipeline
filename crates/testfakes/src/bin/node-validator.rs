@@ -114,7 +114,7 @@ fn main() -> std::process::ExitCode {
     // an operator's `kill` — and what the caller must not do is read that as a
     // verdict.
     #[cfg(unix)]
-    if dir.join("validator.signal").is_file() {
+    if marker(&dir.join("validator.signal")) {
         fake::append(
             &dir.join("validator.jsonl"),
             &serde_json::json!({"as": invoked_as, "node": serde_json::Value::Null}).to_string(),
@@ -133,7 +133,7 @@ fn main() -> std::process::ExitCode {
         ));
     }
 
-    if dir.join("validator.silent").is_file() {
+    if marker(&dir.join("validator.silent")) {
         fake::append(
             &dir.join("validator.jsonl"),
             &serde_json::json!({"as": invoked_as, "node": serde_json::Value::Null}).to_string(),
@@ -182,6 +182,24 @@ fn main() -> std::process::ExitCode {
 /// Folded together they would be, and the fold is fail-open: an unreadable
 /// `validator.refuse` would fall through to accepting the node, so a journey
 /// about refusal would pass having proved the opposite.
+/// Whether one scenario marker is set.
+///
+/// Set is a file that is there and absent is `NotFound`, and nothing else is
+/// either: a marker whose state this program cannot read is a scenario it does
+/// not know, and answering "absent" to that runs the ordinary path where a
+/// journey asked for a crash or a silent refusal.
+fn marker(path: &std::path::Path) -> bool {
+    match std::fs::metadata(path) {
+        Ok(found) => found.is_file(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => fake::fail(&format!(
+            "{} is there and this validator cannot read its state ({error}), so whether it \
+             scripts this run is unknown rather than unset",
+            path.display()
+        )),
+    }
+}
+
 fn scenario(path: &std::path::Path) -> Option<String> {
     match std::fs::read_to_string(path) {
         Ok(text) => Some(text),

@@ -373,7 +373,17 @@ fn offer_to_validator(validator: Option<&str>, command: &Command, node: &Node) -
     if let Some(pipe) = child.stderr.take() {
         use std::io::Read;
         let mut bounded = pipe.take(MAX_VALIDATOR_STDERR);
-        let _ = bounded.read_to_end(&mut stderr);
+        if let Err(e) = bounded.read_to_end(&mut stderr) {
+            // Neither fatal nor silent. The status below is what decides the
+            // edit, so a stderr this process could not finish reading is a
+            // refusal carrying less of the validator's trace and never an
+            // acceptance — and the manager is told the trace is short rather
+            // than left reading a truncation as all the validator said.
+            stderr.extend_from_slice(format!(" [its stderr stopped early: {e}]").as_bytes());
+        }
+        // Draining is not a read: it is here so the child is never left blocked
+        // on a reader that stopped reading, and a pipe that fails it is one that
+        // is already gone — which is the state draining is for.
         let _ = std::io::copy(&mut bounded.into_inner(), &mut std::io::sink());
     }
     // llmlint: ignore[changed_behavior_has_e2e] this arm is this process failing to
