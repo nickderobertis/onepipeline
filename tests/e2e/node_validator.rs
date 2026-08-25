@@ -86,6 +86,10 @@ fn offered(world: &World) -> Vec<(String, Value)> {
         .collect()
 }
 
+/// What the host's rules say, in the sentence a manager reads. Each validator
+/// prefixes it with the name it was invoked as.
+const RULES: &str = "this node's criteria name a procedure rather than a property";
+
 fn envelope(commands: Value) -> String {
     json!({"version": 1, "commands": commands}).to_string()
 }
@@ -304,6 +308,10 @@ fn the_flag_beats_the_environment_which_beats_the_config_and_naming_none_runs_no
     )
     .expect("the launch config is written");
 
+    // Every validator refuses, naming itself, so which one a launch resolved is
+    // readable off `reply`'s own stderr rather than out of any file.
+    world.script("validator.refuse", RULES);
+
     // Each rung, from the bottom up: the config alone, then the environment
     // over it, then the flag over both. A fresh run each time, because a
     // validator is resolved once, at the launch.
@@ -340,20 +348,23 @@ fn the_flag_beats_the_environment_which_beats_the_config_and_naming_none_runs_no
 
         // A `reply` typed with *no* environment at all is judged by the rules
         // the run was launched under, because the resolved validator is in the
-        // launch record rather than re-read here.
+        // launch record rather than re-read here. Which validator that was is
+        // read off the refusal, which is where a manager reads one: each of the
+        // three names itself in what it says.
         let mut reply = world.cmd(&["reply", &name]);
         reply.env_remove(spelling("environment"));
-        world
-            .run_with_stdin_on(
-                reply,
-                &envelope(json!([{"op": "add", "node": agent("fresh", &[])}])),
-            )
-            .exited(0);
-        assert_eq!(
-            offered(&world).last().map(|(named, _)| named.clone()),
-            Some(which.to_string()),
-            "the launch resolved a validator other than the one that should have won"
+        let refused = world.run_with_stdin_on(
+            reply,
+            &envelope(json!([{"op": "add", "node": agent("fresh", &[])}])),
         );
+        refused
+            .exited(REFUSED)
+            .err_has(&format!("{which}: {RULES}"));
+        for other in ["by-flag", "by-environment", "by-config"] {
+            if other != which {
+                refused.err_lacks(other);
+            }
+        }
         world.release("slow.go");
     }
 
@@ -396,12 +407,8 @@ fn the_flag_beats_the_environment_which_beats_the_config_and_naming_none_runs_no
         world.until("the held node to be dispatched", |world| {
             !world.events_of(&name, "node-dispatched").is_empty()
         });
-        assert_eq!(
-            world.run_json(&name, "launch.json")["node_validator"],
-            Value::Null,
-            "{which} resolved a validator"
-        );
-
+        // Every validator this journey placed refuses, so an edit that is
+        // *applied* is one nothing was asked about.
         let mut reply = world.cmd(&["reply", &name]);
         match &environment {
             Some(value) => reply.env(spelling("environment"), value),
@@ -412,7 +419,9 @@ fn the_flag_beats_the_environment_which_beats_the_config_and_naming_none_runs_no
                 reply,
                 &envelope(json!([{"op": "add", "node": agent("fresh", &[])}])),
             )
-            .exited(0);
+            .exited(0)
+            .out_has("\"applied\"")
+            .err_lacks(RULES);
         assert_eq!(
             offered(&world).len(),
             before,
@@ -448,23 +457,28 @@ fn the_resolved_validator_is_in_the_launch_record_and_survives_an_adoption() {
     ]);
     launch.env(spelling("environment"), &elsewhere);
     world.run_on(launch, "start").exited(0).settled();
-    assert_eq!(
-        world.run_json(name, "launch.json")["node_validator"],
-        json!(chosen),
-        "the launch record does not carry the validator the launch resolved"
-    );
 
-    // And a fresh driver takes up what its launch chose. Adopted from a shell
-    // whose environment names the other one, which is exactly the drift this
+    // A fresh driver takes up what its launch chose. Adopted from a shell whose
+    // environment still names the other one, which is exactly the drift this
     // guards against.
     let mut adopt = world.cmd(&["adopt", name]);
     adopt.env(spelling("environment"), &elsewhere);
     world.run_on(adopt, "adopt").exited(0);
-    assert_eq!(
-        world.run_json(name, "launch.json")["node_validator"],
-        json!(chosen),
-        "the adoption replaced the validator its launch resolved"
+
+    // And the edit that follows is judged by the validator the *launch* chose,
+    // said in the refusal a manager reads — from a third shell naming the other
+    // one again.
+    world.script("validator.refuse", RULES);
+    let mut reply = world.cmd(&["reply", name]);
+    reply.env(spelling("environment"), &elsewhere);
+    let refused = world.run_with_stdin_on(
+        reply,
+        &envelope(json!([{"op": "add", "node": agent("fresh", &[])}])),
     );
+    refused
+        .exited(REFUSED)
+        .err_has(&format!("by-flag: {RULES}"))
+        .err_lacks("somewhere-else");
 }
 
 /// A validator that refuses without saying anything is still not silent, and one

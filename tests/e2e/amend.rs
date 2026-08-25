@@ -34,12 +34,15 @@ fn envelope(commands: Value) -> String {
 
 /// The task prose each of a node's dispatches was given, in dispatch order.
 ///
-/// Read off the `--task` the sibling's own launch really carried, which is the
-/// seam this crate composes rather than anything it wrote down about it: a
-/// dispatch is `oneagentgraph run GRAPH --task T`, and that one value is what
-/// the worker and the judge supervising it are both handed. It is also the only
-/// place a journey can read the prose of a dispatch that is still **held**,
-/// which is what the running-node journey below asserts on.
+/// Read off the `--task` the sibling's own launch really carried. That argv is
+/// the **product boundary** this crate composes across — a dispatch *is*
+/// `oneagentgraph run GRAPH --task T`, and that one value is what the worker and
+/// the judge supervising it are both handed — so it is the thing under test
+/// rather than an internal of the crate under test. No view renders a
+/// dispatch's prose: `monitor` caps a line at 96 characters and `transcript`
+/// renders a settled member's conversation, so neither can answer what a
+/// **held** dispatch was asked to do, which is what the running-node journey
+/// below turns on.
 fn tasks_dispatched(world: &World, node: &str) -> Vec<String> {
     let mine = format!("## What\nDo {node}.");
     world
@@ -66,8 +69,14 @@ fn held_beside_a_pending_node(world: &World, name: &str, extra: Vec<Value>) -> S
     world
         .run(&["start", &path.to_string_lossy(), "--detach"])
         .exited(0);
-    world.until("the held node's turn to open", |world| {
-        !world.events_of(name, "turn-started").is_empty()
+    // Waited out on the view a supervisor watches a run through, rather than on
+    // the store behind it: `status` reports a node that is running and how long
+    // it has been.
+    world.until("the held node to be running", |world| {
+        world
+            .run(&["status", name])
+            .stdout
+            .contains("slow: running")
     });
     name.to_string()
 }
@@ -99,19 +108,10 @@ fn an_amendment_binds_every_later_dispatch_and_a_second_one_replaces_it() {
             .any(|event| event["payload"]["command"]["op"] == "amend")
     });
 
-    // It is journalled as an operation of its own, so replay reconstructs the
-    // amended task without re-judging the amendment.
-    let committed = world.events_of(&run, "edit-committed");
-    let operations = committed
-        .iter()
-        .find(|event| event["payload"]["command"]["op"] == "amend")
-        .map(|event| event["payload"]["operations"].clone())
-        .expect("the amend was committed");
-    assert_eq!(operations[0]["kind"], "task-amended", "{operations}");
-    assert_eq!(operations[0]["text"], RULING, "{operations}");
-
     // A manager about to replace it can read what they are replacing, from
-    // either view.
+    // either view — each a fresh process that re-folds the run's journal from
+    // nothing, which is what "replay reconstructs the amended task" means where
+    // a reader stands.
     for verb in ["status", "results"] {
         world
             .run(&[verb, &run])

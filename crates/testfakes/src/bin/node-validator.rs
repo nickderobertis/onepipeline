@@ -10,8 +10,8 @@
 //! It is scripted from the same directory the sibling doubles are, so a journey
 //! states what the host's rules say the way it states everything else:
 //!
-//!   `validator.refuse`   present → refuse every node, with this file's text on
-//!                        stderr; absent → accept
+//!   `validator.refuse`   present → refuse every node, naming itself and then
+//!                        this file's text on stderr; absent → accept
 //!   `validator.silent`   present → refuse without reading stdin and without
 //!                        saying anything, which is the answer a caller still
 //!                        has to be able to act on
@@ -19,10 +19,11 @@
 //!                        answering, the way a host's rules engine narrates what
 //!                        it checked
 //!
-//! Every invocation is recorded to `validator.jsonl`, each line carrying the
-//! **name the validator was invoked as** and the node it was given — so a
-//! journey about which of three names a launch resolved reads the answer off the
-//! program that actually ran.
+//! It names itself in every refusal, so a journey about which of three names a
+//! launch resolved reads the answer off `onepipeline reply`'s own stderr — the
+//! surface a manager reads a refusal from. Every invocation is also recorded to
+//! `validator.jsonl`, carrying the name and the node, which is the only witness
+//! there is to *what crossed the stdin* the contract describes.
 
 use std::io::Read;
 
@@ -82,7 +83,7 @@ fn main() -> std::process::ExitCode {
 
     match std::fs::read_to_string(dir.join("validator.refuse")) {
         Ok(reason) => {
-            eprintln!("{}", reason.trim());
+            eprintln!("{invoked_as}: {}", reason.trim());
             std::process::ExitCode::from(1)
         }
         Err(_) => std::process::ExitCode::SUCCESS,
