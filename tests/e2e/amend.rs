@@ -33,16 +33,25 @@ fn envelope(commands: Value) -> String {
 }
 
 /// The task prose each of a node's dispatches was given, in dispatch order.
-fn tasks_dispatched(world: &World, run: &str, node: &str) -> Vec<String> {
+///
+/// Read off the `--task` the sibling's own launch really carried, which is the
+/// seam this crate composes rather than anything it wrote down about it: a
+/// dispatch is `oneagentgraph run GRAPH --task T`, and that one value is what
+/// the worker and the judge supervising it are both handed. It is also the only
+/// place a journey can read the prose of a dispatch that is still **held**,
+/// which is what the running-node journey below asserts on.
+fn tasks_dispatched(world: &World, node: &str) -> Vec<String> {
+    let mine = format!("## What\nDo {node}.");
     world
-        .journal(run)
+        .invocations()
         .into_iter()
-        .filter(|event| {
-            event["labels"]["node"] == node
-                && event["source"] == "agentgraph"
-                && event["kind"] == "turn-activity"
+        .filter(|call| call["tool"] == "oneagentgraph")
+        .filter_map(|call| {
+            let args = call["args"].as_array()?.clone();
+            let at = args.iter().position(|arg| arg == "--task")?;
+            args.get(at + 1)?.as_str().map(str::to_owned)
         })
-        .filter_map(|event| event["payload"]["task"].as_str().map(str::to_string))
+        .filter(|task| task.starts_with(&mine))
         .collect()
 }
 
@@ -136,7 +145,7 @@ fn an_amendment_binds_every_later_dispatch_and_a_second_one_replaces_it() {
             .iter()
             .any(|event| event["labels"]["node"] == "later")
     });
-    let first = tasks_dispatched(&world, &run, "later");
+    let first = tasks_dispatched(&world, "later");
     assert!(
         first[0].contains(RULING),
         "the ruling did not reach the node's dispatch: {}",
@@ -174,10 +183,10 @@ fn an_amendment_binds_every_later_dispatch_and_a_second_one_replaces_it() {
         )
         .exited(0);
     world.until("the requeued node to be dispatched again", |world| {
-        tasks_dispatched(world, &run, "later").len() >= 2
+        tasks_dispatched(world, "later").len() >= 2
     });
 
-    let both = tasks_dispatched(&world, &run, "later");
+    let both = tasks_dispatched(&world, "later");
     assert!(
         both[1].contains(CORRECTION),
         "the replacing ruling did not reach the later dispatch: {}",
@@ -195,6 +204,104 @@ fn an_amendment_binds_every_later_dispatch_and_a_second_one_replaces_it() {
         .out_has(CORRECTION)
         .out_lacks(RULING);
     world.release("keep.go");
+}
+
+/// A ruling issued while the node is **running** binds its next dispatch, and
+/// leaves the turn already in flight alone.
+///
+/// This is the asymmetry between the two levers, and the reason the pair exists.
+/// A `context` note aimed at a running node is pushed into that turn through the
+/// agent's control socket — it steers the worker that is working *now* and is
+/// gone afterwards. An amendment cannot reach that turn: its task was composed
+/// before the ruling existed and the judge that reviews it reads that same task.
+/// So an amendment does the other thing, and does it permanently — every
+/// dispatch of the node from here on is measured against it.
+#[test]
+fn a_ruling_issued_while_the_node_runs_binds_its_next_dispatch_and_not_its_turn() {
+    let world = World::new("amend-running");
+    // The amended node is the one being held, so the ruling arrives while its
+    // dispatch is genuinely in flight and its turn is one an interrupt *could*
+    // have reached.
+    world.script("slow.turn-open", "");
+    let run = held_beside_a_pending_node(&world, "amendrunning", Vec::new());
+
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([{"op": "amend", "id": "slow", "text": RULING}])),
+        )
+        .exited(0)
+        .out_has("\"applied\"");
+    world.until("the amendment to be committed", |world| {
+        world
+            .events_of(&run, "edit-committed")
+            .iter()
+            .any(|event| event["payload"]["command"]["op"] == "amend")
+    });
+
+    // The turn already in flight was not touched: no lever was pulled at it,
+    // and the task it is working from is the one it was dispatched with.
+    assert!(
+        world.events_of(&run, "turn-interrupted").is_empty(),
+        "an amendment reached for the running turn's control socket: {:?}",
+        world.events_of(&run, "turn-interrupted")
+    );
+    let held = tasks_dispatched(&world, "slow");
+    assert_eq!(held.len(), 1, "{held:?}");
+    assert!(
+        !held[0].contains(RULING),
+        "the running dispatch's own task changed under it: {}",
+        held[0]
+    );
+
+    // And the bar it is now measured against is readable, so a manager watching
+    // the dispatch it just ruled on can see the ruling land.
+    world.run(&["status", &run]).exited(0).out_has(RULING);
+
+    // The node that has not run yet takes its own ruling, before the dependency
+    // that is holding it settles.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([{"op": "amend", "id": "later", "text": CORRECTION}])),
+        )
+        .exited(0);
+
+    // The held dispatch settles, so the amended dependent runs — carrying the
+    // ruling, in the one task its worker and its judge are both handed.
+    world.release("slow.go");
+    world.until("the dependent node to be dispatched", |world| {
+        !tasks_dispatched(world, "later").is_empty()
+    });
+    let next = tasks_dispatched(&world, "later");
+    assert!(
+        next[0].contains(CORRECTION),
+        "the ruling did not reach the dispatch that followed it: {}",
+        next[0]
+    );
+
+    // And the node that has now settled done takes neither lever: a `retry`
+    // refuses it, and so does a second amendment — the same fact from two
+    // sides, that what an amendment binds is a dispatch still to come.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([{"op": "retry", "id": "slow", "node": {
+                "id": "slow-2",
+                "persona": "engineer",
+                "task": "## What\nDo slow.\n\n## Why\nSo the run can settle.\n\n\
+                         ## Acceptance criteria\n- slow is done.",
+            }}])),
+        )
+        .exited(REFUSED)
+        .err_has("not running, failed, or cancelled");
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([{"op": "amend", "id": "slow", "text": CORRECTION}])),
+        )
+        .exited(REFUSED)
+        .err_has("settled done");
 }
 
 /// The three ways an amendment reaches nobody, each refused by the one it was —

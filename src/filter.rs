@@ -204,6 +204,17 @@ impl LaunchConfig {
                     config.schema_version
                 )));
             }
+            // A key present and blank is a decision half-written: it reads as
+            // "this launch names one" everywhere downstream and resolves to a
+            // command nothing can start. Refused here, at the boundary, rather
+            // than left to fail every edit later — the only thing about a
+            // command this crate can check is that there is one.
+            if value.is_some_and(|value| value.trim().is_empty()) {
+                return Err(named(format!(
+                    "`{key}` is present and names nothing — give it a value, or leave the \
+                     key out to declare that this launch has none"
+                )));
+            }
         }
         Ok(config)
     }
@@ -988,6 +999,21 @@ mod tests {
                 _ => read.node_validator.as_deref(),
             };
             assert_eq!(named, Some(value));
+        }
+
+        // A key present and blank, which is a decision half-written rather than a
+        // launch that declared nothing.
+        for key in ["pr_author_graph", "node_validator"] {
+            let blank = LaunchConfig::load(&written(
+                &format!("blank-{key}.yaml"),
+                &format!("schema_version: {LAUNCH_CONFIG_SCHEMA_VERSION}\n{key}: \"   \"\n"),
+            ))
+            .expect_err("a key that names nothing is refused");
+            let said = blank.to_string();
+            assert!(
+                said.contains(&format!("`{key}`")) && said.contains("names nothing"),
+                "{said}"
+            );
         }
 
         let stray = LaunchConfig::load(&written(

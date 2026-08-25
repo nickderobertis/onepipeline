@@ -376,6 +376,7 @@ fn start(args: &StartArgs) -> Result<i32> {
         .clone()
         .or_else(engine::configured_node_validator)
         .or_else(|| declared.node_validator.clone())
+        .map(|command| command.trim().to_string())
         .filter(|command| !command.is_empty());
     let node_graph_ref = resolve_graph(&engine::configured_node_graph(), &launch_dir)?;
     resolve_plan_graphs(&mut plan, &launch_dir)?;

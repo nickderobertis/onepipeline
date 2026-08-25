@@ -171,6 +171,14 @@ pub struct Frontier {
     /// a caller judging an edit from the ledger alone leaves it empty and the
     /// reconciler is where the refusal lands.
     pub in_flight: BTreeMap<String, LiveDispatch>,
+    // llmlint: ignore-block[invalid_states_unrepresentable] the validator stays the
+    // `String` the launch record carries, for the reason `LaunchRecord`'s own graph
+    // references do: this is a **durable record field** read strictly at the start of the
+    // pass, and the record is the schema. A newtype could add exactly one invariant —
+    // non-blank — which `LaunchConfig::load` and `start`'s own resolution already refuse
+    // at the trust boundary, so it would carry no invariant of its own. The property a
+    // command actually has to have is that it *runs*, which nothing but running it can
+    // establish; `offer_to_validator` establishes it, and fails closed where it does not.
     /// The command this run's launch named to check a node before it joins the
     /// graph, when it named one.
     ///
@@ -182,6 +190,7 @@ pub struct Frontier {
     /// checked by one all along, and what was missing is that a node introduced
     /// by a live edit reached a dispatch having been checked by nothing.
     pub node_validator: Option<String>,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
 }
 
 /// One dispatch the loop still has in flight, as an edit sees it.
@@ -262,14 +271,14 @@ pub fn compile_with(
     // Last, and over the node the edit actually produced: the host's own rules
     // are the expensive check and the specific one, so a node this crate's own
     // schema would refuse never reaches them.
-    if let Some(node) = introduced_node(command, &candidate) {
+    if let Some(node) = node_whose_task_is_new(command, &candidate) {
         offer_to_validator(frontier.node_validator.as_deref(), command, node)?;
     }
     *graph = candidate;
     Ok(operations)
 }
 
-/// The node one command introduces or whose task it changes, once the command
+/// The node whose task one command puts in front of a dispatch, once the command
 /// has been compiled against the candidate graph.
 ///
 /// Four ops reach a validator, and they are exactly the ones that put task prose
@@ -278,7 +287,7 @@ pub fn compile_with(
 /// `requeue` is only one of them when its amendment touches `task` — a requeue
 /// that raises a turn budget changes nothing a validator has an opinion about.
 /// Every other op moves edges, parks, attests, or reports.
-fn introduced_node<'a>(command: &Command, graph: &'a Graph) -> Option<&'a Node> {
+fn node_whose_task_is_new<'a>(command: &Command, graph: &'a Graph) -> Option<&'a Node> {
     let id = match command {
         Command::Add { node } | Command::Retry { node, .. } => node.id.as_str(),
         Command::Amend { id, .. } => id.as_str(),
@@ -316,7 +325,7 @@ fn introduced_node<'a>(command: &Command, graph: &'a Graph) -> Option<&'a Node> 
 /// a refused edit is asked once, because the submission check turns it away
 /// before anything is queued.
 fn offer_to_validator(validator: Option<&str>, command: &Command, node: &Node) -> Result<()> {
-    let Some(validator) = validator.filter(|command| !command.is_empty()) else {
+    let Some(validator) = validator.filter(|command| !command.trim().is_empty()) else {
         return Ok(());
     };
     let op = crate::channel::op_of(command);
