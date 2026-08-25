@@ -86,6 +86,14 @@ fn stamp_session(
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // Before the invocation is recorded, because this is not one: it is the
+    // process a dispatch left behind, re-entering its own image because a
+    // rendezvous is the only clock this suite has that a journey controls. A
+    // recorded row here would be an `oneagentgraph` invocation `onepipeline`
+    // never made, in the very file journeys count invocations out of.
+    if args.first().map(String::as_str) == Some(OUTLIVE) {
+        return outlive(&args);
+    }
     let dir = fake::script_dir();
     fake::record(&dir, "oneagentgraph", &args);
 
@@ -99,6 +107,62 @@ fn main() -> ExitCode {
         }
         Some(other) => fake::refuse(&format!("unknown oneagentgraph command '{other}'")),
         None => fake::refuse("oneagentgraph takes a command"),
+    }
+}
+
+/// The verb this double re-enters itself at to act out a process that outlives
+/// the dispatch which started it.
+///
+/// Not a command the sibling has, and it never reaches this double from
+/// `onepipeline`: the only caller is [`outlived_by`], which spawns this image.
+const OUTLIVE: &str = "outlive-the-dispatch";
+
+/// Hold the dispatch's own output open after the dispatch is gone.
+///
+/// What a real host leaves behind. The stream a launcher relays is a pipe, and a
+/// pipe reaches its end when every handle that may write to it is closed — not
+/// when the process it was given to exits. Anything that inherited it holds it
+/// open, and on Windows that is a wider set than the graph's own children: a
+/// console process is given a `conhost` and a `.bat` a `cmd`, either of which can
+/// outlive what it was started for.
+///
+/// So this inherits the dispatch's stdout and stderr, waits for the journey to
+/// release it, and records that it went — which is what lets a journey state that
+/// the node settled *while this was still here* rather than measure how long it
+/// took.
+fn outlive(args: &[String]) -> ExitCode {
+    let (Some(go), Some(gone)) = (args.get(1), args.get(2)) else {
+        return fake::refuse("outlive-the-dispatch takes a rendezvous and a marker");
+    };
+    fake::wait_for(std::path::Path::new(go));
+    if let Err(error) = std::fs::write(gone, "gone\n") {
+        fake::fail(&format!(
+            "the outliving process cannot record that it went: {error}"
+        ));
+    }
+    ExitCode::SUCCESS
+}
+
+/// Leave a process behind that holds this dispatch's output open.
+///
+/// Spawned with this process's own streams inherited — the default, and the
+/// whole point — so what it holds is the pipe the launcher is relaying.
+fn outlived_by(dir: &std::path::Path, key: &str) {
+    let exe = std::env::current_exe().unwrap_or_else(|error| {
+        fake::fail(&format!("this double cannot find its own image: {error}"))
+    });
+    let spawned = std::process::Command::new(exe)
+        .arg(OUTLIVE)
+        .arg(dir.join(format!("{key}.outlived-by.go")))
+        .arg(dir.join(format!("{key}.outlived-by.gone")))
+        .spawn();
+    if let Err(error) = spawned {
+        // Fatal, and deliberately: a journey that asked for an outliving process
+        // and got none proves the opposite of what it says — that a node settled
+        // while nothing was holding its stream.
+        fake::fail(&format!(
+            "this double cannot leave a process behind: {error}"
+        ));
     }
 }
 
@@ -488,6 +552,12 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     // there is neither a side nor a per-side turn to attribute it to.
     if let Some(script) = fake::node_script(dir, &key, "refused") {
         refuse_candidates(args, &node, step.as_deref(), &script);
+    }
+
+    // Left running as this dispatch exits, holding the output it was given. Last,
+    // so everything above has already been said down the stream it holds.
+    if dir.join(format!("{key}.outlived-by")).exists() {
+        outlived_by(dir, &key);
     }
 
     if let Some(code) = fake::node_script(dir, &key, "fail") {
