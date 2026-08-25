@@ -659,15 +659,10 @@ impl World {
     /// release was asked about, because the sibling records a probe against the
     /// identity's own release stream rather than against this run's store.
     ///
-    /// A file that is not there yet is a probe that has not run, which is a count
-    /// of none rather than a failure: every journey reads this before the first
-    /// ask. **Only** that one, because every other way a read fails — a
-    /// permission this host does not have, bytes that are not text, a directory
-    /// where the tally should be — is a tally this journey cannot count, and
-    /// reading one as zero would let a journey pass having counted a host that
-    /// ran nothing. A line that is not a whole record is neither: this is polled
-    /// while a probe is appending to it, so a line the write has not finished is
-    /// a run still in flight rather than one to count.
+    /// A tally that is not there yet is a count of none, and it is the **only**
+    /// read failure that is: reading an unreadable one as zero would let a
+    /// journey pass having counted a host that ran nothing. A torn last line is
+    /// not a run to count either — this is polled while a probe appends to it.
     pub fn probe_runs(&self, name: &str) -> usize {
         let path = self.probe_runs_file(name);
         match std::fs::read_to_string(&path) {
@@ -2722,19 +2717,16 @@ fn both_hook_scripts_answer_the_same_verbs() {
 
 /// The two halves of the release probe fill in the same placeholders.
 ///
-/// Same reason the hook's halves are held in step, and the same shape: no
-/// platform runs both, so a placeholder added to one and not the other is a
-/// journey that passes here and answers nothing on the other leg — a probe
-/// writing the literal text `@RUNS_FILE@` into the tree instead of a tally, or
-/// reading an answer nobody wrote. [`World::probe_in`] substitutes exactly this
-/// set, so a placeholder in neither script would also be a substitution nothing
-/// applies.
+/// Same reason the hook's halves are held in step: no platform runs both, so a
+/// placeholder added to one and not the other is a journey that passes here and
+/// answers nothing on the other leg — a probe writing the literal `@RUNS_FILE@`
+/// into the tree instead of a tally. [`World::probe_in`] substitutes exactly this
+/// set.
 // llmlint: ignore-block[tests_mirror_real_usage] a drift gate over the suite's own
 // scaffolding rather than a journey, exactly as
-// [`both_hook_scripts_answer_the_same_verbs`] is: the probe halves are fixtures no user
-// of this crate can reach, no platform executes both, and reading them is the only way
-// to compare them. The probe itself is driven as a real subprocess throughout
-// `tests/e2e/adoption.rs`.
+// [`both_hook_scripts_answer_the_same_verbs`] is: no platform executes both halves, and
+// reading them is the only way to compare them. The probe itself is driven as a real
+// subprocess throughout `tests/e2e/adoption.rs`.
 #[test]
 fn both_probe_scripts_fill_in_the_same_placeholders() {
     // `@NAME@`, and nothing else that holds an `@` — `cmd`'s own `@echo off` is

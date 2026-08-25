@@ -146,14 +146,10 @@ pub(crate) enum Answer {
 
 /// How a wait names an awaited release **nothing has answered yet**.
 ///
-/// Deliberately not [`Answer::NotAnswered`], and the distinction is the whole
-/// point of it: that one is a probe this host *ran* and could not get an answer
-/// out of — a timeout, a spawn the host refused, output that was not one usable
-/// line — and the reader who meets it goes and looks at the probe. This one is a
-/// question that has been put and whose answer has not come back yet, which is
-/// the state every wait is in before its first probe completes. A wait that
-/// reported the second as the first sends that reader after a probe that is
-/// working.
+/// Deliberately not [`Answer::NotAnswered`], which is a probe this host *ran*
+/// and got no usable answer out of and which sends its reader to go and look at
+/// that probe. This one is a question still out, which is the state every wait
+/// is in before its first probe completes.
 ///
 /// A wait with no question to put at all — no reference the sibling resolves work
 /// by, or no target that answers — is neither: nothing will ever answer it, and
@@ -645,16 +641,12 @@ impl Watch {
                 continue;
             }
             self.surfaced.insert(node.clone(), Instant::now());
-            // The surface first and the record second, and that order is the
-            // promise. They are two appends to one store saying one thing, so a
-            // reader holding the newest record and reading the surface beside it
-            // gets whichever surface was there when it looked — and raised
-            // second, that is the *previous* one, carrying the previous answer
-            // about a probe that has since stopped answering. That is how a probe
-            // that could not answer is read as a release that has not happened,
-            // on a host slow enough between two appends for a reader to land
-            // there. This way round the surface a person has is never older than
-            // the record beside it.
+            // The surface first and the record second. They are two appends
+            // saying one thing, so a reader holding the record and reading the
+            // surface beside it gets whichever surface was there when it looked:
+            // raised second, that is the previous one, carrying the previous
+            // answer about a probe that has since stopped answering. This way
+            // round the surface is never older than the record beside it.
             crate::engine::raise(paths, journal, self.wait_surface(node))?;
             let awaiting = self.awaiting(node);
             journal.emit(
@@ -761,13 +753,11 @@ impl Watch {
     /// The word a payload and a surface name one awaited release's last answer
     /// by.
     ///
-    /// Three states and not two, because a reader acts differently on each. An
-    /// answer this run has is reported as itself. No answer *yet* is
-    /// [`NO_ANSWER_YET`] — the probe has been asked and has not come back, and
-    /// there is nothing to go and look at. No answer *ever* — a wait with no
-    /// reference to ask about or no target that answers — is
-    /// [`Answer::NotAnswered`], which is what a question that could not be put
-    /// is, and never [`Answer::NotReleased`].
+    /// Three states and not two, because a reader acts differently on each: the
+    /// answer this run has, a question still out ([`NO_ANSWER_YET`]), and a
+    /// question that could never be put — no reference to ask about or no target
+    /// that answers — which is [`Answer::NotAnswered`] and never
+    /// [`Answer::NotReleased`].
     fn last_answer(&self, key: &Key, dependency: &Dependency) -> &'static str {
         match self.answers.get(key) {
             Some(answer) => answer.as_str(),
@@ -1179,12 +1169,10 @@ pub(crate) fn arrival_note(released: &[Released]) -> String {
 ///
 /// [`onevcs::release_status`] is answered by the reference and the target alone,
 /// so two waits naming the same pair are asking the **identical** question: it is
-/// put once and its answer belongs to both. Putting it once per waiting node
-/// instead runs the same probe subprocess once per node on every poll — the same
-/// answer, bought as many times as there are nodes waiting for it, and the last
-/// of them waiting out every other probe before it hears anything at all. That
-/// last node reads as a release nothing has answered while a node beside it,
-/// awaiting the very same release, reads as answered.
+/// put once and its answer belongs to both. Put once per waiting node instead,
+/// each copy runs the probe subprocess again on every poll and the last node in
+/// the list waits out every probe before it — which is how it comes to read as a
+/// release nothing has answered while a node beside it reads as answered.
 ///
 /// A wait with nothing to ask — no reference the sibling resolves work by, or no
 /// target that answers — puts no question and joins none. The wait stands: an

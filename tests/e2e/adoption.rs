@@ -1009,19 +1009,11 @@ fn wait_surface(world: &World, run: &str, node: &str) -> String {
 /// Every wait this run **recorded** about one node had already been surfaced,
 /// saying the same thing, by the time the record was written.
 ///
-/// The record and the surface are two appends to one store saying one thing, so
-/// a reader holding the newest record and reading the surface beside it gets
-/// whichever surface was there when it looked. Raised second, that is the
-/// *previous* one — the previous answer, about a probe that has since stopped
-/// answering — which is how a probe that could not answer is read as a release
-/// that has not happened. Raised first, the surface a reader finds is never older
-/// than the record it holds.
-///
-/// Which is why this is the check that carries the promise on every platform: the
-/// window a reader has to land in to be handed the older surface is a couple of
-/// file appends wide, so a journey that reads the two and hopes they agree only
-/// fails where that window is wide enough to hit. The order they were written in
-/// is in the store afterwards, at any speed and on any host.
+/// Which is the promise held where a reader's timing cannot decide whether it
+/// holds. The record and the surface are two appends saying one thing, so a
+/// journey that reads the newest of each and hopes they agree only fails on a
+/// host slow enough between the two to be caught in the middle. The order they
+/// were written in is in the store afterwards, at any speed.
 fn every_wait_was_surfaced_before_it_was_recorded(world: &World, run: &str, node: &str) {
     let mut surface = String::new();
     let mut recorded = 0usize;
@@ -1821,12 +1813,11 @@ fn a_published_node_is_held_until_the_release_answers_and_by_nothing_else() {
 /// Nodes awaiting **one** release put one question between them, are answered
 /// together, and say so while they wait.
 ///
-/// Three promises, against the real probe. The waits read `no-answer-yet` until
-/// the first answer comes back and never `not-answered`, which is a probe that
-/// ran and could not answer. None of them is left reporting no answer once a
-/// node beside it has one, and when the release lands none of them is still
-/// waiting. And the three of them cost one probe run a poll between them — the
-/// count that says the other two are structural rather than luck.
+/// Three promises, against the real probe: a wait still expecting its first
+/// answer reads `no-answer-yet` and never `not-answered`, no node is left
+/// reporting no answer once a node beside it has one, and the three of them cost
+/// one probe run a poll between them — the count that says the first two are
+/// structural rather than luck.
 #[test]
 fn nodes_awaiting_one_release_put_one_question_and_are_answered_together() {
     let world = watching("adoption-one-question");
@@ -1919,14 +1910,10 @@ fn nodes_awaiting_one_release_put_one_question_and_are_answered_together() {
         "no wait carried the probe's answer at all, so this proved nothing"
     );
 
-    // And the three of them cost one probe a poll between them, not one each.
-    //
     // Counted over a window the probe's own tally marks out rather than over the
-    // journey's elapsed time, because what is being held is a **rate**: this host
-    // may run a probe for this release once every `ONEPIPELINE_RELEASE_POLL_SECONDS`
-    // and no oftener, however fast or slow it is. One question per waiting node
-    // spends that budget three times over, which is what leaves the third node
-    // with no answer while the first has one.
+    // journey's elapsed time, because what is held is a **rate**: one probe run
+    // for this release every `ONEPIPELINE_RELEASE_POLL_SECONDS`, however fast the
+    // host is. One question per waiting node spends that budget three times over.
     world.until("the release to be asked about", |world| {
         world.probe_runs(ENGINE) >= 1
     });
