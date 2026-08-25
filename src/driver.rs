@@ -2435,6 +2435,12 @@ mod tests {
     /// all, so a reader that met an entry it could not parse and carried on would
     /// be reporting "there was nothing to stop" about a run it never managed to
     /// ask — which is the false completion, one layer further in.
+    ///
+    /// An entry carrying a field this build does not know is not one of those.
+    /// It is another build of this crate saying a process is running, and the
+    /// stop **aims at it**: refusing the registry over the key would have taken
+    /// the reach away, and dropping the entry would have left the dispatch
+    /// running under a run reported stopped.
     #[test]
     fn a_registry_this_build_cannot_read_refuses_the_stop_rather_than_narrowing_it() {
         let root = scratch("roots-unreadable");
@@ -2456,22 +2462,32 @@ mod tests {
         // running, and the stop proceeds on the records that remain.
         assert!(roots_to_stop(&paths, &launch).is_ok());
 
+        std::fs::write(
+            paths.dispatch(usable.pid, 0),
+            serde_json::to_string(&serde_json::json!({
+                "node": "build",
+                "pid": sys::pid(),
+                "host": here,
+                "dispatched_at": sys::now_rfc3339(),
+                "started": usable.started,
+                "reaped_by": "a build that came later",
+            }))
+            .expect("an entry from a newer writer"),
+        )
+        .expect("an entry");
+        assert_eq!(
+            roots_to_stop(&paths, &launch).expect("an entry from a newer writer reads"),
+            Aim::Here {
+                roots: vec![usable.pid],
+                unproven: Vec::new()
+            },
+            "a dispatch recorded with a field this build does not know was left running"
+        );
+
         for (what, entry) in [
             (
                 "a record that is not JSON at all",
                 "not an entry".to_string(),
-            ),
-            (
-                "a record carrying a field this build does not know",
-                serde_json::to_string(&serde_json::json!({
-                    "node": "build",
-                    "pid": sys::pid(),
-                    "host": here,
-                    "dispatched_at": sys::now_rfc3339(),
-                    "started": usable.started,
-                    "reaped_by": "a build that came later",
-                }))
-                .expect("an entry from a newer writer"),
             ),
             (
                 "a record whose stamp proves nothing",

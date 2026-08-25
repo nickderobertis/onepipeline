@@ -2222,6 +2222,10 @@ mod tests {
     /// The reading it replaces: the same root listed one run and said nothing
     /// about the other directory, so a planner could not tell a root holding one
     /// run from a root holding one run and one it could not open.
+    ///
+    /// **Unreadable** is what is named here, and it is not the same thing as
+    /// unfamiliar: a launch record carrying a key this build does not know is
+    /// read and listed, which is the run beside them below.
     #[test]
     fn a_run_root_this_build_refuses_is_named_rather_than_dropped() {
         let root = scratch("skipped");
@@ -2235,28 +2239,37 @@ mod tests {
                 &[("plan", json!(plan()))],
             )],
         );
-        // A directory that records no launch at all.
+        // A run whose launch record another build wrote, carrying a key this one
+        // has never had. It reads, and the run is on the view.
+        let newer = write_run(&root, "from-a-newer-build", sys::pid(), &[]);
+        let mut written: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(newer.launch()).expect("the launch record this build wrote"),
+        )
+        .expect("a launch record");
+        written["channel_id"] = json!("a field a later build removed");
+        std::fs::write(newer.launch(), written.to_string()).expect("a launch record");
         std::fs::create_dir_all(root.join("no-launch")).expect("a directory with no launch");
-        // And one whose launch record carries a field this build does not accept
-        // — the refusal `results` already words, naming the file and the field.
-        let typo = RunPaths::under(&root, "typo");
-        typo.create().expect("the run directory");
-        std::fs::write(typo.launch(), json!({"oops": true}).to_string()).expect("a launch record");
+        // And one whose launch record is not a launch record: a document with
+        // none of what this build needs to say anything about the run.
+        let empty = RunPaths::under(&root, "not-a-record");
+        empty.create().expect("the run directory");
+        std::fs::write(empty.launch(), json!({"oops": true}).to_string())
+            .expect("a launch record this build cannot read");
 
         let survey = Survey::of(&root);
-        assert_eq!(survey.views.len(), 1, "{:?}", survey.skipped);
+        assert_eq!(survey.views.len(), 2, "{:?}", survey.skipped);
         assert_eq!(survey.skipped.len(), 2, "{:?}", survey.skipped);
 
-        // The run that read is still listed, beside the two that did not.
         for rendered in [
             runs(&root, false, "session-a"),
             status(&survey),
             goals(&survey),
         ] {
             assert!(rendered.contains("readable"), "{rendered}");
+            assert!(rendered.contains("from-a-newer-build"), "{rendered}");
         }
-        // `host` lists dispatches rather than runs, so the run it read is not on
-        // it — the roots it could not read still are.
+        // `host` lists dispatches rather than runs, so the runs it read are not
+        // on it — the roots it could not read still are.
         for rendered in [
             runs(&root, false, "session-a"),
             status(&survey),
@@ -2266,8 +2279,10 @@ mod tests {
             assert!(rendered.contains("2 run root(s) skipped"), "{rendered}");
             assert!(rendered.contains("no-launch"), "{rendered}");
             assert!(rendered.contains("launch.json"), "{rendered}");
-            // The offending field, as the schema named it.
-            assert!(rendered.contains("oops"), "{rendered}");
+            // What the record was missing, as the schema named it: a refusal
+            // that only counted the roots would leave a reader nothing to act
+            // on.
+            assert!(rendered.contains("run_id"), "{rendered}");
         }
         std::fs::remove_dir_all(&root).ok();
     }

@@ -215,15 +215,65 @@ pub fn stop(pid: u32, how: Stop) -> Teardown {
 /// [`Teardown::PartlySignalled`].
 pub fn stop_and_confirm(pids: &[u32], how: Stop, patience: Duration) -> Teardown {
     let (established, aimed) = platform_stop(pids, how);
-    if established != Teardown::Signalled {
-        return established;
-    }
-    if gone_within(&aimed, patience) {
-        Teardown::Signalled
-    } else {
-        Teardown::PartlySignalled
+    confirmed(established, || gone_within(&aimed, patience))
+}
+
+/// What the bounded liveness probe makes of what one round of signalling
+/// established.
+///
+/// Split out of [`stop_and_confirm`] so the decision can be driven where every
+/// platform this crate builds for runs it: what a teardown's own answer becomes
+/// once the tree has been watched is a question about this fold, and the two
+/// inputs it turns on — a platform's `established` and a platform's answer about
+/// what is still running — are the two things a host decides for itself. The
+/// probe is the caller's, so this is the whole of the decision.
+///
+/// **Both** signalled answers are confirmed, and that is the correction. A
+/// teardown asks about each process in the tree separately and a tree-kill ends
+/// descendants as it walks, so an ask aimed at a descendant its own root already
+/// ended meets a process that is terminated and has not yet gone — which is
+/// [`Teardown::PartlySignalled`] on the strength of a liveness answer taken
+/// microseconds after the signal. Returning that outright skipped the bounded
+/// confirmation in exactly the case the confirmation was written for, and
+/// reported a run whose tree was in fact reached as one only partly stopped.
+/// What settles it is the same question `patience` was always there to ask: is
+/// any of it still there a moment later.
+///
+/// The other three keep their own answers, because the confirmation has nothing
+/// to add to them. [`Teardown::NotAttempted`] and [`Teardown::Refused`] both say
+/// **nothing was signalled** — the distinction [`Teardown::PartlySignalled`]
+/// draws against them is the whole point of having three variants, and a tree
+/// that went away by itself while nobody signalled it is not a stop this
+/// teardown made. [`Teardown::NothingToStop`] found no tree to watch.
+// llmlint: ignore-block[changed_behavior_has_e2e] the arm this change adds cannot be
+// reached by a journey on either platform, which is why the fold is split out at all. A
+// `platform_stop` that answers `PartlySignalled` needs either a process this user may not
+// signal standing beside one that takes the ask — not a thing to go and make — or the
+// Windows tree-kill racing its own descendant to exit, which no test can ask a host for.
+// So the decision is driven from the answers, in
+// `a_descendant_the_tree_kill_already_ended_is_a_clean_stop` and
+// `a_tree_still_standing_when_the_patience_runs_out_is_still_a_refusal`, both on no cfg;
+// the reachable arms around it are driven end to end against a real tree in
+// `a_confirmed_stop_answers_only_once_every_descendant_is_gone` and
+// `a_stop_that_watches_reports_a_tree_that_took_the_ask_and_stayed`, and through the
+// binary in `tests/e2e/driver.rs`.
+fn confirmed(established: Teardown, gone: impl FnOnce() -> bool) -> Teardown {
+    match established {
+        // A tree that is gone within the patience was reached, however the
+        // per-process asks read at the instant they were made; one still
+        // standing when it runs out is the run the operator has to be told is
+        // still running.
+        Teardown::Signalled | Teardown::PartlySignalled => {
+            if gone() {
+                Teardown::Signalled
+            } else {
+                Teardown::PartlySignalled
+            }
+        }
+        established => established,
     }
 }
+// llmlint: ignore-end[changed_behavior_has_e2e]
 
 /// Whether every process in `aimed` is gone before `patience` runs out.
 ///
@@ -1880,58 +1930,125 @@ mod tests {
     /// where the leaf was would be asking the code under test to grade itself.
     #[cfg(windows)]
     fn console_tree() -> (std::process::Child, u32) {
-        let mut root = std::process::Command::new("cmd")
+        let root = std::process::Command::new("cmd")
             .args(["/C", "ping -n 120 127.0.0.1"])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
             .expect("a console process tree");
-        match awaited_child_of(root.id()) {
-            Some(leaf) => (root, leaf),
-            None => {
-                let pid = root.id();
-                let _ = root.kill();
-                let _ = root.wait();
-                panic!("the tree under {pid} never started its leaf");
-            }
+        match awaited_child_of(root.id(), LEAF_IMAGE) {
+            Ok(leaf) => (root, leaf),
+            Err(why) => abandon(root, &why),
         }
     }
 
-    /// The pid of one child of `parent`, once it has one.
+    /// The image each level of a fixture tree runs, so the level below one is
+    /// asked for by **what it is** rather than as "some child of it".
+    ///
+    /// A console process started where the caller has no console of its own gets
+    /// a `conhost.exe`, and that helper is a child of the level that started it.
+    /// So "some child of this level" names two processes, the listing orders
+    /// them as it pleases, and a fixture that follows the wrong one waits out its
+    /// whole patience under a process that will never have a child — then
+    /// reports a tree that was running the entire time as one that never
+    /// started.
+    #[cfg(windows)]
+    const SHELL_IMAGE: &str = "cmd.exe";
+
+    #[cfg(windows)]
+    const LEAF_IMAGE: &str = "PING.EXE";
+
+    #[cfg(windows)]
+    const LEVEL_PATIENCE: std::time::Duration = std::time::Duration::from_secs(30);
+
+    /// End a fixture's whole tree and fail with what went wrong.
+    ///
+    /// The tree and not just its root: `Child::kill` ends one process, so a
+    /// fixture that gave up on its root leaks the levels under it. `stop` is the
+    /// crate's own code and is used here only to *clean up*, never as the oracle
+    /// any assertion reads.
+    #[cfg(windows)]
+    fn abandon(mut root: std::process::Child, why: &str) -> ! {
+        stop(root.id(), Stop::Now);
+        let _ = root.kill();
+        let _ = root.wait();
+        panic!("{why}");
+    }
+
+    /// The pid of `parent`'s child running `image`, once it has one.
     ///
     /// A level appears a moment after the one above it starts, so this waits
     /// rather than asking once — and gives up rather than waiting for ever, so a
     /// tree that never grew is a named failure instead of a suite that hangs.
+    ///
+    /// A listing this host would not give is retried and then **reported**,
+    /// rather than read as "no such child yet": those are opposite facts, and
+    /// folding them together is what let a `Get-CimInstance` that failed for its
+    /// own reasons come back as a tree that never started.
     #[cfg(windows)]
-    fn awaited_child_of(parent: u32) -> Option<u32> {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    fn awaited_child_of(parent: u32, image: &str) -> std::result::Result<u32, String> {
+        let deadline = std::time::Instant::now() + LEVEL_PATIENCE;
+        let mut unanswered: Option<String> = None;
         loop {
-            if let Some(child) = child_of(parent) {
-                return Some(child);
+            match child_of(parent, image) {
+                Ok(Some(child)) => return Ok(child),
+                Ok(None) => {}
+                Err(why) => unanswered = Some(why),
             }
             if std::time::Instant::now() >= deadline {
-                return None;
+                return Err(unanswered.map_or_else(
+                    || {
+                        format!(
+                            "this host listed no {image} under {parent} within {}s, so that \
+                             level of the tree never started",
+                            LEVEL_PATIENCE.as_secs()
+                        )
+                    },
+                    |why| format!("this host would not list the processes under {parent}: {why}"),
+                ));
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
     }
 
-    /// The pid of one child of `parent`, or `None` while it has none.
+    /// The pid of `parent`'s child running `image`, `Ok(None)` while it has
+    /// none, and `Err` when this host would not say.
     #[cfg(windows)]
-    fn child_of(parent: u32) -> Option<u32> {
+    fn child_of(parent: u32, image: &str) -> std::result::Result<Option<u32>, String> {
         let listed = std::process::Command::new("powershell")
             .args([
                 "-NoProfile",
                 "-Command",
                 &format!(
-                    "(Get-CimInstance Win32_Process -Filter 'ParentProcessId={parent}').ProcessId"
+                    "(Get-CimInstance Win32_Process -Filter 'ParentProcessId={parent} AND \
+                     Name=\"{image}\"').ProcessId"
                 ),
             ])
             .output()
-            .expect("this host lists its processes");
-        String::from_utf8_lossy(&listed.stdout)
-            .lines()
-            .find_map(|line| line.trim().parse::<u32>().ok())
+            .map_err(|error| format!("`powershell` could not be run: {error}"))?;
+        let complained = String::from_utf8_lossy(&listed.stderr).trim().to_owned();
+        // Either half is this host declining to answer. `Get-CimInstance` reports
+        // most of its failures without failing the shell, so the status alone
+        // would read a refused listing as an empty one.
+        if !listed.status.success() || !complained.is_empty() {
+            return Err(format!("exited {} saying {complained:?}", listed.status));
+        }
+        // Read strictly, for the reason [`parse_table`] is: the command asked for
+        // one column of pids, so a non-blank line that is not one means the answer
+        // is not the one that was asked for — and reading that as "no such child"
+        // is the fold this whole helper exists to undo.
+        let mut listed_pids: Vec<u32> = Vec::new();
+        for line in String::from_utf8_lossy(&listed.stdout).lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            listed_pids.push(
+                line.parse::<u32>()
+                    .map_err(|_| format!("listed {line:?} where a pid was due"))?,
+            );
+        }
+        Ok(listed_pids.first().copied())
     }
 
     /// Whether every pid in `tree` is gone inside `patience`.
@@ -2229,22 +2346,19 @@ mod tests {
     /// of: `cmd` starting `cmd` starting `ping`.
     #[cfg(windows)]
     fn a_tree_and_what_it_started() -> (std::process::Child, Vec<u32>) {
-        let mut root = std::process::Command::new("cmd")
+        let root = std::process::Command::new("cmd")
             .args(["/C", "cmd /C ping -n 120 127.0.0.1"])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
             .expect("a process tree");
-        let below = awaited_child_of(root.id())
-            .and_then(|middle| awaited_child_of(middle).map(|leaf| vec![middle, leaf]));
+        // Each level asked for by the image it runs, for the reason
+        // [`SHELL_IMAGE`] gives.
+        let below = awaited_child_of(root.id(), SHELL_IMAGE)
+            .and_then(|middle| awaited_child_of(middle, LEAF_IMAGE).map(|leaf| vec![middle, leaf]));
         match below {
-            Some(below) => (root, below),
-            None => {
-                let pid = root.id();
-                let _ = root.kill();
-                let _ = root.wait();
-                panic!("the tree under {pid} never started all three of its levels");
-            }
+            Ok(below) => (root, below),
+            Err(why) => abandon(root, &why),
         }
     }
 
@@ -2348,6 +2462,85 @@ mod tests {
             "a stop answered that it had reached the tree under {root} while {surviving:?} was \
              still running, so every caller that reports a stop to a person reports one that had \
              not happened yet"
+        );
+    }
+
+    /// A tree the teardown reached is a clean stop, including when a descendant
+    /// its root's tree-kill had already ended was still answering "live" when
+    /// the ask reached it.
+    ///
+    /// The Windows race in one assertion, held on every platform this crate
+    /// builds for. `taskkill /T` ends descendants as it walks, so the later ask
+    /// aimed at one of them meets a process that is terminated and not yet gone,
+    /// which is `PartlySignalled` — and `stop_and_confirm` returned that
+    /// *immediately*, skipping the bounded confirmation written for exactly this
+    /// race, so `onepipeline stop` refused a teardown it had completed.
+    ///
+    /// The probe is substituted and the decision is not: what a host says about
+    /// a process is the platform's, and what a teardown concludes from it is
+    /// this fold, which is the thing that was wrong.
+    #[test]
+    fn a_descendant_the_tree_kill_already_ended_is_a_clean_stop() {
+        assert_eq!(
+            confirmed(Teardown::PartlySignalled, || true),
+            Teardown::Signalled,
+            "a teardown whose tree was gone within the patience refused a stop it had made"
+        );
+        assert_eq!(
+            confirmed(Teardown::Signalled, || true),
+            Teardown::Signalled,
+            "a teardown that reached its whole tree was not reported as one"
+        );
+    }
+
+    /// A tree that is genuinely still standing when the confirmation runs out is
+    /// still a refusal, and still says which kind of refusal it is.
+    ///
+    /// The other half of the correction above, and the reason the fold cannot
+    /// simply answer `Signalled`. A process that took the ask and stayed, and one
+    /// this user may not signal, are both a run that is still running; and
+    /// "nothing was signalled" — a host that gave no listing, or a teardown every
+    /// ask of which was refused — is a different thing to tell an operator than
+    /// "part of it came down", which is why neither is confirmed into the other.
+    #[test]
+    fn a_tree_still_standing_when_the_patience_runs_out_is_still_a_refusal() {
+        assert_eq!(
+            confirmed(Teardown::PartlySignalled, || false),
+            Teardown::PartlySignalled,
+            "a stop that left part of the run running reported a clean teardown"
+        );
+        assert_eq!(
+            confirmed(Teardown::Signalled, || false),
+            Teardown::PartlySignalled,
+            "a signalled tree that was still there when the patience ran out was reported as \
+             gone"
+        );
+        // Nothing was signalled, so there is nothing for a liveness probe to
+        // confirm: a tree that went away by itself is not a stop this teardown
+        // made, and folding either of these into a signalled answer is the false
+        // completion the whole seam exists to remove.
+        //
+        // Asserted one by one rather than over a list of the two, because the
+        // second is a variant only one platform has: a list of them is a
+        // *single-element* list where it does not, which is a clippy finding on
+        // that platform alone — a lint failure the leg this whole change is
+        // about was the only thing to see, after the leg that reads it here had
+        // gone green.
+        assert_eq!(
+            confirmed(Teardown::NotAttempted, || true),
+            Teardown::NotAttempted,
+            "a teardown that never began was reported as one that reached the tree"
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            confirmed(Teardown::Refused, || true),
+            Teardown::Refused,
+            "a teardown every ask of which was refused was reported as one that reached the tree"
+        );
+        assert_eq!(
+            confirmed(Teardown::NothingToStop, || true),
+            Teardown::NothingToStop,
+            "a teardown that found no tree to aim at was reported as one that ended a run"
         );
     }
 

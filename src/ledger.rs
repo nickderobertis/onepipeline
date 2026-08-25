@@ -11,6 +11,44 @@
 //! it holds the file's exclusive lock instead: it heals a fragment a dead writer
 //! left before it writes, reports what that cost, and takes its own bytes back
 //! off the file when the write fails.
+//!
+//! # How a record here is read, and what that costs
+//!
+//! **A field this build does not know is ignored, not refused.** These records
+//! are this crate's own — written by some build of it and read back by another,
+//! never by a person — so the reader that meets an unfamiliar key is meeting a
+//! build that is not this one, which is a fact about versions and not a typo to
+//! catch. Refusing it takes away the *whole* record over one key, and a run root
+//! whose launch record cannot be read is a run that vanishes from the view an
+//! operator opens to see what is running on their host. Read permissively,
+//! adding a field can never break a reader again — no per-version migration, no
+//! compatibility shim.
+//!
+//! This is the opposite rule from the one that governs a **plan**, an
+//! **executor-rules file**, a **launch config**, or a **reply envelope**. Those
+//! are external input — a document somebody wrote — where an unknown key is a
+//! typo and dropping it silently is how an operator finds out their setting did
+//! nothing. Those types keep `deny_unknown_fields`, and the [`Filters`] block
+//! nested in [`LaunchRecord`] is one of them: it is the same type an operator
+//! writes in a launch config, so it stays closed, and a key added inside that
+//! block is not covered by the paragraph above.
+//!
+//! **A record this build genuinely cannot read is still reported.** Permissive
+//! is not silent: a document that is not JSON, one torn mid-write, or one
+//! missing a field this build requires still comes back as an error naming the
+//! file and the reason, and [`Survey::of`](crate::views::Survey::of) puts it on
+//! the reader's `run root(s) skipped` list. The distinction is the journal's
+//! own: unreadable is reported, unfamiliar is ignored, and neither is ever
+//! dropped on the floor.
+//!
+//! **So retire a field or a variant, never delete one.** Permissive parsing
+//! fixes the additive half only: a record naming something whose *meaning* this
+//! build removed is one it cannot act on however leniently it parses, and that
+//! loss is accepted rather than engineered around. What stops it is keeping a
+//! retired field or variant recognised and **inert**: leave it declared, stop
+//! writing it, `#[serde(default, skip_serializing_if = …)]` so it is omitted
+//! from anything written now, and say in its doc comment that it is retired.
+//! A build that reads it then goes on reading every record already on disk.
 
 // llmlint: ignore-file[invalid_states_unrepresentable] a run id, a host name, and a
 // timestamp are `String`s in these records because each one is a *serialized* field: the
@@ -380,7 +418,6 @@ fn is_unset(path: &Path) -> bool {
 
 /// What `start` recorded about a run, and what `adopt` replays it from.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct LaunchRecord {
     /// The run id.
     pub run_id: String,
@@ -601,7 +638,6 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
 /// repaired, because a store that silently patches itself is a store whose own
 /// record of a run is wrong with nothing saying so.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct TornTail {
     /// When the append that met the fragment healed the file.
     pub at: String,
@@ -632,12 +668,13 @@ pub fn torn_tail_log(path: &Path) -> PathBuf {
 /// Every fragment an append has healed out of one file, oldest first.
 ///
 // llmlint: ignore[boundary_inputs_validated] the loss log is not external input: it is
-// written by `report_torn_tail` in this build and by nothing else, and `TornTail` is
-// `deny_unknown_fields`, so a line that is not one is refused rather than partly read.
-// What a lenient read costs is one loss going unmentioned; what refusing would cost is
-// the whole run's record, taken away over the file that exists to report a loss — which
-// is the rule `read_json_opt` above already states for every ledger record this crate
-// wrote.
+// written by `report_torn_tail` in this build and by nothing else, and `TornTail` is a
+// record of this crate's own, read by the module rule above — a key this build does not
+// know is ignored, and a line that is not a record at all is dropped rather than taking
+// the file with it. What a lenient read costs is one loss going unmentioned; what
+// refusing would cost is the whole run's record, taken away over the file that exists to
+// report a loss — which is the rule `read_json_opt` above already states for every ledger
+// record this crate wrote.
 pub fn torn_tails(path: &Path) -> Vec<TornTail> {
     // llmlint: ignore-block[no_panics_on_recoverable_errors] a line of this log the build cannot read costs that one loss going unmentioned; refusing the read would take away the whole account of what a run lost, over the file that exists to report a loss.
     read_lines(&torn_tail_log(path))
@@ -905,7 +942,6 @@ pub fn read_lines(path: &Path) -> Vec<String> {
 
 /// Who holds a run's single-writer lock.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct LockRecord {
     /// The holding process.
     pub pid: u32,
@@ -1051,7 +1087,6 @@ impl Drop for OwnershipLock {
 /// is not a weaker entry but an unusable one, and the type is what stops one
 /// being written or read.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct DispatchRecord {
     /// The node this dispatch is running.
     pub node: String,
@@ -2007,6 +2042,11 @@ mod tests {
     /// opposite answers for the caller that acts on them, and this reader's whole
     /// job is to keep them apart: the first says a run has no work running, the
     /// second says nobody knows. Each of these was once the same empty vector.
+    ///
+    /// A field this build does not know is **not** one of them, and that is the
+    /// first thing asserted below: an entry from another build of this crate is a
+    /// live process a stop has to reach, and refusing the whole registry over a
+    /// key is how a run's work becomes unreachable.
     #[test]
     fn a_registry_this_build_cannot_read_is_reported_and_never_read_as_an_empty_one() {
         let root = scratch("dispatches-unreadable");
@@ -2020,22 +2060,29 @@ mod tests {
             started: "a start this host once reported".into(),
         };
 
+        fs::write(
+            paths.dispatch(usable.pid, 0),
+            serde_json::to_string(&serde_json::json!({
+                "node": usable.node,
+                "pid": usable.pid,
+                "host": usable.host,
+                "dispatched_at": usable.dispatched_at,
+                "started": usable.started,
+                "reaped_by": "a build that came later",
+            }))
+            .expect("an entry from a newer writer"),
+        )
+        .expect("an entry");
+        assert_eq!(
+            dispatches_of(&paths).expect("an entry from a newer writer reads"),
+            vec![usable.clone()],
+            "an entry carrying a field this build does not know took the whole registry with it"
+        );
+
         for (what, entry) in [
             (
                 "a record that is not JSON at all",
                 "not an entry".to_string(),
-            ),
-            (
-                "a record carrying a field this build does not know",
-                serde_json::to_string(&serde_json::json!({
-                    "node": usable.node,
-                    "pid": usable.pid,
-                    "host": usable.host,
-                    "dispatched_at": usable.dispatched_at,
-                    "started": usable.started,
-                    "reaped_by": "a build that came later",
-                }))
-                .expect("an entry from a newer writer"),
             ),
             (
                 "a record missing the stamp entirely",
