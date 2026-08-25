@@ -494,6 +494,56 @@ fn the_resolved_validator_is_in_the_launch_record_and_survives_an_adoption() {
         .err_lacks("somewhere-else");
 }
 
+/// What a validator says is external input, and a manager reads it: the refusal
+/// carries the sentence that matters, on one line, and does not grow with a
+/// validator that dumped its whole trace after it.
+///
+/// A rules engine that prints escape sequences and then a megabyte of trace is
+/// ordinary. What must not happen is that reaching a terminal, a planner's
+/// queue, and the journal — where every payload text this crate writes is
+/// already bounded.
+#[test]
+fn a_refusal_carries_what_the_validator_said_without_its_escape_codes_or_its_trace() {
+    let world = World::new("validator-loud");
+    let validator = validator_named(&world, "check-node");
+    let run = live_run(&world, "validatorloud", &["--node-validator", &validator]);
+
+    // The sentence that matters, wrapped in the colour a rules engine prints it
+    // in, with a second line after it and a large trace to follow.
+    let sentence = "rule 3 failed: criterion 2 names a procedure";
+    let esc = '\u{1b}';
+    world.script(
+        "validator.refuse",
+        &format!("{esc}[31m{sentence}{esc}[0m\nsee the trace below"),
+    );
+    let flood = 100_000;
+    world.script("validator.flood", &flood.to_string());
+
+    let refused = world.run_with_stdin(
+        &["reply", &run],
+        &envelope(json!([{"op": "add", "node": agent("fresh", &[])}])),
+    );
+    refused.exited(REFUSED).err_has(sentence);
+    assert!(
+        !refused.stderr.contains('\u{1b}'),
+        "a validator's escape sequences reached the refusal: {:?}",
+        refused.stderr
+    );
+    assert!(
+        refused.stderr.lines().count() == 1,
+        "the refusal is not one line: {:?}",
+        refused.stderr
+    );
+    assert!(
+        refused.stderr.len() < flood / 4,
+        "the refusal grew with the validator's trace: {} bytes",
+        refused.stderr.len()
+    );
+    // And the edit is still refused rather than lost in the noise.
+    world.run(&["results", &run]).exited(0).out_lacks("fresh");
+    world.release("slow.go");
+}
+
 /// A validator that refuses without saying anything is still not silent, and one
 /// that cannot be started refuses the edit rather than letting the node through.
 ///

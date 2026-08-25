@@ -18,6 +18,9 @@
 //!   `validator.chatter`  present → write this file's text to **stdout** before
 //!                        answering, the way a host's rules engine narrates what
 //!                        it checked
+//!   `validator.flood`    present → after refusing, write this many bytes more to
+//!                        stderr, the way a rules engine that dumps its whole
+//!                        trace does; the caller's refusal must not grow with it
 //!   `validator.signal`   present → end on a signal rather than an exit status,
 //!                        which is a validator that crashed or was killed and is
 //!                        still an answer the caller has to act on (Unix only)
@@ -163,8 +166,28 @@ fn main() -> std::process::ExitCode {
     match std::fs::read_to_string(dir.join("validator.refuse")) {
         Ok(reason) => {
             eprintln!("{invoked_as}: {}", reason.trim());
+            flood(&dir);
             std::process::ExitCode::from(1)
         }
         Err(_) => std::process::ExitCode::SUCCESS,
     }
+}
+
+/// Write as much further stderr as the scenario asks for.
+///
+/// A rules engine that dumps its whole trace after the sentence that matters is
+/// ordinary, and what the caller must not do is hold all of it or put all of it
+/// in front of a manager. A count this file cannot read as a number of bytes is
+/// a misconfigured scenario rather than a run of zero, so it is reported.
+fn flood(dir: &std::path::Path) {
+    let Ok(asked) = std::fs::read_to_string(dir.join("validator.flood")) else {
+        return;
+    };
+    let Ok(bytes) = asked.trim().parse::<usize>() else {
+        fake::fail(&format!(
+            "validator.flood holds {:?}, which is not a number of bytes",
+            asked.trim()
+        ));
+    };
+    eprintln!("{}", "x".repeat(bytes));
 }
