@@ -2522,17 +2522,24 @@ mod tests {
         // confirm: a tree that went away by itself is not a stop this teardown
         // made, and folding either of these into a signalled answer is the false
         // completion the whole seam exists to remove.
-        for nothing_signalled in [
+        //
+        // Asserted one by one rather than over a list of the two, because the
+        // second is a variant only one platform has: a list of them is a
+        // *single-element* list where it does not, which is a clippy finding on
+        // that platform alone — a lint failure the leg this whole change is
+        // about was the only thing to see, after the leg that reads it here had
+        // gone green.
+        assert_eq!(
+            confirmed(Teardown::NotAttempted, || true),
             Teardown::NotAttempted,
-            #[cfg(unix)]
+            "a teardown that never began was reported as one that reached the tree"
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            confirmed(Teardown::Refused, || true),
             Teardown::Refused,
-        ] {
-            assert_eq!(
-                confirmed(nothing_signalled, || true),
-                nothing_signalled,
-                "a teardown that signalled nothing was reported as one that reached the tree"
-            );
-        }
+            "a teardown every ask of which was refused was reported as one that reached the tree"
+        );
         assert_eq!(
             confirmed(Teardown::NothingToStop, || true),
             Teardown::NothingToStop,
