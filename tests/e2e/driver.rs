@@ -2016,8 +2016,6 @@ fn a_stop_never_signals_a_pid_the_host_has_given_to_another_process() {
     stranger.wait().expect("it is reaped");
     world.release("build.go");
 }
-// llmlint: ignore-end[tests_mirror_real_usage]
-
 /// Linux does not let an old identity decay with `ps`'s wall-clock rendering.
 ///
 /// The stand-in moves `lstart` from the real process's 2026-era value to 1970,
@@ -2101,6 +2099,7 @@ fn a_stop_that_declines_every_live_identity_does_not_report_success() {
     stranger.kill().expect("this test ends its own process");
     stranger.wait().expect("the stranger is reaped");
 }
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 /// A stop reaches a dispatch whose driver is gone.
 ///
