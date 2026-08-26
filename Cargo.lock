@@ -342,6 +342,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "fastrand"
+version = "2.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
+
+[[package]]
 name = "filetime"
 version = "0.2.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -857,9 +863,9 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "oneagentgraph"
-version = "0.3.10"
+version = "0.3.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e0da679561acb72f9b79d27c6fa06b281c76c2de613a6b880d70d73c5e918935"
+checksum = "23b07010e6c5798d8f47bc68c4a7143556d71cafbd3ef28504ad781b0db7b3d3"
 dependencies = [
  "clap",
  "libc",
@@ -877,9 +883,9 @@ dependencies = [
 
 [[package]]
 name = "oneharness-core"
-version = "0.12.0"
+version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b19e04e54e8bbd7bb4aac2930950886bc803435a6b79127e511ee0a9f963dcd2"
+checksum = "154a1bba73e2cfc21060651f93f5f2c428b3a96049afa3ac3d789260bc07eff2"
 dependencies = [
  "fs2",
  "jsonschema",
@@ -898,9 +904,9 @@ dependencies = [
 
 [[package]]
 name = "onejudge"
-version = "0.5.3"
+version = "0.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1988e7d3c8337167e731191265e5a87ada0d2a7424cc40dfbaec0618f407c11"
+checksum = "b08e3ebc975790d0d3b2c4ca552ae3641d4b59f7f53f951bc7d278fa61aac18b"
 dependencies = [
  "clap",
  "oneharness-core",
@@ -949,9 +955,9 @@ dependencies = [
 
 [[package]]
 name = "onevcs"
-version = "0.15.2"
+version = "0.15.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd8f974169eaa2b303cca1c74cc6adf2fcb55d2021bcaa87588f388f7979d1b3"
+checksum = "9095c2e1983e04080b33c185366f6d8daf292feeb3b2f5dde7409e43a1bf0e98"
 dependencies = [
  "clap",
  "dunce",
@@ -964,6 +970,7 @@ dependencies = [
  "serde_json",
  "serde_yaml_ng",
  "sha2",
+ "tempfile",
  "thiserror",
  "time",
  "url",
@@ -972,9 +979,9 @@ dependencies = [
 
 [[package]]
 name = "onevcs-testing"
-version = "0.4.11"
+version = "0.4.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9dbf698fb374ab98bc5a31c1fdfaf4959935b99b973ea1f6ac0b84d089640bf4"
+checksum = "0abf3d6222b9da878880583224412f263df8109ef2cede859f56d79e0b98c7e7"
 dependencies = [
  "onevcs",
  "serde",
@@ -1549,6 +1556,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "tempfile"
+version = "3.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
+dependencies = [
+ "fastrand",
+ "getrandom 0.4.3",
+ "once_cell",
+ "rustix",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
