@@ -820,8 +820,8 @@ fn a_config_carrying_a_blank_drafting_graph_still_launches_a_run() {
         .settled();
 }
 
-/// A blank `pr_author_graph` is the config that omits the key: same launch, and
-/// the same record of what it drafts with.
+/// A blank `pr_author_graph` is the launch that names none — written in the
+/// config, or spelled on argv over a config that names one.
 ///
 /// The other half of the journey above, and the half that does not vary by
 /// platform. "Does it launch?" a blank value can pass by accident: `""` resolved
@@ -830,33 +830,49 @@ fn a_config_carrying_a_blank_drafting_graph_still_launches_a_run() {
 /// refused on Windows — so one document launched on one platform, exited 2 on
 /// another, and where it launched it recorded the launch directory as the graph
 /// a change request's body is drafted by. What is asked here is the property no
-/// file API is consulted for: a config carrying a blank key and a config that
-/// omits it are indistinguishable in what the launch then does.
+/// file API is consulted for: a launch whose drafting graph is blank and a
+/// launch that names none are indistinguishable in what they then do.
+///
+/// Both rungs, because a blank arrives from either: `--pr-author-graph ""` is a
+/// rung that is *there*, so it overrides the config it names — to "this launch
+/// drafts nothing", the way a blank `--node-validator` overrides the rungs under
+/// it — rather than falling through to the graph the document declares.
 #[test]
-fn a_blank_drafting_graph_records_what_omitting_the_key_records() {
+fn a_blank_drafting_graph_records_what_naming_none_records() {
     let world = World::new("validator-blank-drafting-omitted");
     let version = proposed()["config_schema_version"].as_u64().unwrap_or(3);
+    // A real document for the config to name, so the rung under a blank flag is
+    // one that would otherwise reach the record.
+    let declared_graph = world.root.join("drafting.yaml");
+    std::fs::write(&declared_graph, "version: 1\nname: pr-author\n")
+        .expect("the drafting graph is written");
 
-    let recorded = |run: &str, declared: &str| -> Value {
+    let recorded = |run: &str, declared: &str, extra: &[&str]| -> Value {
         let config = world.root.join(format!("{run}.yaml"));
         std::fs::write(&config, format!("schema_version: {version}\n{declared}"))
             .expect("the config is written");
         let path = world.plan(run, &plan_of(run, vec![agent("only", &[])]));
+        let mut args = [
+            "start",
+            &path.to_string_lossy(),
+            "--launch-config",
+            &config.to_string_lossy(),
+            "--attach",
+        ]
+        .iter()
+        .map(|arg| (*arg).to_string())
+        .collect::<Vec<_>>();
+        args.extend(extra.iter().map(|arg| (*arg).to_string()));
         world
-            .run(&[
-                "start",
-                &path.to_string_lossy(),
-                "--launch-config",
-                &config.to_string_lossy(),
-                "--attach",
-            ])
+            .run(&args.iter().map(String::as_str).collect::<Vec<_>>())
             .exited(0)
             .settled();
         world.run_json(run, "launch.json")["pr_author_graph"].clone()
     };
 
-    let blank = recorded("blankkey", "pr_author_graph: \"\"\n");
-    let omitted = recorded("nokey", "");
+    let named = format!("pr_author_graph: {}\n", declared_graph.display());
+    let blank = recorded("blankkey", "pr_author_graph: \"\"\n", &[]);
+    let omitted = recorded("nokey", "", &[]);
     assert_eq!(
         blank, omitted,
         "a blank drafting graph did not launch the run the config omitting the key launches"
@@ -868,5 +884,19 @@ fn a_blank_drafting_graph_records_what_omitting_the_key_records() {
     assert!(
         blank.is_null(),
         "a blank drafting graph reached the record as a graph this launch names: {blank}"
+    );
+
+    // The rung the flag overrides, proved to be a rung: without the flag this
+    // config reaches the record, so the run below records nothing because the
+    // blank flag said so rather than because the document said nothing.
+    assert_eq!(
+        recorded("declaredgraph", &named, &[]),
+        json!(declared_graph.to_string_lossy()),
+        "the config's own drafting graph did not reach the record"
+    );
+    let overridden = recorded("blankflag", &named, &["--pr-author-graph", ""]);
+    assert!(
+        overridden.is_null(),
+        "a blank --pr-author-graph fell through to the config it overrides: {overridden}"
     );
 }
