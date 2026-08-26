@@ -139,6 +139,35 @@ fn an_unreachable_store_is_reported_and_retried_while_the_run_completes_unaffect
 }
 
 #[test]
+fn a_settled_project_launches_again_from_its_projected_metadata() {
+    let first = World::new("store-writeback-relaunch-first");
+    let project = first.plan(
+        "writeback-relaunch",
+        &plan_of(
+            "writeback-relaunch",
+            vec![crate::harness::agent("work", &[])],
+        ),
+    );
+    first.run(&["start", &project, "--attach"]).settled();
+    first.until("the settlement to reach the project", |world| {
+        world
+            .store_tasks(&project)
+            .iter()
+            .any(|task| task["item"]["metadata"]["onepipeline.settlement"].is_object())
+    });
+
+    let second = World::new("store-writeback-relaunch-second").with_env(
+        "ONETASKGRAPH_SOURCES__PLANS__CONFIG__ROOT",
+        &first.store().to_string_lossy(),
+    );
+    second.run(&["start", &project, "--attach"]).settled();
+    assert_eq!(
+        second.run_json("writeback-relaunch", "result.json")["state"],
+        "complete"
+    );
+}
+
+#[test]
 fn derived_waiting_failed_and_parked_states_use_their_board_categories() {
     let world = World::new("store-writeback-categories");
     let local = world.repository("local-direct", &[]);

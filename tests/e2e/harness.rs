@@ -396,35 +396,7 @@ impl World {
 
     /// Read this world's project tasks back through the real onetaskgraph binary.
     pub fn store_tasks(&self, project: &str) -> Vec<Value> {
-        let output = std::process::Command::new(onetaskgraph_binary())
-            .args(["task", "list", "--project", project, "--json"])
-            .env("XDG_CONFIG_HOME", self.root.join("xdg"))
-            .env("ONETASKGRAPH_DEFAULT_SOURCES", STORE_SOURCE)
-            .env(
-                format!(
-                    "ONETASKGRAPH_SOURCES__{}__PLUGIN",
-                    STORE_SOURCE.to_uppercase()
-                ),
-                "local-md",
-            )
-            .env(
-                format!(
-                    "ONETASKGRAPH_SOURCES__{}__CONFIG__ROOT",
-                    STORE_SOURCE.to_uppercase()
-                ),
-                self.store(),
-            )
-            .output()
-            .expect("the real onetaskgraph reads the store");
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        serde_json::from_slice::<Value>(&output.stdout).expect("the task listing is JSON")["items"]
-            .as_array()
-            .expect("the task listing carries items")
-            .clone()
+        self.store_pages(&["task", "list", "--project", project])
     }
 
     /// Read this world's project back through the real onetaskgraph binary.
@@ -459,35 +431,62 @@ impl World {
 
     /// Read one projected task's dependency edges through onetaskgraph.
     pub fn store_deps(&self, task: &str) -> Vec<Value> {
-        let output = std::process::Command::new(onetaskgraph_binary())
-            .args(["task", "deps", task, "--direction", "depends-on", "--json"])
-            .env("XDG_CONFIG_HOME", self.root.join("xdg"))
-            .env("ONETASKGRAPH_DEFAULT_SOURCES", STORE_SOURCE)
-            .env(
-                format!(
-                    "ONETASKGRAPH_SOURCES__{}__PLUGIN",
-                    STORE_SOURCE.to_uppercase()
-                ),
-                "local-md",
-            )
-            .env(
-                format!(
-                    "ONETASKGRAPH_SOURCES__{}__CONFIG__ROOT",
-                    STORE_SOURCE.to_uppercase()
-                ),
-                self.store(),
-            )
-            .output()
-            .expect("the real onetaskgraph reads dependency edges");
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        serde_json::from_slice::<Value>(&output.stdout).expect("the edge listing is JSON")["items"]
-            .as_array()
-            .expect("the edge listing carries items")
-            .clone()
+        self.store_pages(&["task", "deps", task, "--direction", "depends-on"])
+    }
+
+    fn store_pages(&self, base: &[&str]) -> Vec<Value> {
+        let mut items = Vec::new();
+        let mut page: Option<String> = None;
+        let mut seen = std::collections::BTreeSet::new();
+        loop {
+            let mut args: Vec<String> = base.iter().map(|arg| (*arg).to_owned()).collect();
+            args.push("--json".to_owned());
+            if let Some(token) = &page {
+                args.extend(["--page".to_owned(), token.clone()]);
+            }
+            let output = std::process::Command::new(onetaskgraph_binary())
+                .args(&args)
+                .env("XDG_CONFIG_HOME", self.root.join("xdg"))
+                .env("ONETASKGRAPH_DEFAULT_SOURCES", STORE_SOURCE)
+                .env(
+                    format!(
+                        "ONETASKGRAPH_SOURCES__{}__PLUGIN",
+                        STORE_SOURCE.to_uppercase()
+                    ),
+                    "local-md",
+                )
+                .env(
+                    format!(
+                        "ONETASKGRAPH_SOURCES__{}__CONFIG__ROOT",
+                        STORE_SOURCE.to_uppercase()
+                    ),
+                    self.store(),
+                )
+                .output()
+                .expect("the real onetaskgraph reads a store page");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let response: Value =
+                serde_json::from_slice(&output.stdout).expect("the store page is JSON");
+            items.extend(
+                response["items"]
+                    .as_array()
+                    .expect("the store page carries items")
+                    .iter()
+                    .cloned(),
+            );
+            page = response["next"].as_str().map(str::to_owned);
+            if page.is_none() {
+                return items;
+            }
+            assert!(
+                seen.insert(page.clone()),
+                "the store repeated a page cursor"
+            );
+        }
     }
 
     /// The `onepipeline` binary with the **real** `oneagentgraph` behind that one
