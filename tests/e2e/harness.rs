@@ -1070,7 +1070,7 @@ impl World {
     /// token would make a live process disagree with the stamp its own record
     /// carries, which a reader takes for a pid the host has handed to somebody
     /// else: the one verdict that must never come from the host misbehaving.
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "linux")))]
     pub fn path_whose_ps_says_more_than_it_was_asked(&self) -> PathBuf {
         self.path_with_ps("talkative-ps", &answer_plus("a line nobody asked for"))
     }

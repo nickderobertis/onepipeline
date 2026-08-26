@@ -1756,7 +1756,7 @@ fn a_stop_that_cannot_read_the_process_table_refuses_and_leaves_the_run_retryabl
 /// as it was, and the same ask works once the host answers what it was asked. The
 /// listing this stand-in gives is the real one throughout, which is what keeps the
 /// fault to the one question under test.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "linux")))]
 #[test]
 fn a_stop_whose_host_says_more_than_it_was_asked_about_a_pid_refuses_and_signals_nothing() {
     let world = World::new("driver-stop-talkative-ps");
