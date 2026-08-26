@@ -1764,3 +1764,55 @@ prose.
   }
 }
 ```
+
+## 42. `adopt` takes no flags, so a run can only be recovered attached — OPEN
+
+**Proposal (for the planner who owns the contract): state the adoption verb as
+`onepipeline adopt RUN [--attach|--detach]`, the same pair `start` carries one
+paragraph earlier, with the same default and the same meaning — and say of the
+detached form that the driver it retains is `onepipeline drive-run RUN --adopt`,
+which is where the adoption is recorded because it is the process that takes the
+lock.**
+
+The contract spells one way in: *"`onepipeline adopt RUN` attaches a fresh
+driver to an intact ledger"*. `start` has both forms in the same paragraph, and
+adoption is the documented way back from a driver that died — so a manager
+supervising several runs at once could recover one of them only by blocking the
+session watching the others. The way out an operator reaches for is
+backgrounding the launcher by hand, which is the pattern this host's own
+operating doctrine spends a paragraph forbidding: a missing flag that pushes a
+person into a defect is not merely an inconvenience.
+
+Adoption has an ordering the launch verb does not, and it is what decides where
+the work goes. `adopt` checks ownership, refuses a run something is genuinely
+driving, ends a driver holding a run nothing is driving, and **takes the
+ownership lock before anything is written** — because an adoption that recorded
+itself and then lost that race would leave the record naming a process that is
+not driving the run. A detaching launcher cannot hold that lock on the driver's
+behalf: it is about to exit, and the lock is released when it does. So the split
+is by what each process can be the single writer of. The launcher makes every
+check — they are refusals an operator has to see, and a detached one would
+otherwise answer through a log file nobody is reading — and ends the parked
+driver, saying so on its own stderr. The **retained driver** takes the lock and,
+under it, counts the adoption, moves the dead driver's record aside, journals
+`driver-adopted`, launches the observer, and writes the record naming itself.
+One writer of the lock and one writer of the pid, and between the launcher's
+last check and the driver being up the run reads exactly as those checks left
+it: undriven, and adoptable again.
+
+The launcher still waits, exactly as `start --detach` waits: it returns when the
+record names the process it retained, and a driver that died on its way up is
+the refusal it is, carrying the tail of what that driver said out of a log the
+launcher is about to walk away from.
+
+**What this crate does today.** `adopt` takes `--attach` and `--detach`, which
+refuse each other and default to attaching, so an adoption naming neither is
+exactly the adoption this verb has always performed. Detached, it prints the
+same launch record a detached `start` prints — the run, the driver's pid, and
+the two verbs that reach it. The hidden `drive-run` verb entry 25 records grows
+one hidden flag, `--adopt`, which is the adoption's own bookkeeping done where
+the lock is; it stays `hide = true` and stays reached by
+`scripts/smoke-published.sh` under the same requirement. `tests/e2e/driver.rs`
+drives all four outcomes against the real binary over a real run root: the
+detached adoption whose driver holds every claim the run records, the one whose
+driver dies on its way up, and the pair refusing itself.

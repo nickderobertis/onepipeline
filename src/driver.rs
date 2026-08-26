@@ -23,8 +23,9 @@ use serde_json::json;
 use crate::agentgraph;
 use crate::channel::{Author, ChannelState, Command, Reply, Surface, SurfaceKind};
 use crate::cli::{
-    AttestArgs, ChannelCommand, Cli, OptionalRunArgs, ReadArgs, ReplyArgs, RunArgs, RunsArgs,
-    StartArgs, StopArgs, SurfaceArgs, TelemetryArgs, TranscriptArgs, DAG_GRAPH_OFF,
+    AdoptArgs, AttestArgs, ChannelCommand, Cli, DriveRunArgs, OptionalRunArgs, ReadArgs, ReplyArgs,
+    RunArgs, RunsArgs, StartArgs, StopArgs, SurfaceArgs, TelemetryArgs, TranscriptArgs, ADOPT_FLAG,
+    DAG_GRAPH_OFF,
 };
 use crate::concurrency::{self, Liveness, State};
 use crate::edits::{self, Frontier};
@@ -581,7 +582,7 @@ fn start(args: &StartArgs) -> Result<i32> {
         // launch would have run in-process — and it launches the observer
         // itself, so `stop` reaches that graph through the driver's own process
         // tree rather than leaving an agent running beside a stopped run.
-        let mut driver = retain_driver(&paths)?;
+        let mut driver = retain_driver(&paths, Retained::Driving)?;
         let pid = driver.id();
         // The driver records its own pid and its observer's graph run, so there
         // is one writer of those fields and no race between this process and the
@@ -589,17 +590,7 @@ fn start(args: &StartArgs) -> Result<i32> {
         // start a driver says so, rather than printing a pid for a process that
         // is already gone.
         confirm_driving(&paths, &mut driver)?;
-        println!(
-            "{}",
-            json!({
-                "run_id": run,
-                "pid": pid,
-                "commands": {
-                    "next": format!("onepipeline next {run}"),
-                    "monitor": format!("onepipeline monitor {run}"),
-                },
-            })
-        );
+        announce_launch(&run, pid);
         return Ok(EXIT_SUCCESS);
     }
 
@@ -691,12 +682,49 @@ fn driver_said(paths: &RunPaths) -> String {
     format!("{tail} (its whole output is in {})", log.display())
 }
 
+/// What a detached launch prints once its driver has the run: the run it left
+/// behind, the process now driving it, and the two verbs that reach it.
+///
+/// One shape for both detaching verbs — a launch and an adoption leave the same
+/// thing behind, so an operator reads the same record either way, and
+/// `--detach` means on `adopt` exactly what it means on `start`.
+fn announce_launch(run: &str, pid: u32) {
+    println!(
+        "{}",
+        json!({
+            "run_id": run,
+            "pid": pid,
+            "commands": {
+                "next": format!("onepipeline next {run}"),
+                "monitor": format!("onepipeline monitor {run}"),
+            },
+        })
+    );
+}
+
+/// What a retained driver is being started to do.
+///
+/// The run it is handed is either one nothing has driven yet or one it is taking
+/// over, and the difference is a whole sequence — the adoption's counter, the
+/// dead driver's record moved aside, and the journal entry — that belongs under
+/// the ownership lock. Only the retained process holds that lock, so only it can
+/// do it: a launcher that adopted on its behalf would be writing on behalf of a
+/// driver that does not exist yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Retained {
+    /// `start --detach`: the run has never been driven.
+    Driving,
+    /// `adopt --detach`: the run is being taken over from the driver that had
+    /// it.
+    Adopting,
+}
+
 /// Start the retained driver a detached launch leaves behind.
 ///
 /// This executable, at [`engine::DRIVE_VERB`], with its output in the run's own
 /// driver log: the process that returns from `start --detach` must not be
 /// holding the pipe a driver writes to.
-fn retain_driver(paths: &RunPaths) -> Result<std::process::Child> {
+fn retain_driver(paths: &RunPaths, retained: Retained) -> Result<std::process::Child> {
     let log = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -714,9 +742,12 @@ fn retain_driver(paths: &RunPaths) -> Result<std::process::Child> {
             "cannot find this executable to retain a driver: {e}"
         ))
     })?;
-    std::process::Command::new(exe)
-        .arg(engine::DRIVE_VERB)
-        .arg(&paths.run)
+    let mut command = std::process::Command::new(exe);
+    command.arg(engine::DRIVE_VERB).arg(&paths.run);
+    if retained == Retained::Adopting {
+        command.arg(format!("--{ADOPT_FLAG}"));
+    }
+    command
         .stdin(std::process::Stdio::null())
         .stdout(log)
         .stderr(errors)
@@ -731,7 +762,15 @@ fn retain_driver(paths: &RunPaths) -> Result<std::process::Child> {
 /// writer of that field, so the launcher never races it — and launches the
 /// observer itself, so a `stop` that reaps this process's tree reaps the
 /// observer with it.
-fn drive_run(args: &RunArgs) -> Result<i32> {
+///
+/// `--adopt` says the run is one it is **taking over**, and the adoption is
+/// recorded here for the same reason the pid is: this is the process that holds
+/// the lock, and the counter, the dead driver's record moved aside, and the
+/// journal entry are all things an adoption does under it. The record itself is
+/// written once, below, with the observer up and this process's pid on it —
+/// so a detaching launcher's wait ends on a driver that is running, and no
+/// reader ever sees the run naming a process that is not driving it.
+fn drive_run(args: &DriveRunArgs) -> Result<i32> {
     let paths = resolve(&args.run)?;
     // The lock before the claim: a driver that wrote its pid into the record and
     // then lost the race for the lock would leave the run naming a process that
@@ -741,6 +780,10 @@ fn drive_run(args: &RunArgs) -> Result<i32> {
     let mut record: LaunchRecord = ledger::read_json(&paths.launch())?;
     let view = RunView::open(&paths)?;
     let log = paths.driver_log();
+    if args.adopt {
+        take_the_run_over(&paths, &mut record);
+        journal_the_adoption(&paths, &record, &view)?;
+    }
     let mut observer = observe(
         &paths,
         &mut record,
@@ -1046,87 +1089,38 @@ fn settlement_of(view: &RunView) -> Settlement {
 ///
 /// Adoption keeps everything the run owns and replaces only the driver: the run
 /// id, the journal, and the ledger are the ones it already had.
-fn adopt(args: &RunArgs) -> Result<i32> {
+///
+/// `--attach` and `--detach` mean here what they mean on `start`, with the same
+/// default: attached, this process is the fresh driver; detached, the driver it
+/// retains is, and this one returns as soon as that driver has claimed the run.
+fn adopt(args: &AdoptArgs) -> Result<i32> {
     let paths = resolve(&args.run)?;
-    let session = sys::launching_session();
-    let mut record: LaunchRecord = ledger::read_json(&paths.launch())?;
+    let (mut record, view) = adoptable(&paths)?;
 
-    // Ownership is the same rule `stop` keeps, including `unknown` never being
-    // yours.
-    if !record.owned_by(&session) {
-        return Err(Error::NotOwned {
-            run: paths.run.clone(),
-            owner: record.owner_label(&session),
-        });
+    if args.detach {
+        // Nothing is written here, and the lock is not taken here either. The
+        // process that will drive the run is the one that takes the lock, bumps
+        // the adoption, and names itself — one writer of each — so a reader
+        // between this line and the driver being up sees the run exactly as the
+        // refusals above left it: undriven, and adoptable again. A launcher that
+        // claimed on the driver's behalf would instead be publishing its own pid
+        // for a run it is about to walk away from.
+        sys::disown_standard_handles();
+        let mut driver = retain_driver(&paths, Retained::Adopting)?;
+        let pid = driver.id();
+        confirm_driving(&paths, &mut driver)?;
+        announce_launch(&paths.run, pid);
+        return Ok(EXIT_SUCCESS);
     }
-    let view = RunView::open(&paths)?;
-    if !view.liveness().is_undriven() {
-        return Err(Error::Refused(format!(
-            "run '{}' is still being driven; end it with `onepipeline stop {}` first",
-            paths.run, paths.run
-        )));
-    }
-    // A driver this host has proved is *not working* still holds the run's
-    // ownership lock, and the loop this adoption is about to start is the run's
-    // single writer — so taking the run over means ending the process that had
-    // it. Only ever a driver the verdict above already called undriven: a run
-    // still being driven was refused, and this is the same taking-over `adopt`
-    // has always been. A dead one is signalled to no effect, which is the
-    // ordinary case.
-    displace_the_parked_driver(&record);
+
     // And the lock decides, before anything is written: an adoption that
     // recorded itself and *then* lost the race would leave the record naming
     // this process while the driver that won carried on.
     let lock = engine::claim(&paths)?;
 
-    record.adoptions += 1;
-    record.driven_by_this_process();
-    // The dead driver's evidence moves aside rather than being truncated: it is
-    // the first thing to read after adopting.
-    let previous = paths
-        .dir
-        .join(format!("launch.pre-adopt-{}.json", record.adoptions));
-    let _ = std::fs::copy(paths.launch(), previous);
+    take_the_run_over(&paths, &mut record);
     ledger::write_json(&paths.launch(), &record)?;
-
-    // What the dead driver was in the middle of. Recorded with the adoption
-    // itself, because the fresh loop below will dispatch these nodes again and
-    // the session each one was working in is the only record of where its
-    // commits are: named here, that branch is in the run's own account of the
-    // adoption rather than only in a process that has exited.
-    let abandoned = view.state.sessions_in_flight();
-    for (node, session) in &abandoned {
-        eprintln!(
-            "onepipeline: '{node}' had a dispatch in flight; its work is on branch \
-             '{}' in onevcs session {}, and the node is pinned there so the run \
-             continues that branch rather than cutting a second one beside it",
-            session.branch(),
-            session.token().0
-        );
-    }
-    let mut adopted = vec![
-        ("adoption", json!(record.adoptions)),
-        ("pid", json!(record.pid)),
-    ];
-    if !abandoned.is_empty() {
-        adopted.push((
-            journal::ADOPTED_ABANDONED,
-            json!(abandoned
-                .iter()
-                .map(|(node, session)| json!({
-                    "node": node,
-                    "session": session.token().0,
-                    "branch": session.branch().as_str(),
-                }))
-                .collect::<Vec<_>>()),
-        ));
-    }
-    let mut journal = Journal::open(&paths);
-    journal.emit(
-        journal::PipelineKind::DriverAdopted,
-        journal::labels(&paths.run, None),
-        journal::payload(&adopted),
-    )?;
+    journal_the_adoption(&paths, &record, &view)?;
 
     // Relayed: an adoption attaches, so this process stays to read it. The goal
     // comes off the run's own projected plan rather than off the plan file the
@@ -1163,6 +1157,108 @@ fn adopt(args: &RunArgs) -> Result<i32> {
     // the settlements that produced them, so a subtree that was paused stays
     // paused and is released by the same `attest` it always was.
     attach(&paths, observer.as_mut(), lock)
+}
+
+/// The checks every adoption makes before anything is written, and the parked
+/// driver it ends.
+///
+/// Both launch paths refuse for the same reasons and refuse **here**, in the
+/// process the operator is watching: a detaching adoption that left them to the
+/// driver it retains would answer "not yours" and "still being driven" through a
+/// log file nobody is reading.
+///
+/// The view is the one the liveness verdict was read off, and it is what the
+/// adoption goes on to say the dead driver abandoned — the same read, so the two
+/// cannot disagree about the run they are describing.
+fn adoptable(paths: &RunPaths) -> Result<(LaunchRecord, RunView)> {
+    let session = sys::launching_session();
+    let record: LaunchRecord = ledger::read_json(&paths.launch())?;
+
+    // Ownership is the same rule `stop` keeps, including `unknown` never being
+    // yours.
+    if !record.owned_by(&session) {
+        return Err(Error::NotOwned {
+            run: paths.run.clone(),
+            owner: record.owner_label(&session),
+        });
+    }
+    let view = RunView::open(paths)?;
+    if !view.liveness().is_undriven() {
+        return Err(Error::Refused(format!(
+            "run '{}' is still being driven; end it with `onepipeline stop {}` first",
+            paths.run, paths.run
+        )));
+    }
+    // A driver this host has proved is *not working* still holds the run's
+    // ownership lock, and the loop this adoption is about to start is the run's
+    // single writer — so taking the run over means ending the process that had
+    // it. Only ever a driver the verdict above already called undriven: a run
+    // still being driven was refused, and this is the same taking-over `adopt`
+    // has always been. A dead one is signalled to no effect, which is the
+    // ordinary case.
+    displace_the_parked_driver(&record);
+    Ok((record, view))
+}
+
+/// Count the adoption, claim the run for this process, and move the dead
+/// driver's record aside.
+///
+/// Called only under the ownership lock, by the process that holds it — which
+/// attached is the adopting launcher and detached is the driver it retained.
+/// The copy is taken before the record is written, because what it preserves is
+/// what the record said *before* this adoption: it is the first thing to read
+/// after adopting, and truncating it would lose the account of the driver that
+/// died.
+fn take_the_run_over(paths: &RunPaths, record: &mut LaunchRecord) {
+    record.adoptions += 1;
+    record.driven_by_this_process();
+    let previous = paths
+        .dir
+        .join(format!("launch.pre-adopt-{}.json", record.adoptions));
+    let _ = std::fs::copy(paths.launch(), previous);
+}
+
+/// Say what the driver being replaced was in the middle of, on the run's own
+/// journal and on this process's stderr.
+///
+/// Recorded with the adoption itself, because the fresh loop will dispatch these
+/// nodes again and the session each one was working in is the only record of
+/// where its commits are: named here, that branch is in the run's own account of
+/// the adoption rather than only in a process that has exited.
+fn journal_the_adoption(paths: &RunPaths, record: &LaunchRecord, view: &RunView) -> Result<()> {
+    let abandoned = view.state.sessions_in_flight();
+    for (node, session) in &abandoned {
+        eprintln!(
+            "onepipeline: '{node}' had a dispatch in flight; its work is on branch \
+             '{}' in onevcs session {}, and the node is pinned there so the run \
+             continues that branch rather than cutting a second one beside it",
+            session.branch(),
+            session.token().0
+        );
+    }
+    let mut adopted = vec![
+        ("adoption", json!(record.adoptions)),
+        ("pid", json!(record.pid)),
+    ];
+    if !abandoned.is_empty() {
+        adopted.push((
+            journal::ADOPTED_ABANDONED,
+            json!(abandoned
+                .iter()
+                .map(|(node, session)| json!({
+                    "node": node,
+                    "session": session.token().0,
+                    "branch": session.branch().as_str(),
+                }))
+                .collect::<Vec<_>>()),
+        ));
+    }
+    let mut journal = Journal::open(paths);
+    journal.emit(
+        journal::PipelineKind::DriverAdopted,
+        journal::labels(&paths.run, None),
+        journal::payload(&adopted),
+    )
 }
 
 /// End a driver that holds a run nothing is driving, and wait for it to go.
