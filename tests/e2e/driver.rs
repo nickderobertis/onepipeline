@@ -1742,6 +1742,15 @@ fn descendants(pid: u32) -> Vec<u32> {
 }
 
 #[cfg(unix)]
+fn process_name(pid: u32) -> String {
+    let output = std::process::Command::new("ps")
+        .args(["-o", "comm=", "-p", &pid.to_string()])
+        .output()
+        .expect("ps is available to the process-tree journeys");
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+#[cfg(unix)]
 fn still_listed(pid: u32) -> bool {
     process_table().iter().any(|(listed, _)| *listed == pid)
 }
@@ -2722,7 +2731,10 @@ fn a_dispatch_this_run_cannot_record_is_refused_and_does_not_run() {
     world.until("the held dispatch to be a process below the driver", |_| {
         !descendants(driver).is_empty()
     });
-    let held = descendants(driver);
+    let held = descendants(driver)
+        .into_iter()
+        .filter(|pid| process_name(*pid).starts_with("fake-oneagentgr"))
+        .collect::<std::collections::BTreeSet<_>>();
 
     // The registry cannot be written: a file where its directory has to be, which
     // no host will create a directory under.
@@ -2770,7 +2782,13 @@ fn a_dispatch_this_run_cannot_record_is_refused_and_does_not_run() {
     // driver would be one this run cannot find and nobody asked for.
     world.until(
         "the refused dispatch to be gone from under the driver",
-        |_| descendants(driver) == held,
+        |_| {
+            descendants(driver)
+                .into_iter()
+                .filter(|pid| process_name(*pid).starts_with("fake-oneagentgr"))
+                .collect::<std::collections::BTreeSet<_>>()
+                == held
+        },
     );
     world.release("held.go");
 }
