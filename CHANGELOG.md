@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0](https://github.com/nickderobertis/onepipeline/compare/v0.15.2...v0.16.0) - 2026-08-26
+
+### Added
+
+- [**breaking**] read a plan from a onetaskgraph project instead of a file ([#134](https://github.com/nickderobertis/onepipeline/pull/134))
+
 ## [0.15.2](https://github.com/nickderobertis/onepipeline/compare/v0.15.1...v0.15.2) - 2026-08-26
 
 ### Added
