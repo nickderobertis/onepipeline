@@ -2647,3 +2647,173 @@ fn a_ready_node_whose_repositorys_only_session_has_closed_reads_as_queued() {
 
     world.release("blocker.go");
 }
+
+/// Whether one fragment is rendered before another, for a journey whose claim is
+/// about the **order** two steps are prescribed in.
+///
+/// A prescription that names both steps in the wrong order is as expensive as
+/// one that names the wrong step: it is the order that makes the second one do
+/// anything.
+fn named_in_order(rendered: &str, first: &str, then: &str) -> bool {
+    match (rendered.find(first), rendered.find(then)) {
+        (Some(before), Some(after)) => before < after,
+        _ => false,
+    }
+}
+
+/// A run whose graph has settled is never sent an operator after a fresh driver.
+///
+/// The two lines came from two readings — the row's word from the graph, the
+/// advice under it from the driver alone — so a run that had finished printed
+/// `SETTLED` and, directly beneath it, `DRIVER DEAD — attach a fresh driver`.
+/// Both endings a settled graph has are driven here, because the prescription
+/// was identical for them: a run that converged, and one that failed. The word
+/// under each is still the truth about its driver; what is gone is the advice to
+/// replace it.
+#[test]
+fn a_settled_run_is_never_advised_to_attach_a_fresh_driver() {
+    let world = World::new("views-settled-advice");
+    world.script("failing.fail", "1");
+    let converged = settled(&world, "converged", vec![agent("built", &[])]);
+    let broke = settled(&world, "brokeoff", vec![agent("failing", &[])]);
+
+    let listing = world.run(&["runs"]);
+    listing.exited(0).out_has(&converged).out_has(&broke);
+    listing.out_has("SETTLED").out_has("DRIVER DEAD");
+    listing.out_lacks("attach a fresh driver");
+    listing.out_lacks("onepipeline adopt");
+
+    for run in [&converged, &broke] {
+        let status = world.run(&["status", run]);
+        status.exited(0);
+        status.out_lacks("adopt it or stop it");
+        status.out_lacks("onepipeline adopt");
+    }
+}
+
+/// A run nothing is driving whose unfinished work is parked is told to requeue
+/// it **before** a driver is attached.
+///
+/// The state is reached the way an operator reaches it: a `cancel` idles the
+/// node, its dispatch stops, and the driver — with an empty frontier and nothing
+/// it may dispatch — closes the run out and goes. A parked node is held out of
+/// every later reconcile pass, so the `adopt` this used to prescribe on its own
+/// returns at exit 0 having dispatched nothing, which is what it did twice.
+#[test]
+fn a_run_whose_unfinished_work_is_parked_is_told_to_requeue_before_adopting() {
+    let world = World::new("views-parked-advice");
+    world.script("slow.turn-open", "");
+    world.script("slow.wait", "hold");
+    world.script("slow.stops-when-interrupted", "");
+    let path = world.plan("parkedrun", &plan_of("parkedrun", vec![agent("slow", &[])]));
+    world
+        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .exited(0);
+    world.until("the held node's turn to open", |world| {
+        !world.events_of("parkedrun", "turn-started").is_empty()
+    });
+
+    world
+        .run_with_stdin(
+            &["reply", "parkedrun"],
+            &serde_json::json!({"version": 1, "commands": [{"op": "cancel", "id": "slow"}]})
+                .to_string(),
+        )
+        .exited(0);
+    // The run is only what this journey is about once its driver has gone: what
+    // is being read is the advice given to a run nothing is driving.
+    world.until("the driver to close the run out", |world| {
+        world.run_file("parkedrun", "result.json").is_file()
+    });
+
+    let listing = world.run(&["runs"]);
+    listing.exited(0).out_has("parkedrun");
+    listing.out_has("DRIVER DEAD");
+    // The node to requeue is named, so the reply the line asks for is one a
+    // reader can write without going looking for what is parked.
+    listing.out_has("slow");
+    listing.out_has("onepipeline reply parkedrun");
+    listing.out_has("onepipeline adopt parkedrun");
+    assert!(
+        named_in_order(&listing.stdout, "requeue", "onepipeline adopt parkedrun"),
+        "`runs` prescribes the adoption before the requeue that gives it something \
+         to do:\n{}",
+        listing.stdout
+    );
+
+    let status = world.run(&["status", "parkedrun"]);
+    status.exited(0);
+    status.out_has("onepipeline reply parkedrun");
+    status.out_has("onepipeline adopt parkedrun");
+    assert!(
+        named_in_order(&status.stdout, "requeue", "onepipeline adopt parkedrun"),
+        "`status` prescribes the adoption before the requeue that gives it something \
+         to do:\n{}",
+        status.stdout
+    );
+    // And neither view gives the prescription that did nothing: an adoption on
+    // its own.
+    for rendered in [&listing.stdout, &status.stdout] {
+        assert!(
+            !rendered.contains("its ledger is intact; attach a fresh driver"),
+            "a run whose only unfinished work is parked was sent straight to an \
+             adoption:\n{rendered}"
+        );
+    }
+
+    world.release("slow.go");
+}
+
+/// A run nothing is driving that has work a fresh driver could schedule keeps
+/// the advice it has always given.
+///
+/// The other half of the same reading, and the reason it cannot simply be
+/// silenced: this is the run `adopt` exists for — its driver died with a
+/// dispatch in flight and a node behind it — and the line that says so is the
+/// one an operator needs.
+#[cfg(unix)]
+#[test]
+fn a_run_with_work_a_fresh_driver_could_schedule_is_still_told_to_adopt() {
+    let world = World::new("views-undriven-advice");
+    world.script("build.wait", "hold");
+    let path = world.plan(
+        "livework",
+        &plan_of(
+            "livework",
+            vec![agent("build", &[]), agent("later", &["build"])],
+        ),
+    );
+    let started = world.run(&["start", &path.to_string_lossy(), "--detach"]);
+    started.exited(0);
+    let driver = u32::try_from(
+        started.json()["pid"]
+            .as_u64()
+            .expect("a detached launch names the driver it retained"),
+    )
+    .expect("a pid");
+    world.until("the dispatch to be in flight", |world| {
+        !world.events_of("livework", "node-dispatched").is_empty()
+    });
+
+    crate::harness::end_process(driver);
+    world.until("the run to read as undriven", |world| {
+        world
+            .run(&["status", "livework"])
+            .stdout
+            .contains("DRIVER DEAD")
+    });
+
+    let listing = world.run(&["runs"]);
+    listing.exited(0).out_has(
+        "DRIVER DEAD — its ledger is intact; attach a fresh driver with: \
+         onepipeline adopt livework",
+    );
+    listing.out_lacks("requeue");
+
+    let status = world.run(&["status", "livework"]);
+    status.exited(0);
+    status.out_has("DRIVER DEAD: nothing is driving this run; adopt it or stop it");
+    status.out_lacks("requeue");
+
+    world.release("build.go");
+}
