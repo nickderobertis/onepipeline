@@ -1773,7 +1773,10 @@ fn process_name(pid: u32) -> String {
         .args(["-o", "comm=", "-p", &pid.to_string()])
         .output()
         .expect("ps is available to the process-tree journeys");
-    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    let command = String::from_utf8_lossy(&output.stdout);
+    std::path::Path::new(command.trim())
+        .file_name()
+        .map_or_else(String::new, |name| name.to_string_lossy().into_owned())
 }
 
 #[cfg(unix)]
@@ -2390,6 +2393,19 @@ fn a_stop_that_declines_every_live_identity_does_not_report_success() {
     world.until("a node to be in flight", |world| {
         !world.events_of(&run, "node-dispatched").is_empty()
     });
+    world.until(
+        "the in-flight node to record its live dispatch claim",
+        |world| {
+            std::fs::read_dir(world.run_file(&run, "dispatches")).is_ok_and(|entries| {
+                entries.filter_map(Result::ok).any(|entry| {
+                    entry
+                        .path()
+                        .extension()
+                        .is_some_and(|extension| extension == "json")
+                })
+            })
+        },
+    );
 
     let recorded = world.run_json(&run, "launch.json")["started"]
         .as_str()
