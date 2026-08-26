@@ -51,12 +51,11 @@ pub struct Writeback {
 
 impl Writeback {
     pub fn start(binary: PathBuf, paths: &RunPaths, launch: &LaunchRecord) -> Option<Self> {
-        let _: QualifiedId = launch.project.parse().ok()?;
         let pending = Arc::new((Mutex::new(Pending::default()), Condvar::new()));
         let worker_pending = Arc::clone(&pending);
         let run_dir = paths.dir.clone();
         let launch_dir = if launch.dir.as_os_str().is_empty() {
-            std::env::current_dir().ok()?
+            PathBuf::from(".")
         } else {
             launch.dir.clone()
         };
