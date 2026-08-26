@@ -1817,40 +1817,11 @@ drives all four outcomes against the real binary over a real run root: the
 detached adoption whose driver holds every claim the run records, the one whose
 driver dies on its way up, and the pair refusing itself.
 
-## 43. Four things Contract F could not be compiled exactly as written — OPEN
+## 43. One thing Contract F could not be compiled exactly as written — OPEN
 
 The launch contract that replaced the plan file is implemented as it is written,
-with four exceptions. Each is a place where the sentence and something outside
-this repository disagree, and none of them is resolved here.
-
-*A `onevcs` identity that is not a normalized origin has nowhere in
-`repositories` to go.* The contract says "a node's **repo** is the first entry of
-its task's `repositories`", and for every hosted identity that is exactly what it
-is. But `onetaskgraph`'s repository type is a **normalized origin** — at least
-`host/owner/name`, no scheme, no `.git` — and a `onevcs` identity is either one of
-those *or* a local checkout named by its absolute path, which that list cannot
-hold at all: `Repository::try_from` refuses an empty leading segment, which every
-absolute path has. So the second kind travels on the reserved key
-`onepipeline.repo`, and a task naming a repository both ways is refused rather
-than one of them quietly losing. **Proposal: state the reserved key in the
-contract as the identity a normalized origin cannot carry** — or, in the other
-repository, widen that type to hold a local checkout, which is the same question
-asked at the other end. `tests/e2e/store.rs`'s
-`a_project_reads_as_the_plan_document_of_the_same_content` drives the
-`repositories` half against a registered hosted identity, and every lifecycle
-journey in the suite drives the other, because a journey's repository is a
-checkout on the host running it.
-
-*A cross-DAG reference cannot be a dependency edge.* The contract makes a node's
-deps "real onetaskgraph dependency edges", and a `run:<id>#<node>` reference names
-another **run's** DAG — an item of no source, which no backend and no reserved
-`onetaskgraph.depends_on` entry can name. It is therefore carried on
-`onepipeline.deps`, which accepts those references and **nothing else**: an entry
-naming another node of the same plan is refused, saying that a dependency inside
-the plan is an edge between the two tasks, because recording one there would leave
-the backend drawing a graph missing that arrow. **Proposal: name
-`onepipeline.deps` in the contract as the cross-DAG half of a node's deps, beside
-the edges that are the rest of it.**
+with one exception, where its environment-variable spelling collides with the
+child product's configuration namespace.
 
 *`ONETASKGRAPH_BIN` is a name that product's own environment layer already
 claims.* The contract names the variable, and it is the one this build reads. But
@@ -1863,23 +1834,9 @@ say in the contract that it is not passed through, or move it to a name outside
 that product's namespace — `ONEPIPELINE_ONETASKGRAPH_BIN` is what this crate
 already calls the equivalent for `oneagentgraph`.**
 
-*Status write-back and live-edit write-through have no seam to reach.* The
-contract states that a node's state is written onto its task's status category as
-it changes, and that an accepted live edit updates the project's tasks. **No
-source `onetaskgraph` ships is writable**: that product's own `docs/metadata.md`
-records that the write seam arrives with its copy verb, and each remote source's
-write side lands after that. So this build **reads** a project and writes nothing
-back, and a run's state is where it has always been — the journal and the ledger,
-which the contract's own "the journal does not move" paragraph keeps here. Nothing
-is silently dropped: there is no code that attempts a write. **Proposal: keep the
-two paragraphs as the contract's statement of intent and land them as their own
-node once onetaskgraph is writable** — they are a second feature rather than a
-detail of this one, and the acceptance criteria of the node that made the store
-the plan's home named neither.
-
 ## 44. The minimum `onetaskgraph` this build needs is not a released version — OPEN
 
-`src/taskgraph.rs` declares `MINIMUM_VERSION = "0.1.0"`, which is the version the
+`src/taskgraph.rs` declares `CHECKED_MINIMUM = "0.1.0"`, which is the version the
 binary carrying the surface this mapping reads **reports**, and the launch refuses
 anything below it. But the reserved metadata map every field of the mapping rides
 on landed in that repository *after* its 0.1.0 release and before the next one, so
@@ -1891,7 +1848,7 @@ The refusal is correct and names the key, but it names the wrong cause.
 This repository's own checks do not depend on that gap: `justfile`'s
 `_ensure-onetaskgraph` installs the revision pinned there, which is the one
 carrying the surface. **Proposal: when onetaskgraph cuts the release that carries
-custom metadata, raise `MINIMUM_VERSION` to it and turn the justfile's revision
+custom metadata, raise `CHECKED_MINIMUM` to it and turn the justfile's revision
 pin into a version.** Until then the floor is the honest one — the version the
 binary this build is checked against reports — rather than a number invented for a
 release nobody has published.

@@ -111,7 +111,7 @@ fn envelope(commands: Value) -> String {
 fn live_run(world: &World, name: &str, extra: &[&str]) -> String {
     world.script("slow.wait", "hold");
     let path = world.plan(name, &plan_of(name, vec![agent("slow", &[])]));
-    let mut args = vec!["start".to_string(), path.to_string_lossy().into_owned()];
+    let mut args = vec!["start".to_string(), path.clone()];
     args.extend(extra.iter().map(|arg| (*arg).to_string()));
     args.push("--detach".to_string());
     let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -232,13 +232,7 @@ fn every_op_that_introduces_or_changes_a_task_is_offered_and_nothing_else_is() {
         ),
     );
     world
-        .run(&[
-            "start",
-            &path.to_string_lossy(),
-            "--node-validator",
-            &validator,
-            "--detach",
-        ])
+        .run(&["start", &path, "--node-validator", &validator, "--detach"])
         .exited(0);
     let run = "validatoroffered".to_string();
     world.until("the node that fails to settle", |world| {
@@ -347,7 +341,7 @@ fn the_flag_beats_the_environment_which_beats_the_config_and_naming_none_runs_no
         world.script("slow.wait", "hold");
         let mut args = vec![
             "start".to_string(),
-            path.to_string_lossy().into_owned(),
+            path.clone(),
             "--launch-config".to_string(),
             config.to_string_lossy().into_owned(),
         ];
@@ -412,7 +406,7 @@ fn the_flag_beats_the_environment_which_beats_the_config_and_naming_none_runs_no
         let path = world.plan(&name, &plan_of(&name, vec![agent("slow", &[])]));
         let _ = std::fs::remove_file(world.fakes.join("slow.go"));
         world.script("slow.wait", "hold");
-        let mut args = vec!["start".to_string(), path.to_string_lossy().into_owned()];
+        let mut args = vec!["start".to_string(), path.clone()];
         if names_a_config {
             args.push("--launch-config".to_string());
             args.push(config.to_string_lossy().into_owned());
@@ -473,13 +467,7 @@ fn the_resolved_validator_is_in_the_launch_record_and_survives_an_adoption() {
 
     // Launched under an environment naming a *different* validator, so what the
     // record carries is what the launch resolved rather than what was ambient.
-    let mut launch = world.cmd(&[
-        "start",
-        &path.to_string_lossy(),
-        &spelling("flag"),
-        &chosen,
-        "--attach",
-    ]);
+    let mut launch = world.cmd(&["start", &path, &spelling("flag"), &chosen, "--attach"]);
     launch.env(spelling("environment"), &elsewhere);
     world.run_on(launch, "start").exited(0).settled();
 
@@ -608,7 +596,7 @@ fn a_validator_that_says_nothing_and_one_that_cannot_be_started_both_refuse_loud
     world
         .run(&[
             "start",
-            &path.to_string_lossy(),
+            &path,
             "--node-validator",
             &missing.to_string_lossy(),
             "--detach",
@@ -657,7 +645,7 @@ fn a_validator_variable_this_build_cannot_read_refuses_the_launch_by_its_name() 
     let variable = spelling("environment");
     let not_text = OsString::from_vec(vec![0x63, 0x68, 0xff, 0x6b]);
 
-    let mut refused = world.cmd(&["start", &path.to_string_lossy(), "--detach"]);
+    let mut refused = world.cmd(&["start", &path, "--detach"]);
     refused.env(&variable, &not_text);
     world
         .run_on(refused, "start")
@@ -667,13 +655,7 @@ fn a_validator_variable_this_build_cannot_read_refuses_the_launch_by_its_name() 
 
     // And a launch whose flag names one never consults the variable at all: it
     // was not going to use it, so an unreadable one is not its problem.
-    let mut named = world.cmd(&[
-        "start",
-        &path.to_string_lossy(),
-        &spelling("flag"),
-        &chosen,
-        "--attach",
-    ]);
+    let mut named = world.cmd(&["start", &path, &spelling("flag"), &chosen, "--attach"]);
     named.env(&variable, &not_text);
     world.run_on(named, "start").exited(0).settled();
 }
@@ -702,7 +684,7 @@ fn a_config_naming_the_key_at_a_version_that_never_had_it_is_refused_by_that_nam
     world
         .run(&[
             "start",
-            &path.to_string_lossy(),
+            &path,
             "--launch-config",
             &early.to_string_lossy(),
             "--detach",
@@ -725,7 +707,7 @@ fn a_config_naming_the_key_at_a_version_that_never_had_it_is_refused_by_that_nam
     world
         .run(&[
             "start",
-            &path.to_string_lossy(),
+            &path,
             "--launch-config",
             &blank.to_string_lossy(),
             "--detach",
@@ -749,7 +731,7 @@ fn a_config_naming_the_key_at_a_version_that_never_had_it_is_refused_by_that_nam
     world
         .run(&[
             "start",
-            &path.to_string_lossy(),
+            &path,
             "--launch-config",
             &earlier.to_string_lossy(),
             "--attach",
@@ -793,7 +775,7 @@ fn a_config_carrying_a_blank_drafting_graph_still_launches_a_run() {
         world
             .run(&[
                 "start",
-                &plan_for.to_string_lossy(),
+                &plan_for,
                 "--launch-config",
                 &config.to_string_lossy(),
                 "--attach",
@@ -815,7 +797,7 @@ fn a_config_carrying_a_blank_drafting_graph_still_launches_a_run() {
     // And the plan itself was never the problem: the same one runs with no
     // config at all, which is what the assertions above are compared against.
     world
-        .run(&["start", &plan_path.to_string_lossy(), "--attach"])
+        .run(&["start", &plan_path, "--attach"])
         .exited(0)
         .settled();
 }
@@ -854,7 +836,7 @@ fn a_blank_drafting_graph_records_what_naming_none_records() {
         let path = world.plan(run, &plan_of(run, vec![agent("only", &[])]));
         let mut args = [
             "start",
-            &path.to_string_lossy(),
+            &path,
             "--launch-config",
             &config.to_string_lossy(),
             "--attach",

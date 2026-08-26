@@ -71,7 +71,7 @@ const CHECKED_MINIMUM: Version = Version {
 /// `_ensure-onetaskgraph` reads it out of this file rather than keeping a second
 /// copy, and
 /// [`the_revision_the_checks_install_is_read_out_of_this_file`](tests::the_revision_the_checks_install_is_read_out_of_this_file)
-/// fails if a copy appears. `docs/contract-divergences.md` entry 43 is the
+/// fails if a copy appears. `docs/contract-divergences.md` entry 44 is the
 /// proposal to retire it for a version once one carries the surface.
 pub const FIRST_REVISION: &str = "dc0180cf1f5754c23aae065aae6531f858ca4d1f";
 
@@ -131,10 +131,9 @@ const DEPS_ARE_EDGES: &str =
 
 /// The `onetaskgraph` binary this process reads its plans through.
 ///
-/// Holding the resolved path and the version it reported together is what makes
-/// the version check a **launch-time** fact rather than a per-command one: the
-/// value cannot be constructed without one, so nothing downstream can reach the
-/// binary having skipped it.
+/// Construction performs the version check, which makes it a **launch-time**
+/// fact rather than a per-command one: nothing downstream can reach the binary
+/// through this value having skipped it.
 #[derive(Debug, Clone)]
 pub struct Store {
     binary: PathBuf,
@@ -174,8 +173,9 @@ impl Store {
                     .unwrap_or_else(|| format!("exit {}", code_of(&reported.status)))
             )));
         }
-        let printed = String::from_utf8_lossy(&reported.stdout);
-        let token = version_token(&printed).unwrap_or_default();
+        let printed = std::str::from_utf8(&reported.stdout)
+            .map_err(|error| named(format!("reported a version that is not UTF-8: {error}")))?;
+        let token = version_token(printed).unwrap_or_default();
         let version = Version::parse(token).ok_or_else(|| {
             named(format!(
                 "reported no version this build can read: {:?}",
@@ -314,7 +314,10 @@ impl Store {
                 ))
             }
             (Some(repository), None) => {
-                node.insert("repo".to_owned(), Value::String(repository.clone()));
+                node.insert(
+                    "repo".to_owned(),
+                    Value::String(repository.as_str().to_owned()),
+                );
             }
             (None, _) => {}
         }
@@ -352,6 +355,16 @@ impl Store {
     fn deps(&self, task: &Qualified<TaskItem>, ids: &Ids) -> Result<Vec<String>> {
         let mut deps = Vec::new();
         for edge in self.edges(&task.id)? {
+            if edge.from.kind != ItemKind::Task {
+                return Err(Error::Sibling {
+                    tool: DEFAULT_BINARY,
+                    message: format!(
+                        "asked for the dependencies of task '{}' and answered with an edge from \
+                         a {}",
+                        task.id, edge.from.kind
+                    ),
+                });
+            }
             // The near end is the task whose dependencies were asked for. An
             // edge answering about a different one would put another task's
             // prerequisites on this node, which is a graph nobody wrote and a
@@ -585,17 +598,15 @@ pub struct QualifiedId {
 }
 
 impl QualifiedId {
-    /// The source half.
     pub fn source(&self) -> &str {
         &self.whole[..self.colon]
     }
 
-    /// The native half. It may contain colons freely: the split is on the first.
+    /// May contain colons freely: the split is on the first.
     pub fn native(&self) -> &str {
         &self.whole[self.colon + 1..]
     }
 
-    /// The whole id, as it is written.
     pub fn as_str(&self) -> &str {
         &self.whole
     }
@@ -606,13 +617,32 @@ impl TryFrom<String> for QualifiedId {
 
     fn try_from(whole: String) -> std::result::Result<Self, String> {
         match whole.find(':') {
-            Some(colon) if colon > 0 && colon + 1 < whole.len() => Ok(Self { whole, colon }),
+            Some(colon) if valid_source_name(&whole[..colon]) && colon + 1 < whole.len() => {
+                Ok(Self { whole, colon })
+            }
             _ => Err(format!(
                 "'{whole}' is not a qualified onetaskgraph id; write it as <source>:<native>, \
-                 for example plan-store:ship-the-widget"
+                 for example plan-store:ship-the-widget; source names use lower-case letters, \
+                 digits and hyphens, starting with a letter or digit"
             )),
         }
     }
+}
+
+/// The source-name language onetaskgraph publishes for qualified ids.
+///
+/// Native ids stay opaque (and may contain colons or whitespace) because they
+/// belong to the upstream system; the configured source name is the component
+/// onetaskgraph itself validates.
+fn valid_source_name(source: &str) -> bool {
+    let mut chars = source.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_ascii_lowercase() || first.is_ascii_digit())
+        && chars.all(|character| {
+            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+        })
 }
 
 impl std::str::FromStr for QualifiedId {
@@ -637,6 +667,12 @@ impl std::fmt::Display for QualifiedId {
 /// first of. Taking the first would mean a plan assembled out of items nobody
 /// named, which is the one failure a launch cannot report afterwards.
 fn one<T>(id: &QualifiedId, response: Response<Qualified<T>>) -> Result<Qualified<T>> {
+    if response.next.is_some() {
+        return Err(Error::Sibling {
+            tool: DEFAULT_BINARY,
+            message: format!("asked to show '{id}' and the answer claims another page"),
+        });
+    }
     let mut items = response.items.into_iter();
     let Some(found) = items.next() else {
         return Err(Error::Invalid(format!(
@@ -673,8 +709,11 @@ fn code_of(status: &std::process::ExitStatus) -> String {
 }
 
 fn resolved_binary() -> PathBuf {
-    match std::env::var(BINARY_ENV) {
-        Ok(named) if !named.trim().is_empty() => PathBuf::from(named),
+    match std::env::var_os(BINARY_ENV) {
+        Some(named) if named.to_str().is_some_and(|value| value.trim().is_empty()) => {
+            PathBuf::from(DEFAULT_BINARY)
+        }
+        Some(named) if !named.is_empty() => PathBuf::from(named),
         _ => PathBuf::from(DEFAULT_BINARY),
     }
 }
@@ -730,13 +769,20 @@ impl Version {
         // A pre-release and a build are dot-separated identifiers of ASCII
         // alphanumerics and hyphens. Anything else is not a version, and reading
         // it as one would let malformed output decide the floor.
-        if !prerelease.into_iter().chain(build).all(identifiers) {
+        if prerelease.is_some_and(|value| !identifiers(value, true))
+            || build.is_some_and(|value| !identifiers(value, false))
+        {
             return None;
         }
-        let mut parts = numbers.split('.').map(str::parse::<u32>);
-        let major = parts.next()?.ok()?;
-        let minor = parts.next().unwrap_or(Ok(0)).ok()?;
-        let patch = parts.next().unwrap_or(Ok(0)).ok()?;
+        let number = |component: &str| {
+            (!(component.len() > 1 && component.starts_with('0')))
+                .then(|| component.parse::<u32>().ok())
+                .flatten()
+        };
+        let mut parts = numbers.split('.');
+        let major = number(parts.next()?)?;
+        let minor = number(parts.next().unwrap_or("0"))?;
+        let patch = number(parts.next().unwrap_or("0"))?;
         if parts.next().is_some() {
             return None;
         }
@@ -763,10 +809,14 @@ impl std::fmt::Display for Version {
 }
 
 /// Whether `text` is the dot-separated identifiers a pre-release or a build is.
-fn identifiers(text: &str) -> bool {
+fn identifiers(text: &str, prerelease: bool) -> bool {
     !text.is_empty()
         && text.split('.').all(|part| {
             !part.is_empty()
+                && !(prerelease
+                    && part.len() > 1
+                    && part.starts_with('0')
+                    && part.chars().all(|character| character.is_ascii_digit()))
                 && part
                     .chars()
                     .all(|character| character.is_ascii_alphanumeric() || character == '-')
@@ -828,7 +878,39 @@ struct TaskItem {
     #[serde(default)]
     metadata: Map<String, Value>,
     #[serde(default)]
-    repositories: Vec<String>,
+    repositories: Vec<Repository>,
+}
+
+/// A repository identity in the normalized form onetaskgraph emits.
+#[derive(Debug, Deserialize)]
+#[serde(try_from = "String")]
+struct Repository(String);
+
+impl Repository {
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for Repository {
+    type Error = String;
+
+    fn try_from(origin: String) -> std::result::Result<Self, Self::Error> {
+        let valid = !origin.is_empty()
+            && !origin.contains("://")
+            && !origin.ends_with(".git")
+            && !origin.chars().any(char::is_whitespace)
+            && origin.split('/').count() >= 3
+            && origin
+                .split('/')
+                .all(|part| !part.is_empty() && part != "." && part != "..");
+        valid.then_some(Self(origin.clone())).ok_or_else(|| {
+            format!(
+                "{origin:?} is not a normalized repository origin; use host/owner/name without \
+                 a scheme or .git suffix"
+            )
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -850,26 +932,12 @@ struct Endpoint {
 /// A plan's `deps` are the blocking ones; a `related` edge is a link the store
 /// draws and not an ordering, so it is passed over rather than refused.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(from = "String")]
+#[serde(rename_all = "kebab-case")]
 enum DependencyKind {
     /// The near item depends on the far one.
     Blocks,
     /// A link without an ordering.
     Related,
-    /// A kind that product added after this build. Read leniently, as every
-    /// sibling's own vocabulary is: it is not this build's set, and an edge is
-    /// passed over rather than refused for being of a kind it does not know.
-    Unknown(String),
-}
-
-impl From<String> for DependencyKind {
-    fn from(wire: String) -> Self {
-        match wire.as_str() {
-            "blocks" => Self::Blocks,
-            "related" => Self::Related,
-            _ => Self::Unknown(wire),
-        }
-    }
 }
 
 /// What one end of a dependency edge names.
@@ -939,6 +1007,11 @@ mod tests {
         assert_eq!(Version::parse("1.2.3-rc..1"), None);
         assert_eq!(Version::parse("1.2.3-rc 1"), None);
         assert_eq!(Version::parse("1.2.3+build_7"), None);
+        assert_eq!(Version::parse("01.2.3"), None);
+        assert_eq!(Version::parse("1.02.3"), None);
+        assert_eq!(Version::parse("1.2.3-01"), None);
+        assert!(Version::parse("1.2.3-rc.01").is_none());
+        assert!(Version::parse("1.2.3+01").is_some());
         assert!(Version::parse("1.2.3-rc.1+build-7").is_some());
     }
 
@@ -971,9 +1044,33 @@ mod tests {
         assert!(message.contains("<source>:<native>"), "{message}");
         assert!(":ship".parse::<QualifiedId>().is_err());
         assert!("plan-store:".parse::<QualifiedId>().is_err());
+        assert!("Plan Store:ship".parse::<QualifiedId>().is_err());
+        assert!("plan_store:ship".parse::<QualifiedId>().is_err());
+        // A native id is the upstream system's opaque value.
+        assert!("plan-store:ship it".parse::<QualifiedId>().is_ok());
         // And an id the *store* answers with crosses the same boundary: it is a
         // third party's output, read through the one type.
         assert!(serde_json::from_str::<QualifiedId>("\"bare\"").is_err());
+    }
+
+    #[test]
+    fn repository_origins_are_validated_when_the_store_response_is_read() {
+        assert!(serde_json::from_str::<Repository>("\"github.com/acme/widget\"").is_ok());
+        for invalid in [
+            "https://github.com/acme/widget",
+            "github.com/acme/widget.git",
+            "github.com/acme",
+            "github.com/acme/white space",
+            "github.com/acme/../widget",
+        ] {
+            let message = serde_json::from_str::<Repository>(&format!("{invalid:?}"))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                message.contains("normalized repository origin"),
+                "{message}"
+            );
+        }
     }
 
     #[test]

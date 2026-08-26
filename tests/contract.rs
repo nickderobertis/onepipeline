@@ -921,6 +921,7 @@ fn every_reserved_metadata_key_the_contract_names_is_a_field_of_this_schema() {
             completed_steps: Vec::new(),
         }),
         adoption: Some(Adoption::Published),
+        amendment: Some("changed requirements".into()),
         consumes: std::collections::BTreeMap::new(),
     })
     .expect("a node serialises");

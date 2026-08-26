@@ -368,11 +368,7 @@ fn a_blank_graph_reference_is_refused_before_any_path_is_read() {
 
     for (name, extra, node) in cases {
         let path = world.plan(name, &plan_of(name, vec![node]));
-        let mut args = vec![
-            "start".to_string(),
-            path.to_string_lossy().into_owned(),
-            "--attach".to_string(),
-        ];
+        let mut args = vec!["start".to_string(), path.clone(), "--attach".to_string()];
         args.extend(extra);
         let mut command =
             world.agentgraph_cmd(&args.iter().map(String::as_str).collect::<Vec<_>>());
@@ -511,6 +507,36 @@ fn a_legacy_launch_without_a_node_graph_fails_instead_of_reading_live_environmen
         .err_has("has no resolved node graph");
     // llmlint: ignore-end[tests_mirror_real_usage]
 }
+
+/// A run launched before projects replaced plan paths remains operable.
+// llmlint: ignore-block[tests_mirror_real_usage] an older launch-record producer is not a
+// CLI operation this build can invoke. Replacing only the source field with the exact
+// historical `plan` spelling arranges persisted pre-upgrade input; the current public
+// `status` and `adopt` commands drive the compatibility behavior under test.
+#[test]
+fn a_legacy_plan_path_launch_record_is_still_reportable_and_adoptable() {
+    let world = World::new("legacy-plan-launch-record");
+    let mut build = agent("build", &["approve"]);
+    build["deps"] = json!(["approve"]);
+    ready_and_undriven(&world, "legacy-plan", build);
+
+    let path = world.run_file("legacy-plan", "launch.json");
+    let mut launch = world.run_json("legacy-plan", "launch.json");
+    launch
+        .as_object_mut()
+        .expect("a launch record")
+        .remove("project");
+    launch["plan"] = json!("/retired/plan.json");
+    std::fs::write(&path, serde_json::to_vec_pretty(&launch).unwrap())
+        .expect("the historical launch record is installed");
+
+    world.run(&["status", "legacy-plan"]).exited(0);
+    world
+        .run(&["adopt", "legacy-plan"])
+        .exited(0)
+        .out_has("\"settlement\":\"complete\"");
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 #[test]
 fn launch_overrides_reach_the_graphs_that_actually_run() {
@@ -824,7 +850,7 @@ fn a_library_dispatch_settles_while_the_graphs_final_reaper_is_still_running() {
         "terminal-before-reap",
         &plan_of("terminal-before-reap", vec![agent("build", &[])]),
     );
-    let mut command = world.agentgraph_cmd(&["start", &path.to_string_lossy(), "--attach"]);
+    let mut command = world.agentgraph_cmd(&["start", &path, "--attach"]);
     let mut launch = command
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())

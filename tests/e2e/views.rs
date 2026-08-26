@@ -2668,9 +2668,7 @@ fn a_run_whose_unfinished_work_is_parked_is_told_to_requeue_before_adopting() {
     world.script("slow.wait", "hold");
     world.script("slow.stops-when-interrupted", "");
     let path = world.plan("parkedrun", &plan_of("parkedrun", vec![agent("slow", &[])]));
-    world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
+    world.run(&["start", &path, "--detach"]).exited(0);
     world.until("the held node's turn to open", |world| {
         !world.events_of("parkedrun", "turn-started").is_empty()
     });
@@ -2745,7 +2743,7 @@ fn a_run_with_work_a_fresh_driver_could_schedule_is_still_told_to_adopt() {
             vec![agent("build", &[]), agent("later", &["build"])],
         ),
     );
-    let started = world.run(&["start", &path.to_string_lossy(), "--detach"]);
+    let started = world.run(&["start", &path, "--detach"]);
     started.exited(0);
     let driver = u32::try_from(
         started.json()["pid"]

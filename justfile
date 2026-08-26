@@ -34,7 +34,7 @@ set positional-arguments := true
 # version floor it is the other half of: a copy here could go stale against that
 # floor without anything saying so, and
 # `taskgraph::tests::the_revision_the_checks_install_is_read_out_of_this_file`
-# fails if one appears. `docs/contract-divergences.md` entry 43 is the proposal
+# fails if one appears. `docs/contract-divergences.md` entry 44 is the proposal
 # to retire it for a version once one carries the surface.
 onetaskgraph-rev := `sed -n 's/^pub const FIRST_REVISION: &str = "\([0-9a-f]*\)".*/\1/p' src/taskgraph.rs`
 

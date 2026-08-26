@@ -2007,9 +2007,7 @@ fn a_cancelled_run_stops_re_reading_the_merge_path_where_it_stands() {
         "rereadcancelled",
         &plan_of("rereadcancelled", vec![lifecycle("service", &[])]),
     );
-    world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
+    world.run(&["start", &path, "--detach"]).exited(0);
     let run = "rereadcancelled".to_string();
 
     // The publication has committed and is held at the merge path, which is

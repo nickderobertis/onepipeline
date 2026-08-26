@@ -135,6 +135,13 @@ fn a_project_reads_as_the_plan_document_of_the_same_content() {
         ],
     });
     let project = world.plan("mapping", &document);
+    let task = world.store().join("tasks/mapping/000-publish.md");
+    let held = std::fs::read_to_string(&task).expect("the task document");
+    let held = held.replace(
+        "repositories:\n  - github.com/owner/service",
+        "repositories:\n  - github.com/owner/service\n  - github.com/owner/ignored",
+    );
+    std::fs::write(&task, held).expect("the task names a second repository");
     world.run(&["start", &project, "--detach"]).exited(0);
     world.until("the run to settle", |world| {
         world.run_file("mapping", "result.json").is_file()
@@ -231,7 +238,13 @@ fn a_project_larger_than_one_page_is_read_to_its_end() {
 #[test]
 fn a_project_id_that_is_not_qualified_is_refused_and_told_what_one_looks_like() {
     let world = World::new("store-unqualified");
-    for typed in ["ship-the-widget", ":ship", "plans:"] {
+    for typed in [
+        "ship-the-widget",
+        ":ship",
+        "plans:",
+        "Plan Store:ship",
+        "plan_store:ship",
+    ] {
         world
             .run(&["start", typed, "--detach"])
             .exited(REFUSED)
@@ -287,7 +300,9 @@ fn the_launch_record_names_the_project_and_the_run_still_projects_from_its_journ
 /// with a store to search by hand.
 #[test]
 fn a_store_that_answers_badly_refuses_the_launch_and_names_the_query() {
-    let cases: &[(&str, &[(&str, &str)], &str)] = &[
+    type Script<'a> = &'a [(&'a str, &'a str)];
+    type BadAnswer<'a> = (&'a str, Script<'a>, &'a str);
+    let cases: &[BadAnswer<'_>] = &[
         // A query that ran and failed, after the version check passed.
         (
             "exits",
@@ -320,6 +335,15 @@ fn a_store_that_answers_badly_refuses_the_launch_and_names_the_query() {
             )],
             "answered with more than one item",
         ),
+        (
+            "show-next-page",
+            &[(
+                "onetaskgraph.project-show",
+                r#"{"items":[{"id":"plans:mine","item":{"title":"T","metadata":{}}}],
+                   "next":"another"}"#,
+            )],
+            "answer claims another page",
+        ),
         // A `show` answering with an item nobody asked for.
         (
             "elsewhere",
@@ -347,6 +371,26 @@ fn a_store_that_answers_badly_refuses_the_launch_and_names_the_query() {
             ],
             "which is an item of another source",
         ),
+        // The store's wire type promises normalized origins. Validate that
+        // third-party output at this boundary rather than letting an arbitrary
+        // string become the repository a lifecycle node acts on.
+        (
+            "repository",
+            &[
+                (
+                    "onetaskgraph.project-show",
+                    r#"{"items":[{"id":"plans:mine","item":{"title":"T","metadata":
+                       {"onepipeline.schema_version":3}}}],"next":null}"#,
+                ),
+                (
+                    "onetaskgraph.task-list",
+                    r#"{"items":[{"id":"plans:build","item":{"title":"B","content":"t",
+                       "project":"mine","repositories":["https://github.com/acme/widget"],
+                       "metadata":{"onepipeline.id":"build"}}}],"next":null}"#,
+                ),
+            ],
+            "is not a normalized repository origin",
+        ),
         // A dependency edge whose far end is a project. The store draws edges at
         // both levels and across them; a plan node is a task, so a far end that
         // is not one is refused rather than read as a node.
@@ -370,6 +414,50 @@ fn a_store_that_answers_badly_refuses_the_launch_and_names_the_query() {
                 ),
             ],
             "which is a project and not a node of a plan",
+        ),
+        // The command asks for a task's dependencies, so an edge claiming its
+        // matching id is a project is still a malformed answer.
+        (
+            "project-near-end",
+            &[
+                (
+                    "onetaskgraph.project-show",
+                    r#"{"items":[{"id":"plans:mine","item":{"title":"T","metadata":
+                       {"onepipeline.schema_version":3}}}],"next":null}"#,
+                ),
+                (
+                    "onetaskgraph.task-list",
+                    r#"{"items":[{"id":"plans:build","item":{"title":"B","content":"t",
+                       "project":"mine","metadata":{"onepipeline.id":"build"}}}],"next":null}"#,
+                ),
+                (
+                    "onetaskgraph.task-deps",
+                    r#"{"items":[{"from":{"id":"plans:build","kind":"project"},
+                       "to":{"id":"plans:other","kind":"task"},"kind":"blocks"}],"next":null}"#,
+                ),
+            ],
+            "answered with an edge from a project",
+        ),
+        (
+            "unknown-edge-kind",
+            &[
+                (
+                    "onetaskgraph.project-show",
+                    r#"{"items":[{"id":"plans:mine","item":{"title":"T","metadata":
+                       {"onepipeline.schema_version":3}}}],"next":null}"#,
+                ),
+                (
+                    "onetaskgraph.task-list",
+                    r#"{"items":[{"id":"plans:build","item":{"title":"B","content":"t",
+                       "project":"mine","metadata":{"onepipeline.id":"build"}}}],"next":null}"#,
+                ),
+                (
+                    "onetaskgraph.task-deps",
+                    r#"{"items":[{"from":{"id":"plans:build","kind":"task"},
+                       "to":{"id":"plans:other","kind":"task"},"kind":"orders"}],"next":null}"#,
+                ),
+            ],
+            "unknown variant `orders`",
         ),
         // A walk handed a token that is no token: it names no next page and ends
         // nothing, so the walk would ask for the same page for ever.
@@ -424,6 +512,122 @@ fn a_store_that_answers_badly_refuses_the_launch_and_names_the_query() {
             "a launch refused for its store left a run directory behind"
         );
     }
+}
+
+/// Related links are visible in the store but are not plan ordering edges.
+#[test]
+fn a_related_task_link_does_not_become_a_plan_dependency() {
+    let world = World::new("store-related-edge");
+    let project = world.plan(
+        "related",
+        &json!({
+            "schema_version": 3,
+            "name": "related",
+            "tasks": [
+                crate::harness::agent("first", &[]),
+                crate::harness::agent("second", &[]),
+            ],
+        }),
+    );
+    let first = world.store().join("tasks/related/000-first.md");
+    let held = std::fs::read_to_string(&first).expect("the first task");
+    let held = held.replace(
+        "project: related",
+        "project: related\ndepends_on:\n  - id: 001-second\n    kind: related",
+    );
+    std::fs::write(first, held).expect("the real task carries a related edge");
+
+    world.run(&["start", &project, "--detach"]).exited(0);
+    let plan = world.run_json("related", "plan.json");
+    let first = plan["tasks"]
+        .as_array()
+        .expect("tasks")
+        .iter()
+        .find(|node| node["id"] == "first")
+        .expect("first node");
+    assert!(
+        first.get("deps").is_none(),
+        "the related link became a plan dependency: {first}"
+    );
+}
+
+/// With no reserved or usable project name, the native project id names the run.
+#[test]
+fn a_project_without_a_usable_name_mints_the_run_id_from_its_native_id() {
+    let world = World::new("store-native-run-id");
+    let project = world.plan(
+        "native-run",
+        &serde_json::json!({
+            "schema_version": 3,
+            "name": "",
+            "tasks": [crate::harness::agent("build", &[])],
+        }),
+    );
+    world.run(&["start", &project, "--detach"]).exited(0);
+    assert!(
+        world.runs.join("native-run").is_dir(),
+        "the project's native id did not name the run"
+    );
+}
+
+/// When the override is empty, launch resolves `onetaskgraph` on `PATH`.
+#[test]
+fn onetaskgraph_resolves_by_executable_name_when_the_override_is_empty() {
+    let binary = crate::harness::onetaskgraph_binary();
+    let path = std::env::join_paths(
+        std::iter::once(
+            binary
+                .parent()
+                .expect("the binary has a directory")
+                .to_path_buf(),
+        )
+        .chain(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        )),
+    )
+    .expect("a PATH");
+    let world = World::new("store-path-binary")
+        .with_env(STORE_BINARY_ENV, "")
+        .with_env("PATH", &path.to_string_lossy());
+    let project = world.plan(
+        "path-binary",
+        &plan_of("path-binary", vec![crate::harness::agent("build", &[])]),
+    );
+    world.run(&["start", &project, "--detach"]).exited(0);
+    assert!(world.runs.join("path-binary").is_dir());
+}
+
+/// An executable path is an OS path, not necessarily Unicode.
+#[cfg(unix)]
+#[test]
+fn onetaskgraph_resolves_a_non_unicode_executable_path_from_the_override() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let world = World::new("store-non-unicode-binary");
+    let project = world.plan(
+        "non-unicode-binary",
+        &plan_of(
+            "non-unicode-binary",
+            vec![crate::harness::agent("build", &[])],
+        ),
+    );
+    let alias = world
+        .root
+        .join(std::ffi::OsString::from_vec(b"onetaskgraph-\xff".to_vec()));
+    std::os::unix::fs::symlink(crate::harness::onetaskgraph_binary(), &alias)
+        .expect("a non-Unicode executable alias");
+
+    let output = world
+        .cmd(&["start", &project, "--detach"])
+        .env(STORE_BINARY_ENV, &alias)
+        .output()
+        .expect("onepipeline runs");
+    assert!(
+        output.status.success(),
+        "non-Unicode executable path was refused: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(world.runs.join("non-unicode-binary").is_dir());
 }
 
 /// An absent `onetaskgraph` refuses the launch, and nothing is started for it.
@@ -517,6 +721,19 @@ fn an_onetaskgraph_that_cannot_report_a_version_refuses_the_launch() {
         .exited(REFUSED)
         .err_has("reported no version this build can read")
         .err_has("0.1.0 or newer");
+
+    world.script("onetaskgraph.version", "onetaskgraph 0.1.1-01\n");
+    world
+        .run(&["start", &project, "--detach"])
+        .exited(REFUSED)
+        .err_has("reported no version this build can read")
+        .err_has("0.1.1-01");
+
+    world.script("onetaskgraph.version-invalid-utf8", "invalid");
+    world
+        .run(&["start", &project, "--detach"])
+        .exited(REFUSED)
+        .err_has("reported a version that is not UTF-8");
 
     assert!(
         !world.runs.join("unusable").exists(),

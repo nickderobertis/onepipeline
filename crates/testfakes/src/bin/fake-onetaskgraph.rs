@@ -43,6 +43,11 @@ fn main() -> ExitCode {
         return ExitCode::from(1);
     }
     if args == ["--version"] {
+        if dir.join("onetaskgraph.version-invalid-utf8").is_file() {
+            std::io::Write::write_all(&mut std::io::stdout(), &[0xff])
+                .expect("stdout accepts the scripted bytes");
+            return ExitCode::SUCCESS;
+        }
         let printed = std::fs::read_to_string(dir.join("onetaskgraph.version")).unwrap_or_default();
         print!("{printed}");
         return ExitCode::SUCCESS;
@@ -65,7 +70,6 @@ fn main() -> ExitCode {
     }
     let name = format!("onetaskgraph.{}", verb.join("-"));
 
-    // Which call of this verb it is, so a journey can state a walk of pages.
     let nth = fake::count(&dir, &name);
     let answer = (nth > 1)
         .then(|| std::fs::read_to_string(dir.join(format!("{name}.{nth}"))).ok())

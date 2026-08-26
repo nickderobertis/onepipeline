@@ -1483,9 +1483,14 @@ impl World {
         // path, which that list cannot hold at all — so the second kind travels
         // on the reserved key. `docs/contract-divergences.md` records it.
         if let Some(repo) = node.get("repo").and_then(Value::as_str) {
-            if is_normalized_origin(repo) {
+            if repo.starts_with("github.com/") {
+                // These are the hosted origins this suite states literally;
+                // the real store owns and applies their shape validation.
                 front.push(("repositories", json!([repo])));
             } else {
+                // Aliases, local paths, and deliberately malformed schema
+                // fixtures ride the consumer key. This is fixture routing, not
+                // a second implementation of onetaskgraph's origin grammar.
                 metadata.insert("onepipeline.repo".into(), json!(repo));
             }
         }
@@ -2307,23 +2312,6 @@ fn reserved(field: &str) -> String {
         true => field.to_owned(),
         false => format!("onepipeline.{field}"),
     }
-}
-
-/// Whether a repository identity is one the store's own repository list holds.
-///
-/// `onetaskgraph`'s repository type is a **normalized origin** — at least
-/// `host/owner/name`, no scheme, no `.git` — and the rule is restated here
-/// because it is that product's, checked on the way *into* the store rather than
-/// on the way out. A journey whose repository is a local checkout on this host
-/// fails the rule, which is exactly the case the reserved key exists for.
-fn is_normalized_origin(identity: &str) -> bool {
-    !identity.contains("://")
-        && !identity.ends_with(".git")
-        && !identity.chars().any(char::is_whitespace)
-        && identity.split('/').count() >= 3
-        && identity
-            .split('/')
-            .all(|part| !part.is_empty() && part != "." && part != "..")
 }
 
 /// Where an executable of this name sits on **this process's** `PATH`.
