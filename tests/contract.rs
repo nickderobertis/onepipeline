@@ -3019,6 +3019,34 @@ fn every_recorded_divergence_is_ruled_on_or_states_the_proposal_it_waits_on() {
     assert!(CONTRACT.contains("executor_has_capacity"));
 }
 
+/// The adoption flags are the one CLI extension the contract has not yet
+/// approved, so entry 42 and the parser gate each other until the planner rules.
+#[test]
+fn the_adoption_flags_are_exactly_the_open_divergence_the_record_names() {
+    let divergences = std::fs::read_to_string(repo_root().join("docs/contract-divergences.md"))
+        .expect("the divergence record ships");
+    let entry = divergences
+        .split("\n## ")
+        .find(|section| section.starts_with("42."))
+        .expect("the divergence record carries entry 42");
+    assert!(entry
+        .lines()
+        .next()
+        .is_some_and(|line| line.ends_with("— OPEN")));
+    assert!(entry.contains("`onepipeline adopt RUN [--attach|--detach]`"));
+    assert!(CONTRACT.contains("`onepipeline adopt RUN` attaches"));
+    assert!(!CONTRACT.contains("adopt RUN [--attach|--detach]"));
+    let readme = std::fs::read_to_string(repo_root().join("README.md")).expect("the README ships");
+    assert!(readme.contains("the same `--attach`/`--detach` pair `start` does"));
+
+    Cli::try_parse_from(["onepipeline", "adopt", "run-1", "--attach"])
+        .expect("the proposed attached form parses");
+    Cli::try_parse_from(["onepipeline", "adopt", "run-1", "--detach"])
+        .expect("the proposed detached form parses");
+    Cli::try_parse_from(["onepipeline", "adopt", "run-1", "--attach", "--detach"])
+        .expect_err("the proposed alternatives refuse each other");
+}
+
 #[test]
 fn the_smoke_scripts_command_list_is_the_binarys_whole_surface() {
     // The published-artifact smoke checks `--help` against a hand-written word
