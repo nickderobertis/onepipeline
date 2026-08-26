@@ -12,7 +12,7 @@
 //! ordering out of every `onepipeline` release. The executable is resolved from
 //! [`BINARY_ENV`] when that names one and from [`DEFAULT_BINARY`] on the `PATH`
 //! otherwise, and its version is checked **before anything is dispatched** — an
-//! absent binary, an unusable one, or one below [`MINIMUM`] refuses the
+//! absent binary, an unusable one, or one below [`CHECKED_MINIMUM`] refuses the
 //! launch, naming the path it resolved, the version it found, the minimum it
 //! needs, and how to install one.
 //!
@@ -44,13 +44,14 @@ pub const BINARY_ENV: &str = "ONETASKGRAPH_BIN";
 /// The executable's name when the environment names none.
 pub const DEFAULT_BINARY: &str = "onetaskgraph";
 
-/// The oldest `onetaskgraph` this build can read a project out of.
+/// The version floor a launch **checks**, which is not the whole requirement.
 ///
-/// The reserved metadata map every field of this mapping rides on is that
-/// product's own published surface, so the floor is a *requirement* rather than
-/// a preference: below it a project carries no metadata at all and every plan
-/// would read as a graph of untyped, unidentified nodes.
-const MINIMUM: Version = Version {
+/// Named for what it does rather than for what would be useful: it is the oldest
+/// version this build will accept a `--version` from, and no version can say
+/// more than that here. What the mapping actually needs is the reserved metadata
+/// map, which landed *within* this version — see [`FIRST_REVISION`], which is the
+/// rest of the requirement and the half a number cannot express.
+const CHECKED_MINIMUM: Version = Version {
     major: 0,
     minor: 1,
     patch: 0,
@@ -58,7 +59,7 @@ const MINIMUM: Version = Version {
 };
 
 /// The `onetaskgraph` revision that first carried the surface this mapping
-/// reads, which [`MINIMUM`] cannot express.
+/// reads, which [`CHECKED_MINIMUM`] cannot express.
 ///
 /// The reserved metadata map landed **after** that product's 0.1.0 release and
 /// before its next one, so the released 0.1.0 and this revision report the same
@@ -91,12 +92,6 @@ const RESERVED: &str = "onepipeline.";
 
 /// The reserved key carrying a node's id.
 const ID_KEY: &str = "onepipeline.id";
-
-/// The dependency kind a plan edge is.
-const BLOCKS: &str = "blocks";
-
-/// The endpoint kind a plan node is.
-const TASK_KIND: &str = "task";
 
 /// A reserved key this mapping fills from the task itself, and where it comes
 /// from — so a project stating it is told which end to edit rather than having
@@ -158,7 +153,7 @@ impl Store {
             tool: DEFAULT_BINARY,
             message: format!(
                 "{} ({what}); onepipeline reads a plan out of a onetaskgraph project and \
-                 needs {DEFAULT_BINARY} {MINIMUM} or newer — {INSTALL}. The reserved \
+                 needs {DEFAULT_BINARY} {CHECKED_MINIMUM} or newer — {INSTALL}. The reserved \
                  metadata this mapping reads landed at revision {FIRST_REVISION}, after \
                  that product's 0.1.0 release, so an install older than that revision \
                  reports a version this check accepts and then answers with tasks \
@@ -187,7 +182,7 @@ impl Store {
                 printed.trim()
             ))
         })?;
-        if version < MINIMUM {
+        if version < CHECKED_MINIMUM {
             return Err(named(format!("is version {token}, below the minimum")));
         }
         Ok(Self { binary })
@@ -236,12 +231,12 @@ impl Store {
                     format!("`{ID_KEY}` '{id}' is already the id of another task, '{first}'"),
                 ));
             }
-            ids.insert(task.id.native().to_owned(), id);
+            ids.insert(task.id.as_str().to_owned(), id);
         }
 
         let mut nodes = Vec::with_capacity(tasks.len());
         for task in &tasks {
-            nodes.push(self.node(project.source(), task, &ids)?);
+            nodes.push(self.node(task, &ids)?);
         }
         document.insert("tasks".to_owned(), Value::Array(nodes));
 
@@ -279,7 +274,7 @@ impl Store {
     }
 
     /// One node, assembled out of its task.
-    fn node(&self, source: &str, task: &Qualified<TaskItem>, ids: &Ids) -> Result<Value> {
+    fn node(&self, task: &Qualified<TaskItem>, ids: &Ids) -> Result<Value> {
         let mut node = Map::new();
         for (key, value) in &task.item.metadata {
             let Some(field) = key.strip_prefix(RESERVED) else {
@@ -324,7 +319,7 @@ impl Store {
             (None, _) => {}
         }
 
-        let mut deps = self.deps(source, task, ids)?;
+        let mut deps = self.deps(task, ids)?;
         // A cross-DAG reference names another run's DAG, which is an item of no
         // source at all, so it is the one dependency that cannot be an edge.
         if let Some(carried) = node.remove("deps") {
@@ -354,22 +349,21 @@ impl Store {
     }
 
     /// The node ids this task's own dependency edges point at.
-    fn deps(&self, source: &str, task: &Qualified<TaskItem>, ids: &Ids) -> Result<Vec<String>> {
+    fn deps(&self, task: &Qualified<TaskItem>, ids: &Ids) -> Result<Vec<String>> {
         let mut deps = Vec::new();
         for edge in self.edges(&task.id)? {
-            if edge.kind != BLOCKS {
+            if edge.kind != DependencyKind::Blocks {
                 continue;
             }
             let far = &edge.to;
             let both = format!("'{}' depends on '{}'", task.id, far.id);
-            if far.kind != TASK_KIND {
+            if far.kind != ItemKind::Task {
                 return Err(refused(
                     task.id.as_str(),
                     format!("{both}, which is a {} and not a node of a plan", far.kind),
                 ));
             }
-            let here = far.id.source() == source;
-            let resolved = match ids.get(far.id.native()).filter(|_| here) {
+            let resolved = match ids.get(far.id.as_str()) {
                 Some(id) => id.clone(),
                 // A far end outside this project is still resolved through its
                 // own `onepipeline.id`, because that is what a node id is: the
@@ -440,6 +434,7 @@ impl Store {
     fn paged<T: serde::de::DeserializeOwned>(&self, args: &[&str]) -> Result<Vec<T>> {
         let mut all = Vec::new();
         let mut page: Option<String> = None;
+        let mut walked: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         loop {
             let mut args = args.to_vec();
             if let Some(token) = page.as_deref() {
@@ -451,11 +446,12 @@ impl Store {
                 return Ok(all);
             };
             // A walk ends because a page says it is the last one. A token that
-            // is empty, or that is the token this page was *fetched* with, ends
-            // nothing — it asks for the same page again, for ever, and a launch
-            // that hung there would never say what it was waiting for. Refused
-            // as the unreadable answer it is.
-            if token.is_empty() || page.as_deref() == Some(token.as_str()) {
+            // is empty, or that this walk has already been handed, ends nothing:
+            // it revisits a page, for ever, and a launch that hung there would
+            // never say what it was waiting for. Every token this walk has seen
+            // rather than only the last, because a response cycling through two
+            // of them repeats just as endlessly and looks like progress.
+            if token.is_empty() || !walked.insert(token.clone()) {
                 return Err(Error::Sibling {
                     tool: DEFAULT_BINARY,
                     message: format!(
@@ -506,7 +502,12 @@ impl Store {
     }
 }
 
-/// The node ids of one project, by the native id of the task carrying each.
+/// The node ids of one project, by the **whole** qualified id of the task
+/// carrying each.
+///
+/// The whole id and not its native half: a lookup that matched on the half would
+/// have to establish separately that the source agreed, and the pair of checks
+/// is one thing said twice — with only one of them in the type.
 type Ids = BTreeMap<String, String>;
 
 /// The reserved id one task carries, or why it has none.
@@ -686,10 +687,25 @@ enum Release {
 
 impl Version {
     /// One `MAJOR[.MINOR[.PATCH]][-PRERELEASE][+BUILD]` token, or `None`.
+    ///
+    /// The grammar, rather than a prefix of it: `vv1.2.3`, `1.2.3-` and `1.2.3+`
+    /// are not versions, and reading them as `1.2.3` would let a binary printing
+    /// something malformed decide a floor.
     fn parse(token: &str) -> Option<Self> {
-        let token = token.trim_start_matches('v');
-        let (numbers, rest) = token.split_once('-').map_or((token, ""), |split| split);
-        let numbers = numbers.split('+').next()?;
+        // At most one `v`, and only leading.
+        let token = token.strip_prefix('v').unwrap_or(token);
+        let (numbers, prerelease) = match token.split_once('-') {
+            Some((numbers, prerelease)) => (numbers, Some(prerelease)),
+            None => (token, None),
+        };
+        // A separator with nothing after it names no pre-release and no build.
+        let (numbers, build) = match numbers.split_once('+') {
+            Some((numbers, build)) => (numbers, Some(build)),
+            None => (numbers, None),
+        };
+        if prerelease.is_some_and(str::is_empty) || build.is_some_and(str::is_empty) {
+            return None;
+        }
         let mut parts = numbers.split('.').map(str::parse::<u32>);
         let major = parts.next()?.ok()?;
         let minor = parts.next().unwrap_or(Ok(0)).ok()?;
@@ -701,9 +717,9 @@ impl Version {
             major,
             minor,
             patch,
-            release: match rest.is_empty() {
-                true => Release::Released,
-                false => Release::Prerelease,
+            release: match prerelease {
+                None => Release::Released,
+                Some(_) => Release::Prerelease,
             },
         })
     }
@@ -774,13 +790,76 @@ struct TaskItem {
 #[derive(Debug, Deserialize)]
 struct Edge {
     to: Endpoint,
-    kind: String,
+    kind: DependencyKind,
 }
 
 #[derive(Debug, Deserialize)]
 struct Endpoint {
     id: QualifiedId,
-    kind: String,
+    kind: ItemKind,
+}
+
+/// What a dependency edge means.
+///
+/// A plan's `deps` are the blocking ones; a `related` edge is a link the store
+/// draws and not an ordering, so it is passed over rather than refused.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(from = "String")]
+enum DependencyKind {
+    /// The near item depends on the far one.
+    Blocks,
+    /// A link without an ordering.
+    Related,
+    /// A kind that product added after this build. Read leniently, as every
+    /// sibling's own vocabulary is: it is not this build's set, and an edge is
+    /// passed over rather than refused for being of a kind it does not know.
+    Unknown(String),
+}
+
+impl From<String> for DependencyKind {
+    fn from(wire: String) -> Self {
+        match wire.as_str() {
+            "blocks" => Self::Blocks,
+            "related" => Self::Related,
+            _ => Self::Unknown(wire),
+        }
+    }
+}
+
+/// What one end of a dependency edge names.
+///
+/// A plan node is a task, so a `project` end — which the store's edges may carry,
+/// at either level — is refused rather than read as a node.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(from = "String")]
+enum ItemKind {
+    /// One task.
+    Task,
+    /// One project.
+    Project,
+    /// A kind that product added after this build, kept as it arrived so a
+    /// refusal can name what it actually said.
+    Unknown(String),
+}
+
+impl From<String> for ItemKind {
+    fn from(wire: String) -> Self {
+        match wire.as_str() {
+            "task" => Self::Task,
+            "project" => Self::Project,
+            _ => Self::Unknown(wire),
+        }
+    }
+}
+
+impl std::fmt::Display for ItemKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Task => formatter.write_str("task"),
+            Self::Project => formatter.write_str("project"),
+            Self::Unknown(wire) => write!(formatter, "'{wire}'"),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -804,6 +883,11 @@ mod tests {
         assert_eq!(version(""), None);
         assert_eq!(version("onetaskgraph what"), None);
         assert_eq!(version("onetaskgraph 1.2.3.4"), None);
+        // The grammar rather than a prefix of it: a separator with nothing after
+        // it, and a second `v`, are malformed rather than `1.2.3`.
+        assert_eq!(Version::parse("vv1.2.3"), None);
+        assert_eq!(Version::parse("1.2.3-"), None);
+        assert_eq!(Version::parse("1.2.3+"), None);
     }
 
     /// A pre-release sorts below the release it precedes, which is the direction
@@ -812,13 +896,13 @@ mod tests {
     #[test]
     fn versions_order_by_each_number_in_turn_and_a_prerelease_below_its_release() {
         let read = |token: &str| Version::parse(token).expect("a version");
-        assert!(read("0.0.9") < MINIMUM);
-        assert!(read("0.1.0") >= MINIMUM);
-        assert!(read("1.0.0") > MINIMUM);
-        assert!(read("0.1.0-rc.1") < MINIMUM);
-        assert!(read("0.1.1-rc.1") > MINIMUM);
+        assert!(read("0.0.9") < CHECKED_MINIMUM);
+        assert!(read("0.1.0") >= CHECKED_MINIMUM);
+        assert!(read("1.0.0") > CHECKED_MINIMUM);
+        assert!(read("0.1.0-rc.1") < CHECKED_MINIMUM);
+        assert!(read("0.1.1-rc.1") > CHECKED_MINIMUM);
         // A build suffix is not a pre-release: it names the same release.
-        assert_eq!(read("0.1.0+build.7"), MINIMUM);
+        assert_eq!(read("0.1.0+build.7"), CHECKED_MINIMUM);
     }
 
     #[test]

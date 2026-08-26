@@ -403,6 +403,17 @@ fn a_project_the_schema_refuses_never_starts_a_run() {
                 {"id": "a", "persona": "e", "task": "t", "onepipeline-task": "other"}]}),
             "`onepipeline.task` is not a node field",
         ),
+        // A node lands in one repository, and the reserved key is only for an
+        // identity a normalized origin cannot hold — so a task naming one both
+        // ways is refused rather than one of the two quietly losing.
+        (
+            "tworepos",
+            json!({"schema_version": 3, "tasks": [
+                {"id": "a", "persona": "e", "task": "t", "title": "feat: x",
+                 "repo": "github.com/owner/service",
+                 "onepipeline-repo": "/var/checkouts/service"}]}),
+            "names a repository in both `repositories` and `onepipeline.repo`",
+        ),
         // A dependency on another node of this plan is an edge between two
         // tasks, so the reserved key carries cross-DAG references and nothing
         // else — otherwise the backend would draw a graph missing that arrow.

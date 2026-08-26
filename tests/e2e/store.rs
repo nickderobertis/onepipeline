@@ -276,6 +276,125 @@ fn the_launch_record_names_the_project_and_the_run_still_projects_from_its_journ
     world.run(&["status", "record"]).exited(0).out_has("record");
 }
 
+/// A store that answers something this build will not act on refuses the launch.
+///
+/// Five endings, and none of them is reachable through a correct install: the
+/// double below is scripted to answer badly on purpose, which is the only way to
+/// reach the far side of "the store said something unusable". Every one of them
+/// is a **refusal** — the double never stands in for a plan that reads — and
+/// every one of them names the command it came from, because a launch that
+/// stopped without saying which query answered badly would leave an operator
+/// with a store to search by hand.
+#[test]
+fn a_store_that_answers_badly_refuses_the_launch_and_names_the_query() {
+    let cases: &[(&str, &[(&str, &str)], &str)] = &[
+        // A query that ran and failed, after the version check passed.
+        (
+            "exits",
+            &[(
+                "onetaskgraph.refuse-reads",
+                "this store cannot be reached\n",
+            )],
+            "this store cannot be reached",
+        ),
+        // An answer that is not the JSON this build reads.
+        (
+            "malformed",
+            &[("onetaskgraph.project-show", "not json at all\n")],
+            "answered with something this build cannot read",
+        ),
+        // A `show` answering with an item nobody asked for.
+        (
+            "elsewhere",
+            &[(
+                "onetaskgraph.project-show",
+                r#"{"items":[{"id":"plans:other","item":{"title":"T","metadata":{}}}],"next":null}"#,
+            )],
+            "answered with 'plans:other'",
+        ),
+        // A task list carrying an item of another source, which `--project`
+        // said it would not.
+        (
+            "foreign",
+            &[
+                (
+                    "onetaskgraph.project-show",
+                    r#"{"items":[{"id":"plans:mine","item":{"title":"T","metadata":
+                       {"onepipeline.schema_version":3}}}],"next":null}"#,
+                ),
+                (
+                    "onetaskgraph.task-list",
+                    r#"{"items":[{"id":"elsewhere:build","item":{"title":"B","content":"t",
+                       "metadata":{"onepipeline.id":"build"}}}],"next":null}"#,
+                ),
+            ],
+            "which is an item of another source",
+        ),
+        // A dependency edge whose far end is a project. The store draws edges at
+        // both levels and across them; a plan node is a task, so a far end that
+        // is not one is refused rather than read as a node.
+        (
+            "project-end",
+            &[
+                (
+                    "onetaskgraph.project-show",
+                    r#"{"items":[{"id":"plans:mine","item":{"title":"T","metadata":
+                       {"onepipeline.schema_version":3}}}],"next":null}"#,
+                ),
+                (
+                    "onetaskgraph.task-list",
+                    r#"{"items":[{"id":"plans:build","item":{"title":"B","content":"t",
+                       "metadata":{"onepipeline.id":"build"}}}],"next":null}"#,
+                ),
+                (
+                    "onetaskgraph.task-deps",
+                    r#"{"items":[{"from":{"id":"plans:build","kind":"task"},
+                       "to":{"id":"plans:other","kind":"project"},"kind":"blocks"}],"next":null}"#,
+                ),
+            ],
+            "which is a project and not a node of a plan",
+        ),
+        // A walk that cycles: two tokens handed back for ever. Read naively this
+        // is a launch that never returns and never says why.
+        (
+            "cycle",
+            &[
+                (
+                    "onetaskgraph.project-show",
+                    r#"{"items":[{"id":"plans:mine","item":{"title":"T","metadata":
+                       {"onepipeline.schema_version":3}}}],"next":null}"#,
+                ),
+                ("onetaskgraph.task-list", r#"{"items":[],"next":"first"}"#),
+                (
+                    "onetaskgraph.task-list.2",
+                    r#"{"items":[],"next":"second"}"#,
+                ),
+                ("onetaskgraph.task-list.3", r#"{"items":[],"next":"first"}"#),
+            ],
+            "does not advance the walk",
+        ),
+    ];
+
+    for (name, scripted, expected) in cases {
+        let world = World::new(&format!("store-bad-{name}")).with_env(
+            "ONETASKGRAPH_BIN",
+            &double("fake-onetaskgraph").to_string_lossy(),
+        );
+        world.script("onetaskgraph.version", "onetaskgraph 0.1.0\n");
+        for (file, body) in *scripted {
+            world.script(file, body);
+        }
+        world
+            .run(&["start", "plans:mine", "--detach"])
+            .exited(REFUSED)
+            .err_has(expected);
+        assert!(
+            world.runs.read_dir().expect("a runs root").next().is_none(),
+            "a launch refused for its store left a run directory behind"
+        );
+    }
+}
+
 /// An absent `onetaskgraph` refuses the launch, and nothing is started for it.
 ///
 /// The path resolved, the minimum this build needs, and how to install one — all
