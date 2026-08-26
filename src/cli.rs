@@ -41,7 +41,7 @@ pub enum Command {
     /// Execute a plan: drive its DAG continuously to settlement.
     Start(StartArgs),
     /// Attach a fresh driver to a run whose ledger is intact.
-    Adopt(RunArgs),
+    Adopt(AdoptArgs),
     /// The channel's server side.
     #[command(subcommand)]
     Channel(ChannelCommand),
@@ -78,7 +78,7 @@ pub enum Command {
     /// cannot outlive a launcher that is about to exit. Nothing but this
     /// crate's own launcher spells it.
     #[command(hide = true, name = crate::engine::DRIVE_VERB)]
-    DriveRun(RunArgs),
+    DriveRun(DriveRunArgs),
     /// Drive one agent graph in this process, relaying its envelopes as NDJSON.
     ///
     /// Not part of the documented surface and hidden from `--help`: it is how
@@ -164,6 +164,48 @@ pub struct StartArgs {
     /// Repeatable. `planner` and `monitor` ship and are overridden by name.
     #[arg(long = "filter-profile", value_name = "NAME=SPEC")]
     pub filter_profiles: Vec<String>,
+}
+
+/// `onepipeline adopt`.
+///
+/// The same attach/detach pair [`StartArgs`] has, with the same default and the
+/// same meaning: attached, this process drives the run it took over; detached,
+/// the driver it retains does, and the launcher returns once that driver has
+/// claimed the run.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct AdoptArgs {
+    /// The run id.
+    pub run: String,
+    /// Stay attached, driving the adopted run and returning when it settles.
+    /// The default.
+    #[arg(long, conflicts_with = "detach")]
+    pub attach: bool,
+    /// Print the launch record and return, leaving the fresh driver unattended.
+    #[arg(long)]
+    pub detach: bool,
+}
+
+/// The flag that tells a retained driver it is taking a run over rather than
+/// driving one nothing has driven yet.
+///
+/// Named here, beside the argument it parses, because the launcher spells it on
+/// a command line: a spelling only one side of that knew could drift.
+pub(crate) const ADOPT_FLAG: &str = "adopt";
+
+/// `onepipeline drive-run` — the retained driver of a detached launch.
+///
+/// The run it drives, and whether it is **adopting** it: the bookkeeping an
+/// adoption does belongs under the ownership lock, and this is the process that
+/// takes that lock, so a detaching adoption hands the work here rather than
+/// doing it on behalf of a driver that does not exist yet.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct DriveRunArgs {
+    /// The run id.
+    pub run: String,
+    /// Take the run over from the driver that had it, recording the adoption
+    /// under the lock this process is the one to hold.
+    #[arg(long = ADOPT_FLAG)]
+    pub adopt: bool,
 }
 
 /// A read verb that shapes its event view through a filter profile.

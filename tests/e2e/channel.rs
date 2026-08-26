@@ -432,11 +432,11 @@ fn a_settled_run_refuses_a_reply_nothing_will_ever_read() {
     world.until("the run to settle", |world| {
         world.run_file("settled", "result.json").is_file()
     });
-    world.until("the driver to exit", |world| {
-        world
-            .run(&["status", "settled"])
-            .stdout
-            .contains("DRIVER DEAD")
+    // The run's own ownership lock, which its driver releases as it goes: what a
+    // settled run's views say about the driver is `SETTLED`, and deliberately
+    // not `DRIVER DEAD` beside a prescription to replace it.
+    world.until("the driver to release the run", |world| {
+        !world.run_file("settled", "owner.lock").exists()
     });
 
     world

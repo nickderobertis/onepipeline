@@ -129,7 +129,10 @@ a `monitor` member that watches the stream and raises what does not line up, plu
 a resettable-cron `check-in` member that surfaces a status when nobody has
 reported one for a while. It never drives the engine. Attached, `start` returns
 when the run settles; exit `3` means nothing is driving the run, and
-`onepipeline adopt RUN` attaches a fresh driver to the intact ledger.
+`onepipeline adopt RUN` attaches a fresh driver to the intact ledger, and takes
+the same `--attach`/`--detach` pair `start` does: detached, it prints the launch
+record and returns once the driver it retained has the run, so recovering one run
+does not hold the session supervising the others.
 
 A lifecycle node states the `title` its change request opens under, and may state
 its `body` too. `--pr-author-graph REF` names an agent graph that drafts that body

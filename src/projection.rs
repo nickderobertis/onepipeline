@@ -899,6 +899,7 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
                 // claim about a signal nobody sent, and a worker orphaned by a
                 // dead driver is exactly the case that would make it false.
                 journal::StopTeardown::NothingToStop
+                | journal::StopTeardown::IdentityDeclined
                 | journal::StopTeardown::NotAttempted
                 | journal::StopTeardown::PartlySignalled
                 // llmlint: ignore-block[changed_behavior_has_e2e] this pattern is forced by
@@ -2221,6 +2222,19 @@ mod tests {
         assert_eq!(state.recorded["approve"].status(), NodeStatus::Done);
         assert_eq!(state.completion_requests, vec!["verified".to_string()]);
         assert_eq!(state.cross_dag_watches["run:o#n"], 1);
+        assert!(state.stop_recorded());
+    }
+
+    #[test]
+    fn an_identity_declined_stop_leaves_worker_state_undetermined() {
+        let state = fold(&[pipeline(
+            journal::PipelineKind::RunStopped,
+            0,
+            None,
+            &[("teardown", json!("identity-declined"))],
+        )]);
+
+        assert_eq!(state.stop, StopState::WorkersUndetermined);
         assert!(state.stop_recorded());
     }
 

@@ -634,6 +634,254 @@ fn a_dead_driver_reads_as_driver_dead_and_adopt_is_the_way_back() {
     );
 }
 
+/// A detached adoption returns as soon as a driver has the run, and the driver
+/// it leaves behind is the one every claim the run records names.
+///
+/// The case this exists for: a session supervising several runs recovers one of
+/// them without blocking on it. Before the pair reached this verb an adoption
+/// could only run attached, so taking one run back held the session watching the
+/// others, and the only way out was backgrounding the launcher by hand.
+///
+/// The ordering is the hard half. An adoption checks ownership, refuses a run
+/// something is driving, ends a driver holding a run nothing is driving, and
+/// takes the ownership lock before it writes — and a detaching one must do none
+/// of the writing on behalf of the process that will actually drive. So the
+/// three claims are read back here: the record's pid, the lock's, and what the
+/// adoption moved aside.
+#[test]
+fn a_detached_adoption_leaves_a_driver_holding_the_run_its_record_names() {
+    let world = World::new("driver-adopt-detached");
+    // A dispatch held open, so the run keeps a driver: a run whose loop returns
+    // has nothing left to say who is driving it a moment later.
+    world.script("build.wait", "hold");
+    let (run, displaced) =
+        start_detached_announcing(&world, "handed-over", vec![agent("build", &[])]);
+    world.until("the run to be reported parked", |world| {
+        let mut status = world.cmd(&["status", &run]);
+        status.env("ONEPIPELINE_PARKED_AFTER_SECONDS", "1");
+        let out = status.output().expect("the binary runs");
+        String::from_utf8_lossy(&out.stdout).contains("PARKED")
+    });
+
+    let mut adopt = world.cmd(&["adopt", &run, "--detach"]);
+    adopt.env("ONEPIPELINE_PARKED_AFTER_SECONDS", "1");
+    let adopted = world.run_on(adopt, "adopt --detach");
+    adopted.exited(0);
+    // The parked driver was ended by the process the operator is watching, so
+    // the reason a run was taken over is on the terminal that took it over and
+    // not in a log nobody is reading.
+    adopted.err_has("ending it to adopt the run");
+
+    // The launch record a detached launch prints, for the same reason: an
+    // operator who detached has to be told what to address.
+    let announced: serde_json::Value =
+        serde_json::from_str(adopted.stdout.trim()).unwrap_or_else(|error| {
+            panic!(
+                "a detached adoption announces itself: {error}: {}",
+                adopted.stdout
+            )
+        });
+    assert_eq!(announced["run_id"], run.as_str());
+    assert_eq!(
+        announced["commands"]["next"],
+        format!("onepipeline next {run}")
+    );
+    assert_eq!(
+        announced["commands"]["monitor"],
+        format!("onepipeline monitor {run}")
+    );
+    let driver = announced["pid"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("the adoption announced no driver: {announced}"));
+    assert_ne!(
+        driver,
+        u64::from(displaced),
+        "the adoption announced the driver it had just displaced"
+    );
+
+    // One writer of each: the process the record names is the process holding
+    // the lock, and both are the driver the launcher retained rather than the
+    // launcher, which has already returned.
+    assert_eq!(world.run_json(&run, "launch.json")["pid"], json!(driver));
+    assert_eq!(world.run_json(&run, "owner.lock")["pid"], json!(driver));
+    // And the launcher claimed nothing on that driver's behalf: what the
+    // adoption moved aside is the record as it stood immediately before the
+    // adopting write, and it still names the driver the run was taken *from* —
+    // which it could not if this process had written itself in first.
+    assert_eq!(
+        world.run_json(&run, "launch.pre-adopt-1.json")["pid"],
+        json!(displaced),
+        "the launcher wrote itself into the record it was about to hand over"
+    );
+    assert_eq!(world.run_json(&run, "launch.json")["adoptions"], json!(1));
+    assert_eq!(world.events_of(&run, "driver-adopted").len(), 1);
+
+    // And the driver left behind is driving: the node the displaced one had in
+    // flight is dispatched again, and the run it was holding settles.
+    world.until("the fresh driver to re-dispatch the held node", |world| {
+        world.events_of(&run, "node-dispatched").len() >= 2
+    });
+    world.release("build.go");
+    world.until("the adopted run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+    assert_eq!(
+        world.run_json(&run, "result.json")["state"],
+        "complete",
+        "the run the detached adoption left behind did not finish:\n{}",
+        world.dump()
+    );
+}
+
+/// A driver that dies on its way up is the failure it is, carrying its own
+/// words — not an exit 0 and a pid for a process that is already gone.
+///
+/// A detached adoption is the one caller that never waits for what it started,
+/// and the driver's refusal goes to a file the launcher is about to walk away
+/// from, so without this the run would be left undriven with nothing said.
+///
+/// The fault is placed where **only the retained driver** can meet it: the
+/// launcher's own checks read the launch record and the run's liveness, and both
+/// are intact here. What is not is the ownership lock the fresh driver has to
+/// take before it may write anything — which is the last thing an adoption does
+/// in the process that will drive, and the first thing that can refuse it there.
+#[test]
+fn a_detached_adoption_whose_driver_dies_is_refused_with_what_that_driver_said() {
+    // llmlint: ignore-block[tests_mirror_real_usage] no CLI command corrupts a run's
+    // own ownership lock. A half-written lock is an external-state fault — a host that
+    // died mid-write — so the arrangement mutates that persisted boundary directly;
+    // the adoption, its refusal, and every observation still go through the compiled
+    // binary. `dispatch::broken_launch_records_refuse_the_adoption_before_direct_or_lifecycle_dispatch`
+    // arranges the neighbouring fault the same way.
+    let world = World::new("driver-adopt-detached-refused");
+    let run = start_detached(&world, "half-written", vec![human("approve", &[])]);
+    world.until("the driver to exit", |world| {
+        world.run(&["status", &run]).stdout.contains("DRIVER DEAD")
+    });
+    let died = world.run_json(&run, "launch.json")["pid"].clone();
+
+    std::fs::write(world.run_file(&run, "owner.lock"), "not json")
+        .expect("the ownership lock is half-written");
+
+    let adopted = world.run(&["adopt", &run, "--detach"]);
+    adopted.exited(REFUSED);
+    adopted.err_has("did not claim it");
+    // Its own words, out of the log the launcher is walking away from, and the
+    // log named so the rest of them can be read.
+    adopted.err_has("an unreadable lock");
+    adopted.err_has("driver.log");
+    assert!(
+        adopted.stdout.trim().is_empty(),
+        "a refused adoption printed a launch record anyway: {}",
+        adopted.stdout
+    );
+
+    // And nothing claimed the run on that driver's behalf: the record still
+    // names the driver that died rather than the one that never came up, so the
+    // run reads as what it is — undriven, and adoptable once the lock is dealt
+    // with.
+    let record = world.run_json(&run, "launch.json");
+    assert_eq!(
+        record["pid"], died,
+        "the record names a driver that never ran"
+    );
+    assert_eq!(record["adoptions"], json!(0));
+    assert!(
+        world.run(&["status", &run]).stdout.contains("DRIVER DEAD"),
+        "a run whose adoption was refused is not reported as one nothing is driving:\n{}",
+        world.dump()
+    );
+} // llmlint: ignore-end[tests_mirror_real_usage]
+
+#[test]
+fn a_detached_adoption_reports_an_observer_that_refuses_to_relaunch() {
+    // llmlint: ignore-block[tests_mirror_real_usage] no CLI command edits a run's
+    // durable launch record after its launcher has gone. An unavailable recorded
+    // working directory is an external-state fault, so only that premise is arranged
+    // at the persisted boundary; the detached adoption, child-process failure, and
+    // every observation still go through the compiled binary.
+    let world = World::new("driver-adopt-observer-refused");
+    let run = start_detached_observed(&world, "observer-refused", vec![human("approve", &[])]);
+    world.until("the driver to exit", |world| {
+        world.run(&["status", &run]).stdout.contains("DRIVER DEAD")
+    });
+    let mut record = world.run_json(&run, "launch.json");
+    record["dir"] = json!(world.run_file(&run, "missing-observer-directory"));
+    std::fs::write(world.run_file(&run, "launch.json"), record.to_string())
+        .expect("the launch record names an unavailable observer directory");
+
+    let adopted = world.run(&["adopt", &run, "--detach"]);
+    adopted.exited(REFUSED);
+    adopted.err_has("did not claim it");
+    adopted.err_has("not a directory");
+    assert!(adopted.stdout.trim().is_empty(), "{}", adopted.stdout);
+
+    assert_eq!(world.run_json(&run, "launch.json")["adoptions"], json!(0));
+    assert!(world.run_file(&run, "launch.pre-adopt-1.json").exists());
+    assert_eq!(world.events_of(&run, "driver-adopted").len(), 1);
+} // llmlint: ignore-end[tests_mirror_real_usage]
+
+#[test]
+fn a_detached_adoption_refuses_when_the_prior_launch_record_cannot_be_preserved() {
+    // llmlint: ignore-block[tests_mirror_real_usage] no CLI command occupies the
+    // adoption backup's private destination. A filesystem collision is the failure
+    // this boundary must report, so only that premise is arranged directly; the
+    // detached adoption, retained driver's refusal, and every assertion drive the
+    // compiled binary over its real run root.
+    let world = World::new("driver-adopt-backup-refused");
+    let run = start_detached(&world, "backup-refused", vec![human("approve", &[])]);
+    world.until("the driver to exit", |world| {
+        world.run(&["status", &run]).stdout.contains("DRIVER DEAD")
+    });
+    std::fs::create_dir(world.run_file(&run, "launch.pre-adopt-1.json"))
+        .expect("the backup destination is occupied by a directory");
+
+    let adopted = world.run(&["adopt", &run, "--detach"]);
+    adopted.exited(REFUSED);
+    adopted.err_has("did not claim it");
+    adopted.err_has("launch.pre-adopt-1.json");
+    adopted.err_has("driver.log");
+    assert!(adopted.stdout.trim().is_empty(), "{}", adopted.stdout);
+
+    assert_eq!(world.run_json(&run, "launch.json")["adoptions"], json!(0));
+    assert!(world.events_of(&run, "driver-adopted").is_empty());
+} // llmlint: ignore-end[tests_mirror_real_usage]
+
+/// The pair means on `adopt` what it means on `start`, refusals included.
+///
+/// `--attach` is the default either way, so naming it is the adoption the bare
+/// verb performs — and naming both is the usage error `start` answers with,
+/// because they are alternatives rather than a pair.
+#[test]
+fn adopt_takes_the_attach_detach_pair_start_takes() {
+    let world = World::new("driver-adopt-flags");
+    let run = start_detached(&world, "either-way", vec![human("approve", &[])]);
+    world.until("the driver to exit", |world| {
+        world.run(&["status", &run]).stdout.contains("DRIVER DEAD")
+    });
+
+    let both = world.run(&["adopt", &run, "--attach", "--detach"]);
+    assert_eq!(
+        both.code,
+        crate::harness::USAGE_ERROR,
+        "the two flags were accepted together:\n{}",
+        both.stderr
+    );
+    both.err_has("--detach");
+
+    // The default, named: this process is the fresh driver, and everything the
+    // bare verb records is recorded by it.
+    let adopted = world.run(&["adopt", &run, "--attach"]);
+    adopted.exited(0);
+    assert_eq!(world.events_of(&run, "driver-adopted").len(), 1);
+    assert_eq!(world.run_json(&run, "launch.json")["adoptions"], json!(1));
+    assert!(world.run_file(&run, "launch.pre-adopt-1.json").exists());
+    assert!(
+        !world.run_file(&run, "owner.lock").exists(),
+        "an attached adoption returned still holding the run's lock"
+    );
+}
+
 /// One run, one directory — whichever launch path started the driver.
 ///
 /// The two paths used to disagree. Neither passed a directory at all, and the
@@ -1014,7 +1262,7 @@ fn adopt_refuses_another_sessions_run_and_has_no_force() {
 
     let stranger = world.as_session("session-other");
     stranger
-        .run(&["adopt", &run])
+        .run(&["adopt", &run, "--detach"])
         .exited(REFUSED)
         .err_has("belongs to")
         .err_has("not to this session");
@@ -1035,7 +1283,7 @@ fn adopt_refuses_a_run_something_is_still_driving() {
     });
 
     world
-        .run(&["adopt", &run])
+        .run(&["adopt", &run, "--detach"])
         .exited(REFUSED)
         .err_has("still being driven")
         .err_has("onepipeline stop still-live");
@@ -1754,7 +2002,7 @@ fn a_stop_that_cannot_read_the_process_table_refuses_and_leaves_the_run_retryabl
 /// as it was, and the same ask works once the host answers what it was asked. The
 /// listing this stand-in gives is the real one throughout, which is what keeps the
 /// fault to the one question under test.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "linux")))]
 #[test]
 fn a_stop_whose_host_says_more_than_it_was_asked_about_a_pid_refuses_and_signals_nothing() {
     let world = World::new("driver-stop-talkative-ps");
@@ -2013,6 +2261,160 @@ fn a_stop_never_signals_a_pid_the_host_has_given_to_another_process() {
     stranger.kill().expect("this test ends its own process");
     stranger.wait().expect("it is reaped");
     world.release("build.go");
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+/// Linux does not let an old identity decay with `ps`'s wall-clock rendering.
+///
+/// The stand-in moves `lstart` from the real process's 2026-era value to 1970,
+/// vastly more than the 33-second drift observed after 68 minutes. The real
+/// stop command still identifies and ends its real driver and dispatch because
+/// Linux records the kernel's clock-tick start value instead.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_linux_process_identity_survives_wall_clock_start_time_drift() {
+    let world = World::new("driver-stop-drifted-start");
+    world.script("build.wait", "hold");
+    let (run, driver) = start_detached_announcing(&world, "drifted", vec![agent("build", &[])]);
+    world.until("a node to be in flight", |world| {
+        !world.events_of(&run, "node-dispatched").is_empty()
+    });
+    world.until("the dispatch to be a process below the driver", |_| {
+        !descendants(driver).is_empty()
+    });
+    let tree: Vec<u32> = std::iter::once(driver).chain(descendants(driver)).collect();
+
+    let mut command = world.cmd(&["stop", &run]);
+    command.env("PATH", world.path_whose_ps_start_time_has_drifted());
+    world
+        .run_on(command, "stop after ps start-time drift")
+        .exited(0)
+        .out_has("\"stopped\":true")
+        .out_has("\"teardown\":\"signalled\"");
+    world.until("every process the run started to end", |_| {
+        tree.iter().all(|pid| !still_listed(*pid))
+    });
+    world.release("build.go");
+}
+
+/// A Linux run launched by the former `ps lstart` implementation remains
+/// stoppable after upgrading to procfs tokens.
+// llmlint: ignore-block[tests_mirror_real_usage] installing an older binary merely to
+// create its launch record would test packaging rather than this compatibility boundary;
+// replacing only the serialized token with the exact value that binary wrote is the
+// persisted pre-upgrade input the current public `stop` command must accept.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_linux_stop_accepts_an_active_runs_legacy_ps_identity() {
+    let world = World::new("driver-stop-legacy-start-token");
+    world.script("build.wait", "hold");
+    let (run, driver) = start_detached_announcing(&world, "legacy", vec![agent("build", &[])]);
+    world.until("a node to be in flight", |world| {
+        !world.events_of(&run, "node-dispatched").is_empty()
+    });
+
+    let record = world.run_file(&run, "launch.json");
+    let mut launch = world.run_json(&run, "launch.json");
+    launch["started"] = json!(started_at_of(driver));
+    std::fs::write(record, launch.to_string()).expect("the legacy launch record is installed");
+
+    world
+        .run(&["stop", &run])
+        .exited(0)
+        .out_has("\"stopped\":true")
+        .out_has("\"teardown\":\"signalled\"");
+    world.until("the legacy-recorded driver to end", |_| {
+        !still_listed(driver)
+    });
+    world.release("build.go");
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+/// Finding live pids but declining every recorded identity is a refusal, not an
+/// idle run. The stranger is a real process owned by this test and survives.
+// llmlint: ignore-block[tests_mirror_real_usage] PID reuse is a host transition, not a
+// product operation, and waiting for this particular stale pid to be recycled is unbounded.
+// The fixture changes only that historical pid; the real `stop` command then reads the real
+// run root, asks the host about a real independently-started process, and must leave it alive.
+#[cfg(unix)]
+#[test]
+fn a_stop_that_declines_every_live_identity_does_not_report_success() {
+    let world = World::new("driver-stop-all-identities-declined");
+    world.script("build.wait", "hold");
+    let (run, driver) = start_detached_announcing(&world, "declined", vec![agent("build", &[])]);
+    world.until("a node to be in flight", |world| {
+        !world.events_of(&run, "node-dispatched").is_empty()
+    });
+
+    let recorded = world.run_json(&run, "launch.json")["started"]
+        .as_str()
+        .expect("the launch record carries its driver's identity")
+        .to_string();
+    let mut stranger = stranger_started_after(&recorded);
+    let stranger_pid = stranger.id();
+    let mut paths = vec![
+        world.run_file(&run, "launch.json"),
+        world.run_file(&run, "owner.lock"),
+    ];
+    let dispatches: Vec<_> = std::fs::read_dir(world.run_file(&run, "dispatches"))
+        .expect("the live dispatch registry exists")
+        .filter_map(|entry| {
+            let path = entry.expect("a dispatch registry entry").path();
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+                .then_some(path)
+        })
+        .collect();
+    assert!(
+        !dispatches.is_empty(),
+        "the in-flight node recorded no live dispatch claim"
+    );
+    paths.extend(dispatches);
+    for path in paths {
+        let mut claim: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&path).expect("the live process claim is readable"),
+        )
+        .expect("the live process claim is JSON");
+        claim["pid"] = json!(stranger_pid);
+        std::fs::write(&path, claim.to_string()).expect("the reissued pid is planted");
+    }
+
+    let refused = world.run(&["stop", &run]);
+    refused
+        .exited(REFUSED)
+        .err_has("was not stopped")
+        .err_has("every recorded identity disagreed")
+        .err_has("distinct from a run with nothing left to stop");
+    assert!(
+        !refused.stdout.contains("\"stopped\":true") && !refused.stdout.contains("nothing-to-stop"),
+        "an all-declined stop reported success or idleness:\n{}",
+        refused.stdout
+    );
+    assert!(
+        stranger
+            .try_wait()
+            .expect("this host answers about the stranger")
+            .is_none(),
+        "the declined stranger was signalled"
+    );
+    let stopped = world.events_of(&run, "run-stopped");
+    assert_eq!(stopped.len(), 1, "the declined attempt went unrecorded");
+    assert_eq!(
+        stopped[0]["payload"]["teardown"],
+        json!("identity-declined")
+    );
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("build: worker may still be running: the stop could not reach it");
+
+    stranger.kill().expect("this test ends its own process");
+    stranger.wait().expect("the stranger is reaped");
+    world.release("build.go");
+    world.until(
+        "the driver to finish after its dispatch is released",
+        |_| !still_listed(driver),
+    );
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 

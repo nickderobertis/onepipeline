@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.2](https://github.com/nickderobertis/onepipeline/compare/v0.15.1...v0.15.2) - 2026-08-26
+
+### Added
+
+- *(driver)* give adopt the attach/detach pair start has ([#133](https://github.com/nickderobertis/onepipeline/pull/133))
+
+### Fixed
+
+- *(sys)* keep a process start token from decaying, and stop reporting a stop that stopped nothing ([#132](https://github.com/nickderobertis/onepipeline/pull/132))
+- *(views)* stop prescribing adopt for a settled run, and name requeue for a parked one ([#130](https://github.com/nickderobertis/onepipeline/pull/130))
+
+## [0.15.1](https://github.com/nickderobertis/onepipeline/compare/v0.15.0...v0.15.1) - 2026-08-26
+
+### Fixed
+
+- *(deps)* resolve onevcs 0.15.2, the repair of the 0.15.1 capture regression ([#128](https://github.com/nickderobertis/onepipeline/pull/128))
+
 ## [0.15.0](https://github.com/nickderobertis/onepipeline/compare/v0.14.2...v0.15.0) - 2026-08-26
 
 ### Added
