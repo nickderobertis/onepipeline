@@ -793,6 +793,60 @@ fn a_detached_adoption_whose_driver_dies_is_refused_with_what_that_driver_said()
     );
 } // llmlint: ignore-end[tests_mirror_real_usage]
 
+#[test]
+fn a_detached_adoption_reports_an_observer_that_refuses_to_relaunch() {
+    // llmlint: ignore-block[tests_mirror_real_usage] no CLI command edits a run's
+    // durable launch record after its launcher has gone. An unavailable recorded
+    // working directory is an external-state fault, so only that premise is arranged
+    // at the persisted boundary; the detached adoption, child-process failure, and
+    // every observation still go through the compiled binary.
+    let world = World::new("driver-adopt-observer-refused");
+    let run = start_detached_observed(&world, "observer-refused", vec![human("approve", &[])]);
+    world.until("the driver to exit", |world| {
+        world.run(&["status", &run]).stdout.contains("DRIVER DEAD")
+    });
+    let mut record = world.run_json(&run, "launch.json");
+    record["dir"] = json!(world.run_file(&run, "missing-observer-directory"));
+    std::fs::write(world.run_file(&run, "launch.json"), record.to_string())
+        .expect("the launch record names an unavailable observer directory");
+
+    let adopted = world.run(&["adopt", &run, "--detach"]);
+    adopted.exited(REFUSED);
+    adopted.err_has("did not claim it");
+    adopted.err_has("not a directory");
+    assert!(adopted.stdout.trim().is_empty(), "{}", adopted.stdout);
+
+    assert_eq!(world.run_json(&run, "launch.json")["adoptions"], json!(0));
+    assert!(world.run_file(&run, "launch.pre-adopt-1.json").exists());
+    assert_eq!(world.events_of(&run, "driver-adopted").len(), 1);
+} // llmlint: ignore-end[tests_mirror_real_usage]
+
+#[test]
+fn a_detached_adoption_refuses_when_the_prior_launch_record_cannot_be_preserved() {
+    // llmlint: ignore-block[tests_mirror_real_usage] no CLI command occupies the
+    // adoption backup's private destination. A filesystem collision is the failure
+    // this boundary must report, so only that premise is arranged directly; the
+    // detached adoption, retained driver's refusal, and every assertion drive the
+    // compiled binary over its real run root.
+    let world = World::new("driver-adopt-backup-refused");
+    let run = start_detached(&world, "backup-refused", vec![human("approve", &[])]);
+    world.until("the driver to exit", |world| {
+        world.run(&["status", &run]).stdout.contains("DRIVER DEAD")
+    });
+    std::fs::create_dir(world.run_file(&run, "launch.pre-adopt-1.json"))
+        .expect("the backup destination is occupied by a directory");
+
+    let adopted = world.run(&["adopt", &run, "--detach"]);
+    adopted.exited(REFUSED);
+    adopted.err_has("did not claim it");
+    adopted.err_has("launch.pre-adopt-1.json");
+    adopted.err_has("driver.log");
+    assert!(adopted.stdout.trim().is_empty(), "{}", adopted.stdout);
+
+    assert_eq!(world.run_json(&run, "launch.json")["adoptions"], json!(0));
+    assert!(world.events_of(&run, "driver-adopted").is_empty());
+} // llmlint: ignore-end[tests_mirror_real_usage]
+
 /// The pair means on `adopt` what it means on `start`, refusals included.
 ///
 /// `--attach` is the default either way, so naming it is the adoption the bare
@@ -822,7 +876,6 @@ fn adopt_takes_the_attach_detach_pair_start_takes() {
     assert_eq!(world.events_of(&run, "driver-adopted").len(), 1);
     assert_eq!(world.run_json(&run, "launch.json")["adoptions"], json!(1));
     assert!(world.run_file(&run, "launch.pre-adopt-1.json").exists());
-    // Attached, so it left nothing behind holding the run.
     assert!(
         !world.run_file(&run, "owner.lock").exists(),
         "an attached adoption returned still holding the run's lock"
@@ -1209,7 +1262,7 @@ fn adopt_refuses_another_sessions_run_and_has_no_force() {
 
     let stranger = world.as_session("session-other");
     stranger
-        .run(&["adopt", &run])
+        .run(&["adopt", &run, "--detach"])
         .exited(REFUSED)
         .err_has("belongs to")
         .err_has("not to this session");
@@ -1230,7 +1283,7 @@ fn adopt_refuses_a_run_something_is_still_driving() {
     });
 
     world
-        .run(&["adopt", &run])
+        .run(&["adopt", &run, "--detach"])
         .exited(REFUSED)
         .err_has("still being driven")
         .err_has("onepipeline stop still-live");

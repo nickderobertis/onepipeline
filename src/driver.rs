@@ -781,8 +781,8 @@ fn drive_run(args: &DriveRunArgs) -> Result<i32> {
     let view = RunView::open(&paths)?;
     let log = paths.driver_log();
     if args.adopt {
-        take_the_run_over(&paths, &mut record);
-        journal_the_adoption(&paths, &record, &view)?;
+        take_the_run_over(&paths, &mut record)?;
+        report_and_journal_adoption(&paths, &record, &view)?;
     }
     let mut observer = observe(
         &paths,
@@ -1095,7 +1095,7 @@ fn settlement_of(view: &RunView) -> Settlement {
 /// retains is, and this one returns as soon as that driver has claimed the run.
 fn adopt(args: &AdoptArgs) -> Result<i32> {
     let paths = resolve(&args.run)?;
-    let (mut record, view) = adoptable(&paths)?;
+    let (mut record, view) = validate_and_displace_for_adoption(&paths)?;
 
     if args.detach {
         // Nothing is written here, and the lock is not taken here either. The
@@ -1118,9 +1118,9 @@ fn adopt(args: &AdoptArgs) -> Result<i32> {
     // this process while the driver that won carried on.
     let lock = engine::claim(&paths)?;
 
-    take_the_run_over(&paths, &mut record);
+    take_the_run_over(&paths, &mut record)?;
     ledger::write_json(&paths.launch(), &record)?;
-    journal_the_adoption(&paths, &record, &view)?;
+    report_and_journal_adoption(&paths, &record, &view)?;
 
     // Relayed: an adoption attaches, so this process stays to read it. The goal
     // comes off the run's own projected plan rather than off the plan file the
@@ -1170,7 +1170,7 @@ fn adopt(args: &AdoptArgs) -> Result<i32> {
 /// The view is the one the liveness verdict was read off, and it is what the
 /// adoption goes on to say the dead driver abandoned — the same read, so the two
 /// cannot disagree about the run they are describing.
-fn adoptable(paths: &RunPaths) -> Result<(LaunchRecord, RunView)> {
+fn validate_and_displace_for_adoption(paths: &RunPaths) -> Result<(LaunchRecord, RunView)> {
     let session = sys::launching_session();
     let record: LaunchRecord = ledger::read_json(&paths.launch())?;
 
@@ -1209,13 +1209,17 @@ fn adoptable(paths: &RunPaths) -> Result<(LaunchRecord, RunView)> {
 /// what the record said *before* this adoption: it is the first thing to read
 /// after adopting, and truncating it would lose the account of the driver that
 /// died.
-fn take_the_run_over(paths: &RunPaths, record: &mut LaunchRecord) {
+fn take_the_run_over(paths: &RunPaths, record: &mut LaunchRecord) -> Result<()> {
     record.adoptions += 1;
     record.driven_by_this_process();
     let previous = paths
         .dir
         .join(format!("launch.pre-adopt-{}.json", record.adoptions));
-    let _ = std::fs::copy(paths.launch(), previous);
+    std::fs::copy(paths.launch(), &previous).map_err(|source| Error::Ledger {
+        path: previous,
+        source,
+    })?;
+    Ok(())
 }
 
 /// Say what the driver being replaced was in the middle of, on the run's own
@@ -1225,7 +1229,11 @@ fn take_the_run_over(paths: &RunPaths, record: &mut LaunchRecord) {
 /// nodes again and the session each one was working in is the only record of
 /// where its commits are: named here, that branch is in the run's own account of
 /// the adoption rather than only in a process that has exited.
-fn journal_the_adoption(paths: &RunPaths, record: &LaunchRecord, view: &RunView) -> Result<()> {
+fn report_and_journal_adoption(
+    paths: &RunPaths,
+    record: &LaunchRecord,
+    view: &RunView,
+) -> Result<()> {
     let abandoned = view.state.sessions_in_flight();
     for (node, session) in &abandoned {
         eprintln!(
