@@ -960,18 +960,17 @@ impl World {
     /// not, because the set it may not find is everything on the host and no
     /// journey can enumerate that.
     ///
-    /// On Unix that set is `ps`, which `sys::process_start_token` asks when a
-    /// dispatch is registered, delegated to the real one by absolute path.
-    /// Windows asks the process itself, so there is nothing to hold there and
-    /// this is an empty directory.
-    #[cfg(unix)]
+    /// On macOS and other non-Linux Unix that set is `ps`, delegated to the real
+    /// one by absolute path. Linux asks procfs and Windows asks the process
+    /// itself, so there is nothing to hold there and this is an empty directory.
+    #[cfg(all(unix, not(target_os = "linux")))]
     pub fn path_with_only_what_a_dispatch_resolves(&self) -> PathBuf {
         self.path_with_ps("only-ps", &format!("exec {} \"$@\"", real_ps().display()))
     }
 
     /// A `PATH` holding only what a dispatch resolves by name — which on Windows
     /// is nothing, because the start token is read off the process itself.
-    #[cfg(windows)]
+    #[cfg(any(target_os = "linux", windows))]
     pub fn path_with_only_what_a_dispatch_resolves(&self) -> PathBuf {
         self.empty_path()
     }
