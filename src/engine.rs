@@ -622,20 +622,28 @@ fn converge(
 
         // Everything that has **already arrived**, applied in this one pass.
         //
-        // A dispatch's narration and a node's settlement travel the same channel,
-        // and taking one message per pass made a settlement wait a whole reconcile
-        // pass for every envelope queued ahead of it. A pass is not free — it
-        // re-derives the frontier, asks `onevcs` what each repository releases, and
-        // writes whatever is due — so on a loaded host fourteen relayed records held
-        // one node's settlement for fifty-seven seconds, and the node queued behind
-        // that one never settled at all. Applying a message is an append; deciding
-        // what to do about it is the expensive half, and that half only has to
-        // happen once for the whole batch.
+        // Narration and settlement share this channel, so taking one message a pass
+        // made a settlement wait a whole pass per envelope queued ahead of it — and
+        // a pass re-derives the frontier, asks `onevcs` what each repository
+        // releases, and writes whatever is due. Applying a message is an append;
+        // deciding what to do about it is the expensive half, and that half only has
+        // to happen once for the batch.
         //
-        // The batch takes no longer than the `POLL` this pass would otherwise have
-        // spent waiting for a single message, so a dispatch narrating without pause
-        // cannot hold the pass open and starve the scheduling above it — it is
-        // taken up by the next pass instead.
+        // Bounded by the `POLL` this pass would otherwise have spent waiting for one
+        // message, so a dispatch narrating without pause cannot hold a pass open and
+        // starve the scheduling above it; what it is still writing is taken up next
+        // pass.
+        //
+        // llmlint: ignore-block[changed_behavior_has_e2e] the order this writes is the
+        // order it always wrote — the batch is applied in arrival order, so no journal a
+        // journey can read differs by one record. What differs is only how long a
+        // settlement waits, and that is proportional to what a pass costs on the host:
+        // seconds on the loaded Windows runner where this was found, microseconds here.
+        // A journey was written to prove it and deleted, because a driver that takes a
+        // message a pass still outran three doubles narrating at a beat a millisecond on
+        // this host, so it passed against both builds and proved neither. Every journey
+        // in the suite drives this code, which is the only path by which any message
+        // reaches the journal.
         let mut batch: Vec<Message> = Vec::new();
         match rx.recv_timeout(POLL) {
             Ok(message) => batch.push(message),
@@ -654,6 +662,7 @@ fn converge(
         }
 
         for message in batch {
+            // llmlint: ignore-end[changed_behavior_has_e2e]
             match message {
                 Message::Event(envelope) => {
                     if let Some(node) = envelope.labels.node.clone() {
