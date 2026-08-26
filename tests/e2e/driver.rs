@@ -2051,8 +2051,45 @@ fn a_linux_process_identity_survives_wall_clock_start_time_drift() {
     world.release("build.go");
 }
 
+/// A Linux run launched by the former `ps lstart` implementation remains
+/// stoppable after upgrading to procfs tokens.
+// llmlint: ignore-block[tests_mirror_real_usage] installing an older binary merely to
+// create its launch record would test packaging rather than this compatibility boundary;
+// replacing only the serialized token with the exact value that binary wrote is the
+// persisted pre-upgrade input the current public `stop` command must accept.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_linux_stop_accepts_an_active_runs_legacy_ps_identity() {
+    let world = World::new("driver-stop-legacy-start-token");
+    world.script("build.wait", "hold");
+    let (run, driver) = start_detached_announcing(&world, "legacy", vec![agent("build", &[])]);
+    world.until("a node to be in flight", |world| {
+        !world.events_of(&run, "node-dispatched").is_empty()
+    });
+
+    let record = world.run_file(&run, "launch.json");
+    let mut launch = world.run_json(&run, "launch.json");
+    launch["started"] = json!(started_at_of(driver));
+    std::fs::write(record, launch.to_string()).expect("the legacy launch record is installed");
+
+    world
+        .run(&["stop", &run])
+        .exited(0)
+        .out_has("\"stopped\":true")
+        .out_has("\"teardown\":\"signalled\"");
+    world.until("the legacy-recorded driver to end", |_| {
+        !still_listed(driver)
+    });
+    world.release("build.go");
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
 /// Finding live pids but declining every recorded identity is a refusal, not an
 /// idle run. The stranger is a real process owned by this test and survives.
+// llmlint: ignore-block[tests_mirror_real_usage] PID reuse is a host transition, not a
+// product operation, and waiting for this particular stale pid to be recycled is unbounded.
+// The fixture changes only that historical pid; the real `stop` command then reads the real
+// run root, asks the host about a real independently-started process, and must leave it alive.
 #[cfg(unix)]
 #[test]
 fn a_stop_that_declines_every_live_identity_does_not_report_success() {
@@ -2098,6 +2135,7 @@ fn a_stop_that_declines_every_live_identity_does_not_report_success() {
     stranger.kill().expect("this test ends its own process");
     stranger.wait().expect("the stranger is reaped");
 }
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 /// A stop reaches a dispatch whose driver is gone.
 ///

@@ -971,19 +971,33 @@ fn platform_process_may_be_live(pid: u32) -> bool {
 /// leaves behind, and reading either as agreement would let two absences prove
 /// each other.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StartToken(String);
+pub struct StartToken {
+    recorded: String,
+    #[cfg(target_os = "linux")]
+    legacy_ps: Option<String>,
+}
 
 impl StartToken {
     /// The token as a record on disk carries it.
     pub fn recorded(&self) -> &str {
-        &self.0
+        &self.recorded
     }
 
     /// Whether a token recorded earlier is this same process's.
     ///
     /// The empty one is never anybody's, for the reason on the type.
     pub fn matches(&self, recorded: &str) -> bool {
-        !recorded.is_empty() && self.0 == recorded
+        !recorded.is_empty()
+            && (self.recorded == recorded || {
+                #[cfg(target_os = "linux")]
+                {
+                    self.legacy_ps.as_deref() == Some(recorded)
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    false
+                }
+            })
     }
 }
 
@@ -1015,7 +1029,7 @@ pub fn process_start_token(pid: u32) -> Option<StartToken> {
     if pid == 0 {
         return None;
     }
-    platform_process_start_token(pid).map(StartToken)
+    platform_process_start_token(pid)
 }
 
 /// Directly from Linux's process record. Field 22 of `/proc/<pid>/stat` is the
@@ -1036,14 +1050,22 @@ pub fn process_start_token(pid: u32) -> Option<StartToken> {
 /// contain spaces or parentheses. After it, field 3 is the first whitespace
 /// separated value, making field 22 index 19 in that suffix.
 #[cfg(target_os = "linux")]
-fn platform_process_start_token(pid: u32) -> Option<String> {
+fn platform_process_start_token(pid: u32) -> Option<StartToken> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let after_command = stat.rsplit_once(')')?.1;
     let started = after_command.split_whitespace().nth(19)?;
-    started
+    let recorded = started
         .parse::<u64>()
         .ok()
-        .map(|ticks| format!("linux-proc-stat:{ticks}"))
+        .map(|ticks| format!("linux-proc-stat:{ticks}"))?;
+    Some(StartToken {
+        recorded,
+        // Older Linux builds persisted `ps lstart`. Keep reading that spelling
+        // so an in-flight pre-upgrade run remains stoppable. This compatibility
+        // path inherits the old token's one-second PID-reuse resolution and
+        // clock drift, but new records always use the stable procfs value.
+        legacy_ps: ps_process_start_token(pid),
+    })
 }
 
 /// Through `ps` on macOS and the other supported Unix targets, because they do
@@ -1077,7 +1099,12 @@ fn platform_process_start_token(pid: u32) -> Option<String> {
 /// pid handed to somebody else — the one verdict that must never come from the
 /// host misbehaving rather than from the process ending.
 #[cfg(all(unix, not(target_os = "linux")))]
-fn platform_process_start_token(pid: u32) -> Option<String> {
+fn platform_process_start_token(pid: u32) -> Option<StartToken> {
+    ps_process_start_token(pid).map(|recorded| StartToken { recorded })
+}
+
+#[cfg(unix)]
+fn ps_process_start_token(pid: u32) -> Option<String> {
     let listed = std::process::Command::new("ps")
         .args(["-p", &pid.to_string(), "-o", "lstart="])
         // `LC_ALL` rather than `LC_TIME`, because it is the one that overrides
@@ -1119,7 +1146,7 @@ fn platform_process_start_token(pid: u32) -> Option<String> {
 /// time this cannot pair with an exit check, which is the unproven half on its
 /// own — and `None` is already the honest way to say a host will not answer.
 #[cfg(windows)]
-fn platform_process_start_token(pid: u32) -> Option<String> {
+fn platform_process_start_token(pid: u32) -> Option<StartToken> {
     use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, WAIT_TIMEOUT};
     use windows_sys::Win32::System::Threading::{
         GetProcessTimes, OpenProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -1171,8 +1198,9 @@ fn platform_process_start_token(pid: u32) -> Option<String> {
     // report. `WAIT_OBJECT_0` is a process that has exited, and `WAIT_FAILED` is
     // a question this host would not take; neither is a proof of a live process,
     // and both resolve to "this host will not say".
-    (read != 0 && waited == WAIT_TIMEOUT)
-        .then(|| format!("{}:{}", created.dwHighDateTime, created.dwLowDateTime))
+    (read != 0 && waited == WAIT_TIMEOUT).then(|| StartToken {
+        recorded: format!("{}:{}", created.dwHighDateTime, created.dwLowDateTime),
+    })
 }
 
 /// Open an append-only file so this process is its **only** appender until the
