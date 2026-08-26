@@ -1085,7 +1085,7 @@ impl World {
         self.path_with_ps(
             "drifted-start-ps",
             &format!(
-                "case \" $* \" in\n  *lstart=*) echo 'Thu Jan  1 00:00:00 1970'; exit 0 ;;;\nesac\nexec {} \"$@\"",
+                "case \" $* \" in\n  *lstart=*) echo 'Thu Jan  1 00:00:00 1970'; exit 0 ;;\nesac\nexec {} \"$@\"",
                 real_ps().display()
             ),
         )
