@@ -641,8 +641,8 @@ fn converge(
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
-        let draining = Instant::now();
-        while draining.elapsed() < POLL {
+        let drain_started = Instant::now();
+        while drain_started.elapsed() < POLL {
             // One arm for both refusals: nothing is queued, or nothing ever will
             // be again. The second is the loop's own `Disconnected` one pass later,
             // which is where it has always been answered.

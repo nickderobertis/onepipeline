@@ -206,16 +206,10 @@ fn a_dispatch_that_ignores_the_ask_is_killed_at_the_deadline() {
     // It was asked first — a kill that skipped the ask would lose whatever the
     // turn had not committed for no reason.
     //
-    // Waited for on the *surface*, through [`World::surfaced`], rather than on
-    // the `turn-interrupted` envelope. The two are separate appends a whole
-    // reconciler pass apart — the loop journals one message per iteration, and
-    // the envelope is a `Message::Event` where the surface is the
-    // `Message::Cancelling` behind it — so a wait on the envelope that read the
-    // surface next is reading between them wherever the host puts them further
-    // apart than this poll. That is what failed this journey on Windows, where
-    // a pass over the run directory costs more, while it passed on every Unix
-    // host. The envelope is already there once the surface is, because it is
-    // written first, so nothing about the ask goes unasserted.
+    // Waited for on the *surface*, through [`World::surfaced`], which documents
+    // the race. This journey is where it was caught: on Windows a pass over the
+    // run directory costs more than that helper's poll, and the envelope landed
+    // a pass ahead of the surface while every Unix host saw them together.
     world.surfaced(&run, "dispatch-interrupted");
     assert!(
         !world.events_of(&run, "turn-interrupted").is_empty(),
@@ -271,18 +265,9 @@ fn a_member_with_no_lever_is_an_answer_and_the_deadline_still_applies() {
 
     cancel(&world, &run, "slow");
 
-    // Waited for on the *surface*, through [`World::surfaced`], rather than on
-    // the `turn-interrupted` envelope — the same wait the reaped journey above
-    // makes, and for the same reason. The ask publishes the envelope as a
-    // `Message::Event` and reports itself as the `Message::Cancelling` behind
-    // it, and the reconciler can put the two appends a whole pass apart, so a
-    // wait on the envelope that read the surface next is reading between them
-    // wherever a pass costs more than the poll. It does on Windows, where a pass
-    // over the run directory is expensive: modelled here by delaying the pass,
-    // the surface arrives 286ms after the envelope on a Linux host that has
-    // never lost the race, on this reconciler and on the one before it alike.
-    // The envelope is already there once the surface is, because it is written
-    // first, so nothing about the interrupt goes unasserted.
+    // Waited for on the *surface* rather than on the `turn-interrupted`
+    // envelope, for the reason the reaped journey above gives: an ask answered
+    // by a harness with no lever writes the same two appends in the same order.
     world.surfaced(&run, "dispatch-interrupted");
     let interrupted = world.events_of(&run, "turn-interrupted");
     assert!(
