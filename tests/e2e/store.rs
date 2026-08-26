@@ -87,6 +87,53 @@ fn a_run_launches_from_a_local_markdown_project_and_executes_the_graph_it_holds(
         .out_has("Deliver it from a folder of Markdown");
 }
 
+/// Losing the store is a projection failure, never an execution failure. The worker reports
+/// it, keeps retrying off the reconcile loop, and catches the board up when it returns.
+#[test]
+fn an_unreachable_store_is_reported_and_retried_while_the_run_completes_unaffected() {
+    let world = World::new("store-writeback-retry");
+    world.script("work.wait", "hold");
+    let project = world.plan(
+        "writeback-retry",
+        &plan_of("writeback-retry", vec![crate::harness::agent("work", &[])]),
+    );
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the running state to reach the store", |world| {
+        world.store_tasks(&project).iter().any(|task| {
+            task["item"]["metadata"]["onepipeline.id"] == "work"
+                && task["item"]["status"]["category"] == "in-progress"
+        })
+    });
+
+    let unavailable = world.root.join("plan-store-unavailable");
+    std::fs::rename(world.store(), &unavailable).expect("the store becomes unreachable");
+    world.until("write-back failure to be reported", |world| {
+        std::fs::read_to_string(world.run_file("writeback-retry", "driver.log")).is_ok_and(|log| {
+            log.contains("onetaskgraph write-back failed") && log.contains("retrying")
+        })
+    });
+
+    // The dispatch was held throughout the outage: the engine remained live and its own
+    // journal, not a read from the missing store, still says what was executing.
+    assert!(world.events_of("writeback-retry", "node-dispatched").len() == 1);
+    std::fs::rename(&unavailable, world.store()).expect("the store returns");
+    world.release("work.go");
+    world.until("the run to complete", |world| {
+        world.run_file("writeback-retry", "result.json").is_file()
+    });
+    assert_eq!(
+        world.run_json("writeback-retry", "result.json")["state"],
+        "complete"
+    );
+    world.until("the retried settlement to reach the store", |world| {
+        world.store_tasks(&project).iter().any(|task| {
+            task["item"]["metadata"]["onepipeline.id"] == "work"
+                && task["item"]["status"]["category"] == "done"
+                && task["item"]["metadata"]["onepipeline.settlement"]["status"] == "done"
+        })
+    });
+}
+
 /// A project produces the same graph a plan document of the same content
 /// produced.
 ///

@@ -73,7 +73,7 @@ const CHECKED_MINIMUM: Version = Version {
 /// [`the_revision_the_checks_install_is_read_out_of_this_file`](tests::the_revision_the_checks_install_is_read_out_of_this_file)
 /// fails if a copy appears. `docs/contract-divergences.md` entry 44 is the
 /// proposal to retire it for a version once one carries the surface.
-pub const FIRST_REVISION: &str = "dc0180cf1f5754c23aae065aae6531f858ca4d1f";
+pub const FIRST_REVISION: &str = "d8051ac20140e45b0b9f1747545e5a6ce7e6df5e";
 
 /// How a host that has no `onetaskgraph` gets one.
 ///
@@ -92,6 +92,12 @@ const RESERVED: &str = "onepipeline.";
 
 /// The reserved key carrying a node's id.
 const ID_KEY: &str = "onepipeline.id";
+
+/// Projection-only metadata carrying the last node settlement.
+///
+/// It shares the consumer's reserved namespace but is not a plan field: relaunching a
+/// project that a previous run updated must read the same node definition it launched.
+pub(crate) const SETTLEMENT_KEY: &str = "onepipeline.settlement";
 
 /// A reserved key this mapping fills from the task itself, and where it comes
 /// from — so a project stating it is told which end to edit rather than having
@@ -140,6 +146,10 @@ pub struct Store {
 }
 
 impl Store {
+    /// The checked executable, for the best-effort write-back worker.
+    pub(crate) fn binary(&self) -> PathBuf {
+        self.binary.clone()
+    }
     /// Resolve the binary and check what it reports before anything is
     /// dispatched.
     ///
@@ -277,6 +287,9 @@ impl Store {
     fn node(&self, task: &Qualified<TaskItem>, ids: &Ids) -> Result<Value> {
         let mut node = Map::new();
         for (key, value) in &task.item.metadata {
+            if key == SETTLEMENT_KEY {
+                continue;
+            }
             let Some(field) = key.strip_prefix(RESERVED) else {
                 continue;
             };

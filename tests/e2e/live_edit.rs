@@ -85,6 +85,14 @@ fn add_reparent_and_context_are_applied_and_reported_applied() {
         "a node with no dispatch had its turn reached for"
     );
 
+    world.until("the accepted graph edit to reach the project", |world| {
+        world.store_tasks("plans:applied").iter().any(|task| {
+            task["item"]["metadata"]["onepipeline.id"] == "extra"
+                && task["item"]["metadata"]["onepipeline.context"] == "the fixture moved"
+                && task["item"]["status"]["category"] == "todo"
+        })
+    });
+
     world.release("slow.go");
     world.until("the run to settle", |world| {
         world.run_file(&run, "result.json").is_file()
@@ -104,6 +112,13 @@ fn add_reparent_and_context_are_applied_and_reported_applied() {
     assert!(task.contains("## Planner context"), "{task}");
     assert!(task.contains("the fixture moved"), "{task}");
     assert!(task.contains("adds no acceptance criteria"), "{task}");
+
+    world.until("settlement to reach the project", |world| {
+        world.store_tasks("plans:applied").iter().all(|task| {
+            task["item"]["status"]["category"] == "done"
+                && task["item"]["metadata"]["onepipeline.settlement"].is_object()
+        })
+    });
 }
 
 #[test]

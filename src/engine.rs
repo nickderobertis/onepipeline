@@ -596,6 +596,12 @@ fn converge(
     state: &mut RunState,
     launch: &LaunchRecord,
 ) -> Result<GraphState> {
+    // Resolving write-back is deliberately best effort. A run launched by an older build
+    // may name no project, and a sibling unavailable after launch cannot become a run
+    // failure. The worker never feeds anything it reads back into this loop.
+    let writeback = crate::taskgraph::Store::resolve()
+        .ok()
+        .and_then(|store| crate::writeback::Writeback::start(store.binary(), paths, launch));
     let channel = ChannelState::new(paths);
     let rules = executor_rules()?;
     let (tx, rx): (Sender<Message>, Receiver<Message>) = mpsc::channel();
@@ -630,6 +636,9 @@ fn converge(
 
     loop {
         reconcile_edits(paths, journal, state, &channel, launch, &mut in_flight)?;
+        if let Some(writeback) = &writeback {
+            writeback.publish(paths, launch, state);
+        }
 
         // Another run's ledger is the only thing that can answer a cross-DAG
         // edge, and it is written by a process this one does not control — so
@@ -686,6 +695,9 @@ fn converge(
             &paused,
             &releases,
         )?;
+        if let Some(writeback) = &writeback {
+            writeback.publish(paths, launch, state);
+        }
 
         if in_flight.is_empty() {
             // Nothing is running and nothing became ready, so no further
@@ -801,6 +813,10 @@ fn converge(
         watch_for_quiet(paths, journal, stall_after, &mut in_flight)?;
     }
 
+    if let Some(writeback) = &writeback {
+        writeback.publish(paths, launch, state);
+        writeback.finish();
+    }
     Ok(graph::state_of(&state.statuses()))
 }
 

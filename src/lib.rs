@@ -77,6 +77,7 @@ mod sys;
 mod taskgraph;
 mod telemetry;
 mod vcs;
+mod writeback;
 
 pub use error::{Error, Result};
 
