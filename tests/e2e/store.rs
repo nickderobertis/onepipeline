@@ -619,8 +619,17 @@ fn onetaskgraph_resolves_a_non_unicode_executable_path_from_the_override() {
     let alias = world
         .root
         .join(std::ffi::OsString::from_vec(b"onetaskgraph-\xff".to_vec()));
-    std::os::unix::fs::symlink(crate::harness::onetaskgraph_binary(), &alias)
-        .expect("a non-Unicode executable alias");
+    if let Err(error) = std::os::unix::fs::symlink(crate::harness::onetaskgraph_binary(), &alias) {
+        #[cfg(target_os = "macos")]
+        if error.raw_os_error() == Some(libc::EILSEQ) {
+            eprintln!(
+                "macOS refused the non-Unicode executable alias with EILSEQ; override resolution \
+                 for a non-Unicode executable path is unproven on this platform"
+            );
+            return;
+        }
+        panic!("a non-Unicode executable alias: {error}");
+    }
 
     let output = world
         .cmd(&["start", &project, "--detach"])
