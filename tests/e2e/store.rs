@@ -140,27 +140,58 @@ fn an_unreachable_store_is_reported_and_retried_while_the_run_completes_unaffect
         })
     });
 
-    // Take it away again for terminal settlement. This time it deliberately remains
-    // unreachable until after result.json proves the run is over.
+    // Take it away again for terminal settlement. It remains unreachable until
+    // the journal says the graph is complete and the terminal publication has
+    // failed, then returns while that failed publication is retryable.
     std::fs::rename(world.store(), &unavailable).expect("the store becomes unreachable again");
 
-    // The engine remains live and its own journal, not a read from the missing store,
-    // still says what is executing. Let the node and the whole run finish before the
-    // store returns: observing result.json while the directory is still absent is the
-    // boundary that proves terminal write-back cannot hold settlement open.
+    // The engine remains live and its own journal, not a read from the missing
+    // store, still decides what executes. Both nodes settle while the store is
+    // absent, which is the graph-completion boundary the terminal projection
+    // cannot influence.
     assert_eq!(
         world.events_of("writeback-retry", "node-dispatched").len(),
         1
     );
     world.release("work.go");
     world.until(
-        "the run to complete while the store is unreachable",
-        |world| world.run_file("writeback-retry", "result.json").is_file(),
+        "the graph to settle while the store is unreachable",
+        |world| world.events_of("writeback-retry", "node-settled").len() == 2,
     );
+    world.until("terminal write-back failure to be reported", |world| {
+        std::fs::read_to_string(world.run_file("writeback-retry", "driver.log"))
+            .is_ok_and(|log| log.matches("onetaskgraph write-back failed").count() >= 2)
+    });
     assert!(
         !world.store().exists(),
-        "the run only completed after its store became reachable"
+        "the terminal failure was only observed after the store became reachable"
     );
+    assert_eq!(
+        world.events_of("writeback-retry", "node-dispatched").len(),
+        2,
+        "the outage kept the dependent node from dispatching"
+    );
+
+    // Bring the store back inside the worker's bounded closeout window. It must
+    // retry the failed terminal publication and project both settlements
+    // without revisiting execution.
+    std::fs::rename(&unavailable, world.store()).expect("the store returns after settlement");
+    world.until("terminal write-back recovery to be reported", |world| {
+        std::fs::read_to_string(world.run_file("writeback-retry", "driver.log"))
+            .is_ok_and(|log| log.matches("onetaskgraph write-back recovered").count() >= 2)
+    });
+    world.until_store(
+        "the recovered terminal settlement to reach the store",
+        |world| {
+            world.store_tasks(&project).iter().all(|task| {
+                task["item"]["status"]["category"] == "done"
+                    && task["item"]["metadata"]["onepipeline.settlement"].is_object()
+            })
+        },
+    );
+    world.until("the recovered run to write its result", |world| {
+        world.run_file("writeback-retry", "result.json").is_file()
+    });
     let result = world.run_json("writeback-retry", "result.json");
     assert_eq!(result["state"], "complete", "{result}");
     assert!(
@@ -174,7 +205,7 @@ fn an_unreachable_store_is_reported_and_retried_while_the_run_completes_unaffect
     assert_eq!(
         world.events_of("writeback-retry", "node-dispatched").len(),
         2,
-        "the outage kept the dependent node from dispatching"
+        "recovering terminal write-back changed execution"
     );
 }
 

@@ -361,18 +361,17 @@ fn destination_origins(
             return Err("task list returned partial results".to_owned());
         }
         for task in response.items {
-            let _: QualifiedId = task
-                .id
-                .parse()
-                .map_err(|error: crate::Error| error.to_string())?;
             let node = task
                 .item
                 .metadata
                 .get("onepipeline.id")
                 .and_then(Value::as_str)
                 .filter(|id| !id.is_empty())
-                .ok_or_else(|| format!("task '{}' has no onepipeline.id", task.id))?;
-            if origins.insert(node.to_owned(), task.id).is_some() {
+                .ok_or_else(|| format!("task '{}' has no onepipeline.id", task.id.as_str()))?;
+            if origins
+                .insert(node.to_owned(), task.id.as_str().to_owned())
+                .is_some()
+            {
                 return Err(format!("project has more than one task for node '{node}'"));
             }
         }
@@ -402,7 +401,7 @@ struct TaskPage {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DestinationTask {
-    id: String,
+    id: QualifiedId,
     item: DestinationTaskItem,
 }
 
