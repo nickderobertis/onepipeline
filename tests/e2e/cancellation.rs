@@ -271,10 +271,25 @@ fn a_member_with_no_lever_is_an_answer_and_the_deadline_still_applies() {
 
     cancel(&world, &run, "slow");
 
-    world.until("the interrupt to be recorded", |world| {
-        !world.events_of(&run, "turn-interrupted").is_empty()
-    });
+    // Waited for on the *surface*, through [`World::surfaced`], rather than on
+    // the `turn-interrupted` envelope — the same wait the reaped journey above
+    // makes, and for the same reason. The ask publishes the envelope as a
+    // `Message::Event` and reports itself as the `Message::Cancelling` behind
+    // it, and the reconciler can put the two appends a whole pass apart, so a
+    // wait on the envelope that read the surface next is reading between them
+    // wherever a pass costs more than the poll. It does on Windows, where a pass
+    // over the run directory is expensive: modelled here by delaying the pass,
+    // the surface arrives 286ms after the envelope on a Linux host that has
+    // never lost the race, on this reconciler and on the one before it alike.
+    // The envelope is already there once the surface is, because it is written
+    // first, so nothing about the interrupt goes unasserted.
+    world.surfaced(&run, "dispatch-interrupted");
     let interrupted = world.events_of(&run, "turn-interrupted");
+    assert!(
+        !interrupted.is_empty(),
+        "the cancellation surfaced an ask it never recorded making: {}",
+        world.dump()
+    );
     assert_eq!(interrupted[0]["payload"]["delivered"], json!(false));
     assert!(
         interrupted[0]["payload"]["reason"].is_string(),
