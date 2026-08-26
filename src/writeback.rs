@@ -420,6 +420,11 @@ struct DestinationTask {
     item: DestinationTaskItem,
 }
 
+// llmlint: ignore-block[invalid_states_unrepresentable] This projection consumes only the
+// qualified id and metadata below. The remaining required fields prove that the sibling
+// returned its complete task wire shape, but constraining values that never enter graph state
+// would duplicate onetaskgraph's contract and make a harmless representation change break
+// best-effort write-back.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DestinationTaskItem {
@@ -445,6 +450,7 @@ struct DestinationTaskItem {
     #[serde(rename = "repositories")]
     _repositories: Value,
 }
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 fn write_shadow(snapshot: &Snapshot, origins: &BTreeMap<String, String>) -> Result<(), String> {
     let projects = snapshot.dir.join("projects");
