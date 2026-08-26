@@ -149,6 +149,17 @@ resolver = "2"
 #   end one. A requirement because `onevcs-testing` 0.4.9 requires exactly it,
 #   and two `onevcs` copies is a compile error. `tests/e2e/real_vcs.rs` drives
 #   both verdicts against a real origin.
+# - `onevcs` 0.15.1 is the one release here **not** to resolve, and no version
+#   string says so: it polled each captured pipe on a 10ms sleep, charging every
+#   git subprocess that granularity. `tests/e2e/adoption.rs` — 21 journeys, one
+#   host, only the lock differing — ran 16.2s on 0.15.0 and 45.7s on it. This
+#   repository adopted it, measured that, and reverted.
+# - `onevcs` 0.15.2 repairs it: a captured command ends on its own pipes rather
+#   than on a clock, so the sleep is gone and a byte written just before exit is
+#   kept. Both halves answer from here — that selection re-times at a 16.6s
+#   median against 0.15.0's 16.3s, and `tests/e2e/real_vcs.rs` reads a refused
+#   push's outcome off what that command printed, so a dropped last read fails a
+#   journey. `^0.15` already admitted it, so only the resolution moved.
 #
 # **Every pin in this block is declared at the newest release the registry
 # carries**, because this repository resolves no engine at two versions and so
@@ -240,12 +251,15 @@ onejudge = "0.5.3"
 oneharness-core = "0.12"
 # The sibling's own test-support crate, from the **same** revision as the library
 # it implements — here by resolving both from the registry at the releases cut
-# from one commit: `onevcs-testing` v0.4.9 and `onevcs` v0.15.0 are the same tag,
-# and v0.4.9 requires `onevcs = "0.15.0"`, so the build has one copy. Two copies
-# is not a version skew but a compile error: `tests/onevcs_seam.rs` — whose whole
-# job is to drive this crate's seam against those providers — would not build,
-# because the two copies' types are different types.
-onevcs-testing = "0.4.9"
+# from one commit, each release of this crate requiring the exact `onevcs` it was
+# cut beside, so the build has one copy. Two copies is not a version skew but a
+# compile error: `tests/onevcs_seam.rs` — whose whole job is to drive this
+# crate's seam against those providers — would not build, because the two
+# copies' types are different types. `just engines-current` is what holds the
+# pair to the newest each requirement permits and refuses a lock carrying either
+# twice, so the versions stay on the line below and in the lock rather than being
+# restated here.
+onevcs-testing = "0.4.11"
 
 [package]
 name = "onepipeline"
