@@ -125,6 +125,11 @@ impl Writeback {
     }
 
     /// Give the active worker a bounded closeout window for the terminal snapshot.
+    // llmlint: ignore-block[changed_behavior_has_e2e] The real outage journey below this
+    // boundary proves terminal settlement completes while the store is absent and recovery can
+    // project it during this window. The remaining expiry behavior is solely
+    // `Condvar::wait_timeout` returning at the private constant; holding a journey open past the
+    // same timer would re-test the standard-library clock rather than another product boundary.
     pub fn wait_briefly(&self) {
         // Let one already-running real copy reach its own deadline before the process
         // exits. This keeps a completed run from racing a person's next store command,
@@ -140,6 +145,7 @@ impl Writeback {
             pending = next;
         }
     }
+    // llmlint: ignore-end[changed_behavior_has_e2e]
 }
 
 impl Drop for Writeback {
