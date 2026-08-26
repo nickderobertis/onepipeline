@@ -206,16 +206,10 @@ fn a_dispatch_that_ignores_the_ask_is_killed_at_the_deadline() {
     // It was asked first — a kill that skipped the ask would lose whatever the
     // turn had not committed for no reason.
     //
-    // Waited for on the *surface*, through [`World::surfaced`], rather than on
-    // the `turn-interrupted` envelope. The two are separate appends a whole
-    // reconciler pass apart — the loop journals one message per iteration, and
-    // the envelope is a `Message::Event` where the surface is the
-    // `Message::Cancelling` behind it — so a wait on the envelope that read the
-    // surface next is reading between them wherever the host puts them further
-    // apart than this poll. That is what failed this journey on Windows, where
-    // a pass over the run directory costs more, while it passed on every Unix
-    // host. The envelope is already there once the surface is, because it is
-    // written first, so nothing about the ask goes unasserted.
+    // Waited for on the *surface*, through [`World::surfaced`], which documents
+    // the race. This journey is where it was caught: on Windows a pass over the
+    // run directory costs more than that helper's poll, and the envelope landed
+    // a pass ahead of the surface while every Unix host saw them together.
     world.surfaced(&run, "dispatch-interrupted");
     assert!(
         !world.events_of(&run, "turn-interrupted").is_empty(),
@@ -271,10 +265,16 @@ fn a_member_with_no_lever_is_an_answer_and_the_deadline_still_applies() {
 
     cancel(&world, &run, "slow");
 
-    world.until("the interrupt to be recorded", |world| {
-        !world.events_of(&run, "turn-interrupted").is_empty()
-    });
+    // Waited for on the *surface* rather than on the `turn-interrupted`
+    // envelope, for the reason the reaped journey above gives: an ask answered
+    // by a harness with no lever writes the same two appends in the same order.
+    world.surfaced(&run, "dispatch-interrupted");
     let interrupted = world.events_of(&run, "turn-interrupted");
+    assert!(
+        !interrupted.is_empty(),
+        "the cancellation surfaced an ask it never recorded making: {}",
+        world.dump()
+    );
     assert_eq!(interrupted[0]["payload"]["delivered"], json!(false));
     assert!(
         interrupted[0]["payload"]["reason"].is_string(),
