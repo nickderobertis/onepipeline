@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0](https://github.com/nickderobertis/onepipeline/compare/v0.14.2...v0.15.0) - 2026-08-26
+
+### Added
+
+- add a binding amend op and validate the nodes a live edit introduces ([#120](https://github.com/nickderobertis/onepipeline/pull/120))
+- *(engine)* tell a dispatch that died from an agent that failed its task ([#125](https://github.com/nickderobertis/onepipeline/pull/125))
+
+### Fixed
+
+- *(dispatch)* settle library runs on their terminal event ([#126](https://github.com/nickderobertis/onepipeline/pull/126))
+- *(engine)* apply every queued message in one reconcile pass ([#127](https://github.com/nickderobertis/onepipeline/pull/127))
+- *(release)* ask one release question per release, and tell a pending probe from a failed one ([#121](https://github.com/nickderobertis/onepipeline/pull/121))
+
 ## [0.14.2](https://github.com/nickderobertis/onepipeline/compare/v0.14.1...v0.14.2) - 2026-08-25
 
 ### Added
