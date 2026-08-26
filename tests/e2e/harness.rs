@@ -427,6 +427,36 @@ impl World {
             .clone()
     }
 
+    /// Read this world's project back through the real onetaskgraph binary.
+    pub fn store_project(&self, project: &str) -> Value {
+        let output = std::process::Command::new(onetaskgraph_binary())
+            .args(["project", "show", project, "--json"])
+            .env("XDG_CONFIG_HOME", self.root.join("xdg"))
+            .env("ONETASKGRAPH_DEFAULT_SOURCES", STORE_SOURCE)
+            .env(
+                format!(
+                    "ONETASKGRAPH_SOURCES__{}__PLUGIN",
+                    STORE_SOURCE.to_uppercase()
+                ),
+                "local-md",
+            )
+            .env(
+                format!(
+                    "ONETASKGRAPH_SOURCES__{}__CONFIG__ROOT",
+                    STORE_SOURCE.to_uppercase()
+                ),
+                self.store(),
+            )
+            .output()
+            .expect("the real onetaskgraph reads the project");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).expect("project show returns JSON")
+    }
+
     /// Read one projected task's dependency edges through onetaskgraph.
     pub fn store_deps(&self, task: &str) -> Vec<Value> {
         let output = std::process::Command::new(onetaskgraph_binary())

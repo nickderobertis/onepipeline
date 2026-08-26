@@ -149,6 +149,8 @@ fn derived_waiting_failed_and_parked_states_use_their_board_categories() {
         &json!({
             "schema_version": 3,
             "name": "writeback-categories",
+            "concurrency": 2,
+            "goal": {"text": "Keep the board current"},
             "tasks": [
                 {"id": "fails", "persona": "engineer", "task": "## What\nFail."},
                 {"id": "skipped", "persona": "engineer", "task": "## What\nWait.", "deps": ["fails"]},
@@ -156,11 +158,23 @@ fn derived_waiting_failed_and_parked_states_use_their_board_categories() {
                 {"id": "approve", "kind": "human", "task": "Approve it."},
                 {"id": "blocked", "persona": "engineer", "task": "## What\nWait.", "deps": ["approve"]},
                 {"id": "cross", "persona": "engineer", "task": "## What\nWait.", "parked": true, "deps": ["run:missing#up"]},
-                {"id": "hosted", "persona": "engineer", "task": "## What\nWait.", "parked": true, "repo": "github.com/owner/service", "title": "test: hosted"},
+                {"id": "hosted", "persona": "engineer", "task": "## What\nWait.\n\nKeep this body.", "parked": true, "repo": "github.com/owner/service", "title": "test: hosted", "max_turns": 7, "context": "carry this note"},
                 {"id": "local", "persona": "engineer", "task": "## What\nWait.", "parked": true, "repo": local, "title": "test: local"}
             ]
         }),
     );
+    let original_ids: std::collections::BTreeMap<String, String> = world
+        .store_tasks(&project)
+        .into_iter()
+        .filter_map(|task| {
+            Some((
+                task["item"]["metadata"]["onepipeline.id"]
+                    .as_str()?
+                    .to_owned(),
+                task["id"].as_str()?.to_owned(),
+            ))
+        })
+        .collect();
     world.run(&["start", &project, "--detach"]).exited(0);
     world.until("every derived category to reach the store", |world| {
         let categories: std::collections::BTreeMap<String, String> = world
@@ -196,11 +210,28 @@ fn derived_waiting_failed_and_parked_states_use_their_board_categories() {
             && tasks.iter().any(|task| {
                 task["item"]["metadata"]["onepipeline.id"] == "hosted"
                     && task["item"]["repositories"] == json!(["github.com/owner/service"])
+                    && task["id"] == original_ids["hosted"]
+                    && task["item"]["title"] == "test: hosted"
+                    && task["item"]["content"]
+                        .as_str()
+                        .is_some_and(|body| body.contains("Keep this body."))
+                    && task["item"]["metadata"]["onepipeline.persona"] == "engineer"
+                    && task["item"]["metadata"]["onepipeline.max_turns"] == 7
+                    && task["item"]["metadata"]["onepipeline.context"] == "carry this note"
             })
             && tasks.iter().any(|task| {
                 task["item"]["metadata"]["onepipeline.id"] == "local"
                     && task["item"]["metadata"]["onepipeline.repo"] == local
             })
+            && {
+                let project = world.store_project(&project);
+                project["items"][0]["item"]["metadata"]["onepipeline.schema_version"] == 3
+                    && project["items"][0]["item"]["metadata"]["onepipeline.concurrency"] == 2
+                    && project["items"][0]["item"]["metadata"]["onepipeline.goal"]["text"]
+                        == "Keep the board current"
+                    && project["items"][0]["item"]["metadata"]["onepipeline.name"]
+                        == "writeback-categories"
+            }
     });
 }
 

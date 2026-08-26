@@ -135,6 +135,62 @@ fn add_reparent_and_context_are_applied_and_reported_applied() {
 }
 
 #[test]
+fn retry_cancel_requeue_and_drop_are_projected_after_their_rulings() {
+    let world = World::new("edit-writeback-remaining");
+    let run = live(
+        &world,
+        "remaining",
+        vec![
+            agent("root", &[]),
+            agent("cancelled", &["root"]),
+            agent("dropped", &["root"]),
+            agent("retried", &[]),
+        ],
+        &["root", "retried"],
+    );
+    for command in [
+        json!({"op": "cancel", "id": "cancelled"}),
+        json!({"op": "requeue", "id": "cancelled", "amend": {"branch": "topic/resumed"}}),
+        json!({"op": "drop", "id": "dropped", "dependents": "detach"}),
+        json!({"op": "retry", "id": "retried", "node": {
+            "id": "replacement", "persona": "engineer", "task": "## What\nRetry it.",
+            "branch": "topic/replacement"
+        }}),
+    ] {
+        world
+            .run_with_stdin(&["reply", &run], &envelope(json!([command])))
+            .exited(0);
+    }
+
+    world.until(
+        "the remaining accepted edits to reach the project",
+        |world| {
+            let tasks = world.store_tasks("plans:remaining");
+            let task = |id: &str| {
+                tasks
+                    .iter()
+                    .find(|task| task["item"]["metadata"]["onepipeline.id"] == id)
+            };
+            task("cancelled").is_some_and(|task| {
+                task["item"]["status"]["category"] == "todo"
+                    && task["item"]["metadata"]["onepipeline.branch"] == "topic/resumed"
+            }) && task("dropped")
+                .is_some_and(|task| task["item"]["status"]["category"] == "cancelled")
+                && task("retried")
+                    .is_some_and(|task| task["item"]["status"]["category"] == "cancelled")
+                && task("replacement").is_some_and(|task| {
+                    matches!(
+                        task["item"]["status"]["category"].as_str(),
+                        Some("todo" | "done")
+                    ) && task["item"]["metadata"]["onepipeline.branch"] == "topic/replacement"
+                })
+        },
+    );
+    world.release("retried.go");
+    world.release("root.go");
+}
+
+#[test]
 fn cancel_parks_a_node_and_requeue_returns_it_to_the_frontier() {
     let world = World::new("edit-park");
     let run = live(

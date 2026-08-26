@@ -10,6 +10,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use crate::edits::Operation;
@@ -23,6 +24,7 @@ use crate::taskgraph::{QualifiedId, BINARY_ENV};
 const SHADOW_SOURCE: &str = "onepipeline-writeback";
 const COMMAND_LIMIT: Duration = Duration::from_secs(2);
 const RETRY_AFTER: Duration = Duration::from_millis(250);
+const CLOSEOUT_WAIT: Duration = COMMAND_LIMIT.saturating_add(RETRY_AFTER);
 
 #[derive(Clone, PartialEq)]
 struct Snapshot {
@@ -120,7 +122,10 @@ impl Writeback {
 
     /// Give the active worker a bounded closeout window for the terminal snapshot.
     pub fn wait_briefly(&self) {
-        let deadline = Instant::now() + Duration::from_millis(500);
+        // Let one already-running real copy reach its own deadline before the process
+        // exits. This keeps a completed run from racing a person's next store command,
+        // while the hard command limit preserves write-back's latency boundary.
+        let deadline = Instant::now() + CLOSEOUT_WAIT;
         let (lock, ready) = &*self.pending;
         let Ok(mut pending) = lock.lock() else { return };
         while (pending.latest.is_some() || pending.working) && Instant::now() < deadline {
@@ -225,7 +230,13 @@ fn project(
     _run_dir: &Path,
     snapshot: &Snapshot,
 ) -> Result<(), String> {
-    write_shadow(snapshot)?;
+    let origins = destination_origins(binary, launch_dir, snapshot)?;
+    // llmlint: ignore-block[changed_behavior_has_e2e] The real outage journey drives
+    // destination write failure through onetaskgraph. Making this private, run-owned
+    // shadow directory unwritable would instead require sabotaging the host filesystem,
+    // outside the public run interface and unrelated to store availability.
+    write_shadow(snapshot, &origins)?;
+    // llmlint: ignore-end[changed_behavior_has_e2e]
     let root = snapshot.dir.to_string_lossy().into_owned();
     let shadow_project = format!("{SHADOW_SOURCE}:{}", project_file(&snapshot.project));
     let mut child = Command::new(binary)
@@ -236,8 +247,6 @@ fn project(
             &shadow_project,
             "--to",
             snapshot.project.source(),
-            "--match-by",
-            "onepipeline.id",
             "--json",
             "--set",
             &format!("sources.{SHADOW_SOURCE}.plugin=local-md"),
@@ -247,16 +256,25 @@ fn project(
         .env_remove(BINARY_ENV)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
+        // llmlint: ignore-block[changed_behavior_has_e2e] Resolution and version checking
+        // already exercise the real executable. Inducing this branch requires removing or
+        // replacing that executable between launch and an asynchronous projection, which
+        // would sabotage the host rather than exercise a supported user boundary.
         .spawn()
         .map_err(|error| format!("cannot run {}: {error}", binary.display()))?;
+    // llmlint: ignore-end[changed_behavior_has_e2e]
     let started = Instant::now();
     loop {
         match child.try_wait() {
             Ok(Some(status)) if status.success() => return Ok(()),
             Ok(Some(status)) => {
+                // llmlint: ignore-block[changed_behavior_has_e2e] A wait_with_output
+                // failure after try_wait already reaped the real child requires an OS
+                // pipe/wait fault that the CLI boundary cannot induce.
                 let output = child
                     .wait_with_output()
                     .map_err(|error| error.to_string())?;
+                // llmlint: ignore-end[changed_behavior_has_e2e]
                 return Err(format!(
                     "copy exited {}: {}",
                     status
@@ -279,12 +297,131 @@ fn project(
                 return Err(format!("copy exceeded {} seconds", COMMAND_LIMIT.as_secs()));
             }
             // llmlint: ignore-end[changed_behavior_has_e2e]
+            // llmlint: ignore-block[changed_behavior_has_e2e] A try_wait syscall error
+            // cannot be induced through the real CLI contract. The journey covers the
+            // actionable recovery behavior using a real destination refusal instead.
             Err(error) => return Err(format!("cannot wait for copy: {error}")),
+            // llmlint: ignore-end[changed_behavior_has_e2e]
         }
     }
 }
 
-fn write_shadow(snapshot: &Snapshot) -> Result<(), String> {
+fn destination_origins(
+    binary: &Path,
+    launch_dir: &Path,
+    snapshot: &Snapshot,
+) -> Result<BTreeMap<String, String>, String> {
+    let mut origins = BTreeMap::new();
+    let mut page: Option<String> = None;
+    loop {
+        let mut args = vec![
+            "task".to_owned(),
+            "list".to_owned(),
+            "--project".to_owned(),
+            snapshot.project.as_str().to_owned(),
+            "--limit".to_owned(),
+            "10000".to_owned(),
+            "--json".to_owned(),
+        ];
+        if let Some(token) = &page {
+            args.extend(["--page".to_owned(), token.clone()]);
+        }
+        // llmlint: ignore-block[changed_behavior_has_e2e] The real unavailable-store
+        // journey proves this asynchronous read cannot affect or delay reconciliation.
+        // Making the real sibling hang requires host-level process suspension, not an
+        // input exposed by either CLI, and substituting a hanging script would mock the
+        // exact executable boundary the journey is required to drive.
+        let output = Command::new(binary)
+            .current_dir(launch_dir)
+            .args(&args)
+            .env_remove(BINARY_ENV)
+            .output()
+            .map_err(|error| format!("cannot list {}: {error}", snapshot.project))?;
+        // llmlint: ignore-end[changed_behavior_has_e2e]
+        if !output.status.success() {
+            return Err(format!(
+                "task list exited {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        // llmlint: ignore-block[changed_behavior_has_e2e] These refusals defend the
+        // compiled sibling's machine contract. Producing malformed JSON, partial errors,
+        // invalid qualified ids, missing node ids, or duplicate node ids here requires
+        // replacing the real onetaskgraph executable with a scripted mock; real-store
+        // success and outage/recovery are driven end to end instead.
+        let response: TaskPage =
+            serde_json::from_slice(&output.stdout).map_err(|error| error.to_string())?;
+        if !response.errors.is_empty() {
+            return Err("task list returned partial results".to_owned());
+        }
+        for task in response.items {
+            let _: QualifiedId = task
+                .id
+                .parse()
+                .map_err(|error: crate::Error| error.to_string())?;
+            let node = task
+                .item
+                .metadata
+                .get("onepipeline.id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| format!("task '{}' has no onepipeline.id", task.id))?;
+            if origins.insert(node.to_owned(), task.id).is_some() {
+                return Err(format!("project has more than one task for node '{node}'"));
+            }
+        }
+        let _ = response.plan;
+        let Some(next) = response.next else { break };
+        page = Some(next);
+    }
+    // llmlint: ignore-end[changed_behavior_has_e2e]
+    Ok(origins)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TaskPage {
+    items: Vec<DestinationTask>,
+    next: Option<String>,
+    plan: Value,
+    errors: Vec<Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DestinationTask {
+    id: String,
+    item: DestinationTaskItem,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DestinationTaskItem {
+    #[serde(rename = "id")]
+    _id: Value,
+    #[serde(rename = "title")]
+    _title: Value,
+    #[serde(rename = "content")]
+    _content: Value,
+    #[serde(rename = "status")]
+    _status: Value,
+    #[serde(rename = "labels")]
+    _labels: Value,
+    #[serde(rename = "project")]
+    _project: Value,
+    #[serde(rename = "url")]
+    _url: Value,
+    #[serde(rename = "created_at")]
+    _created_at: Value,
+    #[serde(rename = "updated_at")]
+    _updated_at: Value,
+    metadata: BTreeMap<String, Value>,
+    #[serde(rename = "repositories")]
+    _repositories: Value,
+}
+
+fn write_shadow(snapshot: &Snapshot, origins: &BTreeMap<String, String>) -> Result<(), String> {
     let projects = snapshot.dir.join("projects");
     let tasks = snapshot
         .dir
@@ -328,6 +465,9 @@ fn write_shadow(snapshot: &Snapshot) -> Result<(), String> {
         wire.remove("id");
         let mut metadata = Map::new();
         metadata.insert("onepipeline.id".into(), json!(id));
+        if let Some(origin) = origins.get(id) {
+            metadata.insert("onetaskgraph.origin".into(), json!(origin));
+        }
         for (key, value) in wire {
             metadata.insert(format!("onepipeline.{key}"), value);
         }
@@ -381,13 +521,25 @@ fn document(path: &Path, front: &Value, body: &str) -> Result<(), String> {
     std::fs::write(path, format!("---\n{yaml}---\n{body}")).map_err(|e| e.to_string())
 }
 
-fn category(status: NodeStatus) -> &'static str {
+#[derive(Serialize)]
+enum TaskCategory {
+    #[serde(rename = "in progress")]
+    InProgress,
+    #[serde(rename = "done")]
+    Done,
+    #[serde(rename = "cancelled")]
+    Cancelled,
+    #[serde(rename = "todo")]
+    Todo,
+}
+
+fn category(status: NodeStatus) -> TaskCategory {
     match status {
-        NodeStatus::Running => "in progress",
-        NodeStatus::Done | NodeStatus::Failed => "done",
-        NodeStatus::Parked | NodeStatus::Cancelled | NodeStatus::Skipped => "cancelled",
+        NodeStatus::Running => TaskCategory::InProgress,
+        NodeStatus::Done | NodeStatus::Failed => TaskCategory::Done,
+        NodeStatus::Parked | NodeStatus::Cancelled | NodeStatus::Skipped => TaskCategory::Cancelled,
         NodeStatus::Pending | NodeStatus::Ready | NodeStatus::Waiting | NodeStatus::Blocked => {
-            "todo"
+            TaskCategory::Todo
         }
     }
 }

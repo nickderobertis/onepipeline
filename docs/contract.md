@@ -24,7 +24,7 @@ Every validation a plan document crossed is applied at the point a project is re
 
 **Status writes back; the journal does not move.** As a node's state changes, onepipeline writes that state onto its task's status category: `todo` while it waits, `in-progress` while it is dispatched, `done` when it settles done, and `cancelled` when it is parked or dropped. The settlement detail goes to reserved metadata. The run journal and the run ledger stay onepipeline's, and the plan of record is still the graph the run is executing, projected from that journal under this run's ownership lock rather than re-read from the store.
 
-**Live edits write through.** An accepted `add`, `retry`, `cancel`, `requeue`, `reparent`, `drop` or `context` edit updates the onetaskgraph project's tasks after the reconciler commits it to the journal. Write-back is best effort and retried off the reconcile loop: a slow or unavailable store is reported and never changes an edit ruling, a node settlement, or a scheduling decision.
+**Live edits write through.** Every accepted graph edit updates the onetaskgraph project's tasks after the reconciler commits it to the journal. Write-back is best effort and retried off the reconcile loop: a slow or unavailable store is reported and never changes an edit ruling, a node settlement, or a scheduling decision.
 
 A store is configured in onetaskgraph's own document, `onetaskgraph.yaml`, discovered from the directory a launch runs in — so which backend a plan lives in is the operator's, and this crate ships no configuration surface of its own for it. `examples/plan-store/` is one such store, holding the example plans this crate ships.
 
