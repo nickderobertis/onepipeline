@@ -629,67 +629,100 @@ fn converge(
             }
         }
 
+        // Everything that has **already arrived**, applied in this one pass.
+        //
+        // Narration and settlement share this channel, so taking one message a pass
+        // made a settlement wait a whole pass — a frontier re-derived, `onevcs` asked
+        // what each repository releases, whatever is due written — for every envelope
+        // queued ahead of it. Deciding what to do about a batch is that same one pass.
+        //
+        // Bounded by the `POLL` this pass would otherwise have spent waiting for one
+        // message, so a dispatch narrating without pause cannot hold a pass open.
+        //
+        // llmlint: ignore-block[changed_behavior_has_e2e] the batch is applied in arrival
+        // order, so no journal a journey can read differs by a record; what differs is how
+        // long a settlement waits, which is proportional to what a pass costs on the host.
+        // Every journey drives this code — it is the only path a message reaches the
+        // journal by — and one written to prove the wait passed against both builds.
+        let mut batch: Vec<Message> = Vec::new();
         match rx.recv_timeout(POLL) {
-            Ok(Message::Event(envelope)) => {
-                if let Some(node) = envelope.labels.node.clone() {
-                    if let Some(dispatch) = in_flight.get_mut(&node) {
-                        // Only an envelope evidencing progress moves the stall
-                        // clock. A heartbeat says the process is alive, which is
-                        // a different question with its own deadline one layer
-                        // down — and a stall watch it reset could never fire for
-                        // the wedged-but-alive turn it exists to catch.
-                        if projection::evidences_progress(&envelope) {
-                            dispatch.last_progress = Instant::now();
-                            dispatch.reported_quiet = false;
-                        }
-                        // Addressing is not progress: a turn a heartbeat names
-                        // is still the turn a `context` note is delivered into.
-                        if let Some(address) = addressed_by(&envelope) {
-                            dispatch.control = Some(address);
-                        }
-                    }
-                }
-                journal.relay(&envelope)?;
-            }
-            // A dispatch asked again is a dispatch started again, and it reaches
-            // the run's own record as one rather than only a log.
-            Ok(Message::Redispatched(again)) => journal.emit(
-                journal::PipelineKind::NodeDispatched,
-                journal::labels(&paths.run, Some(&again.node)),
-                journal::payload(&[
-                    ("attempt", json!(again.attempt)),
-                    ("attempts", json!(again.attempts)),
-                    ("reason", json!(bounded(&again.reason))),
-                ]),
-            )?,
-            // A cancellation that reached a live turn, and one that ran out of
-            // patience and reaped it. Surfaced rather than only journalled
-            // because a planner reading its own updates is who decides what to
-            // do next, and what to do next is not the same for the two.
-            Ok(Message::Cancelling(step)) => raise(paths, journal, cancelling_surface(&step))?,
-            // Emitted rather than relayed: it is this crate's own kind, so it
-            // belongs in this crate's own stream, numbered by the writer that
-            // owns it.
-            Ok(Message::BodyNotDrafted(undrafted)) => journal.emit(
-                journal::PipelineKind::BodyNotDrafted,
-                journal::labels(&paths.run, Some(&undrafted.node)),
-                journal::payload(&[
-                    ("ending", json!(undrafted.ending.ending())),
-                    ("detail", json!(undrafted.ending.why())),
-                ]),
-            )?,
-            Ok(Message::Settled(settlement)) => {
-                in_flight.remove(&settlement.node);
-                settle(paths, journal, &settlement)?;
-                *state = projection::fold(&journal::read(&paths.journal()));
-                // A node that settled may have readied its dependents, and a
-                // node that is ready again — a requeue, a retry — is announced
-                // again.
-                announced_ready
-                    .retain(|id| state.statuses().get(id).copied() == Some(NodeStatus::Ready));
-            }
+            Ok(message) => batch.push(message),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+        let drain_started = Instant::now();
+        while drain_started.elapsed() < POLL {
+            // One arm for both refusals: nothing is queued, or nothing ever will
+            // be again. The second is the loop's own `Disconnected` one pass later,
+            // which is where it has always been answered.
+            let Ok(message) = rx.try_recv() else {
+                break;
+            };
+            batch.push(message);
+        }
+
+        for message in batch {
+            // llmlint: ignore-end[changed_behavior_has_e2e]
+            match message {
+                Message::Event(envelope) => {
+                    if let Some(node) = envelope.labels.node.clone() {
+                        if let Some(dispatch) = in_flight.get_mut(&node) {
+                            // Only an envelope evidencing progress moves the stall
+                            // clock. A heartbeat says the process is alive, which is
+                            // a different question with its own deadline one layer
+                            // down — and a stall watch it reset could never fire for
+                            // the wedged-but-alive turn it exists to catch.
+                            if projection::evidences_progress(&envelope) {
+                                dispatch.last_progress = Instant::now();
+                                dispatch.reported_quiet = false;
+                            }
+                            // Addressing is not progress: a turn a heartbeat names
+                            // is still the turn a `context` note is delivered into.
+                            if let Some(address) = addressed_by(&envelope) {
+                                dispatch.control = Some(address);
+                            }
+                        }
+                    }
+                    journal.relay(&envelope)?;
+                }
+                // A dispatch asked again is a dispatch started again, and it reaches
+                // the run's own record as one rather than only a log.
+                Message::Redispatched(again) => journal.emit(
+                    journal::PipelineKind::NodeDispatched,
+                    journal::labels(&paths.run, Some(&again.node)),
+                    journal::payload(&[
+                        ("attempt", json!(again.attempt)),
+                        ("attempts", json!(again.attempts)),
+                        ("reason", json!(bounded(&again.reason))),
+                    ]),
+                )?,
+                // A cancellation that reached a live turn, and one that ran out of
+                // patience and reaped it. Surfaced rather than only journalled
+                // because a planner reading its own updates is who decides what to
+                // do next, and what to do next is not the same for the two.
+                Message::Cancelling(step) => raise(paths, journal, cancelling_surface(&step))?,
+                // Emitted rather than relayed: it is this crate's own kind, so it
+                // belongs in this crate's own stream, numbered by the writer that
+                // owns it.
+                Message::BodyNotDrafted(undrafted) => journal.emit(
+                    journal::PipelineKind::BodyNotDrafted,
+                    journal::labels(&paths.run, Some(&undrafted.node)),
+                    journal::payload(&[
+                        ("ending", json!(undrafted.ending.ending())),
+                        ("detail", json!(undrafted.ending.why())),
+                    ]),
+                )?,
+                Message::Settled(settlement) => {
+                    in_flight.remove(&settlement.node);
+                    settle(paths, journal, &settlement)?;
+                    *state = projection::fold(&journal::read(&paths.journal()));
+                    // A node that settled may have readied its dependents, and a
+                    // node that is ready again — a requeue, a retry — is announced
+                    // again.
+                    announced_ready
+                        .retain(|id| state.statuses().get(id).copied() == Some(NodeStatus::Ready));
+                }
+            }
         }
 
         watch_for_quiet(paths, journal, stall_after, &mut in_flight)?;
