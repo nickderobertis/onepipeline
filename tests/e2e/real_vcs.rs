@@ -79,9 +79,7 @@ fn a_lifecycle_node_publishes_through_the_real_onevcs_and_the_base_advances() {
     world.script("service.work", "the worker wrote this\n");
 
     let path = world.plan("landed", &plan_of("landed", vec![node(&repo.checkout)]));
-    world
-        .run(&["start", &path.to_string_lossy(), "--attach"])
-        .settled();
+    world.run(&["start", &path, "--attach"]).settled();
     world.until("the run to settle", |world| {
         world.run_file("landed", "result.json").is_file()
     });
@@ -171,9 +169,7 @@ fn a_merge_path_that_refuses_the_publishing_push_fails_the_node_and_leaves_the_b
     world.script("service.work", "the worker wrote this\n");
 
     let path = world.plan("refused", &plan_of("refused", vec![node(&repo.checkout)]));
-    world
-        .run(&["start", &path.to_string_lossy(), "--attach"])
-        .settled();
+    world.run(&["start", &path, "--attach"]).settled();
     world.until("the run to settle", |world| {
         world.run_file("refused", "result.json").is_file()
     });
@@ -238,9 +234,7 @@ fn a_launchs_vcs_filter_reaches_the_real_sibling_and_narrows_what_it_relays() {
         "unfiltered",
         &plan_of("unfiltered", vec![node(&repo.checkout)]),
     );
-    world
-        .run(&["start", &path.to_string_lossy(), "--attach"])
-        .settled();
+    world.run(&["start", &path, "--attach"]).settled();
     let ingested = relayed("unfiltered");
     for kind in ["fetch", "push", "session-closed"] {
         assert!(
@@ -258,7 +252,7 @@ fn a_launchs_vcs_filter_reaches_the_real_sibling_and_narrows_what_it_relays() {
     world
         .run(&[
             "start",
-            &path.to_string_lossy(),
+            &path,
             "--attach",
             "--filter-vcs",
             r#"{"exclude": [{"kind": "fetch"}]}"#,
@@ -314,7 +308,7 @@ fn a_vcs_filter_flag_replaces_the_one_a_launch_config_supplied() {
     world
         .run(&[
             "start",
-            &path.to_string_lossy(),
+            &path,
             "--attach",
             "--launch-config",
             &config.to_string_lossy(),

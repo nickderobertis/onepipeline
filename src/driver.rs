@@ -221,15 +221,19 @@ fn resolve_plan_graphs(plan: &mut Plan, base: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Mint a run id from the plan's name or the file's, made unique.
-fn mint_run_id(plan: &Plan, path: &Path, root: &Path) -> String {
+/// Mint a run id from the plan's name or the project's, made unique.
+///
+/// The plan's own name first, which a project states as `onepipeline.name` or
+/// leaves to its own title; the native half of the qualified id otherwise, which
+/// is what a person launching it typed.
+fn mint_run_id(plan: &Plan, project: &str, root: &Path) -> String {
     let base = plan
         .name
         .clone()
         .or_else(|| {
-            path.file_stem()
-                .and_then(|stem| stem.to_str())
-                .map(|stem| stem.trim_end_matches(".plan").to_string())
+            project
+                .split_once(':')
+                .map(|(_, native)| native.to_string())
         })
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| "run".to_string());
@@ -330,7 +334,12 @@ fn read_filter(view: &RunView, args: &ReadArgs) -> Result<EventFilter> {
 
 /// `onepipeline start`.
 fn start(args: &StartArgs) -> Result<i32> {
-    let mut plan = Plan::load(&args.plan)?;
+    // The binary first, and its version with it: a plan that cannot be read is
+    // a launch that never starts, and a store this build cannot read a project
+    // out of is named here rather than by a node that fails on its first
+    // dispatch. Nothing is dispatched and no run root is created before this.
+    let store = crate::taskgraph::Store::resolve()?;
+    let mut plan = store.plan(&args.project)?;
     graph::validate(&plan)?;
     let launch_dir = launch_dir()?;
     // The launch config is read once, here, and both halves of what it declares
@@ -372,7 +381,7 @@ fn start(args: &StartArgs) -> Result<i32> {
     let filters = declared_filters(declared.filters, args)?;
 
     let root = ledger::runs_root();
-    let run = mint_run_id(&plan, &args.plan, &root);
+    let run = mint_run_id(&plan, &args.project, &root);
     let holders = concurrency::holders(&plan)?;
     for holder in holders
         .iter()
@@ -423,7 +432,7 @@ fn start(args: &StartArgs) -> Result<i32> {
 
     let mut record = LaunchRecord {
         run_id: run.clone(),
-        plan: args.plan.clone(),
+        project: args.project.clone(),
         // Absolute, once, here: this is the only process that knows where the
         // operator launched from, and every later driver — including the one a
         // fresh `adopt` starts from some other directory — replays this value
@@ -1077,9 +1086,9 @@ fn adopt(args: &RunArgs) -> Result<i32> {
     )?;
 
     // Relayed: an adoption attaches, so this process stays to read it. The goal
-    // comes off the run's own projected plan rather than off the plan file the
+    // comes off the run's own projected plan rather than off the project the
     // launch named: a run whose graph the planner has edited since is still the
-    // run this driver is adopting, and that file may no longer exist at all.
+    // run this driver is adopting, and that project may have moved on or gone.
     //
     // The observer only, and only when the run was launched with one: what
     // adoption is *for* is the loop below, which this process runs itself.
@@ -1671,7 +1680,7 @@ fn reply(args: &ReplyArgs) -> Result<i32> {
     };
     // A reply this schema refuses is read a second time, leniently, to see
     // whether a retired plan field is why — an `add` carrying one is the same
-    // planner mistake as a plan file carrying one, and deserves the same answer.
+    // planner mistake as a task carrying one, and deserves the same answer.
     let envelope: Reply = serde_json::from_str(text.trim()).map_err(|e| {
         let why = serde_json::from_str::<serde_json::Value>(text.trim())
             .ok()
@@ -2157,31 +2166,35 @@ mod tests {
     #[test]
     fn a_run_id_comes_from_the_plans_name_and_is_made_unique() {
         let root = scratch("mint");
-        let path = Path::new("plans/release.plan.json");
+        let project = "plans:release";
         assert_eq!(
-            mint_run_id(&plan(Some("tracked-release")), path, &root),
+            mint_run_id(&plan(Some("tracked-release")), project, &root),
             "tracked-release"
         );
 
         std::fs::create_dir_all(root.join("tracked-release")).expect("an existing run");
         assert_eq!(
-            mint_run_id(&plan(Some("tracked-release")), path, &root),
+            mint_run_id(&plan(Some("tracked-release")), project, &root),
             "tracked-release-2"
         );
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// A project states its plan's name as its own title where the reserved key
+    /// says nothing, so a nameless plan is rare — but a store may hold one, and
+    /// what names the run then is the id a person typed.
     #[test]
-    fn a_nameless_plan_takes_its_run_id_from_the_file() {
-        let root = scratch("mint-file");
+    fn a_nameless_plan_takes_its_run_id_from_the_project_it_was_launched_by() {
+        let root = scratch("mint-project");
+        assert_eq!(mint_run_id(&plan(None), "plans:release", &root), "release");
         assert_eq!(
-            mint_run_id(&plan(None), Path::new("plans/release.plan.json"), &root),
-            "release"
-        );
-        assert_eq!(
-            mint_run_id(&plan(None), Path::new("plans/odd name!.json"), &root),
+            mint_run_id(&plan(None), "plans:odd name!", &root),
             "odd-name-"
         );
+        // An id with no source half at all cannot name a project, and the
+        // launch is refused long before this — so what it falls back to is the
+        // one name a run always has.
+        assert_eq!(mint_run_id(&plan(None), "release", &root), "run");
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -2227,7 +2240,7 @@ mod tests {
     fn launched_by(pid: u32, host: &str, started: &str) -> LaunchRecord {
         LaunchRecord {
             run_id: "stopped".into(),
-            plan: PathBuf::from("plan.json"),
+            project: "plans:demo".into(),
             dir: PathBuf::from("/tmp/launch"),
             graph: String::new(),
             graph_run: String::new(),

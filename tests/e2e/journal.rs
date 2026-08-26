@@ -32,9 +32,7 @@ fn a_runs_journal_is_one_ordered_merged_stream_with_per_stream_sequences() {
     // Detached, so the run really is written by more than one process: the
     // launcher records the launch and the driver it retains records everything
     // the loop does.
-    world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
+    world.run(&["start", &path, "--detach"]).exited(0);
     world.until("the run to settle", |world| {
         world.run_file("sequenced", "result.json").is_file()
     });
@@ -94,9 +92,7 @@ fn a_runs_journal_is_one_ordered_merged_stream_with_per_stream_sequences() {
 fn a_line_this_build_cannot_read_is_skipped_rather_than_ending_the_read() {
     let world = World::new("journal-future");
     let path = world.plan("future", &plan_of("future", vec![agent("build", &[])]));
-    world
-        .run(&["start", &path.to_string_lossy(), "--attach"])
-        .exited(0);
+    world.run(&["start", &path, "--attach"]).exited(0);
 
     // llmlint: ignore-block[tests_mirror_real_usage] the case under test is a store this
     // build did not write: a record left by a *newer* onepipeline, whose envelope shape
@@ -136,7 +132,7 @@ fn a_dispatch_line_this_build_cannot_read_is_skipped_and_the_turn_after_it_is_no
     // follows — and with it the node's own evidence.
     world.script("build.unreadable", "");
     let path = world.plan("badline", &plan_of("badline", vec![agent("build", &[])]));
-    let started = world.run(&["start", &path.to_string_lossy(), "--attach"]);
+    let started = world.run(&["start", &path, "--attach"]);
     started.exited(0).err_has("skipped");
 
     assert!(
@@ -165,9 +161,7 @@ fn the_graph_of_record_is_the_one_the_loop_executed_not_the_launch_file() {
             vec![agent("flaky", &[]), agent("after", &["flaky"])],
         ),
     );
-    world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
+    world.run(&["start", &path, "--detach"]).exited(0);
     world.until("the node to be in flight", |world| {
         !world.events_of("record", "node-dispatched").is_empty()
     });
@@ -191,18 +185,20 @@ fn the_graph_of_record_is_the_one_the_loop_executed_not_the_launch_file() {
         world.run_file("record", "result.json").is_file()
     });
 
-    // The plan file is never rewritten: it is what the run *started* with, and
+    // The launch record's plan is never rewritten: it is what the run *started*
+    // with, and
     // the replacement is not in it.
-    let launched: Vec<String> = world.run_json("record", "plan.json")["tasks"]
+    let mut launched: Vec<String> = world.run_json("record", "plan.json")["tasks"]
         .as_array()
         .expect("tasks")
         .iter()
         .filter_map(|node| node["id"].as_str().map(str::to_string))
         .collect();
+    launched.sort();
     assert_eq!(
         launched,
-        vec!["flaky".to_string(), "after".to_string()],
-        "the launch file was rewritten"
+        vec!["after".to_string(), "flaky".to_string()],
+        "the plan the run started with was rewritten"
     );
 
     // The graph the loop *executed* is the one that counts, and it carried the
@@ -244,9 +240,7 @@ fn the_graph_of_record_is_the_one_the_loop_executed_not_the_launch_file() {
 fn the_runs_result_is_written_atomically_and_read_back_whole() {
     let world = World::new("journal-result");
     let path = world.plan("atomic", &plan_of("atomic", vec![agent("build", &[])]));
-    world
-        .run(&["start", &path.to_string_lossy(), "--attach"])
-        .exited(0);
+    world.run(&["start", &path, "--attach"]).exited(0);
 
     let result = world.run_json("atomic", "result.json");
     assert_eq!(result["run_id"], "atomic");
@@ -285,9 +279,7 @@ fn a_streams_own_order_survives_a_clock_that_disagrees_with_it() {
     let world = World::new("journal-clock");
     world.script("build.clock-stepped", "the turn's clock steps back");
     let path = world.plan("stepped", &plan_of("stepped", vec![agent("build", &[])]));
-    world
-        .run(&["start", &path.to_string_lossy(), "--attach"])
-        .exited(0);
+    world.run(&["start", &path, "--attach"]).exited(0);
 
     let rendered = world.run(&["monitor", "stepped", "--all"]);
     rendered.exited(0);
@@ -319,9 +311,7 @@ fn two_records_of_one_stream_claiming_one_sequence_keep_arriving_order() {
     let world = World::new("journal-dup-seq");
     world.script("build.duplicate-seq", "one seq, stamped twice");
     let path = world.plan("twice", &plan_of("twice", vec![agent("build", &[])]));
-    world
-        .run(&["start", &path.to_string_lossy(), "--attach"])
-        .exited(0);
+    world.run(&["start", &path, "--attach"]).exited(0);
 
     let rendered = world.run(&["monitor", "twice", "--all"]);
     rendered.exited(0);
@@ -347,10 +337,7 @@ fn two_records_of_one_stream_claiming_one_sequence_keep_arriving_order() {
 fn settled_run(name: &'static str) -> (World, String) {
     let world = World::new(name);
     let plan = world.plan(name, &plan_of(name, vec![agent("build", &[])]));
-    world
-        .run(&["start", &plan.to_string_lossy(), "--attach"])
-        .exited(0)
-        .settled();
+    world.run(&["start", &plan, "--attach"]).exited(0).settled();
     (world, name.to_string())
 }
 

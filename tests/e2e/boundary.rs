@@ -15,9 +15,7 @@ use crate::harness::{agent, plan_of, World};
 
 fn settle(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
     let path = world.plan(name, &plan_of(name, nodes));
-    world
-        .run(&["start", &path.to_string_lossy(), "--attach"])
-        .settled();
+    world.run(&["start", &path, "--attach"]).settled();
     world.until("the run to settle", |world| {
         world.run_file(name, "result.json").is_file()
     });
@@ -77,7 +75,7 @@ fn a_budget_that_runs_out_settles_the_node_rather_than_retrying_forever() {
     let world = World::new("boundary-spent");
     world.script("build.silent", "");
     let path = world.plan("spent", &plan_of("spent", vec![agent("build", &[])]));
-    let mut command = world.cmd(&["start", &path.to_string_lossy(), "--attach"]);
+    let mut command = world.cmd(&["start", &path, "--attach"]);
     command.env("ONEPIPELINE_BOUNDARY_ATTEMPTS", "2");
     command.output().expect("the binary runs");
 
@@ -103,7 +101,7 @@ fn an_unusable_attempt_budget_falls_back_rather_than_disabling_the_recovery() {
     world.script("build.silent", "");
     world.script("build.recover-after", "2");
     let path = world.plan("fallback", &plan_of("fallback", vec![agent("build", &[])]));
-    let mut command = world.cmd(&["start", &path.to_string_lossy(), "--attach"]);
+    let mut command = world.cmd(&["start", &path, "--attach"]);
     command.env("ONEPIPELINE_BOUNDARY_ATTEMPTS", "not a number");
     command.output().expect("the binary runs");
 

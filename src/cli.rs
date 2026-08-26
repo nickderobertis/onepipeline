@@ -93,8 +93,13 @@ pub enum Command {
 /// `onepipeline start`.
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
 pub struct StartArgs {
-    /// The plan file.
-    pub plan: PathBuf,
+    /// The qualified onetaskgraph project id the plan is read from,
+    /// `<source>:<native>`.
+    ///
+    /// Qualified by **source**, so a `local-md` project is launchable directly
+    /// with no copy into a remote system first, and nothing special-cases a
+    /// remote source.
+    pub project: String,
     /// Stay attached, streaming the run's events and returning when it settles.
     /// The default.
     #[arg(long, conflicts_with = "detach")]

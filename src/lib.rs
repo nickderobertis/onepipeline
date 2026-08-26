@@ -18,6 +18,13 @@
 //! `tests/contract.rs` drives the fixtures out of that document through these
 //! types, so the two cannot drift.
 //!
+//! A plan is not a file: it is one **project** of a
+//! [`onetaskgraph`](https://github.com/nickderobertis/onetaskgraph) store, named
+//! by its qualified id and read through that product's own binary. What this
+//! crate owns is the run — its journal, its ledger, and the graph it projects
+//! from them — and the plan's *definition* stays where the user already tracks
+//! their work.
+//!
 //! A run's durable state is one directory: the plan it was launched with, the
 //! merged event store every view reads, the run's own result, the channel's
 //! transport, and — beside the store — the account of any record a writer left
@@ -67,6 +74,7 @@ mod lifecycle;
 mod projection;
 mod release;
 mod sys;
+mod taskgraph;
 mod telemetry;
 mod vcs;
 

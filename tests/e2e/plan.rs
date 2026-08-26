@@ -1,6 +1,8 @@
-//! What a plan file may say, what it may not, and the order the engine starts
-//! what it says. A plan is external input, so every refusal here happens before
-//! any provider time is spent.
+//! What a plan may say, what it may not, and the order the engine starts what it
+//! says. A plan is one project of a real `onetaskgraph` store, read through that
+//! product's own binary, and it is external input — so every refusal here
+//! happens at the point the project is read, before any provider time is spent
+//! and before a run root exists.
 //!
 //! Ported from `test_plan_e2e`, `test_single_node_plan_e2e`, and `test_scheduling_e2e`.
 
@@ -13,14 +15,12 @@
 use crate::harness::{
     agent, human, plan_of, World, NOTHING_DRIVING, REFUSED, RENDEZVOUS_SECONDS_ENV, STALL_AFTER_ENV,
 };
-use serde_json::json;
+use serde_json::{json, Value};
 
 /// Run a plan to settlement, attached, and return the run id.
 fn settle(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
     let path = world.plan(name, &plan_of(name, nodes));
-    world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
+    world.run(&["start", &path, "--detach"]).exited(0);
     world.until("the run to settle", |world| {
         world.run_file(name, "result.json").is_file()
     });
@@ -136,7 +136,7 @@ fn a_node_pinned_to_an_executor_the_rules_do_not_declare_is_refused_by_name() {
     let path = world.plan("pinned", &plan_of("pinned", vec![pinned]));
     // The launch drives the run itself, so the refusal is the launch's own: it
     // reaches the operator on the stderr they are already reading.
-    let mut command = world.cmd(&["start", &path.to_string_lossy(), "--attach"]);
+    let mut command = world.cmd(&["start", &path, "--attach"]);
     command.env("ONEPIPELINE_EXECUTOR_RULES", &rules);
     let refused = command.output().expect("the binary runs");
     let said = String::from_utf8_lossy(&refused.stderr).to_string();
@@ -315,9 +315,7 @@ fn concurrency_bounds_how_many_nodes_are_in_flight_at_once() {
     );
     plan["concurrency"] = json!(2);
     let path = world.plan("bounded", &plan);
-    world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
+    world.run(&["start", &path, "--detach"]).exited(0);
 
     world.until("two dispatches to be in flight", |world| {
         world.events_of("bounded", "node-dispatched").len() == 2
@@ -340,104 +338,161 @@ fn concurrency_bounds_how_many_nodes_are_in_flight_at_once() {
 }
 
 #[test]
-fn a_plan_the_schema_refuses_never_starts_a_run() {
+fn a_project_the_schema_refuses_never_starts_a_run() {
     let world = World::new("plan-refuse");
-    let cases: &[(&str, &str, &str)] = &[
+    // The far end of a dependency edge that leaves the project: a real task of
+    // this store, carrying a node id of its own, which this plan has no node
+    // for. It is what makes the reference rule reachable the way a store
+    // reaches it.
+    world.stray_task("dangling", "elsewhere", "nowhere");
+
+    let cases: &[(&str, Value, &str)] = &[
         (
             "cycle",
-            r#"{"schema_version":2,"tasks":[
-                {"id":"a","persona":"e","task":"t","deps":["b"]},
-                {"id":"b","persona":"e","task":"t","deps":["a"]}]}"#,
+            json!({"schema_version": 2, "tasks": [
+                {"id": "a", "persona": "e", "task": "t", "deps": ["b"]},
+                {"id": "b", "persona": "e", "task": "t", "deps": ["a"]}]}),
             "cycle",
         ),
         (
             "dangling",
-            r#"{"schema_version":2,"tasks":[{"id":"a","persona":"e","task":"t","deps":["nowhere"]}]}"#,
+            json!({"schema_version": 2, "tasks": [
+                {"id": "a", "persona": "e", "task": "t", "deps": ["elsewhere"]}]}),
             "not in the plan",
         ),
+        // Two tasks of one project carrying one node id. A plan's dependencies
+        // name a node by that id, so the store is where the collision is caught
+        // and both ends of it are the author's to fix.
         (
             "duplicate",
-            r#"{"schema_version":2,"tasks":[{"id":"a","persona":"e","task":"t"},{"id":"a","persona":"e","task":"t"}]}"#,
-            "duplicate node id",
+            json!({"schema_version": 2, "tasks": [
+                {"id": "a", "persona": "e", "task": "t"},
+                {"id": "a", "persona": "e", "task": "t"}]}),
+            "is already the id of another task",
         ),
+        // A plan-level setting no field answers to, refused by the name the
+        // project wrote it under rather than dropped.
         (
             "typo",
-            r#"{"schema_version":2,"concurency":2,"tasks":[{"id":"a","persona":"e","task":"t"}]}"#,
+            json!({"schema_version": 2, "concurency": 2,
+                   "tasks": [{"id": "a", "persona": "e", "task": "t"}]}),
             "concurency",
         ),
+        // A reserved key of the wrong JSON type: the schema's own types are what
+        // a project is held to, at the point it is read.
         (
-            "notmapping",
-            "[1, 2, 3]",
-            "must be a JSON mapping, got list",
+            "mistyped",
+            json!({"schema_version": "three",
+                   "tasks": [{"id": "a", "persona": "e", "task": "t"}]}),
+            "schema_version",
+        ),
+        // A task carrying no node id at all: a plan's dependencies name a node
+        // by that key, so a task without one is not a node.
+        (
+            "unidentified",
+            json!({"schema_version": 3, "tasks": [
+                {"persona": "e", "task": "t"}]}),
+            "carries no `onepipeline.id`",
+        ),
+        // The two keys the mapping fills from the task itself. A project stating
+        // one is told which end to edit, rather than having its value lose in
+        // silence to what the task already says.
+        (
+            "ownprose",
+            json!({"schema_version": 3, "tasks": [
+                {"id": "a", "persona": "e", "task": "t", "onepipeline-task": "other"}]}),
+            "`onepipeline.task` is not a node field",
+        ),
+        // A dependency on another node of this plan is an edge between two
+        // tasks, so the reserved key carries cross-DAG references and nothing
+        // else — otherwise the backend would draw a graph missing that arrow.
+        (
+            "recordeddep",
+            json!({"schema_version": 3, "tasks": [
+                {"id": "a", "persona": "e", "task": "t"},
+                {"id": "b", "persona": "e", "task": "t", "onepipeline-deps": ["a"]}]}),
+            "is a dependency edge between the two tasks",
         ),
         (
             "humanpersona",
-            r#"{"schema_version":2,"tasks":[{"id":"a","kind":"human","task":"t","persona":"e"}]}"#,
+            json!({"schema_version": 2, "tasks": [
+                {"id": "a", "kind": "human", "task": "t", "persona": "e"}]}),
             "no persona or turn budget",
         ),
         (
             "nodiffpersona",
-            r#"{"schema_version":2,"tasks":[{"id":"a","task":"t","expects_no_diff":true,"persona":"e"}]}"#,
+            json!({"schema_version": 2, "tasks": [
+                {"id": "a", "task": "t", "expects_no_diff": true, "persona": "e"}]}),
             "takes no persona or turn budget",
         ),
         // A control declared where no dispatch will ever read it. The bar this
-        // whole schema change is about: a node control this crate accepts and
-        // cannot apply refuses the launch instead of defaulting in silence.
+        // whole schema is about: a node control this crate accepts and cannot
+        // apply refuses the launch instead of defaulting in silence.
         (
             "humanbudget",
-            r#"{"schema_version":2,"tasks":[{"id":"a","kind":"human","task":"t","max_turns":45}]}"#,
+            json!({"schema_version": 2, "tasks": [
+                {"id": "a", "kind": "human", "task": "t", "max_turns": 45}]}),
             "no persona or turn budget",
         ),
         (
             "stepsbudget",
-            r#"{"schema_version":2,"tasks":[{"id":"a","repo":"o/r","max_turns":45,"steps":[
-                {"id":"s","persona":"e","task":"t"}]}]}"#,
+            json!({"schema_version": 2, "tasks": [
+                {"id": "a", "repo": "o/r", "max_turns": 45,
+                 "steps": [{"id": "s", "persona": "e", "task": "t"}]}]}),
             "takes its persona, task, and turn budget from them",
         ),
         (
             "nodiffbudget",
-            r#"{"schema_version":2,"tasks":[{"id":"a","task":"t","expects_no_diff":true,"max_turns":45}]}"#,
+            json!({"schema_version": 2, "tasks": [
+                {"id": "a", "task": "t", "expects_no_diff": true, "max_turns": 45}]}),
             "takes no persona or turn budget",
         ),
         (
             "humanstepbudget",
-            r#"{"schema_version":2,"tasks":[{"id":"a","repo":"o/r","steps":[
-                {"id":"s","kind":"human","task":"t","max_turns":45}]}]}"#,
+            json!({"schema_version": 2, "tasks": [
+                {"id": "a", "repo": "o/r",
+                 "steps": [{"id": "s", "kind": "human", "task": "t", "max_turns": 45}]}]}),
             "no persona, turn budget, or expects_no_diff",
         ),
         (
             "nodiffstepbudget",
-            r#"{"schema_version":2,"tasks":[{"id":"a","repo":"o/r","steps":[
-                {"id":"s","task":"t","expects_no_diff":true,"max_turns":45}]}]}"#,
+            json!({"schema_version": 2, "tasks": [
+                {"id": "a", "repo": "o/r",
+                 "steps": [{"id": "s", "task": "t", "expects_no_diff": true,
+                            "max_turns": 45}]}]}),
             "expects_no_diff settles without a dispatch",
         ),
         (
             "zerostepbudget",
-            r#"{"schema_version":2,"tasks":[{"id":"a","repo":"o/r","steps":[
-                {"id":"s","persona":"e","task":"t","max_turns":0}]}]}"#,
+            json!({"schema_version": 2, "tasks": [
+                {"id": "a", "repo": "o/r",
+                 "steps": [{"id": "s", "persona": "e", "task": "t", "max_turns": 0}]}]}),
             "no turn at all",
         ),
         (
             "zerobudget",
-            r#"{"schema_version":2,"tasks":[{"id":"a","persona":"e","task":"t","max_turns":0}]}"#,
+            json!({"schema_version": 2, "tasks": [
+                {"id": "a", "persona": "e", "task": "t", "max_turns": 0}]}),
             "no turn at all",
         ),
-        // A plan carrying the retired field is answered with the *field's*
+        // A task carrying the retired field is answered with the *field's*
         // refusal, not the version's: the field is the thing its author has to
         // move, and a planner told only to change a number would carry the bar
         // straight into the new version.
         (
             "donewhen",
-            r#"{"schema_version":1,"tasks":[{"id":"a","persona":"e","task":"t",
-                "done_when":"the gate is green"}]}"#,
+            json!({"schema_version": 1, "tasks": [
+                {"id": "a", "persona": "e", "task": "t",
+                 "done_when": "the gate is green"}]}),
             "`done_when` is no longer a plan field",
         ),
         // Written at the current version and still carrying it: the same answer,
         // because the schema is what refuses it either way.
         (
             "donewhencurrent",
-            r#"{"schema_version":3,"tasks":[{"id":"a","persona":"e","task":"t",
-                "done_when":"the gate is green"}]}"#,
+            json!({"schema_version": 3, "tasks": [
+                {"id": "a", "persona": "e", "task": "t",
+                 "done_when": "the gate is green"}]}),
             "`done_when` is no longer a plan field",
         ),
         // The second retired field, answered the same way and about itself: a
@@ -446,58 +501,52 @@ fn a_plan_the_schema_refuses_never_starts_a_run() {
         // the refusal names the policy that asks for one now.
         (
             "verifyviaci",
-            r#"{"schema_version":3,"tasks":[{"id":"a","repo":"o/r","title":"feat: x",
-                "persona":"e","task":"t","verify_via_ci":true}]}"#,
+            json!({"schema_version": 3, "tasks": [
+                {"id": "a", "repo": "o/r", "title": "feat: x", "persona": "e", "task": "t",
+                 "verify_via_ci": true}]}),
             "`verify_via_ci` is no longer a plan field",
         ),
         // And at a version written before it was ever accepted, because a
         // retired field is not a version's business.
         (
             "verifyviaciold",
-            r#"{"schema_version":1,"tasks":[{"id":"a","repo":"o/r",
-                "persona":"e","task":"t","verify_via_ci":false}]}"#,
+            json!({"schema_version": 1, "tasks": [
+                {"id": "a", "repo": "o/r", "persona": "e", "task": "t",
+                 "verify_via_ci": false}]}),
             "`verify_via_ci` is no longer a plan field",
         ),
         // The one version refusal there is: a number this build has never
         // written, told the versions that are read rather than left to guess.
         (
             "version",
-            r#"{"schema_version":7,"tasks":[{"id":"a","persona":"e","task":"t"}]}"#,
+            json!({"schema_version": 7, "tasks": [
+                {"id": "a", "persona": "e", "task": "t"}]}),
             "schema_version 7 is not one this build reads (3, 2, 1)",
         ),
-        // A title that is only spacing publishes a commit with no subject at
-        // all, which `onevcs` refuses at publication — after a whole dispatch.
-        // The over-long title beside it is `lifecycle.rs`'s journey, where a
-        // real publication is what proves the bound.
-        (
-            "blanktitle",
-            r#"{"schema_version":2,"tasks":[{"id":"a","repo":"o/r","persona":"e","task":"t",
-                "title":"   "}]}"#,
-            "the title is blank",
-        ),
-        // The two rules this schema version added, each keyed to the version the
-        // *document* declares: a lifecycle node at 3 states the title its change
-        // request opens under...
+        // A lifecycle node at 3 states the title its change request opens under.
+        // Every source carries a title, so a blank one is how a store carries
+        // none — and this node's task states nothing there.
         (
             "untitled",
-            r#"{"schema_version":3,"tasks":[{"id":"publish","repo":"o/r","persona":"e",
-                "task":"t"}]}"#,
+            json!({"schema_version": 3, "tasks": [
+                {"id": "publish", "repo": "o/r", "persona": "e", "task": "t"}]}),
             "node 'publish': a lifecycle node states the title its change request opens under",
         ),
-        // The persona this crate dispatches a change request's drafting under.
-        // A node claiming it would be composed as that dispatch — the graph the
+        // The persona this crate dispatches a change request's drafting under. A
+        // node claiming it would be composed as that dispatch — the graph the
         // operator named, and none of the node's own overrides — so the name is
         // refused where a plan is read rather than silently dropping them.
         (
             "reservedpersona",
-            r#"{"schema_version":3,"tasks":[{"id":"draft","persona":"pr-author",
-                "task":"t"}]}"#,
+            json!({"schema_version": 3, "tasks": [
+                {"id": "draft", "persona": "pr-author", "task": "t"}]}),
             "node 'draft': `pr-author` is the persona this crate dispatches",
         ),
         (
             "reservedsteppersona",
-            r#"{"schema_version":3,"tasks":[{"id":"service","repo":"o/r","title":"feat: x",
-                "steps":[{"id":"draft","persona":"pr-author","task":"t"}]}]}"#,
+            json!({"schema_version": 3, "tasks": [
+                {"id": "service", "repo": "o/r", "title": "feat: x",
+                 "steps": [{"id": "draft", "persona": "pr-author", "task": "t"}]}]}),
             "step 'draft': `pr-author` is the persona this crate dispatches",
         ),
         // ...and a plan below it that names `body` is refused by that field's
@@ -505,8 +554,9 @@ fn a_plan_the_schema_refuses_never_starts_a_run() {
         // would leave its author to find out from the published change request.
         (
             "earlybody",
-            r#"{"schema_version":2,"tasks":[{"id":"publish","repo":"o/r","persona":"e",
-                "task":"t","title":"feat: ship it","body":"what it landed"}]}"#,
+            json!({"schema_version": 2, "tasks": [
+                {"id": "publish", "repo": "o/r", "persona": "e", "task": "t",
+                 "title": "feat: ship it", "body": "what it landed"}]}),
             "node 'publish': `body` is a schema 3 field",
         ),
         // The same answer at the oldest version this build reads, and it is the
@@ -514,15 +564,25 @@ fn a_plan_the_schema_refuses_never_starts_a_run() {
         // who wrote a body there has one thing to act on and it is the field.
         (
             "earlybodyv1",
-            r#"{"schema_version":1,"tasks":[{"id":"publish","repo":"o/r","persona":"e",
-                "task":"t","body":"what it landed"}]}"#,
+            json!({"schema_version": 1, "tasks": [
+                {"id": "publish", "repo": "o/r", "persona": "e", "task": "t",
+                 "body": "what it landed"}]}),
             "node 'publish': `body` is a schema 3 field",
         ),
     ];
 
-    for (name, body, expected) in cases {
-        let path = world.raw_plan(&format!("{name}.plan.json"), body);
-        let refused = world.run(&["start", &path.to_string_lossy()]);
+    for (name, plan, expected) in cases {
+        // The two keys a journey has to write *as a key of the store* rather
+        // than as a plan field: the writer moves a plan field onto its reserved
+        // key, and these two are about what happens when the key itself is
+        // wrong. Spelled with a dash here and swapped to the dot below, because
+        // the writer would otherwise prefix them a second time.
+        let stated = serde_json::to_string(plan)
+            .expect("a plan serialises")
+            .replace("onepipeline-", "onepipeline.");
+        let plan: Value = serde_json::from_str(&stated).expect("it re-reads");
+        let project = world.plan(name, &plan);
+        let refused = world.run(&["start", &project]);
         refused.exited(REFUSED).err_has(expected);
         if name.starts_with("donewhen") || name.starts_with("earlybody") {
             // Each of these declares a version *earlier* than this build writes,
@@ -533,40 +593,61 @@ fn a_plan_the_schema_refuses_never_starts_a_run() {
         }
         assert!(
             !world.runs.join(name).exists(),
-            "a refused plan left a run directory behind"
+            "a refused project left a run directory behind"
         );
     }
-
-    // A plan file is read with its own format's escape semantics, so the two
-    // formats reach the schema by different paths. The retired field is named on
-    // both, because a planner who writes YAML wrote the same review bar — and
-    // this one is a legacy document, as every plan carrying that field is.
-    let yaml = world.raw_plan(
-        "donewhen.plan.yaml",
-        "schema_version: 1\ntasks:\n  - id: a\n    persona: e\n    task: t\n    \
-         done_when: the gate is green\n",
-    );
-    world
-        .run(&["start", &yaml.to_string_lossy()])
-        .exited(REFUSED)
-        .err_has("`done_when` is no longer a plan field")
-        .err_has("`## Acceptance criteria` section of its own task")
-        .err_lacks("is not one this build reads");
 }
 
+/// A dependency edge whose far end is not a node is refused where the plan is
+/// read, naming both ends.
+///
+/// The store is a graph of its own, and an edge may leave the project, cross to
+/// the project level, or leave the source entirely. None of those is a plan
+/// node, so each is refused with both ends named — a planner reading it has to
+/// know which task drew the arrow as well as where it pointed.
 #[test]
-fn a_json_plan_keeps_json_escape_semantics_all_the_way_to_the_dispatch() {
-    let world = World::new("plan-emoji");
-    // What a JSON writer emits for one emoji is a surrogate pair. Read as YAML
-    // it is two unpaired halves and the node fails on its own task prose.
-    let path = world.raw_plan(
-        "emoji.plan.json",
-        r#"{"schema_version":2,"name":"emoji","tasks":[
-            {"id":"build","persona":"engineer","task":"😀 ship it"}]}"#,
+fn a_dependency_edge_whose_far_end_is_no_node_is_refused_naming_both_ends() {
+    let world = World::new("plan-faredge");
+    // A far task with no node id of its own. The near task is a node; what the
+    // edge points at is not.
+    world.write_store_item(
+        "tasks/unidentified/far.md",
+        "---\ntitle: \"a task nothing identifies\"\nproject: \"somewhere-else\"\n---\n\n",
+    );
+    let project = world.plan(
+        "faredge",
+        &json!({"schema_version": 3, "name": "faredge", "tasks": [
+            {"id": "near", "persona": "e", "task": "t", "deps": ["store:unidentified/far"]}]}),
     );
     world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
+        .run(&["start", &project])
+        .exited(REFUSED)
+        .err_has("near")
+        .err_has("depends on")
+        .err_has("unidentified/far")
+        .err_has("onepipeline.id");
+    assert!(
+        !world.runs.join("faredge").exists(),
+        "a refused project left a run directory behind"
+    );
+}
+
+/// Task prose reaches the dispatch as the characters the store holds.
+///
+/// A plan is no longer a file, so nothing about the mapping turns on a file
+/// format's escapes: what the store says the task's `content` is, is what the
+/// worker is handed. The emoji is the case that used to break — a JSON
+/// surrogate pair read as YAML is two unpaired halves, which no UTF-8 encoder
+/// accepts — so it is what this holds the whole path with.
+#[test]
+fn task_prose_reaches_the_dispatch_as_the_characters_the_store_holds() {
+    let world = World::new("plan-emoji");
+    let project = world.plan(
+        "emoji",
+        &json!({"schema_version": 2, "name": "emoji", "tasks": [
+            {"id": "build", "persona": "engineer", "task": "😀 ship it"}]}),
+    );
+    world.run(&["start", &project, "--detach"]).exited(0);
     world.until("the run to settle", |world| {
         world.run_file("emoji", "result.json").is_file()
     });
@@ -579,7 +660,7 @@ fn a_json_plan_keeps_json_escape_semantics_all_the_way_to_the_dispatch() {
     let task = relayed["payload"]["task"].as_str().expect("the task prose");
     assert!(
         task.starts_with('\u{1f600}'),
-        "the surrogate pair did not survive as one character: {task:?}"
+        "the emoji did not survive as one character: {task:?}"
     );
 }
 
@@ -596,7 +677,7 @@ fn a_graph_that_settles_unfinished_is_reported_rather_than_erroring() {
     world.script("build.fail", "1");
     let path = world.plan("exit", &plan_of("exit", vec![agent("build", &[])]));
     world
-        .run(&["start", &path.to_string_lossy(), "--attach"])
+        .run(&["start", &path, "--attach"])
         .exited(NOTHING_DRIVING)
         .out_has("\"settlement\":\"unattended\"");
 
@@ -614,7 +695,7 @@ fn a_worker_that_goes_quiet_is_surfaced_without_holding_anything_back() {
         "quiet",
         &plan_of("quiet", vec![agent("slow", &[]), agent("busy", &[])]),
     );
-    let mut command = world.cmd(&["start", &path.to_string_lossy(), "--detach"]);
+    let mut command = world.cmd(&["start", &path, "--detach"]);
     command.env(STALL_AFTER_ENV, "1");
     command.output().expect("the binary runs");
 
@@ -688,7 +769,7 @@ fn a_worker_that_only_heartbeats_is_reported_quiet_rather_than_active() {
     world.script("stuck.wait", "hold");
     world.script("stuck.heartbeat", "50");
     let path = world.plan("wedged", &plan_of("wedged", vec![agent("stuck", &[])]));
-    let mut command = world.cmd(&["start", &path.to_string_lossy(), "--detach"]);
+    let mut command = world.cmd(&["start", &path, "--detach"]);
     command.env(STALL_AFTER_ENV, "2");
     world.run_on(command, "start --detach").exited(0);
 
@@ -750,7 +831,7 @@ fn a_hold_longer_than_a_clock_can_wait_fails_the_dispatch() {
         "unwaitable",
         &plan_of("unwaitable", vec![agent("stuck", &[])]),
     );
-    let mut command = world.cmd(&["start", &path.to_string_lossy(), "--detach"]);
+    let mut command = world.cmd(&["start", &path, "--detach"]);
     command.env(RENDEZVOUS_SECONDS_ENV, u64::MAX.to_string());
     world.run_on(command, "start --detach").exited(0);
     world.until("the run to settle", |world| {
@@ -789,9 +870,7 @@ fn a_node_the_planner_cancels_settles_parked_and_the_run_still_settles() {
         &plan_of("cancelled", vec![agent("slow", &[]), agent("keep", &[])]),
     );
     world.script("keep.wait", "hold");
-    world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
+    world.run(&["start", &path, "--detach"]).exited(0);
     world.until("the held node to be in flight", |world| {
         world
             .events_of("cancelled", "node-dispatched")

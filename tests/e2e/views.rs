@@ -46,7 +46,7 @@ fn names_a_report_file(value: &serde_json::Value) -> bool {
 /// which in a detached run goes to a log no assertion can read.
 fn driven(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> (String, Run) {
     let path = world.plan(name, &plan_of(name, nodes));
-    let launched = world.run(&["start", &path.to_string_lossy(), "--attach"]);
+    let launched = world.run(&["start", &path, "--attach"]);
     (name.to_string(), launched)
 }
 
@@ -61,9 +61,7 @@ const FLOOR: u64 = 250;
 
 fn settled(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
     let path = world.plan(name, &plan_of(name, nodes));
-    world
-        .run(&["start", &path.to_string_lossy(), "--attach"])
-        .settled();
+    world.run(&["start", &path, "--attach"]).settled();
     world.until("the run to settle", |world| {
         world.run_file(name, "result.json").is_file()
     });
@@ -97,9 +95,7 @@ fn monitor_writes_nothing_and_consumes_nothing() {
     let world = World::new("views-readonly");
     world.script("build.wait", "hold");
     let path = world.plan("readonly", &plan_of("readonly", vec![agent("build", &[])]));
-    world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
+    world.run(&["start", &path, "--detach"]).exited(0);
     world.until("a node to be in flight", |world| {
         !world.events_of("readonly", "node-dispatched").is_empty()
     });
@@ -235,7 +231,7 @@ fn an_observer_this_host_cannot_ask_about_is_never_reported_dead() {
 
     let mut launch = world.cmd(&[
         "start",
-        &path.to_string_lossy(),
+        &path,
         "--detach",
         "--dag-graph",
         &world.shipped_dag_graph(),
@@ -307,9 +303,7 @@ fn status_names_a_live_dispatch_and_flags_one_nothing_is_driving() {
     let world = World::new("views-live");
     world.script("build.wait", "hold");
     let path = world.plan("live", &plan_of("live", vec![agent("build", &[])]));
-    world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
+    world.run(&["start", &path, "--detach"]).exited(0);
     world.until("the dispatch to be in flight", |world| {
         !world.events_of("live", "node-dispatched").is_empty()
     });
@@ -763,9 +757,7 @@ fn telemetry_separates_publication_and_lock_time_from_agent_time() {
     world.repository("local-direct", &held.argv());
     world.script("service.work", "the worker wrote this\n");
     let path = world.plan("held", &plan_of("held", vec![lifecycle("service", &[])]));
-    world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
+    world.run(&["start", &path, "--detach"]).exited(0);
 
     world.until("the publication to reach its merge path", |world| {
         !world.events_of("held", "merge-queued").is_empty()
@@ -1283,9 +1275,7 @@ fn a_dispatch_that_has_named_no_tool_reports_its_count_rather_than_a_guess() {
         "nameless",
         &plan_of("nameless", vec![lifecycle("service", &[])]),
     );
-    world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
+    world.run(&["start", &path, "--detach"]).exited(0);
     world.until("the session to be recorded", |world| {
         !world.events_of("nameless", "session-opened").is_empty()
     });
@@ -1352,9 +1342,7 @@ fn status_ages_a_dispatch_by_its_work_rather_than_by_its_heartbeat() {
         "beating",
         &plan_of("beating", vec![agent("stuck", &[]), agent("mute", &[])]),
     );
-    world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
+    world.run(&["start", &path, "--detach"]).exited(0);
 
     // Long enough that an age reading the heartbeat and one reading the work
     // cannot be confused: the turn was announced once, and the beats have gone
@@ -1453,9 +1441,7 @@ fn status_reports_no_work_for_a_dispatch_whose_envelopes_cannot_be_placed_in_tim
         "unplaceable",
         &plan_of("unplaceable", vec![agent("blind", &[])]),
     );
-    world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
+    world.run(&["start", &path, "--detach"]).exited(0);
     world.until("the dispatch to announce its turn", |world| {
         !world.events_of("unplaceable", "turn-started").is_empty()
     });
@@ -1505,9 +1491,7 @@ fn status_dates_and_counts_a_dispatch_from_its_first_placeable_envelope() {
     // announced behind it on one it can.
     world.script("late.unplaceable-member-start", "");
     let path = world.plan("clockback", &plan_of("clockback", vec![agent("late", &[])]));
-    world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
+    world.run(&["start", &path, "--detach"]).exited(0);
     world.until("the dispatch to announce its turn", |world| {
         !world.events_of("clockback", "turn-started").is_empty()
     });
@@ -1557,9 +1541,7 @@ fn status_counts_an_unplaceable_arrival_without_letting_it_move_the_age() {
     // behind it on one it cannot.
     world.script("drifting.unplaceable-turn-start", "");
     let path = world.plan("midturn", &plan_of("midturn", vec![agent("drifting", &[])]));
-    world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
+    world.run(&["start", &path, "--detach"]).exited(0);
     world.until("the dispatch to announce its turn", |world| {
         !world.events_of("midturn", "turn-started").is_empty()
     });
@@ -1609,9 +1591,7 @@ fn status_keeps_the_last_placeable_beat_when_the_clock_stops_being_readable() {
         "lostclock",
         &plan_of("lostclock", vec![agent("fading", &[])]),
     );
-    world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
+    world.run(&["start", &path, "--detach"]).exited(0);
 
     // Long enough that a liveness taken from the newest beat and one taken from
     // the last placeable beat cannot be confused.
@@ -1647,9 +1627,7 @@ fn a_run_that_has_dispatched_nothing_says_it_has_no_transcript() {
     // A human action and nothing else: the loop records it as waiting and
     // dispatches nothing at all, which is the state under test.
     let path = world.plan("quiet", &plan_of("quiet", vec![human("approve", &[])]));
-    world
-        .run(&["start", &path.to_string_lossy(), "--attach"])
-        .exited(0);
+    world.run(&["start", &path, "--attach"]).exited(0);
 
     world
         .run(&["transcript", "quiet"])
@@ -1836,9 +1814,7 @@ fn host_never_renders_a_dispatch_of_a_run_that_was_stopped() {
     let world = World::new("views-stopped");
     world.script("build.wait", "hold");
     let path = world.plan("halted", &plan_of("halted", vec![agent("build", &[])]));
-    world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
+    world.run(&["start", &path, "--detach"]).exited(0);
     world.until("the dispatch to be in flight", |world| {
         !world.events_of("halted", "node-dispatched").is_empty()
     });
@@ -1874,9 +1850,7 @@ fn host_never_renders_a_dispatch_whose_driver_this_host_can_prove_is_gone() {
     let world = World::new("views-ghosted");
     world.script("build.wait", "hold");
     let path = world.plan("ghosted", &plan_of("ghosted", vec![agent("build", &[])]));
-    world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
+    world.run(&["start", &path, "--detach"]).exited(0);
     world.until("the dispatch to be in flight", |world| {
         !world.events_of("ghosted", "node-dispatched").is_empty()
     });
@@ -2022,7 +1996,7 @@ fn host_renders_a_live_dispatch_read_from_a_different_zone_than_its_driver_recor
     let world = World::new("views-zoned");
     world.script("build.wait", "hold");
     let path = world.plan("zoned", &plan_of("zoned", vec![agent("build", &[])]));
-    let mut launch = world.cmd(&["start", &path.to_string_lossy(), "--detach"]);
+    let mut launch = world.cmd(&["start", &path, "--detach"]);
     launch.env("TZ", EAST);
     let started = world.run_on(launch, "a detached launch made in one zone");
     started.exited(0);
@@ -2073,9 +2047,7 @@ fn host_renders_a_live_dispatch_whose_lock_another_build_wrote() {
         "newer-lock",
         &plan_of("newer-lock", vec![agent("build", &[])]),
     );
-    world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
+    world.run(&["start", &path, "--detach"]).exited(0);
     world.until("the dispatch to be in flight", |world| {
         !world.events_of("newer-lock", "node-dispatched").is_empty()
     });
@@ -2117,7 +2089,7 @@ fn host_renders_the_live_dispatches_of_a_run_that_was_adopted() {
     let world = World::new("views-adopted");
     world.script("build.wait", "hold");
     let path = world.plan("adopted", &plan_of("adopted", vec![agent("build", &[])]));
-    let mut launch = world.cmd(&["start", &path.to_string_lossy(), "--detach"]);
+    let mut launch = world.cmd(&["start", &path, "--detach"]);
     launch.env("TZ", EAST);
     let started = world.run_on(launch, "a detached launch made in one zone");
     started.exited(0);
@@ -2426,9 +2398,7 @@ fn a_view_of_a_run_with_no_events_still_renders() {
     let world = World::new("views-empty");
     world.script("driver.wait", "hold");
     let path = world.plan("quiet", &plan_of("quiet", vec![agent("build", &[])]));
-    world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
+    world.run(&["start", &path, "--detach"]).exited(0);
 
     for view in ["monitor", "results", "status", "goals", "telemetry"] {
         world.run(&[view, "quiet"]).exited(0);
@@ -2471,9 +2441,7 @@ fn a_ready_node_waiting_on_a_held_workspace_is_told_apart_from_one_merely_queued
     plan["tasks"][1]["repo"] = serde_json::json!("service");
     plan["tasks"][2]["repo"] = serde_json::json!("other");
     let path = world.plan("readyheld", &plan);
-    world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
+    world.run(&["start", &path, "--detach"]).exited(0);
     world.until("the first node's session to be recorded", |world| {
         !world.events_of("readyheld", "session-opened").is_empty()
     });
@@ -2557,9 +2525,7 @@ fn a_workspace_this_host_cannot_ask_about_is_reported_rather_than_read_as_free()
     // One at a time, so the second node is still ready when `status` renders it.
     plan["concurrency"] = serde_json::json!(1);
     let path = world.plan("unknownrepo", &plan);
-    world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
+    world.run(&["start", &path, "--detach"]).exited(0);
     world.until("the first node's session to be recorded", |world| {
         !world.events_of("unknownrepo", "session-opened").is_empty()
     });
@@ -2605,9 +2571,7 @@ fn a_ready_node_whose_repositorys_only_session_has_closed_reads_as_queued() {
         "worked",
         &plan_of("worked", vec![lifecycle("service", &[])]),
     );
-    world
-        .run(&["start", &done.to_string_lossy(), "--attach"])
-        .settled();
+    world.run(&["start", &done, "--attach"]).settled();
     world.until("the first run to settle", |world| {
         world.run_file("worked", "result.json").is_file()
     });
@@ -2626,9 +2590,7 @@ fn a_ready_node_whose_repositorys_only_session_has_closed_reads_as_queued() {
     );
     plan["concurrency"] = serde_json::json!(1);
     let path = world.plan("readyclosed", &plan);
-    world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
+    world.run(&["start", &path, "--detach"]).exited(0);
     world.until("the blocking node to be dispatched", |world| {
         !world.events_of("readyclosed", "node-dispatched").is_empty()
     });

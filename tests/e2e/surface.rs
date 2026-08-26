@@ -16,7 +16,7 @@ use std::process::Command;
 
 /// Every command the contract documents, with a minimal legal invocation.
 const COMMANDS: &[(&str, &[&str])] = &[
-    ("start", &["start", "plan.json"]),
+    ("start", &["start", "plans:demo"]),
     ("adopt", &["adopt", "run-1"]),
     ("channel", &["channel", "serve", "run-1"]),
     ("next", &["next", "run-1"]),
@@ -113,7 +113,6 @@ fn every_optional_form_the_contract_names_reaches_the_binary() {
         "one",
         &crate::harness::plan_of("one", vec![crate::harness::agent("build", &[])]),
     );
-    let plan = plan.to_string_lossy().into_owned();
 
     for args in [
         vec!["start", &plan, "--detach", "--dag-graph", "off"],
@@ -148,7 +147,7 @@ fn a_missing_required_argument_is_a_usage_error() {
         vec!["channel"],
         // The interval is seconds, so a non-numeric value is rejected before
         // anything is launched rather than silently defaulted.
-        vec!["start", "plan.json", "--heartbeat-interval", "half-hourly"],
+        vec!["start", "plans:demo", "--heartbeat-interval", "half-hourly"],
     ] {
         let output = onepipeline().args(&args).output().expect("it runs");
         assert_eq!(
@@ -174,9 +173,7 @@ fn a_surface_with_nothing_to_say_is_refused_whichever_way_it_was_asked() {
         "quiet",
         &crate::harness::plan_of("quiet", vec![crate::harness::agent("build", &[])]),
     );
-    world
-        .run(&["start", &plan.to_string_lossy(), "--detach"])
-        .exited(0);
+    world.run(&["start", &plan, "--detach"]).exited(0);
 
     let blank = world.root.join("blank.txt");
     std::fs::write(&blank, "  \n\t\n").expect("the blank body is written");
@@ -231,9 +228,7 @@ fn a_stdin_body_that_is_not_text_is_refused_rather_than_salvaged() {
         "garbled",
         &crate::harness::plan_of("garbled", vec![crate::harness::agent("build", &[])]),
     );
-    world
-        .run(&["start", &plan.to_string_lossy(), "--detach"])
-        .exited(0);
+    world.run(&["start", &plan, "--detach"]).exited(0);
 
     let mut child = world
         .cmd(&["surface", "garbled", "--kind", "check-in"])
@@ -293,7 +288,7 @@ fn an_unknown_surface_kind_is_rejected_before_anything_is_attempted() {
 #[test]
 fn attach_and_detach_cannot_both_be_asked_for() {
     let output = onepipeline()
-        .args(["start", "plan.json", "--attach", "--detach"])
+        .args(["start", "plans:demo", "--attach", "--detach"])
         .output()
         .expect("it runs");
     assert_eq!(output.status.code(), Some(USAGE_ERROR));

@@ -126,9 +126,9 @@ impl LaunchConfig {
     /// Read a launch config file: JSON, or the YAML the document is written in,
     /// of which JSON is a subset.
     ///
-    /// Read the way [`Plan::load`](crate::plan::Plan::load) reads a plan, and
-    /// refused at the same boundary: this is a file an operator wrote, and the
-    /// only place it can be refused *before* a run exists is where it is read.
+    /// Refused at the same boundary a plan's own project is: this is a file an
+    /// operator wrote, and the only place it can be refused *before* a run
+    /// exists is where it is read.
     ///
     /// # Errors
     ///

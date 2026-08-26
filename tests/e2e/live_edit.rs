@@ -28,9 +28,7 @@ fn live(world: &World, name: &str, nodes: Vec<Value>, hold: &[&str]) -> String {
         world.script(&format!("{node}.wait"), "hold");
     }
     let path = world.plan(name, &plan_of(name, nodes));
-    world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
+    world.run(&["start", &path, "--detach"]).exited(0);
     world.until("a node to be in flight", |world| {
         !world.events_of(name, "node-dispatched").is_empty()
     });
@@ -575,7 +573,7 @@ fn a_requeue_amending_a_node_to_verify_via_ci_is_refused_by_name_at_the_reconcil
 
 /// A title `onevcs` will not commit under is refused wherever it enters.
 ///
-/// The plan file is one way in and the channel is the other — and the channel
+/// The project is one way in and the channel is the other — and the channel
 /// has three ways to write a publication subject: `add` states one outright, a
 /// `retry` replacement carries one for the node superseding the failure, and a
 /// `requeue` amendment writes one onto a node already in the graph. All three
@@ -838,9 +836,7 @@ fn an_edit_to_a_run_no_loop_is_driving_is_applied_under_the_lock() {
         "undrivengraph",
         &plan_of("undrivengraph", vec![human("approve", &[])]),
     );
-    world
-        .run(&["start", &path.to_string_lossy(), "--attach"])
-        .exited(0);
+    world.run(&["start", &path, "--attach"]).exited(0);
 
     world
         .run_with_stdin(

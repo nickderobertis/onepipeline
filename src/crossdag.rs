@@ -51,12 +51,12 @@ pub struct Reference {
 /// Both halves must be non-empty: `run:#build` and `run:other#` name nothing
 /// that could ever resolve, so they are malformed rather than merely pending.
 ///
-/// The run half must also be a *run id* rather than a path. A plan file is
-/// external input and this half is joined onto the runs root to find the ledger
-/// that answers the edge, so `run:../../elsewhere#node` would otherwise schedule
-/// this run against a ledger outside the root it was pointed at. Refusing it
-/// here makes the plan loader refuse it by name, through the malformed-reference
-/// path that already exists.
+/// The run half must also be a *run id* rather than a path. A plan is external
+/// input and this half is joined onto the runs root to find the ledger that
+/// answers the edge, so `run:../../elsewhere#node` would otherwise schedule this
+/// run against a ledger outside the root it was pointed at. Refusing it here
+/// makes the plan's own reading refuse it by name, through the
+/// malformed-reference path that already exists.
 pub fn parse(dependency: &str) -> Option<Reference> {
     let rest = dependency.strip_prefix(PREFIX)?;
     let (run, node) = rest.split_once('#')?;

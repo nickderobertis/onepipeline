@@ -45,7 +45,7 @@ fn held(world: &World, name: &str, grace: &str) -> String {
     world.script("slow.turn-open", "");
     world.script("slow.wait", "hold");
     let path = world.plan(name, &plan_of(name, vec![agent("slow", &[])]));
-    let mut launch = world.cmd(&["start", &path.to_string_lossy(), "--detach"]);
+    let mut launch = world.cmd(&["start", &path, "--detach"]);
     launch.env(CANCEL_GRACE_ENV, grace);
     world.run_on(launch, "start --detach").exited(0);
     world.until("the held node's turn to open", |world| {
@@ -372,9 +372,7 @@ fn a_requeue_of_a_parked_node_whose_dispatch_has_settled_is_applied() {
             vec![agent("slow", &[]), agent("keep", &[])],
         ),
     );
-    world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
+    world.run(&["start", &path, "--detach"]).exited(0);
     world.until("the held node's turn to open", |world| {
         world
             .events_of("requeuesettled", "turn-started")
@@ -429,7 +427,7 @@ fn a_node_whose_cancellation_is_still_in_flight_renders_as_cancelling() {
     // A deadline nothing in this journey waits out: what is being read is the
     // window *before* a dispatch lets go, so nothing may reap it out from under
     // the reading.
-    let mut launch = world.cmd(&["start", &path.to_string_lossy(), "--detach"]);
+    let mut launch = world.cmd(&["start", &path, "--detach"]);
     launch.env(CANCEL_GRACE_ENV, "600");
     world.run_on(launch, "start --detach").exited(0);
     let run = "cancelrendered".to_string();
@@ -597,7 +595,7 @@ fn a_cancel_of_a_silent_dispatch_asks_nothing_and_still_carries_a_deadline() {
         // Held before it announces anything: no member, no turn, no address.
         world.script(&format!("{node}.wait"), "hold");
         let path = world.plan(node, &plan_of(node, vec![agent(node, &[])]));
-        let mut launch = world.cmd(&["start", &path.to_string_lossy(), "--detach"]);
+        let mut launch = world.cmd(&["start", &path, "--detach"]);
         launch.env(CANCEL_GRACE_ENV, grace);
         world.run_on(launch, "start --detach").exited(0);
         world.until("the node to be dispatched", |world| {

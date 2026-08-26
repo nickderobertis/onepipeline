@@ -29,9 +29,11 @@ Rules:
 
 ## Where the engine lives
 
-- `plan.rs` reads a plan file; `graph.rs` decides whether the graph it describes
-  is legal and what may run now. Both halves of "is this input acceptable" are
-  there, at the trust boundary.
+- `plan.rs` is the plan **schema**; `taskgraph.rs` reads one project of a
+  `onetaskgraph` store as a plan of that shape, driving that binary as a
+  subprocess; `graph.rs` decides whether the graph it describes is legal and
+  what may run now. All of "is this input acceptable" is there, at the trust
+  boundary a project crosses.
 - `engine.rs` is the one continuous reconcile loop — the **single writer**,
   holding the run's ownership lock for as long as it drives. There are no
   rounds: a node dispatches on the pass that observed its last dependency
@@ -40,7 +42,8 @@ Rules:
 - `edits.rs` is the one validator both the submission check and the reconciler
   run, which is what makes "applied or rejected with a reason" true.
 - `projection.rs` folds the journal into the plan of record. The run's
-  `plan.json` is its launch record and is never rewritten.
+  `plan.json` is its launch record and is never rewritten, and the store the
+  plan was read from is never re-read to decide what the run is doing.
 - `agentgraph.rs` and `vcs.rs` are the sibling CLIs, reached as subprocesses.
   Nothing here reimplements what they own.
 - `report.rs` is **half public**: `retain` and the constants an accepted

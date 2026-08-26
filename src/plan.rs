@@ -1,14 +1,18 @@
 //! The plan schema.
 //!
-//! A plan is one JSON document: a task DAG whose node shapes are
+//! A plan is one **onetaskgraph project**: a task DAG whose node shapes are
 //! `ai-orchestrator`'s tracked-graph schema v7, unchanged, plus the three things
 //! `docs/contract.md` adds — `repo` resolved through `onevcs`, an optional
 //! per-node `executor`, and an optional per-node `agent_graph` overriding the
 //! default node-scope graph config.
 //!
-//! This module is the schema and how a plan file is *read*. Whether the graph it
-//! describes is legal — its shape rules, its references, and its acyclicity —
-//! belongs to the graph module, which validates every plan this loader returns.
+//! This module is the **schema** and nothing else. Where a plan comes from is
+//! `taskgraph`'s, which reads one project of that store and maps it onto these
+//! types; whether the graph it describes is legal — its shape rules, its
+//! references, and its acyclicity — belongs to the graph module, which validates
+//! every plan that reader returns. This crate stopped being a file reader when
+//! the store became the plan's home: a plan's *definition* lives where the user
+//! already tracks their work, and only the run's own record is written here.
 
 // llmlint: ignore-file[invalid_states_unrepresentable] a [`Node`] is one flat mapping
 // with optional fields rather than an enum over direct/lifecycle/human, because
@@ -19,15 +23,12 @@
 // enforced instead by `graph::validate_node`, at the trust boundary every plan crosses.
 
 use std::collections::BTreeMap;
-use std::path::Path;
 
 use oneagentgraph::config::ConfigRef;
 use onevcs::registry::{RepoType, Workflow};
 use onevcs::releases::TargetName;
 use onevcs::{Adoption, MergePolicy};
 use serde::{Deserialize, Serialize};
-
-use crate::error::{Error, Result};
 
 /// The plan schema version this crate writes.
 ///
@@ -101,7 +102,8 @@ const CROSS_REPO_REFERENCES_PREAMBLE: &str =
 /// `unknown field `done_when``. That tells a planner a field does not exist; it
 /// does not tell them where the review bar they wrote belongs, and every plan
 /// written before this schema change carries one. So the refusal names the field
-/// and says where the bar goes instead.
+/// and says where the bar goes instead — wherever the field reaches this crate,
+/// including as `onepipeline.done_when` on a task of the store.
 pub(crate) const DONE_WHEN_RETIRED: &str =
     "`done_when` is no longer a plan field. A node's review bar is the \
      `## Acceptance criteria` section of its own task, which the judge is handed \
@@ -129,7 +131,7 @@ pub(crate) const VERIFY_VIA_CI_RETIRED: &str =
 /// The retired fields, each with the refusal a document still carrying it earns.
 ///
 /// A table rather than a branch per field: every one of them reaches this crate
-/// by the same three routes — a plan file, a reply envelope's `add`, and a
+/// by the same three routes — a task's reserved metadata, a reply envelope's `add`, and a
 /// `requeue`'s amendment — and one walk that knows them all is what keeps the
 /// three answering alike.
 const RETIRED_FIELDS: &[(&str, &str)] = &[
@@ -173,62 +175,15 @@ fn default_concurrency() -> u32 {
     4
 }
 
-impl Plan {
-    /// Read a plan file.
-    ///
-    /// Each format is read with **its own** escape semantics: a `.json` file is
-    /// parsed as JSON, so the surrogate pair a JSON writer emits for one emoji
-    /// reaches the dispatched agent as the character it encodes. Reading it as
-    /// YAML instead yields two unpaired halves, which no UTF-8 encoder accepts,
-    /// and the node fails on its own task prose. A JSON document that JSON
-    /// itself cannot parse falls back to the YAML reading, so nothing that
-    /// loaded before stops loading.
-    pub fn load(path: &Path) -> Result<Self> {
-        let text = std::fs::read_to_string(path).map_err(|e| Error::Ledger {
-            path: path.to_path_buf(),
-            source: e,
-        })?;
-        let is_json = path
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("json"));
-        let named = |e: String| Error::Invalid(format!("{}: {e}", path.display()));
-
-        // A document this schema refuses is read a second time, leniently, to
-        // see whether a retired field is why. Only on the failing path: the
-        // reading that decides whether a plan loads stays exactly the one it was.
-        let refused = |e: String| named(retired_field_refusal_in(&text).unwrap_or(e));
-
-        if is_json {
-            match serde_json::from_str::<serde_json::Value>(&text) {
-                Ok(serde_json::Value::Object(_)) => {
-                    return serde_json::from_str(&text).map_err(|e| refused(e.to_string()));
-                }
-                Ok(other) => {
-                    let kind = match other {
-                        serde_json::Value::Array(_) => "list",
-                        serde_json::Value::String(_) => "string",
-                        serde_json::Value::Null => "null",
-                        _ => "scalar",
-                    };
-                    return Err(named(format!("must be a JSON mapping, got {kind}")));
-                }
-                // Not parseable as JSON at all: fall through to the YAML
-                // reading rather than refusing a file that used to load.
-                Err(_) => {}
-            }
-        }
-        serde_norway::from_str(&text).map_err(|e| refused(e.to_string()))
-    }
-}
-
 /// The refusal a submitted document still carrying the retired field earns,
 /// named with where in the document it was found, or `None` if it carries none.
 ///
 /// A whole-document walk rather than a walk of the plan's own shape: the same
-/// field reaches this crate inside a plan file, inside a reply envelope's `add`,
-/// and inside a `requeue`'s amendment, and one refusal for all three is one
-/// answer a planner can act on. Only mapping *keys* are read, so prose that
-/// discusses the field is not mistaken for a document that declares it.
+/// field reaches this crate inside a project's own metadata, inside a reply
+/// envelope's `add`, and inside a `requeue`'s amendment, and one refusal for all
+/// three is one answer a planner can act on. Only mapping *keys* are read, so
+/// prose that discusses the field is not mistaken for a document that declares
+/// it.
 pub(crate) fn retired_field_refusal(document: &serde_json::Value) -> Option<String> {
     match document {
         serde_json::Value::Object(map) => {
@@ -248,15 +203,6 @@ pub(crate) fn retired_field_refusal(document: &serde_json::Value) -> Option<Stri
         serde_json::Value::Array(items) => items.iter().find_map(retired_field_refusal),
         _ => None,
     }
-}
-
-/// The same, for a document that has not been parsed yet.
-///
-/// Read leniently — as YAML, which also reads the JSON a plan file is usually
-/// written in — because the text reaching here is one the strict schema already
-/// refused, and a second refusal to parse it is simply "no retired field".
-fn retired_field_refusal_in(text: &str) -> Option<String> {
-    retired_field_refusal(&serde_norway::from_str::<serde_json::Value>(text).ok()?)
 }
 
 impl Node {
@@ -376,7 +322,7 @@ pub struct Node {
     /// Unique within the plan.
     pub id: String,
     /// Defaults to [`NodeKind::Agent`], and is omitted when it is that, so a
-    /// node round-trips as the plan file wrote it.
+    /// node round-trips as the project wrote it.
     #[serde(default, skip_serializing_if = "NodeKind::is_agent")]
     pub kind: NodeKind,
     /// The task prose: `## What`, `## Why`, `## Acceptance criteria`, then
@@ -691,118 +637,6 @@ mod tests {
         }
     }
 
-    fn scratch(name: &str) -> std::path::PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("onepipeline-plan-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("a scratch root");
-        dir
-    }
-
-    #[test]
-    fn a_json_plan_is_read_with_json_escape_semantics() {
-        let root = scratch("json");
-        let path = root.join("emoji.plan.json");
-        // What `json.dump` writes for one emoji: a surrogate pair. Read as
-        // YAML it is two unpaired halves and the node fails on its own prose.
-        std::fs::write(
-            &path,
-            r#"{"schema_version":2,"tasks":[{"id":"a","persona":"engineer","task":"😀 ship it"}]}"#,
-        )
-        .expect("written");
-        let plan = Plan::load(&path).expect("a JSON plan loads");
-        assert!(
-            plan.tasks[0]
-                .task
-                .as_deref()
-                .expect("task")
-                .starts_with('\u{1f600}'),
-            "the surrogate pair did not survive as one character"
-        );
-        assert_eq!(
-            plan.concurrency, 4,
-            "the default concurrency was not applied"
-        );
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    #[test]
-    fn a_json_document_that_is_not_a_mapping_is_refused_by_name() {
-        let root = scratch("notmapping");
-        let path = root.join("list.plan.json");
-        std::fs::write(&path, "[1, 2, 3]").expect("written");
-        let message = Plan::load(&path).unwrap_err().to_string();
-        assert!(
-            message.contains("must be a JSON mapping, got list"),
-            "{message}"
-        );
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    #[test]
-    fn a_json_named_file_that_json_cannot_parse_falls_back_to_yaml() {
-        let root = scratch("yamlfallback");
-        let path = root.join("actually.plan.json");
-        std::fs::write(
-            &path,
-            "schema_version: 2\ntasks:\n  - id: a\n    persona: engineer\n    task: do it\n",
-        )
-        .expect("written");
-        let plan = Plan::load(&path).expect("the YAML reading is the fallback");
-        assert_eq!(plan.tasks[0].id, "a");
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    #[test]
-    fn a_plan_with_an_unknown_field_is_refused_at_its_trust_boundary() {
-        let root = scratch("unknown");
-        let path = root.join("typo.plan.json");
-        std::fs::write(
-            &path,
-            r#"{"schema_version":2,"concurency":2,"tasks":[{"id":"a","persona":"e","task":"t"}]}"#,
-        )
-        .expect("written");
-        let message = Plan::load(&path).unwrap_err().to_string();
-        assert!(message.contains("concurency"), "{message}");
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    #[test]
-    fn a_missing_plan_file_names_the_path_it_could_not_read() {
-        let message = Plan::load(std::path::Path::new("no/such/plan.json"))
-            .unwrap_err()
-            .to_string();
-        assert!(message.contains("no/such/plan.json"), "{message}");
-    }
-
-    #[test]
-    fn both_shipped_examples_load_and_keep_what_they_declare() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
-        let single = Plan::load(&root.join("single-node.plan.json")).expect("single-node loads");
-        assert_eq!(single.tasks.len(), 1);
-        assert!(single.goal.is_some());
-
-        let mixed = Plan::load(&root.join("mixed-graph.plan.json")).expect("mixed-graph loads");
-        assert_eq!(mixed.concurrency, 3);
-        let docs = mixed
-            .tasks
-            .iter()
-            .find(|n| n.id == "docs")
-            .expect("the docs node");
-        assert_eq!(
-            docs.agent_graph.as_ref().map(|r| r.0.as_str()),
-            Some("./graphs/node-scope.yaml"),
-            "the example does not reference the shipped node-scope config"
-        );
-        let service = mixed
-            .tasks
-            .iter()
-            .find(|n| n.id == "service")
-            .expect("the service node");
-        assert_eq!(service.executor.as_deref(), Some("local"));
-        assert_eq!(service.steps.as_ref().map(Vec::len), Some(2));
-    }
-
     #[test]
     fn a_planner_note_renders_as_its_own_section_and_disclaims_itself() {
         let node = Node {
@@ -1050,70 +884,34 @@ mod tests {
         );
     }
 
-    /// A plan carrying the retired field is answered about the *field*, at every
-    /// version a document can declare it at.
+    /// A document carrying a retired field is answered about the *field*.
     ///
     /// The bar its author wrote has to go somewhere, and only the field's own
-    /// refusal says where. It is a **parse** refusal, so it comes ahead of
-    /// anything the version decides — which is what stops a planner being told to
-    /// move a number when what they have to move is a review bar.
+    /// refusal says where. The walk is over the whole document, because the same
+    /// field reaches this crate three ways — a task's reserved metadata, a reply
+    /// envelope's `add`, and a `requeue`'s amendment — and one answer for all
+    /// three is one thing a planner can act on. `tests/e2e/plan.rs` drives the
+    /// first of those against a real store.
     #[test]
-    fn a_plan_carrying_done_when_is_answered_about_the_field_at_every_version() {
-        let root = scratch("donewhen");
-        for version in PLAN_SCHEMA_VERSIONS_READ {
-            let path = root.join(format!("v{version}.plan.json"));
-            std::fs::write(
-                &path,
-                format!(
-                    r#"{{"schema_version":{version},"tasks":[
-                        {{"id":"contract","persona":"e","task":"t",
-                         "done_when":"the gate is green"}}]}}"#
-                ),
-            )
-            .expect("written");
-            let message = Plan::load(&path).unwrap_err().to_string();
+    fn a_document_carrying_a_retired_field_is_answered_about_the_field_and_names_the_node() {
+        for (field, expected, extra) in [
+            (DONE_WHEN, DONE_WHEN_RETIRED, "## Acceptance criteria"),
+            (VERIFY_VIA_CI, VERIFY_VIA_CI_RETIRED, "change-auto"),
+        ] {
+            let document = serde_json::json!({
+                "schema_version": PLAN_SCHEMA_VERSION,
+                "tasks": [{"id": "contract", "persona": "e", "task": "t", field: true}],
+            });
+            let message = retired_field_refusal(&document).expect("the field is refused");
             assert!(message.contains("'contract':"), "{message}");
-            assert!(message.contains(DONE_WHEN_RETIRED), "{message}");
-            assert!(
-                !message.contains("schema_version"),
-                "a version refusal displaced the field's: {message}"
-            );
+            assert!(message.contains(expected), "{message}");
+            assert!(message.contains(extra), "{message}");
         }
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// The second retired field is answered the same way, and about itself.
-    ///
-    /// A plan that set `verify_via_ci` asked for the host's checks to be the
-    /// merge-path verification, and got a run in which nothing read the field at
-    /// all. `unknown field` would tell its author the field does not exist and
-    /// leave them to guess what asks for it now; this names the policy that does.
-    #[test]
-    fn a_plan_carrying_verify_via_ci_is_answered_about_the_field_at_every_version() {
-        let root = scratch("verifyviaci");
-        for version in PLAN_SCHEMA_VERSIONS_READ {
-            let path = root.join(format!("v{version}.plan.json"));
-            std::fs::write(
-                &path,
-                format!(
-                    r#"{{"schema_version":{version},"tasks":[
-                        {{"id":"service","repo":"owner/service","title":"feat: thing",
-                         "persona":"e","task":"t","verify_via_ci":true}}]}}"#
-                ),
-            )
-            .expect("written");
-            let message = Plan::load(&path).unwrap_err().to_string();
-            assert!(message.contains("'service':"), "{message}");
-            assert!(message.contains(VERIFY_VIA_CI_RETIRED), "{message}");
-            assert!(
-                message.contains("change-auto"),
-                "the refusal does not say what asks for the host's checks now: {message}"
-            );
-            assert!(
-                !message.contains("schema_version"),
-                "a version refusal displaced the field's: {message}"
-            );
-        }
-        std::fs::remove_dir_all(&root).ok();
+        // Only mapping *keys* are read, so prose discussing the field is not a
+        // document declaring it.
+        let prose = serde_json::json!({
+            "tasks": [{"id": "a", "task": "do not use done_when or verify_via_ci"}],
+        });
+        assert_eq!(retired_field_refusal(&prose), None);
     }
 }

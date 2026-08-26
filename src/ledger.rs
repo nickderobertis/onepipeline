@@ -421,8 +421,18 @@ fn is_unset(path: &Path) -> bool {
 pub struct LaunchRecord {
     /// The run id.
     pub run_id: String,
-    /// The plan file the run was launched with.
-    pub plan: PathBuf,
+    /// The qualified onetaskgraph project id the run was launched with.
+    ///
+    /// The plan's **definition** lives in that store; what this run executes is
+    /// the graph projected from its own journal, so this names where the plan
+    /// came from and is never re-read to decide what the run is doing.
+    ///
+    /// Empty on a record written before the store was where a plan came from —
+    /// one that named a plan file instead — and omitted when empty, like every
+    /// other field added to this record after it shipped, so a run an earlier
+    /// build launched is still a run this one can read, adopt, and report on.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub project: String,
     /// The directory every member of this run works in.
     ///
     /// The launch directory, made absolute once — at `start`, by the process
@@ -1379,7 +1389,7 @@ mod tests {
     fn a_record() -> LaunchRecord {
         LaunchRecord {
             run_id: "demo".into(),
-            plan: PathBuf::from("plan.json"),
+            project: "plans:demo".into(),
             dir: PathBuf::from("/tmp/launch"),
             graph: String::new(),
             graph_run: String::new(),
@@ -1589,7 +1599,7 @@ mod tests {
     fn an_unknown_launch_is_nobodys_run() {
         let record = LaunchRecord {
             run_id: "demo".into(),
-            plan: PathBuf::from("plan.json"),
+            project: "plans:demo".into(),
             dir: PathBuf::from("/tmp/launch"),
             graph: "graphs/dag-scope.yaml".into(),
             graph_run: String::new(),
@@ -1615,7 +1625,7 @@ mod tests {
     fn a_foreign_owner_is_labelled_without_naming_the_session() {
         let record = LaunchRecord {
             run_id: "demo".into(),
-            plan: PathBuf::from("plan.json"),
+            project: "plans:demo".into(),
             dir: PathBuf::from("/tmp/launch"),
             graph: "graphs/dag-scope.yaml".into(),
             graph_run: String::new(),

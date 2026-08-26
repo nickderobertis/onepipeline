@@ -757,7 +757,7 @@ fn a_plan_consuming_a_dependency_it_does_not_have_is_refused_by_name() {
     node["consumes"] = json!({"packager": "crate"});
     let path = world.plan("refused", &plan_of("refused", vec![engine(), node]));
     world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .run(&["start", &path, "--detach"])
         .exited(REFUSED)
         .err_has("node 'consumer'")
         .err_has("`consumes` names 'packager'")
@@ -1197,11 +1197,7 @@ fn start_with(world: &World, name: &str, nodes: Vec<Value>, extra: &[&str]) -> S
         world.script(&format!("{id}.work"), &format!("{id} did its work\n"));
     }
     let path = world.plan(name, &plan_of(name, nodes));
-    let mut argv: Vec<String> = vec![
-        "start".to_owned(),
-        path.to_string_lossy().into_owned(),
-        "--detach".to_owned(),
-    ];
+    let mut argv: Vec<String> = vec!["start".to_owned(), path, "--detach".to_owned()];
     argv.extend(extra.iter().map(|arg| (*arg).to_owned()));
     world
         .run(&argv.iter().map(String::as_str).collect::<Vec<&str>>())

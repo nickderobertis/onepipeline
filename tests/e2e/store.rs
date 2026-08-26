@@ -1,0 +1,290 @@
+//! Where a plan comes from: one project of a real `onetaskgraph` store.
+//!
+//! Every journey in this suite launches from a store, so what is held here is
+//! the seam itself — the mapping from a project to the graph a run executes, and
+//! the binary that mapping is read through. Both are driven for real: the store
+//! is a folder of Markdown on this host with no remote system in it, and the
+//! binary is the one an operator installed, resolved the way the contract says
+//! it is resolved.
+//!
+//! The one double is for the version check, and only for the version check: an
+//! install of the wrong version is the one thing a real binary cannot be asked
+//! to be. It answers `--version` and refuses every other invocation, so it can
+//! never stand in for reading a plan.
+
+// llmlint: ignore-file[e2e_not_mocked] `World` substitutes the two *siblings* at their
+// subprocess boundary and nothing inside the crate under test, which is driven as a real
+// compiled binary. `onetaskgraph` is not among them: every plan below is read out of the
+// real store binary against a real folder of Markdown. `harness.rs` carries the same
+// suppression and the full rationale.
+
+use crate::harness::{double, plan_of, World, REFUSED};
+use serde_json::{json, Value};
+
+/// A run launches from a local Markdown project, with no remote system in it at
+/// all, and executes the graph that project holds.
+///
+/// The flow the store exists for: author the plan where you already keep your
+/// work, read it back, and run it. `local-md` is not a lesser source here —
+/// nothing special-cases a remote one — so a project id of that source launches
+/// directly, with no copy into a backend first.
+#[test]
+fn a_run_launches_from_a_local_markdown_project_and_executes_the_graph_it_holds() {
+    let world = World::new("store-localmd");
+    let project = world.plan(
+        "localmd",
+        &json!({
+            "schema_version": 3,
+            "name": "localmd",
+            "concurrency": 4,
+            "goal": {"text": "Deliver it from a folder of Markdown"},
+            "tasks": [
+                {"id": "design", "persona": "engineer", "title": "feat: design it",
+                 "task": "## What\nDesign it."},
+                {"id": "build", "persona": "engineer", "title": "feat: build it",
+                 "task": "## What\nBuild it.", "deps": ["design"]},
+            ],
+        }),
+    );
+    assert_eq!(project, "plans:localmd", "the project id a person types");
+
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the run to settle", |world| {
+        world.run_file("localmd", "result.json").is_file()
+    });
+
+    // The graph that executed is the project's: both nodes ran, and the one that
+    // depends on the other ran after it.
+    let result = world.run_json("localmd", "result.json");
+    let status = |id: &str| {
+        result["nodes"]
+            .as_array()
+            .expect("nodes")
+            .iter()
+            .find(|node| node["id"] == id)
+            .unwrap_or_else(|| panic!("{id} is missing from {result}"))["status"]
+            .clone()
+    };
+    assert_eq!(status("design"), "done", "{result}");
+    assert_eq!(status("build"), "done", "{result}");
+
+    let dispatched: Vec<String> = world
+        .events_of("localmd", "node-dispatched")
+        .into_iter()
+        .filter_map(|event| event["labels"]["node"].as_str().map(ToOwned::to_owned))
+        .collect();
+    assert_eq!(
+        dispatched,
+        ["design", "build"],
+        "the dependency edge the project drew did not order the dispatches"
+    );
+
+    // And the goal the project stated is the run's, read back through the view a
+    // planner reads it in.
+    world
+        .run(&["goals", "localmd"])
+        .exited(0)
+        .out_has("Deliver it from a folder of Markdown");
+}
+
+/// A project produces the same graph a plan document of the same content
+/// produced.
+///
+/// Field by field, against the run's own record of the plan it is executing: the
+/// node fields, the dependency edges, the plan-level settings, and the lifecycle
+/// node's title. The node is `parked`, so the graph is complete and nothing is
+/// dispatched — what this journey is about is the mapping, not the work.
+#[test]
+fn a_project_reads_as_the_plan_document_of_the_same_content() {
+    let world = World::new("store-mapping");
+    // A real identity for the lifecycle node to name, registered the way an
+    // operator registers one: `onevcs` is asked about a repository's live
+    // holders before a run is minted, so a node naming an identity this host
+    // does not have never reaches the mapping at all.
+    world.repository("local-direct", &[]);
+    let document = json!({
+        "schema_version": 3,
+        "name": "mapping",
+        "concurrency": 2,
+        "goal": {"text": "Prove the mapping"},
+        "tasks": [
+            {
+                "id": "publish",
+                "repo": "github.com/owner/service",
+                "repo_type": "team",
+                "workflow": "remote",
+                "merge_policy": "change-auto",
+                "base_branch": "main",
+                "branch": "topic/publish",
+                "title": "feat: publish it",
+                "body": "## What\nIt publishes.",
+                "persona": "engineer",
+                "task": "## What\nPublish it.\n\n## Why\nUsers need it.",
+                "max_turns": 12,
+                "context": "the fixture moved",
+                "executor": "local",
+                "parked": true,
+            },
+            {
+                "id": "audit",
+                "kind": "human",
+                "task": "Approve the publication.",
+                "deps": ["publish"],
+                "parked": true,
+            },
+        ],
+    });
+    let project = world.plan("mapping", &document);
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the run to settle", |world| {
+        world.run_file("mapping", "result.json").is_file()
+    });
+
+    // The nodes come back in the store's own order rather than the order a
+    // document listed them in, which is no difference at all: the schema says
+    // the nodes are in no particular order and `deps` is what orders them. So
+    // both sides are read by id before they are compared.
+    let by_id = |plan: &Value| {
+        let mut plan = plan.clone();
+        plan["tasks"]
+            .as_array_mut()
+            .expect("nodes")
+            .sort_by_key(|node| node["id"].as_str().unwrap_or_default().to_owned());
+        plan
+    };
+    assert_eq!(
+        by_id(&world.run_json("mapping", "plan.json")),
+        by_id(&document),
+        "the project read as a different plan than the document of the same content"
+    );
+}
+
+/// A launch names the project it came from, and the run's journal is still this
+/// crate's.
+///
+/// The store holds the plan's **definition**; what the run executes is the graph
+/// projected from its own journal. So the launch record names where the plan came
+/// from and the run's state is read from the ledger, exactly as it was.
+#[test]
+fn the_launch_record_names_the_project_and_the_run_still_projects_from_its_journal() {
+    let world = World::new("store-record");
+    let project = world.plan(
+        "record",
+        &plan_of("record", vec![crate::harness::agent("build", &[])]),
+    );
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the run to settle", |world| {
+        world.run_file("record", "result.json").is_file()
+    });
+
+    assert_eq!(
+        world.run_json("record", "launch.json")["project"],
+        project,
+        "the launch record does not name the project the plan came from"
+    );
+    // The journal is untouched by any of this: the run's own store still carries
+    // the records the engine wrote, and `status` folds them.
+    assert!(
+        world.run_file("record", "events.jsonl").is_file(),
+        "the run journal moved"
+    );
+    world.run(&["status", "record"]).exited(0).out_has("record");
+}
+
+/// An absent `onetaskgraph` refuses the launch, and nothing is started for it.
+///
+/// The path resolved, the minimum this build needs, and how to install one — all
+/// three, because "not found" alone leaves the one actionable thing unsaid.
+#[test]
+fn an_absent_onetaskgraph_refuses_the_launch_and_starts_nothing() {
+    let world = World::new("store-absent");
+    let missing = world.root.join("no-such-onetaskgraph");
+    let world = world.with_env("ONETASKGRAPH_BIN", &missing.to_string_lossy());
+    let project = world.plan(
+        "absent",
+        &plan_of("absent", vec![crate::harness::agent("build", &[])]),
+    );
+
+    world
+        .run(&["start", &project, "--detach"])
+        .exited(REFUSED)
+        .err_has("no-such-onetaskgraph")
+        .err_has("0.1.0 or newer")
+        .err_has("cargo install onetaskgraph");
+    assert!(
+        !world.runs.join("absent").exists(),
+        "a launch refused for its store left a run directory behind"
+    );
+    assert!(
+        world.events_of("absent", "node-dispatched").is_empty(),
+        "a launch refused for its store dispatched a node"
+    );
+}
+
+/// An `onetaskgraph` below the minimum refuses the launch, naming the version it
+/// found and the one it needs.
+///
+/// The two numbers together, because either alone leaves an operator guessing:
+/// what is installed, and what has to be.
+#[test]
+fn an_onetaskgraph_below_the_minimum_refuses_the_launch_naming_both_versions() {
+    let world = World::new("store-stale").with_env(
+        "ONETASKGRAPH_BIN",
+        &double("fake-onetaskgraph").to_string_lossy(),
+    );
+    let project = world.plan(
+        "stale",
+        &plan_of("stale", vec![crate::harness::agent("build", &[])]),
+    );
+    world.script("onetaskgraph.version", "onetaskgraph 0.0.9\n");
+
+    world
+        .run(&["start", &project, "--detach"])
+        .exited(REFUSED)
+        .err_has("is version 0.0.9")
+        .err_has("0.1.0 or newer")
+        .err_has("cargo install onetaskgraph");
+    assert!(
+        !world.runs.join("stale").exists(),
+        "a launch refused for a stale store left a run directory behind"
+    );
+}
+
+/// An `onetaskgraph` that cannot say what it is refuses the launch too.
+///
+/// Two endings, and both are an install this build cannot read a plan through: a
+/// binary that refuses `--version`, and one that answers with something that is
+/// not a version at all. Neither is allowed to become a run that fails on its
+/// first node.
+#[test]
+fn an_onetaskgraph_that_cannot_report_a_version_refuses_the_launch() {
+    let world = World::new("store-unusable").with_env(
+        "ONETASKGRAPH_BIN",
+        &double("fake-onetaskgraph").to_string_lossy(),
+    );
+    let project = world.plan(
+        "unusable",
+        &plan_of("unusable", vec![crate::harness::agent("build", &[])]),
+    );
+
+    world.script("onetaskgraph.refuse", "this install is broken\n");
+    world
+        .run(&["start", &project, "--detach"])
+        .exited(REFUSED)
+        .err_has("refused `--version`")
+        .err_has("this install is broken")
+        .err_has("0.1.0 or newer");
+
+    std::fs::remove_file(world.fakes.join("onetaskgraph.refuse")).expect("the refusal is cleared");
+    world.script("onetaskgraph.version", "something that is not a version\n");
+    world
+        .run(&["start", &project, "--detach"])
+        .exited(REFUSED)
+        .err_has("reported no version this build can read")
+        .err_has("0.1.0 or newer");
+
+    assert!(
+        !world.runs.join("unusable").exists(),
+        "a launch refused for an unusable store left a run directory behind"
+    );
+}

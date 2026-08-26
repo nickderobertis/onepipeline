@@ -226,9 +226,7 @@ fn dispatched(world: &World, case: &str, branch: Option<&str>) -> (Value, Value)
         node["branch"] = json!(branch);
     }
     let path = world.plan(case, &plan_of(case, vec![node]));
-    world
-        .run(&["start", &path.to_string_lossy(), "--attach"])
-        .settled();
+    world.run(&["start", &path, "--attach"]).settled();
     world.until("the run to settle", |world| {
         world.run_file(case, "result.json").is_file()
     });
@@ -473,7 +471,7 @@ fn a_retry_takes_up_the_session_a_stopped_run_left_its_work_in() {
     let mut stopped = lifecycle("service", &[]);
     stopped["branch"] = json!(STRANDED);
     let path = world.plan("stopped", &plan_of("stopped", vec![stopped]));
-    let mut launch = world.cmd(&["start", &path.to_string_lossy(), "--attach"]);
+    let mut launch = world.cmd(&["start", &path, "--attach"]);
     launch.stdout(Stdio::piped()).stderr(Stdio::piped());
     in_a_group_of_its_own(&mut launch);
     let mut owner = launch.spawn().expect("the stopped run's owner starts");
@@ -518,9 +516,7 @@ fn a_retry_takes_up_the_session_a_stopped_run_left_its_work_in() {
     let mut retry = lifecycle("continuation", &[]);
     retry["branch"] = json!(STRANDED);
     let path = world.plan("retry", &plan_of("retry", vec![retry]));
-    world
-        .run(&["start", &path.to_string_lossy(), "--attach"])
-        .settled();
+    world.run(&["start", &path, "--attach"]).settled();
     world.until("the retry to settle", |world| {
         world.run_file("retry", "result.json").is_file()
     });

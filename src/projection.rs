@@ -1,8 +1,9 @@
 //! Folding the journal into the state the engine loop and every view read from.
 //!
-//! **The plan of record is the graph the run is executing.** The plan file is
-//! the launch record and is never rewritten, so a reader that derived the live
-//! graph from it would lose every live edit the reconciler committed — a `retry`
+//! **The plan of record is the graph the run is executing.** The run's own
+//! `plan.json` is its launch record and is never rewritten — and the project it
+//! was read out of is never re-read — so a reader that derived the live graph
+//! from either would lose every live edit the reconciler committed — a `retry`
 //! replacement's new id, an amended budget, a branch pin. This module folds the
 //! run's own authoritative journal instead.
 //!

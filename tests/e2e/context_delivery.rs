@@ -44,9 +44,7 @@ fn held(world: &World, name: &str, node: &str) -> String {
     world.script(&format!("{node}.turn-open"), "");
     world.script(&format!("{node}.wait"), "hold");
     let path = world.plan(name, &plan_of(name, vec![agent(node, &[])]));
-    world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
+    world.run(&["start", &path, "--detach"]).exited(0);
     world.until("the held node's turn to open", |world| {
         world
             .events_of(name, "turn-started")
@@ -73,9 +71,7 @@ fn held_beside_a_pending_node_with(world: &World, name: &str, extra: Vec<Value>)
     let mut nodes = vec![agent("slow", &[]), agent("later", &["slow"])];
     nodes.extend(extra);
     let path = world.plan(name, &plan_of(name, nodes));
-    world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
+    world.run(&["start", &path, "--detach"]).exited(0);
     world.until("the held node's turn to open", |world| {
         !world.events_of(name, "turn-started").is_empty()
     });
@@ -375,9 +371,7 @@ fn a_live_note_is_not_owed_to_a_later_dispatch_of_the_same_node() {
         "livecarry",
         &plan_of("livecarry", vec![agent("slow", &[]), agent("keep", &[])]),
     );
-    world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
+    world.run(&["start", &path, "--detach"]).exited(0);
     world.until("the held node's turn to open", |world| {
         world
             .events_of("livecarry", "turn-started")

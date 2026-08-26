@@ -1,0 +1,11 @@
+# The store this repository's example plans live in.
+#
+# A plan is one project of a onetaskgraph store, so this configures the store
+# rather than the plan: run `onepipeline start plans:tracked-release` from this
+# directory and it reads the project of that name and executes the graph it
+# holds. A Linear or GitHub Projects store is configured here in exactly the
+# same way, and nothing in onepipeline special-cases either.
+sources:
+  plans:
+    plugin: local-md
+    config: { root: . }

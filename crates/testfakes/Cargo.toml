@@ -89,6 +89,14 @@ path = "src/bin/fake-claude.rs"
 name = "fake-oneharness"
 path = "src/bin/fake-oneharness.rs"
 
+# The one thing a real `onetaskgraph` cannot be asked to be: an install of the
+# wrong version, and one that cannot answer at all. Every *plan* in the suite is
+# read out of the real binary against a real folder of Markdown — this answers
+# `--version` and refuses everything else, so it can never stand in for a read.
+[[bin]]
+name = "fake-onetaskgraph"
+path = "src/bin/fake-onetaskgraph.rs"
+
 [lib]
 name = "onepipeline_testfakes"
 path = "src/lib.rs"

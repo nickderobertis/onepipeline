@@ -308,6 +308,11 @@ serde_json = { version = "1", features = ["preserve_order"] }
 # YAML. serde_norway is the maintained fork of the deprecated serde_yaml, and is
 # the same reader the sibling crates use.
 serde_norway = "0.9"
+# A plan is one project of a store, assembled out of reserved metadata keys, and
+# the refusal it earns has to name the key a person has to fix. `serde_json`'s
+# own error says the type it wanted and not where it wanted it, which for a
+# nested `steps` entry is a sentence nobody can act on; this carries the path.
+serde_path_to_error = "0.1"
 thiserror = "2"
 
 # The siblings this crate composes, at the workspace's own pins. See

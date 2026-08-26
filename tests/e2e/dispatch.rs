@@ -71,9 +71,7 @@ fn config_of(world: &World, run: &str, member: &str) -> String {
 /// `adopt` picks up, and the state a corrupt ledger has to be refused from.
 fn ready_and_undriven(world: &World, run: &str, node: Value) {
     let path = world.plan(run, &plan_of(run, vec![human("approve", &[]), node]));
-    world
-        .run(&["start", &path.to_string_lossy(), "--attach"])
-        .exited(0);
+    world.run(&["start", &path, "--attach"]).exited(0);
     world.run(&["attest", run, "approve"]).exited(0);
 }
 
@@ -90,7 +88,7 @@ fn relative_default_graphs_dispatch_from_the_launch_directory() {
     );
     let mut command = world.agentgraph_cmd(&[
         "start",
-        &path.to_string_lossy(),
+        &path,
         "--attach",
         // Relative, and resolved against the launch directory below.
         "--dag-graph",
@@ -180,7 +178,7 @@ fn relative_node_and_step_graph_overrides_dispatch_from_the_launch_directory() {
         "relative-plan-overrides",
         &plan_of("relative-plan-overrides", vec![node]),
     );
-    let mut command = world.agentgraph_cmd(&["start", &path.to_string_lossy(), "--attach"]);
+    let mut command = world.agentgraph_cmd(&["start", &path, "--attach"]);
     command.current_dir(&world.root);
 
     world
@@ -242,13 +240,7 @@ fn a_lifecycle_nodes_two_graphs_are_the_ones_its_launch_resolved() {
             vec![human("approve", &[]), service],
         ),
     );
-    let mut start = world.cmd(&[
-        "start",
-        &path.to_string_lossy(),
-        "--attach",
-        "--pr-author-graph",
-        &drafting,
-    ]);
+    let mut start = world.cmd(&["start", &path, "--attach", "--pr-author-graph", &drafting]);
     start.env("ONEPIPELINE_NODE_GRAPH", &launch_graph);
     world
         .run_on(start, "start recorded lifecycle graph")
@@ -326,7 +318,7 @@ fn an_unreadable_relative_graph_names_its_launch_base() {
     );
     let mut command = world.agentgraph_cmd(&[
         "start",
-        &path.to_string_lossy(),
+        &path,
         "--attach",
         "--dag-graph",
         "graphs/missing-dag.yaml",
@@ -347,7 +339,7 @@ fn an_unreadable_relative_node_graph_names_its_launch_base() {
         "relative-node-error",
         &plan_of("relative-node-error", vec![agent("build", &[])]),
     );
-    let mut command = world.agentgraph_cmd(&["start", &path.to_string_lossy(), "--attach"]);
+    let mut command = world.agentgraph_cmd(&["start", &path, "--attach"]);
     command
         .current_dir(&world.root)
         .env("ONEPIPELINE_NODE_GRAPH", "graphs/missing-node.yaml");
@@ -393,7 +385,7 @@ fn unreadable_relative_plan_graphs_name_their_path_and_launch_base() {
 
     for (name, node, missing) in cases {
         let path = world.plan(name, &plan_of(name, vec![node]));
-        let mut command = world.agentgraph_cmd(&["start", &path.to_string_lossy(), "--attach"]);
+        let mut command = world.agentgraph_cmd(&["start", &path, "--attach"]);
         command.current_dir(&world.root);
 
         let failed = world.run_on(command, &format!("start {name}"));
@@ -484,7 +476,7 @@ fn launch_overrides_reach_the_graphs_that_actually_run() {
 
     let started = world.run_on_agentgraph(&[
         "start",
-        &path.to_string_lossy(),
+        &path,
         "--attach",
         "--dag-graph",
         &world.dag_graph(),
@@ -532,7 +524,7 @@ fn a_plan_persona_reaches_the_member_that_actually_runs() {
     node["persona"] = Value::from("./requested-reviewer.yaml");
     let path = world.plan("plan-persona", &plan_of("plan-persona", vec![node]));
 
-    let started = world.run_on_agentgraph(&["start", &path.to_string_lossy(), "--attach"]);
+    let started = world.run_on_agentgraph(&["start", &path, "--attach"]);
     started.exited(0).settled();
 
     let turns = world.turns();
@@ -577,7 +569,7 @@ fn adoption_retains_node_overrides_for_later_dispatches() {
     );
     let mut start = world.agentgraph_cmd(&[
         "start",
-        &path.to_string_lossy(),
+        &path,
         "--attach",
         "--node-set",
         "members.worker.oneharness_config=./adopted-node.toml",
@@ -654,7 +646,7 @@ fn a_plan_dispatches_through_the_real_oneagentgraph_and_its_members_run() {
 
     let started = world.run_on_agentgraph(&[
         "start",
-        &path.to_string_lossy(),
+        &path,
         "--attach",
         "--dag-graph",
         &world.dag_graph(),
@@ -814,7 +806,7 @@ fn two_dispatches_running_in_one_driver_are_stopped_as_one_run() {
         ),
     );
     world
-        .run_on_agentgraph(&["start", &path.to_string_lossy(), "--detach"])
+        .run_on_agentgraph(&["start", &path, "--detach"])
         .exited(0);
 
     let dispatched = |world: &World| -> Vec<String> {
@@ -870,7 +862,7 @@ fn status_says_what_a_live_dispatch_is_doing_and_the_readout_advances() {
     world.script("turn.hold", "hold");
     let path = world.plan("watched", &plan_of("watched", vec![agent("build", &[])]));
     world
-        .run_on_agentgraph(&["start", &path.to_string_lossy(), "--detach"])
+        .run_on_agentgraph(&["start", &path, "--detach"])
         .exited(0);
 
     world.until("the dispatch to report a turn", |world| {
@@ -951,13 +943,8 @@ fn a_drafted_body_reaches_the_change_request_through_the_real_siblings() {
         "task": "## What\nship the thing",
     });
     let path = world.plan("authored", &plan_of("authored", vec![node]));
-    let launched = world.run_on_agentgraph(&[
-        "start",
-        &path.to_string_lossy(),
-        "--attach",
-        "--pr-author-graph",
-        &drafting,
-    ]);
+    let launched =
+        world.run_on_agentgraph(&["start", &path, "--attach", "--pr-author-graph", &drafting]);
     launched.settled();
     // What the host was asked to open the change request with.
     let opened = world.changes_opened();
@@ -1022,13 +1009,8 @@ fn a_validated_answer_carrying_no_body_publishes_the_change_request_without_one(
         "task": "## What\nship the thing",
     });
     let path = world.plan("blankdraft", &plan_of("blankdraft", vec![node]));
-    let launched = world.run_on_agentgraph(&[
-        "start",
-        &path.to_string_lossy(),
-        "--attach",
-        "--pr-author-graph",
-        &drafting,
-    ]);
+    let launched =
+        world.run_on_agentgraph(&["start", &path, "--attach", "--pr-author-graph", &drafting]);
     launched.settled();
 
     // Published, with the plan's own title and no body — not a body of spaces.
@@ -1115,7 +1097,7 @@ fn a_drafting_graph_the_runner_refuses_still_publishes_the_change_request() {
     let path = world.plan("refuseddraft", &plan_of("refuseddraft", vec![node]));
     let launched = world.run_on_agentgraph(&[
         "start",
-        &path.to_string_lossy(),
+        &path,
         "--attach",
         "--pr-author-graph",
         &refused.to_string_lossy(),
@@ -1185,7 +1167,7 @@ fn transcript_renders_a_real_dispatched_turns_tools_and_words() {
     world.write_graphs();
     let path = world.plan("read", &plan_of("read", vec![agent("build", &[])]));
     world
-        .run_on_agentgraph(&["start", &path.to_string_lossy(), "--attach"])
+        .run_on_agentgraph(&["start", &path, "--attach"])
         .exited(0)
         .settled();
 
@@ -1274,7 +1256,7 @@ fn a_transcript_names_the_harness_that_answered_and_skips_the_ones_it_stepped_pa
     let path = world.plan("chained", &plan_of("chained", vec![agent("build", &[])]));
     let mut launch = world.agentgraph_cmd(&[
         "start",
-        &path.to_string_lossy(),
+        &path,
         "--attach",
         "--node-set",
         "members.worker.oneharness_config=./chain.toml",
@@ -1336,13 +1318,8 @@ fn a_launch_the_graph_refuses_fails_with_the_graphs_own_words() {
     let path = world.plan("refused", &plan_of("refused", vec![agent("build", &[])]));
 
     for form in ["--detach", "--attach"] {
-        let started = world.run_on_agentgraph(&[
-            "start",
-            &path.to_string_lossy(),
-            form,
-            "--dag-graph",
-            &world.dag_graph(),
-        ]);
+        let started =
+            world.run_on_agentgraph(&["start", &path, form, "--dag-graph", &world.dag_graph()]);
 
         started.exited(crate::harness::REFUSED);
         started.err_has("oneagentgraph");
@@ -1374,7 +1351,7 @@ fn an_adoption_the_graph_refuses_fails_rather_than_leaving_the_run_undriven() {
     world
         .run_on_agentgraph(&[
             "start",
-            &path.to_string_lossy(),
+            &path,
             "--detach",
             "--dag-graph",
             &world.dag_graph(),
@@ -1435,7 +1412,7 @@ fn the_run_state_this_crate_places_is_where_the_sibling_looks_for_it() {
         &plan_of("state-drift", vec![agent("build", &[])]),
     );
     world
-        .run_on_agentgraph(&["start", &path.to_string_lossy(), "--attach"])
+        .run_on_agentgraph(&["start", &path, "--attach"])
         .exited(0)
         .settled();
 
@@ -1595,7 +1572,7 @@ fn the_sibling_still_takes_its_harness_from_the_variable_this_crate_restates() {
     let path = world.plan("harness-bin", &plan_of("harness-bin", vec![node]));
 
     let named = "oneharness-that-is-not-installed";
-    let mut command = world.agentgraph_cmd(&["start", &path.to_string_lossy(), "--attach"]);
+    let mut command = world.agentgraph_cmd(&["start", &path, "--attach"]);
     command.env("ONEAGENTGRAPH_ONEHARNESS_BIN", named);
     world.run_on(command, "start --attach").settled();
 
@@ -1631,7 +1608,7 @@ fn a_note_delivered_through_the_real_sibling_records_what_its_lever_answered() {
     world.script("turn.hold", "hold");
     let path = world.plan("noted", &plan_of("noted", vec![agent("build", &[])]));
     world
-        .run_on_agentgraph(&["start", &path.to_string_lossy(), "--detach"])
+        .run_on_agentgraph(&["start", &path, "--detach"])
         .exited(0);
     world.until("the dispatch to report a turn", |world| {
         !world.events_of("noted", "turn-activity").is_empty()
@@ -1715,7 +1692,7 @@ fn a_cancel_against_a_real_dispatch_asks_its_lever_and_reaps_it_at_the_deadline(
     // ask: the dispatch is still there when the deadline arrives.
     world.script("turn.hold", "hold");
     let path = world.plan("stopped", &plan_of("stopped", vec![agent("build", &[])]));
-    let mut launch = world.agentgraph_cmd(&["start", &path.to_string_lossy(), "--detach"]);
+    let mut launch = world.agentgraph_cmd(&["start", &path, "--detach"]);
     launch.env(crate::harness::CANCEL_GRACE_ENV, "1");
     world.run_on(launch, "start --detach").exited(0);
     world.until("the dispatch to report a turn", |world| {
@@ -1800,7 +1777,7 @@ fn consuming_a_surface_restarts_the_real_pacemakers_clock() {
     world
         .run_on_agentgraph(&[
             "start",
-            &path.to_string_lossy(),
+            &path,
             "--detach",
             "--dag-graph",
             &world.dag_graph(),
@@ -1882,7 +1859,7 @@ fn a_view_renders_with_the_health_block_read_through_the_library() {
     world.write_graphs();
     let path = world.plan("probed", &plan_of("probed", vec![agent("build", &[])]));
     world
-        .run_on_agentgraph(&["start", &path.to_string_lossy(), "--attach"])
+        .run_on_agentgraph(&["start", &path, "--attach"])
         .exited(0)
         .settled();
 
@@ -1922,7 +1899,7 @@ fn a_launchs_own_environment_reaches_the_member_the_library_backend_runs() {
     world
         .run_on_agentgraph(&[
             "start",
-            &path.to_string_lossy(),
+            &path,
             "--attach",
             "--dag-graph",
             &world.dag_graph(),
@@ -1972,13 +1949,8 @@ fn a_document_the_runner_accepts_launches_whichever_way_it_is_asked_for() {
         world.write_graphs_at_the_runners_schema();
         let path = world.plan("schema", &plan_of("schema", vec![agent("build", &[])]));
 
-        let mut command = world.agentgraph_cmd(&[
-            "start",
-            &path.to_string_lossy(),
-            form,
-            "--dag-graph",
-            &world.dag_graph(),
-        ]);
+        let mut command =
+            world.agentgraph_cmd(&["start", &path, form, "--dag-graph", &world.dag_graph()]);
         command.env("PATH", world.empty_path());
         let started = world.run_on(command, &format!("start {form}"));
         // The whole of the defect, in one line of the run's own record: the
@@ -2061,7 +2033,7 @@ fn every_dag_scope_member_is_given_the_runs_description_and_its_own_job() {
         .run_on(
             world.agentgraph_cmd(&[
                 "start",
-                &path.to_string_lossy(),
+                &path,
                 "--attach",
                 "--dag-graph",
                 &world.dag_graph(),
@@ -2326,7 +2298,7 @@ fn a_nodes_turn_budget_reaches_its_dispatch_and_outranks_the_run_wide_one() {
         world
             .run_on_agentgraph(&[
                 "start",
-                &path.to_string_lossy(),
+                &path,
                 "--attach",
                 "--node-set",
                 "members.worker.max_turns=9",
@@ -2421,7 +2393,7 @@ fn a_two_party_member_is_started_in_the_directory_the_graph_was_given() {
     });
     let path = world.plan("twoparty", &plan_of("twoparty", vec![node]));
     world
-        .run_on_agentgraph(&["start", &path.to_string_lossy(), "--attach"])
+        .run_on_agentgraph(&["start", &path, "--attach"])
         .settled();
 
     // Where `onevcs` cut this node's worktree, read off the run's own record of
@@ -2474,7 +2446,7 @@ fn a_steps_turn_budget_reaches_that_steps_own_dispatch() {
     });
     let path = world.plan("stepbudget", &plan_of("stepbudget", vec![node]));
     world
-        .run_on_agentgraph(&["start", &path.to_string_lossy(), "--attach"])
+        .run_on_agentgraph(&["start", &path, "--attach"])
         .settled();
 
     assert_eq!(
@@ -2511,7 +2483,7 @@ fn a_launchs_agentgraph_filter_reaches_the_real_sibling_and_narrows_what_it_rela
         &plan_of("unfiltered", vec![agent("build", &[])]),
     );
     world
-        .run_on_agentgraph(&["start", &path.to_string_lossy(), "--attach"])
+        .run_on_agentgraph(&["start", &path, "--attach"])
         .settled();
     let ingested = relayed("unfiltered");
     for kind in ["turn-activity", "member-settled"] {
@@ -2525,7 +2497,7 @@ fn a_launchs_agentgraph_filter_reaches_the_real_sibling_and_narrows_what_it_rela
     world
         .run_on_agentgraph(&[
             "start",
-            &path.to_string_lossy(),
+            &path,
             "--attach",
             "--filter-agentgraph",
             r#"{"exclude": [{"kind": "turn-*"}]}"#,
@@ -2590,7 +2562,7 @@ fn the_observer_graphs_own_stream_is_filtered_too_and_the_spec_may_be_a_file() {
     world
         .run_on_agentgraph(&[
             "start",
-            &path.to_string_lossy(),
+            &path,
             "--attach",
             "--dag-graph",
             &world.dag_graph(),
@@ -2608,7 +2580,7 @@ fn the_observer_graphs_own_stream_is_filtered_too_and_the_spec_may_be_a_file() {
     world
         .run_on_agentgraph(&[
             "start",
-            &path.to_string_lossy(),
+            &path,
             "--attach",
             "--dag-graph",
             &world.dag_graph(),
@@ -2650,7 +2622,7 @@ fn a_run_whose_observer_graph_is_watching_and_then_is_killed_reads_as_each() {
 
     for (run, dag_graph) in [("watched", true), ("bare", false)] {
         let path = world.plan(run, &plan_of(run, vec![agent("build", &[])]));
-        let mut launch = vec!["start".to_string(), path.to_string_lossy().into_owned()];
+        let mut launch = vec!["start".to_string(), path];
         launch.push("--detach".into());
         if dag_graph {
             launch.push("--dag-graph".into());
@@ -2789,7 +2761,7 @@ fn a_run_whose_observer_graph_finished_is_reported_unwatched() {
     world
         .run_on_agentgraph(&[
             "start",
-            &path.to_string_lossy(),
+            &path,
             "--detach",
             "--dag-graph",
             &world.dag_graph(),
@@ -2874,7 +2846,7 @@ fn an_adoption_relaunches_the_observer_under_the_launchs_own_filter() {
     world
         .run_on_agentgraph(&[
             "start",
-            &path.to_string_lossy(),
+            &path,
             "--attach",
             "--dag-graph",
             &world.dag_graph(),
@@ -2979,7 +2951,7 @@ fn a_detached_runs_worker_turn_can_ask_its_manager() {
     let path = world.plan("askable", &plan_of("askable", vec![agent("build", &[])]));
 
     let started = world.run_on(
-        world.agentgraph_cmd(&["start", &path.to_string_lossy(), "--detach"]),
+        world.agentgraph_cmd(&["start", &path, "--detach"]),
         "start --detach with no dag-scope graph",
     );
     started.exited(0);

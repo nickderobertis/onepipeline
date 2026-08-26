@@ -49,9 +49,7 @@ fn derived_subject(branch: &str) -> String {
 
 fn settle(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
     let path = world.plan(name, &plan_of(name, nodes));
-    world
-        .run(&["start", &path.to_string_lossy(), "--attach"])
-        .settled();
+    world.run(&["start", &path, "--attach"]).settled();
     world.until("the run to settle", |world| {
         world.run_file(name, "result.json").is_file()
     });
@@ -69,7 +67,7 @@ fn driven(
     nodes: Vec<serde_json::Value>,
 ) -> (String, crate::harness::Run) {
     let path = world.plan(name, &plan_of(name, nodes));
-    let launched = world.run(&["start", &path.to_string_lossy(), "--attach"]);
+    let launched = world.run(&["start", &path, "--attach"]);
     (name.to_string(), launched)
 }
 
@@ -414,13 +412,7 @@ fn a_session_record_that_cannot_be_read_falls_back_to_opening_a_session() {
     // Attached, so the fallback's own words land on a descriptor this test
     // holds: the loop runs in the process this command started.
     let driving = world
-        .cmd(&[
-            "start",
-            &path.to_string_lossy(),
-            "--attach",
-            "--pr-author-graph",
-            &drafting,
-        ])
+        .cmd(&["start", &path, "--attach", "--pr-author-graph", &drafting])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -591,13 +583,7 @@ fn the_pr_author_dispatch_drafts_the_body_the_change_request_opens_with() {
     let node = titled(lifecycle("service", &[]), "feat: land what the worker made");
     let path = world.plan("authored", &plan_of("authored", vec![node]));
     world
-        .run(&[
-            "start",
-            &path.to_string_lossy(),
-            "--attach",
-            "--pr-author-graph",
-            &drafting,
-        ])
+        .run(&["start", &path, "--attach", "--pr-author-graph", &drafting])
         .settled();
 
     // It ran the graph the launch named, rather than the node-scope one every
@@ -684,13 +670,7 @@ fn a_node_that_states_its_own_body_publishes_it_and_spends_no_dispatch() {
     // node already carries.
     let drafting = world.pr_author_graph();
     world
-        .run(&[
-            "start",
-            &path.to_string_lossy(),
-            "--attach",
-            "--pr-author-graph",
-            &drafting,
-        ])
+        .run(&["start", &path, "--attach", "--pr-author-graph", &drafting])
         .settled();
 
     let opened = world.changes_opened();
@@ -757,13 +737,7 @@ fn a_drafting_dispatch_that_ends_badly_leaves_the_publication_untouched() {
         let drafting = world.pr_author_graph();
         let node = titled(lifecycle("service", &[]), "feat: land it anyway");
         let path = world.plan(name, &plan_of(name, vec![node]));
-        let launched = world.run(&[
-            "start",
-            &path.to_string_lossy(),
-            "--attach",
-            "--pr-author-graph",
-            &drafting,
-        ]);
+        let launched = world.run(&["start", &path, "--attach", "--pr-author-graph", &drafting]);
         launched.settled();
 
         let result = world.run_json(name, "result.json");
@@ -854,7 +828,7 @@ fn a_launch_config_names_the_drafting_graph_and_the_flag_overrides_it() {
         let path = world.plan(run, &plan_of(run, vec![node]));
         let mut args = vec![
             "start".to_string(),
-            path.to_string_lossy().into_owned(),
+            path,
             "--attach".to_string(),
             "--launch-config".to_string(),
             config.to_string_lossy().into_owned(),
@@ -937,13 +911,7 @@ fn a_drafted_body_is_read_only_from_the_copy_this_run_retained() {
     let node = titled(lifecycle("service", &[]), "feat: land it with no body");
     let path = world.plan("planted", &plan_of("planted", vec![node]));
     world
-        .run(&[
-            "start",
-            &path.to_string_lossy(),
-            "--attach",
-            "--pr-author-graph",
-            &drafting,
-        ])
+        .run(&["start", &path, "--attach", "--pr-author-graph", &drafting])
         .settled();
 
     let opened = world.changes_opened();
@@ -988,9 +956,7 @@ fn an_earlier_plan_still_publishes_under_the_subject_the_sibling_derives() {
         let mut plan = plan_of(&run, vec![node]);
         plan["schema_version"] = json!(version);
         let path = world.plan(&run, &plan);
-        world
-            .run(&["start", &path.to_string_lossy(), "--attach"])
-            .settled();
+        world.run(&["start", &path, "--attach"]).settled();
 
         let result = world.run_json(&run, "result.json");
         assert_eq!(
@@ -1046,9 +1012,7 @@ fn a_publications_own_records_reach_the_journal_while_it_is_still_publishing() {
         "watched",
         &plan_of("watched", vec![lifecycle("service", &[])]),
     );
-    world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
+    world.run(&["start", &path, "--detach"]).exited(0);
 
     world.until("the publication to reach its merge path", |world| {
         world
@@ -1190,7 +1154,7 @@ fn a_drafting_graph_the_launch_directory_cannot_produce_is_refused_before_a_run_
     world
         .run(&[
             "start",
-            &path.to_string_lossy(),
+            &path,
             "--attach",
             "--pr-author-graph",
             "graphs/no-such-pr-author.yaml",
@@ -1216,7 +1180,7 @@ fn an_unresolvable_repository_is_refused_before_a_run_starts() {
         &plan_of("nosession", vec![lifecycle("service", &[])]),
     );
     world
-        .run(&["start", &path.to_string_lossy(), "--attach"])
+        .run(&["start", &path, "--attach"])
         .exited(2)
         // The sibling's own refusal, reaching the operator whole: the interlock
         // calls `onevcs::session_holders` rather than spawning the verb, so what
@@ -1253,13 +1217,7 @@ fn a_publication_its_merge_path_refuses_settles_the_node_failed_by_name() {
         &plan_of("rejected", vec![lifecycle("service", &[])]),
     );
     world
-        .run(&[
-            "start",
-            &path.to_string_lossy(),
-            "--attach",
-            "--pr-author-graph",
-            &drafting,
-        ])
+        .run(&["start", &path, "--attach", "--pr-author-graph", &drafting])
         .settled();
     let run = "rejected".to_string();
 
@@ -1315,7 +1273,7 @@ fn a_publication_its_merge_path_refuses_settles_the_node_failed_by_name() {
 
 /// A title the sibling will not commit under never reaches a dispatch.
 ///
-/// The plan file states the title and
+/// The plan states the title and
 /// [`SUBJECT_LIMIT`](onevcs::provenance::SUBJECT_LIMIT) bounds it, so the launch
 /// refuses it — naming the node, the length, and the limit — rather than the
 /// publication refusing it after the node's whole dispatch. Each
@@ -1343,7 +1301,7 @@ fn a_title_the_sibling_will_not_commit_under_is_refused_before_any_dispatch() {
         &plan_of("longtitle", vec![titled(SUBJECT_LIMIT + 1)]),
     );
     world
-        .run(&["start", &over.to_string_lossy(), "--attach"])
+        .run(&["start", &over, "--attach"])
         .exited(REFUSED)
         .err_has("node 'service'")
         .err_has(&format!("{} characters", SUBJECT_LIMIT + 1))
@@ -1619,9 +1577,7 @@ fn a_publication_its_checks_reject_is_redispatched_on_the_branch_it_preserved() 
         "checksfailed",
         &plan_of("checksfailed", vec![lifecycle("service", &[])]),
     );
-    world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
+    world.run(&["start", &path, "--detach"]).exited(0);
     let run = "checksfailed".to_string();
 
     // The host has reported the check red, which is the reading the publication
@@ -1993,9 +1949,7 @@ fn a_cancel_that_lands_before_the_next_attempt_settles_on_the_publication_failur
         "cancelledretry",
         &plan_of("cancelledretry", vec![lifecycle("service", &[])]),
     );
-    world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
+    world.run(&["start", &path, "--detach"]).exited(0);
     let run = "cancelledretry".to_string();
 
     // The last record before the publishing push, which is where the hook above
@@ -2127,9 +2081,7 @@ fn a_base_that_moved_under_a_publication_is_redispatched_on_the_branch_it_preser
         "syncconflict",
         &plan_of("syncconflict", vec![lifecycle("service", &[])]),
     );
-    world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
+    world.run(&["start", &path, "--detach"]).exited(0);
     let run = "syncconflict".to_string();
 
     // The **session** rather than the dispatch: the branch is cut when the

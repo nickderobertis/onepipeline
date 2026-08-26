@@ -4,11 +4,15 @@ Execute a task DAG over [`oneagentgraph`](https://github.com/nickderobertis/onea
 and [`onevcs`](https://github.com/nickderobertis/onevcs), merging their event
 streams into one.
 
-`onepipeline` is the composition layer. It owns the plan — a dependency graph
+`onepipeline` is the composition layer. It executes a plan — a dependency graph
 mixing direct agent nodes, repository lifecycle nodes, and explicit human actions
-— executes it continuously, dispatching each node the moment its dependencies
+— continuously, dispatching each node the moment its dependencies
 settle, through a pluggable **executor seam**, and keeps a live channel open to
-the planner supervising the run. The
+the planner supervising the run. The plan itself lives in
+[`onetaskgraph`](https://github.com/nickderobertis/onetaskgraph): a run is
+launched by naming a project of whichever backend you already track work in, so
+a plan is something you can open, edit and share without this harness in the
+loop. The
 agents come from `oneagentgraph`; the clones, worktrees, publications, and
 change requests come from `onevcs`. Nothing here verifies a change: that is the
 repository's own merge path — the host's required checks where a change
@@ -47,11 +51,70 @@ so an unqualified command fails with `multiple packages with binaries found`.
 Prebuilt archives for Linux (x86-64, arm64), macOS (Intel, Apple silicon), and
 Windows (x86-64) are attached to every release, with `sha256` checksums.
 
-## What it does
+## Where a plan lives
+
+A plan is one **onetaskgraph project**, and a node is one task in it. A run is
+launched by naming that project's qualified id:
 
 ```bash
-onepipeline start plan.json --heartbeat-interval 1800
+onepipeline start plans:tracked-release --heartbeat-interval 1800
 ```
+
+Which backend that store is — a folder of Markdown, Linear, GitHub Projects — is
+onetaskgraph's own configuration, discovered from the directory you launch in:
+
+```yaml
+# onetaskgraph.yaml
+sources:
+  plans:
+    plugin: local-md
+    config: { root: ./plans }
+```
+
+`examples/plan-store/` is a complete store of that shape, holding the two example
+plans this repository ships. Nothing here special-cases a remote source, so a
+`local-md` project runs directly — author locally, run it, and copy it up only
+when it should become durable.
+
+The mapping is [`docs/contract.md`](docs/contract.md)'s, and it is one rule per
+field: the plan-level settings (`schema_version`, `goal`, `name`, `concurrency`)
+are reserved `onepipeline.<field>` metadata keys on the **project**; a node's id
+is `onepipeline.id` on its task; its prose is the task's `content`, its title the
+task's `title`, and its repository the first of the task's `repositories`; its
+dependencies are real onetaskgraph dependency edges; and every other node field
+is `onepipeline.<field>` carrying the same JSON value a plan document carried
+under that name. One task of the example store:
+
+```markdown
+---
+title: "feat: implement approved release"
+project: "tracked-release"
+repositories:
+  - "github.com/nickderobertis/some-service"
+depends_on:
+  - "tracked-release/design-approval"
+metadata:
+  "onepipeline.id": "service"
+  "onepipeline.persona": "engineer"
+  "onepipeline.max_turns": 24
+---
+## What
+Implement the approved API and rollout behaviour.
+```
+
+onepipeline **drives the onetaskgraph binary** rather than linking the crate, so
+one has to be installed: from `ONETASKGRAPH_BIN` when that names one, and from
+`onetaskgraph` on the `PATH` otherwise. Its version is checked before anything is
+dispatched, and an absent, unusable, or too-old install refuses the launch —
+naming the path, the version, the minimum, and how to install one — rather than
+becoming a run that fails on its first node.
+
+The run's own record does not move: the journal, the ledger, and the graph a run
+is executing are still this crate's, projected from that journal under the run's
+ownership lock. onetaskgraph holds the plan's **definition**, not its execution
+history.
+
+## What it does
 
 `start` **drives the run itself**: a node — and each step within a lifecycle
 node — dispatches the moment its dependencies settle, and settlement triggers
