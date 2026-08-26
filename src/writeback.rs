@@ -22,10 +22,10 @@ use crate::projection::RunState;
 use crate::taskgraph::{QualifiedId, BINARY_ENV};
 
 const SHADOW_SOURCE: &str = "onepipeline-writeback";
-// Cross-platform runners have measured real sibling copies taking longer than ten seconds
-// under suite-wide contention. This remains a backstop for an unreachable store, not a
-// latency target: projection stays off the reconcile loop while the child runs.
-const COMMAND_LIMIT: Duration = Duration::from_secs(60);
+// A real sibling invocation can spend several seconds waiting to be scheduled on a busy
+// cross-platform runner. This bound is for a genuinely wedged child, not a latency target:
+// projection stays off the reconcile loop regardless of how long the child takes.
+const COMMAND_LIMIT: Duration = Duration::from_secs(10);
 const RETRY_AFTER: Duration = Duration::from_millis(250);
 // Closeout never inherits the duration of a store command. A slow store may keep working in
 // the worker, but it still cannot turn a completed graph into run settlement.

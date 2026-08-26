@@ -85,7 +85,7 @@ fn add_reparent_and_context_are_applied_and_reported_applied() {
         "a node with no dispatch had its turn reached for"
     );
 
-    world.until("the accepted graph edit to reach the project", |world| {
+    world.until_store("the accepted graph edit to reach the project", |world| {
         world.store_tasks("plans:applied").iter().any(|task| {
             task["item"]["metadata"]["onepipeline.id"] == "extra"
                 && task["item"]["metadata"]["onepipeline.context"] == "the fixture moved"
@@ -162,7 +162,7 @@ fn retry_cancel_requeue_and_drop_are_projected_after_their_rulings() {
             .exited(0);
     }
 
-    world.until(
+    world.until_store(
         "the remaining accepted edits to reach the project",
         |world| {
             let tasks = world.store_tasks("plans:remaining");

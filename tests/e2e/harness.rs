@@ -1681,6 +1681,23 @@ impl World {
         );
     }
 
+    /// Wait for a predicate that reads the store through a real sibling process.
+    ///
+    /// A normal wait observes files and can poll cheaply. Each store observation
+    /// starts `onetaskgraph`, though, and polling that boundary every 20ms can
+    /// consume the process-start capacity the asynchronous copy itself needs on a
+    /// loaded cross-platform runner. The deadline and assertion stay identical;
+    /// only the expensive observer yields between reads.
+    pub fn until_store(&self, what: &str, mut ready: impl FnMut(&Self) -> bool) {
+        if waited_every(std::time::Duration::from_millis(250), || ready(self)) {
+            return;
+        }
+        panic!(
+            "timed out waiting for {what}; the runs root held:\n{}",
+            self.dump()
+        );
+    }
+
     /// Wait until a file inside a run's directory holds `needle`, or fail with
     /// what it held instead.
     ///
@@ -1964,13 +1981,17 @@ pub fn ended(child: std::process::Child) {
 /// the shape is always the same and the deadline is one number: what differs is
 /// the evidence a caller prints when it runs out, which is why this answers
 /// rather than panicking.
-fn waited(mut ready: impl FnMut() -> bool) -> bool {
+fn waited(ready: impl FnMut() -> bool) -> bool {
+    waited_every(std::time::Duration::from_millis(20), ready)
+}
+
+fn waited_every(interval: std::time::Duration, mut ready: impl FnMut() -> bool) -> bool {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
     while std::time::Instant::now() < deadline {
         if ready() {
             return true;
         }
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::thread::sleep(interval);
     }
     false
 }
