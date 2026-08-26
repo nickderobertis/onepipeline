@@ -1689,7 +1689,18 @@ impl World {
     /// loaded cross-platform runner. The deadline and assertion stay identical;
     /// only the expensive observer yields between reads.
     pub fn until_store(&self, what: &str, mut ready: impl FnMut(&Self) -> bool) {
-        if waited_every(std::time::Duration::from_millis(250), || ready(self)) {
+        self.until_store_for(std::time::Duration::from_secs(120), what, &mut ready);
+    }
+
+    fn until_store_for(
+        &self,
+        duration: std::time::Duration,
+        what: &str,
+        mut ready: impl FnMut(&Self) -> bool,
+    ) {
+        if waited_for(duration, std::time::Duration::from_millis(250), || {
+            ready(self)
+        }) {
             return;
         }
         panic!(
@@ -1745,6 +1756,33 @@ impl World {
                         .filter(|line| !line.trim().is_empty())
                     {
                         out.push_str(&format!("    {line}\n"));
+                    }
+                    for name in [
+                        "writeback-task-list.stdout",
+                        "writeback-task-list.stderr",
+                        "writeback-project-copy.stdout",
+                        "writeback-project-copy.stderr",
+                    ] {
+                        let path = self.runs.join(&run).join(name);
+                        out.push_str(&format!("    {name}:\n"));
+                        match std::fs::read(&path) {
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                                out.push_str("      (missing)\n");
+                            }
+                            Err(error) => out.push_str(&format!("      (unreadable: {error})\n")),
+                            Ok(bytes) if bytes.is_empty() => out.push_str("      (empty)\n"),
+                            Ok(bytes) => match String::from_utf8(bytes) {
+                                Ok(held) => {
+                                    for line in held.lines() {
+                                        out.push_str(&format!("      {line}\n"));
+                                    }
+                                }
+                                Err(error) => out.push_str(&format!(
+                                    "      (not UTF-8: {})\n",
+                                    error.utf8_error()
+                                )),
+                            },
+                        }
                     }
                 }
             }
@@ -1985,8 +2023,16 @@ fn waited(ready: impl FnMut() -> bool) -> bool {
     waited_every(std::time::Duration::from_millis(20), ready)
 }
 
-fn waited_every(interval: std::time::Duration, mut ready: impl FnMut() -> bool) -> bool {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+fn waited_every(interval: std::time::Duration, ready: impl FnMut() -> bool) -> bool {
+    waited_for(std::time::Duration::from_secs(120), interval, ready)
+}
+
+fn waited_for(
+    duration: std::time::Duration,
+    interval: std::time::Duration,
+    mut ready: impl FnMut() -> bool,
+) -> bool {
+    let deadline = std::time::Instant::now() + duration;
     while std::time::Instant::now() < deadline {
         if ready() {
             return true;
@@ -2057,6 +2103,43 @@ impl Drop for World {
             let _ = std::fs::remove_dir_all(held_dir());
         }
     }
+}
+
+#[test]
+fn a_store_wait_timeout_prints_writeback_child_output_leniently() {
+    let world = World::new("store-wait-diagnostic");
+    let run_dir = world.runs.join("diagnostic-run");
+    std::fs::create_dir_all(&run_dir).expect("the diagnostic run directory is created");
+    std::fs::write(
+        run_dir.join("writeback-task-list.stdout"),
+        "listed task output\n",
+    )
+    .expect("stdout is recorded");
+    std::fs::write(run_dir.join("writeback-task-list.stderr"), [])
+        .expect("empty stderr is recorded");
+    std::fs::write(run_dir.join("writeback-project-copy.stdout"), [0xff, 0xfe])
+        .expect("non-UTF-8 stdout is recorded");
+
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        world.until_store_for(
+            std::time::Duration::from_millis(1),
+            "a projection deliberately withheld by this journey",
+            |_| false,
+        );
+    }))
+    .expect_err("the deliberately impossible store wait times out");
+    let message = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied())
+        .expect("the store timeout panic carries text");
+
+    assert!(message
+        .contains("timed out waiting for a projection deliberately withheld by this journey"));
+    assert!(message.contains("writeback-task-list.stdout:\n      listed task output"));
+    assert!(message.contains("writeback-task-list.stderr:\n      (empty)"));
+    assert!(message.contains("writeback-project-copy.stdout:\n      (not UTF-8:"));
+    assert!(message.contains("writeback-project-copy.stderr:\n      (missing)"));
 }
 
 /// `teardown: signalled` is the binary's own evidence: `stop` saying it listed a
