@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.1](https://github.com/nickderobertis/onepipeline/compare/v0.16.0...v0.16.1) - 2026-08-26
+
+### Fixed
+
+- *(deps)* adopt the published onevcs, oneharness-core, oneagentgraph and onejudge ([#137](https://github.com/nickderobertis/onepipeline/pull/137))
+
 ## [0.16.0](https://github.com/nickderobertis/onepipeline/compare/v0.15.2...v0.16.0) - 2026-08-26
 
 ### Added
