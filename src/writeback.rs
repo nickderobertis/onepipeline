@@ -615,3 +615,29 @@ fn encoded(value: &str) -> String {
         .map(|byte| format!("{byte:02x}"))
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::TaskCategory;
+
+    #[test]
+    fn task_categories_remain_named_by_the_approved_contract() {
+        let contract = include_str!("../docs/contract.md");
+        for category in [
+            TaskCategory::Todo,
+            TaskCategory::InProgress,
+            TaskCategory::Done,
+            TaskCategory::Cancelled,
+        ] {
+            let native = serde_json::to_value(category)
+                .expect("a task category serializes")
+                .as_str()
+                .expect("a task category is a string")
+                .replace(' ', "-");
+            assert!(
+                contract.contains(&format!("`{native}`")),
+                "docs/contract.md no longer names the projected status category `{native}`"
+            );
+        }
+    }
+}
