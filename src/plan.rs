@@ -75,6 +75,36 @@ pub(crate) fn body_is_newer(declared: u32) -> String {
 /// The heading a carried planner note is rendered under.
 pub const PLANNER_CONTEXT_HEADING: &str = "## Planner context";
 
+/// The heading a node's binding amendment is rendered under.
+///
+/// Published beside [`PLANNER_CONTEXT_HEADING`] for the same reason, and to be
+/// read *against* it: an amendment changes what the node is judged against and a
+/// carried note does not. A reader of the task — or of the stream — finds each
+/// block by a name this crate publishes rather than by matching prose.
+pub const AMENDMENT_HEADING: &str = "## Amendment";
+
+/// What an amendment tells its reader about its own authority.
+///
+/// The opposite of [`CROSS_REPO_REFERENCES_PREAMBLE`] and of the sentence a
+/// carried note is rendered under, and deliberately so. A note reports observed
+/// state and adds no acceptance criteria; an amendment **is** part of the bar,
+/// read by the worker and by the judge that reviews it, so where it and the
+/// task's own operational notes disagree it is the one that holds. The authority
+/// is the section's first sentence because an instruction whose authority is
+/// unstated is one a reader has to guess at.
+const AMENDMENT_PRECEDENCE: &str =
+    "Where this section and the operational notes below disagree, this section wins.";
+
+/// The task section an amendment is rendered immediately above, when the task
+/// has one.
+///
+/// A node's operational notes live here — how this host runs its gate, what it
+/// must not do — and an amendment placed under them would read as one more note
+/// among them rather than as the ruling that overrides them. Above them, opening
+/// with [`AMENDMENT_PRECEDENCE`], is the convention that resolved this in
+/// practice.
+const ADDITIONAL_INFO_HEADING: &str = "## Additional info";
+
 /// The heading the out-of-repository dependencies of a fast-adoption node are
 /// rendered under.
 ///
@@ -210,7 +240,9 @@ impl Node {
     ///
     /// A carried planner note is rendered as a trailing `## Planner context`
     /// section stating that it reports observed state and adds no acceptance
-    /// criteria — so a worker cannot read one as a new bar to clear.
+    /// criteria — so a worker cannot read one as a new bar to clear. A carried
+    /// **amendment** is rendered under [`AMENDMENT_HEADING`] and says the
+    /// opposite about itself, because it is part of the bar the judge reads.
     pub fn rendered_task(&self) -> String {
         self.rendered_task_with(&[])
     }
@@ -226,6 +258,7 @@ impl Node {
     pub fn rendered_task_with(&self, references: &[CrossRepoReference]) -> String {
         render_task(
             self.task.as_deref().unwrap_or_default(),
+            self.amendment.as_deref(),
             self.context.as_deref(),
             references,
         )
@@ -237,6 +270,11 @@ impl Step {
     ///
     /// The note is about the node the steps share, so a workstream renders it
     /// into every agent step and leaves human steps as written.
+    ///
+    /// It carries no amendment: an amendment belongs to a node, and a caller
+    /// that has that node renders through [`rendered_task_for`](Self::rendered_task_for),
+    /// which is what a dispatch uses. This pair is what a caller written before
+    /// amendments existed asked for, and answers exactly as it did then.
     pub fn rendered_task(&self, node_context: Option<&str>) -> String {
         self.rendered_task_with(node_context, &[])
     }
@@ -252,13 +290,41 @@ impl Step {
     ) -> String {
         render_task(
             self.task.as_deref().unwrap_or_default(),
+            None,
             node_context,
+            references,
+        )
+    }
+
+    /// The task prose this step's dispatch receives, as the node it belongs to
+    /// composes it.
+    ///
+    /// Every part of that composition beyond the step's own prose is the
+    /// **node's** — its amendment, its carried note, and the out-of-repository
+    /// dependencies its branch is building against — because every step of one
+    /// workstream shares one branch and one bar. So the node is what this takes,
+    /// rather than three values a caller has to remember to pass.
+    pub fn rendered_task_for(&self, node: &Node, references: &[CrossRepoReference]) -> String {
+        render_task(
+            self.task.as_deref().unwrap_or_default(),
+            node.amendment.as_deref(),
+            node.context.as_deref(),
             references,
         )
     }
 }
 
-fn render_task(task: &str, context: Option<&str>, references: &[CrossRepoReference]) -> String {
+fn render_task(
+    task: &str,
+    amendment: Option<&str>,
+    context: Option<&str>,
+    references: &[CrossRepoReference],
+) -> String {
+    let task = match amendment.map(str::trim).filter(|text| !text.is_empty()) {
+        None => task.to_string(),
+        Some(text) => amended(task, text),
+    };
+    let task = task.as_str();
     let mut rendered = match context.map(str::trim).filter(|note| !note.is_empty()) {
         None => task.to_string(),
         Some(note) => format!(
@@ -281,6 +347,39 @@ fn render_task(task: &str, context: Option<&str>, references: &[CrossRepoReferen
         rendered.push('\n');
     }
     rendered
+}
+
+/// One task with its node's amendment rendered into it.
+///
+/// **Above the operational notes, never after them.** A task that states
+/// [`ADDITIONAL_INFO_HEADING`] gets the block immediately before that heading,
+/// and one that states none gets it at the end — which is the same placement
+/// read the same way, since a task with no notes has nothing for the amendment
+/// to sit above.
+fn amended(task: &str, amendment: &str) -> String {
+    let block = format!("{AMENDMENT_HEADING}\n{AMENDMENT_PRECEDENCE}\n\n{amendment}\n");
+    match additional_info_at(task) {
+        Some(at) => format!("{}\n\n{block}\n{}", task[..at].trim_end(), &task[at..]),
+        None => format!("{}\n\n{block}", task.trim_end()),
+    }
+}
+
+/// Where the task's operational notes begin, as a byte offset of the line the
+/// heading is on.
+///
+/// Matched as a **whole line**, so prose that mentions the heading — a task
+/// telling a worker where to put something — is not mistaken for the section
+/// itself. A task that spells its notes some other way has none this can find,
+/// and its amendment goes at the end, which is what a task with no notes gets.
+fn additional_info_at(task: &str) -> Option<usize> {
+    let mut at = 0;
+    for line in task.split_inclusive('\n') {
+        if line.trim_end() == ADDITIONAL_INFO_HEADING {
+            return Some(at);
+        }
+        at += line.len();
+    }
+    None
 }
 
 /// What the run is for.
@@ -346,6 +445,23 @@ pub struct Node {
     /// One planner note carried to the node's next dispatch, and only that one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<String>,
+    /// The manager's binding ruling on this node, part of its effective task
+    /// until something replaces it. Present and blank is refused where every
+    /// plan and every edited graph is validated, the way `amend` refuses a blank
+    /// ruling: a bar nobody can clear is not one.
+    ///
+    /// The other half of the pair [`context`](Self::context) is one of, and the
+    /// distinction is the point of both: a note steers the worker for one
+    /// dispatch and says it adds no acceptance criteria, while this is rendered
+    /// into the task the worker **and its judge** are handed, on the dispatch
+    /// that follows it and on every later one, until an `amend` replaces it. A
+    /// turn already running is not reached: its task was composed before the
+    /// ruling existed. Replace rather than
+    /// append, because a bar that can only grow cannot be corrected: a ruling
+    /// thought better of would otherwise go on binding the judge beside its own
+    /// correction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amendment: Option<String>,
     /// Held out of every later reconcile pass until a `requeue`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub parked: bool,
@@ -657,6 +773,153 @@ mod tests {
             rendered.contains("the fixture moved to tests/data"),
             "{rendered}"
         );
+    }
+
+    /// An amendment is the opposite of the note beside it, and both halves are
+    /// asserted: it opens by claiming authority over the notes below it, it
+    /// carries no disclaimer of its own, and it sits **above** the operational
+    /// notes rather than among them.
+    #[test]
+    fn an_amendment_renders_above_the_operational_notes_and_states_its_authority() {
+        let node = Node {
+            id: "build".into(),
+            persona: Some("engineer".into()),
+            task: Some(
+                "## What\nship it\n\n## Acceptance criteria\n\n- it ships\n\n\
+                 ## Additional info\n\nRun the gate once, over the finished tree.\n"
+                    .into(),
+            ),
+            amendment: Some("The four comment lines are out of scope: leave them.".into()),
+            ..Node::default()
+        };
+        let rendered = node.rendered_task();
+        let at = |needle: &str| {
+            rendered
+                .find(needle)
+                .unwrap_or_else(|| panic!("{needle} is not in:\n{rendered}"))
+        };
+        assert!(
+            at("## Acceptance criteria") < at(AMENDMENT_HEADING)
+                && at(AMENDMENT_HEADING) < at("## Additional info"),
+            "the amendment is not immediately above the operational notes:\n{rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "Where this section and the operational notes below disagree, this section wins."
+            ),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("The four comment lines are out of scope: leave them."),
+            "{rendered}"
+        );
+        // The note's disclaimer is the note's. An amendment that carried one
+        // would be the very thing this lever exists because `context` is.
+        assert!(
+            !rendered.contains("adds no acceptance criteria"),
+            "the amendment disclaimed itself:\n{rendered}"
+        );
+        // And the notes it sits above are still there, whole.
+        assert!(
+            rendered.contains("Run the gate once, over the finished tree."),
+            "{rendered}"
+        );
+    }
+
+    /// A task with no operational notes takes its amendment at the end, and a
+    /// node with no amendment renders exactly what it always rendered.
+    #[test]
+    fn an_amendment_lands_at_the_end_of_a_task_that_states_no_operational_notes() {
+        let mut node = Node {
+            id: "build".into(),
+            persona: Some("engineer".into()),
+            task: Some("## What\nship it".into()),
+            ..Node::default()
+        };
+        assert_eq!(node.rendered_task(), "## What\nship it");
+
+        node.amendment = Some("Leave the comments.".into());
+        assert_eq!(
+            node.rendered_task(),
+            "## What\nship it\n\n\
+             ## Amendment\n\
+             Where this section and the operational notes below disagree, this section wins.\n\n\
+             Leave the comments.\n"
+        );
+
+        // Blank is nothing, exactly as a blank note is: whitespace does not
+        // become a section of its own.
+        node.amendment = Some("   \n".into());
+        assert_eq!(node.rendered_task(), "## What\nship it");
+
+        // Prose that *mentions* the heading is not the section, so an amendment
+        // is not hidden inside a paragraph telling a worker where notes go.
+        node.amendment = Some("Leave the comments.".into());
+        node.task = Some("## What\nput it under ## Additional info when you write one".into());
+        let rendered = node.rendered_task();
+        assert!(
+            rendered.trim_end().ends_with("Leave the comments."),
+            "prose naming the heading was read as the section:\n{rendered}"
+        );
+    }
+
+    /// Both levers on one node, and each says what it is.
+    ///
+    /// The amendment is part of the task the judge reads; the note follows it,
+    /// under its own heading, still disclaiming itself. A run that carried one
+    /// and lost the other would be the failure this pair exists to end.
+    #[test]
+    fn a_node_carrying_both_levers_renders_each_under_its_own_heading() {
+        let node = Node {
+            id: "build".into(),
+            persona: Some("engineer".into()),
+            task: Some("## What\nship it\n\n## Additional info\n\nrun the gate.\n".into()),
+            amendment: Some("Leave the comments.".into()),
+            context: Some("the fixture moved to tests/data".into()),
+            ..Node::default()
+        };
+        let rendered = node.rendered_task();
+        let at = |needle: &str| rendered.find(needle).expect("it is rendered");
+        assert!(
+            at(AMENDMENT_HEADING) < at("## Additional info")
+                && at("## Additional info") < at(PLANNER_CONTEXT_HEADING),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("adds no acceptance criteria"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("this section wins"), "{rendered}");
+    }
+
+    /// Every step of a workstream is judged against the node's amendment,
+    /// because every step of one workstream shares one branch and one bar.
+    #[test]
+    fn a_step_renders_the_amendment_of_the_node_it_belongs_to() {
+        let step = Step {
+            id: "implement".into(),
+            task: Some("## What\nimplement\n\n## Additional info\n\nnotes.\n".into()),
+            ..Step::default()
+        };
+        let node = Node {
+            id: "service".into(),
+            amendment: Some("Leave the comments.".into()),
+            context: Some("the API moved".into()),
+            ..Node::default()
+        };
+        let rendered = step.rendered_task_for(&node, &[]);
+        assert!(rendered.contains("Leave the comments."), "{rendered}");
+        assert!(rendered.contains("this section wins"), "{rendered}");
+        assert!(rendered.contains("the API moved"), "{rendered}");
+        assert!(
+            rendered.find(AMENDMENT_HEADING) < rendered.find("## Additional info"),
+            "{rendered}"
+        );
+        // The pair written before amendments existed answers exactly as it did
+        // then: the node's note, and nothing about its bar.
+        let older = step.rendered_task_with(node.context.as_deref(), &[]);
+        assert!(!older.contains(AMENDMENT_HEADING), "{older}");
+        assert_eq!(older, step.rendered_task(node.context.as_deref()));
     }
 
     /// The reference block is the shape the divergence record states, appended by

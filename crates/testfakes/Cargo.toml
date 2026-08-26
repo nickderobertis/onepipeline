@@ -97,6 +97,15 @@ path = "src/bin/fake-oneharness.rs"
 name = "fake-onetaskgraph"
 path = "src/bin/fake-onetaskgraph.rs"
 
+# Not a double at all: a **real** node validator, as `--node-validator` names
+# one. The hook's promise is that a command the consuming host names is run, and
+# that host's own validator reads documents this crate has never seen — so what
+# the journeys drive is a real program at that seam, scripted from the same
+# directory the doubles are. It lives here because it must never ship either.
+[[bin]]
+name = "node-validator"
+path = "src/bin/node-validator.rs"
+
 [lib]
 name = "onepipeline_testfakes"
 path = "src/lib.rs"

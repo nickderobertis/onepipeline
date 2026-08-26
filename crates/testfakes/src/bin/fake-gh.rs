@@ -24,7 +24,11 @@
 //! And one non-ending: `gh.outage` makes this host **unreachable**, which is not
 //! a decision about a change request but the absence of one. It is how a journey
 //! reaches a publication whose push landed and whose merge path then could not be
-//! read at all.
+//! read at all. Empty, it lasts: every invocation is refused, which is the host
+//! that never comes back. Holding a **count**, it is the outage that ends — that
+//! many invocations are refused and every one after them is answered, which is
+//! what a caller that reads the merge path again has to meet to be worth
+//! anything.
 
 use onepipeline_testfakes as fake;
 use std::num::NonZeroU64;
@@ -95,7 +99,7 @@ fn main() -> ExitCode {
     // Recorded first, so a journey scripting the outage can still assert this
     // host was asked — an unreachable host is one that was called, not one that
     // never was.
-    if fake::node_script(&dir, "gh", "outage").is_some() {
+    if unreachable(&dir) {
         eprintln!("{UNREACHABLE}");
         return ExitCode::from(1);
     }
@@ -115,6 +119,43 @@ fn main() -> ExitCode {
         (Some(one), None) => fake::refuse(&format!("unknown gh command '{one}'")),
         (None, _) => fake::refuse("gh takes a command"),
     }
+}
+
+/// Whether this invocation meets the outage a journey scripted, counting it in.
+///
+/// An empty script is the outage that does not end: every invocation is refused.
+/// A script holding a count is the outage that does — the first `n` invocations
+/// are refused and every one after them is answered — and the count of what has
+/// been refused so far lives on disk, because nothing carries state between two
+/// invocations of a program that exits.
+///
+/// A script holding anything else is a scenario nobody wrote, and reading it
+/// leniently would be this program inventing a host behaviour a journey did not
+/// ask for: an unparsable count read as "always" would make an outage that was
+/// meant to end never end, and the journey written to prove a recovery would
+/// prove the opposite.
+fn unreachable(dir: &Path) -> bool {
+    let Some(script) = fake::node_script(dir, "gh", "outage") else {
+        return false;
+    };
+    if script.trim().is_empty() {
+        return true;
+    }
+    let Ok(refuse) = script.trim().parse::<usize>() else {
+        fake::fail(&format!(
+            "gh.outage holds {script:?}, which is neither empty nor a count of invocations              to refuse"
+        ));
+    };
+    let refused = dir.join("gh").join("refused");
+    let so_far = read_if_present(&refused)
+        .unwrap_or_default()
+        .lines()
+        .count();
+    if so_far >= refuse {
+        return false;
+    }
+    fake::append(&refused, "refused");
+    true
 }
 
 /// What a flag's value has to be for this host to trust it.

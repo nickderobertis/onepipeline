@@ -27,7 +27,7 @@ use crate::cli::{
     StartArgs, StopArgs, SurfaceArgs, TelemetryArgs, TranscriptArgs, DAG_GRAPH_OFF,
 };
 use crate::concurrency::{self, Liveness, State};
-use crate::edits;
+use crate::edits::{self, Frontier};
 use crate::engine;
 use crate::error::{Error, Result, EXIT_NOTHING_DRIVING, EXIT_QUEUED, EXIT_SUCCESS};
 use crate::filter::{self, EventFilter};
@@ -184,6 +184,20 @@ fn recorded_dir(record: &LaunchRecord) -> Result<PathBuf> {
 // duplicate the sibling type without adding an invariant: relative references are made
 // absolute here, and the nonempty launch-record invariant is checked before every run.
 fn resolve_graph(reference: &str, base: &Path) -> Result<String> {
+    // Refused before anything is joined or opened, because a blank reference
+    // resolves to `base` itself — the launch directory — and what happens next
+    // is whatever the host's file API answers for opening a directory, which is
+    // read on Linux and refused on Windows. A launch that starts on one platform
+    // and not another is not a launch anybody wrote. What names no graph at all
+    // is the `None` its caller holds; a reference that is *there* and holds
+    // nothing names one that cannot be found, and says so the same way
+    // everywhere.
+    if reference.trim().is_empty() {
+        return Err(Error::Invalid(
+            "graph reference is blank: name a path, an `https://` URL, or no graph at all"
+                .to_string(),
+        ));
+    }
     // llmlint: ignore-block[boundary_inputs_validated] absolute paths and URLs are
     // oneagentgraph's existing input boundary: it reads/fetches them and returns its own
     // config refusal. This boundary resolves only relative paths because onepipeline is
@@ -357,6 +371,17 @@ fn start(args: &StartArgs) -> Result<i32> {
     // is the shipped default, and the flag overrides the config that names one.
     // Resolved against the launch directory like every other reference, so the
     // record carries what a driver started from anywhere else replays.
+    //
+    // A rung that is *there* and blank names no graph, exactly as the node
+    // validator's three rungs below read a blank one: the flag still overrides
+    // the config it names, and what it overrides it to is "this launch drafts
+    // nothing" rather than the config underneath. `LaunchConfig::load` keeps a
+    // blank `pr_author_graph` rather than refusing it — the key has shipped
+    // since schema 2 and a document already on disk may carry one — so the
+    // blank arrives here, and here is where it means the same thing as the
+    // document that omits the key: nothing to resolve, and nothing read off a
+    // disk to decide it, because what a filesystem answers for an empty path is
+    // a property of the platform rather than of the launch.
     // llmlint: ignore-block[invalid_states_unrepresentable] a resolved reference stays the
     // `String` `resolve_graph` answers with, from here into `LaunchRecord` and back out of
     // it, for the reason that function's own suppression gives: the durable record and
@@ -367,10 +392,36 @@ fn start(args: &StartArgs) -> Result<i32> {
         .pr_author_graph
         .as_deref()
         .or(declared.pr_author_graph.as_deref())
+        .filter(|reference| !reference.trim().is_empty())
     {
         Some(reference) => Some(resolve_graph(reference, &launch_dir)?),
         None => None,
     }; // llmlint: ignore-end[invalid_states_unrepresentable]
+
+    // llmlint: ignore-block[invalid_states_unrepresentable] the resolved command stays the
+    // `String` `LaunchRecord`'s schema declares, exactly as `pr_author_graph_ref` above
+    // does. The one invariant a newtype could carry — non-blank — is the `filter` below;
+    // that the command *runs* is establishable only by running it, which
+    // `edits::offer_to_validator` does, failing closed.
+    //
+    // The **presence** of a rung decides which one answers, so a flag or a variable that
+    // is there and blank means this launch names none rather than falling through to the
+    // rung under it. A blank config key never reaches here: `LaunchConfig::load` refuses
+    // one by name. Not resolved against the launch directory — a command the host names
+    // may as legitimately be a name on `PATH` as a path.
+    let named = match args.node_validator.clone() {
+        // The flag wins outright, so a variable this build cannot read is never
+        // consulted by a launch that was not going to use it.
+        flag @ Some(_) => flag,
+        None => match engine::configured_node_validator()? {
+            variable @ Some(_) => variable,
+            None => declared.node_validator.clone(),
+        },
+    };
+    let node_validator: Option<String> = named
+        .map(|command| command.trim().to_string())
+        .filter(|command| !command.is_empty());
+    // llmlint: ignore-end[invalid_states_unrepresentable]
     let node_graph_ref = resolve_graph(&engine::configured_node_graph(), &launch_dir)?;
     resolve_plan_graphs(&mut plan, &launch_dir)?;
     // Before the run directory exists. A spec that could not be honoured is the
@@ -442,6 +493,7 @@ fn start(args: &StartArgs) -> Result<i32> {
         graph_run: String::new(),
         node_graph: node_graph_ref,
         pr_author_graph: pr_author_graph_ref.unwrap_or_default(),
+        node_validator: node_validator.unwrap_or_default(),
         launcher: sys::launcher(),
         session: sys::launching_session(),
         // Claimed by this process immediately below, through the one writer of
@@ -1756,7 +1808,13 @@ fn submit(paths: &RunPaths, envelope: &Reply) -> Result<i32> {
     // through the reconciler's own validator, so the answer is the one the
     // reconciler would give — before anything is queued or sent.
     let mut projected = view.state.graph.clone();
-    let frontier = view.state.frontier();
+    // The validator this run was launched with, off the launch record rather
+    // than out of this process's environment: a `reply` typed in another shell
+    // is judged by the rules the run was started under.
+    let frontier = Frontier {
+        node_validator: view.launch.node_validator().map(str::to_owned),
+        ..view.state.frontier()
+    };
     for command in &envelope.commands {
         edits::compile(&mut projected, &frontier, command)?;
     }
@@ -2239,6 +2297,7 @@ mod tests {
             graph_run: String::new(),
             node_graph: "graphs/node-scope.yaml".into(),
             pr_author_graph: String::new(),
+            node_validator: String::new(),
             launcher: "e2e".into(),
             session: "session-a".into(),
             pid,

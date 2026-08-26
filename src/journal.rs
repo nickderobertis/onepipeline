@@ -541,6 +541,22 @@ impl StopTeardown {
 /// change of its own — see [`crate::graph::Landing`].
 pub const SETTLED_LANDING: &str = "landing";
 
+/// The `node-settled` payload field naming why a dispatch that ended for a reason
+/// other than the agent's verdict ended.
+///
+/// Named once for the reason [`SETTLED_LANDING`] is: `engine::settle` writes it
+/// and `projection` reads it back, and two spellings of one field is a run whose
+/// settlement says a cause its own result document does not. The producer's own
+/// word, and absent on every settlement that carries no classification.
+pub const SETTLED_CAUSE: &str = "cause";
+
+/// The `node-settled` payload field naming the commit the node's branch was left
+/// at.
+///
+/// Named once for the same reason, and absent wherever `onevcs` recorded no
+/// commit — a node that produced no branch, and a branch nothing committed to.
+pub const SETTLED_HEAD: &str = "head";
+
 /// The `driver-adopted` payload field naming the dispatches the adoption
 /// cleared, and where each one's work is.
 ///

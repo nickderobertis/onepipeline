@@ -71,7 +71,7 @@ const CHECKED_MINIMUM: Version = Version {
 /// `_ensure-onetaskgraph` reads it out of this file rather than keeping a second
 /// copy, and
 /// [`the_revision_the_checks_install_is_read_out_of_this_file`](tests::the_revision_the_checks_install_is_read_out_of_this_file)
-/// fails if a copy appears. `docs/contract-divergences.md` entry 42 is the
+/// fails if a copy appears. `docs/contract-divergences.md` entry 43 is the
 /// proposal to retire it for a version once one carries the surface.
 pub const FIRST_REVISION: &str = "dc0180cf1f5754c23aae065aae6531f858ca4d1f";
 

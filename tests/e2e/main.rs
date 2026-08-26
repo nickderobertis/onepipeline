@@ -22,6 +22,7 @@
 mod harness;
 
 mod adoption;
+mod amend;
 mod boundary;
 mod cancellation;
 mod channel;
@@ -34,6 +35,7 @@ mod filter;
 mod journal;
 mod lifecycle;
 mod live_edit;
+mod node_validator;
 mod plan;
 mod real_vcs;
 mod session;

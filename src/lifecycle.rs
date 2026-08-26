@@ -139,7 +139,7 @@ fn attempt_once(
     let Some(request) = crate::vcs::request_for(node) else {
         return Attempt::Settled(Settlement {
             detail: Some("a lifecycle node needs a repo".into()),
-            ..Settlement::plain(&node.id, NodeStatus::Failed, Some("invalid-node"))
+            ..Settlement::plain(&node.id, NodeStatus::Failed, Some(engine::INVALID_NODE))
         });
     };
 
@@ -163,7 +163,7 @@ fn attempt_once(
         Err(reason) => {
             return Attempt::Settled(Settlement {
                 detail: Some(reason),
-                ..Settlement::plain(&node.id, NodeStatus::Failed, Some("invalid-node"))
+                ..Settlement::plain(&node.id, NodeStatus::Failed, Some(engine::INVALID_NODE))
             })
         }
     }; // llmlint: ignore-end[changed_behavior_has_e2e]
@@ -242,7 +242,7 @@ fn attempt_once(
         );
         let build = || DispatchRequest {
             graph: graph.clone(),
-            task: step.rendered_task_with(node.context.as_deref(), references),
+            task: step.rendered_task_for(node, references),
             labels: engine::dispatch_labels(
                 run,
                 &node.id,
@@ -285,7 +285,7 @@ fn attempt_once(
         // node settles on the existing no-changes outcome.
         return Attempt::Settled(Settlement {
             branch,
-            ..Settlement::plain(&node.id, NodeStatus::Done, Some("no-changes"))
+            ..Settlement::plain(&node.id, NodeStatus::Done, Some(engine::NO_CHANGES))
         });
     };
 
@@ -371,16 +371,16 @@ fn publish(
         Attempt::Settled(Settlement {
             branch: branch.clone(),
             detail: Some(with_undrafted(detail)),
-            ..Settlement::plain(&node.id, NodeStatus::Failed, Some("publication-failed"))
+            ..Settlement::plain(
+                &node.id,
+                NodeStatus::Failed,
+                Some(crate::vcs::Failure::RESIDUAL),
+            )
         })
     };
 
-    match crate::vcs::publish(
-        token,
-        node.merge_policy,
-        node.title.as_deref(),
-        body.as_deref(),
-    ) {
+    let publication = publish_rereading_the_merge_path(node, token, body.as_deref(), cancel);
+    match publication.answered {
         Ok(published) => {
             // A publication that did not land is an ending of the publication,
             // not a refused request: `onevcs` draws that line itself, in
@@ -394,6 +394,21 @@ fn publish(
                 retained,
             } = &published.outcome
             {
+                // The push reached the remote and the reads behind it are spent.
+                // Settled here rather than routed with the four the tree was
+                // rejected by: there is nothing about the tree to fix, and the
+                // node says what it is — where the work is, what commit it is at,
+                // and what stopped the read — instead of being asked for again.
+                if crate::vcs::failure_of(*kind) == crate::vcs::Failure::Unread {
+                    return unread_merge_path(
+                        &node.id,
+                        token,
+                        branch.or_else(|| Some(published.branch.clone())),
+                        reason,
+                        publication.reads,
+                        undrafted.clone(),
+                    );
+                }
                 return failed_publication(
                     &node.id,
                     token,
@@ -467,6 +482,123 @@ fn publish(
         // end to end beside an undrafted body.
         Err(error) => publication_failed(error.to_string()),
     }
+}
+
+/// One publication, and how many reads of the merge path it took to answer.
+struct Published {
+    /// What the last read answered, which is the publication the node settles on.
+    answered: crate::error::Result<onevcs::Publication>,
+    /// How many reads were made, for the settlement a spent budget writes. One
+    /// on every path but the re-read, which is every publication that answered
+    /// the first time it was asked.
+    reads: std::num::NonZeroU32,
+}
+
+/// Publish, and where the push reached the remote with the merge path unread,
+/// **re-read that path** rather than sending the agent back to the tree.
+///
+/// The one publication failure whose fix is not more work: the push landed, and
+/// re-dispatching the agent buys a fresh clone and a fresh gate to re-push what
+/// the remote already carries.
+///
+/// The re-read is [`crate::vcs::publish`] on the **same session**, which for a
+/// branch already on the remote is `onevcs`'s own guidance for this state and is a
+/// read of the host rather than a second push. Nothing here asks a host anything
+/// itself: a second route to a change request's state would be host knowledge
+/// regrown in the composition layer.
+///
+/// Bounded by [`engine::merge_path_reads`]. Whatever a read answers is what the
+/// node settles on, and the routing that follows is the one that word has always
+/// had.
+fn publish_rereading_the_merge_path(
+    node: &Node,
+    token: &onevcs::SessionToken,
+    body: Option<&str>,
+    cancel: &crate::executor::CancellationToken,
+) -> Published {
+    let publish = || crate::vcs::publish(token, node.merge_policy, node.title.as_deref(), body);
+    let budget = engine::merge_path_reads();
+    let mut backoff = engine::merge_path_backoff();
+    let mut reads = std::num::NonZeroU32::MIN;
+    let mut answered = publish();
+    while reads < budget && still_unread(&answered) && waited(backoff, cancel) {
+        backoff = engine::doubled(backoff);
+        reads = reads.saturating_add(1);
+        answered = publish();
+    }
+    Published { answered, reads }
+}
+
+/// Wait out one backoff, answering `false` if the run was stopped instead.
+///
+/// In steps rather than one sleep because the backoff doubles to two minutes, and
+/// a teardown held open that long by a poll of somebody else's API is the thing
+/// the cancellation is for.
+fn waited(backoff: std::time::Duration, cancel: &crate::executor::CancellationToken) -> bool {
+    /// How often the wait looks up. Short enough that a stop is not felt as a
+    /// pause, long enough that waiting out a two-minute backoff is not a spin.
+    const STEP: std::time::Duration = std::time::Duration::from_millis(50);
+
+    let until = std::time::Instant::now() + backoff;
+    loop {
+        if cancel.is_cancelled() {
+            return false;
+        }
+        let left = until.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return true;
+        }
+        std::thread::sleep(left.min(STEP));
+    }
+}
+
+/// Whether a publication ended with its push on the remote and the path behind it
+/// unread — the one ending another read of the host could answer.
+///
+/// A publication `onevcs` **refused** is not one: the sibling draws the line
+/// between a request it would not take and a publication that ran and did not
+/// land, and a refusal is the first of those. Nothing about it says a push reached
+/// anything, so re-reading it would ask the host about work that may never have
+/// left this machine. It settles as the residual, exactly as it always did.
+fn still_unread(answered: &crate::error::Result<onevcs::Publication>) -> bool {
+    let Ok(published) = answered else {
+        return false;
+    };
+    matches!(
+        &published.outcome,
+        onevcs::PublishOutcome::Failed { kind, .. }
+            if crate::vcs::failure_of(*kind) == crate::vcs::Failure::Unread
+    )
+}
+
+/// The settlement of a node whose work reached the remote and whose merge path
+/// the reads never answered.
+///
+/// **Not re-dispatched**: nothing rejected the tree, so asking a worker again
+/// would republish what the origin already carries. `reason` is `onevcs`'s own
+/// sentence, which names the branch, the commit, what stopped the read, and the
+/// `publish-branch` that lands it once the host is back.
+fn unread_merge_path(
+    node: &str,
+    token: &onevcs::SessionToken,
+    branch: Option<String>,
+    reason: &str,
+    reads: std::num::NonZeroU32,
+    undrafted: Option<String>,
+) -> Attempt {
+    let how_many = format!(
+        "the merge path was read {reads} time{} and never answered",
+        if reads.get() == 1 { "" } else { "s" }
+    );
+    Attempt::Settled(Settlement {
+        branch,
+        head: crate::vcs::branch_head_in(token),
+        detail: Some(compose(
+            &format!("onevcs: {reason}. {how_many}"),
+            undrafted.as_deref(),
+        )),
+        ..Settlement::plain(node, NodeStatus::Failed, Some(crate::vcs::Failure::UNREAD))
+    })
 }
 
 /// How one attempt at a lifecycle node ended.
