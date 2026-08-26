@@ -2004,7 +2004,7 @@ fn a_stop_that_cannot_read_the_process_table_refuses_and_leaves_the_run_retryabl
 /// as it was, and the same ask works once the host answers what it was asked. The
 /// listing this stand-in gives is the real one throughout, which is what keeps the
 /// fault to the one question under test.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "linux")))]
 #[test]
 fn a_stop_whose_host_says_more_than_it_was_asked_about_a_pid_refuses_and_signals_nothing() {
     let world = World::new("driver-stop-talkative-ps");
@@ -2263,6 +2263,160 @@ fn a_stop_never_signals_a_pid_the_host_has_given_to_another_process() {
     stranger.kill().expect("this test ends its own process");
     stranger.wait().expect("it is reaped");
     world.release("build.go");
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+/// Linux does not let an old identity decay with `ps`'s wall-clock rendering.
+///
+/// The stand-in moves `lstart` from the real process's 2026-era value to 1970,
+/// vastly more than the 33-second drift observed after 68 minutes. The real
+/// stop command still identifies and ends its real driver and dispatch because
+/// Linux records the kernel's clock-tick start value instead.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_linux_process_identity_survives_wall_clock_start_time_drift() {
+    let world = World::new("driver-stop-drifted-start");
+    world.script("build.wait", "hold");
+    let (run, driver) = start_detached_announcing(&world, "drifted", vec![agent("build", &[])]);
+    world.until("a node to be in flight", |world| {
+        !world.events_of(&run, "node-dispatched").is_empty()
+    });
+    world.until("the dispatch to be a process below the driver", |_| {
+        !descendants(driver).is_empty()
+    });
+    let tree: Vec<u32> = std::iter::once(driver).chain(descendants(driver)).collect();
+
+    let mut command = world.cmd(&["stop", &run]);
+    command.env("PATH", world.path_whose_ps_start_time_has_drifted());
+    world
+        .run_on(command, "stop after ps start-time drift")
+        .exited(0)
+        .out_has("\"stopped\":true")
+        .out_has("\"teardown\":\"signalled\"");
+    world.until("every process the run started to end", |_| {
+        tree.iter().all(|pid| !still_listed(*pid))
+    });
+    world.release("build.go");
+}
+
+/// A Linux run launched by the former `ps lstart` implementation remains
+/// stoppable after upgrading to procfs tokens.
+// llmlint: ignore-block[tests_mirror_real_usage] installing an older binary merely to
+// create its launch record would test packaging rather than this compatibility boundary;
+// replacing only the serialized token with the exact value that binary wrote is the
+// persisted pre-upgrade input the current public `stop` command must accept.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_linux_stop_accepts_an_active_runs_legacy_ps_identity() {
+    let world = World::new("driver-stop-legacy-start-token");
+    world.script("build.wait", "hold");
+    let (run, driver) = start_detached_announcing(&world, "legacy", vec![agent("build", &[])]);
+    world.until("a node to be in flight", |world| {
+        !world.events_of(&run, "node-dispatched").is_empty()
+    });
+
+    let record = world.run_file(&run, "launch.json");
+    let mut launch = world.run_json(&run, "launch.json");
+    launch["started"] = json!(started_at_of(driver));
+    std::fs::write(record, launch.to_string()).expect("the legacy launch record is installed");
+
+    world
+        .run(&["stop", &run])
+        .exited(0)
+        .out_has("\"stopped\":true")
+        .out_has("\"teardown\":\"signalled\"");
+    world.until("the legacy-recorded driver to end", |_| {
+        !still_listed(driver)
+    });
+    world.release("build.go");
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+/// Finding live pids but declining every recorded identity is a refusal, not an
+/// idle run. The stranger is a real process owned by this test and survives.
+// llmlint: ignore-block[tests_mirror_real_usage] PID reuse is a host transition, not a
+// product operation, and waiting for this particular stale pid to be recycled is unbounded.
+// The fixture changes only that historical pid; the real `stop` command then reads the real
+// run root, asks the host about a real independently-started process, and must leave it alive.
+#[cfg(unix)]
+#[test]
+fn a_stop_that_declines_every_live_identity_does_not_report_success() {
+    let world = World::new("driver-stop-all-identities-declined");
+    world.script("build.wait", "hold");
+    let (run, driver) = start_detached_announcing(&world, "declined", vec![agent("build", &[])]);
+    world.until("a node to be in flight", |world| {
+        !world.events_of(&run, "node-dispatched").is_empty()
+    });
+
+    let recorded = world.run_json(&run, "launch.json")["started"]
+        .as_str()
+        .expect("the launch record carries its driver's identity")
+        .to_string();
+    let mut stranger = stranger_started_after(&recorded);
+    let stranger_pid = stranger.id();
+    let mut paths = vec![
+        world.run_file(&run, "launch.json"),
+        world.run_file(&run, "owner.lock"),
+    ];
+    let dispatches: Vec<_> = std::fs::read_dir(world.run_file(&run, "dispatches"))
+        .expect("the live dispatch registry exists")
+        .filter_map(|entry| {
+            let path = entry.expect("a dispatch registry entry").path();
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+                .then_some(path)
+        })
+        .collect();
+    assert!(
+        !dispatches.is_empty(),
+        "the in-flight node recorded no live dispatch claim"
+    );
+    paths.extend(dispatches);
+    for path in paths {
+        let mut claim: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&path).expect("the live process claim is readable"),
+        )
+        .expect("the live process claim is JSON");
+        claim["pid"] = json!(stranger_pid);
+        std::fs::write(&path, claim.to_string()).expect("the reissued pid is planted");
+    }
+
+    let refused = world.run(&["stop", &run]);
+    refused
+        .exited(REFUSED)
+        .err_has("was not stopped")
+        .err_has("every recorded identity disagreed")
+        .err_has("distinct from a run with nothing left to stop");
+    assert!(
+        !refused.stdout.contains("\"stopped\":true") && !refused.stdout.contains("nothing-to-stop"),
+        "an all-declined stop reported success or idleness:\n{}",
+        refused.stdout
+    );
+    assert!(
+        stranger
+            .try_wait()
+            .expect("this host answers about the stranger")
+            .is_none(),
+        "the declined stranger was signalled"
+    );
+    let stopped = world.events_of(&run, "run-stopped");
+    assert_eq!(stopped.len(), 1, "the declined attempt went unrecorded");
+    assert_eq!(
+        stopped[0]["payload"]["teardown"],
+        json!("identity-declined")
+    );
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("build: worker may still be running: the stop could not reach it");
+
+    stranger.kill().expect("this test ends its own process");
+    stranger.wait().expect("the stranger is reaped");
+    world.release("build.go");
+    world.until(
+        "the driver to finish after its dispatch is released",
+        |_| !still_listed(driver),
+    );
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 

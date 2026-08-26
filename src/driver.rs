@@ -1332,6 +1332,7 @@ fn stop(args: &StopArgs) -> Result<i32> {
         None => journal::StopTeardown::Elsewhere,
         Some(sys::Teardown::Signalled) => journal::StopTeardown::Signalled,
         Some(sys::Teardown::NothingToStop) => journal::StopTeardown::NothingToStop,
+        Some(sys::Teardown::IdentityDeclined) => journal::StopTeardown::IdentityDeclined,
         Some(sys::Teardown::NotAttempted) => journal::StopTeardown::NotAttempted,
         Some(sys::Teardown::PartlySignalled) => journal::StopTeardown::PartlySignalled,
         // Unix-only, as the variant is: no Windows teardown establishes it.
@@ -1370,6 +1371,14 @@ fn stop(args: &StopArgs) -> Result<i32> {
                  signalled and at least one process in it is still running — one this \
                  session could not signal, or one that took the ask and stayed. Find it \
                  in this host's process list and end it as the user that owns it"
+            )));
+        }
+        Some(sys::Teardown::IdentityDeclined) => {
+            return Err(Error::Refused(format!(
+                "run '{run}' was not stopped: live processes were found, but every recorded \
+                 identity disagreed with the process now holding its pid, so none was safe \
+                 to signal. This is distinct from a run with nothing left to stop; inspect \
+                 the declined claims above and retry only after correcting the run records"
             )));
         }
         // llmlint: ignore-block[changed_behavior_has_e2e] this arm has no journey and
@@ -1436,9 +1445,17 @@ fn stop(args: &StopArgs) -> Result<i32> {
 // stale record names beside the pid the lock stamps — is what the first of those walks over
 // one listing.
 fn terminate(paths: &RunPaths, record: &LaunchRecord) -> Result<Option<sys::Teardown>> {
-    let Aim::Here { roots, unproven } = roots_to_stop(paths, record)? else {
+    let Aim::Here {
+        roots,
+        unproven,
+        declined,
+    } = roots_to_stop(paths, record)?
+    else {
         return Ok(None);
     };
+    if roots.is_empty() && unproven.is_empty() && !declined.is_empty() {
+        return Ok(Some(sys::Teardown::IdentityDeclined));
+    }
     let established = sys::stop_and_confirm(&roots, sys::Stop::Politely, TEARDOWN_PATIENCE);
     if unproven.is_empty() {
         return Ok(Some(established));
@@ -1447,6 +1464,10 @@ fn terminate(paths: &RunPaths, record: &LaunchRecord) -> Result<Option<sys::Tear
         // Nothing was signalled and the run is exactly as it was, which is what
         // a retry rests on.
         sys::Teardown::NothingToStop | sys::Teardown::NotAttempted => sys::Teardown::NotAttempted,
+        // `stop_and_confirm` never manufactures this caller-level outcome, but
+        // if another platform can establish it directly it remains the most
+        // precise answer after adding an unproven claim beside it.
+        sys::Teardown::IdentityDeclined => sys::Teardown::IdentityDeclined,
         // Part of the run was signalled and something on this host is still
         // running that this teardown was not entitled to touch.
         sys::Teardown::Signalled | sys::Teardown::PartlySignalled => sys::Teardown::PartlySignalled,
@@ -1486,6 +1507,10 @@ enum Aim {
         /// A teardown that dropped these would report a clean stop over a
         /// process that may well be the run's own driver.
         unproven: Vec<u32>,
+        /// Live pids whose readable start token disagreed with their record.
+        /// They are strangers, so they are never signalled; retaining them is
+        /// what distinguishes an all-declined walk from an empty one.
+        declined: Vec<u32>,
     },
 }
 
@@ -1514,6 +1539,7 @@ fn roots_to_stop(paths: &RunPaths, record: &LaunchRecord) -> Result<Aim> {
     let mut on_this_host = false;
     let mut roots: Vec<u32> = Vec::new();
     let mut unproven: Vec<u32> = Vec::new();
+    let mut declined: Vec<u32> = Vec::new();
     // Each claim in turn, and the launch record first, so a teardown asks the
     // driver to go before the work it started: the record's driver, then the
     // lock's holder, then every dispatch the run has recorded.
@@ -1543,11 +1569,14 @@ fn roots_to_stop(paths: &RunPaths, record: &LaunchRecord) -> Result<Aim> {
         match claim_on(pid, &started) {
             Claim::Proved => roots.push(pid),
             Claim::Gone => {}
-            Claim::Reissued => eprintln!(
-                "onepipeline: run '{}': the {named_by} names pid {pid}, which this host has \
-                 since given to another process, so it was not signalled",
-                paths.run
-            ),
+            Claim::Reissued => {
+                eprintln!(
+                    "onepipeline: run '{}': the {named_by} names pid {pid}, which this host has \
+                     since given to another process, so it was not signalled",
+                    paths.run
+                );
+                declined.push(pid);
+            }
             Claim::Unstamped => {
                 left_alone(
                     &paths.run,
@@ -1571,7 +1600,11 @@ fn roots_to_stop(paths: &RunPaths, record: &LaunchRecord) -> Result<Aim> {
     if !on_this_host {
         return Ok(Aim::Elsewhere);
     }
-    Ok(Aim::Here { roots, unproven })
+    Ok(Aim::Here {
+        roots,
+        unproven,
+        declined,
+    })
 }
 
 /// Say out loud that a live pid was left alone, and what stood in the way of
@@ -2456,7 +2489,8 @@ mod tests {
             aimed_at(&launched_by(dead, &here, &proven)),
             Aim::Here {
                 roots: Vec::new(),
-                unproven: Vec::new()
+                unproven: Vec::new(),
+                declined: Vec::new(),
             }
         );
         // The same record naming this live process, which its stamp proves.
@@ -2477,7 +2511,8 @@ mod tests {
             )),
             Aim::Here {
                 roots: Vec::new(),
-                unproven: Vec::new()
+                unproven: Vec::new(),
+                declined: vec![sys::pid()],
             },
             "a stop aimed at a pid the host has since given to another process"
         );
@@ -2488,7 +2523,8 @@ mod tests {
             aimed_at(&launched_by(sys::pid(), &here, "")),
             Aim::Here {
                 roots: Vec::new(),
-                unproven: vec![sys::pid()]
+                unproven: vec![sys::pid()],
+                declined: Vec::new(),
             }
         );
 
@@ -2514,7 +2550,8 @@ mod tests {
             aimed_at(&launched_by(dead, &here, &proven)),
             Aim::Here {
                 roots: Vec::new(),
-                unproven: vec![sys::pid()]
+                unproven: vec![sys::pid()],
+                declined: Vec::new(),
             }
         );
         // A lock taken on another machine, where a pid means nothing.
@@ -2642,7 +2679,8 @@ mod tests {
             roots_to_stop(&paths, &launch).expect("an entry from a newer writer reads"),
             Aim::Here {
                 roots: vec![usable.pid],
-                unproven: Vec::new()
+                unproven: Vec::new(),
+                declined: Vec::new(),
             },
             "a dispatch recorded with a field this build does not know was left running"
         );

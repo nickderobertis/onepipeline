@@ -92,9 +92,9 @@ pub fn hostname() -> String {
 
 /// What a teardown established about the processes it was aimed at.
 ///
-/// Five outcomes because they call for five different things from the caller,
+/// Six outcomes because they call for six different things from the caller,
 /// and collapsing any two of them is how a stop reports a completion nobody
-/// achieved. The fifth is [`Refused`](Self::Refused), which only a platform
+/// achieved. [`Refused`](Self::Refused) is the one which only a platform
 /// that signals processes one at a time can establish, and so exists only where
 /// one does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,6 +119,9 @@ pub enum Teardown {
     /// having ended a dispatch it never found. Neither is a failure: a run whose
     /// work is already over has nothing left to end.
     NothingToStop,
+    /// Live pids were found, but every readable recorded identity disagreed
+    /// with the process now holding it. Nothing was safe to signal.
+    IdentityDeclined,
     /// The teardown never began — this host gave no listing the tree could be
     /// read from, or the program that ends it could not be run — so **nothing**
     /// was signalled and the run is exactly as it was.
@@ -135,7 +138,7 @@ pub enum Teardown {
     /// The run is *not* untouched and retrying will not necessarily help: what
     /// is left is a process this user may not touch, or one that took the ask
     /// and stayed, and either way it is still running. The caller has to say so
-    /// rather than report any of the other four.
+    /// rather than report any of the other outcomes.
     PartlySignalled,
     /// The teardown began and **every** ask was refused: nothing was signalled,
     /// and every process it aimed at that was still there is one this user may
@@ -600,10 +603,12 @@ fn platform_stop(roots: &[u32], _how: Stop) -> (Teardown, Vec<u32>) {
             }
             Teardown::NotAttempted => walked = false,
             // `taskkill_established` never answers it: everything this teardown
-            // aimed at was live when it was filtered above. `Teardown::Refused`
-            // is not an arm here at all, because this platform cannot establish
-            // it — the note on the variant says why.
-            Teardown::NothingToStop => {}
+            // aimed at was live when it was filtered above. `IdentityDeclined`
+            // is likewise established by the caller before teardown begins,
+            // never by `taskkill_established`. `Teardown::Refused` is not an
+            // arm here at all, because this platform cannot establish it — the
+            // note on the variant says why.
+            Teardown::NothingToStop | Teardown::IdentityDeclined => {}
         }
     }
     let established = match (walked, attempted) {
@@ -968,19 +973,33 @@ fn platform_process_may_be_live(pid: u32) -> bool {
 /// leaves behind, and reading either as agreement would let two absences prove
 /// each other.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StartToken(String);
+pub struct StartToken {
+    recorded: String,
+    #[cfg(target_os = "linux")]
+    legacy_ps: Option<String>,
+}
 
 impl StartToken {
     /// The token as a record on disk carries it.
     pub fn recorded(&self) -> &str {
-        &self.0
+        &self.recorded
     }
 
     /// Whether a token recorded earlier is this same process's.
     ///
     /// The empty one is never anybody's, for the reason on the type.
     pub fn matches(&self, recorded: &str) -> bool {
-        !recorded.is_empty() && self.0 == recorded
+        !recorded.is_empty()
+            && (self.recorded == recorded || {
+                #[cfg(target_os = "linux")]
+                {
+                    self.legacy_ps.as_deref() == Some(recorded)
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    false
+                }
+            })
     }
 }
 
@@ -1012,17 +1031,53 @@ pub fn process_start_token(pid: u32) -> Option<StartToken> {
     if pid == 0 {
         return None;
     }
-    platform_process_start_token(pid).map(StartToken)
+    platform_process_start_token(pid)
 }
 
-/// Through `ps`, for the same reason [`process_table`] is: Linux has `/proc` and
-/// macOS does not, and a second implementation is a platform fixed in only one
-/// of them. `lstart` is the process's own start time, which the kernel fixes
-/// when the process is created and nothing afterwards changes.
+/// Directly from Linux's process record. Field 22 of `/proc/<pid>/stat` is the
+/// process's start time in clock ticks after boot, so it is fixed at creation
+/// and does not move when wall-clock discipline changes the relationship
+/// between uptime and UTC.
+///
+/// This deliberately replaces the formerly shared Unix `ps lstart` reading on
+/// Linux while leaving macOS on that path below. A single implementation cannot
+/// serve both: macOS has no procfs, while Linux procps reconstructs `lstart` as
+/// the current wall clock less elapsed uptime. That reconstruction was observed
+/// to move backwards for one live pid, so equality made every old record decay.
+/// Linux's kernel-relative value costs PID-reuse discrimination only at the
+/// kernel clock-tick resolution (normally finer than `ps`'s one second); a pid
+/// reused at the identical tick is the remaining indistinguishable case.
+///
+/// Parse from the final `)`: the parenthesized command in field 2 may itself
+/// contain spaces or parentheses. After it, field 3 is the first whitespace
+/// separated value, making field 22 index 19 in that suffix.
+#[cfg(target_os = "linux")]
+fn platform_process_start_token(pid: u32) -> Option<StartToken> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let after_command = stat.rsplit_once(')')?.1;
+    let started = after_command.split_whitespace().nth(19)?;
+    let recorded = started
+        .parse::<u64>()
+        .ok()
+        .map(|ticks| format!("linux-proc-stat:{ticks}"))?;
+    Some(StartToken {
+        recorded,
+        // Older Linux builds persisted `ps lstart`. Keep reading that spelling
+        // so an in-flight pre-upgrade run remains stoppable. This compatibility
+        // path inherits the old token's one-second PID-reuse resolution and
+        // clock drift, but new records always use the stable procfs value.
+        legacy_ps: ps_process_start_token(pid),
+    })
+}
+
+/// Through `ps` on macOS and the other supported Unix targets, because they do
+/// not expose Linux's procfs record. On macOS `lstart` comes from the process's
+/// kernel-recorded start `timeval`, so unlike Linux procps's uptime-to-wall-time
+/// reconstruction it remains fixed for the life of the process.
 ///
 /// **Asked in a fixed environment**, and that is what makes two readings
 /// comparable at all. `lstart` is not a fact `ps` copies out; it is that fact
-/// *rendered*, and every Unix renders it through the reader's own environment —
+/// *rendered*, and `ps` renders it through the reader's own environment —
 /// `localtime` for the zone, and on the BSDs `strftime("%c")` for the words. So
 /// the same live process answers `Mon Aug 17 11:22:34 2026` to one reader and
 /// `Mon Aug 17 07:22:34 2026` to another standing in a different `TZ`, and two
@@ -1030,11 +1085,10 @@ pub fn process_start_token(pid: u32) -> Option<StartToken> {
 /// process*. That is not a hypothetical: a run adopted from one session and
 /// looked at from another is two processes with two environments, and the view
 /// that exists to say whether its dispatches are alive reported them dead.
-/// Pinning the zone and the locale on the child leaves the reading a function of
-/// the process alone, which is the property the token is for; the alternative —
-/// a source rendered by nobody, `/proc/<pid>/stat` — exists on one of the two
-/// platforms this crate supports, and a platform fixed in only one of them is
-/// what having a single implementation here is worth avoiding.
+/// Pinning the zone and locale on the child leaves the reading a function of the
+/// process alone. Its one-second resolution means a pid reused within the same
+/// rendered second cannot be distinguished; that is the portability cost on a
+/// platform without a finer stable process identity.
 ///
 /// Read strictly. A `ps` that cannot run, exits non-zero, or writes bytes this
 /// cannot decode is not an answer, and neither is an empty line — a token
@@ -1046,8 +1100,13 @@ pub fn process_start_token(pid: u32) -> Option<StartToken> {
 /// live process disagree with its own recorded stamp, which a caller reads as a
 /// pid handed to somebody else — the one verdict that must never come from the
 /// host misbehaving rather than from the process ending.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn platform_process_start_token(pid: u32) -> Option<StartToken> {
+    ps_process_start_token(pid).map(|recorded| StartToken { recorded })
+}
+
 #[cfg(unix)]
-fn platform_process_start_token(pid: u32) -> Option<String> {
+fn ps_process_start_token(pid: u32) -> Option<String> {
     let listed = std::process::Command::new("ps")
         .args(["-p", &pid.to_string(), "-o", "lstart="])
         // `LC_ALL` rather than `LC_TIME`, because it is the one that overrides
@@ -1089,7 +1148,7 @@ fn platform_process_start_token(pid: u32) -> Option<String> {
 /// time this cannot pair with an exit check, which is the unproven half on its
 /// own — and `None` is already the honest way to say a host will not answer.
 #[cfg(windows)]
-fn platform_process_start_token(pid: u32) -> Option<String> {
+fn platform_process_start_token(pid: u32) -> Option<StartToken> {
     use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, WAIT_TIMEOUT};
     use windows_sys::Win32::System::Threading::{
         GetProcessTimes, OpenProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -1141,8 +1200,9 @@ fn platform_process_start_token(pid: u32) -> Option<String> {
     // report. `WAIT_OBJECT_0` is a process that has exited, and `WAIT_FAILED` is
     // a question this host would not take; neither is a proof of a live process,
     // and both resolve to "this host will not say".
-    (read != 0 && waited == WAIT_TIMEOUT)
-        .then(|| format!("{}:{}", created.dwHighDateTime, created.dwLowDateTime))
+    (read != 0 && waited == WAIT_TIMEOUT).then(|| StartToken {
+        recorded: format!("{}:{}", created.dwHighDateTime, created.dwLowDateTime),
+    })
 }
 
 /// Open an append-only file so this process is its **only** appender until the

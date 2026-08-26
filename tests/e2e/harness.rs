@@ -960,18 +960,18 @@ impl World {
     /// not, because the set it may not find is everything on the host and no
     /// journey can enumerate that.
     ///
-    /// On Unix that set is `ps`, which `sys::process_start_token` asks when a
-    /// dispatch is registered, delegated to the real one by absolute path.
-    /// Windows asks the process itself, so there is nothing to hold there and
-    /// this is an empty directory.
-    #[cfg(unix)]
+    /// On macOS and other non-Linux Unix that set is `ps`, delegated to the real
+    /// one by absolute path. Linux asks procfs and Windows asks the process
+    /// itself, so there is nothing to hold there and this is an empty directory.
+    #[cfg(all(unix, not(target_os = "linux")))]
     pub fn path_with_only_what_a_dispatch_resolves(&self) -> PathBuf {
         self.path_with_ps("only-ps", &format!("exec {} \"$@\"", real_ps().display()))
     }
 
-    /// A `PATH` holding only what a dispatch resolves by name — which on Windows
-    /// is nothing, because the start token is read off the process itself.
-    #[cfg(windows)]
+    /// A `PATH` holding only what a dispatch resolves by name. Linux reads the
+    /// start token from procfs and Windows reads it from the process itself, so
+    /// neither needs a named program here.
+    #[cfg(any(target_os = "linux", windows))]
     pub fn path_with_only_what_a_dispatch_resolves(&self) -> PathBuf {
         self.empty_path()
     }
@@ -1071,9 +1071,25 @@ impl World {
     /// token would make a live process disagree with the stamp its own record
     /// carries, which a reader takes for a pid the host has handed to somebody
     /// else: the one verdict that must never come from the host misbehaving.
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "linux")))]
     pub fn path_whose_ps_says_more_than_it_was_asked(&self) -> PathBuf {
         self.path_with_ps("talkative-ps", &answer_plus("a line nobody asked for"))
+    }
+
+    /// A `PATH` whose `ps lstart` answer has drifted far farther than the 33
+    /// seconds measured from one live Linux process in the originating report.
+    ///
+    /// The process table remains real. On Linux the product must not ask this
+    /// wall-clock question at all: its stable start token comes from procfs.
+    #[cfg(target_os = "linux")]
+    pub fn path_whose_ps_start_time_has_drifted(&self) -> PathBuf {
+        self.path_with_ps(
+            "drifted-start-ps",
+            &format!(
+                "case \" $* \" in\n  *lstart=*) echo 'Thu Jan  1 00:00:00 1970'; exit 0 ;;\nesac\nexec {} \"$@\"",
+                real_ps().display()
+            ),
+        )
     }
 
     /// A `PATH` holding one `ps` stand-in that behaves like `script`.

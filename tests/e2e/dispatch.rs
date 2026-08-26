@@ -2082,9 +2082,9 @@ fn a_launchs_own_environment_reaches_the_member_the_library_backend_runs() {
 /// this journey is about, and asserted below so the two are never confused for
 /// one another. That fact is the one thing here the two platforms do not share,
 /// because the question a dispatch is registered against — when its process
-/// started — is asked of a program on Unix and of the process itself on Windows.
-/// So it is stated per platform at the assertion, and neither platform is left
-/// asserting nothing.
+/// started — is asked through `ps` on macOS/other Unix, procfs on Linux, and the
+/// process itself on Windows. So it is stated per platform at the assertion,
+/// and no platform is left asserting nothing.
 #[test]
 fn a_document_the_runner_accepts_launches_whichever_way_it_is_asked_for() {
     for form in ["--attach", "--detach"] {
@@ -2130,26 +2130,24 @@ fn a_document_the_runner_accepts_launches_whichever_way_it_is_asked_for() {
             world.dump()
         );
         let settled = world.events_of("schema", "node-settled");
-        // On Unix `sys::process_start_token` asks `ps`, which is resolved **by
-        // name** off the `PATH` emptied above — so this host cannot say when the
-        // dispatch's process started, and a dispatch the run could never find
-        // again is refused rather than run blind.
-        #[cfg(unix)]
+        // On macOS and other non-Linux Unix, `sys::process_start_token` asks
+        // `ps`, resolved by name off the empty `PATH`, so the dispatch cannot be
+        // stamped and is refused rather than run blind.
+        #[cfg(all(unix, not(target_os = "linux")))]
         assert_eq!(
             settled[0]["payload"]["outcome"],
             json!("infrastructure-failure"),
             "a dispatch nothing could stamp settled as something else: {}",
             settled[0]
         );
-        // Windows asks the **process**, not a program: `OpenProcess` and
-        // `GetProcessTimes` in the `#[cfg(windows)]` half of that same function,
-        // which resolves nothing by name. So an emptied `PATH` takes nothing
-        // away here — the dispatch is stamped and registered, and it runs,
-        // because everything below it in this world is named by absolute path.
+        // Linux asks procfs and Windows asks the **process**, neither of which
+        // resolves a program by name. So an emptied `PATH` takes nothing away
+        // here — the dispatch is stamped and registered, and it runs, because
+        // everything below it in this world is named by absolute path.
         // Asserted rather than gated away, so the platform that *can* stamp is
         // held to running the node through to a settlement rather than to
         // whatever it happened to do.
-        #[cfg(windows)]
+        #[cfg(any(target_os = "linux", windows))]
         assert_eq!(
             settled[0]["payload"]["status"],
             json!("done"),
