@@ -603,10 +603,12 @@ fn platform_stop(roots: &[u32], _how: Stop) -> (Teardown, Vec<u32>) {
             }
             Teardown::NotAttempted => walked = false,
             // `taskkill_established` never answers it: everything this teardown
-            // aimed at was live when it was filtered above. `Teardown::Refused`
-            // is not an arm here at all, because this platform cannot establish
-            // it — the note on the variant says why.
-            Teardown::NothingToStop => {}
+            // aimed at was live when it was filtered above. `IdentityDeclined`
+            // is likewise established by the caller before teardown begins,
+            // never by `taskkill_established`. `Teardown::Refused` is not an
+            // arm here at all, because this platform cannot establish it — the
+            // note on the variant says why.
+            Teardown::NothingToStop | Teardown::IdentityDeclined => {}
         }
     }
     let established = match (walked, attempted) {
