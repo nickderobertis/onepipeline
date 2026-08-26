@@ -159,6 +159,91 @@ fn a_project_reads_as_the_plan_document_of_the_same_content() {
     );
 }
 
+/// A project bigger than one page of the store is read to its end.
+///
+/// A store pages, and a plan is the whole graph or it is not a plan: a launch
+/// that read the first page alone would execute a prefix of the project and
+/// never say which nodes it left out. The world's own `page_size` is turned down
+/// so the real binary really does hand back continuation tokens — three pages of
+/// tasks, and a page of edges behind each of them — rather than fitting the
+/// project into one response by accident.
+#[test]
+fn a_project_larger_than_one_page_is_read_to_its_end() {
+    let world = World::new("store-paged").with_env("ONETASKGRAPH_PAGE_SIZE", "2");
+    let nodes: Vec<Value> = (0..5)
+        .map(|nth| {
+            let id = format!("node-{nth}");
+            // A chain, so every node also has an edge to page through, and so
+            // the last of them can only run if the first four were read.
+            let deps: Vec<String> = (nth > 0)
+                .then(|| format!("node-{}", nth - 1))
+                .into_iter()
+                .collect();
+            json!({
+                "id": id,
+                "persona": "engineer",
+                "title": format!("feat: ship {id}"),
+                "task": format!("## What\nShip {id}."),
+                "deps": deps,
+            })
+        })
+        .collect();
+    let project = world.plan("paged", &plan_of("paged", nodes));
+
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the run to settle", |world| {
+        world.run_file("paged", "result.json").is_file()
+    });
+
+    let result = world.run_json("paged", "result.json");
+    let settled: Vec<String> = result["nodes"]
+        .as_array()
+        .expect("nodes")
+        .iter()
+        .filter(|node| node["status"] == "done")
+        .filter_map(|node| node["id"].as_str().map(ToOwned::to_owned))
+        .collect();
+    assert_eq!(
+        settled.len(),
+        5,
+        "the pages past the first did not reach the graph that executed: {result}"
+    );
+    // The chain the edges drew survived the paging too: every node ran after the
+    // one it depends on.
+    let dispatched: Vec<String> = world
+        .events_of("paged", "node-dispatched")
+        .into_iter()
+        .filter_map(|event| event["labels"]["node"].as_str().map(ToOwned::to_owned))
+        .collect();
+    assert_eq!(
+        dispatched,
+        (0..5).map(|nth| format!("node-{nth}")).collect::<Vec<_>>(),
+        "a dependency edge on a later page did not order its node"
+    );
+}
+
+/// A launch that names something that is not a qualified project id is refused,
+/// and told what one looks like.
+///
+/// A bare id names nothing a store can answer for — a store may hold several
+/// sources and a native id is only unique within one — so it is refused where a
+/// person typed it, before the binary is asked anything.
+#[test]
+fn a_project_id_that_is_not_qualified_is_refused_and_told_what_one_looks_like() {
+    let world = World::new("store-unqualified");
+    for typed in ["ship-the-widget", ":ship", "plans:"] {
+        world
+            .run(&["start", typed, "--detach"])
+            .exited(REFUSED)
+            .err_has(typed)
+            .err_has("<source>:<native>");
+    }
+    assert!(
+        world.runs.read_dir().expect("a runs root").next().is_none(),
+        "a launch refused for its project id left a run directory behind"
+    );
+}
+
 /// A launch names the project it came from, and the run's journal is still this
 /// crate's.
 ///

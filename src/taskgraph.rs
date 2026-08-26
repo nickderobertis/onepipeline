@@ -12,7 +12,7 @@
 //! ordering out of every `onepipeline` release. The executable is resolved from
 //! [`BINARY_ENV`] when that names one and from [`DEFAULT_BINARY`] on the `PATH`
 //! otherwise, and its version is checked **before anything is dispatched** — an
-//! absent binary, an unusable one, or one below [`MINIMUM_VERSION`] refuses the
+//! absent binary, an unusable one, or one below [`MINIMUM`] refuses the
 //! launch, naming the path it resolved, the version it found, the minimum it
 //! needs, and how to install one.
 //!
@@ -50,7 +50,29 @@ pub const DEFAULT_BINARY: &str = "onetaskgraph";
 /// product's own published surface, so the floor is a *requirement* rather than
 /// a preference: below it a project carries no metadata at all and every plan
 /// would read as a graph of untyped, unidentified nodes.
-pub const MINIMUM_VERSION: &str = "0.1.0";
+const MINIMUM: Version = Version {
+    major: 0,
+    minor: 1,
+    patch: 0,
+    release: Release::Released,
+};
+
+/// The `onetaskgraph` revision that first carried the surface this mapping
+/// reads, which [`MINIMUM`] cannot express.
+///
+/// The reserved metadata map landed **after** that product's 0.1.0 release and
+/// before its next one, so the released 0.1.0 and this revision report the same
+/// number and answer differently. A version floor cannot separate them, so the
+/// refusal names the revision instead of leaving a host with the released 0.1.0
+/// to work out why every task of its project reads as unidentified.
+///
+/// **This is the only place the revision is written.** `justfile`'s
+/// `_ensure-onetaskgraph` reads it out of this file rather than keeping a second
+/// copy, and
+/// [`the_revision_the_checks_install_is_read_out_of_this_file`](tests::the_revision_the_checks_install_is_read_out_of_this_file)
+/// fails if a copy appears. `docs/contract-divergences.md` entry 42 is the
+/// proposal to retire it for a version once one carries the surface.
+pub const FIRST_REVISION: &str = "dc0180cf1f5754c23aae065aae6531f858ca4d1f";
 
 /// How a host that has no `onetaskgraph` gets one.
 ///
@@ -136,7 +158,11 @@ impl Store {
             tool: DEFAULT_BINARY,
             message: format!(
                 "{} ({what}); onepipeline reads a plan out of a onetaskgraph project and \
-                     needs {DEFAULT_BINARY} {MINIMUM_VERSION} or newer — {INSTALL}",
+                 needs {DEFAULT_BINARY} {MINIMUM} or newer — {INSTALL}. The reserved \
+                 metadata this mapping reads landed at revision {FIRST_REVISION}, after \
+                 that product's 0.1.0 release, so an install older than that revision \
+                 reports a version this check accepts and then answers with tasks \
+                 carrying no metadata at all",
                 binary.display()
             ),
         };
@@ -154,15 +180,15 @@ impl Store {
             )));
         }
         let printed = String::from_utf8_lossy(&reported.stdout);
-        let version = Version::parse(&printed).ok_or_else(|| {
+        let token = version_token(&printed).unwrap_or_default();
+        let version = Version::parse(token).ok_or_else(|| {
             named(format!(
                 "reported no version this build can read: {:?}",
                 printed.trim()
             ))
         })?;
-        let minimum = Version::parse(MINIMUM_VERSION).expect("the declared minimum is a version");
-        if version < minimum {
-            return Err(named(format!("is version {version}, below the minimum")));
+        if version < MINIMUM {
+            return Err(named(format!("is version {token}, below the minimum")));
         }
         Ok(Self { binary })
     }
@@ -173,8 +199,7 @@ impl Store {
     /// before a run is minted: a reserved key of the wrong JSON type, a key no
     /// plan field answers to, a task carrying no node id, and a dependency edge
     /// whose far end this plan cannot name.
-    pub fn plan(&self, project: &str) -> Result<Plan> {
-        let source = source_of(project)?;
+    pub fn plan(&self, project: &QualifiedId) -> Result<Plan> {
         let held = self.project(project)?;
         let tasks = self.tasks(project)?;
 
@@ -184,7 +209,7 @@ impl Store {
                 continue;
             };
             if field == "tasks" {
-                return Err(refused(project, TASKS_ARE_THE_PROJECTS.to_owned()));
+                return Err(refused(project.as_str(), TASKS_ARE_THE_PROJECTS.to_owned()));
             }
             document.insert(field.to_owned(), value.clone());
         }
@@ -203,25 +228,26 @@ impl Store {
         let mut ids: Ids = BTreeMap::new();
         let mut claimed: BTreeMap<String, String> = BTreeMap::new();
         for task in &tasks {
-            let id = node_id(&task.item).map_err(|why| refused(&task.id, format!("it {why}")))?;
-            if let Some(first) = claimed.insert(id.clone(), task.id.clone()) {
+            let id = node_id(&task.item)
+                .map_err(|why| refused(task.id.as_str(), format!("it {why}")))?;
+            if let Some(first) = claimed.insert(id.clone(), task.id.to_string()) {
                 return Err(refused(
-                    &task.id,
+                    task.id.as_str(),
                     format!("`{ID_KEY}` '{id}' is already the id of another task, '{first}'"),
                 ));
             }
-            ids.insert(native_of(&task.id).to_owned(), id);
+            ids.insert(task.id.native().to_owned(), id);
         }
 
         let mut nodes = Vec::with_capacity(tasks.len());
         for task in &tasks {
-            nodes.push(self.node(&source, task, &ids)?);
+            nodes.push(self.node(project.source(), task, &ids)?);
         }
         document.insert("tasks".to_owned(), Value::Array(nodes));
 
         let document = Value::Object(document);
         if let Some(retired) = crate::plan::retired_field_refusal(&document) {
-            return Err(refused(project, retired));
+            return Err(refused(project.as_str(), retired));
         }
         // Each node on its own first, so a refusal names the task it is about;
         // the whole document afterwards, which is what refuses a plan-level key
@@ -233,7 +259,7 @@ impl Store {
         ) {
             read::<Node>(node.clone()).map_err(|error| {
                 refused(
-                    &task.id,
+                    task.id.as_str(),
                     format!(
                         "{error} — a node's fields are the reserved `{RESERVED}<field>` \
                          metadata keys on its task"
@@ -243,7 +269,7 @@ impl Store {
         }
         read::<Plan>(document).map_err(|error| {
             refused(
-                project,
+                project.as_str(),
                 format!(
                     "{error} — a plan's settings are the reserved `{RESERVED}<field>` \
                      metadata keys on its project"
@@ -264,7 +290,7 @@ impl Store {
                 .find(|(filled, _)| *filled == field)
             {
                 return Err(refused(
-                    &task.id,
+                    task.id.as_str(),
                     format!(
                         "`{RESERVED}{field}` is not a node field: a node's `{field}` is {whence}"
                     ),
@@ -284,7 +310,7 @@ impl Store {
         match (task.item.repositories.first(), node.get("repo")) {
             (Some(_), Some(_)) => {
                 return Err(refused(
-                    &task.id,
+                    task.id.as_str(),
                     format!(
                         "it names a repository in both `repositories` and `{REPO_KEY}`; a node \
                          lands in one repository, and `{REPO_KEY}` is only for an identity a \
@@ -303,7 +329,7 @@ impl Store {
         // source at all, so it is the one dependency that cannot be an edge.
         if let Some(carried) = node.remove("deps") {
             let listed: Vec<String> = serde_json::from_value(carried)
-                .map_err(|error| refused(&task.id, format!("`{RESERVED}deps` {error}")))?;
+                .map_err(|error| refused(task.id.as_str(), format!("`{RESERVED}deps` {error}")))?;
             for reference in listed {
                 // Anything spelled as a cross-DAG reference is carried, well
                 // formed or not: a malformed one is answered by the graph
@@ -311,7 +337,7 @@ impl Store {
                 // here is a dependency that never meant to leave this run.
                 if !reference.starts_with(crate::crossdag::PREFIX) {
                     return Err(refused(
-                        &task.id,
+                        task.id.as_str(),
                         format!("`{RESERVED}deps` names '{reference}': {DEPS_ARE_EDGES}"),
                     ));
                 }
@@ -338,15 +364,12 @@ impl Store {
             let both = format!("'{}' depends on '{}'", task.id, far.id);
             if far.kind != TASK_KIND {
                 return Err(refused(
-                    &task.id,
+                    task.id.as_str(),
                     format!("{both}, which is a {} and not a node of a plan", far.kind),
                 ));
             }
-            let here = far
-                .id
-                .split_once(':')
-                .is_none_or(|(named, _)| named == source);
-            let resolved = match ids.get(native_of(&far.id)).filter(|_| here) {
+            let here = far.id.source() == source;
+            let resolved = match ids.get(far.id.native()).filter(|_| here) {
                 Some(id) => id.clone(),
                 // A far end outside this project is still resolved through its
                 // own `onepipeline.id`, because that is what a node id is: the
@@ -356,12 +379,12 @@ impl Store {
                 None => {
                     let far_task = self.show(&far.id).map_err(|error| {
                         refused(
-                            &task.id,
+                            task.id.as_str(),
                             format!("{both}, which could not be read: {error}"),
                         )
                     })?;
                     node_id(&far_task.item).map_err(|why| {
-                        refused(&task.id, format!("{both}, and the far task {why}"))
+                        refused(task.id.as_str(), format!("{both}, and the far task {why}"))
                     })?
                 }
             };
@@ -370,26 +393,43 @@ impl Store {
         Ok(deps)
     }
 
-    fn project(&self, project: &str) -> Result<Qualified<ProjectItem>> {
-        one(
-            project,
-            self.read::<Qualified<ProjectItem>>(&["project", "show", project])?,
-        )
+    fn project(&self, project: &QualifiedId) -> Result<Qualified<ProjectItem>> {
+        let read = self.read::<Qualified<ProjectItem>>(&["project", "show", project.as_str()])?;
+        one(project, read)
     }
 
-    fn show(&self, task: &str) -> Result<Qualified<TaskItem>> {
-        one(
-            task,
-            self.read::<Qualified<TaskItem>>(&["task", "show", task])?,
-        )
+    fn show(&self, task: &QualifiedId) -> Result<Qualified<TaskItem>> {
+        let read = self.read::<Qualified<TaskItem>>(&["task", "show", task.as_str()])?;
+        one(task, read)
     }
 
-    fn tasks(&self, project: &str) -> Result<Vec<Qualified<TaskItem>>> {
-        self.paged(&["task", "list", "--project", project])
+    /// Every task of one project, each one an item of that project's own source.
+    ///
+    /// The source check is not a restatement of the query: `--project` is a
+    /// filter this build asked a third party to apply, and a plan assembled out
+    /// of an item from somewhere else would carry a node whose id collides with
+    /// this project's by coincidence. Refused here, where both the project asked
+    /// for and the item answered with can still be named.
+    fn tasks(&self, project: &QualifiedId) -> Result<Vec<Qualified<TaskItem>>> {
+        let tasks: Vec<Qualified<TaskItem>> =
+            self.paged(&["task", "list", "--project", project.as_str()])?;
+        for task in &tasks {
+            if task.id.source() != project.source() {
+                return Err(Error::Sibling {
+                    tool: DEFAULT_BINARY,
+                    message: format!(
+                        "asked for the tasks of '{project}' and answered with '{}', which is \
+                         an item of another source",
+                        task.id
+                    ),
+                });
+            }
+        }
+        Ok(tasks)
     }
 
-    fn edges(&self, task: &str) -> Result<Vec<Edge>> {
-        self.paged(&["task", "deps", task, "--direction", "depends-on"])
+    fn edges(&self, task: &QualifiedId) -> Result<Vec<Edge>> {
+        self.paged(&["task", "deps", task.as_str(), "--direction", "depends-on"])
     }
 
     /// Every page of one query, walked to its end.
@@ -407,10 +447,25 @@ impl Store {
             }
             let response = self.read::<T>(&args)?;
             all.extend(response.items);
-            match response.next {
-                Some(token) => page = Some(token),
-                None => return Ok(all),
+            let Some(token) = response.next else {
+                return Ok(all);
+            };
+            // A walk ends because a page says it is the last one. A token that
+            // is empty, or that is the token this page was *fetched* with, ends
+            // nothing — it asks for the same page again, for ever, and a launch
+            // that hung there would never say what it was waiting for. Refused
+            // as the unreadable answer it is.
+            if token.is_empty() || page.as_deref() == Some(token.as_str()) {
+                return Err(Error::Sibling {
+                    tool: DEFAULT_BINARY,
+                    message: format!(
+                        "`{DEFAULT_BINARY} {}` answered with a continuation token that does \
+                         not advance the walk, so the whole project can never be read",
+                        args.join(" ")
+                    ),
+                });
             }
+            page = Some(token);
         }
     }
 
@@ -485,36 +540,99 @@ fn read<T: serde::de::DeserializeOwned>(document: Value) -> std::result::Result<
     })
 }
 
-/// The refusal one item of the store earns, named by the id it was read under.
 fn refused(id: &str, what: String) -> Error {
     Error::Invalid(format!("{id}: {what}"))
 }
 
-/// The source half of a qualified `<source>:<native>` id.
-fn source_of(id: &str) -> Result<String> {
-    id.split_once(':')
-        .filter(|(source, native)| !source.is_empty() && !native.is_empty())
-        .map(|(source, _)| source.to_owned())
-        .ok_or_else(|| {
-            Error::Invalid(format!(
-                "'{id}' is not a qualified onetaskgraph id; write it as <source>:<native>, \
+/// Every id in this module: a `<source>:<native>` pair, parsed once where it
+/// arrives and never re-split afterwards.
+///
+/// A bare id names nothing — a store may hold several sources and a native id is
+/// only unique within one — so an unqualified one is refused at the boundary
+/// rather than carried inwards for some later layer to notice. That boundary is
+/// both directions: the id a person types on the command line, and every id the
+/// store answers with, which is a third party's output and is read through the
+/// same type.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "String")]
+pub struct QualifiedId {
+    whole: String,
+    /// Where the colon is, so both halves are slices of `whole`.
+    colon: usize,
+}
+
+impl QualifiedId {
+    /// The source half.
+    pub fn source(&self) -> &str {
+        &self.whole[..self.colon]
+    }
+
+    /// The native half. It may contain colons freely: the split is on the first.
+    pub fn native(&self) -> &str {
+        &self.whole[self.colon + 1..]
+    }
+
+    /// The whole id, as it is written.
+    pub fn as_str(&self) -> &str {
+        &self.whole
+    }
+}
+
+impl TryFrom<String> for QualifiedId {
+    type Error = String;
+
+    fn try_from(whole: String) -> std::result::Result<Self, String> {
+        match whole.find(':') {
+            Some(colon) if colon > 0 && colon + 1 < whole.len() => Ok(Self { whole, colon }),
+            _ => Err(format!(
+                "'{whole}' is not a qualified onetaskgraph id; write it as <source>:<native>, \
                  for example plan-store:ship-the-widget"
-            ))
-        })
+            )),
+        }
+    }
 }
 
-/// The native half, or the whole id when it carries no source.
-fn native_of(id: &str) -> &str {
-    id.split_once(':').map_or(id, |(_, native)| native)
+impl std::str::FromStr for QualifiedId {
+    type Err = Error;
+
+    fn from_str(id: &str) -> Result<Self> {
+        Self::try_from(id.to_owned()).map_err(Error::Invalid)
+    }
 }
 
-/// The one item a `show` answered with.
-fn one<T>(id: &str, response: Response<T>) -> Result<T> {
-    response
-        .items
-        .into_iter()
-        .next()
-        .ok_or_else(|| Error::Invalid(format!("'{id}' names nothing in the configured sources")))
+impl std::fmt::Display for QualifiedId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.whole.fmt(formatter)
+    }
+}
+
+/// The one item a `show` of one id answered with.
+///
+/// Exactly one, and that one's own id: a `show` addresses a single item, so a
+/// response carrying several — or carrying one that is not the item asked for —
+/// is a store this build cannot read a plan out of rather than a set to pick the
+/// first of. Taking the first would mean a plan assembled out of items nobody
+/// named, which is the one failure a launch cannot report afterwards.
+fn one<T>(id: &QualifiedId, response: Response<Qualified<T>>) -> Result<Qualified<T>> {
+    let mut items = response.items.into_iter();
+    let Some(found) = items.next() else {
+        return Err(Error::Invalid(format!(
+            "'{id}' names nothing in the configured sources"
+        )));
+    };
+    if items.next().is_some() {
+        return Err(Error::Sibling {
+            tool: DEFAULT_BINARY,
+            message: format!("asked for '{id}' and answered with more than one item"),
+        });
+    }
+    if found.id != *id {
+        return Err(Error::Sibling {
+            tool: DEFAULT_BINARY,
+            message: format!("asked for '{id}' and answered with '{}'", found.id),
+        });
+    }
+    Ok(found)
 }
 
 fn first_line(bytes: &[u8]) -> Option<String> {
@@ -531,7 +649,6 @@ fn code_of(status: &std::process::ExitStatus) -> String {
         .map_or_else(|| "on a signal".to_owned(), |code| code.to_string())
 }
 
-/// The executable this process reads its plans through.
 fn resolved_binary() -> PathBuf {
     match std::env::var(BINARY_ENV) {
         Ok(named) if !named.trim().is_empty() => PathBuf::from(named),
@@ -539,36 +656,82 @@ fn resolved_binary() -> PathBuf {
     }
 }
 
-/// A released version, as far as an ordering needs it.
+/// A version, ordered the way semantic versioning orders one.
 ///
-/// Three numbers and nothing else: a pre-release or build suffix is dropped,
-/// because what this comparison decides is whether an installed binary carries
-/// the surface this build reads, and a `-rc.1` of the release that carries it
-/// does.
+/// The three numbers, and then whether the version is a release at all: a
+/// pre-release sorts **below** the release it precedes, so `0.2.0-rc.1` does not
+/// satisfy a floor of `0.2.0`. That is the direction that cannot go wrong — a
+/// release candidate is by definition a build of something not yet released, and
+/// a floor is a statement about what has shipped.
+///
+/// The field order is the comparison order, which is what `derive(Ord)` gives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct Version(u32, u32, u32);
+struct Version {
+    major: u32,
+    minor: u32,
+    patch: u32,
+    release: Release,
+}
+
+/// Whether a version names a release or something before one.
+///
+/// Declared in comparison order: everything before a release is below it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Release {
+    /// A pre-release of the version beside it — `-rc.1`, `-alpha`.
+    Prerelease,
+    /// The release itself.
+    Released,
+}
 
 impl Version {
-    /// The version in a line like `onetaskgraph 0.1.0`, or `None`.
-    fn parse(printed: &str) -> Option<Self> {
-        let token = printed.split_whitespace().last()?;
+    /// One `MAJOR[.MINOR[.PATCH]][-PRERELEASE][+BUILD]` token, or `None`.
+    fn parse(token: &str) -> Option<Self> {
         let token = token.trim_start_matches('v');
-        let token = token.split(['-', '+']).next()?;
-        let mut parts = token.split('.').map(str::parse::<u32>);
+        let (numbers, rest) = token.split_once('-').map_or((token, ""), |split| split);
+        let numbers = numbers.split('+').next()?;
+        let mut parts = numbers.split('.').map(str::parse::<u32>);
         let major = parts.next()?.ok()?;
         let minor = parts.next().unwrap_or(Ok(0)).ok()?;
         let patch = parts.next().unwrap_or(Ok(0)).ok()?;
         if parts.next().is_some() {
             return None;
         }
-        Some(Self(major, minor, patch))
+        Some(Self {
+            major,
+            minor,
+            patch,
+            release: match rest.is_empty() {
+                true => Release::Released,
+                false => Release::Prerelease,
+            },
+        })
     }
 }
 
 impl std::fmt::Display for Version {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "{}.{}.{}", self.0, self.1, self.2)
+        write!(formatter, "{}.{}.{}", self.major, self.minor, self.patch)?;
+        match self.release {
+            Release::Prerelease => formatter.write_str("-<pre-release>"),
+            Release::Released => Ok(()),
+        }
     }
+}
+
+/// The version token in what a `--version` printed, or `None`.
+///
+/// The **first** line, and either its only token or the second of exactly two —
+/// which is what every `--version` in this stack prints, `NAME VERSION`. Read
+/// any looser (the last token of the output, say) a binary printing a banner, a
+/// path, or a build hash would have some fragment of it parsed as a version, and
+/// the floor would be decided by whatever happened to sit at the end.
+fn version_token(printed: &str) -> Option<&str> {
+    let line = printed.lines().find(|line| !line.trim().is_empty())?;
+    let mut tokens = line.split_whitespace();
+    let first = tokens.next()?;
+    let token = tokens.next().unwrap_or(first);
+    tokens.next().is_none().then_some(token)
 }
 
 /// What every `--json` query answers with, in the shape the store writes it.
@@ -586,7 +749,7 @@ struct Response<T> {
 /// One item and the qualified id it was read under.
 #[derive(Debug, Deserialize)]
 struct Qualified<T> {
-    id: String,
+    id: QualifiedId,
     item: T,
 }
 
@@ -616,7 +779,7 @@ struct Edge {
 
 #[derive(Debug, Deserialize)]
 struct Endpoint {
-    id: String,
+    id: QualifiedId,
     kind: String,
 }
 
@@ -624,53 +787,93 @@ struct Endpoint {
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_version_is_read_off_the_line_the_binary_prints() {
-        assert_eq!(
-            Version::parse("onetaskgraph 0.1.0\n"),
-            Some(Version(0, 1, 0))
-        );
-        assert_eq!(
-            Version::parse("onetaskgraph v1.2.3"),
-            Some(Version(1, 2, 3))
-        );
-        // A pre-release of the release that carries the surface carries it.
-        assert_eq!(
-            Version::parse("onetaskgraph 0.2.0-rc.1"),
-            Some(Version(0, 2, 0))
-        );
-        assert_eq!(Version::parse("onetaskgraph 2"), Some(Version(2, 0, 0)));
-        assert_eq!(Version::parse(""), None);
-        assert_eq!(Version::parse("onetaskgraph what"), None);
-        assert_eq!(Version::parse("onetaskgraph 1.2.3.4"), None);
+    fn version(printed: &str) -> Option<Version> {
+        Version::parse(version_token(printed)?)
     }
 
     #[test]
-    fn versions_order_by_each_number_in_turn() {
-        let minimum = Version::parse(MINIMUM_VERSION).expect("the declared minimum parses");
-        assert!(Version::parse("0.0.9").expect("a version") < minimum);
-        assert!(Version::parse("0.1.0").expect("a version") >= minimum);
-        assert!(Version::parse("1.0.0").expect("a version") > minimum);
+    fn a_version_is_read_off_the_first_line_the_binary_prints() {
+        assert_eq!(version("onetaskgraph 0.1.0\n"), Version::parse("0.1.0"));
+        assert_eq!(version("onetaskgraph v1.2.3"), Version::parse("1.2.3"));
+        assert_eq!(version("2"), Version::parse("2.0.0"));
+        // A second line is not where a version is, and neither is a third token:
+        // a banner or a build hash beside the number would otherwise decide the
+        // floor.
+        assert_eq!(version("onetaskgraph 0.1.0 (abc1234)"), None);
+        assert_eq!(version("\nonetaskgraph 0.1.0"), Version::parse("0.1.0"));
+        assert_eq!(version(""), None);
+        assert_eq!(version("onetaskgraph what"), None);
+        assert_eq!(version("onetaskgraph 1.2.3.4"), None);
+    }
+
+    /// A pre-release sorts below the release it precedes, which is the direction
+    /// that cannot go wrong: a floor is a statement about what has shipped, and
+    /// a release candidate is by construction a build of something that has not.
+    #[test]
+    fn versions_order_by_each_number_in_turn_and_a_prerelease_below_its_release() {
+        let read = |token: &str| Version::parse(token).expect("a version");
+        assert!(read("0.0.9") < MINIMUM);
+        assert!(read("0.1.0") >= MINIMUM);
+        assert!(read("1.0.0") > MINIMUM);
+        assert!(read("0.1.0-rc.1") < MINIMUM);
+        assert!(read("0.1.1-rc.1") > MINIMUM);
+        // A build suffix is not a pre-release: it names the same release.
+        assert_eq!(read("0.1.0+build.7"), MINIMUM);
     }
 
     #[test]
     fn a_qualified_id_is_split_on_its_first_colon_and_a_bare_one_is_refused() {
-        assert_eq!(
-            source_of("plan-store:ship").as_deref().ok(),
-            Some("plan-store")
-        );
+        let id: QualifiedId = "plan-store:ship".parse().expect("a qualified id");
+        assert_eq!(id.source(), "plan-store");
+        assert_eq!(id.native(), "ship");
+        assert_eq!(id.as_str(), "plan-store:ship");
         // A native id may contain colons freely; the split is on the first.
-        assert_eq!(native_of("plan-store:a:b"), "a:b");
-        let message = source_of("ship").unwrap_err().to_string();
+        let nested: QualifiedId = "plan-store:a:b".parse().expect("a qualified id");
+        assert_eq!(nested.native(), "a:b");
+
+        let message = "ship".parse::<QualifiedId>().unwrap_err().to_string();
         assert!(message.contains("<source>:<native>"), "{message}");
-        assert!(source_of(":ship").is_err());
-        assert!(source_of("plan-store:").is_err());
+        assert!(":ship".parse::<QualifiedId>().is_err());
+        assert!("plan-store:".parse::<QualifiedId>().is_err());
+        // And an id the *store* answers with crosses the same boundary: it is a
+        // third party's output, read through the one type.
+        assert!(serde_json::from_str::<QualifiedId>("\"bare\"").is_err());
     }
 
     #[test]
-    fn the_binary_is_the_environments_when_it_names_one() {
-        // The default is the executable name, looked up on the PATH.
+    fn the_binary_is_the_environments_when_it_names_one_and_the_name_on_the_path_otherwise() {
+        // Each test runs in its own process, so this environment is this test's.
+        let named = std::path::Path::new("/opt/onetaskgraph/bin/onetaskgraph");
+        std::env::set_var(BINARY_ENV, named);
+        assert_eq!(resolved_binary(), named);
+
+        // A variable that is set to nothing names nothing.
+        std::env::set_var(BINARY_ENV, "   ");
         assert_eq!(resolved_binary(), PathBuf::from(DEFAULT_BINARY));
+
+        std::env::remove_var(BINARY_ENV);
+        assert_eq!(resolved_binary(), PathBuf::from(DEFAULT_BINARY));
+    }
+
+    /// The revision the checks install is the one this file declares.
+    ///
+    /// A version floor cannot separate the released 0.1.0 from the revision that
+    /// first carried the metadata surface — they report the same number — so the
+    /// revision is written down, once, and everything that needs it derives it
+    /// from here. A second copy in the justfile would be a pin that could go
+    /// stale against the floor beside it without anything saying so.
+    #[test]
+    fn the_revision_the_checks_install_is_read_out_of_this_file() {
+        let justfile = include_str!("../justfile");
+        assert!(
+            justfile.contains("FIRST_REVISION"),
+            "the justfile no longer derives the revision it installs from this file"
+        );
+        assert!(
+            !justfile.contains(FIRST_REVISION),
+            "the justfile carries its own copy of the revision, which can go stale \
+             against the floor declared beside it here"
+        );
     }
 
     #[test]

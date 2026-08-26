@@ -226,17 +226,12 @@ fn resolve_plan_graphs(plan: &mut Plan, base: &Path) -> Result<()> {
 /// The plan's own name first, which a project states as `onepipeline.name` or
 /// leaves to its own title; the native half of the qualified id otherwise, which
 /// is what a person launching it typed.
-fn mint_run_id(plan: &Plan, project: &str, root: &Path) -> String {
+fn mint_run_id(plan: &Plan, native: &str, root: &Path) -> String {
     let base = plan
         .name
         .clone()
-        .or_else(|| {
-            project
-                .split_once(':')
-                .map(|(_, native)| native.to_string())
-        })
         .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| "run".to_string());
+        .unwrap_or_else(|| native.to_string());
     let base: String = base
         .chars()
         .map(|c| {
@@ -339,7 +334,10 @@ fn start(args: &StartArgs) -> Result<i32> {
     // out of is named here rather than by a node that fails on its first
     // dispatch. Nothing is dispatched and no run root is created before this.
     let store = crate::taskgraph::Store::resolve()?;
-    let mut plan = store.plan(&args.project)?;
+    // Parsed once, here: a bare id names nothing a store can answer for, and
+    // this is where a person typed it.
+    let project: crate::taskgraph::QualifiedId = args.project.parse()?;
+    let mut plan = store.plan(&project)?;
     graph::validate(&plan)?;
     let launch_dir = launch_dir()?;
     // The launch config is read once, here, and both halves of what it declares
@@ -381,7 +379,7 @@ fn start(args: &StartArgs) -> Result<i32> {
     let filters = declared_filters(declared.filters, args)?;
 
     let root = ledger::runs_root();
-    let run = mint_run_id(&plan, &args.project, &root);
+    let run = mint_run_id(&plan, project.native(), &root);
     let holders = concurrency::holders(&plan)?;
     for holder in holders
         .iter()
@@ -2182,19 +2180,14 @@ mod tests {
 
     /// A project states its plan's name as its own title where the reserved key
     /// says nothing, so a nameless plan is rare — but a store may hold one, and
-    /// what names the run then is the id a person typed.
+    /// what names the run then is the project a person launched.
     #[test]
     fn a_nameless_plan_takes_its_run_id_from_the_project_it_was_launched_by() {
         let root = scratch("mint-project");
-        assert_eq!(mint_run_id(&plan(None), "plans:release", &root), "release");
-        assert_eq!(
-            mint_run_id(&plan(None), "plans:odd name!", &root),
-            "odd-name-"
-        );
-        // An id with no source half at all cannot name a project, and the
-        // launch is refused long before this — so what it falls back to is the
-        // one name a run always has.
-        assert_eq!(mint_run_id(&plan(None), "release", &root), "run");
+        assert_eq!(mint_run_id(&plan(None), "release", &root), "release");
+        // A run id names a directory, so anything that could not be one becomes
+        // a character that can.
+        assert_eq!(mint_run_id(&plan(None), "odd name!", &root), "odd-name-");
         std::fs::remove_dir_all(&root).ok();
     }
 

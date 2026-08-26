@@ -28,10 +28,15 @@ set positional-arguments := true
 # binary rather than linking it, so cargo cannot bring it into the build graph
 # and `bootstrap` installs it instead — pinned to a revision, because the surface
 # the mapping reads (a task's custom metadata) landed after that repository's
-# 0.1.0 release and there is no published version carrying it yet. When one is
-# cut this becomes a version and `src/taskgraph.rs`'s minimum moves with it;
-# `docs/contract-divergences.md` records that.
-onetaskgraph-rev := "dc0180cf1f5754c23aae065aae6531f858ca4d1f"
+# 0.1.0 release and there is no published version carrying it yet.
+#
+# **Read out of `src/taskgraph.rs`, which is where it is declared**, beside the
+# version floor it is the other half of: a copy here could go stale against that
+# floor without anything saying so, and
+# `taskgraph::tests::the_revision_the_checks_install_is_read_out_of_this_file`
+# fails if one appears. `docs/contract-divergences.md` entry 42 is the proposal
+# to retire it for a version once one carries the surface.
+onetaskgraph-rev := `sed -n 's/^pub const FIRST_REVISION: &str = "\([0-9a-f]*\)".*/\1/p' src/taskgraph.rs`
 
 # The MSRV has one source of truth — Cargo.toml's `rust-version` — so `just msrv`
 # cannot promise a floor the manifest no longer declares. CI reads the same field.
