@@ -482,6 +482,22 @@ pub fn validate_node(node: &Node) -> Result<()> {
         validate_title(title).map_err(|why| named(&why))?;
     }
 
+    // A blank amendment is a bar nobody can clear. The `amend` op refuses one
+    // rather than recording it, and a plan file is the same input by another
+    // route — so it is refused here too, at the boundary every plan and every
+    // edited graph crosses, rather than accepted and then silently left out of
+    // the task it was written to change.
+    if node
+        .amendment
+        .as_ref()
+        .is_some_and(|text| text.trim().is_empty())
+    {
+        return Err(named(
+            "`amendment` is present and says nothing — give it the ruling it carries, or leave \
+             it out",
+        ));
+    }
+
     // `consumes` is keyed by **dependency node id**, so a key that names nothing
     // this node depends on is a plan whose author expected a target to apply and
     // will not find out from the run that it did not. Refused here, at the

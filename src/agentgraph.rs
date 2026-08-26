@@ -429,6 +429,27 @@ fn relayed(envelope: oneagentgraph::event::Envelope) -> Result<Envelope> {
         })
 }
 
+/// The terminal answer carried by the sibling's final event.
+///
+/// `oneagentgraph` emits this before its final scratch reap. Its event channel
+/// remains connected until that teardown returns, so channel disconnection is
+/// not the graph's settlement boundary.
+fn terminal_settlement(envelope: &oneagentgraph::event::Envelope) -> Option<Settled> {
+    (envelope.kind == oneagentgraph::event::EventKind::GraphSettled)
+        // llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the kind is
+        // the sibling's typed enum above; its payload has no public typed shape.
+        // `a_plan_dispatches_through_the_real_oneagentgraph_and_its_members_run`
+        // drives the linked producer and asserts this terminal event settles the
+        // node, so a renamed or removed field fails at the producing boundary.
+        .then(|| envelope.payload.get("exit_code")?.as_i64())
+        .flatten()
+        .and_then(|code| i32::try_from(code).ok())
+        .map(|code| Settled {
+            code: Some(code),
+            stderr: String::new(),
+        })
+}
+
 /// One `oneagentgraph run`, started and streaming.
 #[derive(Debug)]
 pub struct GraphRun {
@@ -1314,14 +1335,20 @@ impl GraphRun {
         std::thread::Builder::new()
             .name("oneagentgraph-relay".into())
             .spawn(move || {
+                let mut graph_settled = None;
                 loop {
                     if cancel_rx.try_recv().is_ok() {
                         let _ = running.cancel();
                     }
                     match running.recv_timeout(Duration::from_millis(10)) {
                         Ok(Some(envelope)) => {
-                            if events_tx.send(relayed(envelope)).is_err() {
+                            graph_settled = terminal_settlement(&envelope);
+                            let envelope = relayed(envelope);
+                            if events_tx.send(envelope).is_err() {
                                 let _ = running.cancel();
+                                break;
+                            }
+                            if graph_settled.is_some() {
                                 break;
                             }
                         }
@@ -1339,7 +1366,7 @@ impl GraphRun {
                         Err(mpsc::RecvTimeoutError::Disconnected) => break,
                     }
                 }
-                let settled = Ok(match running.wait() {
+                let settled = graph_settled.unwrap_or_else(|| match running.wait() {
                     Ok(code) => Settled {
                         code: Some(code),
                         stderr: String::new(),
@@ -1355,7 +1382,7 @@ impl GraphRun {
                     },
                 });
                 thread_exited.store(true, Ordering::Release);
-                let _ = settled_tx.send(settled);
+                let _ = settled_tx.send(Ok(settled));
             })
             .map_err(|error| sibling(format!("cannot start graph relay: {error}")))?;
         Ok(Self {
@@ -2314,6 +2341,39 @@ mod tests {
         // Not a vacuous comparison: the enrichment both paths apply really ran.
         assert_eq!(in_process.labels.node.as_deref(), Some("build"));
         assert_eq!(in_process.labels.step.as_deref(), Some("implement"));
+    }
+
+    /// `oneagentgraph` publishes its terminal event before its final process
+    /// reap. The sender held here is that still-running teardown: settlement
+    /// must be available while disconnection is deliberately impossible.
+    #[test]
+    fn a_library_run_settles_on_graph_settled_without_waiting_for_channel_disconnect() {
+        let (sent, events) = std::sync::mpsc::channel();
+        sent.send(
+            serde_json::from_value::<oneagentgraph::event::Envelope>(serde_json::json!({
+                "v": 1,
+                "ts": "2026-08-25T00:00:00.000Z",
+                "stream": "node-scope-1",
+                "seq": 9,
+                "source": "agentgraph",
+                "kind": "graph-settled",
+                "labels": {},
+                "payload": {"exit_code": 0},
+                "artifacts": []
+            }))
+            .expect("the sibling's terminal envelope reads"),
+        )
+        .expect("the terminal event is sent");
+
+        let envelope = events.recv().expect("the terminal event arrives");
+        let settled = terminal_settlement(&envelope)
+            .expect("the terminal event settles the library run before teardown");
+        assert!(settled.succeeded());
+        assert!(
+            matches!(events.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)),
+            "the source disconnected, so the test did not exercise a final teardown still running"
+        );
+        drop(sent);
     }
 
     /// A reset reaches the run's own signal directory, under the name the
