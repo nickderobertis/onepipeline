@@ -495,6 +495,9 @@ pub enum StopTeardown {
     /// apart cannot tell a run whose workers were ended from one whose workers
     /// nobody found.
     NothingToStop,
+    /// Live processes were found, but every record named a different process
+    /// from the one now holding its pid, so none was safe to signal.
+    IdentityDeclined,
     /// This host gave no listing the tree could be read from, so nothing was
     /// signalled and the run was left as it was.
     NotAttempted,

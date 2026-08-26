@@ -1076,6 +1076,22 @@ impl World {
         self.path_with_ps("talkative-ps", &answer_plus("a line nobody asked for"))
     }
 
+    /// A `PATH` whose `ps lstart` answer has drifted far farther than the 33
+    /// seconds measured from one live Linux process in the originating report.
+    ///
+    /// The process table remains real. On Linux the product must not ask this
+    /// wall-clock question at all: its stable start token comes from procfs.
+    #[cfg(target_os = "linux")]
+    pub fn path_whose_ps_start_time_has_drifted(&self) -> PathBuf {
+        self.path_with_ps(
+            "drifted-start-ps",
+            &format!(
+                "case \" $* \" in\n  *lstart=*) echo 'Thu Jan  1 00:00:00 1970'; exit 0 ;;;\nesac\nexec {} \"$@\"",
+                real_ps().display()
+            ),
+        )
+    }
+
     /// A `PATH` holding one `ps` stand-in that behaves like `script`.
     ///
     /// Unix-only: the fixture is a shell script, and the Windows arm reaches the

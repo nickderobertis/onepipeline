@@ -898,6 +898,7 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
                 // claim about a signal nobody sent, and a worker orphaned by a
                 // dead driver is exactly the case that would make it false.
                 journal::StopTeardown::NothingToStop
+                | journal::StopTeardown::IdentityDeclined
                 | journal::StopTeardown::NotAttempted
                 | journal::StopTeardown::PartlySignalled
                 // llmlint: ignore-block[changed_behavior_has_e2e] this pattern is forced by

@@ -2018,6 +2018,90 @@ fn a_stop_never_signals_a_pid_the_host_has_given_to_another_process() {
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 
+/// Linux does not let an old identity decay with `ps`'s wall-clock rendering.
+///
+/// The stand-in moves `lstart` from the real process's 2026-era value to 1970,
+/// vastly more than the 33-second drift observed after 68 minutes. The real
+/// stop command still identifies and ends its real driver and dispatch because
+/// Linux records the kernel's clock-tick start value instead.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_linux_process_identity_survives_wall_clock_start_time_drift() {
+    let world = World::new("driver-stop-drifted-start");
+    world.script("build.wait", "hold");
+    let (run, driver) = start_detached_announcing(&world, "drifted", vec![agent("build", &[])]);
+    world.until("a node to be in flight", |world| {
+        !world.events_of(&run, "node-dispatched").is_empty()
+    });
+    world.until("the dispatch to be a process below the driver", |_| {
+        !descendants(driver).is_empty()
+    });
+    let tree: Vec<u32> = std::iter::once(driver).chain(descendants(driver)).collect();
+
+    let mut command = world.cmd(&["stop", &run]);
+    command.env("PATH", world.path_whose_ps_start_time_has_drifted());
+    world
+        .run_on(command, "stop after ps start-time drift")
+        .exited(0)
+        .out_has("\"stopped\":true")
+        .out_has("\"teardown\":\"signalled\"");
+    world.until("every process the run started to end", |_| {
+        tree.iter().all(|pid| !still_listed(*pid))
+    });
+    world.release("build.go");
+}
+
+/// Finding live pids but declining every recorded identity is a refusal, not an
+/// idle run. The stranger is a real process owned by this test and survives.
+#[cfg(unix)]
+#[test]
+fn a_stop_that_declines_every_live_identity_does_not_report_success() {
+    let world = World::new("driver-stop-all-identities-declined");
+    let run = start_detached(&world, "declined", vec![agent("build", &[])]);
+    world.until("the run to settle and release its live claims", |world| {
+        world.run_file(&run, "result.json").is_file()
+            && !world.run_file(&run, "driver.lock").exists()
+    });
+
+    let record = world.run_file(&run, "launch.json");
+    let mut named = world.run_json(&run, "launch.json");
+    let recorded = named["started"]
+        .as_str()
+        .expect("the launch record carries its driver's identity")
+        .to_string();
+    let mut stranger = stranger_started_after(&recorded);
+    named["pid"] = json!(stranger.id());
+    std::fs::write(&record, named.to_string()).expect("the stale pid is planted");
+
+    let refused = world.run(&["stop", &run]);
+    refused
+        .exited(REFUSED)
+        .err_has("was not stopped")
+        .err_has("every recorded identity disagreed")
+        .err_has("distinct from a run with nothing left to stop");
+    assert!(
+        !refused.stdout.contains("\"stopped\":true") && !refused.stdout.contains("nothing-to-stop"),
+        "an all-declined stop reported success or idleness:\n{}",
+        refused.stdout
+    );
+    assert!(
+        stranger
+            .try_wait()
+            .expect("this host answers about the stranger")
+            .is_none(),
+        "the declined stranger was signalled"
+    );
+    let stopped = world.events_of(&run, "run-stopped");
+    assert_eq!(stopped.len(), 1, "the declined attempt went unrecorded");
+    assert_eq!(
+        stopped[0]["payload"]["teardown"],
+        json!("identity-declined")
+    );
+
+    stranger.kill().expect("this test ends its own process");
+    stranger.wait().expect("the stranger is reaped");
+}
+
 /// A stop reaches a dispatch whose driver is gone.
 ///
 /// The launch record and the ownership lock name a driver, and a dispatch
