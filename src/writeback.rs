@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -22,10 +22,10 @@ use crate::projection::RunState;
 use crate::taskgraph::{QualifiedId, BINARY_ENV};
 
 const SHADOW_SOURCE: &str = "onepipeline-writeback";
-// A real sibling invocation can spend several seconds waiting to be scheduled on a busy
-// cross-platform runner. This bound is for a genuinely wedged child, not a latency target:
-// projection stays off the reconcile loop regardless of how long the child takes.
-const COMMAND_LIMIT: Duration = Duration::from_secs(10);
+// Cross-platform runners have measured real sibling commands taking longer than ten seconds
+// under suite-wide contention. This remains a backstop for an unreachable store, not a
+// latency target: projection stays off the reconcile loop while the child runs.
+const COMMAND_LIMIT: Duration = Duration::from_secs(60);
 const RETRY_AFTER: Duration = Duration::from_millis(250);
 // Closeout never inherits the duration of a store command. A slow store may keep working in
 // the worker, but it still cannot turn a completed graph into run settlement.
@@ -231,10 +231,10 @@ fn worker(
 fn project(
     binary: &Path,
     launch_dir: &Path,
-    _run_dir: &Path,
+    run_dir: &Path,
     snapshot: &Snapshot,
 ) -> Result<(), String> {
-    let origins = destination_origins(binary, launch_dir, snapshot)?;
+    let origins = destination_origins(binary, launch_dir, run_dir, snapshot)?;
     // llmlint: ignore-block[changed_behavior_has_e2e] The real outage journey drives
     // destination write failure through onetaskgraph. Making this private, run-owned
     // shadow directory unwritable would instead require sabotaging the host filesystem,
@@ -243,76 +243,34 @@ fn project(
     // llmlint: ignore-end[changed_behavior_has_e2e]
     let root = snapshot.dir.to_string_lossy().into_owned();
     let shadow_project = format!("{SHADOW_SOURCE}:{}", project_file(&snapshot.project));
-    let mut child = Command::new(binary)
-        .current_dir(launch_dir)
-        .args([
-            "project",
-            "copy",
-            &shadow_project,
-            "--to",
-            snapshot.project.source(),
-            "--json",
-            "--set",
-            &format!("sources.{SHADOW_SOURCE}.plugin=local-md"),
-            "--set",
-            &format!("sources.{SHADOW_SOURCE}.config.root={root}"),
-        ])
-        .env_remove(BINARY_ENV)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        // llmlint: ignore-block[changed_behavior_has_e2e] Resolution and version checking
-        // already exercise the real executable. Inducing this branch requires removing or
-        // replacing that executable between launch and an asynchronous projection, which
-        // would sabotage the host rather than exercise a supported user boundary.
-        .spawn()
-        .map_err(|error| format!("cannot run {}: {error}", binary.display()))?;
-    // llmlint: ignore-end[changed_behavior_has_e2e]
-    let started = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) if status.success() => return Ok(()),
-            Ok(Some(status)) => {
-                // llmlint: ignore-block[changed_behavior_has_e2e] A wait_with_output
-                // failure after try_wait already reaped the real child requires an OS
-                // pipe/wait fault that the CLI boundary cannot induce.
-                let output = child
-                    .wait_with_output()
-                    .map_err(|error| error.to_string())?;
-                // llmlint: ignore-end[changed_behavior_has_e2e]
-                return Err(format!(
-                    "copy exited {}: {}",
-                    status
-                        .code()
-                        .map_or_else(|| "on a signal".into(), |code| code.to_string()),
-                    String::from_utf8_lossy(&output.stderr).trim()
-                ));
-            }
-            Ok(None) if started.elapsed() < COMMAND_LIMIT => {
-                std::thread::sleep(Duration::from_millis(25));
-            }
-            // llmlint: ignore-block[changed_behavior_has_e2e] The real local-md outage
-            // journey proves failed copies are bounded, reported, retried, and cannot alter
-            // execution. Reaching this exact time limit would require a wrapper that hangs
-            // in place of the real onetaskgraph binary, which would mock the boundary the
-            // acceptance journey is required to drive for real.
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!("copy exceeded {} seconds", COMMAND_LIMIT.as_secs()));
-            }
-            // llmlint: ignore-end[changed_behavior_has_e2e]
-            // llmlint: ignore-block[changed_behavior_has_e2e] A try_wait syscall error
-            // cannot be induced through the real CLI contract. The journey covers the
-            // actionable recovery behavior using a real destination refusal instead.
-            Err(error) => return Err(format!("cannot wait for copy: {error}")),
-            // llmlint: ignore-end[changed_behavior_has_e2e]
-        }
+    let args = [
+        "project",
+        "copy",
+        &shadow_project,
+        "--to",
+        snapshot.project.source(),
+        "--json",
+        "--set",
+        &format!("sources.{SHADOW_SOURCE}.plugin=local-md"),
+        "--set",
+        &format!("sources.{SHADOW_SOURCE}.config.root={root}"),
+    ];
+    let output = bounded_output(binary, launch_dir, run_dir, "project-copy", &args)?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "copy exited {}: {}",
+            exit(&output.status),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
     }
 }
 
 fn destination_origins(
     binary: &Path,
     launch_dir: &Path,
+    run_dir: &Path,
     snapshot: &Snapshot,
 ) -> Result<BTreeMap<String, String>, String> {
     let mut origins = BTreeMap::new();
@@ -336,12 +294,7 @@ fn destination_origins(
         // Making the real sibling hang requires host-level process suspension, not an
         // input exposed by either CLI, and substituting a hanging script would mock the
         // exact executable boundary the journey is required to drive.
-        let output = Command::new(binary)
-            .current_dir(launch_dir)
-            .args(&args)
-            .env_remove(BINARY_ENV)
-            .output()
-            .map_err(|error| format!("cannot list {}: {error}", snapshot.project))?;
+        let output = bounded_output(binary, launch_dir, run_dir, "task-list", &args)?;
         // llmlint: ignore-end[changed_behavior_has_e2e]
         if !output.status.success() {
             return Err(format!(
@@ -387,6 +340,68 @@ fn destination_origins(
     }
     // llmlint: ignore-end[changed_behavior_has_e2e]
     Ok(origins)
+}
+
+struct Output {
+    status: ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+/// Run one sibling command without letting either its duration or output pipes hold the worker.
+fn bounded_output<S: AsRef<std::ffi::OsStr>>(
+    binary: &Path,
+    launch_dir: &Path,
+    run_dir: &Path,
+    name: &str,
+    args: &[S],
+) -> Result<Output, String> {
+    let stdout = run_dir.join(format!("writeback-{name}.stdout"));
+    let stderr = run_dir.join(format!("writeback-{name}.stderr"));
+    let stdout_file = std::fs::File::create(&stdout).map_err(|error| error.to_string())?;
+    let stderr_file = std::fs::File::create(&stderr).map_err(|error| error.to_string())?;
+    // llmlint: ignore-block[changed_behavior_has_e2e] Resolution and version checking
+    // already exercise the real executable. Inducing spawn or wait syscall failure requires
+    // replacing the executable or sabotaging the host; the real-store journey covers the
+    // actionable command refusal, retry, and recovery behavior.
+    let mut child = Command::new(binary)
+        .current_dir(launch_dir)
+        .args(args)
+        .env_remove(BINARY_ENV)
+        .stdout(Stdio::from(stdout_file))
+        .stderr(Stdio::from(stderr_file))
+        .spawn()
+        .map_err(|error| format!("cannot run {}: {error}", binary.display()))?;
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() < COMMAND_LIMIT => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "{name} exceeded {} seconds",
+                    COMMAND_LIMIT.as_secs()
+                ));
+            }
+            Err(error) => return Err(format!("cannot wait for {name}: {error}")),
+        }
+    };
+    // llmlint: ignore-end[changed_behavior_has_e2e]
+    Ok(Output {
+        status,
+        stdout: std::fs::read(stdout).map_err(|error| error.to_string())?,
+        stderr: std::fs::read(stderr).map_err(|error| error.to_string())?,
+    })
+}
+
+fn exit(status: &ExitStatus) -> String {
+    status
+        .code()
+        .map_or_else(|| "on a signal".into(), |code| code.to_string())
 }
 
 #[derive(Deserialize)]
