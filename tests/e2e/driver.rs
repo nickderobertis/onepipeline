@@ -2094,10 +2094,10 @@ fn a_linux_stop_accepts_an_active_runs_legacy_ps_identity() {
 #[test]
 fn a_stop_that_declines_every_live_identity_does_not_report_success() {
     let world = World::new("driver-stop-all-identities-declined");
-    let run = start_detached(&world, "declined", vec![agent("build", &[])]);
-    world.until("the run to settle and release its live claims", |world| {
-        world.run_file(&run, "result.json").is_file()
-            && !world.run_file(&run, "driver.lock").exists()
+    world.script("build.wait", "hold");
+    let (run, driver) = start_detached_announcing(&world, "declined", vec![agent("build", &[])]);
+    world.until("a node to be in flight", |world| {
+        !world.events_of(&run, "node-dispatched").is_empty()
     });
 
     let recorded = world.run_json(&run, "launch.json")["started"]
@@ -2105,7 +2105,33 @@ fn a_stop_that_declines_every_live_identity_does_not_report_success() {
         .expect("the launch record carries its driver's identity")
         .to_string();
     let mut stranger = stranger_started_after(&recorded);
-    world.plant_reissued_launch_pid(&run, stranger.id());
+    let stranger_pid = stranger.id();
+    let mut paths = vec![
+        world.run_file(&run, "launch.json"),
+        world.run_file(&run, "owner.lock"),
+    ];
+    let dispatches: Vec<_> = std::fs::read_dir(world.run_file(&run, "dispatches"))
+        .expect("the live dispatch registry exists")
+        .filter_map(|entry| {
+            let path = entry.expect("a dispatch registry entry").path();
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+                .then_some(path)
+        })
+        .collect();
+    assert!(
+        !dispatches.is_empty(),
+        "the in-flight node recorded no live dispatch claim"
+    );
+    paths.extend(dispatches);
+    for path in paths {
+        let mut claim: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&path).expect("the live process claim is readable"),
+        )
+        .expect("the live process claim is JSON");
+        claim["pid"] = json!(stranger_pid);
+        std::fs::write(&path, claim.to_string()).expect("the reissued pid is planted");
+    }
 
     let refused = world.run(&["stop", &run]);
     refused
@@ -2131,9 +2157,18 @@ fn a_stop_that_declines_every_live_identity_does_not_report_success() {
         stopped[0]["payload"]["teardown"],
         json!("identity-declined")
     );
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has("build: worker may still be running: the stop could not reach it");
 
     stranger.kill().expect("this test ends its own process");
     stranger.wait().expect("the stranger is reaped");
+    world.release("build.go");
+    world.until(
+        "the driver to finish after its dispatch is released",
+        |_| !still_listed(driver),
+    );
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 
