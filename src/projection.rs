@@ -2225,6 +2225,19 @@ mod tests {
     }
 
     #[test]
+    fn an_identity_declined_stop_leaves_worker_state_undetermined() {
+        let state = fold(&[pipeline(
+            journal::PipelineKind::RunStopped,
+            0,
+            None,
+            &[("teardown", json!("identity-declined"))],
+        )]);
+
+        assert_eq!(state.stop, StopState::WorkersUndetermined);
+        assert!(state.stop_recorded());
+    }
+
+    #[test]
     fn a_relayed_sibling_envelope_is_evidence_of_work_and_nothing_more() {
         let plan = plan_of_nodes(vec![agent("build", &[])]);
         let mut relayed = pipeline(

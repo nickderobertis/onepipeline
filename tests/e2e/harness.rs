@@ -968,8 +968,9 @@ impl World {
         self.path_with_ps("only-ps", &format!("exec {} \"$@\"", real_ps().display()))
     }
 
-    /// A `PATH` holding only what a dispatch resolves by name — which on Windows
-    /// is nothing, because the start token is read off the process itself.
+    /// A `PATH` holding only what a dispatch resolves by name. Linux reads the
+    /// start token from procfs and Windows reads it from the process itself, so
+    /// neither needs a named program here.
     #[cfg(any(target_os = "linux", windows))]
     pub fn path_with_only_what_a_dispatch_resolves(&self) -> PathBuf {
         self.empty_path()
