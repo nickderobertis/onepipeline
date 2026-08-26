@@ -61,7 +61,7 @@ fn add_reparent_and_context_are_applied_and_reported_applied() {
         .run_with_stdin(
             &["reply", &run],
             &envelope(json!([
-                {"op": "add", "node": {"id": "extra", "persona": "engineer", "task": "## What\nextra"}},
+                {"op": "add", "node": {"id": "extra", "persona": "engineer", "task": "## What\nextra", "max_turns": 2, "branch": "topic/extra"}},
                 {"op": "reparent", "id": "extra", "deps": ["slow"]},
                 {"op": "context", "id": "extra", "note": "the fixture moved"},
             ])),
@@ -89,9 +89,22 @@ fn add_reparent_and_context_are_applied_and_reported_applied() {
         world.store_tasks("plans:applied").iter().any(|task| {
             task["item"]["metadata"]["onepipeline.id"] == "extra"
                 && task["item"]["metadata"]["onepipeline.context"] == "the fixture moved"
+                && task["item"]["metadata"]["onepipeline.max_turns"] == 2
+                && task["item"]["metadata"]["onepipeline.branch"] == "topic/extra"
                 && task["item"]["status"]["category"] == "todo"
         })
     });
+    let extra = world
+        .store_tasks("plans:applied")
+        .into_iter()
+        .find(|task| task["item"]["metadata"]["onepipeline.id"] == "extra")
+        .expect("the added task is in the store");
+    let edges = world.store_deps(extra["id"].as_str().expect("a qualified task id"));
+    assert_eq!(
+        edges.len(),
+        1,
+        "the accepted reparent did not write its edge: {edges:?}"
+    );
 
     world.release("slow.go");
     world.until("the run to settle", |world| {

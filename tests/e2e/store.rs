@@ -117,6 +117,10 @@ fn an_unreachable_store_is_reported_and_retried_while_the_run_completes_unaffect
     // journal, not a read from the missing store, still says what was executing.
     assert!(world.events_of("writeback-retry", "node-dispatched").len() == 1);
     std::fs::rename(&unavailable, world.store()).expect("the store returns");
+    world.until("write-back recovery to be reported", |world| {
+        std::fs::read_to_string(world.run_file("writeback-retry", "driver.log"))
+            .is_ok_and(|log| log.contains("onetaskgraph write-back recovered"))
+    });
     world.release("work.go");
     world.until("the run to complete", |world| {
         world.run_file("writeback-retry", "result.json").is_file()
@@ -131,6 +135,72 @@ fn an_unreachable_store_is_reported_and_retried_while_the_run_completes_unaffect
                 && task["item"]["status"]["category"] == "done"
                 && task["item"]["metadata"]["onepipeline.settlement"]["status"] == "done"
         })
+    });
+}
+
+#[test]
+fn derived_waiting_failed_and_parked_states_use_their_board_categories() {
+    let world = World::new("store-writeback-categories");
+    let local = world.repository("local-direct", &[]);
+    let local = local.checkout.to_string_lossy().into_owned();
+    world.script("fails.fail", "1");
+    let project = world.plan(
+        "writeback-categories",
+        &json!({
+            "schema_version": 3,
+            "name": "writeback-categories",
+            "tasks": [
+                {"id": "fails", "persona": "engineer", "task": "## What\nFail."},
+                {"id": "skipped", "persona": "engineer", "task": "## What\nWait.", "deps": ["fails"]},
+                {"id": "parked", "persona": "engineer", "task": "## What\nWait.", "parked": true},
+                {"id": "approve", "kind": "human", "task": "Approve it."},
+                {"id": "blocked", "persona": "engineer", "task": "## What\nWait.", "deps": ["approve"]},
+                {"id": "cross", "persona": "engineer", "task": "## What\nWait.", "parked": true, "deps": ["run:missing#up"]},
+                {"id": "hosted", "persona": "engineer", "task": "## What\nWait.", "parked": true, "repo": "github.com/owner/service", "title": "test: hosted"},
+                {"id": "local", "persona": "engineer", "task": "## What\nWait.", "parked": true, "repo": local, "title": "test: local"}
+            ]
+        }),
+    );
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("every derived category to reach the store", |world| {
+        let categories: std::collections::BTreeMap<String, String> = world
+            .store_tasks(&project)
+            .iter()
+            .filter_map(|task| {
+                Some((
+                    task["item"]["metadata"]["onepipeline.id"]
+                        .as_str()?
+                        .to_owned(),
+                    task["item"]["status"]["category"].as_str()?.to_owned(),
+                ))
+            })
+            .collect();
+        let tasks = world.store_tasks(&project);
+        categories.get("fails").is_some_and(|value| value == "done")
+            && categories
+                .get("parked")
+                .is_some_and(|value| value == "cancelled")
+            && categories
+                .get("skipped")
+                .is_some_and(|value| value == "cancelled")
+            && categories
+                .get("approve")
+                .is_some_and(|value| value == "todo")
+            && categories
+                .get("blocked")
+                .is_some_and(|value| value == "todo")
+            && tasks.iter().any(|task| {
+                task["item"]["metadata"]["onepipeline.id"] == "cross"
+                    && task["item"]["metadata"]["onepipeline.deps"] == json!(["run:missing#up"])
+            })
+            && tasks.iter().any(|task| {
+                task["item"]["metadata"]["onepipeline.id"] == "hosted"
+                    && task["item"]["repositories"] == json!(["github.com/owner/service"])
+            })
+            && tasks.iter().any(|task| {
+                task["item"]["metadata"]["onepipeline.id"] == "local"
+                    && task["item"]["metadata"]["onepipeline.repo"] == local
+            })
     });
 }
 
