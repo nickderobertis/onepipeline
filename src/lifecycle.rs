@@ -242,7 +242,7 @@ fn attempt_once(
         );
         let build = || DispatchRequest {
             graph: graph.clone(),
-            task: step.rendered_task_with(node.context.as_deref(), references),
+            task: step.rendered_task_for(node, references),
             labels: engine::dispatch_labels(
                 run,
                 &node.id,

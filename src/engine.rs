@@ -49,6 +49,15 @@ pub const DEFAULT_NODE_GRAPH: &str = "graphs/node-scope.yaml";
 /// The environment variable naming the executor-rules file.
 pub const EXECUTOR_RULES_ENV: &str = "ONEPIPELINE_EXECUTOR_RULES";
 
+/// The environment variable naming the command a live-edited node is checked by.
+///
+/// The middle rung of three: `--node-validator` beats it, it beats the launch
+/// config's own `node_validator`, and beneath all three is the shipped default
+/// of no validator at all. Read once, at the launch, and the answer is retained
+/// in the launch record — so an `adopt` replays what its launch resolved rather
+/// than whatever this variable happens to say later.
+pub const NODE_VALIDATOR_ENV: &str = "ONEPIPELINE_NODE_VALIDATOR";
+
 /// The environment variable naming the directory a direct agent node runs in.
 pub const PROJECT_DIR_ENV: &str = "ONEPIPELINE_PROJECT_DIR";
 
@@ -620,7 +629,7 @@ fn converge(
         .collect();
 
     loop {
-        reconcile_edits(paths, journal, state, &channel, &mut in_flight)?;
+        reconcile_edits(paths, journal, state, &channel, launch, &mut in_flight)?;
 
         // Another run's ledger is the only thing that can answer a cross-DAG
         // edge, and it is written by a process this one does not control — so
@@ -1066,6 +1075,7 @@ fn reconcile_edits(
     journal: &mut Journal,
     state: &mut RunState,
     channel: &ChannelState,
+    launch: &LaunchRecord,
     in_flight: &mut BTreeMap<String, Dispatch>,
 ) -> Result<()> {
     for envelope in channel.claim_commands()? {
@@ -1074,7 +1084,7 @@ fn reconcile_edits(
         let mut reason = None;
         for command in &envelope.commands {
             let compiled = crate::channel::allows(author, command)
-                .and_then(|()| compile_and_deliver(journal, state, command, in_flight));
+                .and_then(|()| compile_and_deliver(journal, state, command, launch, in_flight));
             match compiled {
                 Ok(operations) => {
                     // Dropping or retrying a running node raises its
@@ -1184,6 +1194,7 @@ fn compile_and_deliver(
     journal: &mut Journal,
     state: &RunState,
     command: &Command,
+    launch: &LaunchRecord,
     in_flight: &BTreeMap<String, Dispatch>,
 ) -> Result<Vec<edits::Operation>> {
     // The loop's own frontier, which is the ledger's plus what only this process
@@ -1195,6 +1206,10 @@ fn compile_and_deliver(
             .iter()
             .map(|(id, dispatch)| (id.clone(), dispatch.live()))
             .collect(),
+        // The launch's own, read off the record this loop read strictly at the
+        // start of the pass — never out of this process's environment, which is
+        // a driver an `adopt` started somewhere else with a different one.
+        node_validator: launch.node_validator().map(str::to_owned),
         ..state.frontier()
     };
     let mut candidate = state.graph.clone();
@@ -2255,6 +2270,36 @@ pub(crate) fn configured_node_graph() -> String {
         .ok()
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| DEFAULT_NODE_GRAPH.to_string())
+}
+// llmlint: ignore-end[invalid_states_unrepresentable]
+
+/// What [`NODE_VALIDATOR_ENV`] says, when it says anything at all.
+///
+/// *Set* rather than *usable*: a variable that is there answers this rung, and
+/// whether what it holds names a command is settled once, by the caller, for
+/// all three rungs alike. So set-and-blank means "this launch names none" and
+/// stops the search rather than falling through to a config file that names
+/// one — which is what a host exporting it empty to turn the hook off is saying.
+///
+/// # Errors
+///
+/// [`Error::Invalid`] for a value this build cannot read as text. That is a
+/// rung that is *there* and names something unusable, and it is external input
+/// like any other: refused at the boundary rather than discarded, which would
+/// silently hand the run whichever validator the config file names.
+// llmlint: ignore-block[invalid_states_unrepresentable] the value is a `String` because
+// that is what an environment holds and what `LaunchRecord`'s schema declares; the one
+// invariant a newtype could carry is applied by the caller, for all three rungs at once.
+pub(crate) fn configured_node_validator() -> Result<Option<String>> {
+    match std::env::var(NODE_VALIDATOR_ENV) {
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(Error::Invalid(format!(
+            "{NODE_VALIDATOR_ENV} holds something this build cannot read as text, so the \
+             command it names cannot be resolved — set it to the command, or unset it to \
+             declare that this launch has none"
+        ))),
+    }
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 

@@ -30,10 +30,11 @@ use onepipeline::executor::{
 };
 use onepipeline::filter::{
     EventFilter, Filters, LaunchConfig, Matcher, LAUNCH_CONFIG_SCHEMA_VERSION,
+    LAUNCH_CONFIG_SCHEMA_VERSIONS_READ,
 };
 use onepipeline::plan::{
-    Node, NodeKind, Plan, Resume, Step, CROSS_REPO_REFERENCES_HEADING, PLANNER_CONTEXT_HEADING,
-    PLAN_SCHEMA_VERSION, PLAN_SCHEMA_VERSIONS_READ,
+    Node, NodeKind, Plan, Resume, Step, AMENDMENT_HEADING, CROSS_REPO_REFERENCES_HEADING,
+    PLANNER_CONTEXT_HEADING, PLAN_SCHEMA_VERSION, PLAN_SCHEMA_VERSIONS_READ,
 };
 use onepipeline::report::{
     retain, ACCEPTED_REPORT_FILE, MAX_REPORT_BYTES, MEMBER_SETTLED, REPORT_PATH,
@@ -381,9 +382,14 @@ fn dispatching_goes_through_the_oneagentgraph_seam_and_says_so_when_it_cannot() 
 fn the_contracts_launch_config_example_parses_and_round_trips() {
     let yaml = fenced_block_naming("yaml", "schema_version: 2");
     let config: LaunchConfig = serde_norway::from_str(&yaml).expect("the launch config parses");
-    assert_eq!(
-        config.schema_version, LAUNCH_CONFIG_SCHEMA_VERSION,
-        "the contract's example declares a version this build does not read"
+    // A version this build **reads**, which is what the contract's committed
+    // example is: the document is approved verbatim and is never edited to
+    // follow the schema, so a later version having been written since does not
+    // stop the example being a config an operator still has on disk.
+    assert!(
+        LAUNCH_CONFIG_SCHEMA_VERSIONS_READ.contains(&config.schema_version),
+        "the contract's example declares a version this build does not read: {}",
+        config.schema_version
     );
     assert_eq!(
         config.pr_author_graph.as_deref(),
@@ -469,19 +475,21 @@ fn the_contracts_launch_config_example_parses_and_round_trips() {
 /// what this crate writes, and neither is an error.
 #[test]
 fn the_contracts_launch_config_omits_an_empty_block_and_still_reads() {
-    for version in [LAUNCH_CONFIG_SCHEMA_VERSION, 1] {
+    for version in LAUNCH_CONFIG_SCHEMA_VERSIONS_READ {
         let bare: LaunchConfig = serde_norway::from_str(&format!("schema_version: {version}\n"))
             .expect("a config may declare only a version");
         assert!(bare.filters.is_empty());
         assert_eq!(bare.pr_author_graph, None);
+        assert_eq!(bare.node_validator, None);
     }
-    // And what this crate *writes* for one is the version alone: both optional
-    // keys are omitted, so a launch that declared neither is a document an
-    // earlier reader accepts.
+    // And what this crate *writes* for one is the version alone: every optional
+    // key is omitted, so a launch that declared none is a document an earlier
+    // reader accepts.
     assert_eq!(
         serde_json::to_string(&LaunchConfig::default()).expect("serializes"),
         format!(r#"{{"schema_version":{LAUNCH_CONFIG_SCHEMA_VERSION}}}"#),
-        "an empty filters block or an absent drafting graph was written out"
+        "an empty filters block, an absent drafting graph, or an absent node \
+         validator was written out"
     );
     assert_contract_names(
         "launch config surface",
@@ -1176,6 +1184,7 @@ fn op_of(command: &Edit) -> &'static str {
         Edit::Attest { .. } => "attest",
         Edit::Complete { .. } => "complete",
         Edit::Context { .. } => "context",
+        Edit::Amend { .. } => "amend",
         Edit::Finding { .. } => "finding",
     }
 }
@@ -1491,6 +1500,218 @@ fn the_release_adoption_surface_is_what_the_divergence_record_names() {
         "entry 40 names a different heading than this crate publishes"
     );
     assert_ne!(CROSS_REPO_REFERENCES_HEADING, PLANNER_CONTEXT_HEADING);
+}
+
+/// The amendment lever and the node-validator hook this build carries **beyond**
+/// the contract are exactly what the divergence record proposes.
+///
+/// The contract is committed as approved and names neither, so entry 41 is the
+/// only place they are written down — and a divergence nothing gates quietly
+/// stops being true. The entry's own block is the source: what parses here is
+/// what a planner would type and what an operator would write in a config.
+#[test]
+fn the_amendment_and_validator_surface_is_what_the_divergence_record_names() {
+    let block = divergence_block("41.");
+
+    // The op, as the wire carries it.
+    let fixtures: Vec<Value> =
+        serde_json::from_value(block["ops"].clone()).expect("entry 41 names the op it adds");
+    let monitor_may: BTreeSet<String> = serde_json::from_value(block["monitor_may_issue"].clone())
+        .expect("entry 41 says which of them the monitor may issue");
+    assert!(!fixtures.is_empty(), "{block}");
+    for fixture in &fixtures {
+        let op = fixture["op"].as_str().expect("the fixture names its op");
+        assert!(
+            !OPS.contains(&op),
+            "`{op}` is on the contract's own list, so it is no divergence"
+        );
+        let edit: Edit = serde_json::from_value(fixture.clone())
+            .unwrap_or_else(|e| panic!("`{op}` deserializes: {e}"));
+        assert_eq!(op_of(&edit), op, "`{op}` deserialized into another variant");
+        assert_eq!(
+            &serde_json::to_value(&edit).expect("serializes"),
+            fixture,
+            "`{op}` round-trips unchanged"
+        );
+        allows(Author::Planner, &edit)
+            .unwrap_or_else(|e| panic!("the planner was refused `{op}`: {e}"));
+        let verdict = allows(Author::Monitor, &edit);
+        if monitor_may.contains(op) {
+            verdict.unwrap_or_else(|e| panic!("the monitor was refused `{op}`: {e}"));
+            continue;
+        }
+        // Refused, and the refusal names the op — an observer told only "no"
+        // has nothing to act on.
+        let refusal = verdict
+            .expect_err(&format!("the monitor was allowed `{op}`"))
+            .to_string();
+        assert!(
+            refusal.contains(op) && refusal.contains("Surface it to the planner"),
+            "the refusal does not name `{op}` and what to do instead: {refusal}"
+        );
+    }
+
+    // The node field, at schema 3 and optional, exactly as the entry writes it.
+    let written = block["node"].clone();
+    let node: Node = serde_json::from_value(written.clone()).expect("entry 41's node parses");
+    assert_eq!(
+        serde_json::to_value(&node).expect("serializes"),
+        written,
+        "entry 41's node does not round-trip as written"
+    );
+    let text = node.amendment.clone().expect("the node carries one");
+    let plain = json!({"id": "solo", "persona": "engineer", "task": "## What\nx"});
+    let bare: Node = serde_json::from_value(plain.clone()).expect("a node naming none parses");
+    assert_eq!(bare.amendment, None);
+    assert_eq!(
+        serde_json::to_value(&bare).expect("serializes"),
+        plain,
+        "a node naming no amendment gained one on the way out"
+    );
+
+    // The heading, which is a published constant, and the rendering it opens:
+    // the amendment states its own authority over the notes it sits above.
+    assert_eq!(
+        block["heading"].as_str(),
+        Some(AMENDMENT_HEADING),
+        "entry 41 names a different heading than this crate publishes"
+    );
+    assert_ne!(AMENDMENT_HEADING, PLANNER_CONTEXT_HEADING);
+    let rendered = Node {
+        task: Some("## What\nship it\n\n## Additional info\n\nrun the gate.\n".into()),
+        ..node.clone()
+    }
+    .rendered_task();
+    let (heading, notes) = (
+        rendered.find(AMENDMENT_HEADING).expect("it is rendered"),
+        rendered.find("## Additional info").expect("the notes are"),
+    );
+    assert!(
+        heading < notes,
+        "the amendment is below the notes: {rendered}"
+    );
+    assert!(rendered.contains(&text), "{rendered}");
+    assert!(
+        rendered.contains("this section wins"),
+        "the amendment does not state its authority: {rendered}"
+    );
+
+    // The validator, named three ways, with the config key at the version the
+    // entry states.
+    let validator = &block["validator"];
+    assert_eq!(validator["config_key"].as_str(), Some("node_validator"));
+    let at = validator["config_schema_version"]
+        .as_u64()
+        .expect("entry 41 states the version the key arrived at");
+    assert_eq!(
+        u32::try_from(at).expect("a version fits"),
+        LAUNCH_CONFIG_SCHEMA_VERSION
+    );
+    let named: LaunchConfig = serde_json::from_value(json!({
+        "schema_version": at,
+        "node_validator": "./scripts/check-node.sh",
+    }))
+    .expect("a launch config naming a validator parses");
+    assert_eq!(
+        named.node_validator.as_deref(),
+        Some("./scripts/check-node.sh")
+    );
+    // The flag is the one `start` actually takes, asked of the parser rather
+    // than of a list beside it.
+    let flag = validator["flag"].as_str().expect("entry 41 names the flag");
+    let parsed = Cli::try_parse_from(["onepipeline", "start", "plan.json", flag, "check-node"])
+        .expect("the flag entry 41 names is one `start` takes");
+    let Command::Start(started) = parsed.command else {
+        panic!("that is not a start")
+    };
+    assert_eq!(started.node_validator.as_deref(), Some("check-node"));
+    // And the ops it is offered, which the journeys drive.
+    let offered: BTreeSet<String> = serde_json::from_value(validator["ops_offered"].clone())
+        .expect("entry 41 names the ops a validator is offered");
+    assert_eq!(
+        offered,
+        ["add", "amend", "requeue", "retry"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<BTreeSet<String>>()
+    );
+
+    // The README is a **second copy** of all of this, in the prose an operator
+    // meets it in, and nothing compiles that. So the entry is held against it
+    // here: every name and every op above has to appear there, and the two
+    // headings the guidance turns on have to be the constants this crate
+    // publishes rather than prose that drifted away from them.
+    let readme = std::fs::read_to_string(repo_root().join("README.md")).expect("the README ships");
+    let prose = readme.split_whitespace().collect::<Vec<_>>().join(" ");
+    let precedence: Vec<String> = serde_json::from_value(validator["precedence"].clone())
+        .expect("entry 41 states the order it proposes");
+    let mut at: Vec<usize> = Vec::new();
+    for named in &precedence {
+        let spelling = validator[named.as_str()]
+            .as_str()
+            .expect("entry 41 names it");
+        let found = prose.find(spelling).unwrap_or_else(|| {
+            panic!("the README does not name the validator's {named}, `{spelling}`")
+        });
+        at.push(found);
+    }
+    // And in the order the entry proposes: a README listing them the other way
+    // round would read as a different rule while naming the same three things.
+    assert!(
+        at.windows(2).all(|pair| pair[0] < pair[1]),
+        "the README names the three spellings in an order entry 41 does not propose: \
+         {precedence:?} at {at:?}"
+    );
+    for op in offered
+        .iter()
+        .chain(std::iter::once(&"context".to_string()))
+    {
+        assert!(
+            prose.contains(&format!("`{op}`")),
+            "the README's live-edit guidance does not name `{op}`"
+        );
+    }
+    for heading in [AMENDMENT_HEADING, PLANNER_CONTEXT_HEADING] {
+        assert!(
+            prose.contains(heading),
+            "the README does not name `{heading}`, which is where this crate renders one of \
+             the two levers"
+        );
+    }
+    // And the distinction itself, which is the whole reason both exist: the
+    // README has to say which one moves the bar and which one only steers.
+    assert!(
+        prose.contains("adds no acceptance criteria")
+            && prose.contains("the worker and the judge reviewing it read the same ruling"),
+        "the README no longer states which lever changes what a node is judged against \
+         and which one only steers its worker"
+    );
+    // And *when* it binds, which is where the two levers differ in practice and
+    // where a paraphrase drifts: the journeys establish that a turn already in
+    // flight is not reached, so both copies have to say so.
+    let record = std::fs::read_to_string(repo_root().join("docs/contract-divergences.md"))
+        .expect("the divergence record ships");
+    for (which, copy) in [
+        ("the README", prose.clone()),
+        (
+            "divergence entry 41",
+            record.split_whitespace().collect::<Vec<_>>().join(" "),
+        ),
+    ] {
+        assert!(
+            copy.contains("on the dispatch that follows")
+                && copy.contains("A turn already in flight is not reached"),
+            "{which} no longer says which dispatch an amendment binds; the journeys \
+             establish that a turn already running is not reached"
+        );
+    }
+    // The refusal it promises for a rejected edit, and the default it promises
+    // for a launch that names none.
+    assert!(
+        prose.contains("a non-zero exit refuses it with the command's own stderr as the reason")
+            && prose.contains("naming none is the default and runs no validator at all"),
+        "the README no longer states what a validator's answers mean"
+    );
 }
 
 #[test]
@@ -2650,10 +2871,14 @@ fn the_monitor_persona_names_exactly_the_ops_the_channel_lets_it_issue() {
             blocking: false,
             id: None,
         },
+        Edit::Amend {
+            id: "x".into(),
+            text: "the ruling".into(),
+        },
     ];
     assert_eq!(
         every.len(),
-        OPS.len() + 1,
+        OPS.len() + 2,
         "an op is missing from this table; `op_of` above is what says so"
     );
 

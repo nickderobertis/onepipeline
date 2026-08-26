@@ -473,6 +473,21 @@ pub struct LaunchRecord {
     /// reads what it wrote.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub pr_author_graph: String,
+    /// The command every op that introduces or changes a node's task is offered
+    /// to before it is applied, when the launch named one.
+    ///
+    /// **Resolved once, at the launch**, out of the flag, the environment, and
+    /// the launch config in that order — so an `adopt` replays the validator its
+    /// launch resolved rather than re-reading an environment that has since
+    /// moved. Absent when the launch named none, which is the shipped default
+    /// and is exactly the behaviour every run had before this field existed.
+    /// Read it through [`node_validator`](Self::node_validator) rather than
+    /// testing this field, for the reason [`graph`](Self::graph) is read through
+    /// its own accessor. Omitted when empty, like every other field added to
+    /// this record after it shipped, so a build that predates it still reads
+    /// what it wrote.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub node_validator: String,
     /// The launcher, as the environment reported it.
     pub launcher: String,
     /// The launching session. A view labels a foreign one by
@@ -564,6 +579,16 @@ impl LaunchRecord {
     /// this is the one place that absence becomes "there is none" again.
     pub fn pr_author_graph(&self) -> Option<&str> {
         (!self.pr_author_graph.is_empty()).then_some(self.pr_author_graph.as_str())
+    }
+
+    /// The node validator this run was launched with, when it was launched with
+    /// one.
+    ///
+    /// The same reading [`observer_graph`](Self::observer_graph) has, and for
+    /// the same reason: an absent string field is written as no field at all,
+    /// and this is the one place that absence becomes "there is none" again.
+    pub fn node_validator(&self) -> Option<&str> {
+        (!self.node_validator.is_empty()).then_some(self.node_validator.as_str())
     }
 
     /// Whether `session` is the session that launched this run.
@@ -1385,6 +1410,7 @@ mod tests {
             graph_run: String::new(),
             node_graph: "graphs/node-scope.yaml".into(),
             pr_author_graph: String::new(),
+            node_validator: String::new(),
             launcher: "claude-code".into(),
             session: "a-session".into(),
             pid: 1,
@@ -1595,6 +1621,7 @@ mod tests {
             graph_run: String::new(),
             node_graph: String::new(),
             pr_author_graph: String::new(),
+            node_validator: String::new(),
             launcher: sys::UNKNOWN_LAUNCHER.into(),
             session: sys::UNKNOWN_LAUNCHER.into(),
             pid: 1,
@@ -1621,6 +1648,7 @@ mod tests {
             graph_run: String::new(),
             node_graph: String::new(),
             pr_author_graph: String::new(),
+            node_validator: String::new(),
             launcher: "claude-code".into(),
             session: "secret-session-id".into(),
             pid: 1,
