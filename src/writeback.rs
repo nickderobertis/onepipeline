@@ -22,13 +22,13 @@ use crate::projection::RunState;
 use crate::taskgraph::{QualifiedId, BINARY_ENV};
 
 const SHADOW_SOURCE: &str = "onepipeline-writeback";
-// A real sibling invocation can spend several seconds waiting to be scheduled on a busy
-// cross-platform runner. This bound is for a genuinely wedged child, not a latency target:
-// projection stays off the reconcile loop regardless of how long the child takes.
-const COMMAND_LIMIT: Duration = Duration::from_secs(10);
+// Cross-platform runners have measured real sibling copies taking longer than ten seconds
+// under suite-wide contention. This remains a backstop for an unreachable store, not a
+// latency target: projection stays off the reconcile loop while the child runs.
+const COMMAND_LIMIT: Duration = Duration::from_secs(60);
 const RETRY_AFTER: Duration = Duration::from_millis(250);
-// Closeout deliberately does not inherit COMMAND_LIMIT. A slow store may keep retrying in
-// the worker, but it still cannot turn a completed graph into a ten-second run settlement.
+// Closeout never inherits the duration of a store command. A slow store may keep working in
+// the worker, but it still cannot turn a completed graph into run settlement.
 const CLOSEOUT_WAIT: Duration = Duration::from_millis(2_250);
 
 #[derive(Clone, PartialEq)]
@@ -272,40 +272,26 @@ fn project(
         match child.try_wait() {
             Ok(Some(status)) if status.success() => return Ok(()),
             Ok(Some(status)) => {
-                // llmlint: ignore-block[changed_behavior_has_e2e] A wait_with_output
-                // failure after try_wait already reaped the real child requires an OS
-                // pipe/wait fault that the CLI boundary cannot induce.
                 let output = child
                     .wait_with_output()
                     .map_err(|error| error.to_string())?;
-                // llmlint: ignore-end[changed_behavior_has_e2e]
                 return Err(format!(
                     "copy exited {}: {}",
                     status
                         .code()
-                        .map_or_else(|| "on a signal".into(), |c| c.to_string()),
+                        .map_or_else(|| "on a signal".into(), |code| code.to_string()),
                     String::from_utf8_lossy(&output.stderr).trim()
                 ));
             }
             Ok(None) if started.elapsed() < COMMAND_LIMIT => {
-                std::thread::sleep(Duration::from_millis(25))
+                std::thread::sleep(Duration::from_millis(25));
             }
-            // llmlint: ignore-block[changed_behavior_has_e2e] The real local-md outage
-            // journey proves failed copies are bounded, reported, retried, and cannot alter
-            // execution. Reaching this exact time limit would require a wrapper that hangs
-            // in place of the real onetaskgraph binary, which would mock the boundary the
-            // acceptance journey is required to drive for real.
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(format!("copy exceeded {} seconds", COMMAND_LIMIT.as_secs()));
             }
-            // llmlint: ignore-end[changed_behavior_has_e2e]
-            // llmlint: ignore-block[changed_behavior_has_e2e] A try_wait syscall error
-            // cannot be induced through the real CLI contract. The journey covers the
-            // actionable recovery behavior using a real destination refusal instead.
             Err(error) => return Err(format!("cannot wait for copy: {error}")),
-            // llmlint: ignore-end[changed_behavior_has_e2e]
         }
     }
 }

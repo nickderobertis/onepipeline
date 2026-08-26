@@ -2670,12 +2670,11 @@ fn a_failed_dispatch_says_why_while_something_still_holds_the_stream_it_said_it_
 #[test]
 fn stopping_a_run_whose_work_is_over_says_there_was_nothing_to_stop() {
     let world = World::new("driver-stop-nothing");
-    let run = start_detached(&world, "finished", vec![agent("build", &[])]);
-    world.until("the run to settle", |world| {
-        world.run_file(&run, "result.json").is_file()
-    });
+    let run = "finished";
+    let plan = world.plan(run, &plan_of(run, vec![agent("build", &[])]));
+    world.run(&["start", &plan, "--attach"]).settled();
 
-    let stopped = world.run(&["stop", &run]);
+    let stopped = world.run(&["stop", run]);
     stopped.exited(0).out_has("\"stopped\":true");
     assert_eq!(
         stopped.json()["teardown"],
@@ -2685,7 +2684,7 @@ fn stopping_a_run_whose_work_is_over_says_there_was_nothing_to_stop() {
     );
     // And the run's own record says the same, so a later reader is not left to
     // take this for a run whose workers were ended by it.
-    let recorded = world.events_of(&run, "run-stopped");
+    let recorded = world.events_of(run, "run-stopped");
     assert_eq!(recorded.len(), 1, "the stop went unrecorded");
     assert_eq!(recorded[0]["payload"]["teardown"], json!("nothing-to-stop"));
 }
