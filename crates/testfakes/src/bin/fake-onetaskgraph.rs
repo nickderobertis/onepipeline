@@ -44,9 +44,10 @@ fn main() -> ExitCode {
     }
     if args == ["--version"] {
         if dir.join("onetaskgraph.version-invalid-utf8").is_file() {
-            std::io::Write::write_all(&mut std::io::stdout(), &[0xff])
-                .expect("stdout accepts the scripted bytes");
-            return ExitCode::SUCCESS;
+            return match std::io::Write::write_all(&mut std::io::stdout(), &[0xff]) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(_) => ExitCode::from(1),
+            };
         }
         let printed = std::fs::read_to_string(dir.join("onetaskgraph.version")).unwrap_or_default();
         print!("{printed}");

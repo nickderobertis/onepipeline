@@ -137,9 +137,14 @@ fn a_project_reads_as_the_plan_document_of_the_same_content() {
     let project = world.plan("mapping", &document);
     let task = world.store().join("tasks/mapping/000-publish.md");
     let held = std::fs::read_to_string(&task).expect("the task document");
-    let held = held.replace(
-        "repositories:\n  - github.com/owner/service",
-        "repositories:\n  - github.com/owner/service\n  - github.com/owner/ignored",
+    let held = held.replacen(
+        r#"repositories: ["github.com/owner/service"]"#,
+        r#"repositories: ["github.com/owner/service","github.com/owner/ignored"]"#,
+        1,
+    );
+    assert!(
+        held.contains("github.com/owner/ignored"),
+        "the multi-repository fixture was not installed"
     );
     std::fs::write(&task, held).expect("the task names a second repository");
     world.run(&["start", &project, "--detach"]).exited(0);
