@@ -2385,7 +2385,8 @@ mod tests {
             aimed_at(&launched_by(dead, &here, &proven)),
             Aim::Here {
                 roots: Vec::new(),
-                unproven: Vec::new()
+                unproven: Vec::new(),
+                declined: Vec::new(),
             }
         );
         // The same record naming this live process, which its stamp proves.
@@ -2406,7 +2407,8 @@ mod tests {
             )),
             Aim::Here {
                 roots: Vec::new(),
-                unproven: Vec::new()
+                unproven: Vec::new(),
+                declined: vec![sys::pid()],
             },
             "a stop aimed at a pid the host has since given to another process"
         );
@@ -2417,7 +2419,8 @@ mod tests {
             aimed_at(&launched_by(sys::pid(), &here, "")),
             Aim::Here {
                 roots: Vec::new(),
-                unproven: vec![sys::pid()]
+                unproven: vec![sys::pid()],
+                declined: Vec::new(),
             }
         );
 
@@ -2443,7 +2446,8 @@ mod tests {
             aimed_at(&launched_by(dead, &here, &proven)),
             Aim::Here {
                 roots: Vec::new(),
-                unproven: vec![sys::pid()]
+                unproven: vec![sys::pid()],
+                declined: Vec::new(),
             }
         );
         // A lock taken on another machine, where a pid means nothing.
@@ -2571,7 +2575,8 @@ mod tests {
             roots_to_stop(&paths, &launch).expect("an entry from a newer writer reads"),
             Aim::Here {
                 roots: vec![usable.pid],
-                unproven: Vec::new()
+                unproven: Vec::new(),
+                declined: Vec::new(),
             },
             "a dispatch recorded with a field this build does not know was left running"
         );
