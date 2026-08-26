@@ -4,7 +4,7 @@
 //! snapshots to this worker, and the worker only projects them. Store reads never feed back
 //! into scheduling, and a failed or slow write is reported and retried off the engine thread.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex};
@@ -313,6 +313,7 @@ fn destination_origins(
 ) -> Result<BTreeMap<String, String>, String> {
     let mut origins = BTreeMap::new();
     let mut page: Option<String> = None;
+    let mut cursors = BTreeSet::new();
     loop {
         let mut args = vec![
             "task".to_owned(),
@@ -373,6 +374,12 @@ fn destination_origins(
         }
         let _ = response.plan;
         let Some(next) = response.next else { break };
+        if next.is_empty() {
+            return Err("task list returned an empty next-page cursor".to_owned());
+        }
+        if !cursors.insert(next.clone()) {
+            return Err("task list repeated a next-page cursor".to_owned());
+        }
         page = Some(next);
     }
     // llmlint: ignore-end[changed_behavior_has_e2e]
