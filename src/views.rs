@@ -558,21 +558,23 @@ fn nothing_to_report(survey: &Survey) -> String {
 struct Standing {
     /// How the run is being driven.
     liveness: DriverLiveness,
-    /// Every node is done: the run converged, and a driver that is gone is gone
-    /// because there was nothing left for it to do.
-    complete: bool,
-    /// Something is still outstanding: a node that has not settled, a ready
-    /// human action nobody has attested, or a node gated behind one of those or
-    /// behind an upstream run. All of it is work a fresh driver picks up — now,
-    /// or when what it is waiting on arrives.
-    outstanding: bool,
-    /// The parked nodes a `requeue` would put back on an otherwise empty
-    /// frontier.
-    ///
-    /// Only ever populated for a run whose loop has converged: a parked node
-    /// beside work that can still move is not what is holding the run up, and a
-    /// driver adopted there has plenty to do.
-    parked: Vec<String>,
+    /// What remains for a driver or planner to do.
+    work: WorkStanding,
+}
+
+/// Mutually exclusive readings of the graph behind a run's word and advice.
+enum WorkStanding {
+    /// Every node completed successfully.
+    Complete,
+    /// The graph converged without completing and has no work an operator can
+    /// return to the frontier, as for a failed run.
+    Settled,
+    /// Something is ready, running, waiting, or blocked and a fresh driver can
+    /// pick it up now or when its gate opens.
+    Outstanding,
+    /// These nodes must be returned to the frontier before a driver can move
+    /// the run again.
+    Parked(Vec<String>),
 }
 
 impl Standing {
@@ -584,7 +586,7 @@ impl Standing {
         // empty map with the settled reading, and taking it would report a run
         // that has recorded nothing as finished.
         let converged = !statuses.is_empty() && graph::is_terminal(&statuses);
-        let parked = if converged {
+        let parked: Vec<_> = if converged {
             statuses
                 .iter()
                 .filter(|(_, status)| **status == NodeStatus::Parked)
@@ -593,26 +595,28 @@ impl Standing {
         } else {
             Vec::new()
         };
+        let work = if converged && graph::state_of(&statuses) == graph::GraphState::Complete {
+            WorkStanding::Complete
+        } else if !parked.is_empty() {
+            WorkStanding::Parked(parked)
+        } else if !converged
+            || statuses
+                .values()
+                .any(|status| matches!(status, NodeStatus::Waiting | NodeStatus::Blocked))
+        {
+            WorkStanding::Outstanding
+        } else {
+            WorkStanding::Settled
+        };
         Self {
             liveness: view.liveness(),
-            complete: converged && graph::state_of(&statuses) == graph::GraphState::Complete,
-            // A converged loop is not the same as a finished run: a ready human
-            // action derives as settled, and so does a node gated behind one or
-            // behind another run's — and every one of those is work an
-            // attestation, an upstream landing, or the next reconcile pass hands
-            // straight to a driver. Only a park stays out of a fresh driver's
-            // reach, which is why it is read separately.
-            outstanding: !converged
-                || statuses
-                    .values()
-                    .any(|status| matches!(status, NodeStatus::Waiting | NodeStatus::Blocked)),
-            parked,
+            work,
         }
     }
 
     /// The word a view prints for how the run is being driven.
     fn word(&self) -> &'static str {
-        if self.complete {
+        if matches!(&self.work, WorkStanding::Complete) {
             "SETTLED"
         } else {
             self.liveness.as_str()
@@ -624,26 +628,24 @@ impl Standing {
     /// `None` is the third answer and the one the advice used not to have: a run
     /// whose work is over needs nothing, and a driver attached to it settles it
     /// again in no time at all having dispatched nothing.
-    fn intervention(&self) -> Option<Intervention> {
+    fn intervention(&self) -> Option<Intervention<'_>> {
         if !self.liveness.is_undriven() {
             return None;
         }
-        if !self.parked.is_empty() {
-            return Some(Intervention::RequeueThenAdopt);
+        match &self.work {
+            WorkStanding::Outstanding => Some(Intervention::Adopt),
+            WorkStanding::Parked(nodes) => Some(Intervention::RequeueThenAdopt(nodes)),
+            WorkStanding::Complete | WorkStanding::Settled => None,
         }
-        if !self.outstanding {
-            return None;
-        }
-        Some(Intervention::Adopt)
     }
 }
 
 /// What a run nothing is driving needs before it can move again.
-enum Intervention {
+enum Intervention<'a> {
     /// A fresh driver, and nothing else: work is waiting on the frontier for it.
     Adopt,
     /// The parked work returned to the frontier, and *then* a driver.
-    RequeueThenAdopt,
+    RequeueThenAdopt(&'a [String]),
 }
 
 /// The prescription for a run nothing is driving whose unfinished work is
@@ -728,10 +730,10 @@ pub fn runs(root: &Path, mine_only: bool, session: &str) -> String {
                     standing.word(),
                     view.paths.run
                 ),
-                Intervention::RequeueThenAdopt => format!(
+                Intervention::RequeueThenAdopt(parked) => format!(
                     "    {} — its ledger is intact; {}\n",
                     standing.word(),
-                    requeue_then_adopt(&view.paths.run, &standing.parked)
+                    requeue_then_adopt(&view.paths.run, parked)
                 ),
             });
             continue;
@@ -774,10 +776,10 @@ pub fn status(survey: &Survey) -> String {
                     "  {}: nothing is driving this run; adopt it or stop it\n",
                     standing.word()
                 ),
-                Intervention::RequeueThenAdopt => format!(
+                Intervention::RequeueThenAdopt(parked) => format!(
                     "  {}: nothing is driving this run and {}\n",
                     standing.word(),
-                    requeue_then_adopt(&view.paths.run, &standing.parked)
+                    requeue_then_adopt(&view.paths.run, parked)
                 ),
             });
         }
