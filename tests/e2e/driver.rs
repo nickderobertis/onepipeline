@@ -2016,6 +2016,8 @@ fn a_stop_never_signals_a_pid_the_host_has_given_to_another_process() {
     stranger.wait().expect("it is reaped");
     world.release("build.go");
 }
+// llmlint: ignore-end[tests_mirror_real_usage]
+
 /// Linux does not let an old identity decay with `ps`'s wall-clock rendering.
 ///
 /// The stand-in moves `lstart` from the real process's 2026-era value to 1970,
@@ -2061,15 +2063,12 @@ fn a_stop_that_declines_every_live_identity_does_not_report_success() {
             && !world.run_file(&run, "driver.lock").exists()
     });
 
-    let record = world.run_file(&run, "launch.json");
-    let mut named = world.run_json(&run, "launch.json");
-    let recorded = named["started"]
+    let recorded = world.run_json(&run, "launch.json")["started"]
         .as_str()
         .expect("the launch record carries its driver's identity")
         .to_string();
     let mut stranger = stranger_started_after(&recorded);
-    named["pid"] = json!(stranger.id());
-    std::fs::write(&record, named.to_string()).expect("the stale pid is planted");
+    world.plant_reissued_launch_pid(&run, stranger.id());
 
     let refused = world.run(&["stop", &run]);
     refused
@@ -2099,7 +2098,6 @@ fn a_stop_that_declines_every_live_identity_does_not_report_success() {
     stranger.kill().expect("this test ends its own process");
     stranger.wait().expect("the stranger is reaped");
 }
-// llmlint: ignore-end[tests_mirror_real_usage]
 
 /// A stop reaches a dispatch whose driver is gone.
 ///

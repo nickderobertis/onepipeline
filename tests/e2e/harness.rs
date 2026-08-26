@@ -1623,6 +1623,21 @@ impl World {
         )
         .unwrap_or_else(|e| panic!("{} is not JSON: {e}", path.display()))
     }
+
+    /// Make a settled run's historical launch claim describe a pid the host
+    /// has reissued, the state a real stale record reaches only with time.
+    ///
+    /// This constructs the fixture but does not substitute the behavior under
+    /// test: the caller still drives the real `onepipeline stop` command and a
+    /// real process. Product commands deliberately cannot request PID reuse,
+    /// while waiting for a chosen pid to recycle would be unbounded.
+    #[cfg(unix)]
+    pub fn plant_reissued_launch_pid(&self, run: &str, pid: u32) {
+        let path = self.run_file(run, "launch.json");
+        let mut launch = self.run_json(run, "launch.json");
+        launch["pid"] = serde_json::json!(pid);
+        std::fs::write(path, launch.to_string()).expect("the stale launch pid is planted");
+    }
 }
 
 /// Wait for a child this journey spawned with piped streams to end, draining
