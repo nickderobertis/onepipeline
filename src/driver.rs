@@ -184,6 +184,20 @@ fn recorded_dir(record: &LaunchRecord) -> Result<PathBuf> {
 // duplicate the sibling type without adding an invariant: relative references are made
 // absolute here, and the nonempty launch-record invariant is checked before every run.
 fn resolve_graph(reference: &str, base: &Path) -> Result<String> {
+    // Refused before anything is joined or opened, because a blank reference
+    // resolves to `base` itself — the launch directory — and what happens next
+    // is whatever the host's file API answers for opening a directory, which is
+    // read on Linux and refused on Windows. A launch that starts on one platform
+    // and not another is not a launch anybody wrote. What names no graph at all
+    // is the `None` its caller holds; a reference that is *there* and holds
+    // nothing names one that cannot be found, and says so the same way
+    // everywhere.
+    if reference.trim().is_empty() {
+        return Err(Error::Invalid(
+            "graph reference is blank: name a path, an `https://` URL, or no graph at all"
+                .to_string(),
+        ));
+    }
     // llmlint: ignore-block[boundary_inputs_validated] absolute paths and URLs are
     // oneagentgraph's existing input boundary: it reads/fetches them and returns its own
     // config refusal. This boundary resolves only relative paths because onepipeline is
@@ -350,6 +364,17 @@ fn start(args: &StartArgs) -> Result<i32> {
     // is the shipped default, and the flag overrides the config that names one.
     // Resolved against the launch directory like every other reference, so the
     // record carries what a driver started from anywhere else replays.
+    //
+    // A rung that is *there* and blank names no graph, exactly as the node
+    // validator's three rungs below read a blank one: the flag still overrides
+    // the config it names, and what it overrides it to is "this launch drafts
+    // nothing" rather than the config underneath. `LaunchConfig::load` keeps a
+    // blank `pr_author_graph` rather than refusing it — the key has shipped
+    // since schema 2 and a document already on disk may carry one — so the
+    // blank arrives here, and here is where it means the same thing as the
+    // document that omits the key: nothing to resolve, and nothing read off a
+    // disk to decide it, because what a filesystem answers for an empty path is
+    // a property of the platform rather than of the launch.
     // llmlint: ignore-block[invalid_states_unrepresentable] a resolved reference stays the
     // `String` `resolve_graph` answers with, from here into `LaunchRecord` and back out of
     // it, for the reason that function's own suppression gives: the durable record and
@@ -360,6 +385,7 @@ fn start(args: &StartArgs) -> Result<i32> {
         .pr_author_graph
         .as_deref()
         .or(declared.pr_author_graph.as_deref())
+        .filter(|reference| !reference.trim().is_empty())
     {
         Some(reference) => Some(resolve_graph(reference, &launch_dir)?),
         None => None,

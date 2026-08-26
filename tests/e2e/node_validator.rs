@@ -819,3 +819,54 @@ fn a_config_carrying_a_blank_drafting_graph_still_launches_a_run() {
         .exited(0)
         .settled();
 }
+
+/// A blank `pr_author_graph` is the config that omits the key: same launch, and
+/// the same record of what it drafts with.
+///
+/// The other half of the journey above, and the half that does not vary by
+/// platform. "Does it launch?" a blank value can pass by accident: `""` resolved
+/// against the launch directory *is* the launch directory, and opening a
+/// directory is a read the host answers for itself — allowed on Linux and
+/// refused on Windows — so one document launched on one platform, exited 2 on
+/// another, and where it launched it recorded the launch directory as the graph
+/// a change request's body is drafted by. What is asked here is the property no
+/// file API is consulted for: a config carrying a blank key and a config that
+/// omits it are indistinguishable in what the launch then does.
+#[test]
+fn a_blank_drafting_graph_records_what_omitting_the_key_records() {
+    let world = World::new("validator-blank-drafting-omitted");
+    let version = proposed()["config_schema_version"].as_u64().unwrap_or(3);
+
+    let recorded = |run: &str, declared: &str| -> Value {
+        let config = world.root.join(format!("{run}.yaml"));
+        std::fs::write(&config, format!("schema_version: {version}\n{declared}"))
+            .expect("the config is written");
+        let path = world.plan(run, &plan_of(run, vec![agent("only", &[])]));
+        world
+            .run(&[
+                "start",
+                &path.to_string_lossy(),
+                "--launch-config",
+                &config.to_string_lossy(),
+                "--attach",
+            ])
+            .exited(0)
+            .settled();
+        world.run_json(run, "launch.json")["pr_author_graph"].clone()
+    };
+
+    let blank = recorded("blankkey", "pr_author_graph: \"\"\n");
+    let omitted = recorded("nokey", "");
+    assert_eq!(
+        blank, omitted,
+        "a blank drafting graph did not launch the run the config omitting the key launches"
+    );
+    // Named, and not only compared: two runs that both recorded the launch
+    // directory would agree with each other and still have wired a directory in
+    // as the drafting graph. The record omits the field when the launch named no
+    // graph, so absent is what "drafts nothing" reads as here.
+    assert!(
+        blank.is_null(),
+        "a blank drafting graph reached the record as a graph this launch names: {blank}"
+    );
+}

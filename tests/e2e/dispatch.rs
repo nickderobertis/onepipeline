@@ -339,6 +339,60 @@ fn an_unreadable_relative_graph_names_its_launch_base() {
     failed.err_has(&world.root.to_string_lossy());
 }
 
+/// A graph reference that is *there* and holds nothing is refused by that, and
+/// refused identically wherever the launch runs.
+///
+/// `""` joined onto the launch directory **is** the launch directory, so a
+/// reference holding nothing used to mean whatever the host answers for opening
+/// a directory — read on Linux, refused on Windows — and neither of those is
+/// what the operator wrote. Refused before anything is joined or opened, so the
+/// ending is a property of the launch rather than of the platform it ran on.
+/// What names no graph at all names none; both spellings driven here, because a
+/// blank arrives from argv and from a plan a planner templated alike.
+#[test]
+fn a_blank_graph_reference_is_refused_before_any_path_is_read() {
+    let world = World::new("blank-graph-reference");
+    world.write_graphs();
+    let cases: [(&str, Vec<String>, Value); 2] = [
+        (
+            "blank-observer",
+            vec!["--dag-graph".to_string(), String::new()],
+            agent("build", &[]),
+        ),
+        (
+            "blank-node-override",
+            Vec::new(),
+            json!({
+                "id": "build",
+                "persona": "engineer",
+                "task": "## What\nbuild",
+                "agent_graph": "",
+            }),
+        ),
+    ];
+
+    for (name, extra, node) in cases {
+        let path = world.plan(name, &plan_of(name, vec![node]));
+        let mut args = vec![
+            "start".to_string(),
+            path.to_string_lossy().into_owned(),
+            "--attach".to_string(),
+        ];
+        args.extend(extra);
+        let mut command =
+            world.agentgraph_cmd(&args.iter().map(String::as_str).collect::<Vec<_>>());
+        command.current_dir(&world.root);
+
+        let failed = world.run_on(command, "start with a blank graph reference");
+        failed.exited(REFUSED);
+        failed.err_has("graph reference is blank");
+        assert!(
+            !world.run_file(name, "launch.json").exists(),
+            "{name} minted a run for a reference nothing could resolve"
+        );
+    }
+}
+
 #[test]
 fn an_unreadable_relative_node_graph_names_its_launch_base() {
     let world = World::new("relative-node-graph-error");

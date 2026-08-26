@@ -83,7 +83,9 @@ pub const LAUNCH_CONFIG_SCHEMA_VERSIONS_READ: [u32; 3] = [LAUNCH_CONFIG_SCHEMA_V
 /// to work. `pr_author_graph` has shipped since version 2 and a document
 /// already written may carry a blank one; whatever that meant then it goes on
 /// meaning, because a build that started refusing it would break a config over
-/// a key the operator did not change.
+/// a key the operator did not change. What it means is settled where the value
+/// is *read* rather than here: `driver::start` reads a blank drafting graph as
+/// naming none, which is what the document omitting the key says.
 const KEYS_BY_VERSION: &[(&str, u32, BlankValue)] = &[
     ("pr_author_graph", 2, BlankValue::Kept),
     ("node_validator", 3, BlankValue::Refused),
