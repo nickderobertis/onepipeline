@@ -1129,6 +1129,24 @@ fn a_launch_record_without_a_directory_is_replayed_from_the_adopting_process() {
             .err_has(&dir.to_string_lossy());
     }
 }
+
+#[test]
+fn a_legacy_unqualified_project_does_not_prevent_adoption() {
+    let world = World::new("driver-legacy-project");
+    let run = start_detached_observed(&world, "legacy-project", vec![human("approve", &[])]);
+    world.until("the driver to exit", |world| {
+        world.run(&["status", &run]).stdout.contains("DRIVER DEAD")
+    });
+
+    let mut record = world.run_json(&run, "launch.json");
+    record["project"] = json!("legacy-project");
+    std::fs::write(world.run_file(&run, "launch.json"), record.to_string())
+        .expect("the legacy launch record is rewritten");
+
+    world.run(&["adopt", &run]).exited(0);
+    assert_eq!(world.run_json(&run, "launch.json")["adoptions"], 1);
+    assert_eq!(world.events_of(&run, "driver-adopted").len(), 1);
+}
 // llmlint: ignore-end[tests_mirror_real_usage]
 
 /// An adoption re-addresses the pacemaker at the graph run now driving the run.
