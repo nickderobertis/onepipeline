@@ -1816,3 +1816,39 @@ the lock is; it stays `hide = true` and stays reached by
 drives all four outcomes against the real binary over a real run root: the
 detached adoption whose driver holds every claim the run records, the one whose
 driver dies on its way up, and the pair refusing itself.
+
+## 43. One thing Contract F could not be compiled exactly as written — OPEN
+
+The launch contract that replaced the plan file is implemented as it is written,
+with one exception, where its environment-variable spelling collides with the
+child product's configuration namespace.
+
+*`ONETASKGRAPH_BIN` is a name that product's own environment layer already
+claims.* The contract names the variable, and it is the one this build reads. But
+`onetaskgraph` reads its **whole configuration** from `ONETASKGRAPH_`-prefixed
+variables, where the suffix is a dotted setting path — so a child spawned with
+`ONETASKGRAPH_BIN` still set is a child told to configure a setting called `bin`,
+and it refuses the read by name. This build therefore removes the variable from
+the child's environment before spawning it. **Proposal: either keep the name and
+say in the contract that it is not passed through, or move it to a name outside
+that product's namespace — `ONEPIPELINE_ONETASKGRAPH_BIN` is what this crate
+already calls the equivalent for `oneagentgraph`.**
+
+## 44. The minimum `onetaskgraph` this build needs is not a released version — OPEN
+
+`src/taskgraph.rs` declares `CHECKED_MINIMUM = "0.1.0"`, which is the version the
+binary carrying the surface this mapping reads **reports**, and the launch refuses
+anything below it. But the reserved metadata map every field of the mapping rides
+on landed in that repository *after* its 0.1.0 release and before the next one, so
+the published 0.1.0 does not carry it: a host that installed from crates.io today
+passes the version check and then answers every project read with a task carrying
+no metadata at all, which this build refuses as a task with no `onepipeline.id`.
+The refusal is correct and names the key, but it names the wrong cause.
+
+This repository's own checks do not depend on that gap: `justfile`'s
+`_ensure-onetaskgraph` installs the revision pinned there, which is the one
+carrying the surface. **Proposal: when onetaskgraph cuts the release that carries
+custom metadata, raise `CHECKED_MINIMUM` to it and turn the justfile's revision
+pin into a version.** Until then the floor is the honest one — the version the
+binary this build is checked against reports — rather than a number invented for a
+release nobody has published.

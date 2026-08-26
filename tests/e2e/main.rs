@@ -41,6 +41,7 @@ mod real_vcs;
 mod session;
 mod session_reuse;
 mod shipped;
+mod store;
 mod surface;
 mod turns;
 mod views;

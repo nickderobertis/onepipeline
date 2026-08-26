@@ -30,7 +30,7 @@ fn live_holders_refuse_unless_acknowledged_and_stale_holders_do_not_refuse() {
     // Attached, so the process this test holds *is* the run's driver: the loop
     // runs in it, and it is what asks the linked `onevcs` to open the session.
     // The held worker keeps both owner and session live.
-    let mut first_owner = world.cmd(&["start", &first_plan.to_string_lossy(), "--attach"]);
+    let mut first_owner = world.cmd(&["start", &first_plan, "--attach"]);
     let mut first_owner = first_owner
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -56,10 +56,7 @@ fn live_holders_refuse_unless_acknowledged_and_stale_holders_do_not_refuse() {
 
     let plan = world.plan("second", &plan_of("second", vec![lifecycle()]));
 
-    let refused = world.run_on(
-        world.cmd(&["start", &plan.to_string_lossy(), "--detach"]),
-        "start",
-    );
+    let refused = world.run_on(world.cmd(&["start", &plan, "--detach"]), "start");
     refused
         .exited(2)
         .err_has("concurrent project work refused")
@@ -68,12 +65,7 @@ fn live_holders_refuse_unless_acknowledged_and_stale_holders_do_not_refuse() {
         .err_has(&format!("owner_pid {owner_pid}"));
 
     let acknowledged = world.run_on(
-        world.cmd(&[
-            "start",
-            &plan.to_string_lossy(),
-            "--detach",
-            "--acknowledge-concurrent",
-        ]),
+        world.cmd(&["start", &plan, "--detach", "--acknowledge-concurrent"]),
         "start --acknowledge-concurrent",
     );
     acknowledged
@@ -110,7 +102,7 @@ fn live_holders_refuse_unless_acknowledged_and_stale_holders_do_not_refuse() {
     let stale_plan = world.plan("third", &plan_of("third", vec![lifecycle()]));
     world
         .run_on(
-            world.cmd(&["start", &stale_plan.to_string_lossy(), "--detach"]),
+            world.cmd(&["start", &stale_plan, "--detach"]),
             "start stale",
         )
         .exited(0)

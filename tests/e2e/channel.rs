@@ -17,9 +17,7 @@ use serde_json::json;
 /// Start a run detached and wait until it is executing.
 fn running(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
     let path = world.plan(name, &plan_of(name, nodes));
-    world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
+    world.run(&["start", &path, "--detach"]).exited(0);
     world.until("the run to dispatch something", |world| {
         !world.events_of(name, "node-dispatched").is_empty()
     });
@@ -57,7 +55,7 @@ fn observed(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String 
     world
         .run(&[
             "start",
-            &path.to_string_lossy(),
+            &path,
             "--detach",
             "--dag-graph",
             &world.shipped_dag_graph(),
@@ -430,9 +428,7 @@ fn a_malformed_reply_is_refused_rather_than_half_applied() {
 fn a_settled_run_refuses_a_reply_nothing_will_ever_read() {
     let world = World::new("channel-settled");
     let path = world.plan("settled", &plan_of("settled", vec![agent("build", &[])]));
-    world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
+    world.run(&["start", &path, "--detach"]).exited(0);
     world.until("the run to settle", |world| {
         world.run_file("settled", "result.json").is_file()
     });
@@ -794,7 +790,7 @@ fn a_live_edit_while_the_observer_member_is_between_turns_leaves_it_supervising(
     let path = world.plan("watched", &plan_of("watched", vec![agent("build", &[])]));
     let mut start = world.cmd(&[
         "start",
-        &path.to_string_lossy(),
+        &path,
         "--detach",
         "--dag-graph",
         &world.shipped_dag_graph(),
@@ -940,7 +936,7 @@ fn every_verdict_half_the_contract_names_rules_a_supervised_member() {
     let path = world.plan("halves", &plan_of("halves", vec![agent("build", &[])]));
     let mut start = world.cmd(&[
         "start",
-        &path.to_string_lossy(),
+        &path,
         "--detach",
         "--dag-graph",
         &world.shipped_dag_graph(),
@@ -1044,7 +1040,7 @@ fn an_observer_graph_whose_judge_names_no_command_is_refused_and_the_run_goes_on
     world
         .run(&[
             "start",
-            &path.to_string_lossy(),
+            &path,
             "--attach",
             "--dag-graph",
             &broken.display().to_string(),
@@ -1203,9 +1199,7 @@ fn a_rejected_commands_only_reply_leaves_the_observers_side_waiting() {
             vec![agent("slow", &[]), agent("later", &["slow"])],
         ),
     );
-    world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
+    world.run(&["start", &path, "--detach"]).exited(0);
     world.until("the held node's turn to open", |world| {
         !world.events_of("refused", "turn-started").is_empty()
     });
@@ -1308,9 +1302,7 @@ fn a_rejected_reply_carrying_both_halves_still_delivers_its_verdict() {
             vec![agent("slow", &[]), agent("later", &["slow"])],
         ),
     );
-    world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
+    world.run(&["start", &path, "--detach"]).exited(0);
     world.until("the held node's turn to open", |world| {
         !world.events_of("bothrefused", "turn-started").is_empty()
     });
@@ -1400,9 +1392,7 @@ fn a_reply_refused_before_routing_delivers_neither_half() {
     let world = World::new("channel-reply-refused-whole");
     world.script("build.wait", "hold");
     let path = world.plan("whole", &plan_of("whole", vec![agent("build", &[])]));
-    world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
+    world.run(&["start", &path, "--detach"]).exited(0);
 
     let mut serving = world
         .cmd(&["channel", "serve", "whole"])
@@ -1511,9 +1501,7 @@ fn a_commands_only_reply_applied_under_the_lock_leaves_the_observers_side_waitin
         "underlock",
         &plan_of("underlock", vec![human("approve", &[])]),
     );
-    world
-        .run(&["start", &path.to_string_lossy(), "--attach"])
-        .exited(0);
+    world.run(&["start", &path, "--attach"]).exited(0);
 
     let mut serving = world
         .cmd(&["channel", "serve", "underlock"])
@@ -2106,9 +2094,7 @@ fn a_human_decision_holds_its_subtree_while_another_branch_runs_and_attest_resum
             ],
         ),
     );
-    world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
+    world.run(&["start", &path, "--detach"]).exited(0);
 
     // The decision is reported the moment it begins holding dependents back,
     // and it names what it holds.
@@ -2171,9 +2157,7 @@ fn an_edit_to_a_run_nothing_is_driving_is_applied_rather_than_refused() {
         "settledgraph",
         &plan_of("settledgraph", vec![human("approve", &[])]),
     );
-    world
-        .run(&["start", &path.to_string_lossy(), "--attach"])
-        .exited(0);
+    world.run(&["start", &path, "--attach"]).exited(0);
 
     world
         .run_with_stdin(
@@ -2277,7 +2261,7 @@ fn a_dag_graph_observes_while_the_monitors_edits_are_held_to_its_allowlist() {
     world
         .run(&[
             "start",
-            &path.to_string_lossy(),
+            &path,
             "--detach",
             "--dag-graph",
             &world.shipped_dag_graph(),
@@ -2433,9 +2417,7 @@ fn a_blocking_surface_holds_the_subtree_of_the_node_it_names_until_it_is_answere
             ],
         ),
     );
-    world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
+    world.run(&["start", &path, "--detach"]).exited(0);
     world.until("the held node to be in flight", |world| {
         world
             .events_of("surfacegate", "node-dispatched")
@@ -2545,7 +2527,7 @@ fn a_blocking_surface_naming_no_node_pauses_nothing_and_still_awaits_the_planner
     world.script("build.fail", "1");
     let path = world.plan("runwide", &plan_of("runwide", vec![agent("build", &[])]));
     world
-        .run(&["start", &path.to_string_lossy(), "--attach"])
+        .run(&["start", &path, "--attach"])
         .exited(NOTHING_DRIVING)
         .out_has("\"settlement\":\"unattended\"");
 
@@ -2687,9 +2669,7 @@ fn a_monitor_edit_applied_with_nothing_driving_is_still_surfaced_to_the_planner(
         "undrivenmonitor",
         &plan_of("undrivenmonitor", vec![human("approve", &[])]),
     );
-    world
-        .run(&["start", &path.to_string_lossy(), "--attach"])
-        .exited(0);
+    world.run(&["start", &path, "--attach"]).exited(0);
 
     world
         .run_with_stdin(
@@ -2931,9 +2911,7 @@ fn a_finding_is_placed_by_the_node_it_names_or_refused_by_it() {
 fn a_finding_raised_while_nothing_drives_the_run_still_reaches_the_planner() {
     let world = World::new("channel-finding-undriven");
     let path = world.plan("parked", &plan_of("parked", vec![human("approve", &[])]));
-    world
-        .run(&["start", &path.to_string_lossy(), "--attach"])
-        .exited(0);
+    world.run(&["start", &path, "--attach"]).exited(0);
 
     world
         .run_with_stdin(

@@ -37,7 +37,7 @@ fn start_detached_observed(world: &World, name: &str, nodes: Vec<serde_json::Val
     world
         .run(&[
             "start",
-            &path.to_string_lossy(),
+            &path,
             "--detach",
             "--dag-graph",
             &world.shipped_dag_graph(),
@@ -57,7 +57,7 @@ fn start_detached_announcing(
     nodes: Vec<serde_json::Value>,
 ) -> (String, u32) {
     let path = world.plan(name, &plan_of(name, nodes));
-    let started = world.run(&["start", &path.to_string_lossy(), "--detach"]);
+    let started = world.run(&["start", &path, "--detach"]);
     started.exited(0);
     let announced: serde_json::Value = serde_json::from_str(started.stdout.trim())
         .unwrap_or_else(|error| panic!("a detached launch announces itself: {error}"));
@@ -150,7 +150,7 @@ fn assert_says_only_what_the_run_is(task: &str, run: &str, goal: &str) {
 ///
 /// The adoption half is the one a launch cannot state for itself: a fresh driver
 /// composes the description from the run's **projected** plan rather than from
-/// the plan file the launch named, because the planner may have edited the graph
+/// the project the launch named, because the planner may have edited the graph
 /// since and that file may not be there at all.
 #[test]
 fn the_launched_graphs_task_names_the_run_and_its_goal_at_start_and_at_adoption() {
@@ -192,7 +192,7 @@ fn a_run_whose_plan_states_no_goal_is_launched_saying_so() {
     world
         .run(&[
             "start",
-            &path.to_string_lossy(),
+            &path,
             "--detach",
             "--dag-graph",
             &world.shipped_dag_graph(),
@@ -211,7 +211,7 @@ fn start_launches_the_named_dag_scope_graph_and_records_how_to_relaunch_it() {
     let path = world.plan("launched", &plan_of("launched", vec![agent("build", &[])]));
     let started = world.run(&[
         "start",
-        &path.to_string_lossy(),
+        &path,
         "--detach",
         "--dag-graph",
         &world.shipped_dag_graph(),
@@ -293,7 +293,7 @@ fn a_dependency_chain_runs_to_completion_under_start_with_no_agent_graph() {
         ),
     );
     world
-        .run(&["start", &path.to_string_lossy()])
+        .run(&["start", &path])
         .exited(0)
         .out_has("\"settlement\":\"complete\"");
 
@@ -372,7 +372,7 @@ fn the_launch_record_exists_before_the_member_the_launcher_starts_reads_the_ledg
     world
         .run(&[
             "start",
-            &path.to_string_lossy(),
+            &path,
             "--detach",
             "--dag-graph",
             &world.shipped_dag_graph(),
@@ -404,7 +404,7 @@ fn the_launch_record_exists_before_the_member_the_launcher_starts_reads_the_ledg
 fn an_attached_start_returns_when_the_graph_completes() {
     let world = World::new("driver-attach");
     let path = world.plan("attached", &plan_of("attached", vec![agent("build", &[])]));
-    let started = world.run(&["start", &path.to_string_lossy(), "--attach"]);
+    let started = world.run(&["start", &path, "--attach"]);
     started.exited(0).out_has("\"settlement\":\"complete\"");
 }
 
@@ -419,7 +419,7 @@ fn an_attach_returns_exit_three_when_nothing_is_driving_the_run() {
     // and no surface is blocking: the run is simply not being driven any more.
     world.script("build.fail", "1");
     world
-        .run(&["start", &path.to_string_lossy(), "--attach"])
+        .run(&["start", &path, "--attach"])
         .exited(NOTHING_DRIVING)
         .out_has("\"settlement\":\"unattended\"");
 }
@@ -437,7 +437,7 @@ fn an_attach_returns_awaiting_planner_when_a_decision_point_is_all_that_is_left(
         &plan_of("awaiting", vec![human("approve", &[])]),
     );
     world
-        .run(&["start", &path.to_string_lossy(), "--attach"])
+        .run(&["start", &path, "--attach"])
         .exited(0)
         .out_has("\"settlement\":\"awaiting-planner\"");
     assert_eq!(
@@ -585,7 +585,7 @@ fn a_dead_driver_reads_as_driver_dead_and_adopt_is_the_way_back() {
     world
         .run(&[
             "start",
-            &path.to_string_lossy(),
+            &path,
             "--detach",
             "--dag-graph",
             &world.shipped_dag_graph(),
@@ -910,7 +910,7 @@ fn start_and_adopt_give_the_sibling_the_same_directory_for_one_run() {
     let launched_from = world.project.clone();
     let mut start = world.cmd(&[
         "start",
-        &path.to_string_lossy(),
+        &path,
         "--detach",
         "--dag-graph",
         &world.shipped_dag_graph(),
@@ -1009,7 +1009,7 @@ fn a_launch_records_the_directory_the_process_resolves_not_the_route_to_it() {
     let path = world.plan("routed", &plan_of("routed", vec![human("approve", &[])]));
     let mut start = world.cmd(&[
         "start",
-        &path.to_string_lossy(),
+        &path,
         "--detach",
         "--dag-graph",
         &world.shipped_dag_graph(),
@@ -1398,7 +1398,7 @@ fn the_owner_stops_its_own_run_without_force() {
 fn a_run_nobody_can_attribute_is_nobodys() {
     let world = World::new("driver-unknown");
     let path = world.plan("anon", &plan_of("anon", vec![human("approve", &[])]));
-    let mut command = world.cmd(&["start", &path.to_string_lossy(), "--detach"]);
+    let mut command = world.cmd(&["start", &path, "--detach"]);
     command.env_remove("ONEPIPELINE_LAUNCHER_SESSION");
     command.output().expect("the binary runs");
 
@@ -1479,9 +1479,7 @@ fn a_detached_run_settles_and_its_driver_is_left_a_log_to_write_to() {
         "detachedlog",
         &plan_of("detachedlog", vec![agent("build", &[])]),
     );
-    world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
+    world.run(&["start", &path, "--detach"]).exited(0);
     let run = "detachedlog".to_string();
 
     world.until("the run to settle", |world| {
@@ -1544,7 +1542,7 @@ fn a_refusal_slower_than_any_launch_window_still_fails_the_launch() {
     for form in ["--detach", "--attach"] {
         let started = world.run(&[
             "start",
-            &path.to_string_lossy(),
+            &path,
             form,
             "--dag-graph",
             &world.shipped_dag_graph(),
@@ -1573,7 +1571,7 @@ fn a_refusal_slower_than_any_launch_window_still_fails_the_launch() {
     for unusable in ["however long it takes", "0"] {
         let mut launch = world.cmd(&[
             "start",
-            &path.to_string_lossy(),
+            &path,
             "--detach",
             "--dag-graph",
             &world.shipped_dag_graph(),
@@ -1612,7 +1610,7 @@ fn a_graph_that_neither_starts_nor_exits_fails_the_launch_rather_than_outlasting
     for (form, run) in [("--detach", "silent"), ("--attach", "silent-2")] {
         let mut launch = world.cmd(&[
             "start",
-            &path.to_string_lossy(),
+            &path,
             form,
             "--dag-graph",
             &world.shipped_dag_graph(),
@@ -1664,7 +1662,7 @@ fn a_graph_that_finished_before_announcing_anything_is_a_launch_that_worked() {
     // nothing, because the observer never drove it.
     let started = world.run(&[
         "start",
-        &path.to_string_lossy(),
+        &path,
         "--detach",
         "--dag-graph",
         &world.shipped_dag_graph(),
@@ -1679,7 +1677,7 @@ fn a_graph_that_finished_before_announcing_anything_is_a_launch_that_worked() {
     // observer's clean exit is reported and changes nothing.
     let attached = world.run(&[
         "start",
-        &path.to_string_lossy(),
+        &path,
         "--attach",
         "--dag-graph",
         &world.shipped_dag_graph(),
@@ -2074,7 +2072,7 @@ fn a_stop_aimed_at_another_hosts_driver_reports_that_it_reached_nothing() {
     world.script("build.wait", "hold");
 
     let path = world.plan("afar", &plan_of("afar", vec![agent("build", &[])]));
-    let mut launch = world.cmd(&["start", &path.to_string_lossy(), "--detach"]);
+    let mut launch = world.cmd(&["start", &path, "--detach"]);
     launch.env("HOSTNAME", ELSEWHERE);
     let started = world.run_on(launch, "start recorded on another host");
     started.exited(0);
@@ -3216,10 +3214,7 @@ fn an_attached_runs_worker_can_ask_its_manager() {
         "askableattached",
         &plan_of("askableattached", vec![agent("build", &[])]),
     );
-    world
-        .run(&["start", &path.to_string_lossy(), "--attach"])
-        .exited(0)
-        .settled();
+    world.run(&["start", &path, "--attach"]).exited(0).settled();
 
     assert_eq!(
         world.question_for_the_manager("askableattached"),
@@ -3244,9 +3239,7 @@ fn an_adopted_runs_worker_can_ask_its_manager() {
             vec![human("approve", &[]), agent("build", &["approve"])],
         ),
     );
-    world
-        .run(&["start", &path.to_string_lossy(), "--attach"])
-        .exited(0);
+    world.run(&["start", &path, "--attach"]).exited(0);
     world
         .run(&["attest", "askableadopted", "approve"])
         .exited(0);
@@ -3380,7 +3373,7 @@ fn adopting_a_run_whose_dispatch_was_in_flight_leaves_that_dispatchs_work_reacha
         &plan_of(&run, vec![crate::harness::lifecycle("service", &[])]),
     );
     let mut owner = world
-        .cmd(&["start", &path.to_string_lossy(), "--attach"])
+        .cmd(&["start", &path, "--attach"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()

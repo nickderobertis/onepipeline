@@ -105,6 +105,32 @@ pub fn record(dir: &Path, tool: &str, args: &[String]) {
     append(&dir.join("invocations.jsonl"), &line);
 }
 
+/// How many times this double has been asked for `what`, counting this one.
+///
+/// A file per counter rather than a count of `invocations.jsonl` lines: several
+/// doubles record into that file at once, and what a walk of pages needs is
+/// "which call of *this* verb is this", which only this program can say.
+pub fn count(dir: &Path, what: &str) -> usize {
+    let path = dir.join(format!("{what}.calls"));
+    let so_far = match std::fs::read_to_string(&path) {
+        Ok(text) => text.trim().parse::<usize>().unwrap_or_else(|error| {
+            fail(&format!(
+                "cannot read counter {} as an integer: {error}",
+                path.display()
+            ))
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(error) => fail(&format!("cannot read counter {}: {error}", path.display())),
+    };
+    let nth = so_far
+        .checked_add(1)
+        .unwrap_or_else(|| fail(&format!("counter {} is exhausted", path.display())));
+    if let Err(error) = std::fs::write(&path, nth.to_string()) {
+        fail(&format!("cannot count into {}: {error}", path.display()));
+    }
+    nth
+}
+
 /// Append one line to a file, creating it if needed.
 ///
 /// A double that cannot record what it was asked for would let a test assert

@@ -1,5 +1,5 @@
 //! The shipped content: the personas, the two agent-graph configs, the example
-//! plans, and the executor-rules example.
+//! plan store, and the executor-rules example.
 //!
 //! These are what a consumer receives, so they are checked against the schemas
 //! that read them rather than only against the eye.
@@ -234,63 +234,95 @@ fn the_pr_author_persona_is_off_the_publication_path() {
     assert!(text.contains("the JSON object the schema your graph names requires"));
 }
 
+/// The store this repository ships is one a run launches from, as it is.
+///
+/// Not a fixture translated into one: the journey points a world at
+/// `examples/plan-store` and launches the projects by the ids the README tells a
+/// reader to type. What it proves is that the example store is readable, maps,
+/// validates, and mints a run — which is the whole of what an example is for.
 #[test]
-fn both_example_plans_start_a_real_run() {
-    for (name, run) in [
-        ("single-node.plan.json", "single-node"),
-        ("mixed-graph.plan.json", "tracked-release"),
-    ] {
+fn both_example_projects_start_a_real_run() {
+    for run in ["single-node", "tracked-release"] {
         let world = World::new(&format!("shipped-{run}"));
-        world.script("driver.wait", "hold");
-        let mut parsed: serde_json::Value =
-            serde_json::from_str(&read(&format!("examples/{name}"))).expect("the example parses");
-        let mut repos = std::collections::BTreeMap::new();
-        for task in parsed["tasks"].as_array_mut().into_iter().flatten() {
-            if let Some(repo) = task["repo"].as_str().map(str::to_string) {
-                let checkout = world.root.join(repo.replace('/', "-"));
-                if repos.insert(repo.clone(), checkout.clone()).is_none() {
-                    std::fs::create_dir_all(&checkout).expect("an example checkout");
-                    let initialized = std::process::Command::new("git")
-                        .args(["init", "--initial-branch=main"])
-                        .arg(&checkout)
-                        .output()
-                        .expect("git initializes the example checkout");
-                    assert!(
-                        initialized.status.success(),
-                        "{}",
-                        String::from_utf8_lossy(&initialized.stderr)
-                    );
-                    world.register(&checkout, Some(&format!("https://github.com/{repo}.git")));
-                }
-                task["repo"] = serde_json::Value::String(checkout.to_string_lossy().into_owned());
-            }
+        // Every repository the example store names, registered as an identity of
+        // this world: the launcher asks `onevcs` about a targeted repository's
+        // live holders before it mints a run, so an identity this host does not
+        // have refuses the launch before the mapping is reached.
+        for (index, identity) in example_repositories().into_iter().enumerate() {
+            let checkout = world.root.join(format!("example-{index}"));
+            std::fs::create_dir_all(&checkout).expect("an example checkout");
+            let initialized = std::process::Command::new("git")
+                .args(["init", "--initial-branch=main"])
+                .arg(&checkout)
+                .output()
+                .expect("git initializes the example checkout");
+            assert!(
+                initialized.status.success(),
+                "{}",
+                String::from_utf8_lossy(&initialized.stderr)
+            );
+            world.register(&checkout, Some(&format!("https://{identity}.git")));
         }
-        let plan = world.plan(name, &parsed);
+        world.script("driver.wait", "hold");
+
+        let world = world.with_env(
+            "ONETASKGRAPH_SOURCES__PLANS__CONFIG__ROOT",
+            &repo_file("examples/plan-store").to_string_lossy(),
+        );
         world
-            .run(&["start", &plan.to_string_lossy(), "--detach"])
+            .run(&["start", &format!("plans:{run}"), "--detach"])
             .exited(0)
             .out_has(run);
         assert!(
             world.run_file(run, "launch.json").exists(),
-            "examples/{name} did not start a run"
+            "the example project {run} did not start a run"
         );
         world.release("driver.go");
     }
 }
 
-#[test]
-fn the_examples_reference_the_shipped_node_scope_config() {
-    let mixed: serde_json::Value =
-        serde_json::from_str(&read("examples/mixed-graph.plan.json")).expect("it parses");
-    let referenced: Vec<&str> = mixed["tasks"]
-        .as_array()
-        .expect("tasks")
-        .iter()
-        .filter_map(|node| node["agent_graph"].as_str())
-        .collect();
+/// Every repository origin the example store's tasks name.
+///
+/// Read out of the documents themselves rather than restated here: a task that
+/// grew a repository, or moved to another one, would otherwise leave the journey
+/// registering an identity nothing launches under.
+fn example_repositories() -> std::collections::BTreeSet<String> {
+    let mut found = std::collections::BTreeSet::new();
+    let tasks = repo_file("examples/plan-store/tasks");
+    let mut pending = vec![tasks];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).expect("the example store has tasks") {
+            let path = entry.expect("a directory entry").path();
+            if path.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            let document = std::fs::read_to_string(&path).expect("a task document");
+            let mut listing = false;
+            for line in document.lines() {
+                match line.strip_prefix("  - ") {
+                    Some(origin) if listing => {
+                        found.insert(origin.trim().trim_matches('"').to_owned());
+                    }
+                    _ => listing = line.starts_with("repositories:"),
+                }
+            }
+        }
+    }
     assert!(
-        referenced.contains(&"./graphs/node-scope.yaml"),
-        "no example node overrides its graph with the shipped node-scope config: {referenced:?}"
+        !found.is_empty(),
+        "no example task names a repository, so the mapping's own field is unexercised"
+    );
+    found
+}
+
+/// The example store names the node-scope config this repository ships.
+#[test]
+fn the_example_store_references_the_shipped_node_scope_config() {
+    let document = read("examples/plan-store/tasks/tracked-release/docs.md");
+    assert!(
+        document.contains("\"onepipeline.agent_graph\": \"./graphs/node-scope.yaml\""),
+        "no example task overrides its graph with the shipped node-scope config:\n{document}"
     );
     // And the config it names is the one this repository ships.
     assert!(repo_file("graphs/node-scope.yaml").is_file());
@@ -303,7 +335,7 @@ fn the_executor_rules_example_selects_the_shipped_local_executor() {
         "ruled",
         &crate::harness::plan_of("ruled", vec![crate::harness::agent("build", &[])]),
     );
-    let mut command = world.cmd(&["start", &plan.to_string_lossy(), "--attach"]);
+    let mut command = world.cmd(&["start", &plan, "--attach"]);
     command.env(
         "ONEPIPELINE_EXECUTOR_RULES",
         repo_file("examples/executors.yaml"),
@@ -330,7 +362,7 @@ fn a_rules_file_the_grammar_refuses_dispatches_nothing() {
         "badrules",
         &crate::harness::plan_of("badrules", vec![crate::harness::agent("build", &[])]),
     );
-    let mut command = world.cmd(&["start", &plan.to_string_lossy(), "--attach"]);
+    let mut command = world.cmd(&["start", &plan, "--attach"]);
     command.env("ONEPIPELINE_EXECUTOR_RULES", &rules);
     let output = command.output().expect("the binary runs");
     // The loop refuses; the run is recorded but nothing is dispatched.
@@ -360,7 +392,7 @@ fn a_memory_limit_in_a_unit_the_grammar_cannot_read_dispatches_nothing() {
         "badunit",
         &crate::harness::plan_of("badunit", vec![crate::harness::agent("build", &[])]),
     );
-    let mut command = world.cmd(&["start", &plan.to_string_lossy(), "--attach"]);
+    let mut command = world.cmd(&["start", &plan, "--attach"]);
     command.env("ONEPIPELINE_EXECUTOR_RULES", &rules);
     command.output().expect("the binary runs");
     assert!(
@@ -373,7 +405,7 @@ fn a_memory_limit_in_a_unit_the_grammar_cannot_read_dispatches_nothing() {
 
     // And it refuses by name, on the stderr the operator who typed `start` is
     // already reading: the launch drives the run itself.
-    let mut again = world.cmd(&["start", &plan.to_string_lossy(), "--attach"]);
+    let mut again = world.cmd(&["start", &plan, "--attach"]);
     again.env("ONEPIPELINE_EXECUTOR_RULES", &rules);
     let refused = again.output().expect("the binary runs");
     let said = String::from_utf8_lossy(&refused.stderr).to_string();
@@ -411,7 +443,7 @@ fn a_node_label_rule_routes_the_node_it_names_and_only_that_node() {
         "labelled",
         &crate::harness::plan_of("labelled", vec![crate::harness::agent("build", &[])]),
     );
-    let mut command = world.cmd(&["start", &plan.to_string_lossy(), "--attach"]);
+    let mut command = world.cmd(&["start", &plan, "--attach"]);
     command.env("ONEPIPELINE_EXECUTOR_RULES", &rules);
     let output = command.output().expect("the binary runs");
     assert_eq!(output.status.code(), Some(0), "{output:?}");
@@ -442,7 +474,7 @@ fn refused_launch(world: &World, name: &str, rules: &std::path::Path) -> String 
         &crate::harness::plan_of(name, vec![crate::harness::agent("build", &[])]),
     );
     let refused = world
-        .cmd(&["start", &plan.to_string_lossy(), "--attach"])
+        .cmd(&["start", &plan, "--attach"])
         .env("ONEPIPELINE_EXECUTOR_RULES", rules)
         .output()
         .expect("the binary runs");

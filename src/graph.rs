@@ -328,7 +328,7 @@ pub fn validate(plan: &Plan) -> Result<()> {
 
 /// The two rules a plan's **own declared version** decides.
 ///
-/// A plan file is a document written at a version and read by a build, so what
+/// A plan is a document written at a version and read by a build, so what
 /// it may say is the version it declares rather than the one this build writes.
 /// Version 3 states the change request a lifecycle node publishes: a `title` is
 /// required on one, and a `body` may be carried beside it. A plan declaring an

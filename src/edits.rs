@@ -1553,7 +1553,7 @@ mod tests {
     }
 
     /// The retry that carried a corrected review bar is where a planner writes
-    /// one, so the amendment gets the same named refusal a plan file does — not
+    /// one, so the amendment gets the same named refusal a project does — not
     /// the schema's bare `unknown field`.
     #[test]
     fn requeue_refuses_a_retired_field_by_name_and_says_where_the_bar_goes() {

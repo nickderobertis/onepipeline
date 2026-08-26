@@ -70,7 +70,7 @@ fn a_real_dispatched_turn_relays_every_field_its_producer_publishes() {
         .to_string();
     let path = world.plan("turns", &plan);
     world
-        .run_on_agentgraph(&["start", &path.to_string_lossy(), "--attach"])
+        .run_on_agentgraph(&["start", &path, "--attach"])
         .exited(0)
         .settled();
 
@@ -211,7 +211,7 @@ fn a_real_supervised_conversation_relays_what_each_party_said() {
         .to_string();
     let path = world.plan("talk", &plan);
     world
-        .run_on_agentgraph(&["start", &path.to_string_lossy(), "--attach"])
+        .run_on_agentgraph(&["start", &path, "--attach"])
         .exited(0)
         .settled();
 
@@ -361,9 +361,7 @@ fn a_relayed_payload_text_past_the_bound_is_cut_and_flagged_rather_than_served_w
     let task = task_whose_bound_falls_inside_a_character();
     node["task"] = Value::String(task.clone());
     let path = world.plan("bounded", &plan_of("bounded", vec![node]));
-    world
-        .run(&["start", &path.to_string_lossy(), "--attach"])
-        .exited(0);
+    world.run(&["start", &path, "--attach"]).exited(0);
 
     // The words. Read back through the producer's own payload type, as every
     // other field here is: a cut value is still a `turn-message` and not a shape
@@ -463,9 +461,7 @@ fn a_relayed_payload_text_past_the_bound_is_cut_and_flagged_rather_than_served_w
     // otherwise the assertions above hold for a relay that cuts everything.
     let plain = World::new("relay-unbounded");
     let path = plain.plan("plain", &plan_of("plain", vec![agent(NODE, &[])]));
-    plain
-        .run(&["start", &path.to_string_lossy(), "--attach"])
-        .exited(0);
+    plain.run(&["start", &path, "--attach"]).exited(0);
     let messages = relayed(&plain, "plain", EventKind::TurnMessage);
     let [message] = &messages[..] else {
         panic!(

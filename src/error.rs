@@ -30,7 +30,7 @@ pub enum Error {
         /// The run id.
         run: String,
     },
-    /// External input the schema does not accept — a plan file, a rules file, a
+    /// External input the schema does not accept — a project, a rules file, a
     /// reply envelope, or a command line naming something that does not exist.
     /// Exits [`EXIT_REFUSED`].
     #[error("invalid: {0}")]

@@ -25,7 +25,6 @@ use crate::harness::{agent, ended, plan_of, World, REFUSED};
 /// a run held at its first node has none of them in the store yet.
 fn settled(world: &World, name: &str, flags: &[&str]) -> String {
     let path = world.plan(name, &plan_of(name, vec![agent("build", &[])]));
-    let path = path.to_string_lossy().to_string();
     let mut args = vec!["start", &path, "--attach"];
     args.extend_from_slice(flags);
     world.run(&args).exited(0).settled();
@@ -469,7 +468,6 @@ fn a_launch_refuses_a_filter_block_it_could_not_honour() {
     let world = World::new("filter-launch-refusal");
     let plan = world
         .plan("refused", &plan_of("refused", vec![agent("build", &[])]))
-        .to_string_lossy()
         .to_string();
 
     // Each refusal names the thing its author has to fix: the declaration that
@@ -815,7 +813,6 @@ fn a_launch_config_may_declare_nothing_and_is_refused_when_it_cannot_be_read() {
     // declared nothing is the launch every build before the block wrote.
     let plan = world
         .plan("refusals", &plan_of("refusals", vec![agent("build", &[])]))
-        .to_string_lossy()
         .to_string();
     let written = |name: &str, body: &str| {
         let path = world.root.join(name);

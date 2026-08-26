@@ -93,9 +93,7 @@ fn every_turn_relayed_into_the_journal_names_the_conversation_it_belongs_to() {
         "conversation",
         &plan_of("conversation", vec![agent("work", &[])]),
     );
-    world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
+    world.run(&["start", &path, "--detach"]).exited(0);
     world.until("the held node's turn to open", |world| {
         !world.events_of("conversation", "turn-started").is_empty()
     });
@@ -201,9 +199,7 @@ fn every_turn_relayed_into_the_journal_names_the_conversation_it_belongs_to() {
 fn the_record_a_turns_conversation_was_written_into_reaches_the_journal() {
     let world = World::new("session-record");
     let path = world.plan("record", &plan_of("record", vec![agent("work", &[])]));
-    world
-        .run(&["start", &path.to_string_lossy(), "--attach"])
-        .exited(0);
+    world.run(&["start", &path, "--attach"]).exited(0);
 
     let sessions = world.events_of("record", "oneharness-session");
     let [event] = &sessions[..] else {

@@ -32,11 +32,12 @@
               unused-code check cannot see across the ones that do not"
 )]
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 use onepipeline_testfakes::{segment, CLI_BIN_ENV, MEMBER_ENV, SCRIPT_DIR_ENV};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 // The exit codes are the crate's own, not a second copy of them. A suite that
 // restated the numbers would keep passing against a build that had changed one,
@@ -301,6 +302,29 @@ impl World {
             .args(args)
             .env("PATH", path)
             .env("ONEPIPELINE_RUNS_DIR", &self.runs)
+            // The store every plan in this world is read out of: one `local-md`
+            // source rooted in the world's own directory, declared through
+            // `onetaskgraph`'s own environment layer so no configuration file is
+            // discovered from wherever the test process happens to be running.
+            // `XDG_CONFIG_HOME` is redirected for the same reason — the
+            // operator's own sources are not this world's.
+            .env(STORE_BINARY_ENV, onetaskgraph_binary())
+            .env("XDG_CONFIG_HOME", self.root.join("xdg"))
+            .env("ONETASKGRAPH_DEFAULT_SOURCES", STORE_SOURCE)
+            .env(
+                format!(
+                    "ONETASKGRAPH_SOURCES__{}__PLUGIN",
+                    STORE_SOURCE.to_uppercase()
+                ),
+                "local-md",
+            )
+            .env(
+                format!(
+                    "ONETASKGRAPH_SOURCES__{}__CONFIG__ROOT",
+                    STORE_SOURCE.to_uppercase()
+                ),
+                self.store(),
+            )
             .env(
                 "ONEPIPELINE_ONEAGENTGRAPH_BIN",
                 double("fake-oneagentgraph"),
@@ -1334,22 +1358,211 @@ impl World {
         )
     }
 
-    /// Write a plan file and return its path.
-    pub fn plan(&self, name: &str, plan: &Value) -> PathBuf {
-        let path = self.root.join(format!("{name}.plan.json"));
-        std::fs::write(
-            &path,
-            serde_json::to_string_pretty(plan).expect("the plan serialises"),
-        )
-        .expect("the plan is written");
-        path
+    /// This world's `onetaskgraph` store: one folder of Markdown, no network.
+    pub fn store(&self) -> PathBuf {
+        self.root.join("plan-store")
     }
 
-    /// Write a raw plan file, for the loader's own refusals.
-    pub fn raw_plan(&self, name: &str, body: &str) -> PathBuf {
-        let path = self.root.join(name);
-        std::fs::write(&path, body).expect("the plan is written");
-        path
+    /// Write a plan into this world's store and return the project id that
+    /// launches it.
+    ///
+    /// The inverse of what `src/taskgraph.rs` reads, written from the plan
+    /// document a journey states: the plan-level settings become reserved
+    /// `onepipeline.<field>` metadata on the **project**, each node becomes one
+    /// **task** carrying its own id, title, prose and repositories, and each
+    /// dependency becomes a real dependency edge between two of those tasks. A
+    /// cross-DAG `run:<id>#<node>` reference is the one dependency that cannot
+    /// be an edge — it names another run's DAG, which is an item of no source —
+    /// so it stays on the reserved key.
+    ///
+    /// Deliberately tolerant of a document the schema will refuse: a journey
+    /// about a refusal states the plan it means and this writes it faithfully,
+    /// so what refuses it is the reader under test rather than the fixture.
+    pub fn plan(&self, name: &str, plan: &Value) -> String {
+        let plan = plan.as_object().expect("a plan is a mapping");
+        let mut metadata = serde_json::Map::new();
+        for (key, value) in plan {
+            if key == "name" || key == "tasks" {
+                continue;
+            }
+            metadata.insert(reserved(key), value.clone());
+        }
+        let title = plan.get("name").and_then(Value::as_str).unwrap_or(name);
+        self.write_item(
+            &self.store().join("projects").join(format!("{name}.md")),
+            &[("title", json!(title)), ("metadata", json!(metadata))],
+            "",
+        );
+        let nodes = plan
+            .get("tasks")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        // A task's name in the store is not its node id, and this writer uses
+        // that on purpose. `local-md` traverses lexicographically, so numbering
+        // the files gives the project back in the order the document listed its
+        // nodes — which is what a plan file used to decide, and what several
+        // journeys about dispatch order are written against. It is also what
+        // lets two tasks of one project carry one node id, which a journey about
+        // that collision needs.
+        let files: Vec<String> = nodes
+            .iter()
+            .enumerate()
+            .map(|(index, node)| {
+                let id = node.get("id").and_then(Value::as_str).unwrap_or("unnamed");
+                format!("{index:03}-{id}")
+            })
+            .collect();
+        let named: BTreeMap<&str, &str> = nodes
+            .iter()
+            .zip(&files)
+            .filter_map(|(node, file)| Some((node.get("id")?.as_str()?, file.as_str())))
+            .collect();
+        for (node, file) in nodes.iter().zip(&files) {
+            self.task(name, node, file, &named);
+        }
+        format!("{STORE_SOURCE}:{name}")
+    }
+
+    /// One node of a plan, as the task carrying it.
+    fn task(&self, project: &str, node: &Value, file: &str, named: &BTreeMap<&str, &str>) {
+        let node = node.as_object().expect("a node is a mapping");
+        let id = node.get("id").and_then(Value::as_str);
+        let mut metadata = serde_json::Map::new();
+        if let Some(id) = id {
+            metadata.insert("onepipeline.id".into(), json!(id));
+        }
+        let mut edges: Vec<String> = Vec::new();
+        let mut crossdag: Vec<String> = Vec::new();
+        for dep in node
+            .get("deps")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+        {
+            match dep.as_str() {
+                // What a cross-DAG reference names is another run, so no
+                // dependency edge in any store can point at it.
+                Some(reference) if reference.starts_with("run:") => {
+                    crossdag.push(reference.to_owned());
+                }
+                // A dependency stated as a *store* id rather than as a node id
+                // of this plan: what a journey about an edge leaving the
+                // project needs, and the one thing a plan document could not
+                // say.
+                Some(elsewhere) => match elsewhere.strip_prefix("store:") {
+                    Some(native) => edges.push(native.to_owned()),
+                    // By the far node's own file, which is not its node id: what
+                    // an edge names is the store's id, and what the plan reads
+                    // back off the far task is `onepipeline.id`. A dependency on
+                    // a node this plan does not hold names it directly, which is
+                    // what the dangling-reference journey states.
+                    None => edges.push(format!(
+                        "{project}/{}",
+                        named.get(elsewhere).copied().unwrap_or(elsewhere)
+                    )),
+                },
+                None => panic!("a dependency is a string"),
+            }
+        }
+        if !crossdag.is_empty() {
+            metadata.insert("onepipeline.deps".into(), json!(crossdag));
+        }
+        let mut front = vec![
+            (
+                "title",
+                json!(node.get("title").and_then(Value::as_str).unwrap_or("")),
+            ),
+            ("project", json!(project)),
+        ];
+        if !edges.is_empty() {
+            front.push(("depends_on", json!(edges)));
+        }
+        // A `onevcs` identity is either a normalized origin, which the store's
+        // own repository list holds, or a local checkout named by its absolute
+        // path, which that list cannot hold at all — so the second kind travels
+        // on the reserved key. `docs/contract-divergences.md` records it.
+        if let Some(repo) = node.get("repo").and_then(Value::as_str) {
+            if repo.starts_with("github.com/") {
+                // These are the hosted origins this suite states literally;
+                // the real store owns and applies their shape validation.
+                front.push(("repositories", json!([repo])));
+            } else {
+                // Aliases, local paths, and deliberately malformed schema
+                // fixtures ride the consumer key. This is fixture routing, not
+                // a second implementation of onetaskgraph's origin grammar.
+                metadata.insert("onepipeline.repo".into(), json!(repo));
+            }
+        }
+        for (key, value) in node {
+            if matches!(key.as_str(), "id" | "title" | "task" | "deps" | "repo") {
+                continue;
+            }
+            metadata.insert(reserved(key), value.clone());
+        }
+        front.push(("metadata", json!(metadata)));
+        self.write_item(
+            &self
+                .store()
+                .join("tasks")
+                .join(project)
+                .join(format!("{file}.md")),
+            &front,
+            node.get("task").and_then(Value::as_str).unwrap_or_default(),
+        );
+    }
+
+    /// Write one document of this world's store verbatim.
+    ///
+    /// For the journeys that are about a document the writer above would never
+    /// produce — a task with no metadata at all, say — where stating the bytes
+    /// is what the journey means.
+    pub fn write_store_item(&self, relative: &str, document: &str) {
+        let path = self.store().join(relative);
+        std::fs::create_dir_all(path.parent().expect("a directory")).expect("a store directory");
+        std::fs::write(path, document).expect("the store document is written");
+    }
+
+    /// A task of this store that belongs to no plan a journey launches.
+    ///
+    /// What a dependency edge leaving the project points at: it carries a node
+    /// id of its own, so the plan resolves the edge and then finds no node of
+    /// that name — which is the dangling-reference refusal, reached the way a
+    /// store reaches it.
+    pub fn stray_task(&self, project: &str, file: &str, node_id: &str) {
+        self.write_item(
+            &self
+                .store()
+                .join("tasks")
+                .join(project)
+                .join(format!("{file}.md")),
+            &[
+                ("title", json!("a task of another plan")),
+                ("project", json!(format!("{project}-elsewhere"))),
+                ("metadata", json!({"onepipeline.id": node_id})),
+            ],
+            "",
+        );
+    }
+
+    /// One Markdown document of the store: YAML front matter, then the body.
+    ///
+    /// Every front-matter value is written as compact JSON, which is YAML flow
+    /// style — so a value reaches the store with the JSON type the journey wrote
+    /// it at, and the writer needs no YAML emitter of its own.
+    fn write_item(&self, path: &Path, front: &[(&str, Value)], body: &str) {
+        std::fs::create_dir_all(path.parent().expect("a directory")).expect("a store directory");
+        let mut document = String::from("---\n");
+        for (key, value) in front {
+            document.push_str(&format!(
+                "{key}: {}\n",
+                serde_json::to_string(value).expect("a front-matter value serialises")
+            ));
+        }
+        document.push_str("---\n\n");
+        document.push_str(body);
+        document.push('\n');
+        std::fs::write(path, document).expect("the store document is written");
     }
 
     /// Script one of the doubles: `world.script("build.fail", "1")`.
@@ -1747,9 +1960,7 @@ fn a_worlds_teardown_ends_a_run_that_is_still_working() {
     let run = "teardownsignals";
     world.script("build.wait", "hold");
     let plan = world.plan(run, &plan_of(run, vec![agent("build", &[])]));
-    world
-        .run(&["start", &plan.to_string_lossy(), "--detach"])
-        .exited(0);
+    world.run(&["start", &plan, "--detach"]).exited(0);
     world.until("the run to dispatch something", |world| {
         !world.events_of(run, "node-dispatched").is_empty()
     });
@@ -1786,9 +1997,7 @@ fn a_world_that_is_dropped_while_its_run_is_working_leaves_no_driver_behind() {
         let run = "teardowndrops";
         world.script("build.wait", "hold");
         let plan = world.plan(run, &plan_of(run, vec![agent("build", &[])]));
-        world
-            .run(&["start", &plan.to_string_lossy(), "--detach"])
-            .exited(0);
+        world.run(&["start", &plan, "--detach"]).exited(0);
         world.until("the run to dispatch something", |world| {
             !world.events_of(run, "node-dispatched").is_empty()
         });
@@ -2091,6 +2300,95 @@ pub fn oneagentgraph_binary() -> PathBuf {
         ])
     });
     held_alias(held, "oneagentgraph")
+}
+
+/// The reserved metadata key one plan field rides on.
+///
+/// A journey that spells the whole key means it literally — which is what a
+/// journey about a key the mapping refuses has to be able to say — and one that
+/// names a plain field means that field.
+fn reserved(field: &str) -> String {
+    match field.starts_with("onepipeline.") {
+        true => field.to_owned(),
+        false => format!("onepipeline.{field}"),
+    }
+}
+
+/// Where an executable of this name sits on **this process's** `PATH`.
+///
+/// The resolution the operating system would do, done once and kept, so a child
+/// this suite hands a different `PATH` still reaches the same program.
+fn on_path(name: &str) -> Option<PathBuf> {
+    let executable = |dir: PathBuf| {
+        [name.to_owned(), format!("{name}.exe")]
+            .into_iter()
+            .map(|file| dir.join(file))
+            .find(|candidate| candidate.is_file())
+    };
+    std::env::split_paths(&std::env::var_os("PATH")?).find_map(executable)
+}
+
+/// The environment variable naming the `onetaskgraph` executable.
+///
+/// Restated here rather than imported: the crate under test declares it in a
+/// module `src/lib.rs` keeps private, so there is no item to name.
+///
+/// What reconciles the two spellings is
+/// `store::an_absent_onetaskgraph_refuses_the_launch_and_starts_nothing`, which
+/// points this key at a path that does not exist and requires the launch to
+/// **refuse, naming that path**. A spelling that drifted would leave the binary
+/// under test ignoring the key, resolving whatever the host installed, and
+/// launching successfully — so that journey fails rather than passing against a
+/// key nothing reads. Every use of the key in this suite goes through this
+/// constant, which is what makes the one journey cover them all.
+pub const STORE_BINARY_ENV: &str = "ONETASKGRAPH_BIN";
+
+/// The name of the one source every world configures.
+///
+/// A qualified project id is `<source>:<native>`, so this is the first half of
+/// every id a journey launches. A source name may not contain an underscore,
+/// which is what makes `onetaskgraph`'s environment layer unambiguous.
+pub const STORE_SOURCE: &str = "plans";
+
+/// The **real** `onetaskgraph` executable every journey reads its plan through.
+///
+/// Not a double, and deliberately: a plan is one project of that store, so a
+/// journey that launched from a stand-in would prove the fixture rather than the
+/// mapping. It is not a Cargo dependency either — this crate *drives* the binary
+/// rather than linking it — so cargo cannot build it and the suite resolves what
+/// the host installed: `ONETASKGRAPH_BIN` when that names one, and the name on
+/// the `PATH` otherwise.
+///
+/// A host without one **fails**, naming what to run. A skip would be a pass
+/// nobody earned, and this is not the credentialled tier: the binary reads a
+/// folder of Markdown with no network and no account.
+pub fn onetaskgraph_binary() -> PathBuf {
+    static FOUND: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    FOUND
+        .get_or_init(|| {
+            // Absolute, and resolved here rather than left to the child: a
+            // journey may hand the binary under test a `PATH` of its own — one
+            // that leads with a sibling's directory, or one that is empty — and
+            // the store it reads its plan through is not what those journeys are
+            // about.
+            let named = std::env::var("ONETASKGRAPH_BIN")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .map(PathBuf::from)
+                .or_else(|| on_path("onetaskgraph"))
+                .unwrap_or_else(|| PathBuf::from("onetaskgraph"));
+            let reported = Command::new(&named).arg("--version").output();
+            match reported {
+                Ok(output) if output.status.success() => named,
+                other => panic!(
+                    "the e2e suite reads every plan through the real onetaskgraph and {} \
+                     could not be run ({other:?}) — run `just bootstrap`, or set \
+                     ONETASKGRAPH_BIN to an executable one",
+                    named.display()
+                ),
+            }
+        })
+        .clone()
 }
 
 /// The released `onevcs` executable whose holders verb the launcher consumes.

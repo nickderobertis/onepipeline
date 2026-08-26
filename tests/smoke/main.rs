@@ -451,7 +451,7 @@ fn a_lifecycle_node_opens_a_real_pull_request_merges_it_and_the_base_advances() 
     );
 
     let started = world
-        .real_cmd(&["start", &plan.to_string_lossy(), "--attach"])
+        .real_cmd(&["start", &plan, "--attach"])
         .env("GIT_CONFIG_GLOBAL", git_credentials(&world))
         .output()
         .expect("the binary runs");

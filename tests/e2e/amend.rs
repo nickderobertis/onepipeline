@@ -78,9 +78,7 @@ fn held_beside_a_pending_node(world: &World, name: &str, extra: Vec<Value>) -> S
     let mut nodes = vec![agent("slow", &[]), agent("later", &["slow"])];
     nodes.extend(extra);
     let path = world.plan(name, &plan_of(name, nodes));
-    world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
+    world.run(&["start", &path, "--detach"]).exited(0);
     // Waited out on the view a supervisor watches a run through, rather than on
     // the store behind it: `status` reports a node that is running and how long
     // it has been.
@@ -396,10 +394,7 @@ fn a_plan_may_state_an_amendment_and_every_step_of_an_amended_node_is_handed_it(
         ],
     });
     let path = world.plan("amendplan", &plan_of("amendplan", vec![node]));
-    world
-        .run(&["start", &path.to_string_lossy(), "--attach"])
-        .exited(0)
-        .settled();
+    world.run(&["start", &path, "--attach"]).exited(0).settled();
 
     // Every step's own dispatch, read off the `--task` the sibling's launch
     // carried. A step that never saw the ruling is a step judged against a bar
@@ -454,7 +449,7 @@ fn a_plan_amendment_that_says_nothing_is_refused_at_the_plan_boundary() {
     node["amendment"] = json!("   \n");
     let path = world.plan("amendblank", &plan_of("amendblank", vec![node]));
     world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
+        .run(&["start", &path, "--detach"])
         .exited(REFUSED)
         .err_has("`amendment`")
         .err_has("says nothing");

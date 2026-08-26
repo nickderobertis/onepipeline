@@ -30,9 +30,7 @@ fn consumer(id: &str, upstream: &str) -> Value {
 /// Run a plan to settlement, attached, and return the run id.
 fn settle(world: &World, name: &str, nodes: Vec<Value>) -> String {
     let path = world.plan(name, &plan_of(name, nodes));
-    world
-        .run(&["start", &path.to_string_lossy(), "--attach"])
-        .settled();
+    world.run(&["start", &path, "--attach"]).settled();
     world.until("the run to settle", |world| {
         world.run_file(name, "result.json").is_file()
     });
@@ -147,9 +145,7 @@ fn an_upstream_that_moves_after_it_was_recorded_is_reported_without_rerunning_wo
             vec![consumer("ship", "run:moving#build"), agent("late", &[])],
         ),
     );
-    world
-        .run(&["start", &path.to_string_lossy(), "--detach"])
-        .exited(0);
+    world.run(&["start", &path, "--detach"]).exited(0);
     world.until("the edge to resolve", |world| {
         !world.events_of("watcher", "cross-dag-satisfied").is_empty()
     });
@@ -255,7 +251,7 @@ fn plant_outside(world: &World) -> String {
         "elsewhere",
         &plan_of("elsewhere", vec![agent("build", &[])]),
     );
-    let mut start = world.cmd(&["start", &path.to_string_lossy(), "--attach"]);
+    let mut start = world.cmd(&["start", &path, "--attach"]);
     start.env("ONEPIPELINE_RUNS_DIR", &root);
     world
         .run_on(start, "start elsewhere in a runs root of its own")
@@ -330,7 +326,7 @@ fn a_plan_whose_upstream_climbs_out_of_the_runs_root_is_refused() {
         ),
     );
     world
-        .run(&["start", &path.to_string_lossy(), "--attach"])
+        .run(&["start", &path, "--attach"])
         .exited(crate::harness::REFUSED)
         .err_has("run:<run_id>#<node_id>");
 
@@ -352,7 +348,7 @@ fn a_malformed_cross_dag_reference_is_refused_by_name() {
         &plan_of("malformed", vec![consumer("ship", "run:produced")]),
     );
     world
-        .run(&["start", &path.to_string_lossy(), "--attach"])
+        .run(&["start", &path, "--attach"])
         .exited(crate::harness::REFUSED)
         .err_has("run:<run_id>#<node_id>");
 }

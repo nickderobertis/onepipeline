@@ -195,6 +195,11 @@ jobs:
       # The journey's own refusal names GH_TOKEN, the variable; a red job needs
       # the name of the secret to go set. Given a presence signal rather than the
       # PAT itself — nothing here needs the value.
+      # The store every plan in the suite is read out of. This job does not run
+      # `just bootstrap` — it needs none of the rest of it — so it provisions the
+      # one binary the journeys cannot run without, through the same recipe.
+      - name: The onetaskgraph every plan is read through
+        run: just _ensure-onetaskgraph
       - name: The smoke's credential is present
         env:
           HAS_CREDENTIAL: ${{ secrets.RELEASE_PLZ_TOKEN != '' }}

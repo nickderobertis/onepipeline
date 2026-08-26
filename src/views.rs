@@ -2098,7 +2098,7 @@ mod tests {
     fn launch(pid: u32) -> LaunchRecord {
         LaunchRecord {
             run_id: "demo".into(),
-            plan: PathBuf::from("plan.json"),
+            project: "plans:demo".into(),
             dir: PathBuf::from("/tmp/launch"),
             graph: "graphs/dag-scope.yaml".into(),
             graph_run: String::new(),

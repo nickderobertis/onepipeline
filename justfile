@@ -23,6 +23,21 @@ set positional-arguments := true
 # recipes whose failure needs project-level context (_crate-fmt-check,
 # _crate-test, msrv) add one explicitly.
 
+# The revision of `onetaskgraph` this build's own checks read their plans
+# through. A plan is one project of that store and this crate *drives* the
+# binary rather than linking it, so cargo cannot bring it into the build graph
+# and `bootstrap` installs it instead — pinned to a revision, because the surface
+# the mapping reads (a task's custom metadata) landed after that repository's
+# 0.1.0 release and there is no published version carrying it yet.
+#
+# **Read out of `src/taskgraph.rs`, which is where it is declared**, beside the
+# version floor it is the other half of: a copy here could go stale against that
+# floor without anything saying so, and
+# `taskgraph::tests::the_revision_the_checks_install_is_read_out_of_this_file`
+# fails if one appears. `docs/contract-divergences.md` entry 44 is the proposal
+# to retire it for a version once one carries the surface.
+onetaskgraph-rev := `sed -n 's/^pub const FIRST_REVISION: &str = "\([0-9a-f]*\)".*/\1/p' src/taskgraph.rs`
+
 # The MSRV has one source of truth — Cargo.toml's `rust-version` — so `just msrv`
 # cannot promise a floor the manifest no longer declares. CI reads the same field.
 msrv-version := `sed -n 's/^rust-version *= *"\([^"]*\)".*/\1/p' Cargo.toml`
@@ -48,7 +63,21 @@ _crate-bootstrap:
       || { echo "cannot add toolchain components — install rustup (https://rustup.rs/) and re-run" >&2; exit 1; }
     @just _ensure-tool cargo-nextest
     @just _ensure-tool cargo-llvm-cov
+    @just _ensure-onetaskgraph
     @cargo fetch --locked --quiet
+
+# The one binary this crate composes that cargo cannot build for it: `onevcs` and
+# `oneagentgraph` are linked crates, and this one is driven as a subprocess by
+# design — that is onetaskgraph's own recorded decision for its SDKs, and it is
+# what keeps a crates.io release ordering out of every release here. Installed at
+# bootstrap, so `check` itself stays offline; the e2e suite **fails** without one
+# rather than skipping, because a plan read through a stand-in would prove the
+# stand-in.
+# Install the `onetaskgraph` every plan in this repository is read through.
+_ensure-onetaskgraph:
+    @command -v onetaskgraph >/dev/null 2>&1 \
+      || cargo install onetaskgraph --locked --quiet \
+           --git https://github.com/nickderobertis/onetaskgraph --rev {{onetaskgraph-rev}}
 
 # These are test runners, not rules: their version cannot change the gate's
 # verdict, so both here and CI take the latest rather than keeping two pins that

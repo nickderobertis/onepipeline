@@ -843,39 +843,128 @@ fn the_contracts_plan_schema_version_is_the_one_this_crate_writes() {
         "this crate reads a different set of versions than the contract states"
     );
 
-    let root = std::env::temp_dir().join(format!("onepipeline-version-{}", std::process::id()));
-    std::fs::create_dir_all(&root).expect("a scratch root");
     // Every version the contract names, as a document an operator wrote: each
-    // one loads, and each keeps the version it declares — a reader decides by
-    // that number, so a loader that normalized it would answer for a document
-    // nobody wrote. That they *execute* is driven through the binary, in
-    // `tests/e2e/plan.rs`, and all the way to a publication in
-    // `tests/e2e/lifecycle.rs`, because that is where a planner meets either
-    // answer.
+    // one reads, and each keeps the version it declares — a reader decides by
+    // that number, so a schema that normalized it would answer for a document
+    // nobody wrote. That a *project* declaring each one executes is driven
+    // through the binary and a real store, in `tests/e2e/plan.rs`, and all the
+    // way to a publication in `tests/e2e/lifecycle.rs`, because that is where a
+    // planner meets either answer.
     for version in PLAN_SCHEMA_VERSIONS_READ {
-        let path = root.join(format!("v{version}.plan.json"));
-        std::fs::write(
-            &path,
-            format!(
-                r#"{{"schema_version":{version},
-                    "tasks":[{{"id":"a","persona":"engineer","task":"Do it."}}]}}"#
-            ),
-        )
-        .expect("written");
-        let plan = Plan::load(&path)
-            .unwrap_or_else(|why| panic!("a version {version} plan is a readable document: {why}"));
+        let plan: Plan = serde_json::from_value(json!({
+            "schema_version": version,
+            "tasks": [{"id": "a", "persona": "engineer", "task": "Do it."}],
+        }))
+        .unwrap_or_else(|why| panic!("a version {version} plan is a readable document: {why}"));
         assert_eq!(plan.schema_version, version);
     }
 
     // What this crate *writes* carries the current number, whatever it read.
-    let earlier = Plan::load(&root.join("v1.plan.json")).expect("it still loads");
+    let earlier: Plan = serde_json::from_value(json!({
+        "schema_version": 1,
+        "tasks": [{"id": "a", "persona": "engineer", "task": "Do it."}],
+    }))
+    .expect("it still reads");
     let current = Plan {
         schema_version: PLAN_SCHEMA_VERSION,
         ..earlier
     };
     let written = serde_json::to_value(&current).expect("it serialises");
     assert_eq!(written["schema_version"], PLAN_SCHEMA_VERSION);
-    std::fs::remove_dir_all(&root).ok();
+}
+
+/// Every field the contract says a task carries under `onepipeline.<field>` is
+/// a field of this schema.
+///
+/// The mapping itself is behind the surface — a plan is read out of the store by
+/// the private engine, and `tests/e2e/plan.rs` drives it through the real binary
+/// against a real project. What this holds is the half a document can drift on
+/// alone: the contract names each reserved key in writing, and a key naming no
+/// field of `Plan` or `Node` would be a promise nothing could keep.
+#[test]
+fn every_reserved_metadata_key_the_contract_names_is_a_field_of_this_schema() {
+    let plan = serde_json::to_value(Plan {
+        schema_version: PLAN_SCHEMA_VERSION,
+        goal: Some(onepipeline::plan::Goal { text: "why".into() }),
+        name: Some("named".into()),
+        concurrency: 2,
+        tasks: Vec::new(),
+    })
+    .expect("a plan serialises");
+    // Every optional field set, so the serialized shape names all of them: an
+    // omitted one would read here as a field the schema does not have.
+    let node = serde_json::to_value(Node {
+        id: "n".into(),
+        kind: NodeKind::Human,
+        task: Some("t".into()),
+        persona: Some("engineer".into()),
+        deps: vec!["other".into()],
+        max_turns: Some(1),
+        expects_no_diff: true,
+        context: Some("note".into()),
+        parked: true,
+        executor: Some("local".into()),
+        agent_graph: Some(ConfigRef("g".into())),
+        repo: Some("github.com/owner/name".into()),
+        repo_type: Some(RepoType::Team),
+        workflow: Some(Workflow::Remote),
+        merge_policy: Some(MergePolicy::ChangeAuto),
+        base_branch: Some("main".into()),
+        branch: Some("topic".into()),
+        title: Some("feat: x".into()),
+        body: Some("why".into()),
+        execution_checkout: Some("checkout".into()),
+        steps: Some(Vec::new()),
+        resume: Some(Resume {
+            branch: "topic".into(),
+            checkpoint: None,
+            completed_steps: Vec::new(),
+        }),
+        adoption: Some(Adoption::Published),
+        amendment: Some("changed requirements".into()),
+        consumes: std::collections::BTreeMap::new(),
+    })
+    .expect("a node serialises");
+    let fields: BTreeSet<String> = plan
+        .as_object()
+        .expect("a mapping")
+        .keys()
+        .chain(node.as_object().expect("a mapping").keys())
+        .cloned()
+        .collect();
+
+    let named: BTreeSet<String> = backticked()
+        .iter()
+        .filter_map(|token| token.strip_prefix("onepipeline.").map(ToOwned::to_owned))
+        .filter(|field| field != "<field>")
+        .collect();
+    assert!(
+        !named.is_empty(),
+        "the contract names no reserved metadata key at all"
+    );
+    for field in &named {
+        assert!(
+            fields.contains(field),
+            "the contract reserves `onepipeline.{field}`, which is not a field of the plan schema"
+        );
+    }
+    // The four the contract calls the plan's own sit on the **project** rather
+    // than on a task, and it names them in one sentence rather than one key at a
+    // time — so that sentence is what is held, and each of the four is a field
+    // of the plan.
+    assert!(
+        CONTRACT.contains(
+            "The plan-level fields — `schema_version`, `goal`, `name`, `concurrency` — are \
+             reserved metadata keys `onepipeline.<field>` on the **project**"
+        ),
+        "the contract no longer states which fields the project carries"
+    );
+    for field in ["schema_version", "goal", "name", "concurrency"] {
+        assert!(
+            plan.as_object().expect("a mapping").contains_key(field),
+            "the contract reserves `{field}` on the project, which is not a plan field"
+        );
+    }
 }
 
 /// The retired field, refused **by name** at every boundary a plan crosses.
@@ -884,83 +973,50 @@ fn the_contracts_plan_schema_version_is_the_one_this_crate_writes() {
 /// `unknown field`, which tells a planner that a field does not exist and not
 /// where the review bar they wrote belongs. Every plan written before this schema
 /// change carries one, so the refusal has to say where the bar goes instead.
+///
+/// Two halves. Here: the field is not in the schema at any version this build
+/// reads, which is what makes the named refusal the only answer there can be.
+/// In `tests/e2e/plan.rs`: a real project carrying `onepipeline.done_when` is
+/// refused **by that name**, through the binary, with the bar's new home in the
+/// message — which is where a planner meets it.
 #[test]
 fn a_plan_still_carrying_done_when_is_refused_by_name_and_told_where_the_bar_goes() {
     assert!(
         CONTRACT.contains("A plan still carrying `done_when` is refused **by name**"),
         "the contract no longer states the refusal"
     );
-    let root = std::env::temp_dir().join(format!("onepipeline-donewhen-{}", std::process::id()));
-    std::fs::create_dir_all(&root).expect("a scratch root");
-    let path = root.join("retired.plan.json");
-    // At the retired version, as every plan carrying this field is: the field is
-    // what its author has to move, so the field is what they are told about.
-    std::fs::write(
-        &path,
-        r#"{"schema_version":1,"tasks":[{"id":"contract","persona":"engineer",
-            "task":"Do the thing.","done_when":"the gate is green"}]}"#,
-    )
-    .expect("written");
-
-    let message = Plan::load(&path).unwrap_err().to_string();
     assert!(
-        message.contains("'contract':"),
-        "the refusal does not name the node that carries it: {message}"
-    );
-    assert!(
-        message.contains("`done_when` is no longer a plan field"),
-        "the refusal does not name the field: {message}"
-    );
-    assert!(
-        message.contains("`## Acceptance criteria` section of its own task"),
-        "the refusal does not say where a per-node bar goes: {message}"
-    );
-    assert!(
-        message.contains("onejudge base config") && message.contains("user.done_when"),
-        "the refusal does not say where a broader bar goes: {message}"
-    );
-    assert!(
-        !message.contains("unknown field"),
-        "the schema's bare refusal reached the planner instead: {message}"
-    );
-    assert!(
-        !message.contains("schema_version"),
-        "the version refusal displaced the field's: {message}"
-    );
-
-    // A step carries the same field and gets the same answer, named by the step.
-    std::fs::write(
-        &path,
-        r#"{"schema_version":1,"tasks":[{"id":"service","repo":"o/r","steps":[
-            {"id":"implement","persona":"engineer","task":"Do the thing.",
-             "done_when":"the gate is green"}]}]}"#,
-    )
-    .expect("written");
-    let message = Plan::load(&path).unwrap_err().to_string();
-    assert!(
-        message.contains("'implement':") && message.contains("no longer a plan field"),
-        "a step's retired field is not named: {message}"
-    );
-
-    // And a plan that carries none still loads: the second, lenient reading only
-    // ever runs on a document the schema already refused.
-    std::fs::write(
-        &path,
-        format!(
-            r#"{{"schema_version":{PLAN_SCHEMA_VERSION},"tasks":[
-                {{"id":"contract","persona":"engineer","task":"Do the thing.",
-                 "max_turns":45}}]}}"#
+        CONTRACT.contains(
+            "A retired field is refused by its own name here exactly as it is in a \
+                           plan document"
         ),
-    )
-    .expect("written");
-    assert_eq!(
-        Plan::load(&path)
-            .expect("a plan without the retired field loads")
-            .tasks[0]
-            .max_turns,
-        Some(45)
+        "the contract no longer carries the refusal into the store"
     );
-    std::fs::remove_dir_all(&root).ok();
+    for version in PLAN_SCHEMA_VERSIONS_READ {
+        for field in ["done_when", "verify_via_ci"] {
+            let refused = serde_json::from_value::<Plan>(json!({
+                "schema_version": version,
+                "tasks": [{"id": "contract", "persona": "engineer", "task": "t", field: true}],
+            }))
+            .expect_err("a retired field is not a field of this schema");
+            assert!(
+                refused.to_string().contains(field),
+                "the schema's own refusal does not name the field: {refused}"
+            );
+        }
+    }
+    // A step carries the same fields and is held to the same schema.
+    for field in ["done_when", "verify_via_ci"] {
+        serde_json::from_value::<Step>(json!({"id": "implement", field: true}))
+            .expect_err("a retired field is not a field of a step either");
+    }
+    // And a plan that carries none reads, with what it did declare intact.
+    let plan: Plan = serde_json::from_value(json!({
+        "schema_version": PLAN_SCHEMA_VERSION,
+        "tasks": [{"id": "contract", "persona": "engineer", "task": "t", "max_turns": 45}],
+    }))
+    .expect("a plan without the retired field reads");
+    assert_eq!(plan.tasks[0].max_turns, Some(45));
 }
 
 /// A dispatch an external caller builds carries its node's controls into the
@@ -1155,15 +1211,39 @@ fn a_node_and_a_step_default_to_the_shapes_the_contract_states() {
     );
 }
 
+/// The shipped example store holds one project per example plan, and each
+/// declares the version this crate writes.
+///
+/// The documents themselves rather than the graph they read as: what they read
+/// as is `tests/e2e/shipped.rs`'s, which drives them through the real
+/// `onetaskgraph` binary and executes one. What is held here is that the store
+/// the contract names is on disk, in the shape the mapping needs — a project per
+/// plan, a task per node, and the reserved key that carries the schema version.
 #[test]
-fn the_shipped_example_plans_parse() {
-    for name in ["single-node.plan.json", "mixed-graph.plan.json"] {
-        let path = repo_root().join("examples").join(name);
-        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{name} ships: {e}"));
-        let plan: Plan =
-            serde_json::from_str(&text).unwrap_or_else(|e| panic!("{name} parses: {e}"));
-        assert_eq!(plan.schema_version, PLAN_SCHEMA_VERSION);
-        assert!(!plan.tasks.is_empty(), "{name} has nodes");
+fn the_shipped_example_store_holds_a_project_per_example_plan() {
+    let store = repo_root().join("examples").join("plan-store");
+    assert!(
+        store.join("onetaskgraph.yaml").is_file(),
+        "the example store configures no source, so nothing can read it"
+    );
+    for name in ["single-node", "tracked-release"] {
+        let project = store.join("projects").join(format!("{name}.md"));
+        let text = std::fs::read_to_string(&project)
+            .unwrap_or_else(|e| panic!("the {name} project ships: {e}"));
+        assert!(
+            text.contains(&format!(
+                "\"onepipeline.schema_version\": {PLAN_SCHEMA_VERSION}"
+            )),
+            "the {name} project does not declare the schema version this crate writes:\n{text}"
+        );
+        let tasks = store.join("tasks").join(name);
+        assert!(
+            std::fs::read_dir(&tasks)
+                .unwrap_or_else(|e| panic!("the {name} project has tasks: {e}"))
+                .count()
+                > 0,
+            "the {name} project holds no task, so its plan has no node"
+        );
     }
 }
 
@@ -1445,7 +1525,7 @@ fn what_this_build_carries_beyond_the_contract_is_what_the_divergence_record_nam
 /// The contract is committed as approved and names none of it, so entry 40 is the
 /// only place it is written down — and a divergence nothing gates quietly stops
 /// being true. The entry's own block is the source: what parses here is what a
-/// planner would write in a plan file.
+/// planner would write in a plan.
 #[test]
 fn the_release_adoption_surface_is_what_the_divergence_record_names() {
     let block = divergence_block("40.");
@@ -2464,7 +2544,7 @@ fn the_contract_names_the_retention_path_and_the_release_it_ships_in() {
 
 #[test]
 fn the_driver_contracts_invocation_parses_exactly_as_written() {
-    let documented = "onepipeline start plan.json [--attach|--detach] \
+    let documented = "onepipeline start PROJECT [--attach|--detach] \
                       [--dag-graph off|REF] [--pr-author-graph REF] \
                       [--heartbeat-interval 1800] \
                       [--set PATH=VALUE]... [--node-set PATH=VALUE]... \
@@ -2474,7 +2554,7 @@ fn the_driver_contracts_invocation_parses_exactly_as_written() {
     let cli = Cli::try_parse_from([
         "onepipeline",
         "start",
-        "plan.json",
+        "otg:plan-store",
         "--detach",
         "--dag-graph",
         "graphs/dag-scope.yaml",
@@ -2494,7 +2574,7 @@ fn the_driver_contracts_invocation_parses_exactly_as_written() {
     let Command::Start(args) = cli.command else {
         panic!("expected `start`");
     };
-    assert_eq!(args.plan, PathBuf::from("plan.json"));
+    assert_eq!(args.project, "otg:plan-store");
     assert!(args.detach);
     assert!(!args.attach);
     assert_eq!(args.dag_graph, "graphs/dag-scope.yaml");
@@ -2525,7 +2605,7 @@ fn the_driver_contracts_invocation_parses_exactly_as_written() {
         CONTRACT.contains("`--dag-graph` defaults to `off`"),
         "the contract no longer states the shipped default"
     );
-    let defaulted = Cli::try_parse_from(["onepipeline", "start", "plan.json"]).expect("parses");
+    let defaulted = Cli::try_parse_from(["onepipeline", "start", "plans:demo"]).expect("parses");
     let Command::Start(args) = defaulted.command else {
         panic!("expected `start`");
     };
@@ -2572,7 +2652,7 @@ fn attach_and_detach_are_the_alternatives_the_contract_writes_them_as() {
 #[test]
 fn every_command_the_contract_names_parses() {
     let invocations: &[(&str, &[&str])] = &[
-        ("start", &["start", "plan.json"]),
+        ("start", &["start", "plans:demo"]),
         ("adopt", &["adopt", "run-1"]),
         ("channel serve", &["channel", "serve", "run-1"]),
         ("next", &["next", "run-1"]),
