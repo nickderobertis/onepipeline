@@ -2327,10 +2327,16 @@ fn on_path(name: &str) -> Option<PathBuf> {
 /// The environment variable naming the `onetaskgraph` executable.
 ///
 /// Restated here rather than imported: the crate under test declares it in a
-/// module `src/lib.rs` keeps private, so there is no item to name. What
-/// reconciles the two spellings is a journey — every launch below reads its plan
-/// through the binary this key points at, so a spelling that drifted leaves the
-/// whole suite resolving whatever the host happened to install.
+/// module `src/lib.rs` keeps private, so there is no item to name.
+///
+/// What reconciles the two spellings is
+/// `store::an_absent_onetaskgraph_refuses_the_launch_and_starts_nothing`, which
+/// points this key at a path that does not exist and requires the launch to
+/// **refuse, naming that path**. A spelling that drifted would leave the binary
+/// under test ignoring the key, resolving whatever the host installed, and
+/// launching successfully — so that journey fails rather than passing against a
+/// key nothing reads. Every use of the key in this suite goes through this
+/// constant, which is what makes the one journey cover them all.
 pub const STORE_BINARY_ENV: &str = "ONETASKGRAPH_BIN";
 
 /// The name of the one source every world configures.

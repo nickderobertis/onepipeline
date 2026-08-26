@@ -403,6 +403,20 @@ fn a_project_the_schema_refuses_never_starts_a_run() {
                 {"id": "a", "persona": "e", "task": "t", "onepipeline-task": "other"}]}),
             "`onepipeline.task` is not a node field",
         ),
+        (
+            "owntitle",
+            json!({"schema_version": 3, "tasks": [
+                {"id": "a", "persona": "e", "task": "t", "onepipeline-title": "other"}]}),
+            "`onepipeline.title` is not a node field",
+        ),
+        // A node id is the name every dependency of this plan calls the node by,
+        // so one that is not a string is not a name at all.
+        (
+            "numberedid",
+            json!({"schema_version": 3, "tasks": [
+                {"id": "a", "persona": "e", "task": "t", "onepipeline-id": 7}]}),
+            "a node id is a string",
+        ),
         // A node lands in one repository, and the reserved key is only for an
         // identity a normalized origin cannot hold — so a task naming one both
         // ways is refused rather than one of the two quietly losing.

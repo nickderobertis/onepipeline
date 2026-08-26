@@ -352,6 +352,20 @@ impl Store {
     fn deps(&self, task: &Qualified<TaskItem>, ids: &Ids) -> Result<Vec<String>> {
         let mut deps = Vec::new();
         for edge in self.edges(&task.id)? {
+            // The near end is the task whose dependencies were asked for. An
+            // edge answering about a different one would put another task's
+            // prerequisites on this node, which is a graph nobody wrote and a
+            // run nothing could explain afterwards.
+            if edge.from.id != task.id {
+                return Err(Error::Sibling {
+                    tool: DEFAULT_BINARY,
+                    message: format!(
+                        "asked for the dependencies of '{}' and answered with an edge from \
+                         '{}'",
+                        task.id, edge.from.id
+                    ),
+                });
+            }
             if edge.kind != DependencyKind::Blocks {
                 continue;
             }
@@ -397,23 +411,31 @@ impl Store {
         one(task, read)
     }
 
-    /// Every task of one project, each one an item of that project's own source.
+    /// Every task of one project, each one that project's own.
     ///
-    /// The source check is not a restatement of the query: `--project` is a
-    /// filter this build asked a third party to apply, and a plan assembled out
-    /// of an item from somewhere else would carry a node whose id collides with
-    /// this project's by coincidence. Refused here, where both the project asked
-    /// for and the item answered with can still be named.
+    /// Checked rather than assumed: `--project` is a filter this build asked a
+    /// **third party** to apply, and a plan assembled out of an item from
+    /// somewhere else would carry a node nobody put in this project. Both halves
+    /// of "somewhere else" are refused — another source, and another project of
+    /// this one — because the two are different mistakes and neither is one a
+    /// launch could report afterwards. Refused here, where the project asked for
+    /// and the item answered with can both still be named.
     fn tasks(&self, project: &QualifiedId) -> Result<Vec<Qualified<TaskItem>>> {
         let tasks: Vec<Qualified<TaskItem>> =
             self.paged(&["task", "list", "--project", project.as_str()])?;
         for task in &tasks {
-            if task.id.source() != project.source() {
+            let elsewhere = match &task.item.project {
+                _ if task.id.source() != project.source() => Some("an item of another source"),
+                Some(named) if named != project.native() => Some("a task of another project"),
+                None => Some("a task of no project at all"),
+                Some(_) => None,
+            };
+            if let Some(elsewhere) = elsewhere {
                 return Err(Error::Sibling {
                     tool: DEFAULT_BINARY,
                     message: format!(
                         "asked for the tasks of '{project}' and answered with '{}', which is \
-                         an item of another source",
+                         {elsewhere}",
                         task.id
                     ),
                 });
@@ -694,16 +716,21 @@ impl Version {
     fn parse(token: &str) -> Option<Self> {
         // At most one `v`, and only leading.
         let token = token.strip_prefix('v').unwrap_or(token);
-        let (numbers, prerelease) = match token.split_once('-') {
-            Some((numbers, prerelease)) => (numbers, Some(prerelease)),
+        // The build comes **after** the pre-release — `1.2.3-rc.1+build.7` — so
+        // it is split off first; the other order puts the build inside the
+        // pre-release and refuses a version that is perfectly well formed.
+        let (rest, build) = match token.split_once('+') {
+            Some((rest, build)) => (rest, Some(build)),
             None => (token, None),
         };
-        // A separator with nothing after it names no pre-release and no build.
-        let (numbers, build) = match numbers.split_once('+') {
-            Some((numbers, build)) => (numbers, Some(build)),
-            None => (numbers, None),
+        let (numbers, prerelease) = match rest.split_once('-') {
+            Some((numbers, prerelease)) => (numbers, Some(prerelease)),
+            None => (rest, None),
         };
-        if prerelease.is_some_and(str::is_empty) || build.is_some_and(str::is_empty) {
+        // A pre-release and a build are dot-separated identifiers of ASCII
+        // alphanumerics and hyphens. Anything else is not a version, and reading
+        // it as one would let malformed output decide the floor.
+        if !prerelease.into_iter().chain(build).all(identifiers) {
             return None;
         }
         let mut parts = numbers.split('.').map(str::parse::<u32>);
@@ -733,6 +760,17 @@ impl std::fmt::Display for Version {
             Release::Released => Ok(()),
         }
     }
+}
+
+/// Whether `text` is the dot-separated identifiers a pre-release or a build is.
+fn identifiers(text: &str) -> bool {
+    !text.is_empty()
+        && text.split('.').all(|part| {
+            !part.is_empty()
+                && part
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || character == '-')
+        })
 }
 
 /// The version token in what a `--version` printed, or `None`.
@@ -779,6 +817,12 @@ struct ProjectItem {
 #[derive(Debug, Deserialize)]
 struct TaskItem {
     title: String,
+    /// The project this task belongs to, as the store says it does.
+    ///
+    /// `None` is a first-class case in that product — an orphan task — and it is
+    /// simply not a task of any project this build could have asked for.
+    #[serde(default)]
+    project: Option<String>,
     #[serde(default)]
     content: Option<String>,
     #[serde(default)]
@@ -789,6 +833,8 @@ struct TaskItem {
 
 #[derive(Debug, Deserialize)]
 struct Edge {
+    /// The item that depends — the one whose dependencies were asked for.
+    from: Endpoint,
     to: Endpoint,
     kind: DependencyKind,
 }
@@ -888,6 +934,12 @@ mod tests {
         assert_eq!(Version::parse("vv1.2.3"), None);
         assert_eq!(Version::parse("1.2.3-"), None);
         assert_eq!(Version::parse("1.2.3+"), None);
+        // A pre-release and a build are dot-separated identifiers, so an empty
+        // one and a character that is not in the grammar are not versions.
+        assert_eq!(Version::parse("1.2.3-rc..1"), None);
+        assert_eq!(Version::parse("1.2.3-rc 1"), None);
+        assert_eq!(Version::parse("1.2.3+build_7"), None);
+        assert!(Version::parse("1.2.3-rc.1+build-7").is_some());
     }
 
     /// A pre-release sorts below the release it precedes, which is the direction
@@ -964,6 +1016,7 @@ mod tests {
     fn a_task_carrying_no_node_id_is_refused_by_the_key_it_is_missing() {
         let bare = TaskItem {
             title: "Build it".into(),
+            project: None,
             content: None,
             metadata: Map::new(),
             repositories: Vec::new(),

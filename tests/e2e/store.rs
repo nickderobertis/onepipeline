@@ -18,7 +18,7 @@
 // real store binary against a real folder of Markdown. `harness.rs` carries the same
 // suppression and the full rationale.
 
-use crate::harness::{double, plan_of, World, REFUSED};
+use crate::harness::{double, plan_of, World, REFUSED, STORE_BINARY_ENV};
 use serde_json::{json, Value};
 
 /// A run launches from a local Markdown project, with no remote system in it at
@@ -303,6 +303,23 @@ fn a_store_that_answers_badly_refuses_the_launch_and_names_the_query() {
             &[("onetaskgraph.project-show", "not json at all\n")],
             "answered with something this build cannot read",
         ),
+        // A `show` answering with nothing, and with several. A `show` addresses
+        // one item, so both are a store this build cannot read a plan out of
+        // rather than a set to take the first of.
+        (
+            "nothing",
+            &[("onetaskgraph.project-show", r#"{"items":[],"next":null}"#)],
+            "names nothing in the configured sources",
+        ),
+        (
+            "several",
+            &[(
+                "onetaskgraph.project-show",
+                r#"{"items":[{"id":"plans:mine","item":{"title":"T","metadata":{}}},
+                   {"id":"plans:mine","item":{"title":"T","metadata":{}}}],"next":null}"#,
+            )],
+            "answered with more than one item",
+        ),
         // A `show` answering with an item nobody asked for.
         (
             "elsewhere",
@@ -325,7 +342,7 @@ fn a_store_that_answers_badly_refuses_the_launch_and_names_the_query() {
                 (
                     "onetaskgraph.task-list",
                     r#"{"items":[{"id":"elsewhere:build","item":{"title":"B","content":"t",
-                       "metadata":{"onepipeline.id":"build"}}}],"next":null}"#,
+                       "project":"mine","metadata":{"onepipeline.id":"build"}}}],"next":null}"#,
                 ),
             ],
             "which is an item of another source",
@@ -344,7 +361,7 @@ fn a_store_that_answers_badly_refuses_the_launch_and_names_the_query() {
                 (
                     "onetaskgraph.task-list",
                     r#"{"items":[{"id":"plans:build","item":{"title":"B","content":"t",
-                       "metadata":{"onepipeline.id":"build"}}}],"next":null}"#,
+                       "project":"mine","metadata":{"onepipeline.id":"build"}}}],"next":null}"#,
                 ),
                 (
                     "onetaskgraph.task-deps",
@@ -353,6 +370,20 @@ fn a_store_that_answers_badly_refuses_the_launch_and_names_the_query() {
                 ),
             ],
             "which is a project and not a node of a plan",
+        ),
+        // A walk handed a token that is no token: it names no next page and ends
+        // nothing, so the walk would ask for the same page for ever.
+        (
+            "emptytoken",
+            &[
+                (
+                    "onetaskgraph.project-show",
+                    r#"{"items":[{"id":"plans:mine","item":{"title":"T","metadata":
+                       {"onepipeline.schema_version":3}}}],"next":null}"#,
+                ),
+                ("onetaskgraph.task-list", r#"{"items":[],"next":""}"#),
+            ],
+            "does not advance the walk",
         ),
         // A walk that cycles: two tokens handed back for ever. Read naively this
         // is a launch that never returns and never says why.
@@ -377,7 +408,7 @@ fn a_store_that_answers_badly_refuses_the_launch_and_names_the_query() {
 
     for (name, scripted, expected) in cases {
         let world = World::new(&format!("store-bad-{name}")).with_env(
-            "ONETASKGRAPH_BIN",
+            STORE_BINARY_ENV,
             &double("fake-onetaskgraph").to_string_lossy(),
         );
         world.script("onetaskgraph.version", "onetaskgraph 0.1.0\n");
@@ -403,7 +434,7 @@ fn a_store_that_answers_badly_refuses_the_launch_and_names_the_query() {
 fn an_absent_onetaskgraph_refuses_the_launch_and_starts_nothing() {
     let world = World::new("store-absent");
     let missing = world.root.join("no-such-onetaskgraph");
-    let world = world.with_env("ONETASKGRAPH_BIN", &missing.to_string_lossy());
+    let world = world.with_env(STORE_BINARY_ENV, &missing.to_string_lossy());
     let project = world.plan(
         "absent",
         &plan_of("absent", vec![crate::harness::agent("build", &[])]),
@@ -433,7 +464,7 @@ fn an_absent_onetaskgraph_refuses_the_launch_and_starts_nothing() {
 #[test]
 fn an_onetaskgraph_below_the_minimum_refuses_the_launch_naming_both_versions() {
     let world = World::new("store-stale").with_env(
-        "ONETASKGRAPH_BIN",
+        STORE_BINARY_ENV,
         &double("fake-onetaskgraph").to_string_lossy(),
     );
     let project = world.plan(
@@ -463,7 +494,7 @@ fn an_onetaskgraph_below_the_minimum_refuses_the_launch_naming_both_versions() {
 #[test]
 fn an_onetaskgraph_that_cannot_report_a_version_refuses_the_launch() {
     let world = World::new("store-unusable").with_env(
-        "ONETASKGRAPH_BIN",
+        STORE_BINARY_ENV,
         &double("fake-onetaskgraph").to_string_lossy(),
     );
     let project = world.plan(
