@@ -95,7 +95,13 @@ fn an_unreachable_store_is_reported_and_retried_while_the_run_completes_unaffect
     world.script("work.wait", "hold");
     let project = world.plan(
         "writeback-retry",
-        &plan_of("writeback-retry", vec![crate::harness::agent("work", &[])]),
+        &plan_of(
+            "writeback-retry",
+            vec![
+                crate::harness::agent("work", &[]),
+                crate::harness::agent("later", &["work"]),
+            ],
+        ),
     );
     world.run(&["start", &project, "--detach"]).exited(0);
     world.until("the running state to reach the store", |world| {
@@ -107,35 +113,69 @@ fn an_unreachable_store_is_reported_and_retried_while_the_run_completes_unaffect
 
     let unavailable = world.root.join("plan-store-unavailable");
     std::fs::rename(world.store(), &unavailable).expect("the store becomes unreachable");
+    world
+        .run_with_stdin(
+            &["reply", "writeback-retry"],
+            &json!({
+                "version": 1,
+                "commands": [{"op": "context", "id": "later", "note": "retry this projection"}]
+            })
+            .to_string(),
+        )
+        .exited(0);
     world.until("write-back failure to be reported", |world| {
         std::fs::read_to_string(world.run_file("writeback-retry", "driver.log")).is_ok_and(|log| {
             log.contains("onetaskgraph write-back failed") && log.contains("retrying")
         })
     });
-
-    // The dispatch was held throughout the outage: the engine remained live and its own
-    // journal, not a read from the missing store, still says what was executing.
-    assert!(world.events_of("writeback-retry", "node-dispatched").len() == 1);
     std::fs::rename(&unavailable, world.store()).expect("the store returns");
     world.until("write-back recovery to be reported", |world| {
         std::fs::read_to_string(world.run_file("writeback-retry", "driver.log"))
             .is_ok_and(|log| log.contains("onetaskgraph write-back recovered"))
     });
-    world.release("work.go");
-    world.until("the run to complete", |world| {
-        world.run_file("writeback-retry", "result.json").is_file()
-    });
-    assert_eq!(
-        world.run_json("writeback-retry", "result.json")["state"],
-        "complete"
-    );
-    world.until("the retried settlement to reach the store", |world| {
+    world.until("the retried edit to reach the store", |world| {
         world.store_tasks(&project).iter().any(|task| {
-            task["item"]["metadata"]["onepipeline.id"] == "work"
-                && task["item"]["status"]["category"] == "done"
-                && task["item"]["metadata"]["onepipeline.settlement"]["status"] == "done"
+            task["item"]["metadata"]["onepipeline.id"] == "later"
+                && task["item"]["metadata"]["onepipeline.context"] == "retry this projection"
         })
     });
+
+    // Take it away again for terminal settlement. This time it deliberately remains
+    // unreachable until after result.json proves the run is over.
+    std::fs::rename(world.store(), &unavailable).expect("the store becomes unreachable again");
+
+    // The engine remains live and its own journal, not a read from the missing store,
+    // still says what is executing. Let the node and the whole run finish before the
+    // store returns: observing result.json while the directory is still absent is the
+    // boundary that proves terminal write-back cannot hold settlement open.
+    assert_eq!(
+        world.events_of("writeback-retry", "node-dispatched").len(),
+        1
+    );
+    world.release("work.go");
+    world.until(
+        "the run to complete while the store is unreachable",
+        |world| world.run_file("writeback-retry", "result.json").is_file(),
+    );
+    assert!(
+        !world.store().exists(),
+        "the run only completed after its store became reachable"
+    );
+    let result = world.run_json("writeback-retry", "result.json");
+    assert_eq!(result["state"], "complete", "{result}");
+    assert!(
+        result["nodes"]
+            .as_array()
+            .expect("result nodes")
+            .iter()
+            .all(|node| node["status"] == "done"),
+        "the outage changed a node's settlement: {result}"
+    );
+    assert_eq!(
+        world.events_of("writeback-retry", "node-dispatched").len(),
+        2,
+        "the outage kept the dependent node from dispatching"
+    );
 }
 
 #[test]
