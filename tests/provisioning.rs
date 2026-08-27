@@ -108,5 +108,42 @@ chmod +x "$root/bin/onetaskgraph"
             pinned,
             "the wrong-revision binary survived provisioning"
         );
+
+        let cargo_home = root.join("default-cargo-home");
+        let cargo_bin = cargo_home.join("bin");
+        let tools = root.join("tools");
+        fs::create_dir_all(&cargo_bin).expect("the default Cargo bin exists");
+        fs::create_dir(&tools).expect("the installer tools directory exists");
+        executable(
+            &cargo_bin.join("onetaskgraph"),
+            "#!/bin/sh\nprintf '%s\\n' wrong-revision\n",
+        );
+        fs::copy(root.join("bin/cargo"), tools.join("cargo"))
+            .expect("the same recording installer is ahead of Cargo's bin");
+        let mut default_paths = vec![tools, cargo_bin];
+        default_paths.extend(std::env::split_paths(&host_path));
+        let default_path = std::env::join_paths(default_paths).expect("the default PATH joins");
+        let default_provisioned = Command::new("just")
+            .arg("_ensure-onetaskgraph")
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .env("PATH", &default_path)
+            .env("CARGO_HOME", &cargo_home)
+            .output()
+            .expect("the default-Cargo provisioning recipe runs");
+        assert!(
+            default_provisioned.status.success(),
+            "default-Cargo provisioning failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&default_provisioned.stdout),
+            String::from_utf8_lossy(&default_provisioned.stderr)
+        );
+        let default_resolved = Command::new("onetaskgraph")
+            .env("PATH", default_path)
+            .output()
+            .expect("the default-Cargo provisioned binary resolves");
+        assert_eq!(
+            String::from_utf8_lossy(&default_resolved.stdout).trim(),
+            pinned,
+            "the wrong revision survived in the default Cargo home"
+        );
     }
 }
