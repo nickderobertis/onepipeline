@@ -18,7 +18,7 @@
 // real store binary against a real folder of Markdown. `harness.rs` carries the same
 // suppression and the full rationale.
 
-use crate::harness::{double, plan_of, World, REFUSED, STORE_BINARY_ENV};
+use crate::harness::{double, onetaskgraph_binary, plan_of, World, REFUSED, STORE_BINARY_ENV};
 use serde_json::{json, Value};
 
 /// A run launches from a local Markdown project, with no remote system in it at
@@ -207,6 +207,57 @@ fn an_unreachable_store_is_reported_and_retried_while_the_run_completes_unaffect
         2,
         "recovering terminal write-back changed execution"
     );
+}
+
+/// A copy refusal happens after the destination task list was read successfully. The
+/// write-back worker reports that child failure, retries through the same subprocess
+/// boundary, and publishes the snapshot when the real sibling accepts the next copy.
+#[test]
+fn a_project_copy_refusal_is_reported_retried_and_recovers() {
+    let world = World::new("store-writeback-copy-retry");
+    world.script("work.wait", "hold");
+    let project = world.plan(
+        "writeback-copy-retry",
+        &plan_of(
+            "writeback-copy-retry",
+            vec![crate::harness::agent("work", &[])],
+        ),
+    );
+    world.script(
+        "onetaskgraph.delegate",
+        &onetaskgraph_binary().to_string_lossy(),
+    );
+    world.script(
+        "onetaskgraph.project-copy.refuse.1",
+        "the destination refused this copy once\n",
+    );
+    let world = world.with_env(
+        STORE_BINARY_ENV,
+        &double("fake-onetaskgraph").to_string_lossy(),
+    );
+
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the copy refusal and recovery to be reported", |world| {
+        std::fs::read_to_string(world.run_file("writeback-copy-retry", "driver.log")).is_ok_and(
+            |log| {
+                log.contains("the destination refused this copy once")
+                    && log.contains("onetaskgraph write-back recovered")
+            },
+        )
+    });
+    world.until_store("the retried snapshot to reach the real store", |world| {
+        world.store_tasks(&project).iter().any(|task| {
+            task["item"]["metadata"]["onepipeline.id"] == "work"
+                && task["item"]["status"]["category"] == "in-progress"
+        })
+    });
+
+    world.release("work.go");
+    world.until("the run to settle after copy recovery", |world| {
+        world
+            .run_file("writeback-copy-retry", "result.json")
+            .is_file()
+    });
 }
 
 /// Losing the worker's own command-capture path is handled by the same best-effort

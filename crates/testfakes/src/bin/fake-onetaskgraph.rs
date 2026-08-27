@@ -29,9 +29,24 @@
 //!   double that answered a query no journey stated would be inventing a store.
 //! * `onetaskgraph.<verb>.2` — what the **second** call to that verb answers,
 //!   and `.3` the third, so a journey can state a walk of several pages.
+//! * `onetaskgraph.delegate` — an executable to proxy unscripted calls to. A
+//!   matching `onetaskgraph.<verb>.refuse.<n>` injects one refused call before
+//!   later calls reach that real executable, for retry journeys at this sibling
+//!   subprocess boundary.
 
 use onepipeline_testfakes as fake;
-use std::process::ExitCode;
+use std::process::{Command, ExitCode};
+
+fn delegate(dir: &std::path::Path, args: &[String]) -> Option<ExitCode> {
+    let binary = std::fs::read_to_string(dir.join("onetaskgraph.delegate")).ok()?;
+    let status = Command::new(binary.trim()).args(args).status().ok()?;
+    Some(ExitCode::from(
+        status
+            .code()
+            .and_then(|code| u8::try_from(code).ok())
+            .unwrap_or(1),
+    ))
+}
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -48,6 +63,9 @@ fn main() -> ExitCode {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(_) => ExitCode::from(1),
             };
+        }
+        if let Some(status) = delegate(&dir, &args) {
+            return status;
         }
         let printed = std::fs::read_to_string(dir.join("onetaskgraph.version")).unwrap_or_default();
         print!("{printed}");
@@ -72,6 +90,10 @@ fn main() -> ExitCode {
     let name = format!("onetaskgraph.{}", verb.join("-"));
 
     let nth = fake::count(&dir, &name);
+    if let Ok(reason) = std::fs::read_to_string(dir.join(format!("{name}.refuse.{nth}"))) {
+        eprintln!("{}", reason.trim());
+        return ExitCode::from(1);
+    }
     let answer = (nth > 1)
         .then(|| std::fs::read_to_string(dir.join(format!("{name}.{nth}"))).ok())
         .flatten()
@@ -81,6 +103,8 @@ fn main() -> ExitCode {
             print!("{scripted}");
             ExitCode::SUCCESS
         }
+        None if dir.join("onetaskgraph.delegate").is_file() => delegate(&dir, &args)
+            .unwrap_or_else(|| fake::refuse("the scripted onetaskgraph delegate could not run")),
         None => fake::refuse(&format!(
             "no scenario scripts `{name}`, so this double has no store to answer for"
         )),
