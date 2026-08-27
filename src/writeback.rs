@@ -259,12 +259,13 @@ fn project(
     run_dir: &Path,
     snapshot: &Snapshot,
 ) -> Result<(), String> {
+    let project_content = destination_project_content(binary, launch_dir, run_dir, snapshot)?;
     let origins = destination_origins(binary, launch_dir, run_dir, snapshot)?;
     // llmlint: ignore-block[changed_behavior_has_e2e] The real outage journey drives
     // destination write failure through onetaskgraph. Making this private, run-owned
     // shadow directory unwritable would instead require sabotaging the host filesystem,
     // outside the public run interface and unrelated to store availability.
-    write_shadow(snapshot, &origins)?;
+    write_shadow(snapshot, &origins, project_content.as_deref())?;
     // llmlint: ignore-end[changed_behavior_has_e2e]
     let root = snapshot.dir.to_string_lossy().into_owned();
     let shadow_project = format!("{SHADOW_SOURCE}:{}", project_file(&snapshot.project));
@@ -290,6 +291,40 @@ fn project(
             String::from_utf8_lossy(&output.stderr).trim()
         ))
     }
+}
+
+fn destination_project_content(
+    binary: &Path,
+    launch_dir: &Path,
+    run_dir: &Path,
+    snapshot: &Snapshot,
+) -> Result<Option<String>, String> {
+    let args = ["project", "show", snapshot.project.as_str(), "--json"];
+    let output = bounded_output(binary, launch_dir, run_dir, "project-show", &args)?;
+    if !output.status.success() {
+        return Err(format!(
+            "project show exited {}: {}",
+            exit(&output.status),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let response: ProjectPage =
+        serde_json::from_slice(&output.stdout).map_err(|error| error.to_string())?;
+    if !response.errors.is_empty() {
+        return Err("project show returned partial results".to_owned());
+    }
+    let mut items = response.items.into_iter();
+    let project = items
+        .next()
+        .ok_or_else(|| format!("project '{}' was not found", snapshot.project))?;
+    if items.next().is_some() || project.id != snapshot.project {
+        return Err(format!(
+            "project show returned the wrong project for '{}'",
+            snapshot.project
+        ));
+    }
+    let _ = (response.next, response.plan);
+    Ok(project.item.content)
 }
 
 fn destination_origins(
@@ -440,6 +475,46 @@ struct TaskPage {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ProjectPage {
+    items: Vec<DestinationProject>,
+    next: Option<String>,
+    plan: Value,
+    errors: Vec<Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DestinationProject {
+    id: QualifiedId,
+    item: DestinationProjectItem,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DestinationProjectItem {
+    #[serde(rename = "id")]
+    _id: String,
+    #[serde(rename = "title")]
+    _title: String,
+    content: Option<String>,
+    #[serde(rename = "status")]
+    _status: DestinationStatus,
+    #[serde(rename = "labels")]
+    _labels: Vec<DestinationLabel>,
+    #[serde(rename = "url")]
+    _url: Option<String>,
+    #[serde(rename = "created_at")]
+    _created_at: Option<String>,
+    #[serde(rename = "updated_at")]
+    _updated_at: Option<String>,
+    #[serde(rename = "metadata")]
+    _metadata: BTreeMap<String, Value>,
+    #[serde(rename = "repositories")]
+    _repositories: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DestinationTask {
     id: QualifiedId,
     item: DestinationTaskItem,
@@ -502,7 +577,11 @@ struct DestinationLabel {
     _color: Option<String>,
 }
 
-fn write_shadow(snapshot: &Snapshot, origins: &BTreeMap<String, String>) -> Result<(), String> {
+fn write_shadow(
+    snapshot: &Snapshot,
+    origins: &BTreeMap<String, String>,
+    project_content: Option<&str>,
+) -> Result<(), String> {
     let projects = snapshot.dir.join("projects");
     let tasks = snapshot
         .dir
@@ -520,7 +599,7 @@ fn write_shadow(snapshot: &Snapshot, origins: &BTreeMap<String, String>) -> Resu
         &json!({
             "title": snapshot.project.native(), "metadata": project_metadata
         }),
-        "",
+        project_content.unwrap_or_default(),
     )?;
     for (id, node) in &snapshot.nodes {
         let mut wire = serde_json::to_value(node)

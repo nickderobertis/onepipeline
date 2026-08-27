@@ -87,6 +87,71 @@ fn a_run_launches_from_a_local_markdown_project_and_executes_the_graph_it_holds(
         .out_has("Deliver it from a folder of Markdown");
 }
 
+/// Write-back owns the projection keys it adds to a plan-store item, not the prose a
+/// person authored around them. Drive both sides of that distinction through the installed
+/// CLI and real local-md store: settlement must arrive without changing either a present
+/// project body or an absent one.
+#[test]
+fn settlement_preserves_authored_project_content() {
+    let world = World::new("store-project-content");
+    for (name, body) in [
+        ("project-with-content", "A person's project description.\n"),
+        ("project-without-content", ""),
+    ] {
+        let project = world.plan(
+            name,
+            &plan_of(name, vec![crate::harness::agent("work", &[])]),
+        );
+        let path = world.store().join("projects").join(format!("{name}.md"));
+        let original = std::fs::read_to_string(&path).expect("the authored project document");
+        let (front, _) = original
+            .split_once("---\n\n")
+            .expect("the fixture's front matter delimiter");
+        std::fs::write(&path, format!("{front}---\n{body}")).expect("the project body is authored");
+        let authored_document = std::fs::read_to_string(&path).expect("the authored document");
+        let before = world.store_project(&project)["items"][0]["item"]["content"].clone();
+
+        world.run(&["start", &project, "--attach"]).settled();
+        world.until_store("the settlement to reach the project", |world| {
+            world
+                .store_tasks(&project)
+                .iter()
+                .any(|task| task["item"]["metadata"]["onepipeline.settlement"].is_object())
+        });
+
+        let after = world.store_project(&project)["items"][0]["item"]["content"].clone();
+        assert_eq!(
+            after, before,
+            "settlement changed authored content for {project}"
+        );
+        let settled_document =
+            std::fs::read_to_string(&path).expect("the settled project document");
+        let authored_body = authored_document
+            .split_once("\n---\n")
+            .expect("the authored front matter closes")
+            .1;
+        let settled_body = settled_document
+            .split_once("\n---\n")
+            .expect("the settled front matter closes")
+            .1;
+        assert_eq!(
+            settled_body.trim_end_matches('\n'),
+            authored_body.trim_end_matches('\n'),
+            "settlement changed the source document body for {project}"
+        );
+        assert_eq!(
+            settled_body.trim_end_matches('\n').is_empty(),
+            body.is_empty(),
+            "settlement changed whether {project} has a body"
+        );
+        assert_eq!(
+            settled_body.ends_with("\n\n"),
+            authored_body.ends_with("\n\n"),
+            "settlement changed the trailing blank line for {project}"
+        );
+    }
+}
+
 /// Losing the store is a projection failure, never an execution failure. The worker reports
 /// it, keeps retrying off the reconcile loop, and catches the board up when it returns.
 #[test]
