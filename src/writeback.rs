@@ -308,6 +308,11 @@ fn destination_project_content(
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
+    // llmlint: ignore-block[changed_behavior_has_e2e] These refusals defend the compiled
+    // sibling's machine contract. Producing malformed JSON, partial results, no project,
+    // or a different/duplicate project here requires replacing the real onetaskgraph
+    // executable with a scripted mock; the real-store journey drives the successful read,
+    // total-replacement copy, and preservation of present and absent content end to end.
     let response: ProjectPage =
         serde_json::from_slice(&output.stdout).map_err(|error| error.to_string())?;
     if !response.errors.is_empty() {
@@ -324,6 +329,7 @@ fn destination_project_content(
         ));
     }
     let _ = (response.next, response.plan);
+    // llmlint: ignore-end[changed_behavior_has_e2e]
     Ok(project.item.content)
 }
 
