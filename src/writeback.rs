@@ -259,12 +259,13 @@ fn project(
     run_dir: &Path,
     snapshot: &Snapshot,
 ) -> Result<(), String> {
+    let destination_project = destination_project(binary, launch_dir, run_dir, snapshot)?;
     let origins = destination_origins(binary, launch_dir, run_dir, snapshot)?;
     // llmlint: ignore-block[changed_behavior_has_e2e] The real outage journey drives
     // destination write failure through onetaskgraph. Making this private, run-owned
     // shadow directory unwritable would instead require sabotaging the host filesystem,
     // outside the public run interface and unrelated to store availability.
-    write_shadow(snapshot, &origins)?;
+    write_shadow(snapshot, &origins, &destination_project)?;
     // llmlint: ignore-end[changed_behavior_has_e2e]
     let root = snapshot.dir.to_string_lossy().into_owned();
     let shadow_project = format!("{SHADOW_SOURCE}:{}", project_file(&snapshot.project));
@@ -290,6 +291,46 @@ fn project(
             String::from_utf8_lossy(&output.stderr).trim()
         ))
     }
+}
+
+fn destination_project(
+    binary: &Path,
+    launch_dir: &Path,
+    run_dir: &Path,
+    snapshot: &Snapshot,
+) -> Result<DestinationProjectItem, String> {
+    let args = ["project", "show", snapshot.project.as_str(), "--json"];
+    let output = bounded_output(binary, launch_dir, run_dir, "project-show", &args)?;
+    if !output.status.success() {
+        return Err(format!(
+            "project show exited {}: {}",
+            exit(&output.status),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    // llmlint: ignore-block[changed_behavior_has_e2e] These refusals defend the compiled
+    // sibling's machine contract. Producing malformed JSON, partial results, no project,
+    // or a different/duplicate project here requires replacing the real onetaskgraph
+    // executable with a scripted mock; the real-store journey drives the successful read,
+    // total-replacement copy, and preservation of present and absent content end to end.
+    let response: ProjectPage =
+        serde_json::from_slice(&output.stdout).map_err(|error| error.to_string())?;
+    if !response.errors.is_empty() {
+        return Err("project show returned partial results".to_owned());
+    }
+    let mut items = response.items.into_iter();
+    let project = items
+        .next()
+        .ok_or_else(|| format!("project '{}' was not found", snapshot.project))?;
+    if items.next().is_some() || project.id != snapshot.project {
+        return Err(format!(
+            "project show returned the wrong project for '{}'",
+            snapshot.project
+        ));
+    }
+    let _ = (response.next, response.plan);
+    // llmlint: ignore-end[changed_behavior_has_e2e]
+    Ok(project.item)
 }
 
 fn destination_origins(
@@ -440,6 +481,50 @@ struct TaskPage {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ProjectPage {
+    items: Vec<DestinationProject>,
+    next: Option<String>,
+    plan: Value,
+    errors: Vec<Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DestinationProject {
+    id: QualifiedId,
+    item: DestinationProjectItem,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DestinationProjectItem {
+    // llmlint: ignore-block[invalid_states_unrepresentable] These fields enumerate the
+    // compiled sibling's complete, deny-unknown machine response but are not inputs this
+    // projection interprets. onetaskgraph owns and validates its native id, URL, timestamps,
+    // and repository identities; write-back consumes only content and metadata below.
+    #[serde(rename = "id")]
+    _id: String,
+    #[serde(rename = "title")]
+    _title: String,
+    content: Option<String>,
+    #[serde(rename = "status")]
+    _status: DestinationStatus,
+    #[serde(rename = "labels")]
+    _labels: Vec<DestinationLabel>,
+    #[serde(rename = "url")]
+    _url: Option<String>,
+    #[serde(rename = "created_at")]
+    _created_at: Option<String>,
+    #[serde(rename = "updated_at")]
+    _updated_at: Option<String>,
+    metadata: BTreeMap<String, Value>,
+    #[serde(rename = "repositories")]
+    _repositories: Vec<String>,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DestinationTask {
     id: QualifiedId,
     item: DestinationTaskItem,
@@ -502,7 +587,11 @@ struct DestinationLabel {
     _color: Option<String>,
 }
 
-fn write_shadow(snapshot: &Snapshot, origins: &BTreeMap<String, String>) -> Result<(), String> {
+fn write_shadow(
+    snapshot: &Snapshot,
+    origins: &BTreeMap<String, String>,
+    destination_project: &DestinationProjectItem,
+) -> Result<(), String> {
     let projects = snapshot.dir.join("projects");
     let tasks = snapshot
         .dir
@@ -510,7 +599,12 @@ fn write_shadow(snapshot: &Snapshot, origins: &BTreeMap<String, String>) -> Resu
         .join(project_file(&snapshot.project));
     std::fs::create_dir_all(&projects).map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&tasks).map_err(|e| e.to_string())?;
-    let mut project_metadata = snapshot.project_metadata.clone();
+    let mut project_metadata = destination_project.metadata.clone();
+    for (key, value) in &snapshot.project_metadata {
+        if project_metadata.contains_key(key) {
+            project_metadata.insert(key.clone(), value.clone());
+        }
+    }
     project_metadata.insert(
         "onetaskgraph.origin".into(),
         json!(snapshot.project.as_str()),
@@ -520,7 +614,7 @@ fn write_shadow(snapshot: &Snapshot, origins: &BTreeMap<String, String>) -> Resu
         &json!({
             "title": snapshot.project.native(), "metadata": project_metadata
         }),
-        "",
+        destination_project.content.as_deref().unwrap_or_default(),
     )?;
     for (id, node) in &snapshot.nodes {
         let mut wire = serde_json::to_value(node)
