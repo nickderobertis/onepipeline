@@ -209,6 +209,61 @@ fn an_unreachable_store_is_reported_and_retried_while_the_run_completes_unaffect
     );
 }
 
+/// A store that remains unavailable cannot hold terminal run settlement past the write-back
+/// closeout bound. This drives the installed CLI and real local-md sibling, then observes the
+/// user's result file while the store is still absent.
+#[test]
+fn a_terminal_writeback_outage_expires_without_holding_run_settlement() {
+    let world = World::new("store-writeback-closeout-expiry");
+    world.script("work.wait", "hold");
+    let project = world.plan(
+        "writeback-closeout-expiry",
+        &plan_of(
+            "writeback-closeout-expiry",
+            vec![crate::harness::agent("work", &[])],
+        ),
+    );
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the work to be dispatched", |world| {
+        world
+            .events_of("writeback-closeout-expiry", "node-dispatched")
+            .len()
+            == 1
+    });
+
+    let unavailable = world.root.join("plan-store-unavailable-through-closeout");
+    std::fs::rename(world.store(), &unavailable).expect("the store becomes unreachable");
+    let released = std::time::Instant::now();
+    world.release("work.go");
+    world.until(
+        "the run to settle after write-back closeout expires",
+        |world| {
+            world
+                .run_file("writeback-closeout-expiry", "result.json")
+                .is_file()
+        },
+    );
+
+    assert!(
+        released.elapsed() < std::time::Duration::from_secs(15),
+        "the unavailable store held closeout for {:?}",
+        released.elapsed()
+    );
+    assert!(
+        !world.store().exists(),
+        "the run only settled after the store became reachable"
+    );
+    let result = world.run_json("writeback-closeout-expiry", "result.json");
+    assert_eq!(result["state"], "complete", "{result}");
+    assert_eq!(result["nodes"][0]["status"], "done", "{result}");
+    let log = std::fs::read_to_string(world.run_file("writeback-closeout-expiry", "driver.log"))
+        .expect("the driver log is readable");
+    assert!(
+        log.contains("onetaskgraph write-back failed") && log.contains("retrying"),
+        "the run settled without reporting the store outage: {log}"
+    );
+}
+
 #[test]
 fn a_settled_project_launches_again_from_its_projected_metadata() {
     let first = World::new("store-writeback-relaunch-first");

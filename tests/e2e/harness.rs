@@ -2105,10 +2105,11 @@ impl Drop for World {
     }
 }
 
-// llmlint: ignore-block[tests_mirror_real_usage] This test proves the diagnostic emitted by
-// this suite's own store-wait failure, which is not a product interface. Deliberately making a
-// user journey consume its full 120-second deadline would test the same harness-only path much
-// more slowly; the real live-edit journeys are the users of this diagnostic on every platform.
+/// Evidence about the test boundary: `until_store` and `dump` are failure-reporting machinery
+/// of this e2e suite, not a `onepipeline` product interface. The live-edit journeys drive the
+/// real CLI and real store and consume this diagnostic when their user-facing store assertion
+/// times out; this focused harness test deliberately reaches that same timeout with a short
+/// deadline so its panic text can be asserted without adding two minutes to every platform.
 #[test]
 fn a_store_wait_timeout_prints_writeback_child_output_leniently() {
     let world = World::new("store-wait-diagnostic");
@@ -2145,7 +2146,6 @@ fn a_store_wait_timeout_prints_writeback_child_output_leniently() {
     assert!(message.contains("writeback-project-copy.stdout:\n      (not UTF-8:"));
     assert!(message.contains("writeback-project-copy.stderr:\n      (missing)"));
 }
-// llmlint: ignore-end[tests_mirror_real_usage]
 
 /// `teardown: signalled` is the binary's own evidence: `stop` saying it listed a
 /// tree, signalled every process in it, and then watched them go — which

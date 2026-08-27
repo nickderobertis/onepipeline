@@ -125,11 +125,6 @@ impl Writeback {
     }
 
     /// Give the active worker a bounded closeout window for the terminal snapshot.
-    // llmlint: ignore-block[changed_behavior_has_e2e] The real outage journey below this
-    // boundary proves terminal settlement completes while the store is absent and recovery can
-    // project it during this window. The remaining expiry behavior is solely
-    // `Condvar::wait_timeout` returning at the private constant; holding a journey open past the
-    // same timer would re-test the standard-library clock rather than another product boundary.
     pub fn wait_briefly(&self) {
         // Let one already-running real copy reach its own deadline before the process
         // exits. This keeps a completed run from racing a person's next store command,
@@ -145,7 +140,6 @@ impl Writeback {
             pending = next;
         }
     }
-    // llmlint: ignore-end[changed_behavior_has_e2e]
 }
 
 impl Drop for Writeback {
@@ -426,37 +420,62 @@ struct DestinationTask {
     item: DestinationTaskItem,
 }
 
-// llmlint: ignore-block[invalid_states_unrepresentable] This projection consumes only the
-// qualified id and metadata below. The remaining required fields prove that the sibling
-// returned its complete task wire shape, but constraining values that never enter graph state
-// would duplicate onetaskgraph's contract and make a harmless representation change break
-// best-effort write-back.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DestinationTaskItem {
     #[serde(rename = "id")]
-    _id: Value,
+    _id: String,
     #[serde(rename = "title")]
-    _title: Value,
+    _title: String,
     #[serde(rename = "content")]
-    _content: Value,
+    _content: Option<String>,
     #[serde(rename = "status")]
-    _status: Value,
+    _status: DestinationStatus,
     #[serde(rename = "labels")]
-    _labels: Value,
+    _labels: Vec<DestinationLabel>,
     #[serde(rename = "project")]
-    _project: Value,
+    _project: Option<String>,
     #[serde(rename = "url")]
-    _url: Value,
+    _url: Option<String>,
     #[serde(rename = "created_at")]
-    _created_at: Value,
+    _created_at: Option<String>,
     #[serde(rename = "updated_at")]
-    _updated_at: Value,
+    _updated_at: Option<String>,
     metadata: BTreeMap<String, Value>,
     #[serde(rename = "repositories")]
-    _repositories: Value,
+    _repositories: Vec<String>,
 }
-// llmlint: ignore-end[invalid_states_unrepresentable]
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DestinationStatus {
+    #[serde(rename = "category")]
+    _category: DestinationStatusCategory,
+    #[serde(rename = "name")]
+    _name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum DestinationStatusCategory {
+    Backlog,
+    Todo,
+    InProgress,
+    Done,
+    Cancelled,
+    Unknown,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DestinationLabel {
+    #[serde(rename = "id")]
+    _id: String,
+    #[serde(rename = "name")]
+    _name: String,
+    #[serde(rename = "color")]
+    _color: Option<String>,
+}
 
 fn write_shadow(snapshot: &Snapshot, origins: &BTreeMap<String, String>) -> Result<(), String> {
     let projects = snapshot.dir.join("projects");
