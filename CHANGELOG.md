@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.2](https://github.com/nickderobertis/onepipeline/compare/v0.16.1...v0.16.2) - 2026-08-27
+
+### Added
+
+- write node settlement and live graph edits back to the onetaskgraph plan ([#136](https://github.com/nickderobertis/onepipeline/pull/136))
+
 ## [0.16.1](https://github.com/nickderobertis/onepipeline/compare/v0.16.0...v0.16.1) - 2026-08-26
 
 ### Fixed
