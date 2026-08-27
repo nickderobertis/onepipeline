@@ -75,16 +75,20 @@ _crate-bootstrap:
 # stand-in.
 _ensure-onetaskgraph:
     @resolved="${ONETASKGRAPH_BIN:-$(command -v onetaskgraph 2>/dev/null || true)}"; \
-      root_args=(); \
       cargo_root="${CARGO_HOME:-$HOME/.cargo}"; \
       if [[ "$resolved" == */bin/onetaskgraph ]]; then \
         resolved_root="${resolved%/bin/onetaskgraph}"; \
         if [[ "$resolved_root" != "$cargo_root" ]]; then \
-          root_args=(--root "$resolved_root"); \
+          cargo install onetaskgraph --locked --quiet --force --root "$resolved_root" \
+            --git https://github.com/nickderobertis/onetaskgraph --rev {{onetaskgraph-rev}}; \
+        else \
+          cargo install onetaskgraph --locked --quiet --force \
+            --git https://github.com/nickderobertis/onetaskgraph --rev {{onetaskgraph-rev}}; \
         fi; \
+      else \
+        cargo install onetaskgraph --locked --quiet --force \
+          --git https://github.com/nickderobertis/onetaskgraph --rev {{onetaskgraph-rev}}; \
       fi; \
-      cargo install onetaskgraph --locked --quiet --force "${root_args[@]}" \
-        --git https://github.com/nickderobertis/onetaskgraph --rev {{onetaskgraph-rev}}; \
       if [[ -n "$resolved" && "$resolved" != */bin/onetaskgraph ]]; then \
         cp "$cargo_root/bin/onetaskgraph" "$resolved"; \
         chmod +x "$resolved"; \
