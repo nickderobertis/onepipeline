@@ -41,12 +41,19 @@ struct Snapshot {
     project_metadata: BTreeMap<String, Value>,
 }
 
+#[derive(Default, PartialEq, Eq)]
+enum WorkerState {
+    #[default]
+    Idle,
+    Working,
+    StopRequested,
+}
+
 #[derive(Default)]
 struct Pending {
     latest: Option<Snapshot>,
     last_success: Option<Snapshot>,
-    working: bool,
-    stopped: bool,
+    worker: WorkerState,
 }
 
 impl Pending {
@@ -54,7 +61,10 @@ impl Pending {
         if self.latest.as_ref() == Some(&snapshot) {
             return false;
         }
-        if !self.working && self.latest.is_none() && self.last_success.as_ref() == Some(&snapshot) {
+        if self.worker == WorkerState::Idle
+            && self.latest.is_none()
+            && self.last_success.as_ref() == Some(&snapshot)
+        {
             return false;
         }
         self.latest = Some(snapshot);
@@ -141,7 +151,9 @@ impl Writeback {
         let deadline = Instant::now() + CLOSEOUT_WAIT;
         let (lock, ready) = &*self.pending;
         let Ok(mut pending) = lock.lock() else { return };
-        while (pending.latest.is_some() || pending.working) && Instant::now() < deadline {
+        while (pending.latest.is_some() || pending.worker == WorkerState::Working)
+            && Instant::now() < deadline
+        {
             let wait = deadline.saturating_duration_since(Instant::now());
             let Ok((next, _)) = ready.wait_timeout(pending, wait) else {
                 return;
@@ -155,7 +167,7 @@ impl Drop for Writeback {
     fn drop(&mut self) {
         let (lock, ready) = &*self.pending;
         if let Ok(mut pending) = lock.lock() {
-            pending.stopped = true;
+            pending.worker = WorkerState::StopRequested;
             ready.notify_one();
         }
         // Deliberately no join: a store process is outside the run's failure and latency
@@ -177,16 +189,18 @@ fn worker(
                 Ok(state) => state,
                 Err(_) => return,
             };
-            while state.latest.is_none() && !state.stopped {
+            while state.latest.is_none() && state.worker != WorkerState::StopRequested {
                 state = match ready.wait(state) {
                     Ok(state) => state,
                     Err(_) => return,
                 };
             }
-            if state.stopped && state.latest.is_none() {
+            if state.worker == WorkerState::StopRequested && state.latest.is_none() {
                 return;
             }
-            state.working = true;
+            if state.worker == WorkerState::Idle {
+                state.worker = WorkerState::Working;
+            }
             state
                 .latest
                 .take()
@@ -204,7 +218,7 @@ fn worker(
                 let (lock, _) = &*pending;
                 if let Ok(mut state) = lock.lock() {
                     state.last_success = Some(snapshot.clone());
-                    if state.stopped && state.latest.is_none() {
+                    if state.worker == WorkerState::StopRequested && state.latest.is_none() {
                         return;
                     }
                 }
@@ -220,10 +234,10 @@ fn worker(
                 std::thread::sleep(RETRY_AFTER);
                 let (lock, ready) = &*pending;
                 let Ok(mut state) = lock.lock() else { return };
-                if state.stopped {
+                if state.worker == WorkerState::StopRequested {
                     return;
                 }
-                if state.latest.is_none() && !state.stopped {
+                if state.latest.is_none() {
                     state.latest = Some(snapshot);
                     ready.notify_one();
                 }
@@ -231,7 +245,9 @@ fn worker(
         }
         let (lock, ready) = &*pending;
         if let Ok(mut state) = lock.lock() {
-            state.working = false;
+            if state.worker == WorkerState::Working {
+                state.worker = WorkerState::Idle;
+            }
             ready.notify_all();
         }
     }
@@ -672,7 +688,7 @@ fn encoded(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Pending, Snapshot, TaskCategory};
+    use super::{Pending, Snapshot, TaskCategory, WorkerState};
     use crate::graph::NodeStatus;
     use std::collections::BTreeMap;
     use std::path::PathBuf;
@@ -695,8 +711,7 @@ mod tests {
         let mut pending = Pending {
             latest: Some(superseded),
             last_success: Some(first.clone()),
-            working: true,
-            stopped: false,
+            worker: WorkerState::Working,
         };
 
         assert!(pending.queue(first.clone()));
