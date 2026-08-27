@@ -75,8 +75,13 @@ _crate-bootstrap:
 # stand-in.
 # Install the `onetaskgraph` every plan in this repository is read through.
 _ensure-onetaskgraph:
-    @cargo install onetaskgraph --locked --quiet \
-      --git https://github.com/nickderobertis/onetaskgraph --rev {{onetaskgraph-rev}}
+    @resolved="${ONETASKGRAPH_BIN:-$(command -v onetaskgraph 2>/dev/null || true)}"; \
+      root_args=(); \
+      if [[ "$resolved" == */bin/onetaskgraph ]]; then \
+        root_args=(--root "${resolved%/bin/onetaskgraph}"); \
+      fi; \
+      cargo install onetaskgraph --locked --quiet "${root_args[@]}" \
+        --git https://github.com/nickderobertis/onetaskgraph --rev {{onetaskgraph-rev}}
 
 # These are test runners, not rules: their version cannot change the gate's
 # verdict, so both here and CI take the latest rather than keeping two pins that

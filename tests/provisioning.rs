@@ -34,38 +34,49 @@ mod unix {
             std::env::temp_dir().join(format!("onepipeline-provisioning-{}", std::process::id()));
         fs::create_dir(&root).expect("a fresh provisioning scratch directory");
         let _scratch = Scratch(root.clone());
+        let bin = root.join("bin");
+        fs::create_dir(&bin).expect("the stale installation has a bin directory");
 
-        let binary = root.join("onetaskgraph");
+        let binary = bin.join("onetaskgraph");
         executable(&binary, "#!/bin/sh\nprintf '%s\\n' wrong-revision\n");
         executable(
-            &root.join("cargo"),
+            &bin.join("cargo"),
             r#"#!/bin/sh
 set -eu
 revision=
+root=${CARGO_HOME:?}
 while [ "$#" -gt 0 ]; do
   if [ "$1" = "--rev" ]; then
     revision=$2
-    break
+    shift 2
+    continue
+  fi
+  if [ "$1" = "--root" ]; then
+    root=$2
+    shift 2
+    continue
   fi
   shift
 done
 [ -n "$revision" ]
-cat > "$(dirname "$0")/onetaskgraph" <<EOF
+mkdir -p "$root/bin"
+cat > "$root/bin/onetaskgraph" <<EOF
 #!/bin/sh
 printf '%s\\n' '$revision'
 EOF
-chmod +x "$(dirname "$0")/onetaskgraph"
+chmod +x "$root/bin/onetaskgraph"
 "#,
         );
 
         let host_path = std::env::var_os("PATH").expect("the host has a PATH");
-        let mut paths = vec![root.clone()];
+        let mut paths = vec![bin];
         paths.extend(std::env::split_paths(&host_path));
         let path = std::env::join_paths(paths).expect("the test PATH joins");
         let provisioned = Command::new("just")
             .arg("_ensure-onetaskgraph")
             .current_dir(env!("CARGO_MANIFEST_DIR"))
             .env("PATH", &path)
+            .env("CARGO_HOME", root.join("cargo-home"))
             .output()
             .expect("the provisioning recipe runs");
         assert!(
