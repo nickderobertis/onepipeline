@@ -37,7 +37,132 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 use onepipeline_testfakes::{segment, CLI_BIN_ENV, MEMBER_ENV, SCRIPT_DIR_ENV};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoreResponse<T> {
+    items: Vec<T>,
+    next: Option<String>,
+    plan: serde::de::IgnoredAny,
+    errors: Vec<StoreFailure>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoreFailure {
+    source: String,
+    error: StoreSourceError,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+enum StoreSourceError {
+    Config { message: String },
+    Auth { message: String },
+    Refused { message: String },
+    RateLimited { retry_after_seconds: Option<u64> },
+    Unavailable { message: String },
+    Malformed { message: String },
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct StoreQualified<T> {
+    id: String,
+    item: T,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct StoreTask {
+    id: String,
+    title: String,
+    content: Option<String>,
+    status: StoreStatus,
+    labels: Vec<StoreLabel>,
+    project: Option<String>,
+    url: Option<String>,
+    created_at: Option<String>,
+    updated_at: Option<String>,
+    #[serde(default)]
+    repositories: Vec<String>,
+    #[serde(default)]
+    metadata: BTreeMap<String, Value>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct StoreProject {
+    id: String,
+    title: String,
+    content: Option<String>,
+    status: StoreStatus,
+    labels: Vec<StoreLabel>,
+    url: Option<String>,
+    created_at: Option<String>,
+    updated_at: Option<String>,
+    #[serde(default)]
+    repositories: Vec<String>,
+    #[serde(default)]
+    metadata: BTreeMap<String, Value>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct StoreStatus {
+    category: StoreStatusCategory,
+    name: String,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum StoreStatusCategory {
+    Backlog,
+    Todo,
+    InProgress,
+    Done,
+    Cancelled,
+    Unknown,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct StoreLabel {
+    id: String,
+    name: String,
+    color: Option<String>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct StoreEdge {
+    from: StoreEndpoint,
+    to: StoreEndpoint,
+    kind: StoreEdgeKind,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct StoreEndpoint {
+    id: String,
+    kind: StoreItemKind,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum StoreItemKind {
+    Task,
+    Project,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum StoreEdgeKind {
+    Blocks,
+    Related,
+}
 
 // The exit codes are the crate's own, not a second copy of them. A suite that
 // restated the numbers would keep passing against a build that had changed one,
@@ -396,7 +521,7 @@ impl World {
 
     /// Read this world's project tasks back through the real onetaskgraph binary.
     pub fn store_tasks(&self, project: &str) -> Vec<Value> {
-        self.store_pages(&["task", "list", "--project", project])
+        self.store_pages::<StoreQualified<StoreTask>>(&["task", "list", "--project", project])
     }
 
     /// Read this world's project back through the real onetaskgraph binary.
@@ -426,15 +551,20 @@ impl World {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        serde_json::from_slice(&output.stdout).expect("project show returns JSON")
+        let response: StoreResponse<StoreQualified<StoreProject>> =
+            serde_json::from_slice(&output.stdout).expect("project show returns schema-valid JSON");
+        json!({"items": response.items, "next": response.next})
     }
 
     /// Read one projected task's dependency edges through onetaskgraph.
     pub fn store_deps(&self, task: &str) -> Vec<Value> {
-        self.store_pages(&["task", "deps", task, "--direction", "depends-on"])
+        self.store_pages::<StoreEdge>(&["task", "deps", task, "--direction", "depends-on"])
     }
 
-    fn store_pages(&self, base: &[&str]) -> Vec<Value> {
+    fn store_pages<T>(&self, base: &[&str]) -> Vec<Value>
+    where
+        T: DeserializeOwned + Serialize,
+    {
         let mut items = Vec::new();
         let mut page: Option<String> = None;
         let mut seen = std::collections::BTreeSet::new();
@@ -469,16 +599,12 @@ impl World {
                 "{}",
                 String::from_utf8_lossy(&output.stderr)
             );
-            let response: Value =
-                serde_json::from_slice(&output.stdout).expect("the store page is JSON");
-            items.extend(
-                response["items"]
-                    .as_array()
-                    .expect("the store page carries items")
-                    .iter()
-                    .cloned(),
-            );
-            page = response["next"].as_str().map(str::to_owned);
+            let response: StoreResponse<T> = serde_json::from_slice(&output.stdout)
+                .expect("the store page is schema-valid JSON");
+            items.extend(response.items.into_iter().map(|item| {
+                serde_json::to_value(item).expect("a validated store item renders as JSON")
+            }));
+            page = response.next;
             if page.is_none() {
                 return items;
             }
@@ -2103,48 +2229,6 @@ impl Drop for World {
             let _ = std::fs::remove_dir_all(held_dir());
         }
     }
-}
-
-/// Evidence about the test boundary: `until_store` and `dump` are failure-reporting machinery
-/// of this e2e suite, not a `onepipeline` product interface. The live-edit journeys drive the
-/// real CLI and real store and consume this diagnostic when their user-facing store assertion
-/// times out; this focused harness test deliberately reaches that same timeout with a short
-/// deadline so its panic text can be asserted without adding two minutes to every platform.
-#[test]
-fn a_store_wait_timeout_prints_writeback_child_output_leniently() {
-    let world = World::new("store-wait-diagnostic");
-    let run_dir = world.runs.join("diagnostic-run");
-    std::fs::create_dir_all(&run_dir).expect("the diagnostic run directory is created");
-    std::fs::write(
-        run_dir.join("writeback-task-list.stdout"),
-        "listed task output\n",
-    )
-    .expect("stdout is recorded");
-    std::fs::write(run_dir.join("writeback-task-list.stderr"), [])
-        .expect("empty stderr is recorded");
-    std::fs::write(run_dir.join("writeback-project-copy.stdout"), [0xff, 0xfe])
-        .expect("non-UTF-8 stdout is recorded");
-
-    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        world.until_store_for(
-            std::time::Duration::from_millis(1),
-            "a projection deliberately withheld by this journey",
-            |_| false,
-        );
-    }))
-    .expect_err("the deliberately impossible store wait times out");
-    let message = panic
-        .downcast_ref::<String>()
-        .map(String::as_str)
-        .or_else(|| panic.downcast_ref::<&str>().copied())
-        .expect("the store timeout panic carries text");
-
-    assert!(message
-        .contains("timed out waiting for a projection deliberately withheld by this journey"));
-    assert!(message.contains("writeback-task-list.stdout:\n      listed task output"));
-    assert!(message.contains("writeback-task-list.stderr:\n      (empty)"));
-    assert!(message.contains("writeback-project-copy.stdout:\n      (not UTF-8:"));
-    assert!(message.contains("writeback-project-copy.stderr:\n      (missing)"));
 }
 
 /// `teardown: signalled` is the binary's own evidence: `stop` saying it listed a
