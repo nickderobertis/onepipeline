@@ -1,0 +1,96 @@
+//! Provisioning journeys driven through the same `just` recipe CI uses.
+
+#[cfg(unix)]
+mod unix {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    struct Scratch(PathBuf);
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).expect("the provisioning scratch directory is removed");
+        }
+    }
+
+    fn executable(path: &Path, contents: &str) {
+        fs::write(path, contents).expect("the executable is written");
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+            .expect("the executable is runnable");
+    }
+
+    /// A cached binary is not evidence that it came from the pinned revision.
+    ///
+    /// This puts a wrong-revision `onetaskgraph` and Cargo's installer ahead of
+    /// the host tools, drives the real provisioning recipe, and then resolves
+    /// the binary again. The installer records the requested revision in the
+    /// installed executable, so the final invocation proves which pin the
+    /// provisioning path replaced the stale binary with.
+    #[test]
+    fn provisioning_replaces_a_wrong_revision_on_path_with_the_pin() {
+        let root =
+            std::env::temp_dir().join(format!("onepipeline-provisioning-{}", std::process::id()));
+        fs::create_dir(&root).expect("a fresh provisioning scratch directory");
+        let _scratch = Scratch(root.clone());
+
+        let binary = root.join("onetaskgraph");
+        executable(&binary, "#!/bin/sh\nprintf '%s\\n' wrong-revision\n");
+        executable(
+            &root.join("cargo"),
+            r#"#!/bin/sh
+set -eu
+revision=
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--rev" ]; then
+    revision=$2
+    break
+  fi
+  shift
+done
+[ -n "$revision" ]
+cat > "$(dirname "$0")/onetaskgraph" <<EOF
+#!/bin/sh
+printf '%s\\n' '$revision'
+EOF
+chmod +x "$(dirname "$0")/onetaskgraph"
+"#,
+        );
+
+        let host_path = std::env::var_os("PATH").expect("the host has a PATH");
+        let mut paths = vec![root.clone()];
+        paths.extend(std::env::split_paths(&host_path));
+        let path = std::env::join_paths(paths).expect("the test PATH joins");
+        let provisioned = Command::new("just")
+            .arg("_ensure-onetaskgraph")
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .env("PATH", &path)
+            .output()
+            .expect("the provisioning recipe runs");
+        assert!(
+            provisioned.status.success(),
+            "provisioning failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&provisioned.stdout),
+            String::from_utf8_lossy(&provisioned.stderr)
+        );
+
+        let resolved = Command::new("onetaskgraph")
+            .env("PATH", path)
+            .output()
+            .expect("the provisioned binary resolves");
+        let declaration = include_str!("../src/taskgraph.rs")
+            .lines()
+            .find(|line| line.starts_with("pub const FIRST_REVISION"))
+            .expect("taskgraph declares the provisioning revision");
+        let pinned = declaration
+            .split('"')
+            .nth(1)
+            .expect("the revision declaration carries a quoted value");
+        assert_eq!(
+            String::from_utf8_lossy(&resolved.stdout).trim(),
+            pinned,
+            "the wrong-revision binary survived provisioning"
+        );
+    }
+}
