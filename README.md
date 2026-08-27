@@ -111,8 +111,9 @@ becoming a run that fails on its first node.
 
 The run's own record does not move: the journal, the ledger, and the graph a run
 is executing are still this crate's, projected from that journal under the run's
-ownership lock. onetaskgraph holds the plan's **definition**, not its execution
-history.
+ownership lock. Node status, settlement metadata, and accepted live graph edits
+are projected back onto the onetaskgraph project in the background. A failed
+write is reported and retried; it never changes execution or an edit ruling.
 
 ## What it does
 

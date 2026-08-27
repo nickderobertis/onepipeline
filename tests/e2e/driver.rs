@@ -1129,6 +1129,24 @@ fn a_launch_record_without_a_directory_is_replayed_from_the_adopting_process() {
             .err_has(&dir.to_string_lossy());
     }
 }
+
+#[test]
+fn a_legacy_unqualified_project_does_not_prevent_adoption() {
+    let world = World::new("driver-legacy-project");
+    let run = start_detached_observed(&world, "legacy-project", vec![human("approve", &[])]);
+    world.until("the driver to exit", |world| {
+        world.run(&["status", &run]).stdout.contains("DRIVER DEAD")
+    });
+
+    let mut record = world.run_json(&run, "launch.json");
+    record["project"] = json!("legacy-project");
+    std::fs::write(world.run_file(&run, "launch.json"), record.to_string())
+        .expect("the legacy launch record is rewritten");
+
+    world.run(&["adopt", &run]).exited(0);
+    assert_eq!(world.run_json(&run, "launch.json")["adoptions"], 1);
+    assert_eq!(world.events_of(&run, "driver-adopted").len(), 1);
+}
 // llmlint: ignore-end[tests_mirror_real_usage]
 
 /// An adoption re-addresses the pacemaker at the graph run now driving the run.
@@ -1742,6 +1760,26 @@ fn descendants(pid: u32) -> Vec<u32> {
 }
 
 #[cfg(unix)]
+fn dispatches(driver: u32) -> Vec<u32> {
+    descendants(driver)
+        .into_iter()
+        .filter(|pid| process_name(*pid).starts_with("fake-oneagentgr"))
+        .collect()
+}
+
+#[cfg(unix)]
+fn process_name(pid: u32) -> String {
+    let output = std::process::Command::new("ps")
+        .args(["-o", "comm=", "-p", &pid.to_string()])
+        .output()
+        .expect("ps is available to the process-tree journeys");
+    let command = String::from_utf8_lossy(&output.stdout);
+    std::path::Path::new(command.trim())
+        .file_name()
+        .map_or_else(String::new, |name| name.to_string_lossy().into_owned())
+}
+
+#[cfg(unix)]
 fn still_listed(pid: u32) -> bool {
     process_table().iter().any(|(listed, _)| *listed == pid)
 }
@@ -1825,9 +1863,9 @@ fn stopping_a_run_ends_its_whole_dispatch_tree_and_leaves_the_run_beside_it_alon
     // tree of one process is a journey that would pass without the fix, because
     // the expensive process is a level below the pid the ledger holds.
     world.until("the dispatch to be a process below the driver", |_| {
-        !descendants(driver).is_empty()
+        !dispatches(driver).is_empty()
     });
-    let tree: Vec<u32> = std::iter::once(driver).chain(descendants(driver)).collect();
+    let tree: Vec<u32> = std::iter::once(driver).chain(dispatches(driver)).collect();
     assert!(
         !tree.contains(&untouched),
         "the run beside it is inside the tree, so this journey proves nothing: {tree:?}"
@@ -1866,9 +1904,9 @@ fn a_forced_stop_ends_the_whole_dispatch_tree_of_another_sessions_run() {
         !world.events_of(&run, "node-dispatched").is_empty()
     });
     world.until("the dispatch to be a process below the driver", |_| {
-        !descendants(driver).is_empty()
+        !dispatches(driver).is_empty()
     });
-    let tree: Vec<u32> = std::iter::once(driver).chain(descendants(driver)).collect();
+    let tree: Vec<u32> = std::iter::once(driver).chain(dispatches(driver)).collect();
 
     let stranger = world.as_session("session-forcing");
     stranger
@@ -1915,9 +1953,19 @@ fn a_stop_that_cannot_read_the_process_table_refuses_and_leaves_the_run_retryabl
             !world.events_of(&run, "node-dispatched").is_empty()
         });
         world.until("the dispatch to be a process below the driver", |_| {
-            !descendants(driver).is_empty()
+            !dispatches(driver).is_empty()
         });
-        let tree: Vec<u32> = std::iter::once(driver).chain(descendants(driver)).collect();
+        // A projection copy is deliberately asynchronous and may naturally exit
+        // between this observation and the refusal assertion. It is not part of
+        // the run's execution tree that stop owns; retain the driver and the real
+        // dispatch double whose survival proves the refused stop changed nothing.
+        let tree: Vec<u32> = std::iter::once(driver)
+            .chain(
+                descendants(driver)
+                    .into_iter()
+                    .filter(|pid| process_name(*pid).starts_with("fake-oneagentgr")),
+            )
+            .collect();
 
         let mut command = world.cmd(&["stop", &run]);
         command.env("PATH", path(&world));
@@ -2012,9 +2060,9 @@ fn a_stop_whose_host_says_more_than_it_was_asked_about_a_pid_refuses_and_signals
         !world.events_of(&run, "node-dispatched").is_empty()
     });
     world.until("the dispatch to be a process below the driver", |_| {
-        !descendants(driver).is_empty()
+        !dispatches(driver).is_empty()
     });
-    let tree: Vec<u32> = std::iter::once(driver).chain(descendants(driver)).collect();
+    let tree: Vec<u32> = std::iter::once(driver).chain(dispatches(driver)).collect();
 
     let mut command = world.cmd(&["stop", &run]);
     command.env("PATH", world.path_whose_ps_says_more_than_it_was_asked());
@@ -2150,9 +2198,9 @@ fn stopping_a_run_ends_the_tree_its_lock_names_when_the_record_names_a_dead_driv
         !world.events_of(&run, "node-dispatched").is_empty()
     });
     world.until("the dispatch to be a process below the driver", |_| {
-        !descendants(driver).is_empty()
+        !dispatches(driver).is_empty()
     });
-    let tree: Vec<u32> = std::iter::once(driver).chain(descendants(driver)).collect();
+    let tree: Vec<u32> = std::iter::once(driver).chain(dispatches(driver)).collect();
 
     let record = world.run_file(&run, "launch.json");
     let mut named = world.run_json(&run, "launch.json");
@@ -2213,9 +2261,9 @@ fn a_stop_never_signals_a_pid_the_host_has_given_to_another_process() {
         !world.events_of(&run, "node-dispatched").is_empty()
     });
     world.until("the dispatch to be a process below the driver", |_| {
-        !descendants(driver).is_empty()
+        !dispatches(driver).is_empty()
     });
-    let tree: Vec<u32> = std::iter::once(driver).chain(descendants(driver)).collect();
+    let tree: Vec<u32> = std::iter::once(driver).chain(dispatches(driver)).collect();
 
     // The stranger the host handed the pid to: a real process, started by this
     // test rather than by the run, so it is nobody's descendant in the tree a
@@ -2280,9 +2328,9 @@ fn a_linux_process_identity_survives_wall_clock_start_time_drift() {
         !world.events_of(&run, "node-dispatched").is_empty()
     });
     world.until("the dispatch to be a process below the driver", |_| {
-        !descendants(driver).is_empty()
+        !dispatches(driver).is_empty()
     });
-    let tree: Vec<u32> = std::iter::once(driver).chain(descendants(driver)).collect();
+    let tree: Vec<u32> = std::iter::once(driver).chain(dispatches(driver)).collect();
 
     let mut command = world.cmd(&["stop", &run]);
     command.env("PATH", world.path_whose_ps_start_time_has_drifted());
@@ -2345,6 +2393,19 @@ fn a_stop_that_declines_every_live_identity_does_not_report_success() {
     world.until("a node to be in flight", |world| {
         !world.events_of(&run, "node-dispatched").is_empty()
     });
+    world.until(
+        "the in-flight node to record its live dispatch claim",
+        |world| {
+            std::fs::read_dir(world.run_file(&run, "dispatches")).is_ok_and(|entries| {
+                entries.filter_map(Result::ok).any(|entry| {
+                    entry
+                        .path()
+                        .extension()
+                        .is_some_and(|extension| extension == "json")
+                })
+            })
+        },
+    );
 
     let recorded = world.run_json(&run, "launch.json")["started"]
         .as_str()
@@ -2435,9 +2496,9 @@ fn stopping_a_run_reaches_a_dispatch_whose_driver_and_lock_holder_are_dead() {
         !world.events_of(&run, "node-dispatched").is_empty()
     });
     world.until("the dispatch to be a process below the driver", |_| {
-        !descendants(driver).is_empty()
+        !dispatches(driver).is_empty()
     });
-    let dispatch = descendants(driver);
+    let dispatch = dispatches(driver);
 
     // The driver goes the way a host ends a process it has run out of memory
     // for, and what it started does not go with it.
@@ -2609,12 +2670,11 @@ fn a_failed_dispatch_says_why_while_something_still_holds_the_stream_it_said_it_
 #[test]
 fn stopping_a_run_whose_work_is_over_says_there_was_nothing_to_stop() {
     let world = World::new("driver-stop-nothing");
-    let run = start_detached(&world, "finished", vec![agent("build", &[])]);
-    world.until("the run to settle", |world| {
-        world.run_file(&run, "result.json").is_file()
-    });
+    let run = "finished";
+    let plan = world.plan(run, &plan_of(run, vec![agent("build", &[])]));
+    world.run(&["start", &plan, "--attach"]).settled();
 
-    let stopped = world.run(&["stop", &run]);
+    let stopped = world.run(&["stop", run]);
     stopped.exited(0).out_has("\"stopped\":true");
     assert_eq!(
         stopped.json()["teardown"],
@@ -2624,7 +2684,7 @@ fn stopping_a_run_whose_work_is_over_says_there_was_nothing_to_stop() {
     );
     // And the run's own record says the same, so a later reader is not left to
     // take this for a run whose workers were ended by it.
-    let recorded = world.events_of(&run, "run-stopped");
+    let recorded = world.events_of(run, "run-stopped");
     assert_eq!(recorded.len(), 1, "the stop went unrecorded");
     assert_eq!(recorded[0]["payload"]["teardown"], json!("nothing-to-stop"));
 }
@@ -2647,7 +2707,7 @@ fn a_stop_that_found_nothing_running_never_reports_its_workers_as_ended() {
         !world.events_of(&run, "node-dispatched").is_empty()
     });
     world.until("the dispatch to be a process below the driver", |_| {
-        !descendants(driver).is_empty()
+        !dispatches(driver).is_empty()
     });
     for pid in std::iter::once(driver).chain(descendants(driver)) {
         end_process(pid);
@@ -2720,9 +2780,12 @@ fn a_dispatch_this_run_cannot_record_is_refused_and_does_not_run() {
         },
     );
     world.until("the held dispatch to be a process below the driver", |_| {
-        !descendants(driver).is_empty()
+        !dispatches(driver).is_empty()
     });
-    let held = descendants(driver);
+    let held = descendants(driver)
+        .into_iter()
+        .filter(|pid| process_name(*pid).starts_with("fake-oneagentgr"))
+        .collect::<std::collections::BTreeSet<_>>();
 
     // The registry cannot be written: a file where its directory has to be, which
     // no host will create a directory under.
@@ -2770,7 +2833,13 @@ fn a_dispatch_this_run_cannot_record_is_refused_and_does_not_run() {
     // driver would be one this run cannot find and nobody asked for.
     world.until(
         "the refused dispatch to be gone from under the driver",
-        |_| descendants(driver) == held,
+        |_| {
+            descendants(driver)
+                .into_iter()
+                .filter(|pid| process_name(*pid).starts_with("fake-oneagentgr"))
+                .collect::<std::collections::BTreeSet<_>>()
+                == held
+        },
     );
     world.release("held.go");
 }
@@ -2801,9 +2870,9 @@ fn stopping_a_run_whose_lock_cannot_be_read_says_so_and_still_ends_what_it_finds
         !world.events_of(&run, "node-dispatched").is_empty()
     });
     world.until("the dispatch to be a process below the driver", |_| {
-        !descendants(driver).is_empty()
+        !dispatches(driver).is_empty()
     });
-    let tree: Vec<u32> = std::iter::once(driver).chain(descendants(driver)).collect();
+    let tree: Vec<u32> = std::iter::once(driver).chain(dispatches(driver)).collect();
 
     std::fs::write(
         world.run_file(&run, "owner.lock"),
@@ -2888,9 +2957,9 @@ fn stopping_a_run_whose_registry_cannot_be_read_refuses_and_leaves_the_run_retry
             !world.events_of(&run, "node-dispatched").is_empty()
         });
         world.until("the dispatch to be a process below the driver", |_| {
-            !descendants(driver).is_empty()
+            !dispatches(driver).is_empty()
         });
-        let tree: Vec<u32> = std::iter::once(driver).chain(descendants(driver)).collect();
+        let tree: Vec<u32> = std::iter::once(driver).chain(dispatches(driver)).collect();
 
         let planted = world.run_file(&run, "dispatches/planted.json");
         match &entry {
@@ -2976,9 +3045,9 @@ fn a_registry_entry_from_another_build_is_read_and_its_work_is_still_stopped() {
         !world.events_of(&run, "node-dispatched").is_empty()
     });
     world.until("the dispatch to be a process below the driver", |_| {
-        !descendants(driver).is_empty()
+        !dispatches(driver).is_empty()
     });
-    let tree: Vec<u32> = std::iter::once(driver).chain(descendants(driver)).collect();
+    let tree: Vec<u32> = std::iter::once(driver).chain(dispatches(driver)).collect();
 
     let registry = world.run_file(&run, "dispatches");
     let entries: Vec<std::path::PathBuf> = std::fs::read_dir(&registry)
@@ -3033,9 +3102,9 @@ fn a_stop_whose_tree_takes_the_ask_and_stays_refuses_rather_than_reporting_a_cle
         !world.events_of(&run, "node-dispatched").is_empty()
     });
     world.until("the dispatch to be a process below the driver", |_| {
-        !descendants(driver).is_empty()
+        !dispatches(driver).is_empty()
     });
-    let worker = descendants(driver);
+    let worker = dispatches(driver);
 
     let refused = world.run(&["stop", &run]);
     refused.exited(REFUSED).err_has("only partly stopped");
@@ -3099,9 +3168,9 @@ fn a_stop_that_reaches_part_of_the_tree_refuses_and_names_what_it_left() {
         !world.events_of(&run, "node-dispatched").is_empty()
     });
     world.until("the dispatch to be a process below the driver", |_| {
-        !descendants(driver).is_empty()
+        !dispatches(driver).is_empty()
     });
-    let tree: Vec<u32> = std::iter::once(driver).chain(descendants(driver)).collect();
+    let tree: Vec<u32> = std::iter::once(driver).chain(dispatches(driver)).collect();
 
     let mut command = world.cmd(&["stop", &run]);
     command.env(

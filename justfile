@@ -73,11 +73,26 @@ _crate-bootstrap:
 # bootstrap, so `check` itself stays offline; the e2e suite **fails** without one
 # rather than skipping, because a plan read through a stand-in would prove the
 # stand-in.
-# Install the `onetaskgraph` every plan in this repository is read through.
 _ensure-onetaskgraph:
-    @command -v onetaskgraph >/dev/null 2>&1 \
-      || cargo install onetaskgraph --locked --quiet \
-           --git https://github.com/nickderobertis/onetaskgraph --rev {{onetaskgraph-rev}}
+    @resolved="${ONETASKGRAPH_BIN:-$(command -v onetaskgraph 2>/dev/null || true)}"; \
+      cargo_root="${CARGO_HOME:-$HOME/.cargo}"; \
+      if [[ "$resolved" == */bin/onetaskgraph ]]; then \
+        resolved_root="${resolved%/bin/onetaskgraph}"; \
+        if [[ "$resolved_root" != "$cargo_root" ]]; then \
+          cargo install onetaskgraph --locked --quiet --force --root "$resolved_root" \
+            --git https://github.com/nickderobertis/onetaskgraph --rev {{onetaskgraph-rev}}; \
+        else \
+          cargo install onetaskgraph --locked --quiet --force \
+            --git https://github.com/nickderobertis/onetaskgraph --rev {{onetaskgraph-rev}}; \
+        fi; \
+      else \
+        cargo install onetaskgraph --locked --quiet --force \
+          --git https://github.com/nickderobertis/onetaskgraph --rev {{onetaskgraph-rev}}; \
+      fi; \
+      if [[ -n "$resolved" && "$resolved" != */bin/onetaskgraph ]]; then \
+        cp "$cargo_root/bin/onetaskgraph" "$resolved"; \
+        chmod +x "$resolved"; \
+      fi
 
 # These are test runners, not rules: their version cannot change the gate's
 # verdict, so both here and CI take the latest rather than keeping two pins that

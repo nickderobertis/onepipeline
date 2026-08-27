@@ -18,7 +18,7 @@
 // real store binary against a real folder of Markdown. `harness.rs` carries the same
 // suppression and the full rationale.
 
-use crate::harness::{double, plan_of, World, REFUSED, STORE_BINARY_ENV};
+use crate::harness::{double, onetaskgraph_binary, plan_of, World, REFUSED, STORE_BINARY_ENV};
 use serde_json::{json, Value};
 
 /// A run launches from a local Markdown project, with no remote system in it at
@@ -85,6 +85,560 @@ fn a_run_launches_from_a_local_markdown_project_and_executes_the_graph_it_holds(
         .run(&["goals", "localmd"])
         .exited(0)
         .out_has("Deliver it from a folder of Markdown");
+}
+
+/// Losing the store is a projection failure, never an execution failure. The worker reports
+/// it, keeps retrying off the reconcile loop, and catches the board up when it returns.
+#[test]
+fn an_unreachable_store_is_reported_and_retried_while_the_run_completes_unaffected() {
+    let world = World::new("store-writeback-retry");
+    world.script("work.wait", "hold");
+    let project = world.plan(
+        "writeback-retry",
+        &plan_of(
+            "writeback-retry",
+            vec![
+                crate::harness::agent("work", &[]),
+                crate::harness::agent("later", &["work"]),
+            ],
+        ),
+    );
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the running state to reach the store", |world| {
+        world.store_tasks(&project).iter().any(|task| {
+            task["item"]["metadata"]["onepipeline.id"] == "work"
+                && task["item"]["status"]["category"] == "in-progress"
+        })
+    });
+
+    let unavailable = world.root.join("plan-store-unavailable");
+    std::fs::rename(world.store(), &unavailable).expect("the store becomes unreachable");
+    world
+        .run_with_stdin(
+            &["reply", "writeback-retry"],
+            &json!({
+                "version": 1,
+                "commands": [{"op": "context", "id": "later", "note": "retry this projection"}]
+            })
+            .to_string(),
+        )
+        .exited(0);
+    world.until("write-back failure to be reported", |world| {
+        std::fs::read_to_string(world.run_file("writeback-retry", "driver.log")).is_ok_and(|log| {
+            log.contains("onetaskgraph write-back failed") && log.contains("retrying")
+        })
+    });
+    std::fs::rename(&unavailable, world.store()).expect("the store returns");
+    world.until("write-back recovery to be reported", |world| {
+        std::fs::read_to_string(world.run_file("writeback-retry", "driver.log"))
+            .is_ok_and(|log| log.contains("onetaskgraph write-back recovered"))
+    });
+    world.until("the retried edit to reach the store", |world| {
+        world.store_tasks(&project).iter().any(|task| {
+            task["item"]["metadata"]["onepipeline.id"] == "later"
+                && task["item"]["metadata"]["onepipeline.context"] == "retry this projection"
+        })
+    });
+
+    // Take it away again for terminal settlement. It remains unreachable until
+    // the journal says the graph is complete and the terminal publication has
+    // failed, then returns while that failed publication is retryable.
+    std::fs::rename(world.store(), &unavailable).expect("the store becomes unreachable again");
+
+    // The engine remains live and its own journal, not a read from the missing
+    // store, still decides what executes. Both nodes settle while the store is
+    // absent, which is the graph-completion boundary the terminal projection
+    // cannot influence.
+    assert_eq!(
+        world.events_of("writeback-retry", "node-dispatched").len(),
+        1
+    );
+    world.release("work.go");
+    world.until(
+        "the graph to settle while the store is unreachable",
+        |world| world.events_of("writeback-retry", "node-settled").len() == 2,
+    );
+    world.until("terminal write-back failure to be reported", |world| {
+        std::fs::read_to_string(world.run_file("writeback-retry", "driver.log"))
+            .is_ok_and(|log| log.matches("onetaskgraph write-back failed").count() >= 2)
+    });
+    assert!(
+        !world.store().exists(),
+        "the terminal failure was only observed after the store became reachable"
+    );
+    assert_eq!(
+        world.events_of("writeback-retry", "node-dispatched").len(),
+        2,
+        "the outage kept the dependent node from dispatching"
+    );
+
+    // Bring the store back inside the worker's bounded closeout window. It must
+    // retry the failed terminal publication and project both settlements
+    // without revisiting execution.
+    std::fs::rename(&unavailable, world.store()).expect("the store returns after settlement");
+    world.until("terminal write-back recovery to be reported", |world| {
+        std::fs::read_to_string(world.run_file("writeback-retry", "driver.log"))
+            .is_ok_and(|log| log.matches("onetaskgraph write-back recovered").count() >= 2)
+    });
+    world.until_store(
+        "the recovered terminal settlement to reach the store",
+        |world| {
+            world.store_tasks(&project).iter().all(|task| {
+                task["item"]["status"]["category"] == "done"
+                    && task["item"]["metadata"]["onepipeline.settlement"].is_object()
+            })
+        },
+    );
+    world.until("the recovered run to write its result", |world| {
+        world.run_file("writeback-retry", "result.json").is_file()
+    });
+    let result = world.run_json("writeback-retry", "result.json");
+    assert_eq!(result["state"], "complete", "{result}");
+    assert!(
+        result["nodes"]
+            .as_array()
+            .expect("result nodes")
+            .iter()
+            .all(|node| node["status"] == "done"),
+        "the outage changed a node's settlement: {result}"
+    );
+    assert_eq!(
+        world.events_of("writeback-retry", "node-dispatched").len(),
+        2,
+        "recovering terminal write-back changed execution"
+    );
+}
+
+/// A copy refusal happens after the destination task list was read successfully. The
+/// write-back worker reports that child failure, retries through the same subprocess
+/// boundary, and publishes the snapshot when the real sibling accepts the next copy.
+#[test]
+fn a_project_copy_refusal_is_reported_retried_and_recovers() {
+    let world = World::new("store-writeback-copy-retry");
+    world.script("work.wait", "hold");
+    let project = world.plan(
+        "writeback-copy-retry",
+        &plan_of(
+            "writeback-copy-retry",
+            vec![crate::harness::agent("work", &[])],
+        ),
+    );
+    world.script(
+        "onetaskgraph.delegate",
+        &onetaskgraph_binary().to_string_lossy(),
+    );
+    world.script(
+        "onetaskgraph.project-copy.refuse.1",
+        "the destination refused this copy once\n",
+    );
+    let world = world.with_env(
+        STORE_BINARY_ENV,
+        &double("fake-onetaskgraph").to_string_lossy(),
+    );
+
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the copy refusal and recovery to be reported", |world| {
+        std::fs::read_to_string(world.run_file("writeback-copy-retry", "driver.log")).is_ok_and(
+            |log| {
+                log.contains("the destination refused this copy once")
+                    && log.contains("onetaskgraph write-back recovered")
+            },
+        )
+    });
+    world.until_store("the retried snapshot to reach the real store", |world| {
+        world.store_tasks(&project).iter().any(|task| {
+            task["item"]["metadata"]["onepipeline.id"] == "work"
+                && task["item"]["status"]["category"] == "in-progress"
+        })
+    });
+
+    world.release("work.go");
+    world.until("the run to settle after copy recovery", |world| {
+        world
+            .run_file("writeback-copy-retry", "result.json")
+            .is_file()
+    });
+}
+
+/// Losing the worker's own command-capture path is handled by the same best-effort
+/// boundary as losing the destination: the committed graph keeps running, and the
+/// projection catches up after the filesystem recovers.
+///
+/// This fault injection depends on POSIX `File::create` refusing a path occupied by a
+/// directory. Windows can open that path as a directory-associated handle instead: the
+/// sibling then completes successfully, so there is deliberately no capture failure for
+/// this journey to await. The portable sibling-refusal path is covered separately by
+/// `a_project_copy_refusal_is_reported_retried_and_recovers`.
+#[cfg(not(windows))]
+#[test]
+fn an_unwritable_writeback_capture_is_reported_retried_and_recovered() {
+    let world = World::new("store-writeback-capture-retry");
+    world.script("work.wait", "hold");
+    let project = world.plan(
+        "writeback-capture-retry",
+        &plan_of(
+            "writeback-capture-retry",
+            vec![
+                crate::harness::agent("work", &[]),
+                crate::harness::agent("later", &["work"]),
+            ],
+        ),
+    );
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the initial projection to finish", |world| {
+        world.store_tasks(&project).iter().any(|task| {
+            task["item"]["metadata"]["onepipeline.id"] == "work"
+                && task["item"]["status"]["category"] == "in-progress"
+        })
+    });
+
+    let capture = world.run_file("writeback-capture-retry", "writeback-task-list.stdout");
+    std::fs::remove_file(&capture).expect("the completed capture is removed");
+    std::fs::create_dir(&capture).expect("a directory makes the capture path unwritable");
+    world
+        .run_with_stdin(
+            &["reply", "writeback-capture-retry"],
+            &json!({
+                "version": 1,
+                "commands": [{"op": "context", "id": "later", "note": "capture recovered"}]
+            })
+            .to_string(),
+        )
+        .exited(0);
+    world.until("the capture failure to be reported", |world| {
+        std::fs::read_to_string(world.run_file("writeback-capture-retry", "driver.log")).is_ok_and(
+            |log| {
+                log.contains("onetaskgraph write-back failed")
+                    && log.contains("retrying")
+                    && log.contains("Is a directory")
+            },
+        )
+    });
+
+    std::fs::remove_dir(&capture).expect("the capture path becomes writable again");
+    world.until("capture recovery to be reported", |world| {
+        std::fs::read_to_string(world.run_file("writeback-capture-retry", "driver.log"))
+            .is_ok_and(|log| log.contains("onetaskgraph write-back recovered"))
+    });
+    world.until_store("the committed edit to reach the recovered store", |world| {
+        world.store_tasks(&project).iter().any(|task| {
+            task["item"]["metadata"]["onepipeline.id"] == "later"
+                && task["item"]["metadata"]["onepipeline.context"] == "capture recovered"
+        })
+    });
+
+    assert_eq!(
+        world
+            .events_of("writeback-capture-retry", "edit-committed")
+            .len(),
+        1,
+        "capture failure changed edit validation or journal commitment"
+    );
+    assert_eq!(
+        world
+            .events_of("writeback-capture-retry", "node-dispatched")
+            .len(),
+        1,
+        "capture failure changed scheduling"
+    );
+    world.release("work.go");
+    world.until("the unaffected run to complete", |world| {
+        world
+            .run_file("writeback-capture-retry", "result.json")
+            .is_file()
+    });
+    assert_eq!(
+        world.run_json("writeback-capture-retry", "result.json")["state"],
+        "complete"
+    );
+}
+
+/// Returning to the last successful graph is still a new projection when a different
+/// snapshot superseded it while the store was unavailable.
+#[test]
+fn a_reverted_edit_supersedes_the_failed_projection_before_store_recovery() {
+    let world = World::new("store-writeback-reverted-edit");
+    world.script("work.wait", "hold");
+    world.script("spare.wait", "hold");
+    let project = world.plan(
+        "writeback-reverted-edit",
+        &plan_of(
+            "writeback-reverted-edit",
+            vec![
+                crate::harness::agent("work", &[]),
+                crate::harness::agent("spare", &[]),
+                crate::harness::agent("later", &["work"]),
+            ],
+        ),
+    );
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until_store("the original edge to reach the store", |world| {
+        world
+            .store_tasks(&project)
+            .into_iter()
+            .find(|task| task["item"]["metadata"]["onepipeline.id"] == "later")
+            .is_some_and(|task| {
+                world
+                    .store_deps(task["id"].as_str().expect("later has a qualified id"))
+                    .len()
+                    == 1
+            })
+    });
+
+    let unavailable = world.root.join("plan-store-reverted-edit-unavailable");
+    std::fs::rename(world.store(), &unavailable).expect("the store becomes unreachable");
+    let reparent = |deps: &[&str]| {
+        world
+            .run_with_stdin(
+                &["reply", "writeback-reverted-edit"],
+                &json!({
+                    "version": 1,
+                    "commands": [{"op": "reparent", "id": "later", "deps": deps}]
+                })
+                .to_string(),
+            )
+            .exited(0)
+            .out_has("\"applied\"");
+    };
+    reparent(&["work", "spare"]);
+    world.until("the changed projection to fail", |world| {
+        std::fs::read_to_string(world.run_file("writeback-reverted-edit", "driver.log"))
+            .is_ok_and(|log| log.contains("onetaskgraph write-back failed"))
+    });
+    reparent(&["work"]);
+    world.until("both edits to be committed before recovery", |world| {
+        world
+            .events_of("writeback-reverted-edit", "edit-committed")
+            .len()
+            == 2
+    });
+
+    std::fs::rename(&unavailable, world.store()).expect("the store recovers");
+    world.until("write-back to report recovery", |world| {
+        std::fs::read_to_string(world.run_file("writeback-reverted-edit", "driver.log"))
+            .is_ok_and(|log| log.contains("onetaskgraph write-back recovered"))
+    });
+    let recovered_later = world
+        .store_tasks(&project)
+        .into_iter()
+        .find(|task| task["item"]["metadata"]["onepipeline.id"] == "later")
+        .expect("the recovered store still has later");
+    assert_eq!(
+        world
+            .store_deps(
+                recovered_later["id"]
+                    .as_str()
+                    .expect("later has a qualified id")
+            )
+            .len(),
+        1,
+        "recovery published the superseded two-edge snapshot after its one-edge replacement was committed"
+    );
+    world.until_store("the reverted edge to supersede the failed edit", |world| {
+        world
+            .store_tasks(&project)
+            .into_iter()
+            .find(|task| task["item"]["metadata"]["onepipeline.id"] == "later")
+            .is_some_and(|task| {
+                world
+                    .store_deps(task["id"].as_str().expect("later has a qualified id"))
+                    .len()
+                    == 1
+            })
+    });
+
+    world.release("work.go");
+    world.release("spare.go");
+    world.until("the unchanged run to settle", |world| {
+        world
+            .run_file("writeback-reverted-edit", "result.json")
+            .is_file()
+    });
+    assert_eq!(
+        world.run_json("writeback-reverted-edit", "result.json")["state"],
+        "complete"
+    );
+}
+
+/// A store that remains unavailable cannot hold terminal run settlement past the write-back
+/// closeout bound. This drives the installed CLI and real local-md sibling, then observes the
+/// user's result file while the store is still absent.
+#[test]
+fn a_terminal_writeback_outage_expires_without_holding_run_settlement() {
+    let world = World::new("store-writeback-closeout-expiry");
+    world.script("work.wait", "hold");
+    let project = world.plan(
+        "writeback-closeout-expiry",
+        &plan_of(
+            "writeback-closeout-expiry",
+            vec![crate::harness::agent("work", &[])],
+        ),
+    );
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the work to be dispatched", |world| {
+        world
+            .events_of("writeback-closeout-expiry", "node-dispatched")
+            .len()
+            == 1
+    });
+
+    let unavailable = world.root.join("plan-store-unavailable-through-closeout");
+    std::fs::rename(world.store(), &unavailable).expect("the store becomes unreachable");
+    let released = std::time::Instant::now();
+    world.release("work.go");
+    world.until(
+        "the run to settle after write-back closeout expires",
+        |world| {
+            world
+                .run_file("writeback-closeout-expiry", "result.json")
+                .is_file()
+        },
+    );
+
+    assert!(
+        released.elapsed() < std::time::Duration::from_secs(15),
+        "the unavailable store held closeout for {:?}",
+        released.elapsed()
+    );
+    assert!(
+        !world.store().exists(),
+        "the run only settled after the store became reachable"
+    );
+    let result = world.run_json("writeback-closeout-expiry", "result.json");
+    assert_eq!(result["state"], "complete", "{result}");
+    assert_eq!(result["nodes"][0]["status"], "done", "{result}");
+    let log = std::fs::read_to_string(world.run_file("writeback-closeout-expiry", "driver.log"))
+        .expect("the driver log is readable");
+    assert!(
+        log.contains("onetaskgraph write-back failed") && log.contains("retrying"),
+        "the run settled without reporting the store outage: {log}"
+    );
+}
+
+#[test]
+fn a_settled_project_launches_again_from_its_projected_metadata() {
+    let first = World::new("store-writeback-relaunch-first");
+    let project = first.plan(
+        "writeback-relaunch",
+        &plan_of(
+            "writeback-relaunch",
+            vec![crate::harness::agent("work", &[])],
+        ),
+    );
+    first.run(&["start", &project, "--attach"]).settled();
+    first.until("the settlement to reach the project", |world| {
+        world
+            .store_tasks(&project)
+            .iter()
+            .any(|task| task["item"]["metadata"]["onepipeline.settlement"].is_object())
+    });
+
+    let second = World::new("store-writeback-relaunch-second").with_env(
+        "ONETASKGRAPH_SOURCES__PLANS__CONFIG__ROOT",
+        &first.store().to_string_lossy(),
+    );
+    second.run(&["start", &project, "--attach"]).settled();
+    assert_eq!(
+        second.run_json("writeback-relaunch", "result.json")["state"],
+        "complete"
+    );
+}
+
+#[test]
+fn derived_waiting_failed_and_parked_states_use_their_board_categories() {
+    let world = World::new("store-writeback-categories");
+    let local = world.repository("local-direct", &[]);
+    let local = local.checkout.to_string_lossy().into_owned();
+    world.script("fails.fail", "1");
+    let project = world.plan(
+        "writeback-categories",
+        &json!({
+            "schema_version": 3,
+            "name": "writeback-categories",
+            "concurrency": 2,
+            "goal": {"text": "Keep the board current"},
+            "tasks": [
+                {"id": "fails", "persona": "engineer", "task": "## What\nFail."},
+                {"id": "skipped", "persona": "engineer", "task": "## What\nWait.", "deps": ["fails"]},
+                {"id": "parked", "persona": "engineer", "task": "## What\nWait.", "parked": true},
+                {"id": "approve", "kind": "human", "task": "Approve it."},
+                {"id": "blocked", "persona": "engineer", "task": "## What\nWait.", "deps": ["approve"]},
+                {"id": "cross", "persona": "engineer", "task": "## What\nWait.", "parked": true, "deps": ["run:missing#up"]},
+                {"id": "hosted", "persona": "engineer", "task": "## What\nWait.\n\nKeep this body.", "parked": true, "repo": "github.com/owner/service", "title": "test: hosted", "max_turns": 7, "context": "carry this note"},
+                {"id": "local", "persona": "engineer", "task": "## What\nWait.", "parked": true, "repo": local, "title": "test: local"}
+            ]
+        }),
+    );
+    let original_ids: std::collections::BTreeMap<String, String> = world
+        .store_tasks(&project)
+        .into_iter()
+        .filter_map(|task| {
+            Some((
+                task["item"]["metadata"]["onepipeline.id"]
+                    .as_str()?
+                    .to_owned(),
+                task["id"].as_str()?.to_owned(),
+            ))
+        })
+        .collect();
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("every derived category to reach the store", |world| {
+        let categories: std::collections::BTreeMap<String, String> = world
+            .store_tasks(&project)
+            .iter()
+            .filter_map(|task| {
+                Some((
+                    task["item"]["metadata"]["onepipeline.id"]
+                        .as_str()?
+                        .to_owned(),
+                    task["item"]["status"]["category"].as_str()?.to_owned(),
+                ))
+            })
+            .collect();
+        let tasks = world.store_tasks(&project);
+        categories.get("fails").is_some_and(|value| value == "done")
+            && categories
+                .get("parked")
+                .is_some_and(|value| value == "cancelled")
+            && categories
+                .get("skipped")
+                .is_some_and(|value| value == "cancelled")
+            && categories
+                .get("approve")
+                .is_some_and(|value| value == "todo")
+            && categories
+                .get("blocked")
+                .is_some_and(|value| value == "todo")
+            && tasks.iter().any(|task| {
+                task["item"]["metadata"]["onepipeline.id"] == "cross"
+                    && task["item"]["metadata"]["onepipeline.deps"] == json!(["run:missing#up"])
+            })
+            && tasks.iter().any(|task| {
+                task["item"]["metadata"]["onepipeline.id"] == "hosted"
+                    && task["item"]["repositories"] == json!(["github.com/owner/service"])
+                    && task["id"] == original_ids["hosted"]
+                    && task["item"]["title"] == "test: hosted"
+                    && task["item"]["content"]
+                        .as_str()
+                        .is_some_and(|body| body.contains("Keep this body."))
+                    && task["item"]["metadata"]["onepipeline.persona"] == "engineer"
+                    && task["item"]["metadata"]["onepipeline.max_turns"] == 7
+                    && task["item"]["metadata"]["onepipeline.context"] == "carry this note"
+            })
+            && tasks.iter().any(|task| {
+                task["item"]["metadata"]["onepipeline.id"] == "local"
+                    && task["item"]["metadata"]["onepipeline.repo"] == local
+            })
+            && {
+                let project = world.store_project(&project);
+                project["items"][0]["item"]["metadata"]["onepipeline.schema_version"] == 3
+                    && project["items"][0]["item"]["metadata"]["onepipeline.concurrency"] == 2
+                    && project["items"][0]["item"]["metadata"]["onepipeline.goal"]["text"]
+                        == "Keep the board current"
+                    && project["items"][0]["item"]["metadata"]["onepipeline.name"]
+                        == "writeback-categories"
+            }
+    });
 }
 
 /// A project produces the same graph a plan document of the same content

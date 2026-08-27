@@ -37,7 +37,132 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 use onepipeline_testfakes::{segment, CLI_BIN_ENV, MEMBER_ENV, SCRIPT_DIR_ENV};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoreResponse<T> {
+    items: Vec<T>,
+    next: Option<String>,
+    plan: serde::de::IgnoredAny,
+    errors: Vec<StoreFailure>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoreFailure {
+    source: String,
+    error: StoreSourceError,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+enum StoreSourceError {
+    Config { message: String },
+    Auth { message: String },
+    Refused { message: String },
+    RateLimited { retry_after_seconds: Option<u64> },
+    Unavailable { message: String },
+    Malformed { message: String },
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct StoreQualified<T> {
+    id: String,
+    item: T,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct StoreTask {
+    id: String,
+    title: String,
+    content: Option<String>,
+    status: StoreStatus,
+    labels: Vec<StoreLabel>,
+    project: Option<String>,
+    url: Option<String>,
+    created_at: Option<String>,
+    updated_at: Option<String>,
+    #[serde(default)]
+    repositories: Vec<String>,
+    #[serde(default)]
+    metadata: BTreeMap<String, Value>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct StoreProject {
+    id: String,
+    title: String,
+    content: Option<String>,
+    status: StoreStatus,
+    labels: Vec<StoreLabel>,
+    url: Option<String>,
+    created_at: Option<String>,
+    updated_at: Option<String>,
+    #[serde(default)]
+    repositories: Vec<String>,
+    #[serde(default)]
+    metadata: BTreeMap<String, Value>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct StoreStatus {
+    category: StoreStatusCategory,
+    name: String,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum StoreStatusCategory {
+    Backlog,
+    Todo,
+    InProgress,
+    Done,
+    Cancelled,
+    Unknown,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct StoreLabel {
+    id: String,
+    name: String,
+    color: Option<String>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct StoreEdge {
+    from: StoreEndpoint,
+    to: StoreEndpoint,
+    kind: StoreEdgeKind,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct StoreEndpoint {
+    id: String,
+    kind: StoreItemKind,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum StoreItemKind {
+    Task,
+    Project,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum StoreEdgeKind {
+    Blocks,
+    Related,
+}
 
 // The exit codes are the crate's own, not a second copy of them. A suite that
 // restated the numbers would keep passing against a build that had changed one,
@@ -392,6 +517,102 @@ impl World {
             args,
             self,
         )
+    }
+
+    /// Read this world's project tasks back through the real onetaskgraph binary.
+    pub fn store_tasks(&self, project: &str) -> Vec<Value> {
+        self.store_pages::<StoreQualified<StoreTask>>(&["task", "list", "--project", project])
+    }
+
+    /// Read this world's project back through the real onetaskgraph binary.
+    pub fn store_project(&self, project: &str) -> Value {
+        let output = std::process::Command::new(onetaskgraph_binary())
+            .args(["project", "show", project, "--json"])
+            .env("XDG_CONFIG_HOME", self.root.join("xdg"))
+            .env("ONETASKGRAPH_DEFAULT_SOURCES", STORE_SOURCE)
+            .env(
+                format!(
+                    "ONETASKGRAPH_SOURCES__{}__PLUGIN",
+                    STORE_SOURCE.to_uppercase()
+                ),
+                "local-md",
+            )
+            .env(
+                format!(
+                    "ONETASKGRAPH_SOURCES__{}__CONFIG__ROOT",
+                    STORE_SOURCE.to_uppercase()
+                ),
+                self.store(),
+            )
+            .output()
+            .expect("the real onetaskgraph reads the project");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let response: StoreResponse<StoreQualified<StoreProject>> =
+            serde_json::from_slice(&output.stdout).expect("project show returns schema-valid JSON");
+        json!({"items": response.items, "next": response.next})
+    }
+
+    /// Read one projected task's dependency edges through onetaskgraph.
+    pub fn store_deps(&self, task: &str) -> Vec<Value> {
+        self.store_pages::<StoreEdge>(&["task", "deps", task, "--direction", "depends-on"])
+    }
+
+    fn store_pages<T>(&self, base: &[&str]) -> Vec<Value>
+    where
+        T: DeserializeOwned + Serialize,
+    {
+        let mut items = Vec::new();
+        let mut page: Option<String> = None;
+        let mut seen = std::collections::BTreeSet::new();
+        loop {
+            let mut args: Vec<String> = base.iter().map(|arg| (*arg).to_owned()).collect();
+            args.push("--json".to_owned());
+            if let Some(token) = &page {
+                args.extend(["--page".to_owned(), token.clone()]);
+            }
+            let output = std::process::Command::new(onetaskgraph_binary())
+                .args(&args)
+                .env("XDG_CONFIG_HOME", self.root.join("xdg"))
+                .env("ONETASKGRAPH_DEFAULT_SOURCES", STORE_SOURCE)
+                .env(
+                    format!(
+                        "ONETASKGRAPH_SOURCES__{}__PLUGIN",
+                        STORE_SOURCE.to_uppercase()
+                    ),
+                    "local-md",
+                )
+                .env(
+                    format!(
+                        "ONETASKGRAPH_SOURCES__{}__CONFIG__ROOT",
+                        STORE_SOURCE.to_uppercase()
+                    ),
+                    self.store(),
+                )
+                .output()
+                .expect("the real onetaskgraph reads a store page");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let response: StoreResponse<T> = serde_json::from_slice(&output.stdout)
+                .expect("the store page is schema-valid JSON");
+            items.extend(response.items.into_iter().map(|item| {
+                serde_json::to_value(item).expect("a validated store item renders as JSON")
+            }));
+            page = response.next;
+            if page.is_none() {
+                return items;
+            }
+            assert!(
+                seen.insert(page.clone()),
+                "the store repeated a page cursor"
+            );
+        }
     }
 
     /// The `onepipeline` binary with the **real** `oneagentgraph` behind that one
@@ -1586,6 +1807,34 @@ impl World {
         );
     }
 
+    /// Wait for a predicate that reads the store through a real sibling process.
+    ///
+    /// A normal wait observes files and can poll cheaply. Each store observation
+    /// starts `onetaskgraph`, though, and polling that boundary every 20ms can
+    /// consume the process-start capacity the asynchronous copy itself needs on a
+    /// loaded cross-platform runner. The deadline and assertion stay identical;
+    /// only the expensive observer yields between reads.
+    pub fn until_store(&self, what: &str, mut ready: impl FnMut(&Self) -> bool) {
+        self.until_store_for(std::time::Duration::from_secs(120), what, &mut ready);
+    }
+
+    fn until_store_for(
+        &self,
+        duration: std::time::Duration,
+        what: &str,
+        mut ready: impl FnMut(&Self) -> bool,
+    ) {
+        if waited_for(duration, std::time::Duration::from_millis(250), || {
+            ready(self)
+        }) {
+            return;
+        }
+        panic!(
+            "timed out waiting for {what}; the runs root held:\n{}",
+            self.dump()
+        );
+    }
+
     /// Wait until a file inside a run's directory holds `needle`, or fail with
     /// what it held instead.
     ///
@@ -1633,6 +1882,33 @@ impl World {
                         .filter(|line| !line.trim().is_empty())
                     {
                         out.push_str(&format!("    {line}\n"));
+                    }
+                    for name in [
+                        "writeback-task-list.stdout",
+                        "writeback-task-list.stderr",
+                        "writeback-project-copy.stdout",
+                        "writeback-project-copy.stderr",
+                    ] {
+                        let path = self.runs.join(&run).join(name);
+                        out.push_str(&format!("    {name}:\n"));
+                        match std::fs::read(&path) {
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                                out.push_str("      (missing)\n");
+                            }
+                            Err(error) => out.push_str(&format!("      (unreadable: {error})\n")),
+                            Ok(bytes) if bytes.is_empty() => out.push_str("      (empty)\n"),
+                            Ok(bytes) => match String::from_utf8(bytes) {
+                                Ok(held) => {
+                                    for line in held.lines() {
+                                        out.push_str(&format!("      {line}\n"));
+                                    }
+                                }
+                                Err(error) => out.push_str(&format!(
+                                    "      (not UTF-8: {})\n",
+                                    error.utf8_error()
+                                )),
+                            },
+                        }
                     }
                 }
             }
@@ -1869,13 +2145,25 @@ pub fn ended(child: std::process::Child) {
 /// the shape is always the same and the deadline is one number: what differs is
 /// the evidence a caller prints when it runs out, which is why this answers
 /// rather than panicking.
-fn waited(mut ready: impl FnMut() -> bool) -> bool {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+fn waited(ready: impl FnMut() -> bool) -> bool {
+    waited_every(std::time::Duration::from_millis(20), ready)
+}
+
+fn waited_every(interval: std::time::Duration, ready: impl FnMut() -> bool) -> bool {
+    waited_for(std::time::Duration::from_secs(120), interval, ready)
+}
+
+fn waited_for(
+    duration: std::time::Duration,
+    interval: std::time::Duration,
+    mut ready: impl FnMut() -> bool,
+) -> bool {
+    let deadline = std::time::Instant::now() + duration;
     while std::time::Instant::now() < deadline {
         if ready() {
             return true;
         }
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::thread::sleep(interval);
     }
     false
 }

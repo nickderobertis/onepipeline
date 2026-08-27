@@ -61,7 +61,7 @@ fn add_reparent_and_context_are_applied_and_reported_applied() {
         .run_with_stdin(
             &["reply", &run],
             &envelope(json!([
-                {"op": "add", "node": {"id": "extra", "persona": "engineer", "task": "## What\nextra"}},
+                {"op": "add", "node": {"id": "extra", "persona": "engineer", "task": "## What\nextra", "max_turns": 2, "branch": "topic/extra"}},
                 {"op": "reparent", "id": "extra", "deps": ["slow"]},
                 {"op": "context", "id": "extra", "note": "the fixture moved"},
             ])),
@@ -85,6 +85,27 @@ fn add_reparent_and_context_are_applied_and_reported_applied() {
         "a node with no dispatch had its turn reached for"
     );
 
+    world.until_store("the accepted graph edit to reach the project", |world| {
+        world.store_tasks("plans:applied").iter().any(|task| {
+            task["item"]["metadata"]["onepipeline.id"] == "extra"
+                && task["item"]["metadata"]["onepipeline.context"] == "the fixture moved"
+                && task["item"]["metadata"]["onepipeline.max_turns"] == 2
+                && task["item"]["metadata"]["onepipeline.branch"] == "topic/extra"
+                && task["item"]["status"]["category"] == "todo"
+        })
+    });
+    let extra = world
+        .store_tasks("plans:applied")
+        .into_iter()
+        .find(|task| task["item"]["metadata"]["onepipeline.id"] == "extra")
+        .expect("the added task is in the store");
+    let edges = world.store_deps(extra["id"].as_str().expect("a qualified task id"));
+    assert_eq!(
+        edges.len(),
+        1,
+        "the accepted reparent did not write its edge: {edges:?}"
+    );
+
     world.release("slow.go");
     world.until("the run to settle", |world| {
         world.run_file(&run, "result.json").is_file()
@@ -104,6 +125,69 @@ fn add_reparent_and_context_are_applied_and_reported_applied() {
     assert!(task.contains("## Planner context"), "{task}");
     assert!(task.contains("the fixture moved"), "{task}");
     assert!(task.contains("adds no acceptance criteria"), "{task}");
+
+    world.until("settlement to reach the project", |world| {
+        world.store_tasks("plans:applied").iter().all(|task| {
+            task["item"]["status"]["category"] == "done"
+                && task["item"]["metadata"]["onepipeline.settlement"].is_object()
+        })
+    });
+}
+
+#[test]
+fn retry_cancel_requeue_and_drop_are_projected_after_their_rulings() {
+    let world = World::new("edit-writeback-remaining");
+    let run = live(
+        &world,
+        "remaining",
+        vec![
+            agent("root", &[]),
+            agent("cancelled", &["root"]),
+            agent("dropped", &["root"]),
+            agent("retried", &[]),
+        ],
+        &["root", "retried"],
+    );
+    for command in [
+        json!({"op": "cancel", "id": "cancelled"}),
+        json!({"op": "requeue", "id": "cancelled", "amend": {"branch": "topic/resumed"}}),
+        json!({"op": "drop", "id": "dropped", "dependents": "detach"}),
+        json!({"op": "retry", "id": "retried", "node": {
+            "id": "replacement", "persona": "engineer", "task": "## What\nRetry it.",
+            "branch": "topic/replacement"
+        }}),
+    ] {
+        world
+            .run_with_stdin(&["reply", &run], &envelope(json!([command])))
+            .exited(0);
+    }
+
+    world.until_store(
+        "the remaining accepted edits to reach the project",
+        |world| {
+            let tasks = world.store_tasks("plans:remaining");
+            let task = |id: &str| {
+                tasks
+                    .iter()
+                    .find(|task| task["item"]["metadata"]["onepipeline.id"] == id)
+            };
+            task("cancelled").is_some_and(|task| {
+                task["item"]["status"]["category"] == "todo"
+                    && task["item"]["metadata"]["onepipeline.branch"] == "topic/resumed"
+            }) && task("dropped")
+                .is_some_and(|task| task["item"]["status"]["category"] == "cancelled")
+                && task("retried")
+                    .is_some_and(|task| task["item"]["status"]["category"] == "cancelled")
+                && task("replacement").is_some_and(|task| {
+                    matches!(
+                        task["item"]["status"]["category"].as_str(),
+                        Some("todo" | "done")
+                    ) && task["item"]["metadata"]["onepipeline.branch"] == "topic/replacement"
+                })
+        },
+    );
+    world.release("retried.go");
+    world.release("root.go");
 }
 
 #[test]

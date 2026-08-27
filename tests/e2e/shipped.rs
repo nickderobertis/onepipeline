@@ -19,6 +19,19 @@ fn read(relative: &str) -> String {
         .unwrap_or_else(|e| panic!("{relative} does not ship: {e}"))
 }
 
+fn copy_tree(source: &std::path::Path, destination: &std::path::Path) {
+    std::fs::create_dir_all(destination).expect("the example-store copy has a directory");
+    for entry in std::fs::read_dir(source).expect("the shipped example store is readable") {
+        let entry = entry.expect("the example store has a directory entry");
+        let target = destination.join(entry.file_name());
+        if entry.path().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), target).expect("the example-store file is copied");
+        }
+    }
+}
+
 /// A persona is wrapped prose, so match on its words rather than its line
 /// breaks.
 fn unwrapped(relative: &str) -> String {
@@ -234,12 +247,12 @@ fn the_pr_author_persona_is_off_the_publication_path() {
     assert!(text.contains("the JSON object the schema your graph names requires"));
 }
 
-/// The store this repository ships is one a run launches from, as it is.
+/// The store this repository ships is one a run launches from, byte for byte.
 ///
-/// Not a fixture translated into one: the journey points a world at
-/// `examples/plan-store` and launches the projects by the ids the README tells a
-/// reader to type. What it proves is that the example store is readable, maps,
-/// validates, and mints a run — which is the whole of what an example is for.
+/// Not a fixture translated into one: the journey copies `examples/plan-store`
+/// unchanged into its isolated world and launches the ids the README tells a
+/// reader to type. Isolation matters now that a run writes status back: testing
+/// the shipped input must not rewrite the repository's checked-in example.
 #[test]
 fn both_example_projects_start_a_real_run() {
     for run in ["single-node", "tracked-release"] {
@@ -265,9 +278,12 @@ fn both_example_projects_start_a_real_run() {
         }
         world.script("driver.wait", "hold");
 
+        let example_store = world.root.join("shipped-plan-store");
+        copy_tree(&repo_file("examples/plan-store"), &example_store);
+
         let world = world.with_env(
             "ONETASKGRAPH_SOURCES__PLANS__CONFIG__ROOT",
-            &repo_file("examples/plan-store").to_string_lossy(),
+            &example_store.to_string_lossy(),
         );
         world
             .run(&["start", &format!("plans:{run}"), "--detach"])
