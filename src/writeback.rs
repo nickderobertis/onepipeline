@@ -259,13 +259,13 @@ fn project(
     run_dir: &Path,
     snapshot: &Snapshot,
 ) -> Result<(), String> {
-    let project_content = destination_project_content(binary, launch_dir, run_dir, snapshot)?;
+    let destination_project = destination_project(binary, launch_dir, run_dir, snapshot)?;
     let origins = destination_origins(binary, launch_dir, run_dir, snapshot)?;
     // llmlint: ignore-block[changed_behavior_has_e2e] The real outage journey drives
     // destination write failure through onetaskgraph. Making this private, run-owned
     // shadow directory unwritable would instead require sabotaging the host filesystem,
     // outside the public run interface and unrelated to store availability.
-    write_shadow(snapshot, &origins, project_content.as_deref())?;
+    write_shadow(snapshot, &origins, &destination_project)?;
     // llmlint: ignore-end[changed_behavior_has_e2e]
     let root = snapshot.dir.to_string_lossy().into_owned();
     let shadow_project = format!("{SHADOW_SOURCE}:{}", project_file(&snapshot.project));
@@ -293,12 +293,12 @@ fn project(
     }
 }
 
-fn destination_project_content(
+fn destination_project(
     binary: &Path,
     launch_dir: &Path,
     run_dir: &Path,
     snapshot: &Snapshot,
-) -> Result<Option<String>, String> {
+) -> Result<DestinationProjectItem, String> {
     let args = ["project", "show", snapshot.project.as_str(), "--json"];
     let output = bounded_output(binary, launch_dir, run_dir, "project-show", &args)?;
     if !output.status.success() {
@@ -330,7 +330,7 @@ fn destination_project_content(
     }
     let _ = (response.next, response.plan);
     // llmlint: ignore-end[changed_behavior_has_e2e]
-    Ok(project.item.content)
+    Ok(project.item)
 }
 
 fn destination_origins(
@@ -513,8 +513,7 @@ struct DestinationProjectItem {
     _created_at: Option<String>,
     #[serde(rename = "updated_at")]
     _updated_at: Option<String>,
-    #[serde(rename = "metadata")]
-    _metadata: BTreeMap<String, Value>,
+    metadata: BTreeMap<String, Value>,
     #[serde(rename = "repositories")]
     _repositories: Vec<String>,
 }
@@ -586,7 +585,7 @@ struct DestinationLabel {
 fn write_shadow(
     snapshot: &Snapshot,
     origins: &BTreeMap<String, String>,
-    project_content: Option<&str>,
+    destination_project: &DestinationProjectItem,
 ) -> Result<(), String> {
     let projects = snapshot.dir.join("projects");
     let tasks = snapshot
@@ -595,7 +594,12 @@ fn write_shadow(
         .join(project_file(&snapshot.project));
     std::fs::create_dir_all(&projects).map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&tasks).map_err(|e| e.to_string())?;
-    let mut project_metadata = snapshot.project_metadata.clone();
+    let mut project_metadata = destination_project.metadata.clone();
+    for (key, value) in &snapshot.project_metadata {
+        if project_metadata.contains_key(key) {
+            project_metadata.insert(key.clone(), value.clone());
+        }
+    }
     project_metadata.insert(
         "onetaskgraph.origin".into(),
         json!(snapshot.project.as_str()),
@@ -605,7 +609,7 @@ fn write_shadow(
         &json!({
             "title": snapshot.project.native(), "metadata": project_metadata
         }),
-        project_content.unwrap_or_default(),
+        destination_project.content.as_deref().unwrap_or_default(),
     )?;
     for (id, node) in &snapshot.nodes {
         let mut wire = serde_json::to_value(node)

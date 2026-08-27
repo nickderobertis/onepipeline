@@ -96,20 +96,26 @@ fn settlement_preserves_authored_project_content() {
     let world = World::new("store-project-content");
     for (name, body) in [
         ("project-with-content", "A person's project description.\n"),
-        ("project-without-content", ""),
+        ("project-without-content", "\n"),
     ] {
         let project = world.plan(
             name,
             &plan_of(name, vec![crate::harness::agent("work", &[])]),
         );
         let path = world.store().join("projects").join(format!("{name}.md"));
-        let original = std::fs::read_to_string(&path).expect("the authored project document");
+        let original = std::fs::read_to_string(&path)
+            .expect("the authored project document")
+            .replacen(
+                "metadata: {",
+                "metadata: {\"authored.note\":\"keep this value\",",
+                1,
+            );
         let (front, _) = original
             .split_once("---\n\n")
             .expect("the fixture's front matter delimiter");
         std::fs::write(&path, format!("{front}---\n{body}")).expect("the project body is authored");
         let authored_document = std::fs::read_to_string(&path).expect("the authored document");
-        let before = world.store_project(&project)["items"][0]["item"]["content"].clone();
+        let before = world.store_project(&project)["items"][0]["item"].clone();
 
         world.run(&["start", &project, "--attach"]).settled();
         world.until_store("the settlement to reach the project", |world| {
@@ -119,10 +125,33 @@ fn settlement_preserves_authored_project_content() {
                 .any(|task| task["item"]["metadata"]["onepipeline.settlement"].is_object())
         });
 
-        let after = world.store_project(&project)["items"][0]["item"]["content"].clone();
+        let after = world.store_project(&project)["items"][0]["item"].clone();
         assert_eq!(
-            after, before,
+            after["content"], before["content"],
             "settlement changed authored content for {project}"
+        );
+        let authored_metadata = |item: &Value| {
+            let mut metadata = item["metadata"]
+                .as_object()
+                .expect("project metadata is an object")
+                .clone();
+            for maintained in [
+                "onepipeline.settlement",
+                "onetaskgraph.origin",
+                "onepipeline.id",
+            ] {
+                metadata.remove(maintained);
+            }
+            metadata
+        };
+        assert_eq!(
+            authored_metadata(&after),
+            authored_metadata(&before),
+            "settlement changed non-engine-owned metadata for {project}"
+        );
+        assert_eq!(
+            after["metadata"]["authored.note"], "keep this value",
+            "settlement deleted authored metadata for {project}"
         );
         let settled_document =
             std::fs::read_to_string(&path).expect("the settled project document");
@@ -135,19 +164,8 @@ fn settlement_preserves_authored_project_content() {
             .expect("the settled front matter closes")
             .1;
         assert_eq!(
-            settled_body.trim_end_matches('\n'),
-            authored_body.trim_end_matches('\n'),
+            settled_body, authored_body,
             "settlement changed the source document body for {project}"
-        );
-        assert_eq!(
-            settled_body.trim_end_matches('\n').is_empty(),
-            body.is_empty(),
-            "settlement changed whether {project} has a body"
-        );
-        assert_eq!(
-            settled_body.ends_with("\n\n"),
-            authored_body.ends_with("\n\n"),
-            "settlement changed the trailing blank line for {project}"
         );
     }
 }
@@ -700,8 +718,9 @@ fn derived_waiting_failed_and_parked_states_use_their_board_categories() {
                     && project["items"][0]["item"]["metadata"]["onepipeline.concurrency"] == 2
                     && project["items"][0]["item"]["metadata"]["onepipeline.goal"]["text"]
                         == "Keep the board current"
-                    && project["items"][0]["item"]["metadata"]["onepipeline.name"]
-                        == "writeback-categories"
+                    // `name` supplied the native project title; it was not authored as
+                    // metadata, so write-back must not materialise a second copy.
+                    && project["items"][0]["item"]["metadata"]["onepipeline.name"].is_null()
             }
     });
 }
