@@ -498,6 +498,10 @@ struct DestinationProject {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DestinationProjectItem {
+    // llmlint: ignore-block[invalid_states_unrepresentable] These fields enumerate the
+    // compiled sibling's complete, deny-unknown machine response but are not inputs this
+    // projection interprets. onetaskgraph owns and validates its native id, URL, timestamps,
+    // and repository identities; write-back consumes only content and metadata below.
     #[serde(rename = "id")]
     _id: String,
     #[serde(rename = "title")]
@@ -516,6 +520,7 @@ struct DestinationProjectItem {
     metadata: BTreeMap<String, Value>,
     #[serde(rename = "repositories")]
     _repositories: Vec<String>,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
 }
 
 #[derive(Deserialize)]
