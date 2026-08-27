@@ -45,6 +45,7 @@ mod unix {
 set -eu
 revision=
 root=${CARGO_HOME:?}
+force=false
 while [ "$#" -gt 0 ]; do
   if [ "$1" = "--rev" ]; then
     revision=$2
@@ -56,9 +57,13 @@ while [ "$#" -gt 0 ]; do
     shift 2
     continue
   fi
+  if [ "$1" = "--force" ]; then
+    force=true
+  fi
   shift
 done
 [ -n "$revision" ]
+[ "$root" = "$CARGO_HOME" ] || [ "$force" = true ]
 mkdir -p "$root/bin"
 cat > "$root/bin/onetaskgraph" <<EOF
 #!/bin/sh

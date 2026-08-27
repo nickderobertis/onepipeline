@@ -78,7 +78,11 @@ _ensure-onetaskgraph:
     @resolved="${ONETASKGRAPH_BIN:-$(command -v onetaskgraph 2>/dev/null || true)}"; \
       root_args=(); \
       if [[ "$resolved" == */bin/onetaskgraph ]]; then \
-        root_args=(--root "${resolved%/bin/onetaskgraph}"); \
+        resolved_root="${resolved%/bin/onetaskgraph}"; \
+        cargo_root="${CARGO_HOME:-$HOME/.cargo}"; \
+        if [[ "$resolved_root" != "$cargo_root" ]]; then \
+          root_args=(--root "$resolved_root" --force); \
+        fi; \
       fi; \
       cargo install onetaskgraph --locked --quiet "${root_args[@]}" \
         --git https://github.com/nickderobertis/onetaskgraph --rev {{onetaskgraph-rev}}
