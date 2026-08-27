@@ -80,10 +80,10 @@ _ensure-onetaskgraph:
       if [[ "$resolved" == */bin/onetaskgraph ]]; then \
         resolved_root="${resolved%/bin/onetaskgraph}"; \
         if [[ "$resolved_root" != "$cargo_root" ]]; then \
-          root_args=(--root "$resolved_root" --force); \
+          root_args=(--root "$resolved_root"); \
         fi; \
       fi; \
-      cargo install onetaskgraph --locked --quiet "${root_args[@]}" \
+      cargo install onetaskgraph --locked --quiet --force "${root_args[@]}" \
         --git https://github.com/nickderobertis/onetaskgraph --rev {{onetaskgraph-rev}}; \
       if [[ -n "$resolved" && "$resolved" != */bin/onetaskgraph ]]; then \
         cp "$cargo_root/bin/onetaskgraph" "$resolved"; \

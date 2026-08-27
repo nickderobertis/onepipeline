@@ -63,6 +63,7 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 [ -n "$revision" ]
+[ "$force" = true ]
 [ "$root" = "$CARGO_HOME" ] || [ "$force" = true ]
 mkdir -p "$root/bin"
 cat > "$root/bin/onetaskgraph" <<EOF
