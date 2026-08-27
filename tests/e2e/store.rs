@@ -263,6 +263,13 @@ fn a_project_copy_refusal_is_reported_retried_and_recovers() {
 /// Losing the worker's own command-capture path is handled by the same best-effort
 /// boundary as losing the destination: the committed graph keeps running, and the
 /// projection catches up after the filesystem recovers.
+///
+/// This fault injection depends on POSIX `File::create` refusing a path occupied by a
+/// directory. Windows can open that path as a directory-associated handle instead: the
+/// sibling then completes successfully, so there is deliberately no capture failure for
+/// this journey to await. The portable sibling-refusal path is covered separately by
+/// `a_project_copy_refusal_is_reported_retried_and_recovers`.
+#[cfg(not(windows))]
 #[test]
 fn an_unwritable_writeback_capture_is_reported_retried_and_recovered() {
     let world = World::new("store-writeback-capture-retry");
