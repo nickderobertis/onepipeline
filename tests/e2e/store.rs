@@ -209,6 +209,92 @@ fn an_unreachable_store_is_reported_and_retried_while_the_run_completes_unaffect
     );
 }
 
+/// Losing the worker's own command-capture path is handled by the same best-effort
+/// boundary as losing the destination: the committed graph keeps running, and the
+/// projection catches up after the filesystem recovers.
+#[test]
+fn an_unwritable_writeback_capture_is_reported_retried_and_recovered() {
+    let world = World::new("store-writeback-capture-retry");
+    world.script("work.wait", "hold");
+    let project = world.plan(
+        "writeback-capture-retry",
+        &plan_of(
+            "writeback-capture-retry",
+            vec![
+                crate::harness::agent("work", &[]),
+                crate::harness::agent("later", &["work"]),
+            ],
+        ),
+    );
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the initial projection to finish", |world| {
+        world.store_tasks(&project).iter().any(|task| {
+            task["item"]["metadata"]["onepipeline.id"] == "work"
+                && task["item"]["status"]["category"] == "in-progress"
+        })
+    });
+
+    let capture = world.run_file("writeback-capture-retry", "writeback-task-list.stdout");
+    std::fs::remove_file(&capture).expect("the completed capture is removed");
+    std::fs::create_dir(&capture).expect("a directory makes the capture path unwritable");
+    world
+        .run_with_stdin(
+            &["reply", "writeback-capture-retry"],
+            &json!({
+                "version": 1,
+                "commands": [{"op": "context", "id": "later", "note": "capture recovered"}]
+            })
+            .to_string(),
+        )
+        .exited(0);
+    world.until("the capture failure to be reported", |world| {
+        std::fs::read_to_string(world.run_file("writeback-capture-retry", "driver.log")).is_ok_and(
+            |log| {
+                log.contains("onetaskgraph write-back failed")
+                    && log.contains("retrying")
+                    && log.contains("Is a directory")
+            },
+        )
+    });
+
+    std::fs::remove_dir(&capture).expect("the capture path becomes writable again");
+    world.until("capture recovery to be reported", |world| {
+        std::fs::read_to_string(world.run_file("writeback-capture-retry", "driver.log"))
+            .is_ok_and(|log| log.contains("onetaskgraph write-back recovered"))
+    });
+    world.until_store("the committed edit to reach the recovered store", |world| {
+        world.store_tasks(&project).iter().any(|task| {
+            task["item"]["metadata"]["onepipeline.id"] == "later"
+                && task["item"]["metadata"]["onepipeline.context"] == "capture recovered"
+        })
+    });
+
+    assert_eq!(
+        world
+            .events_of("writeback-capture-retry", "edit-committed")
+            .len(),
+        1,
+        "capture failure changed edit validation or journal commitment"
+    );
+    assert_eq!(
+        world
+            .events_of("writeback-capture-retry", "node-dispatched")
+            .len(),
+        1,
+        "capture failure changed scheduling"
+    );
+    world.release("work.go");
+    world.until("the unaffected run to complete", |world| {
+        world
+            .run_file("writeback-capture-retry", "result.json")
+            .is_file()
+    });
+    assert_eq!(
+        world.run_json("writeback-capture-retry", "result.json")["state"],
+        "complete"
+    );
+}
+
 /// Returning to the last successful graph is still a new projection when a different
 /// snapshot superseded it while the store was unavailable.
 #[test]
