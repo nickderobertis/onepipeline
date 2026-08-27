@@ -145,5 +145,39 @@ chmod +x "$root/bin/onetaskgraph"
             pinned,
             "the wrong revision survived in the default Cargo home"
         );
+
+        let configured = root.join("configured-onetaskgraph");
+        executable(&configured, "#!/bin/sh\nprintf '%s\\n' wrong-revision\n");
+        let configured_home = root.join("configured-cargo-home");
+        let configured_tools = root.join("configured-tools");
+        fs::create_dir(&configured_tools).expect("the configured installer directory exists");
+        fs::copy(root.join("bin/cargo"), configured_tools.join("cargo"))
+            .expect("the configured-path installer is available");
+        let mut configured_paths = vec![configured_tools];
+        configured_paths.extend(std::env::split_paths(&host_path));
+        let configured_path =
+            std::env::join_paths(configured_paths).expect("the configured PATH joins");
+        let configured_provisioned = Command::new("just")
+            .arg("_ensure-onetaskgraph")
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .env("PATH", &configured_path)
+            .env("CARGO_HOME", &configured_home)
+            .env("ONETASKGRAPH_BIN", &configured)
+            .output()
+            .expect("configured-path provisioning runs");
+        assert!(
+            configured_provisioned.status.success(),
+            "configured-path provisioning failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&configured_provisioned.stdout),
+            String::from_utf8_lossy(&configured_provisioned.stderr)
+        );
+        let configured_resolved = Command::new(&configured)
+            .output()
+            .expect("the configured executable still resolves");
+        assert_eq!(
+            String::from_utf8_lossy(&configured_resolved.stdout).trim(),
+            pinned,
+            "the configured wrong-revision executable survived provisioning"
+        );
     }
 }
