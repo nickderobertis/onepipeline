@@ -209,6 +209,113 @@ fn an_unreachable_store_is_reported_and_retried_while_the_run_completes_unaffect
     );
 }
 
+/// Returning to the last successful graph is still a new projection when a different
+/// snapshot superseded it while the store was unavailable.
+#[test]
+fn a_reverted_edit_supersedes_the_failed_projection_before_store_recovery() {
+    let world = World::new("store-writeback-reverted-edit");
+    world.script("work.wait", "hold");
+    world.script("spare.wait", "hold");
+    let project = world.plan(
+        "writeback-reverted-edit",
+        &plan_of(
+            "writeback-reverted-edit",
+            vec![
+                crate::harness::agent("work", &[]),
+                crate::harness::agent("spare", &[]),
+                crate::harness::agent("later", &["work"]),
+            ],
+        ),
+    );
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until_store("the original edge to reach the store", |world| {
+        world
+            .store_tasks(&project)
+            .into_iter()
+            .find(|task| task["item"]["metadata"]["onepipeline.id"] == "later")
+            .is_some_and(|task| {
+                world
+                    .store_deps(task["id"].as_str().expect("later has a qualified id"))
+                    .len()
+                    == 1
+            })
+    });
+
+    let unavailable = world.root.join("plan-store-reverted-edit-unavailable");
+    std::fs::rename(world.store(), &unavailable).expect("the store becomes unreachable");
+    let reparent = |deps: &[&str]| {
+        world
+            .run_with_stdin(
+                &["reply", "writeback-reverted-edit"],
+                &json!({
+                    "version": 1,
+                    "commands": [{"op": "reparent", "id": "later", "deps": deps}]
+                })
+                .to_string(),
+            )
+            .exited(0)
+            .out_has("\"applied\"");
+    };
+    reparent(&["work", "spare"]);
+    world.until("the changed projection to fail", |world| {
+        std::fs::read_to_string(world.run_file("writeback-reverted-edit", "driver.log"))
+            .is_ok_and(|log| log.contains("onetaskgraph write-back failed"))
+    });
+    reparent(&["work"]);
+    world.until("both edits to be committed before recovery", |world| {
+        world
+            .events_of("writeback-reverted-edit", "edit-committed")
+            .len()
+            == 2
+    });
+
+    std::fs::rename(&unavailable, world.store()).expect("the store recovers");
+    world.until("write-back to report recovery", |world| {
+        std::fs::read_to_string(world.run_file("writeback-reverted-edit", "driver.log"))
+            .is_ok_and(|log| log.contains("onetaskgraph write-back recovered"))
+    });
+    let recovered_later = world
+        .store_tasks(&project)
+        .into_iter()
+        .find(|task| task["item"]["metadata"]["onepipeline.id"] == "later")
+        .expect("the recovered store still has later");
+    assert_eq!(
+        world
+            .store_deps(
+                recovered_later["id"]
+                    .as_str()
+                    .expect("later has a qualified id")
+            )
+            .len(),
+        1,
+        "recovery published the superseded two-edge snapshot after its one-edge replacement was committed"
+    );
+    world.until_store("the reverted edge to supersede the failed edit", |world| {
+        world
+            .store_tasks(&project)
+            .into_iter()
+            .find(|task| task["item"]["metadata"]["onepipeline.id"] == "later")
+            .is_some_and(|task| {
+                world
+                    .store_deps(task["id"].as_str().expect("later has a qualified id"))
+                    .len()
+                    == 1
+            })
+    });
+
+    world.release("work.go");
+    world.release("spare.go");
+    world.until("the unchanged run to settle", |world| {
+        world
+            .run_file("writeback-reverted-edit", "result.json")
+            .is_file()
+    });
+    assert_eq!(
+        world.run_json("writeback-reverted-edit", "result.json")["state"],
+        "complete"
+    );
+}
+
 /// A store that remains unavailable cannot hold terminal run settlement past the write-back
 /// closeout bound. This drives the installed CLI and real local-md sibling, then observes the
 /// user's result file while the store is still absent.

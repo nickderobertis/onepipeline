@@ -49,6 +49,19 @@ struct Pending {
     stopped: bool,
 }
 
+impl Pending {
+    fn queue(&mut self, snapshot: Snapshot) -> bool {
+        if self.latest.as_ref() == Some(&snapshot) {
+            return false;
+        }
+        if !self.working && self.latest.is_none() && self.last_success.as_ref() == Some(&snapshot) {
+            return false;
+        }
+        self.latest = Some(snapshot);
+        true
+    }
+}
+
 /// A non-blocking handle owned by the one reconcile loop.
 pub struct Writeback {
     pending: Arc<(Mutex<Pending>, Condvar)>,
@@ -114,13 +127,9 @@ impl Writeback {
         };
         let (lock, ready) = &*self.pending;
         if let Ok(mut pending) = lock.lock() {
-            if pending.latest.as_ref() == Some(&snapshot)
-                || pending.last_success.as_ref() == Some(&snapshot)
-            {
-                return;
+            if pending.queue(snapshot) {
+                ready.notify_one();
             }
-            pending.latest = Some(snapshot);
-            ready.notify_one();
         }
     }
 
@@ -663,7 +672,36 @@ fn encoded(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::TaskCategory;
+    use super::{Pending, Snapshot, TaskCategory};
+    use crate::graph::NodeStatus;
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
+    fn snapshot(status: NodeStatus) -> Snapshot {
+        Snapshot {
+            project: "plans:deduplication".parse().expect("a qualified project"),
+            dir: PathBuf::from("writeback"),
+            nodes: BTreeMap::new(),
+            statuses: BTreeMap::from([("node".to_owned(), status)]),
+            settlements: BTreeMap::new(),
+            project_metadata: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn returning_to_the_last_success_supersedes_a_different_pending_snapshot() {
+        let first = snapshot(NodeStatus::Pending);
+        let superseded = snapshot(NodeStatus::Running);
+        let mut pending = Pending {
+            latest: Some(superseded),
+            last_success: Some(first.clone()),
+            working: true,
+            stopped: false,
+        };
+
+        assert!(pending.queue(first.clone()));
+        assert!(pending.latest.as_ref() == Some(&first));
+    }
 
     #[test]
     fn task_categories_remain_named_by_the_approved_contract() {
