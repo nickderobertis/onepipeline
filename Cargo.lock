@@ -919,7 +919,7 @@ dependencies = [
 
 [[package]]
 name = "onepipeline"
-version = "0.16.3"
+version = "0.16.4"
 dependencies = [
  "clap",
  "fs4",
