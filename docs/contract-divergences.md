@@ -1944,9 +1944,11 @@ introduces it, exactly as entry 41's did.
 the flag must be one `start` takes, the config key must parse at the version
 stated, and the document must be built out of this crate's own published shapes —
 each `changes[].node` a plan `Node` and `plan` a `Plan`, both round-tripping as
-written. `tests/e2e/envelope_reviewer.rs` reads the three spellings out of the
-same block and drives them against a real reviewer program, so what a reply
-actually hands a host is proven rather than asserted in prose.
+written. `tests/e2e/envelope_reviewer.rs` reads the three spellings and the
+`ops_listed_as_changes` list out of the same block and drives them against a
+real reviewer program — every op the protocol has, through the real CLI, held
+against that list in both directions — so what a reply actually hands a host is
+proven rather than asserted in prose.
 
 ```json
 {

@@ -834,6 +834,23 @@ fn a_launch_config_may_declare_nothing_and_is_refused_when_it_cannot_be_read() {
             ),
             "`pr_author_graph` is a schema 2 key",
         ),
+        // The same rule for the newest key, at its own arrival version — and for
+        // a key that is there and names nothing, which is a decision
+        // half-written rather than a launch that declared none.
+        (
+            written(
+                "earlyreviewer.yaml",
+                "schema_version: 3\nenvelope_reviewer: ./scripts/review-envelope.sh\n",
+            ),
+            "`envelope_reviewer` is a schema 4 key",
+        ),
+        (
+            written(
+                "blankreviewer.yaml",
+                "schema_version: 4\nenvelope_reviewer: \"   \"\n",
+            ),
+            "`envelope_reviewer` is present and names nothing",
+        ),
         (
             written("stray.yaml", "schema_version: 1\nfilterz: {}\n"),
             "filterz",

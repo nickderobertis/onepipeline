@@ -392,3 +392,285 @@ fn the_flag_beats_the_environment_which_beats_the_config() {
         world.release("slow.go");
     }
 }
+
+/// Every op that introduces or changes a node is listed in the document, and no
+/// other op is — held against the list entry 45 states, in both directions.
+///
+/// The drift gate for that list: the record names the ops it proposes and this
+/// journey drives every op the protocol has through the real CLI, so a set the
+/// code and the record disagree about fails here rather than reaching a host as
+/// a document it was not told to expect. And an envelope that changes no node at
+/// all is still reviewed — its edits are the plan's, which is where a review
+/// sees them.
+#[test]
+fn the_ops_listed_as_changes_are_the_ones_the_record_names_and_no_others() {
+    let listed: Vec<String> = serde_json::from_value(proposed()["ops_listed_as_changes"].clone())
+        .expect("entry 45 names the ops it lists as changes");
+    let world = World::new("reviewer-ops");
+    let reviewer = reviewer_named(&world, "review-edit");
+    world.script("build.fail", "");
+    world.script("slow.wait", "hold");
+    // `spare` waits on the held node throughout, so it is a node an edit can
+    // still reach: unstarted, so it can be reparented, parked, and requeued.
+    let path = world.plan(
+        "reviewerops",
+        &plan_of(
+            "reviewerops",
+            vec![
+                agent("slow", &[]),
+                agent("build", &[]),
+                agent("spare", &["slow"]),
+            ],
+        ),
+    );
+    world
+        .run(&["start", &path, &spelling("flag"), &reviewer, "--detach"])
+        .exited(0);
+    let run = "reviewerops".to_string();
+    world.until("the node that fails to settle", |world| {
+        world
+            .run(&["results", &run])
+            .stdout
+            .lines()
+            .any(|line| line.trim_start().starts_with("build") && line.contains("failed"))
+    });
+
+    // One envelope per op, so what each contributes to the document is read off
+    // that envelope's own review rather than untangled from a batch.
+    let commands = [
+        json!({"op": "add", "node": agent("fresh", &[])}),
+        json!({"op": "retry", "id": "build", "node": agent("build-2", &[])}),
+        json!({"op": "amend", "id": "spare", "text": "the ruling"}),
+        json!({"op": "cancel", "id": "spare"}),
+        // Listed: a requeue carrying any amendment changes the node a reviewer
+        // reads, whether or not the amendment touches its task.
+        json!({"op": "requeue", "id": "spare", "amend": {"max_turns": 9}}),
+        json!({"op": "context", "id": "spare", "note": "the fixture moved"}),
+        // Last of the ops about `spare`, because it moves that node onto a
+        // dependency that has already settled and so lets it run.
+        json!({"op": "reparent", "id": "spare", "deps": ["fresh"]}),
+        // A node waiting on the held one, so there is something still droppable
+        // once everything else has run.
+        json!({"op": "add", "node": agent("extra", &["slow"])}),
+        // Listed as no change at all, like the `cancel` and the `context` above:
+        // these move the plan without changing any node's definition, and the
+        // plan is where the review sees them.
+        json!({"op": "drop", "id": "extra", "dependents": "detach"}),
+    ];
+    for command in &commands {
+        world
+            .run_with_stdin(&["reply", &run], &envelope(json!([command])))
+            .exited(0);
+    }
+
+    let seen = offered(&world);
+    // One review per envelope, including the envelopes that changed no node:
+    // every accepted envelope is offered, and each exactly once.
+    assert_eq!(
+        seen.len(),
+        commands.len(),
+        "an envelope was reviewed a different number of times than once: {seen:?}"
+    );
+    let ops: Vec<Vec<String>> = seen
+        .iter()
+        .map(|(_, document)| {
+            document["changes"]
+                .as_array()
+                .expect("the changes are a list")
+                .iter()
+                .map(|change| change["op"].as_str().expect("an op").to_string())
+                .collect()
+        })
+        .collect();
+    // The three that change no node contribute nothing, and every other
+    // envelope contributes exactly the op it carried.
+    assert_eq!(
+        ops,
+        vec![
+            vec!["add".to_string()],
+            vec!["retry".to_string()],
+            vec!["amend".to_string()],
+            vec![],
+            vec!["requeue".to_string()],
+            vec![],
+            vec!["reparent".to_string()],
+            vec!["add".to_string()],
+            vec![],
+        ],
+        "the ops listed as changes are not the ones the envelopes carried"
+    );
+    // And the set of them is the record's, exactly: neither an op the code
+    // lists and the record does not, nor one the record names and the code
+    // never sends.
+    let mut sent: Vec<String> = ops.into_iter().flatten().collect();
+    sent.sort();
+    sent.dedup();
+    let mut named = listed.clone();
+    named.sort();
+    assert_eq!(
+        sent, named,
+        "the ops this build lists as changes are not the ops entry 45 names"
+    );
+    world.release("slow.go");
+}
+
+/// What a reviewer says is external input, and a manager reads it: the refusal
+/// carries the sentence that matters, on one line, and does not grow with a
+/// reviewer that dumped its whole trace after it. A reviewer that says nothing
+/// at all is still not silent.
+#[test]
+fn a_refusal_carries_what_the_reviewer_said_without_its_escape_codes_or_its_trace() {
+    let world = World::new("reviewer-loud");
+    let reviewer = reviewer_named(&world, "review-edit");
+    let run = live_run(&world, "reviewerloud", &[&spelling("flag"), &reviewer]);
+
+    // The sentence that matters, wrapped in the colour a review prints it in,
+    // with a second line after it and a large trace to follow.
+    let sentence = "rule 3 failed: this envelope duplicates a seam the plan already owns";
+    let esc = '\u{1b}';
+    world.script(
+        "reviewer.refuse",
+        &format!("{esc}[31m{sentence}{esc}[0m\nsee the trace below"),
+    );
+    let flood = 100_000;
+    world.script("reviewer.flood", &flood.to_string());
+
+    let refused = world.run_with_stdin(&["reply", &run], &envelope(two_related_nodes()));
+    refused.exited(REFUSED).err_has(sentence);
+    assert!(
+        !refused.stderr.contains('\u{1b}'),
+        "a reviewer's escape sequences reached the refusal: {:?}",
+        refused.stderr
+    );
+    assert_eq!(
+        refused.stderr.lines().count(),
+        1,
+        "the refusal is not one line: {:?}",
+        refused.stderr
+    );
+    assert!(
+        refused.stderr.len() < flood / 4,
+        "the refusal grew with the reviewer's trace: {} bytes",
+        refused.stderr.len()
+    );
+
+    // A reviewer that refuses without saying anything: never silent, because a
+    // refusal nobody can act on is the failure this hook exists to end.
+    world.script("reviewer.silent", "");
+    world
+        .run_with_stdin(&["reply", &run], &envelope(two_related_nodes()))
+        .exited(REFUSED)
+        .err_has("exited 5")
+        .err_has("said nothing on stderr");
+
+    // And the edits are still refused rather than lost in the noise.
+    world.run(&["results", &run]).exited(0).out_lacks("cover");
+    world.release("slow.go");
+}
+
+/// A rung that is *there* and names nothing is a launch saying it has none,
+/// rather than a fall-through to the rung below — and a variable this build
+/// cannot read as text is refused at the launch rather than discarded.
+#[test]
+fn a_blank_rung_names_no_reviewer_and_an_unreadable_variable_is_refused() {
+    let world = World::new("reviewer-none");
+    let by_config = reviewer_named(&world, "by-config");
+    let config = world.root.join("launch.yaml");
+    std::fs::write(
+        &config,
+        format!(
+            "schema_version: {}\n{}: {by_config}\n",
+            proposed()["config_schema_version"]
+                .as_u64()
+                .expect("entry 45 states the version the key arrived at"),
+            spelling("config_key"),
+        ),
+    )
+    .expect("the launch config is written");
+    // The reviewer this config names refuses everything, so an edit that is
+    // *applied* below is one nothing was asked about.
+    world.script("reviewer.refuse", RULES);
+
+    // Three launches that name none: no rung at all, a blank flag over a config
+    // that names one, and a blank variable over the same config. A host that
+    // exported the variable empty to turn the hook off would otherwise get the
+    // config's reviewer.
+    for (at, (which, names_a_config, extra, environment)) in [
+        ("no rung at all", false, vec![], None),
+        (
+            "a blank flag",
+            true,
+            vec![spelling("flag"), "   ".to_string()],
+            None,
+        ),
+        ("a blank variable", true, vec![], Some(String::new())),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let name = format!("reviewernone{at}");
+        let _ = std::fs::remove_file(world.fakes.join("slow.go"));
+        world.script("slow.wait", "hold");
+        let path = world.plan(&name, &plan_of(&name, vec![agent("slow", &[])]));
+        let mut args = vec!["start".to_string(), path.clone()];
+        if names_a_config {
+            args.push("--launch-config".to_string());
+            args.push(config.to_string_lossy().into_owned());
+        }
+        args.extend(extra);
+        args.push("--detach".to_string());
+        let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+        let mut command = world.cmd(&borrowed);
+        match &environment {
+            Some(value) => command.env(spelling("environment"), value),
+            None => command.env_remove(spelling("environment")),
+        };
+        world.run_on(command, "start").exited(0);
+        world.until("the held node to be running", |world| {
+            world
+                .run(&["status", &name])
+                .stdout
+                .contains("slow: running")
+        });
+
+        let mut reply = world.cmd(&["reply", &name]);
+        match &environment {
+            Some(value) => reply.env(spelling("environment"), value),
+            None => reply.env_remove(spelling("environment")),
+        };
+        world
+            .run_with_stdin_on(reply, &envelope(two_related_nodes()))
+            .exited(0)
+            .out_has("\"applied\"")
+            .err_lacks(RULES);
+        assert!(
+            offered(&world).is_empty(),
+            "a launch naming {which} ran a reviewer"
+        );
+        world.release("slow.go");
+    }
+
+    // And a variable that is there and holds something this build cannot read
+    // as text: refused at the launch, naming the variable, rather than
+    // discarded — which would hand the run whichever reviewer the config names.
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let name = "reviewergarbled";
+        let _ = std::fs::remove_file(world.fakes.join("slow.go"));
+        world.script("slow.wait", "hold");
+        let path = world.plan(name, &plan_of(name, vec![agent("slow", &[])]));
+        let mut command = world.cmd(&["start", &path, "--detach"]);
+        command.env(
+            spelling("environment"),
+            std::ffi::OsStr::from_bytes(&[0x2e, 0xff, 0x2e]),
+        );
+        let refused = world.run_on(command, "start");
+        refused.exited(REFUSED);
+        assert!(
+            refused.stderr.contains(&spelling("environment")),
+            "the refusal does not name the variable: {}",
+            refused.stderr
+        );
+    }
+}

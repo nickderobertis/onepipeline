@@ -16,6 +16,11 @@
 //!   `reviewer.chatter`   present → write this file's text to **stdout** before
 //!                        answering, the way a review that narrates what it
 //!                        checked does
+//!   `reviewer.silent`    present → refuse without saying anything, which is the
+//!                        answer a caller still has to be able to act on
+//!   `reviewer.flood`     present → after refusing, write this many bytes more to
+//!                        stderr, the way a review that dumps its whole trace
+//!                        does; the caller's refusal must not grow with it
 //!
 //! It names itself in every refusal, so a journey about which of three names a
 //! launch resolved reads the answer off `onepipeline reply`'s own stderr. Every
@@ -49,10 +54,40 @@ impl<'de> Deserialize<'de> for Named {
     }
 }
 
+/// The ops a change may arrive under.
+///
+/// A closed set rather than a string: the caller lists a node under exactly the
+/// ops entry 45 of the divergence record names, so an op outside them is a seam
+/// that moved, and a reviewer that read it anyway would let a journey pass on a
+/// document nothing checked.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum ChangeOp {
+    Add,
+    Retry,
+    Amend,
+    Requeue,
+    Reparent,
+}
+
+impl ChangeOp {
+    /// The op as the wire spells it, which is how this reviewer records it.
+    fn wire(&self) -> &'static str {
+        match self {
+            Self::Add => "add",
+            Self::Retry => "retry",
+            Self::Amend => "amend",
+            Self::Requeue => "requeue",
+            Self::Reparent => "reparent",
+        }
+    }
+}
+
 /// One node the envelope introduces or changes, with the op that produced it.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ChangedNode {
-    op: Named,
+    op: ChangeOp,
     node: OfferedNode,
 }
 
@@ -75,6 +110,20 @@ impl OfferedNode {
     }
 }
 
+/// One document's fields put back the way they crossed: the named ones, and
+/// everything else beside them rather than under a key of this program's own.
+fn beside(
+    named: Vec<(&str, serde_json::Value)>,
+    rest: &serde_json::Map<String, serde_json::Value>,
+) -> serde_json::Value {
+    let mut document = serde_json::Map::new();
+    for (key, value) in named {
+        document.insert(key.into(), value);
+    }
+    document.extend(rest.clone());
+    serde_json::Value::Object(document)
+}
+
 /// The plan the edits are being made into, as it crosses.
 ///
 /// `tasks` is required rather than defaulted: a review that could not see the
@@ -88,7 +137,11 @@ struct ReviewedPlan {
 }
 
 /// The envelope under review, as the contract states the document.
+///
+/// Closed at the top level: this is the document the crate under test writes,
+/// and a key it grew that nothing here reads is a seam that moved silently.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct EnvelopeUnderReview {
     #[serde(default)]
     goal: Option<Named>,
@@ -97,19 +150,28 @@ struct EnvelopeUnderReview {
 }
 
 impl EnvelopeUnderReview {
-    /// The envelope as this reviewer records it.
+    /// The envelope as this reviewer records it, which is the envelope as it
+    /// arrived: every field back where the document had it, the plan's own
+    /// included.
     fn recorded(&self) -> serde_json::Value {
         serde_json::json!({
             "goal": self.goal.as_ref().map(|goal| goal.0.clone()),
             "changes": self
                 .changes
                 .iter()
-                .map(|change| serde_json::json!({"op": change.op.0, "node": change.node.recorded()}))
+                .map(|change| {
+                    serde_json::json!({"op": change.op.wire(), "node": change.node.recorded()})
+                })
                 .collect::<Vec<_>>(),
-            "plan": {
-                "tasks": self.plan.tasks.iter().map(OfferedNode::recorded).collect::<Vec<_>>(),
-                "rest": serde_json::Value::Object(self.plan.rest.clone()),
-            },
+            "plan": beside(
+                vec![(
+                    "tasks",
+                    serde_json::Value::from(
+                        self.plan.tasks.iter().map(OfferedNode::recorded).collect::<Vec<_>>(),
+                    ),
+                )],
+                &self.plan.rest,
+            ),
         })
     }
 
@@ -161,16 +223,80 @@ fn main() -> std::process::ExitCode {
         println!("{}", chatter.trim());
     }
 
+    // A reviewer that refuses without saying anything is still an answer the
+    // caller has to act on, and what it must not do is read the silence as a
+    // verdict.
+    if marker(&dir.join("reviewer.silent")) {
+        return std::process::ExitCode::from(5);
+    }
+
     match scenario(&dir.join("reviewer.refuse")) {
         Some(reason) => {
             // The node it objected to, in its own sentence: an envelope is no
             // longer one command, so a reason that named none would leave a
             // manager reading a refusal with nothing to look at.
             eprintln!("{invoked_as}: {}: {}", envelope.objection(), reason.trim());
+            flood(&dir);
             std::process::ExitCode::from(1)
         }
         None => std::process::ExitCode::SUCCESS,
     }
+}
+
+/// Whether one scenario marker is set.
+///
+/// Set is a file that is there and absent is `NotFound`, and nothing else is
+/// either: a marker whose state this program cannot read is a scenario it does
+/// not know, and answering "absent" to that runs the ordinary path where a
+/// journey asked for a silent refusal.
+fn marker(path: &std::path::Path) -> bool {
+    match std::fs::metadata(path) {
+        Ok(found) if found.is_file() => true,
+        Ok(_) => fake::fail(&format!(
+            "{} is not a file, so what it scripts cannot be read",
+            path.display()
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => fake::fail(&format!(
+            "{} is there and this reviewer cannot read its state ({error}), so whether it \
+             scripts this run is unknown rather than unset",
+            path.display()
+        )),
+    }
+}
+
+/// The largest trace a scenario may ask this reviewer to dump.
+///
+/// Two orders of magnitude past the loudest journey and three past the caller's
+/// own `MAX_HOOK_STDERR`, so every scenario worth writing fits under it — and a
+/// file asking for more is a typo rather than a louder reviewer, which is worth
+/// saying before this program allocates it.
+const MAX_FLOOD_BYTES: usize = 1 << 20;
+
+/// Write as much further stderr as the scenario asks for.
+///
+/// A review that dumps its whole trace after the sentence that matters is
+/// ordinary, and what the caller must not do is hold all of it or put all of it
+/// in front of a manager. The count is this program's input and is read as one:
+/// a value that is not a number of bytes, or one past [`MAX_FLOOD_BYTES`], is a
+/// misconfigured scenario rather than a run of zero.
+fn flood(dir: &std::path::Path) {
+    let Some(asked) = scenario(&dir.join("reviewer.flood")) else {
+        return;
+    };
+    let Ok(bytes) = asked.trim().parse::<usize>() else {
+        fake::fail(&format!(
+            "reviewer.flood holds {:?}, which is not a number of bytes",
+            asked.trim()
+        ));
+    };
+    if bytes > MAX_FLOOD_BYTES {
+        fake::fail(&format!(
+            "reviewer.flood asks for {bytes} bytes of trace, past the {MAX_FLOOD_BYTES} this \
+             reviewer will write; a scenario needs far less to prove a refusal stays bounded"
+        ));
+    }
+    eprintln!("{}", "x".repeat(bytes));
 }
 
 /// What one scenario file states, or `None` when that scenario is simply not
