@@ -161,45 +161,33 @@ resolver = "2"
 #   push's outcome off what that command printed, so a dropped last read fails a
 #   journey. The requirement then in force, `^0.15`, already admitted it, so only
 #   the resolution moved.
-# - `onevcs` 0.15.5 stops **refusing a check name for carrying whitespace** — or
-#   a leading dash — so a failing check's log, and the bounded tail that goes into
-#   the failure evidence, are read and recorded instead of fetched and thrown
-#   away. A check's name is matched against the ones the host reports and never
-#   becomes a `gh` argument, and every GitHub matrix job is named with a space in
-#   it: `check (macos-latest)`, `test-os (windows-latest)`. Below it a
-#   `checks-failed` node reached its next worker with a name and a URL and no log
-#   at all, and that worker paid for another CI run to learn what the tail already
-#   said. This crate holds no copy of that boundary — `src/vcs.rs`'s `usable`
-#   guards a session token and a branch name, values this build hands back and
-#   renders into line-oriented views, and never a check name — so the resolution
-#   is the whole of what puts the fix in force.
+# - `onevcs` 0.15.5 stops **refusing a check name for carrying whitespace**, so a
+#   red check's log reaches the failure evidence a re-dispatched worker is handed.
+#   Every GitHub matrix job is named with a space in it — `check (macos-latest)` —
+#   and the name is matched against what the host reports rather than passed to
+#   `gh`, so the refusal cost the diagnosis and bought nothing.
+#   `tests/e2e/lifecycle.rs`'s
+#   `a_red_matrix_check_hands_over_the_log_its_name_used_to_cost_it` drives it to
+#   the stored artifact, so a pin below the floor fails rather than reads
+#   differently.
 # - `onevcs` 0.15.6 **keeps a run root a live session is still working in**: a
-#   root an open session names is held against reclamation even after the CLI
-#   process that opened it has exited and before anything is committed, while an
-#   unnamed, unoccupied one stays reclaimable and the retention bound is
-#   unchanged. Below it a sibling's session open deleted a live dispatch's
-#   worktree moments after launch — three dispatches of one run inside ninety
-#   seconds — and the child processes that followed failed naming an executable
-#   search path, which is not what had happened to them.
-#   `tests/e2e/session_reuse.rs` drives the other side of the same lease: it takes
-#   the run root's lock **exclusively**, which is still the one answer that stops
-#   reuse, so the narrowing leaves that journey deciding what it always decided.
+#   root an open session's record names is held against reclamation, because a
+#   session opened from the command line is owned by a process that has already
+#   exited and its record answers stale from that instant. An unnamed or occupied
+#   one is unchanged. Below it a sibling's session open deleted a live dispatch's
+#   worktree. `tests/e2e/session_reuse.rs`'s fall-through case asserts the run
+#   root survives that opening before sweeping it itself.
 # - `onevcs` 0.15.7 **decides a landing against a base fresh enough to answer
 #   it**, reading the publication checkout's own object store where the branch
-#   holder's base history is stale, and leaving status, recovery and release
-#   reporting *undecided* where the base still cannot be read rather than
-#   answering that the work did not land. Below it a checkout that had not fetched
-#   the landing reported merged work as unlanded — and this crate relays that
-#   answer as prose: `src/lifecycle.rs`'s `unread_merge_path` hands the node
-#   `onevcs`'s own reason verbatim, which names the `publish-branch` that lands
-#   the branch, so a stale read became an offer to republish work that had merged
-#   52 minutes earlier. Nothing here decides a landing, so nothing here moved with
-#   it.
+#   holder's base history is stale and staying *undecided* where it still cannot
+#   be read. Below it a stale checkout reported merged work as unlanded, and this
+#   crate relays that sentence: `src/lifecycle.rs`'s `unread_merge_path` hands the
+#   node `onevcs`'s own reason verbatim, which offers the `publish-branch` that
+#   would republish it. Nothing here decides a landing, so nothing here moved.
 # - `onevcs` 0.15.8 is the newest the registry carries and the release
-#   `onevcs-testing` 0.4.17 requires exactly, so it is what the pair resolves to
-#   from either end. `^0.15` already admitted all three fixes above: what held
-#   this build at 0.15.4 was the resolution and not the declaration, which is why
-#   the pin names a release rather than the window that was already wide enough.
+#   `onevcs-testing` 0.4.17 requires exactly, so the pair resolves to it from
+#   either end. `^0.15` already admitted the three fixes above: the resolution
+#   held this build at 0.15.4, not the declaration.
 #
 # **Every pin in this block is declared at the newest release the registry
 # carries**, because this repository resolves no engine at two versions and so
@@ -257,17 +245,13 @@ resolver = "2"
 # split one is invisible to a currency check, which reads each copy separately
 # and calls both current.
 #
-# 0.3.12 is also the release that **carries `onejudge` past 0.5**. `onejudge`
-# 0.6.0 lets a conversation whose contract is a quiet turn opt out of the no-op
-# settle — `Settings::settle_on_noop`, defaulting to the behaviour every 0.5
-# build had, so nothing this crate composes reads differently for it — and 0.3.12
-# adopts 0.6.1 and proves the flag reaches the loop. The pin below must be the
-# version *that* pin resolves to, for the reason the `onejudge` comment gives:
-# `src/report.rs` coerces between the two libraries' types and only type-checks
-# against one copy. So the two move together or `onejudge` resolves twice. The
-# `0.5.4` this replaces was the constraint itself and not a lagging lock — pre-1.0
-# the minor is the breaking position, so `^0.5.4` excluded every 0.6.x outright
-# and no refresh of the resolution could have reached one.
+# 0.3.12 is also the release that **carries `onejudge` past 0.5** — 0.6.0 adds
+# `Settings::settle_on_noop`, defaulting to what every 0.5 build did. The pin
+# below must be the version that pin resolves to, because `src/report.rs` coerces
+# between the two libraries' types and only type-checks against one copy, so the
+# two move together or `onejudge` resolves twice. The `0.5.4` it replaces was the
+# constraint rather than a lagging lock: pre-1.0 the minor is the breaking
+# position, so `^0.5.4` excluded every 0.6.x and no refresh could have reached one.
 #
 # Two floors inside that unification. `onejudge` 0.5.2, because `src/report.rs`
 # reads the text a turn reported off `member-settled` rather than the harness's

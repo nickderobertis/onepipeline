@@ -1543,6 +1543,10 @@ fn tasks_dispatched_to(world: &World, run: &str, node: &str) -> Vec<String> {
 /// to a change request the host was asked to land.
 const RED: &str = "llmlint completed failure required";
 
+/// The name of a required check reported the way every GitHub matrix job is
+/// named: with a space in it.
+const MATRIX_CHECK: &str = "check (macos-latest)";
+
 /// A commit this suite never makes, so a host reporting it as a change request's
 /// head is reporting one no publication here pushed.
 const REPLACED_HEAD: &str = "0123456789abcdef0123456789abcdef01234567";
@@ -1701,6 +1705,92 @@ fn a_publication_its_checks_reject_is_redispatched_on_the_branch_it_preserved() 
         repo.has_branch(&world, branch),
         "the branch the attempts shared was not handed back to the checkout"
     );
+}
+
+/// A matrix job's name carries whitespace, and its log has to survive that.
+///
+/// `check (macos-latest)`, `test-os (windows-latest)`: every GitHub matrix job is
+/// named with a space in it, and `onevcs` below 0.15.5 refused such a name at the
+/// boundary that asks the host for a log. A check's name never becomes a `gh`
+/// argument — it is matched against the names the host reports — so the refusal
+/// bought nothing and cost the diagnosis: a `checks-failed` node reached its next
+/// worker with the check's name and its URL and no log at all, and that worker
+/// paid for another CI run to learn what the tail already said.
+///
+/// The whole path, end to end and offline: the host reports a red required check
+/// under a matrix name, the publication asks that host for its log, and the
+/// artifact the answer became is read back out of the store — through the
+/// sibling's own `artifact cat`, by the id the merged stream recorded — and is
+/// the log this host printed.
+#[test]
+fn a_red_matrix_check_hands_over_the_log_its_name_used_to_cost_it() {
+    let world =
+        World::new("lifecycle-matrixcheck").with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "1");
+    world.repository("change-auto", &[]);
+    world.script("service.work", "the worker wrote this\n");
+    world.script(
+        "gh.checks",
+        &format!("{MATRIX_CHECK} completed failure required"),
+    );
+
+    let run = settle(&world, "matrixcheck", vec![lifecycle("service", &[])]);
+    let result = world.run_json(&run, "result.json");
+    let node = result["nodes"][0].clone();
+    assert_eq!(node["status"], "failed", "{result}\n{}", why(&world, &run));
+    assert_eq!(node["outcome"], "checks-failed", "{result}");
+
+    // The host reported it under the name it really uses, rather than under one
+    // this journey had to shorten to get an answer at all.
+    let red = world
+        .events_of(&run, "change-check")
+        .into_iter()
+        .find(|event| event["payload"]["conclusion"] == "failure")
+        .unwrap_or_else(|| panic!("the host never reported a red check\n{}", why(&world, &run)));
+    assert_eq!(red["payload"]["name"], json!(MATRIX_CHECK), "{red}");
+
+    // And the log is *on that record*, which is what a name refused locally used
+    // to leave off it.
+    let log = red["artifacts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|artifact| artifact["kind"] == "log")
+        .unwrap_or_else(|| {
+            panic!(
+                "the red check {MATRIX_CHECK:?} was recorded without its log: {red}\n{}",
+                why(&world, &run)
+            )
+        })
+        .clone();
+    let id = log["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the artifact carries no id: {log}"));
+
+    // Fetched the way the re-dispatch prose tells a worker to fetch it, so what is
+    // asserted is an artifact the store really holds under that id rather than a
+    // reference nothing resolves.
+    let printed = artifact_cat(&world, id);
+    assert!(
+        printed.contains("job log"),
+        "the artifact the check's log was stored as is not that log: {printed:?}"
+    );
+}
+
+/// One stored artifact's bytes, through `onevcs artifact cat` — the same verb a
+/// re-dispatched worker is told to run.
+fn artifact_cat(world: &World, id: &str) -> String {
+    let output = std::process::Command::new(crate::harness::onevcs_binary())
+        .args(["artifact", "cat", id])
+        .env("ONEVCS_HOME", world.onevcs_home())
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("the onevcs binary runs");
+    assert!(
+        output.status.success(),
+        "`onevcs artifact cat {id}` failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
 /// A publishing push the merge path refuses is the second preserving failure, and

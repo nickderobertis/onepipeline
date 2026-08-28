@@ -593,7 +593,7 @@ fn every_other_shape_cuts_a_fresh_session_onto_its_branch_or_from_the_base() {
     // that run's own opening runs the sibling's housekeeping over it. What that
     // housekeeping does with it is case 2, and since `onevcs` 0.15.6 the answer
     // is *nothing*.
-    let reclaimed = abandoned_session(&world, "feature/reclaimed");
+    let swept = abandoned_session(&world, "feature/swept");
 
     // 1. Occupied. Somebody has taken the run root against the world, so the
     //    session cannot be taken up and a fresh one is cut instead.
@@ -616,41 +616,35 @@ fn every_other_shape_cuts_a_fresh_session_onto_its_branch_or_from_the_base() {
     // 2. Gone. The record still names a run root; the directory is not there, and
     //    with it goes every place the branch could have been continued.
     //
-    //    Two things, in this order, because the second is only a fair test of the
-    //    fall-through once the first has held. Case 1's opening ran the sibling's
-    //    reclamation across this host with the session above sitting open in it,
-    //    and `onevcs` 0.15.6 left that run root standing: a session opened from
-    //    the command line is owned by the `onevcs` that printed its token and then
-    //    exited, so its record answers *stale* from that instant while an operator
-    //    works in the worktree for hours, and reading stale as "nobody is in here"
-    //    is what deleted three live dispatches inside ninety seconds of their
-    //    launch. So the sibling is no longer the thing that empties a live
-    //    session's directory, and this journey takes the broom itself — an
-    //    operator, a host reboot, a `/tmp` sweep — rather than dressing a removal
-    //    up as housekeeping the build under test would not do.
+    //    The sweep is this journey's, because since `onevcs` 0.15.6 the sibling
+    //    will not do it: case 1's opening ran its reclamation over this host with
+    //    the session above sitting open in it and left that run root standing.
+    //    Asserted first, both because it is the fix this build links and because
+    //    the fall-through below is only a fair test once the removal is the one
+    //    thing that reached the directory.
     assert!(
-        run_root(&reclaimed).is_dir(),
-        "the sibling reclaimed the run root of a session still open at {}, so this \
-         build reads a record that answers stale the moment its opening command \
-         exits as a run root nobody is working in",
-        run_root(&reclaimed).display()
+        run_root(&swept).is_dir(),
+        "the sibling reclaimed the run root of a session still open at {}: a session \
+         opened from the command line answers stale the moment that command exits, \
+         and reading stale as nobody is in here deletes live dispatches",
+        run_root(&swept).display()
     );
-    std::fs::remove_dir_all(run_root(&reclaimed)).unwrap_or_else(|e| {
+    std::fs::remove_dir_all(run_root(&swept)).unwrap_or_else(|e| {
         panic!(
             "the run root at {} could not be swept: {e}",
-            run_root(&reclaimed).display()
+            run_root(&swept).display()
         )
     });
-    let (settled, session) = dispatched(&world, "reclaimed", Some("feature/reclaimed"));
+    let (settled, session) = dispatched(&world, "swept", Some("feature/swept"));
     assert_eq!(
         settled["nodes"][0]["status"],
         "done",
         "{settled}\n{}",
-        why(&world, "reclaimed")
+        why(&world, "swept")
     );
     assert_ne!(
         session["payload"]["token"].as_str(),
-        Some(reclaimed.token.0.as_str()),
+        Some(swept.token.0.as_str()),
         "a session whose run root is gone was taken up: {session}"
     );
 
@@ -748,7 +742,7 @@ fn every_other_shape_cuts_a_fresh_session_onto_its_branch_or_from_the_base() {
     );
 
     // 6. No session at all. A branch somebody finished by hand is work no record
-    //    points at, which is the other half of what a reclaimed run root leaves —
+    //    points at, which is the other half of what a swept run root leaves —
     //    and it is continued for the same reason: the branch exists, so it is
     //    where the work goes.
     let handmade = world.root.join("by-hand");
