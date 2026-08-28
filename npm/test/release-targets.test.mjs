@@ -277,14 +277,6 @@ function indexRecord(name, version, yanked) {
   })}\n`;
 }
 
-/**
- * The environment the host hands a probe, and nothing else.
- *
- * `PATH` and `HOME` are the whole of it — no credential, no registry token, no
- * variable the caller happened to be holding — so a probe that needed one would
- * fail every journey below rather than passing on the runner's ambient
- * environment. `extra` carries only the registry substitution.
- */
 /** Where one of the programs the probe reaches for lives on this host. */
 function hostTool(tool) {
   const resolved = spawnSync("sh", ["-c", `command -v ${tool}`], {
@@ -312,7 +304,7 @@ const scratchPaths = [];
 function fixturePath(base, { without } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "release-probe-path-"));
   scratchPaths.push(dir);
-  for (const tool of ["bash", "env", "mktemp", "sleep", "tr", "rm", "awk"]) {
+  for (const tool of ["bash", "env", "mktemp", "sleep", "rm", "awk"]) {
     if (tool === without) continue;
     symlinkSync(hostTool(tool), join(dir, tool));
   }
@@ -819,6 +811,43 @@ describe("the release probe", () => {
       assert.equal(run.stdout, "", said(run));
       assert.match(run.stderr, /ACTION: /, said(run));
     }
+  });
+
+  it("does not answer when it cannot wait before asking a hiccuping registry again", async () => {
+    // The registry says "not now", so the probe has to pause before asking
+    // again. A host that cannot pause has not been told anything about a
+    // release, and three immediate asks would be a retry that never waited.
+    const server = await serving(
+      registry({ "/onepipeline-cli/latest": always(503, '{"error":"unavailable"}') }),
+    );
+    const run = await probe("npm:onepipeline-cli", {
+      env: contractEnv(fixturePath(server.base, { without: "sleep" })),
+    });
+    assert.notEqual(run.status, 0, `a retry that never waited was answered:\n${said(run)}`);
+    assert.equal(run.stdout, "", said(run));
+    assert.match(
+      run.stderr,
+      /cannot wait 1 second\(s\) before asking[\s\S]*ACTION: /,
+      `the refusal blames the registry for a pause this host could not take:\n${said(run)}`,
+    );
+    assert.equal(
+      server.asked.get("/onepipeline-cli/latest"),
+      1,
+      "a host that cannot pause asked the registry again anyway, which is a retry that never waited",
+    );
+  });
+
+  it("does not unmake an answer it gave when it cannot clear up after itself", async () => {
+    // Cleanup runs after the version is already on stdout, so a failure there
+    // must not become the exit status: non-zero is *not answered*, which holds a
+    // consumer forever over a directory nobody removed.
+    const server = await serving(releasedAt("7.8.9"));
+    const run = await probe("npm:onepipeline-cli", {
+      env: contractEnv(fixturePath(server.base, { without: "rm" })),
+    });
+    assert.equal(run.status, 0, `a failed cleanup took the answer with it:\n${said(run)}`);
+    assert.equal(run.stdout, "7.8.9\n", said(run));
+    assert.match(run.stderr, /could not remove the temporary directory[\s\S]*ACTION: /, said(run));
   });
 
   it("answers nothing when every release a registry files is one nothing resolves to", async () => {

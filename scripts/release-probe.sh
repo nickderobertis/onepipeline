@@ -275,7 +275,20 @@ if ! scratch="$(mktemp -d)"; then
   refuse "cannot create the temporary directory a registry's answer is read in" \
     "check that this host's temporary directory exists and is writable" 3
 fi
-trap 'rm -rf "$scratch"' EXIT
+# Cleanup that cannot unmake an answer. A failing `rm` in an EXIT trap would
+# otherwise carry its own status out of the script — turning a version already on
+# stdout into a non-zero exit, which a consumer reads as *not answered* and holds
+# on forever. So the status this exits with is the one it arrived with, and a
+# directory left behind is said rather than silently kept.
+cleanup() {
+  local status=$?
+  if ! rm -rf "$scratch" 2>/dev/null; then
+    echo "release-probe: could not remove the temporary directory $scratch" >&2
+    echo "ACTION: remove it by hand; the answer above stands, and this changed neither it nor this exit status" >&2
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
 body="$scratch/body"
 curl_errors="$scratch/curl"
 
@@ -310,10 +323,16 @@ fetch() {
           ;;
       esac
     else
-      detail="$(tr '\n' ' ' <"$curl_errors")"
+      detail="$(<"$curl_errors")"
+      detail="${detail//$'\n'/ }"
     fi
     if [ "$attempt" -ne "$attempts" ]; then
-      sleep "$attempt"
+      # A backoff that did not happen is a retry that never waited, so a host
+      # that cannot pause is not answered rather than asked three times at once.
+      if ! sleep "$attempt"; then
+        refuse "$what: cannot wait $attempt second(s) before asking $url again" \
+          "check that a 'sleep' this host can run is on PATH; this is not answered, and says nothing about whether a release happened" 3
+      fi
     fi
     attempt=$((attempt + 1))
   done
