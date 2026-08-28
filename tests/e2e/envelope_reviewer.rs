@@ -1,17 +1,7 @@
 //! The hook that reviews a whole reply envelope, driven end to end against a
-//! real reviewer program.
-//!
-//! The per-node validator beside it is handed one node serialized on its own —
-//! no goal, no siblings, no dependency edges, and no plan — so a reply carrying
-//! several related ops is seen as several unrelated nodes. Nothing checks two
-//! added nodes that duplicate each other, a contract seam between two nodes of
-//! one edit, the edges the edit introduces, or whether the edited graph still
-//! delivers the run's goal.
-//!
-//! What runs here is a **real** reviewer: a compiled program at the seam,
-//! reading the envelope off its stdin and answering with an exit status and its
-//! own words, exactly as a host's would.
+//! real reviewer program — a compiled one at the seam, which
 //! `crates/testfakes/src/bin/envelope-reviewer.rs` says why it is not a double.
+//! Entry 45 of the divergence record states the seam it exists for.
 
 // llmlint: ignore-file[e2e_not_mocked] `World` substitutes `oneagentgraph` at its
 // subprocess boundary and nothing inside the crate under test, which is driven as a real
