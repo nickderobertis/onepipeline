@@ -468,9 +468,10 @@ fn offer_to_validator(validator: Option<&str>, command: &Command, node: &Node) -
 /// node already in flight.
 #[derive(Debug, Serialize)]
 struct ChangedNode<'a> {
-    /// The op that produced it, as the wire spells it.
     op: &'static str,
-    /// The node as the envelope leaves it.
+    /// Not the node the command carried: the one the whole envelope leaves
+    /// behind, so a node two of its commands touched is read once, as it will
+    /// be dispatched.
     node: &'a Node,
 }
 
@@ -499,7 +500,6 @@ struct EnvelopeUnderReview<'a> {
     /// asks for completion — those change the plan without putting new prose in
     /// front of a dispatch, and the plan below is where the reviewer sees it.
     changes: Vec<ChangedNode<'a>>,
-    /// The plan as this envelope leaves it.
     plan: crate::plan::Plan,
 }
 
