@@ -160,8 +160,9 @@ fn a_refused_envelope_applies_none_of_its_commands_and_an_accepted_one_is_review
         // same envelope carried: an envelope is no longer one command, so a
         // refusal a reader cannot locate is one nobody can act on.
         .err_has("refused this envelope over node 'cover',")
-        // And what this crate handed it beside that, which is the set it looked
-        // at rather than the one it turned down.
+        // And everything the envelope carried beside that, which is not the
+        // same set: it is what a reader looks over, rather than what the
+        // reviewer turned down.
         .err_has("add 'cover'")
         .err_has("add 'verify'");
 

@@ -1901,16 +1901,19 @@ review sees what they did.
 Exit 0 accepts the envelope. A non-zero exit refuses it **whole** — no command
 of it half-applies — carrying the reviewer's own stderr, bounded and
 control-stripped exactly as entry 41's refusals are, and naming every op and
-node it was reviewing, because an envelope is no longer one command and a reason
-nobody can locate is a reason nobody can act on. Its stdout goes nowhere,
+node the envelope carried, because an envelope is no longer one command and a
+reason nobody can locate is a reason nobody can act on. That list is wider than
+the document: a `drop` reaches the reviewer as the plan it leaves behind rather
+than as an op of its own, and a refusal is still read by somebody looking for
+what to change. Its stdout goes nowhere,
 because this runs inside `reply`, whose own stdout is a parsed verdict. It
 **fails closed**: a reviewer that cannot be started refuses the envelope, for the
 reason entry 41's validator does. A launch that configures none behaves exactly
 as it did before this hook.
 
-**The refusal names the node the reviewer objected to**, which is not the set it
-was reviewing: the envelope is no longer one command, so a reader given only the
-list it looked at still cannot tell which node to go and change. Only the
+**The refusal names the node the reviewer objected to**, which is not the set the
+envelope carried: the envelope is no longer one command, so a reader given only
+the list it held still cannot tell which node to go and change. Only the
 reviewer knows which one, so it **declares** it, on a line of its stderr reading
 `objection: cover` — the prefix matched case-insensitively, one line per node,
 anywhere in what it says, and repeatable for an objection about the seam between

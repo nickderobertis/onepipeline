@@ -562,9 +562,10 @@ fn node_the_command_changes<'a>(command: &Command, graph: &'a Graph) -> Option<&
 /// bounded and control-stripped exactly as the per-node validator's are, and
 /// names two sets that are not the same one: the node the reviewer **objected
 /// to**, declared on an [`OBJECTION_PREFIX`] line of its stderr, and every op
-/// and node it was **reviewing**. An envelope is no longer one command, so what
-/// it looked at is not what it turned down, and a reader given only the first
-/// still cannot tell which node to go and change. A reviewer that declared no
+/// and node the envelope **carried**. An envelope is no longer one command, so
+/// what it carried is not what the reviewer turned down, and a reader given only
+/// the first still cannot tell which node to go and change. A reviewer that
+/// declared no
 /// node is reported as having declared none, rather than having the whole
 /// envelope read back as its objection — those are different facts about a
 /// refusal and a reader acts differently on each.
@@ -640,9 +641,8 @@ pub(crate) fn offer_envelope_to_reviewer(
         return Ok(());
     }
     // What the reviewer declared it objected to, held against the names this
-    // envelope actually put in front of it — the same set `reviewed` prints
-    // below, so a node the refusal points at is one a reader finds again in the
-    // list beside it.
+    // envelope actually carries — the same set `carried` prints below, so a node
+    // the refusal points at is one a reader finds again in the list beside it.
     let said = String::from_utf8_lossy(&answer.stderr);
     let objection = Objection::read(&said);
     let envelope_named: BTreeSet<String> = commands
@@ -651,21 +651,24 @@ pub(crate) fn offer_envelope_to_reviewer(
         .collect();
     Err(refuse(format!(
         "the envelope reviewer refused this envelope{}, so none of its edits were applied — \
-         it was reviewing {}: {}",
+         it carried {}: {}",
         objection.against(&envelope_named),
-        reviewed(commands),
+        carried(commands),
         answer.reason_from(&objection.said)
     )))
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
-/// What the reviewer was given, as its refusal names it: every op in the
-/// envelope with the node it is about.
+/// What the envelope held, as its refusal names it: every op in it with the node
+/// that op is about.
 ///
-/// Every op rather than only the changed nodes, because a refusal is read by
-/// somebody looking for what to change, and an envelope's `drop` is as much a
-/// reason to refuse it as its `add` is.
-fn reviewed(commands: &[Command]) -> String {
+/// Not what crossed the reviewer's stdin, which is a narrower thing:
+/// [`EnvelopeUnderReview`] lists only the nodes the envelope changes, and a
+/// `drop` or a `cancel` reaches the reviewer as the plan it leaves behind rather
+/// than as an op of its own. Every op is named here anyway, because a refusal is
+/// read by somebody looking for what to change and an envelope's `drop` is as
+/// much a reason to refuse it as its `add` is.
+fn carried(commands: &[Command]) -> String {
     commands
         .iter()
         .map(|command| {
@@ -2596,7 +2599,7 @@ mod tests {
     }
 
     /// A reviewer that refuses turns the whole envelope away, in its own words,
-    /// naming both the node it objected to and everything it was reviewing.
+    /// naming both the node it objected to and everything the envelope carried.
     #[test]
     #[cfg(unix)]
     fn a_refused_envelope_carries_the_reviewers_words_and_names_what_it_objected_to() {
@@ -2638,8 +2641,8 @@ mod tests {
             refusal.contains("refused this envelope over node 'fresh',"),
             "{refusal}"
         );
-        // And every op it was given beside it, which is the set it looked at
-        // rather than the one it turned down.
+        // And every op the envelope carried beside it, which is not the same
+        // set as the one the reviewer turned down.
         assert!(
             refusal.contains("add 'fresh'") && refusal.contains("drop 'build'"),
             "{refusal}"

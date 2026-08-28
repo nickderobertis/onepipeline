@@ -244,9 +244,9 @@ per-node check can make — two added nodes that duplicate each other, a contrac
 seam between two nodes of one edit, the dependency edges the edit introduces, or
 whether the edited graph still delivers the goal. Exit `0` accepts it; a non-zero
 exit **refuses the whole envelope**, so no command of it half-applies, with the
-command's own stderr as the reason and every op and node it was reviewing named
-beside it. The refusal also names the node the reviewer **objected to**, which
-is not the set it looked at: the reviewer declares it on a line of its stderr
+command's own stderr as the reason and every op and node the envelope carried
+named beside it. The refusal also names the node the reviewer **objected to**,
+which is not the same set: the reviewer declares it on a line of its stderr
 reading `objection: cover` — one line per node, repeatable — and a reviewer that
 declares none is reported as having declared none rather than as objecting to
 everything. A reviewer that cannot be started refuses the envelope rather than
