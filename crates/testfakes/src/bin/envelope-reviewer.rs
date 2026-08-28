@@ -142,6 +142,38 @@ fn beside(
     serde_json::Value::Object(document)
 }
 
+/// The plan schema this reviewer was written against.
+///
+/// A literal rather than the crate's own constant, deliberately: this program is
+/// a **host's**, and a host has this crate's plan schema written down in its own
+/// rules rather than linked from it. So a plan arriving at another version is a
+/// wire contract that moved under a host that was never told, which is a thing
+/// the journeys should fail on loudly — and when this crate bumps the plan
+/// schema, this line is one of the places that has to be brought along.
+const REVIEWED_PLAN_SCHEMA: u32 = 3;
+
+/// A plan's schema version, as this boundary accepts one.
+///
+/// The version is what says the rest of the document means what this reviewer
+/// reads it as, so a document declaring one this program does not know is
+/// refused where it is read rather than reviewed as though it said something
+/// else.
+#[derive(Debug)]
+struct PlanSchema(u32);
+
+impl<'de> Deserialize<'de> for PlanSchema {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let declared = u32::deserialize(deserializer)?;
+        match declared == REVIEWED_PLAN_SCHEMA {
+            true => Ok(Self(declared)),
+            false => Err(serde::de::Error::custom(format!(
+                "a plan crossed at schema {declared}, and this reviewer reads \
+                 {REVIEWED_PLAN_SCHEMA}"
+            ))),
+        }
+    }
+}
+
 /// The plan the edits are being made into, as it crosses.
 ///
 /// Its two required fields are required here rather than defaulted: a plan
@@ -152,7 +184,7 @@ fn beside(
 /// document and this fixture is not the place to restate the plan schema.
 #[derive(Debug, Deserialize)]
 struct ReviewedPlan {
-    schema_version: u32,
+    schema_version: PlanSchema,
     tasks: Vec<OfferedNode>,
     #[serde(flatten)]
     rest: serde_json::Map<String, serde_json::Value>,
@@ -187,7 +219,10 @@ impl EnvelopeUnderReview {
                 .collect::<Vec<_>>(),
             "plan": beside(
                 vec![
-                    ("schema_version", serde_json::Value::from(self.plan.schema_version)),
+                    (
+                        "schema_version",
+                        serde_json::Value::from(self.plan.schema_version.0),
+                    ),
                     (
                         "tasks",
                         serde_json::Value::from(
