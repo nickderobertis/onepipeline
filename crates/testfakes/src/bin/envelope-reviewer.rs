@@ -219,33 +219,48 @@ struct EnvelopeUnderReview {
 impl EnvelopeUnderReview {
     /// The envelope as this reviewer records it, which is the envelope as it
     /// arrived: every field back where the document had it, the plan's own
-    /// included.
+    /// included, and a field the document omitted omitted here too — an envelope
+    /// stating no goal and one stating a null goal are different documents, and
+    /// recording the first as the second would have this reviewer witnessing a
+    /// field the caller never wrote.
     fn recorded(&self) -> serde_json::Value {
-        serde_json::json!({
-            "goal": self.goal.as_ref().map(|goal| goal.0.clone()),
-            "changes": self
-                .changes
-                .iter()
-                .map(|change| {
-                    serde_json::json!({"op": change.op.wire(), "node": change.node.recorded()})
-                })
-                .collect::<Vec<_>>(),
-            "plan": beside(
-                vec![
-                    (
-                        "schema_version",
-                        serde_json::Value::from(self.plan.schema_version.0),
+        let goal = self
+            .goal
+            .as_ref()
+            .map(|goal| ("goal", serde_json::Value::from(goal.0.clone())));
+        let changes = self
+            .changes
+            .iter()
+            .map(|change| serde_json::json!({"op": change.op.wire(), "node": change.node.recorded()}))
+            .collect::<Vec<_>>();
+        let plan = beside(
+            vec![
+                (
+                    "schema_version",
+                    serde_json::Value::from(self.plan.schema_version.0),
+                ),
+                (
+                    "tasks",
+                    serde_json::Value::from(
+                        self.plan
+                            .tasks
+                            .iter()
+                            .map(OfferedNode::recorded)
+                            .collect::<Vec<_>>(),
                     ),
-                    (
-                        "tasks",
-                        serde_json::Value::from(
-                            self.plan.tasks.iter().map(OfferedNode::recorded).collect::<Vec<_>>(),
-                        ),
-                    ),
-                ],
-                &self.plan.rest,
-            ),
-        })
+                ),
+            ],
+            &self.plan.rest,
+        );
+        beside(
+            goal.into_iter()
+                .chain([
+                    ("changes", serde_json::Value::from(changes)),
+                    ("plan", plan),
+                ])
+                .collect(),
+            &serde_json::Map::new(),
+        )
     }
 
     /// The node a refusal is about: the first this envelope changes, and none
