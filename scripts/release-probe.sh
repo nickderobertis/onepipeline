@@ -56,14 +56,20 @@ TARGETS=(
   npm:onepipeline-cli
 )
 
-# Where each registry is asked. Overridable for the reason
-# `scripts/linked-engines.sh`'s `--index` is: a mirror, or a test's fixture
-# server, answers instead. The host passes neither — it passes `PATH` and `HOME`
-# and nothing else — so in production these are unset and the public endpoints
-# below are what answer.
-crates_index="${ONEPIPELINE_CRATES_INDEX:-https://index.crates.io}"
-pypi_api="${ONEPIPELINE_PYPI_API:-https://pypi.org/pypi}"
-npm_registry="${ONEPIPELINE_NPM_REGISTRY:-https://registry.npmjs.org}"
+# Where each registry is asked, fixed here and settable from nowhere else. The
+# host hands this `PATH` and `HOME` and nothing else, so an environment variable
+# is not something it could pass in production — and one read here anyway would
+# be a way for a caller's environment to decide which registry an answer came
+# from, on the one question a consumer holds a node against.
+#
+# What a test substitutes instead is the program that makes the request, on the
+# search path the host already gives it: `npm/test/release-targets.test.mjs`
+# hands the probe a `PATH` carrying a `curl` that points these three names at a
+# fixture registry, and reads them out of the lines below so a moved endpoint
+# reaches that fixture rather than the public registry.
+CRATES_INDEX="https://index.crates.io"
+PYPI_API="https://pypi.org/pypi"
+NPM_REGISTRY="https://registry.npmjs.org"
 
 # One request's budget. Three attempts of eight seconds, with one- and
 # two-second backoffs, is twenty-seven seconds worst case — comfortably inside
@@ -81,29 +87,6 @@ refuse() {
   echo "ACTION: $2" >&2
   exit "$3"
 }
-
-# An endpoint is external input as much as the identifier is — a mirror or a
-# test's fixture server names one — so each is held to the shape a request can be
-# made to before `curl` is handed it. An unset one never reaches here: it is the
-# public endpoint above, which is what the host's own environment always gets.
-endpoint() {
-  case "$2" in
-    http://?*|https://?*) ;;
-    *)
-      refuse "$1 is set to '$2', which is not an http(s) registry endpoint" \
-        "unset $1 to ask the public registry, or set it to a base URL such as 'https://index.crates.io'" 2
-      ;;
-  esac
-  case "$2" in
-    *[!0-9A-Za-z:/._~%?=+@-]*)
-      refuse "$1 is set to '$2', which holds a character no registry endpoint has" \
-        "unset $1 to ask the public registry, or set it to a base URL such as 'https://index.crates.io'" 2
-      ;;
-  esac
-}
-endpoint ONEPIPELINE_CRATES_INDEX "$crates_index"
-endpoint ONEPIPELINE_PYPI_API "$pypi_api"
-endpoint ONEPIPELINE_NPM_REGISTRY "$npm_registry"
 
 if [ "$#" -ne 1 ]; then
   refuse "expected exactly one registry-qualified identifier, got $#" "$usage" 2
@@ -401,7 +384,7 @@ crates_path() {
 # a crate with nothing currently served, which is the empty answer.
 ask_crates() {
   local tag rest best parsed
-  if ! fetch "$crates_index/$(crates_path "$name")" "the crates.io index"; then
+  if ! fetch "$CRATES_INDEX/$(crates_path "$name")" "the crates.io index"; then
     return 0
   fi
   if ! parsed="$(awk -v want="$name" "$json_walker$crates_records" "$body")"; then
@@ -423,11 +406,11 @@ ask_crates() {
       skip|"") ;;
       foreign)
         refuse "the crates.io index served a record filed under another crate for '$name'" \
-          "check that '$crates_index' is a crates.io sparse index" 3
+          "check that '$CRATES_INDEX' is serving the crates.io sparse index" 3
         ;;
       *)
         refuse "the crates.io index served a record for '$name' this could not read ($tag)" \
-          "check that '$crates_index' is a crates.io sparse index" 3
+          "check that '$CRATES_INDEX' is serving the crates.io sparse index" 3
         ;;
     esac
   done <<<"$parsed"
@@ -456,7 +439,7 @@ read_member() {
 # which is the version `pip install <name>` resolves to.
 ask_pypi() {
   local answer tag value
-  if ! fetch "$pypi_api/$name/json" "the PyPI API"; then
+  if ! fetch "$PYPI_API/$name/json" "the PyPI API"; then
     return 0
   fi
   answer="$(read_member info version PyPI)"
@@ -474,7 +457,7 @@ ask_pypi() {
 # with no such tag is served as a 404, which is the empty answer.
 ask_npm() {
   local answer tag value
-  if ! fetch "$npm_registry/$name/latest" "the npm registry"; then
+  if ! fetch "$NPM_REGISTRY/$name/latest" "the npm registry"; then
     return 0
   fi
   answer="$(read_member version "" npm)"

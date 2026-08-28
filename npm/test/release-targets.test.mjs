@@ -8,16 +8,18 @@
 // `releaseConfiguration()`, and the mutated-configuration journeys prove the
 // derivation notices a change rather than agreeing with itself.
 //
-// The probe journeys spawn the real script the way `src/release.rs` spawns one.
-// The registry is the one collaborator substituted, over real HTTP, as
-// `tests/linked_engines.rs` substitutes the crates.io index: what a public
+// The probe journeys spawn the real script the way `src/release.rs` spawns one,
+// under that environment exactly: a search path and a home directory. The
+// registry is the one collaborator substituted, and it is substituted *on that
+// search path* — a `curl` that points the probe's own endpoints at a fixture
+// server, since the probe reads no variable one could be named in. What a public
 // registry serves cannot be asked offline, and a fake registry standing in for
-// itself is what would then be under test. The real ones are asked weekly by
+// itself is what would then be under test; the real ones are asked weekly by
 // `.github/workflows/published-smoke.yml`.
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
-import { mkdtempSync, readFileSync, rmSync, statSync, symlinkSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -46,6 +48,23 @@ function declaredTargets(script = read("scripts", "release-probe.sh")) {
   const block = script.match(/^TARGETS=\(\n([\s\S]*?)^\)$/m);
   assert.ok(block, "no `TARGETS=(` array in scripts/release-probe.sh");
   return block[1].split(/\s+/).filter(Boolean);
+}
+
+/**
+ * The registry endpoints the probe asks, read out of the probe itself.
+ *
+ * They are constants in that file and settable from nowhere else: the host hands
+ * a probe `PATH` and `HOME`, so a variable it read would be a way for a caller's
+ * environment to decide which registry an answer came from.
+ */
+function endpoints(script = read("scripts", "release-probe.sh")) {
+  const named = [...script.matchAll(/^[A-Z_]+="(https:\/\/[^"]+)"$/gm)].map((match) => match[1]);
+  assert.equal(
+    named.length,
+    3,
+    "the probe names one public endpoint per registry it answers for, as a constant",
+  );
+  return named;
 }
 
 function parseTarget(identifier) {
@@ -266,30 +285,73 @@ function indexRecord(name, version, yanked) {
  * fail every journey below rather than passing on the runner's ambient
  * environment. `extra` carries only the registry substitution.
  */
+/** Where one of the programs the probe reaches for lives on this host. */
+function hostTool(tool) {
+  const resolved = spawnSync("sh", ["-c", `command -v ${tool}`], {
+    encoding: "utf8",
+  }).stdout.trim();
+  assert.ok(resolved, `${tool} is not on this host's PATH, so the probe cannot run at all`);
+  return resolved;
+}
+
 /**
- * A search path carrying everything the probe reaches for except one program.
+ * A search path holding exactly the programs the probe reaches for, with a
+ * `curl` that asks the fixture registry rather than the public ones.
  *
- * Symlinks to the real tools rather than shims: what is under test is what the
- * probe does when a host cannot run the program, and a stand-in that answered
- * would be the thing proven instead.
+ * The substitution rides on the search path because that — with `HOME` — is the
+ * whole environment the host gives a probe: there is no variable to point it
+ * elsewhere with, and deliberately none to add. What the fixture `curl` decides
+ * is only *which host answers*; the arguments, the status code, the body file,
+ * the timeout, and the transport failure a closed port produces are the real
+ * curl's, over real HTTP.
+ *
+ * `without` leaves one program off, which is how a host that cannot run what the
+ * probe needs is driven.
  */
 const scratchPaths = [];
-function pathWithout(missing) {
+function fixturePath(base, { without } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "release-probe-path-"));
   scratchPaths.push(dir);
-  for (const tool of ["bash", "env", "mktemp", "curl", "sleep", "tr", "rm", "awk"]) {
-    if (tool === missing) continue;
-    const resolved = spawnSync("sh", ["-c", `command -v ${tool}`], {
-      encoding: "utf8",
-    }).stdout.trim();
-    assert.ok(resolved, `${tool} is not on this host's PATH, so the probe cannot run at all`);
-    symlinkSync(resolved, join(dir, tool));
+  for (const tool of ["bash", "env", "mktemp", "sleep", "tr", "rm", "awk"]) {
+    if (tool === without) continue;
+    symlinkSync(hostTool(tool), join(dir, tool));
   }
+  // Read out of the probe rather than written here, so an endpoint it moves to
+  // reaches this fixture rather than quietly reaching the public registry and
+  // passing.
+  const rewrites = endpoints()
+    .map((endpoint) => `    ${endpoint}/*) asked+=("${base}/\${arg#${endpoint}/}") ;;`)
+    .join("\n");
+  writeFileSync(
+    join(dir, "curl"),
+    `#!/usr/bin/env bash
+set -euo pipefail
+asked=()
+for arg in "$@"; do
+  case "$arg" in
+${rewrites}
+    http://*|https://*)
+      echo "fixture curl: nothing here serves '$arg' — the probe asked an endpoint this fixture does not rewrite" >&2
+      exit 6
+      ;;
+    *) asked+=("$arg") ;;
+  esac
+done
+exec ${hostTool("curl")} "\${asked[@]}"
+`,
+    { mode: 0o755 },
+  );
   return dir;
 }
 
-function contractEnv(extra = {}) {
-  return { PATH: process.env.PATH, HOME: process.env.HOME, ...extra };
+/**
+ * The environment the host hands a probe, and nothing else: a search path and a
+ * home directory. No credential, no registry setting, nothing the caller
+ * happened to be holding — so a probe that had come to need one would fail every
+ * journey below rather than passing on this machine's ambient environment.
+ */
+function contractEnv(path) {
+  return { PATH: path, HOME: process.env.HOME };
 }
 
 /**
@@ -352,14 +414,6 @@ function releasedAt(version) {
       JSON.stringify({ name: "onepipeline-cli", version, dist: { tarball: "https://x/y.tgz" } }),
     ),
   });
-}
-
-function bases(base) {
-  return {
-    ONEPIPELINE_CRATES_INDEX: base,
-    ONEPIPELINE_PYPI_API: base,
-    ONEPIPELINE_NPM_REGISTRY: base,
-  };
 }
 
 describe("the release targets this repository declares", () => {
@@ -494,33 +548,59 @@ describe("the release probe", () => {
   });
 
   it("answers the version each registry currently serves", async () => {
-    const server = await serving(releasedAt("0.16.3"));
+    // A version no public registry has ever served, so a journey whose fixture
+    // `curl` had stopped rewriting — and had reached the real registry instead —
+    // fails here rather than passing on what is really published.
+    const server = await serving(releasedAt("7.8.9"));
+    const env = contractEnv(fixturePath(server.base));
     for (const identifier of declared) {
-      const run = await probe(identifier, { env: contractEnv(bases(server.base)) });
+      const run = await probe(identifier, { env });
       assert.equal(run.status, 0, `${identifier} was not answered:\n${said(run)}`);
-      assert.equal(run.stdout, "0.16.3\n", `${identifier} answered wrongly:\n${said(run)}`);
+      assert.equal(run.stdout, "7.8.9\n", `${identifier} answered wrongly:\n${said(run)}`);
       assert.equal(run.stderr, "", `${identifier} answered with noise:\n${said(run)}`);
       assert.ok(run.elapsed < BOUND_MS, `${identifier} took ${run.elapsed}ms to answer`);
     }
+    assert.deepEqual(
+      [...server.asked.values()],
+      [1, 1, 1],
+      "one ask per target reached the fixture registry, and no target was asked twice",
+    );
   });
 
-  it("needs nothing but a search path and a home directory to answer", async () => {
+  it("takes no direction from the environment but a search path and a home directory", async () => {
     const server = await serving(releasedAt("1.2.3"));
-    const env = contractEnv(bases(server.base));
+    const env = contractEnv(fixturePath(server.base));
     assert.deepEqual(
       Object.keys(env).sort(),
-      [
-        "HOME",
-        "ONEPIPELINE_CRATES_INDEX",
-        "ONEPIPELINE_NPM_REGISTRY",
-        "ONEPIPELINE_PYPI_API",
-        "PATH",
-      ],
+      ["HOME", "PATH"],
       "the environment these journeys hand the probe carries something the host does not",
     );
-    const run = await probe("pypi:onepipeline-cli", { env });
-    assert.equal(run.status, 0, `the probe wanted more than the host gives it:\n${said(run)}`);
-    assert.equal(run.stdout, "1.2.3\n", said(run));
+    const bare = await probe("pypi:onepipeline-cli", { env });
+    assert.equal(bare.status, 0, `the probe wanted more than the host gives it:\n${said(bare)}`);
+    assert.equal(bare.stdout, "1.2.3\n", said(bare));
+
+    // The same question under an environment holding a credential and a registry
+    // setting for every endpoint, each pointed at a port nothing listens on. A
+    // probe that read any of them would answer from somewhere else or refuse;
+    // this one answers the same version, because where it asks is a constant in
+    // its own source and nothing outside the file can move it.
+    const noisy = await probe("pypi:onepipeline-cli", {
+      env: {
+        ...env,
+        ONEPIPELINE_CRATES_INDEX: "http://127.0.0.1:1",
+        ONEPIPELINE_PYPI_API: "http://127.0.0.1:1",
+        ONEPIPELINE_NPM_REGISTRY: "http://127.0.0.1:1",
+        CARGO_REGISTRY_TOKEN: "not-a-token",
+        PYPI_TOKEN: "not-a-token",
+        NPM_TOKEN: "",
+      },
+    });
+    assert.equal(noisy.status, 0, `an ambient environment changed the answer:\n${said(noisy)}`);
+    assert.equal(
+      noisy.stdout,
+      "1.2.3\n",
+      `an ambient environment changed the answer:\n${said(noisy)}`,
+    );
   });
 
   it("answers nothing at all, and succeeds, when a registry has no release yet", async () => {
@@ -528,7 +608,7 @@ describe("the release probe", () => {
     // each of the three says it serves no such artifact.
     const server = await serving(registry({}));
     for (const identifier of declared) {
-      const run = await probe(identifier, { env: contractEnv(bases(server.base)) });
+      const run = await probe(identifier, { env: contractEnv(fixturePath(server.base)) });
       assert.equal(
         run.status,
         0,
@@ -544,7 +624,7 @@ describe("the release probe", () => {
 
   it("does not answer for an identifier it does not recognise", async () => {
     const server = await serving(releasedAt("0.16.3"));
-    const env = contractEnv(bases(server.base));
+    const env = contractEnv(fixturePath(server.base));
     const strangers = [
       // A real artifact of a sibling repository, which this one cannot speak for.
       "crate:onevcs",
@@ -588,7 +668,7 @@ describe("the release probe", () => {
       }),
     );
     for (const identifier of declared) {
-      const run = await probe(identifier, { env: contractEnv(bases(server.base)) });
+      const run = await probe(identifier, { env: contractEnv(fixturePath(server.base)) });
       assert.notEqual(
         run.status,
         0,
@@ -629,7 +709,7 @@ describe("the release probe", () => {
         ),
       }),
     );
-    const env = contractEnv(bases(server.base));
+    const env = contractEnv(fixturePath(server.base));
     for (const [identifier, path, asks] of [
       ["npm:onepipeline-cli", "/onepipeline-cli/latest", 2],
       ["pypi:onepipeline-cli", "/onepipeline-cli/json", 3],
@@ -655,7 +735,7 @@ describe("the release probe", () => {
     const closed = await registry({});
     const base = closed.base;
     await closed.close();
-    const run = await probe("crate:onepipeline", { env: contractEnv(bases(base)) });
+    const run = await probe("crate:onepipeline", { env: contractEnv(fixturePath(base)) });
     assert.notEqual(run.status, 0, `an unreachable registry was answered for:\n${said(run)}`);
     assert.equal(run.stdout, "", said(run));
     assert.match(run.stderr, /did not answer in 3 attempts[\s\S]*ACTION: /, said(run));
@@ -677,7 +757,7 @@ describe("the release probe", () => {
       }),
     );
     for (const identifier of declared) {
-      const run = await probe(identifier, { env: contractEnv(bases(server.base)) });
+      const run = await probe(identifier, { env: contractEnv(fixturePath(server.base)) });
       assert.notEqual(
         run.status,
         0,
@@ -701,7 +781,7 @@ describe("the release probe", () => {
         ? JSON.stringify({ info: { name: "onepipeline-cli", version } })
         : JSON.stringify({ name: "onepipeline-cli", version });
       const server = await serving(registry({ [path]: always(200, body) }));
-      const run = await probe(identifier, { env: contractEnv(bases(server.base)) });
+      const run = await probe(identifier, { env: contractEnv(fixturePath(server.base)) });
       assert.notEqual(
         run.status,
         0,
@@ -712,31 +792,10 @@ describe("the release probe", () => {
     }
   });
 
-  it("refuses an endpoint override that is not a registry endpoint", async () => {
-    const server = await serving(releasedAt("0.16.3"));
-    for (const endpoint of ["file:///etc", `${server.base}/ ;rm -rf x`]) {
-      const run = await probe("npm:onepipeline-cli", {
-        env: contractEnv({ ...bases(server.base), ONEPIPELINE_NPM_REGISTRY: endpoint }),
-      });
-      assert.notEqual(
-        run.status,
-        0,
-        `'${endpoint}' was requested rather than refused:\n${said(run)}`,
-      );
-      assert.equal(run.stdout, "", said(run));
-      assert.match(run.stderr, /ACTION: /, said(run));
-    }
-  });
-
   it("does not answer when the host gives it nowhere to read the answer", async () => {
     const server = await serving(releasedAt("0.16.3"));
-    // `TMPDIR` is how a host says where that is; the host the contract describes
-    // passes none, and the probe then reads its answer under /tmp.
     const run = await probe("crate:onepipeline", {
-      env: contractEnv({
-        ...bases(server.base),
-        TMPDIR: join(tmpdir(), "release-probe-nowhere-at-all"),
-      }),
+      env: contractEnv(fixturePath(server.base, { without: "mktemp" })),
     });
     assert.notEqual(
       run.status,
@@ -749,7 +808,7 @@ describe("the release probe", () => {
 
   it("does not answer when the reader of a registry's document cannot run", async () => {
     const server = await serving(releasedAt("0.16.3"));
-    const env = { ...contractEnv(bases(server.base)), PATH: pathWithout("awk") };
+    const env = contractEnv(fixturePath(server.base, { without: "awk" }));
     for (const identifier of declared) {
       const run = await probe(identifier, { env });
       assert.notEqual(
@@ -775,7 +834,7 @@ describe("the release probe", () => {
         ),
       }),
     );
-    const run = await probe("crate:onepipeline", { env: contractEnv(bases(server.base)) });
+    const run = await probe("crate:onepipeline", { env: contractEnv(fixturePath(server.base)) });
     assert.equal(
       run.status,
       0,
@@ -793,7 +852,7 @@ describe("the release probe", () => {
       }),
     );
     for (const identifier of declared) {
-      const run = await probe(identifier, { env: contractEnv(bases(server.base)) });
+      const run = await probe(identifier, { env: contractEnv(fixturePath(server.base)) });
       assert.notEqual(
         run.status,
         0,
@@ -813,7 +872,7 @@ describe("the release probe", () => {
         ),
       }),
     );
-    const run = await probe("crate:onepipeline", { env: contractEnv(bases(server.base)) });
+    const run = await probe("crate:onepipeline", { env: contractEnv(fixturePath(server.base)) });
     assert.notEqual(
       run.status,
       0,
