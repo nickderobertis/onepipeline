@@ -590,8 +590,9 @@ fn every_other_shape_cuts_a_fresh_session_onto_its_branch_or_from_the_base() {
     let repo = world.repository("local-direct", &[]);
 
     // A session nothing ever came back for, opened before the first run below so
-    // that run's own opening reclaims it — a real reclamation by the sibling
-    // rather than a directory this journey removed to look like one.
+    // that run's own opening runs the sibling's housekeeping over it. What that
+    // housekeeping does with it is case 2, and since `onevcs` 0.15.6 the answer
+    // is *nothing*.
     let reclaimed = abandoned_session(&world, "feature/reclaimed");
 
     // 1. Occupied. Somebody has taken the run root against the world, so the
@@ -612,14 +613,34 @@ fn every_other_shape_cuts_a_fresh_session_onto_its_branch_or_from_the_base() {
     );
     drop(lease);
 
-    // 2. Reclaimed. The record still names a run root; the directory is gone, and
-    //    with it every place the branch could have been continued.
+    // 2. Gone. The record still names a run root; the directory is not there, and
+    //    with it goes every place the branch could have been continued.
+    //
+    //    Two things, in this order, because the second is only a fair test of the
+    //    fall-through once the first has held. Case 1's opening ran the sibling's
+    //    reclamation across this host with the session above sitting open in it,
+    //    and `onevcs` 0.15.6 left that run root standing: a session opened from
+    //    the command line is owned by the `onevcs` that printed its token and then
+    //    exited, so its record answers *stale* from that instant while an operator
+    //    works in the worktree for hours, and reading stale as "nobody is in here"
+    //    is what deleted three live dispatches inside ninety seconds of their
+    //    launch. So the sibling is no longer the thing that empties a live
+    //    session's directory, and this journey takes the broom itself — an
+    //    operator, a host reboot, a `/tmp` sweep — rather than dressing a removal
+    //    up as housekeeping the build under test would not do.
     assert!(
-        !run_root(&reclaimed).is_dir(),
-        "the sibling did not reclaim the abandoned run root at {}, so this case is \
-         not the one it names",
+        run_root(&reclaimed).is_dir(),
+        "the sibling reclaimed the run root of a session still open at {}, so this \
+         build reads a record that answers stale the moment its opening command \
+         exits as a run root nobody is working in",
         run_root(&reclaimed).display()
     );
+    std::fs::remove_dir_all(run_root(&reclaimed)).unwrap_or_else(|e| {
+        panic!(
+            "the run root at {} could not be swept: {e}",
+            run_root(&reclaimed).display()
+        )
+    });
     let (settled, session) = dispatched(&world, "reclaimed", Some("feature/reclaimed"));
     assert_eq!(
         settled["nodes"][0]["status"],

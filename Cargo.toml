@@ -159,7 +159,47 @@ resolver = "2"
 #   kept. Both halves answer from here — that selection re-times at a 16.6s
 #   median against 0.15.0's 16.3s, and `tests/e2e/real_vcs.rs` reads a refused
 #   push's outcome off what that command printed, so a dropped last read fails a
-#   journey. `^0.15` already admitted it, so only the resolution moved.
+#   journey. The requirement then in force, `^0.15`, already admitted it, so only
+#   the resolution moved.
+# - `onevcs` 0.15.5 stops **refusing a check name for carrying whitespace** — or
+#   a leading dash — so a failing check's log, and the bounded tail that goes into
+#   the failure evidence, are read and recorded instead of fetched and thrown
+#   away. A check's name is matched against the ones the host reports and never
+#   becomes a `gh` argument, and every GitHub matrix job is named with a space in
+#   it: `check (macos-latest)`, `test-os (windows-latest)`. Below it a
+#   `checks-failed` node reached its next worker with a name and a URL and no log
+#   at all, and that worker paid for another CI run to learn what the tail already
+#   said. This crate holds no copy of that boundary — `src/vcs.rs`'s `usable`
+#   guards a session token and a branch name, values this build hands back and
+#   renders into line-oriented views, and never a check name — so the resolution
+#   is the whole of what puts the fix in force.
+# - `onevcs` 0.15.6 **keeps a run root a live session is still working in**: a
+#   root an open session names is held against reclamation even after the CLI
+#   process that opened it has exited and before anything is committed, while an
+#   unnamed, unoccupied one stays reclaimable and the retention bound is
+#   unchanged. Below it a sibling's session open deleted a live dispatch's
+#   worktree moments after launch — three dispatches of one run inside ninety
+#   seconds — and the child processes that followed failed naming an executable
+#   search path, which is not what had happened to them.
+#   `tests/e2e/session_reuse.rs` drives the other side of the same lease: it takes
+#   the run root's lock **exclusively**, which is still the one answer that stops
+#   reuse, so the narrowing leaves that journey deciding what it always decided.
+# - `onevcs` 0.15.7 **decides a landing against a base fresh enough to answer
+#   it**, reading the publication checkout's own object store where the branch
+#   holder's base history is stale, and leaving status, recovery and release
+#   reporting *undecided* where the base still cannot be read rather than
+#   answering that the work did not land. Below it a checkout that had not fetched
+#   the landing reported merged work as unlanded — and this crate relays that
+#   answer as prose: `src/lifecycle.rs`'s `unread_merge_path` hands the node
+#   `onevcs`'s own reason verbatim, which names the `publish-branch` that lands
+#   the branch, so a stale read became an offer to republish work that had merged
+#   52 minutes earlier. Nothing here decides a landing, so nothing here moved with
+#   it.
+# - `onevcs` 0.15.8 is the newest the registry carries and the release
+#   `onevcs-testing` 0.4.17 requires exactly, so it is what the pair resolves to
+#   from either end. `^0.15` already admitted all three fixes above: what held
+#   this build at 0.15.4 was the resolution and not the declaration, which is why
+#   the pin names a release rather than the window that was already wide enough.
 #
 # **Every pin in this block is declared at the newest release the registry
 # carries**, because this repository resolves no engine at two versions and so
@@ -211,11 +251,23 @@ resolver = "2"
 # own launch-time `Bounds::from_env`, and the rule that bound governs, driven
 # over real processes under a bound the environment sets small.
 #
-# `oneagentgraph` 0.3.11 requires `oneharness-core 0.12.1` and `onejudge 0.5.4`.
+# `oneagentgraph` 0.3.12 requires `oneharness-core 0.12.1` and `onejudge 0.6.1`.
 # The latter still requires `oneharness-core 0.12.0`, whose caret requirement
 # admits 0.12.1, so the pins below let the graph resolve **one** turn engine. A
 # split one is invisible to a currency check, which reads each copy separately
 # and calls both current.
+#
+# 0.3.12 is also the release that **carries `onejudge` past 0.5**. `onejudge`
+# 0.6.0 lets a conversation whose contract is a quiet turn opt out of the no-op
+# settle — `Settings::settle_on_noop`, defaulting to the behaviour every 0.5
+# build had, so nothing this crate composes reads differently for it — and 0.3.12
+# adopts 0.6.1 and proves the flag reaches the loop. The pin below must be the
+# version *that* pin resolves to, for the reason the `onejudge` comment gives:
+# `src/report.rs` coerces between the two libraries' types and only type-checks
+# against one copy. So the two move together or `onejudge` resolves twice. The
+# `0.5.4` this replaces was the constraint itself and not a lagging lock — pre-1.0
+# the minor is the breaking position, so `^0.5.4` excluded every 0.6.x outright
+# and no refresh of the resolution could have reached one.
 #
 # Two floors inside that unification. `onejudge` 0.5.2, because `src/report.rs`
 # reads the text a turn reported off `member-settled` rather than the harness's
@@ -227,23 +279,23 @@ resolver = "2"
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
 # second with no registry at all.
 [workspace.dependencies]
-oneagentgraph = "0.3.11"
-onevcs = "0.15"
+oneagentgraph = "0.3.12"
+onevcs = "0.15.8"
 # **Not a third sibling this crate composes** — nothing here launches, calls, or
 # spawns onejudge. It is one vocabulary: the verdicts a two-party member settles
 # on, which `oneagentgraph` copies onto the `member-settled` this crate relays.
 # It adds nothing to the dependency graph, because `oneagentgraph` already builds
 # it — and it must resolve to the version *that* pin does. `src/report.rs` is
 # where the build fails if it ever resolves to two, and why.
-onejudge = "0.5.4"
+onejudge = "0.6.1"
 # **Test-support only**, and named for one reason: `crates/testfakes`'s
 # `oneharness` double writes the report onejudge reads back, and that report is
 # oneharness's own typed contract. Written by hand it would be fifty fields of
 # copied wire shape that goes on parsing after the producer changed it — which is
 # the failure every other pin in this block is taken to avoid.
 #
-# The reader is **onejudge**, so this pin is whatever onejudge links: at 0.5.4 it
-# requires `oneharness-core 0.12.0`, while `oneagentgraph` 0.3.11 requires
+# The reader is **onejudge**, so this pin is whatever onejudge links: at 0.6.1 it
+# requires `oneharness-core 0.12.0`, while `oneagentgraph` 0.3.12 requires
 # 0.12.1, so the shared `0.12` requirement resolves one compatible copy and the
 # double writes the one its consumer parses. If onejudge's pin moves and this
 # one does not, `tests/e2e/turns.rs` fails on a report shape onejudge cannot read
@@ -260,7 +312,7 @@ oneharness-core = "0.12"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.4.13"
+onevcs-testing = "0.4.17"
 
 [package]
 name = "onepipeline"
