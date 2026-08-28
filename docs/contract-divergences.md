@@ -1902,13 +1902,34 @@ Exit 0 accepts the envelope. A non-zero exit refuses it **whole** — no command
 of it half-applies — carrying the reviewer's own stderr, bounded and
 control-stripped exactly as entry 41's refusals are, and naming every op and
 node it was reviewing, because an envelope is no longer one command and a reason
-nobody can locate is a reason nobody can act on. *Which* node the reviewer
-objected to is the reviewer's own sentence to write, since only it knows;
-naming what it was given is this crate's half of that. Its stdout goes nowhere,
+nobody can locate is a reason nobody can act on. Its stdout goes nowhere,
 because this runs inside `reply`, whose own stdout is a parsed verdict. It
 **fails closed**: a reviewer that cannot be started refuses the envelope, for the
 reason entry 41's validator does. A launch that configures none behaves exactly
 as it did before this hook.
+
+**The refusal names the node the reviewer objected to**, which is not the set it
+was reviewing: the envelope is no longer one command, so a reader given only the
+list it looked at still cannot tell which node to go and change. Only the
+reviewer knows which one, so it **declares** it, on a line of its stderr reading
+`objection: cover` — the prefix matched case-insensitively, one line per node,
+anywhere in what it says, and repeatable for an objection about the seam between
+two of them. A prefix on the stream the hook already has, rather than a second
+channel: its stdout is a parsed verdict's and unavailable, and a JSON answer
+would make every host's reviewer a serializer to say one node's name. The
+declarations are lifted out of the stderr before the rest is quoted, so a
+refusal does not read the same name back in front of the reviewer's own
+sentence.
+
+A reviewer that declares nothing is not refused for it — the shell scripts
+written against this hook before the line existed declare none — and it is not
+reported as objecting to everything either. The refusal states which of three
+answers it got, because a reader acts differently on each: a node the envelope
+changes is one to go and fix, a name the envelope does not carry is the reviewer
+pointing somewhere else (at a node already in the plan, or at nothing), and no
+declaration at all is a refusal whose target is simply unstated. Reporting the
+third as the first, by listing every node the envelope carried, is the failure
+the declaration exists to end.
 
 **An accepted envelope is offered once**, which is the one property that does not
 follow entry 41 — that validator is offered an accepted edit twice, at the
@@ -1944,11 +1965,13 @@ introduces it, exactly as entry 41's did.
 the flag must be one `start` takes, the config key must parse at the version
 stated, and the document must be built out of this crate's own published shapes —
 each `changes[].node` a plan `Node` and `plan` a `Plan`, both round-tripping as
-written. `tests/e2e/envelope_reviewer.rs` reads the three spellings and the
-`ops_listed_as_changes` list out of the same block and drives them against a
-real reviewer program — every op the protocol has, through the real CLI, held
-against that list in both directions — so what a reply actually hands a host is
-proven rather than asserted in prose.
+written. `tests/e2e/envelope_reviewer.rs` reads the three spellings, the
+`ops_listed_as_changes` list and the `objection_prefix` out of the same block and
+drives them against a real reviewer program — every op the protocol has, through
+the real CLI, held against that list in both directions, and a declaration
+composed from that prefix held against the node the refusal then names — so what
+a reply actually hands a host, and what it reads back from one, is proven rather
+than asserted in prose.
 
 ```json
 {
@@ -1959,6 +1982,7 @@ proven rather than asserted in prose.
     "config_schema_version": 4,
     "precedence": ["flag", "environment", "config_key"],
     "offers_per_accepted_envelope": 1,
+    "objection_prefix": "objection:",
     "ops_listed_as_changes": ["add", "amend", "reparent", "requeue", "retry"],
     "document": {
       "goal": "close the coverage gap",

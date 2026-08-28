@@ -10,9 +10,12 @@
 //!
 //! It is scripted from the same directory the sibling doubles are:
 //!
-//!   `reviewer.refuse`    present → refuse every envelope, naming itself, the
-//!                        node it objected to, and this file's text on stderr;
-//!                        absent → accept
+//!   `reviewer.refuse`    present → refuse every envelope, declaring the node it
+//!                        objected to and then naming itself and this file's
+//!                        text on stderr; absent → accept
+//!   `reviewer.objection` present → declare exactly these lines instead, verbatim,
+//!                        an empty file declaring nothing at all; absent → declare
+//!                        the first node the envelope changes
 //!   `reviewer.chatter`   present → write this file's text to **stdout** before
 //!                        answering, the way a review that narrates what it
 //!                        checked does
@@ -152,6 +155,16 @@ fn beside(
 /// schema, this line is one of the places that has to be brought along.
 const REVIEWED_PLAN_SCHEMA: u32 = 3;
 
+/// How this reviewer declares the node it objected to.
+///
+/// A literal rather than the caller's own constant, for the reason
+/// [`REVIEWED_PLAN_SCHEMA`] is one: this program is a **host's**, and a host has
+/// the line it is required to write down in its own rules rather than linked
+/// from the crate that reads it. A caller that moved the prefix would stop
+/// recognising every declaration this reviewer makes, which is a thing the
+/// journeys should fail on loudly.
+const OBJECTION_PREFIX: &str = "objection:";
+
 /// A plan's schema version, as this boundary accepts one.
 ///
 /// The version is what says the rest of the document means what this reviewer
@@ -235,13 +248,11 @@ impl EnvelopeUnderReview {
         })
     }
 
-    /// What a refusal is about: the first node this envelope changes, or the
-    /// plan itself for an envelope that changes none.
-    fn objection(&self) -> String {
-        match self.changes.first() {
-            Some(change) => format!("node '{}'", change.node.id.0),
-            None => "this envelope's edits to the plan".to_string(),
-        }
+    /// The node a refusal is about: the first this envelope changes, and none
+    /// for an envelope that changes none — there the objection is to the plan
+    /// the edits leave behind and there is no node to declare.
+    fn objection(&self) -> Option<&str> {
+        self.changes.first().map(|change| change.node.id.0.as_str())
     }
 }
 
@@ -292,14 +303,42 @@ fn main() -> std::process::ExitCode {
 
     match scenario(&dir.join("reviewer.refuse")) {
         Some(reason) => {
-            // The node it objected to, in its own sentence: an envelope is no
-            // longer one command, so a reason that named none would leave a
-            // manager reading a refusal with nothing to look at.
-            eprintln!("{invoked_as}: {}: {}", envelope.objection(), reason.trim());
+            // The node it objected to, declared where the caller reads it, and
+            // then the sentence a manager does: an envelope is no longer one
+            // command, so a refusal that declared none would leave a manager
+            // reading it with nothing to look at.
+            for line in declaration(&dir, &envelope) {
+                eprintln!("{line}");
+            }
+            eprintln!("{invoked_as}: {}", reason.trim());
             flood(&dir);
             std::process::ExitCode::from(1)
         }
         None => std::process::ExitCode::SUCCESS,
+    }
+}
+
+/// What this reviewer declares it objected to, before its own sentence.
+///
+/// Ordinarily the first node the envelope changes: a review that refuses an edit
+/// refuses it over something, and the caller can only report which node if the
+/// reviewer says. A scenario may state the lines instead, verbatim, which is how
+/// a journey drives a reviewer that declares a name the envelope does not carry,
+/// two nodes at once, or nothing at all — three answers the caller has to tell
+/// apart.
+fn declaration(dir: &std::path::Path, envelope: &EnvelopeUnderReview) -> Vec<String> {
+    match scenario(&dir.join("reviewer.objection")) {
+        Some(scripted) => scripted
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(str::to_string)
+            .collect(),
+        None => envelope
+            .objection()
+            .map(|id| vec![format!("{OBJECTION_PREFIX} {id}")])
+            .into_iter()
+            .flatten()
+            .collect(),
     }
 }
 

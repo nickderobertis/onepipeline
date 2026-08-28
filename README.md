@@ -245,7 +245,11 @@ seam between two nodes of one edit, the dependency edges the edit introduces, or
 whether the edited graph still delivers the goal. Exit `0` accepts it; a non-zero
 exit **refuses the whole envelope**, so no command of it half-applies, with the
 command's own stderr as the reason and every op and node it was reviewing named
-beside it. A reviewer that cannot be started refuses the envelope rather than
+beside it. The refusal also names the node the reviewer **objected to**, which
+is not the set it looked at: the reviewer declares it on a line of its stderr
+reading `objection: cover` — one line per node, repeatable — and a reviewer that
+declares none is reported as having declared none rather than as objecting to
+everything. A reviewer that cannot be started refuses the envelope rather than
 letting it through **reviewed by nothing**. An accepted envelope is offered
 **once per envelope** — unlike the node validator's two offers, because this hook
 exists for a review a host plausibly answers with an agent, and because the

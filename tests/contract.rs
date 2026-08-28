@@ -1937,6 +1937,7 @@ fn the_envelope_reviewer_surface_is_what_the_divergence_record_names() {
         "refuses the whole envelope",
         "once per envelope",
         "reviewed by nothing",
+        "reported as having declared none",
         "naming none is the default and runs no reviewer at all",
     ] {
         assert!(
@@ -1944,6 +1945,15 @@ fn the_envelope_reviewer_surface_is_what_the_divergence_record_names() {
             "the README no longer states that the envelope reviewer {promise}"
         );
     }
+    // And the line a reviewer declares the node it objected to on, which a host
+    // writing one reads out of the README rather than out of this record.
+    let prefix = reviewer["objection_prefix"]
+        .as_str()
+        .expect("entry 45 states the line a reviewer declares its objection on");
+    assert!(
+        prose.contains(prefix),
+        "the README does not state the `{prefix}` line a reviewer declares on"
+    );
 }
 
 #[test]

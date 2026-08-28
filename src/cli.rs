@@ -141,7 +141,9 @@ pub struct StartArgs {
     /// One document crosses its stdin: every node the envelope introduces or
     /// changes with the op that produced each, the plan they are being edited
     /// into, and the run's goal. Exit 0 accepts the envelope and a non-zero exit
-    /// refuses it whole, with the command's own stderr as the reason. Naming
+    /// refuses it whole, with the command's own stderr as the reason and the
+    /// node it declared on an `objection: ID` line of that stderr named as the
+    /// one it objected to. Naming
     /// none is the shipped default and is exactly what a launch did before this
     /// flag existed. Given here it beats `ONEPIPELINE_ENVELOPE_REVIEWER` and the
     /// launch config's own field — including when what it names is blank, which

@@ -100,7 +100,8 @@ fn offered(world: &World) -> Vec<(String, Value)> {
 }
 
 /// What the host's review says, in the sentence a manager reads. The reviewer
-/// prefixes it with the name it was invoked as and the node it objected to.
+/// prefixes it with the name it was invoked as, and declares the node it
+/// objected to on the line before it.
 const RULES: &str =
     "its acceptance criterion contradicts a rule the target repository states in its own suite";
 
@@ -155,12 +156,12 @@ fn a_refused_envelope_applies_none_of_its_commands_and_an_accepted_one_is_review
     refused
         .exited(REFUSED)
         .err_has(RULES)
-        // The node the reviewer objected to, in its own words: an envelope is no
-        // longer one command, so a refusal that named none leaves a manager with
-        // nothing to look at.
-        .err_has("node 'cover'")
-        // And what this crate handed it, so the objection can be located even
-        // when the reviewer is terse.
+        // The node the reviewer objected to, told apart from the other node the
+        // same envelope carried: an envelope is no longer one command, so a
+        // refusal a reader cannot locate is one nobody can act on.
+        .err_has("refused this envelope over node 'cover',")
+        // And what this crate handed it beside that, which is the set it looked
+        // at rather than the one it turned down.
         .err_has("add 'cover'")
         .err_has("add 'verify'");
 
@@ -258,6 +259,78 @@ fn a_refused_envelope_applies_none_of_its_commands_and_an_accepted_one_is_review
         2,
         "an accepted envelope was reviewed more than once: {seen:?}"
     );
+    world.release("slow.go");
+}
+
+/// Which node the reviewer objected to, told apart from the other nodes the same
+/// envelope carried — and said outright when it declared none.
+///
+/// The set an envelope offered for review is not the set the reviewer turned
+/// down, and a reader handed only the first still cannot tell which node to go
+/// and change. So the reviewer declares the node, on the line entry 45 states,
+/// and the three answers it can leave are three different facts a reader acts
+/// differently on: a node this envelope changes, a name it does not carry, and no
+/// declaration at all. Reporting the last as the first, by listing everything the
+/// envelope offered, is the failure the declaration exists to end.
+#[test]
+fn a_refusal_names_the_node_objected_to_and_says_so_when_the_reviewer_declared_none() {
+    let world = World::new("reviewer-objection");
+    let reviewer = reviewer_named(&world, "review-edit");
+    let run = live_run(&world, "reviewerobjection", &[&spelling("flag"), &reviewer]);
+    // The declaration is composed from the prefix the record states rather than
+    // from a literal here, so a build that stopped reading that line fails this
+    // journey instead of quietly reporting every refusal as unnamed.
+    let prefix = spelling("objection_prefix");
+    world.script("reviewer.refuse", RULES);
+
+    for (which, declares, names, absent) in [
+        (
+            "one of the two nodes it was offered",
+            format!("{prefix} cover"),
+            "refused this envelope over node 'cover', so none of its edits were applied",
+            vec!["over node 'verify'", "over nodes"],
+        ),
+        (
+            "both of them, for a seam between the two",
+            format!("{prefix} cover\n{prefix} verify"),
+            "refused this envelope over nodes 'cover', 'verify', so none of its edits were \
+             applied",
+            vec!["over node 'cover',"],
+        ),
+        (
+            "a name no node in the envelope goes by",
+            format!("{prefix} ghost"),
+            "over the name 'ghost', which no node this envelope changes goes by",
+            vec!["over node"],
+        ),
+        (
+            "nothing at all",
+            String::new(),
+            "refused this envelope without declaring the node it objected to",
+            vec!["over node", "over the name"],
+        ),
+    ] {
+        world.script("reviewer.objection", &declares);
+        let refused = world.run_with_stdin(&["reply", &run], &envelope(two_related_nodes()));
+        refused.exited(REFUSED).err_has(names);
+        for other in &absent {
+            refused.err_lacks(other);
+        }
+        // The reviewer's own sentence still reaches the manager beside it, and
+        // the declaration is lifted out rather than read back in front of it.
+        refused.err_has(RULES).err_lacks(&prefix);
+        // And every one of them is still a refusal of the whole envelope: a
+        // reviewer that declared nothing identifiable is not a reviewer that
+        // accepted anything.
+        for node in ["cover", "verify"] {
+            world.run(&["results", &run]).exited(0).out_lacks(node);
+        }
+        assert!(
+            refused.stderr.lines().count() == 1,
+            "a reviewer declaring {which} left a refusal of more than one line: {:?}",
+            refused.stderr
+        );
+    }
     world.release("slow.go");
 }
 
@@ -385,7 +458,7 @@ fn the_flag_beats_the_environment_which_beats_the_config() {
         let refused = world.run_with_stdin_on(reply, &envelope(two_related_nodes()));
         refused
             .exited(REFUSED)
-            .err_has(&format!("{which}: node 'cover': {RULES}"));
+            .err_has(&format!("{which}: {RULES}"));
         for other in ["by-flag", "by-environment", "by-config"] {
             if other != which {
                 refused.err_lacks(other);
@@ -763,6 +836,6 @@ fn the_resolved_reviewer_is_in_the_launch_record_and_survives_an_adoption() {
     let refused = world.run_with_stdin_on(reply, &envelope(two_related_nodes()));
     refused
         .exited(REFUSED)
-        .err_has(&format!("by-flag: node 'cover': {RULES}"))
+        .err_has(&format!("by-flag: {RULES}"))
         .err_lacks("somewhere-else");
 }

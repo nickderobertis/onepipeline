@@ -336,9 +336,19 @@ impl HookAnswer {
     /// on is the failure these hooks exist to end, so the exit code is at least
     /// something to look at.
     fn reason(&self) -> String {
-        let said = crate::views::one_line(&String::from_utf8_lossy(&self.stderr))
-            .trim()
-            .to_string();
+        self.reason_from(&String::from_utf8_lossy(&self.stderr))
+    }
+
+    /// The same, over one part of what it said.
+    ///
+    /// The envelope reviewer lifts the lines a hook declared its objection on
+    /// out of its stderr before quoting the rest, so the reason a refusal
+    /// carries is the reviewer's own sentence rather than that sentence with a
+    /// declaration read back in front of it. Everything else is identical, the
+    /// status fallback included: a hook whose every line was a declaration said
+    /// nothing a reader can act on, which is the case that fallback is for.
+    fn reason_from(&self, said: &str) -> String {
+        let said = crate::views::one_line(said).trim().to_string();
         if !said.is_empty() {
             return said;
         }
@@ -550,10 +560,14 @@ fn node_the_command_changes<'a>(command: &Command, graph: &'a Graph) -> Option<&
 /// before any of its commands is compiled into the journal, so no command of a
 /// refused envelope half-applies. The refusal carries the reviewer's own words,
 /// bounded and control-stripped exactly as the per-node validator's are, and
-/// names every op and node it was reviewing — an envelope is no longer one
-/// command, so a reason nobody can locate is a reason nobody can act on. Which
-/// one the reviewer objected to is the reviewer's own sentence to write, because
-/// only it knows; naming what it was given is this crate's half of that.
+/// names two sets that are not the same one: the node the reviewer **objected
+/// to**, declared on an [`OBJECTION_PREFIX`] line of its stderr, and every op
+/// and node it was **reviewing**. An envelope is no longer one command, so what
+/// it looked at is not what it turned down, and a reader given only the first
+/// still cannot tell which node to go and change. A reviewer that declared no
+/// node is reported as having declared none, rather than having the whole
+/// envelope read back as its objection — those are different facts about a
+/// refusal and a reader acts differently on each.
 ///
 /// **Fails closed**, for the reason the per-node validator does: a reviewer that
 /// cannot be started is a launch configured wrongly, and letting the envelope
@@ -625,11 +639,22 @@ pub(crate) fn offer_envelope_to_reviewer(
     if answer.status.success() {
         return Ok(());
     }
+    // What the reviewer declared it objected to, held against the names this
+    // envelope actually put in front of it — the same set `reviewed` prints
+    // below, so a node the refusal points at is one a reader finds again in the
+    // list beside it.
+    let said = String::from_utf8_lossy(&answer.stderr);
+    let objection = Objection::read(&said);
+    let envelope_named: BTreeSet<String> = commands
+        .iter()
+        .filter_map(crate::channel::target_of)
+        .collect();
     Err(refuse(format!(
-        "the envelope reviewer refused this envelope, so none of its edits were applied — \
+        "the envelope reviewer refused this envelope{}, so none of its edits were applied — \
          it was reviewing {}: {}",
+        objection.against(&envelope_named),
         reviewed(commands),
-        answer.reason()
+        answer.reason_from(&objection.said)
     )))
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
@@ -652,6 +677,111 @@ fn reviewed(commands: &[Command]) -> String {
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// The line prefix a reviewer names the node it objected to on.
+///
+/// The refusal has to say *which* node, and only the reviewer can: it read the
+/// whole envelope and the objection is its own reasoning. So it declares the
+/// node on a line of its stderr reading `objection: cover` — one line per node,
+/// matched case-insensitively, anywhere in what it says, and repeatable for an
+/// objection that is about a seam between two of them.
+///
+/// A prefix on the stream a hook already has, rather than a second channel: this
+/// crate's half of the answer is an exit status and prose, its stdout is not
+/// available — `reply`'s own stdout is a parsed verdict — and a JSON answer
+/// would make every host's reviewer a serializer to say one node's name. A hook
+/// that declares nothing is not refused for it either; it is reported as having
+/// declared nothing, which is what the shell scripts written against this hook
+/// before the line existed do.
+const OBJECTION_PREFIX: &str = "objection:";
+
+/// What a reviewer declared it objected to, lifted out of what it said.
+#[derive(Debug)]
+struct Objection {
+    /// The names it declared, in the order it declared them and none twice.
+    /// Empty for a reviewer that declared none, which is a fact about the
+    /// refusal rather than a reason to invent one.
+    named: Vec<String>,
+    /// Everything else it said: its own sentence, with the declarations taken
+    /// out so a refusal does not read the same name back in front of it.
+    said: String,
+}
+
+impl Objection {
+    /// Read one reviewer's declarations out of its stderr.
+    fn read(stderr: &str) -> Self {
+        let mut named: Vec<String> = Vec::new();
+        let mut said: Vec<&str> = Vec::new();
+        for line in stderr.lines() {
+            let trimmed = line.trim();
+            let declared = trimmed
+                .get(..OBJECTION_PREFIX.len())
+                .filter(|start| start.eq_ignore_ascii_case(OBJECTION_PREFIX))
+                .map(|_| &trimmed[OBJECTION_PREFIX.len()..]);
+            let Some(declared) = declared else {
+                said.push(line);
+                continue;
+            };
+            // A declaration is external input on its way to a terminal, a
+            // planner's queue, and the journal, so it is control-stripped where
+            // the reviewer's prose beside it is. One that names nothing declares
+            // nothing — it is still lifted out of the prose, and a reviewer
+            // whose every declaration was blank named no node, which the refusal
+            // says outright rather than pointing at an empty name.
+            let name = crate::views::one_line(declared).trim().to_string();
+            if !name.is_empty() && !named.contains(&name) {
+                named.push(name);
+            }
+        }
+        Self {
+            named,
+            said: said.join("\n"),
+        }
+    }
+
+    /// How a refusal names what the reviewer objected to, against the names the
+    /// envelope put in front of it.
+    ///
+    /// Three different facts, and a reader acts differently on each: a node this
+    /// envelope changes is one to go and fix, a name it does not carry is a
+    /// reviewer pointing somewhere else — at a node already in the plan, or at
+    /// nothing — and no declaration at all is a refusal whose target is simply
+    /// unstated. Reporting the first for the third by listing every node the
+    /// envelope carried is the failure this whole line exists to end.
+    fn against(&self, envelope_named: &BTreeSet<String>) -> String {
+        let (changed, elsewhere): (Vec<&String>, Vec<&String>) = self
+            .named
+            .iter()
+            .partition(|name| envelope_named.contains(*name));
+        let unknown = |names| {
+            listed("the name", names)
+                .map(|named| format!("{named}, which no node this envelope changes goes by"))
+        };
+        match (listed("node", &changed), unknown(&elsewhere)) {
+            (Some(changed), Some(elsewhere)) => format!(" over {changed}, and over {elsewhere}"),
+            (Some(changed), None) => format!(" over {changed}"),
+            (None, Some(elsewhere)) => format!(" over {elsewhere}"),
+            (None, None) => " without declaring the node it objected to".to_string(),
+        }
+    }
+}
+
+/// One list of names as a refusal says it — `node 'a'`, `nodes 'a', 'b'` — and
+/// `None` for no names at all, which is a clause the sentence leaves out rather
+/// than an empty one it keeps.
+fn listed(noun: &str, names: &[&String]) -> Option<String> {
+    let (first, rest) = names.split_first()?;
+    let plural = match rest.is_empty() {
+        true => String::new(),
+        false => "s".to_string(),
+    };
+    let quoted = std::iter::once(first)
+        .chain(rest)
+        .map(|name| format!("'{name}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!("{noun}{plural} {quoted}"))
 }
 
 fn compile_into(
@@ -2466,16 +2596,19 @@ mod tests {
     }
 
     /// A reviewer that refuses turns the whole envelope away, in its own words,
-    /// and the refusal names what it was reviewing.
+    /// naming both the node it objected to and everything it was reviewing.
     #[test]
     #[cfg(unix)]
-    fn a_refused_envelope_carries_the_reviewers_words_and_names_what_it_reviewed() {
+    fn a_refused_envelope_carries_the_reviewers_words_and_names_what_it_objected_to() {
         let dir = scratch("reviewer-refuses");
-        let objection = "node 'fresh' repeats the contract seam node 'build' already owns";
+        let objection = "it repeats the contract seam node 'build' already owns";
         let reviewer = validator(
             &dir,
             "refuse.sh",
-            &format!("cat > /dev/null\nprintf '%s\\n' \"{objection}\" >&2\nexit 1\n"),
+            &format!(
+                "cat > /dev/null\nprintf '%s\\n%s\\n' \"{OBJECTION_PREFIX} fresh\" \
+                 \"{objection}\" >&2\nexit 1\n"
+            ),
         );
         let commands = vec![
             Command::Add {
@@ -2498,13 +2631,22 @@ mod tests {
             refusal.contains("none of its edits were applied"),
             "{refusal}"
         );
-        // Every op it was given, with the node each is about: an envelope is no
-        // longer one command, so a reason nobody can locate is one nobody can
-        // act on.
+        // The node it objected to, told apart from the other node the same
+        // envelope carried: an envelope is no longer one command, so a reason
+        // nobody can locate is one nobody can act on.
+        assert!(
+            refusal.contains("refused this envelope over node 'fresh',"),
+            "{refusal}"
+        );
+        // And every op it was given beside it, which is the set it looked at
+        // rather than the one it turned down.
         assert!(
             refusal.contains("add 'fresh'") && refusal.contains("drop 'build'"),
             "{refusal}"
         );
+        // The declaration is lifted out of the sentence rather than read back
+        // into it.
+        assert!(!refusal.contains(OBJECTION_PREFIX), "{refusal}");
 
         // A reviewer that says nothing is still an answer that has to be acted
         // on, so the status is reported rather than a blank reason.
@@ -2513,6 +2655,98 @@ mod tests {
             .expect_err("it refused")
             .to_string();
         assert!(said.contains("exited 4"), "{said}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// What a refusal says about the node the reviewer objected to, in every
+    /// shape a reviewer can leave that question in.
+    ///
+    /// The three are different facts and a reader acts differently on each: a
+    /// node this envelope changes is one to go and fix, a name it does not carry
+    /// is the reviewer pointing somewhere else, and no declaration at all is a
+    /// refusal whose target is unstated. Falling back to listing every node the
+    /// envelope carried would tell a reader the first when the truth is the
+    /// third, which is the failure the declaration exists to end.
+    #[test]
+    #[cfg(unix)]
+    fn a_refusal_tells_a_declared_node_from_a_stray_name_and_from_no_declaration() {
+        let dir = scratch("reviewer-objections");
+        let commands = vec![
+            Command::Add {
+                node: agent("fresh", &[]),
+            },
+            Command::Drop {
+                id: "build".into(),
+                dependents: Dependents::Detach,
+            },
+        ];
+        let graph = graph_of(vec![agent("fresh", &[])]);
+        for (which, declares, expected) in [
+            (
+                "nothing at all",
+                vec![],
+                "without declaring the node it objected to",
+            ),
+            (
+                "only a blank declaration",
+                vec![OBJECTION_PREFIX.to_string()],
+                "without declaring the node it objected to",
+            ),
+            (
+                "one node the envelope changes",
+                vec![format!("{OBJECTION_PREFIX} fresh")],
+                "over node 'fresh',",
+            ),
+            (
+                // Declared as the reviewer wrote it: the prefix is matched
+                // case-insensitively and the name is trimmed, because a host's
+                // reviewer writes a sentence rather than a wire format.
+                "two of them, its own way",
+                vec![
+                    "  Objection:   build  ".to_string(),
+                    format!("{OBJECTION_PREFIX} fresh"),
+                ],
+                "over nodes 'build', 'fresh',",
+            ),
+            (
+                "a name the envelope does not carry",
+                vec![format!("{OBJECTION_PREFIX} ghost")],
+                "over the name 'ghost', which no node this envelope changes goes by",
+            ),
+            (
+                "one of each",
+                vec![
+                    format!("{OBJECTION_PREFIX} fresh"),
+                    format!("{OBJECTION_PREFIX} ghost"),
+                ],
+                "over node 'fresh', and over the name 'ghost', which no node this envelope \
+                 changes goes by",
+            ),
+        ] {
+            let lines = declares
+                .iter()
+                .map(|line| format!("printf '%s\\n' \"{line}\" >&2\n"))
+                .collect::<String>();
+            let reviewer = validator(
+                &dir,
+                &format!("refuse-{}.sh", which.replace(' ', "-")),
+                &format!("cat > /dev/null\n{lines}printf 'the seam is wrong\\n' >&2\nexit 1\n"),
+            );
+            let refusal = offer_envelope_to_reviewer(Some(&reviewer), &commands, &graph, None)
+                .expect_err("the reviewer refused the envelope")
+                .to_string();
+            assert!(
+                refusal.contains(expected),
+                "a reviewer declaring {which} was reported as {refusal}"
+            );
+            // Its own sentence survives every shape of declaration, and no
+            // declaration is read back into it.
+            assert!(refusal.contains("the seam is wrong"), "{refusal}");
+            assert!(
+                !refusal.to_lowercase().contains(OBJECTION_PREFIX),
+                "{refusal}"
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
