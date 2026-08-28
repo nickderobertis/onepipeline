@@ -126,6 +126,15 @@ them. **Nothing else writes a version:** maturin reads it from `Cargo.toml` via
 `dynamic = ["version"]` and `scripts/npm-build.mjs` stamps it from the same
 place.
 
+**What this repository publishes is declared once**, in
+`scripts/release-probe.sh`'s `TARGETS`, registry-qualified (`crate:`/`pypi:`/
+`npm:`) because one of the names is served by two registries on two cadences.
+That script is also the probe a consuming run asks before launching work that
+depends on a release of this one: a version on stdout, *nothing* for no release
+yet, and a non-zero exit for **not answered** — which is never the same answer
+and must never be collapsed into the second, because a consumer holds
+indefinitely on it. `npm/test/release-targets.test.mjs` is the gate on that list.
+
 Bump policy, **pre-1.0**: `feat` → minor, `feat!` / `BREAKING CHANGE` → minor (a
 breaking change pre-1.0 is not yet a major), `fix` / `perf` / `refactor` /
 `build` → patch, and `chore` / `docs` / `ci` / `test` / `style` → no release.

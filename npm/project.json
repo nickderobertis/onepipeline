@@ -40,11 +40,13 @@
         "{workspaceRoot}/scripts/llmlint-judge.sh",
         "{workspaceRoot}/scripts/llmlint-runtime-env.sh",
         "{workspaceRoot}/scripts/setup-llmlint.sh",
+        "{workspaceRoot}/scripts/release-probe.sh",
         "{workspaceRoot}/project.json",
         "{workspaceRoot}/.github/workflows/release.yml",
         "{workspaceRoot}/src/**/*",
         "{workspaceRoot}/Cargo.toml",
         "{workspaceRoot}/Cargo.lock",
+        "{workspaceRoot}/crates/*/Cargo.toml",
         "{workspaceRoot}/pyproject.toml",
         "sharedGlobals"
       ]
