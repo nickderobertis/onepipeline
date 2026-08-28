@@ -293,7 +293,7 @@ body=""
 # release happened, so a hiccup is retried; a status that will not change on a
 # retry is not.
 fetch() {
-  local url="$1" what="$2" attempt code detail answered
+  local url="$1" what="$2" attempt code detail answered status
   detail=""
   attempt=1
   # A counted loop rather than `seq`: the host hands this a `PATH` and nothing
@@ -319,7 +319,16 @@ fetch() {
           ;;
       esac
     else
+      # `$?` here is the request's own status, and 127 is the shell's "no such
+      # program": a `curl` that never ran is not a registry that did not answer,
+      # and sending its reader to check reachability would have them looking at
+      # the network for a program that is missing.
+      status=$?
       detail="${answered//$'\n'/ }"
+      if [ "$status" -eq 127 ]; then
+        refuse "$what: cannot run 'curl' to ask $url: $detail" \
+          "check that a 'curl' this host can run is on PATH; this is not answered, and says nothing about whether a release happened" 3
+      fi
     fi
     if [ "$attempt" -ne "$attempts" ]; then
       # A backoff that did not happen is a retry that never waited, so a host

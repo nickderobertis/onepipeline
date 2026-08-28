@@ -14,8 +14,8 @@
 // search path* — a `curl` that points the probe's own endpoints at a fixture
 // server, since the probe reads no variable one could be named in. What a public
 // registry serves cannot be asked offline, and a fake registry standing in for
-// itself is what would then be under test; the real ones are asked weekly by
-// `.github/workflows/published-smoke.yml`.
+// itself is what would then be under test; the real ones are asked by
+// `tests/smoke/release_probe.rs`, in the tier that is not offline.
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
@@ -28,10 +28,8 @@ import { fileURLToPath } from "node:url";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
-/** The probe, at the path the release-targets contract fixes it to. */
 const PROBE = join(REPO_ROOT, "scripts", "release-probe.sh");
 
-/** The sixty seconds the contract allows one answer. */
 const BOUND_MS = 60_000;
 
 function read(...parts) {
@@ -127,7 +125,6 @@ const PUBLISH_STEPS = {
   npm: { marker: "scripts/publish-npm.sh", where: "the npm publish step" },
 };
 
-/** Everything the reconciliation reads, as text, so a mutation can replace one. */
 function releaseConfiguration() {
   const cargo = read("Cargo.toml");
   return {
@@ -307,6 +304,8 @@ function fixturePath(base, { without } = {}) {
     if (tool === without) continue;
     symlinkSync(hostTool(tool), join(dir, tool));
   }
+  if (without === "curl") return dir;
+
   // Read out of the probe rather than written here, so an endpoint it moves to
   // reaches this fixture rather than quietly reaching the public registry and
   // passing.
@@ -757,6 +756,25 @@ describe("the release probe", () => {
     }
   });
 
+  it("answers a prerelease the way each registry spells one", async () => {
+    // npm keeps the version semver as published; PyPI normalizes it. Both are
+    // versions a consumer holds a node against, so both are answered rather than
+    // refused as something that is not one.
+    const cases = [
+      ["pypi:onepipeline-cli", "/onepipeline-cli/json", "0.17.0rc1"],
+      ["npm:onepipeline-cli", "/onepipeline-cli/latest", "0.17.0-rc.1"],
+    ];
+    for (const [identifier, path, version] of cases) {
+      const body = path.endsWith("/json")
+        ? JSON.stringify({ info: { name: "onepipeline-cli", version } })
+        : JSON.stringify({ name: "onepipeline-cli", version });
+      const server = await serving(registry({ [path]: always(200, body) }));
+      const run = await probe(identifier, { env: contractEnv(fixturePath(server.base)) });
+      assert.equal(run.status, 0, `${identifier} refused '${version}':\n${said(run)}`);
+      assert.equal(run.stdout, `${version}\n`, said(run));
+    }
+  });
+
   it("refuses a version string that is not one rather than passing it on", async () => {
     const cases = [
       ["pypi:onepipeline-cli", "/onepipeline-cli/json", "the latest one"],
@@ -795,6 +813,23 @@ describe("the release probe", () => {
       assert.equal(run.stdout, "", said(run));
       assert.match(run.stderr, /ACTION: /, said(run));
     }
+  });
+
+  it("does not answer when it cannot run the program that makes the request", async () => {
+    // A host with no `curl` has said nothing about a release, and it is a
+    // different failure from a registry that would not answer — the reader is
+    // sent to the program rather than to the network.
+    const server = await serving(releasedAt("7.8.9"));
+    const run = await probe("crate:onepipeline", {
+      env: contractEnv(fixturePath(server.base, { without: "curl" })),
+    });
+    assert.notEqual(run.status, 0, `a host with no curl was answered:\n${said(run)}`);
+    assert.equal(run.stdout, "", said(run));
+    assert.match(
+      run.stderr,
+      /cannot run 'curl'[\s\S]*ACTION: check that a 'curl' this host can run is on PATH/,
+      `the refusal sends its reader to the network for a program that is missing:\n${said(run)}`,
+    );
   });
 
   it("does not answer when it cannot wait before asking a hiccuping registry again", async () => {
