@@ -144,11 +144,15 @@ fn beside(
 
 /// The plan the edits are being made into, as it crosses.
 ///
-/// `tasks` is required rather than defaulted: a review that could not see the
-/// plan is the review this hook exists to make possible, and a document arriving
-/// without one is a seam that broke rather than a plan with no nodes.
+/// Its two required fields are required here rather than defaulted: a plan
+/// arriving without a schema version, or without the tasks a review is about, is
+/// a seam that broke rather than a plan that states neither, and a reviewer that
+/// read it anyway would let a journey pass on a document nothing checked. The
+/// rest of the plan is kept as written, because a host's review reads the whole
+/// document and this fixture is not the place to restate the plan schema.
 #[derive(Debug, Deserialize)]
 struct ReviewedPlan {
+    schema_version: u32,
     tasks: Vec<OfferedNode>,
     #[serde(flatten)]
     rest: serde_json::Map<String, serde_json::Value>,
@@ -182,12 +186,15 @@ impl EnvelopeUnderReview {
                 })
                 .collect::<Vec<_>>(),
             "plan": beside(
-                vec![(
-                    "tasks",
-                    serde_json::Value::from(
-                        self.plan.tasks.iter().map(OfferedNode::recorded).collect::<Vec<_>>(),
+                vec![
+                    ("schema_version", serde_json::Value::from(self.plan.schema_version)),
+                    (
+                        "tasks",
+                        serde_json::Value::from(
+                            self.plan.tasks.iter().map(OfferedNode::recorded).collect::<Vec<_>>(),
+                        ),
                     ),
-                )],
+                ],
                 &self.plan.rest,
             ),
         })

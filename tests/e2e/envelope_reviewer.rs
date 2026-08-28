@@ -721,3 +721,48 @@ fn a_blank_rung_names_no_reviewer_and_an_unreadable_variable_is_refused() {
         );
     }
 }
+
+/// The reviewer a launch resolved is in the launch record, and an `adopt`
+/// replays it rather than re-reading an environment that has since moved.
+///
+/// It is resolved **once**, before the run exists, out of three names a later
+/// process has no way to resolve the same way: a fresh driver started from
+/// another shell — with another `ONEPIPELINE_ENVELOPE_REVIEWER`, or none —
+/// would otherwise review the run's envelopes by rules its launch never chose.
+#[test]
+fn the_resolved_reviewer_is_in_the_launch_record_and_survives_an_adoption() {
+    let world = World::new("reviewer-adopt");
+    let chosen = reviewer_named(&world, "by-flag");
+    let elsewhere = reviewer_named(&world, "somewhere-else");
+    let name = "revieweradopt";
+    let path = world.plan(name, &plan_of(name, vec![agent("only", &[])]));
+
+    // Launched under an environment naming a *different* reviewer, so what the
+    // record carries is what the launch resolved rather than what was ambient.
+    let mut launch = world.cmd(&["start", &path, &spelling("flag"), &chosen, "--attach"]);
+    launch.env(spelling("environment"), &elsewhere);
+    world.run_on(launch, "start").exited(0).settled();
+    assert_eq!(
+        world.run_json(name, "launch.json")["envelope_reviewer"],
+        json!(chosen),
+        "the launch record does not carry the reviewer the launch resolved"
+    );
+
+    // A fresh driver takes up what its launch chose, adopted from a shell whose
+    // environment still names the other one.
+    let mut adopt = world.cmd(&["adopt", name]);
+    adopt.env(spelling("environment"), &elsewhere);
+    world.run_on(adopt, "adopt").exited(0);
+
+    // And the envelope that follows is reviewed by the reviewer the *launch*
+    // chose, said in the refusal a manager reads — from a third shell naming the
+    // other one again.
+    world.script("reviewer.refuse", RULES);
+    let mut reply = world.cmd(&["reply", name]);
+    reply.env(spelling("environment"), &elsewhere);
+    let refused = world.run_with_stdin_on(reply, &envelope(two_related_nodes()));
+    refused
+        .exited(REFUSED)
+        .err_has(&format!("by-flag: node 'cover': {RULES}"))
+        .err_lacks("somewhere-else");
+}

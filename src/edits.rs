@@ -466,14 +466,20 @@ fn offer_to_validator(validator: Option<&str>, command: &Command, node: &Node) -
 /// depending on how it got there: a node an `add` introduced is prose nothing
 /// has checked, and the same node under an `amend` is a bar that was moved on a
 /// node already in flight.
+// llmlint: ignore-block[invalid_states_unrepresentable] the op is a `&'static str` because
+// it is **produced** rather than accepted: every value comes from `channel::op_of`, which
+// is `Command`'s own discriminant already spelled for the wire and published as this
+// crate's one word for an op. An enum here could hold no value that one does not, and
+// would be a second vocabulary to keep in step with the first.
 #[derive(Debug, Serialize)]
 struct ChangedNode<'a> {
     op: &'static str,
     /// Not the node the command carried: the one the whole envelope leaves
-    /// behind, so a node two of its commands touched is read once, as it will
-    /// be dispatched.
+    /// behind. Two commands that touched one node are two entries, under the op
+    /// each carried, and both show the node as it will be dispatched.
     node: &'a Node,
 }
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 /// The document the envelope reviewer reads on its stdin.
 ///
@@ -564,6 +570,12 @@ fn node_the_command_changes<'a>(command: &Command, graph: &'a Graph) -> Option<&
 /// about edits that are already committed. And it is the one door: every
 /// envelope carrying commands reaches the durable queue through this check, so
 /// once here is once per envelope rather than once per path.
+// llmlint: ignore-block[invalid_states_unrepresentable] the reviewer stays the
+// `Option<&str>` `offer_to_validator` takes beside it, and for the same reason: what a
+// launch record holds is a `String`, and *blank means this launch names none* is a rule of
+// the rungs rather than a state to be made unrepresentable — `driver::start` applies it
+// once for all three, `LaunchConfig::load` refuses a blank key outright, and this filter is
+// the last of the three rather than a reinterpretation of a value that got past them.
 pub(crate) fn offer_envelope_to_reviewer(
     reviewer: Option<&str>,
     commands: &[Command],
@@ -620,6 +632,7 @@ pub(crate) fn offer_envelope_to_reviewer(
         answer.reason()
     )))
 }
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 /// What the reviewer was given, as its refusal names it: every op in the
 /// envelope with the node it is about.
