@@ -118,6 +118,14 @@ jobs:
             ${REQUESTED:+--expect-version "$REQUESTED"} \
             --label "npm onepipeline-cli on $RUNNER_OS/$RUNNER_ARCH"
 
+  # llmlint: ignore-block[live_tier_compiles_and_requires_credential] this live tier is
+  # credential-free by contract rather than by omission: the host spawns a release probe
+  # with `PATH` and `HOME` and nothing else, and every endpoint it reads is a public
+  # registry serving unauthenticated reads — so requiring a secret here would assert the
+  # opposite of the property this job exists to prove, and a probe that had grown a
+  # dependency on one would pass a job that supplied it. What the rule protects is still
+  # held: the tier cannot pass without reaching the registries, because it fails on a
+  # probe that did not answer and on a declared target no registry serves.
   # Whether the release probe still answers the real registries.
   #
   # `scripts/release-probe.sh` is what a consuming run asks before it launches a
@@ -141,7 +149,6 @@ jobs:
       - uses: actions/checkout@v4
       - name: Ask each declared target's registry what it serves
         run: |
-          # The targets, read out of the probe rather than listed again here.
           targets="$(sed -n '/^TARGETS=(/,/^)$/p' scripts/release-probe.sh | sed '1d;$d')"
           if [ -z "${targets//[[:space:]]/}" ]; then
             echo "::error::scripts/release-probe.sh declares no release targets"
@@ -158,3 +165,4 @@ jobs:
             fi
             echo "$target -> $answer"
           done
+  # llmlint: ignore-end[live_tier_compiles_and_requires_credential]

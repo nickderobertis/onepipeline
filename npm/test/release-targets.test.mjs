@@ -49,10 +49,6 @@ function read(...parts) {
   return readFileSync(join(REPO_ROOT, ...parts), "utf8");
 }
 
-// ---------------------------------------------------------------------------
-// The declaration
-// ---------------------------------------------------------------------------
-
 /**
  * The targets the probe declares, read out of the probe itself.
  *
@@ -65,17 +61,11 @@ function declaredTargets(script = read("scripts", "release-probe.sh")) {
   return block[1].split(/\s+/).filter(Boolean);
 }
 
-/** `crate:name` split into its registry and its name. */
 function parseTarget(identifier) {
   const match = identifier.match(/^(crate|pypi|npm):([A-Za-z0-9][A-Za-z0-9._-]*)$/);
   return match ? { registry: match[1], name: match[2] } : null;
 }
 
-// ---------------------------------------------------------------------------
-// The release configuration this reads the published set out of
-// ---------------------------------------------------------------------------
-
-/** The value of a top-level `key = "..."` in a TOML table. */
 function tomlString(text, table, key) {
   const section = text.split(`[${table}]`)[1];
   assert.ok(section, `no [${table}] table`);
@@ -87,7 +77,6 @@ function tomlString(text, table, key) {
   return JSON.parse(line.slice(`${key} = `.length));
 }
 
-/** Whether a manifest's `[package]` table keeps the crate off crates.io. */
 function unpublishable(manifest) {
   const section = manifest.split("[package]")[1] ?? "";
   return /^publish\s*=\s*false\s*$/m.test(section.split(/^\[/m)[0]);
@@ -100,8 +89,7 @@ function workspaceMembers(cargo) {
   return JSON.parse(line[1]);
 }
 
-/** The names in a `const NAME = { ... }` object literal, in source order. */
-function literalKeys(source, name) {
+function objectLiteral(source, name) {
   const start = source.indexOf(`const ${name} = {`);
   assert.notEqual(start, -1, `no \`const ${name} = {\` in the source`);
   const end = source.indexOf("\n};", start);
@@ -109,7 +97,6 @@ function literalKeys(source, name) {
   return source.slice(start, end);
 }
 
-/** The Rust targets one release job builds, from its own matrix. */
 function workflowTargets(workflow, job) {
   const start = workflow.indexOf(`\n  ${job}:\n`);
   assert.notEqual(start, -1, `no \`${job}\` job in release.yml`);
@@ -176,7 +163,7 @@ function publishedNames(config) {
     published.npm.push(config.launcher.name);
     const facts = new Map(
       [
-        ...literalKeys(config.buildScript, "TARGETS").matchAll(
+        ...objectLiteral(config.buildScript, "TARGETS").matchAll(
           /"([^"]+)": \{ platform: "([^"]+)", arch: "([^"]+)"/g,
         ),
       ].map(([, triple, platform, arch]) => [triple, `onepipeline-cli-${platform}-${arch}`]),
@@ -228,10 +215,6 @@ function reconcile(declared, config) {
   return { undeclared, unpublished };
 }
 
-// ---------------------------------------------------------------------------
-// Driving the probe
-// ---------------------------------------------------------------------------
-
 /**
  * A registry, over real HTTP, answering from a route table.
  *
@@ -250,7 +233,8 @@ async function registry(routes) {
       response.end('"Not Found"');
       return;
     }
-    const { status, body } = route(count);
+    const { status, body } =
+      typeof route === "string" ? { status: 200, body: route } : route(count);
     response.writeHead(status, { "content-type": "application/json" });
     response.end(body);
   });
@@ -261,14 +245,12 @@ async function registry(routes) {
       return `http://127.0.0.1:${server.address().port}`;
     },
     asked,
-    close: () => server.close(),
+    close: () => new Promise((closed) => server.close(closed)),
   };
 }
 
-/** A route that always answers the same way. */
 const always = (status, body) => () => ({ status, body });
 
-/** One crates.io sparse-index record, shaped the way the registry shapes one. */
 function indexRecord(name, version, yanked) {
   return `${JSON.stringify({
     name,
@@ -363,7 +345,6 @@ function releasedAt(version) {
   });
 }
 
-/** The bases that point the probe at a fixture registry instead of the public one. */
 function bases(base) {
   return {
     ONEPIPELINE_CRATES_INDEX: base,
@@ -371,8 +352,6 @@ function bases(base) {
     ONEPIPELINE_NPM_REGISTRY: base,
   };
 }
-
-// ---------------------------------------------------------------------------
 
 describe("the release targets this repository declares", () => {
   const config = releaseConfiguration();
@@ -620,22 +599,130 @@ describe("the release probe", () => {
   });
 
   it("retries a registry that hiccups and answers once it recovers", async () => {
+    // Each status a registry says "not now" with, rather than "no such thing":
+    // unavailable, rate-limited, and timed out are all answers a later attempt
+    // gets past, and reporting any of them as a verdict would hold — or release
+    // — a node on a hiccup.
+    const recovering = (statuses, body) => (count) =>
+      count <= statuses.length
+        ? { status: statuses[count - 1], body: '{"busy":true}' }
+        : { status: 200, body };
     const server = await serving(
       registry({
-        "/onepipeline-cli/latest": (count) =>
-          count < 3
-            ? { status: 503, body: '{"error":"unavailable"}' }
-            : { status: 200, body: JSON.stringify({ name: "onepipeline-cli", version: "0.16.3" }) },
+        "/onepipeline-cli/latest": recovering(
+          [503],
+          JSON.stringify({ name: "onepipeline-cli", version: "0.16.3" }),
+        ),
+        "/onepipeline-cli/json": recovering(
+          [429, 408],
+          JSON.stringify({ info: { name: "onepipeline-cli", version: "0.16.3" } }),
+        ),
       }),
     );
-    const run = await probe("npm:onepipeline-cli", { env: contractEnv(bases(server.base)) });
-    assert.equal(run.status, 0, `a registry that recovered was reported as unread:\n${said(run)}`);
-    assert.equal(run.stdout, "0.16.3\n", said(run));
-    assert.equal(
-      server.asked.get("/onepipeline-cli/latest"),
-      3,
-      "the probe gave up before the registry recovered",
+    const env = contractEnv(bases(server.base));
+    for (const [identifier, path, asks] of [
+      ["npm:onepipeline-cli", "/onepipeline-cli/latest", 2],
+      ["pypi:onepipeline-cli", "/onepipeline-cli/json", 3],
+    ]) {
+      const run = await probe(identifier, { env });
+      assert.equal(
+        run.status,
+        0,
+        `${identifier}: a registry that recovered was reported as unread:\n${said(run)}`,
+      );
+      assert.equal(run.stdout, "0.16.3\n", said(run));
+      assert.equal(
+        server.asked.get(path),
+        asks,
+        `${identifier}: the probe gave up before the registry recovered`,
+      );
+    }
+  });
+
+  it("does not read a registry it cannot reach at all as one with no release", async () => {
+    // A port nothing is listening on: the transport fails before any status
+    // exists to read, which is the shape an outage or a bad endpoint takes.
+    const closed = await registry({});
+    const base = closed.base;
+    await closed.close();
+    const run = await probe("crate:onepipeline", { env: contractEnv(bases(base)) });
+    assert.notEqual(run.status, 0, `an unreachable registry was answered for:\n${said(run)}`);
+    assert.equal(run.stdout, "", said(run));
+    assert.match(run.stderr, /did not answer in 3 attempts[\s\S]*ACTION: /, said(run));
+    assert.ok(run.elapsed < BOUND_MS, `an unreachable registry took ${run.elapsed}ms`);
+  });
+
+  it("refuses a document that answers twice rather than picking a copy", async () => {
+    // Duplicate members are legal JSON and no parser has to prefer either copy,
+    // so which release such a document names depends on who reads it — which is
+    // not an answer a node can be held or launched on.
+    const server = await serving(
+      registry({
+        "/on/ep/onepipeline":
+          '{"name":"onepipeline","vers":"0.16.3","vers":"0.2.0","deps":[],"cksum":"0",' +
+          '"features":{},"yanked":false}\n',
+        "/onepipeline-cli/json": '{"info":{"version":"0.16.3","version":"0.2.0"}}',
+        "/onepipeline-cli/latest":
+          '{"name":"onepipeline-cli","version":"0.16.3","version":"0.2.0"}',
+      }),
     );
+    for (const identifier of declared) {
+      const run = await probe(identifier, { env: contractEnv(bases(server.base)) });
+      assert.notEqual(
+        run.status,
+        0,
+        `${identifier} picked one of two answers a document gave:\n${said(run)}`,
+      );
+      assert.equal(run.stdout, "", said(run));
+    }
+  });
+
+  it("refuses a version string that is not one rather than passing it on", async () => {
+    const server = await serving(
+      registry({
+        "/onepipeline-cli/json": always(
+          200,
+          JSON.stringify({ info: { name: "onepipeline-cli", version: "the latest one" } }),
+        ),
+        "/onepipeline-cli/latest": always(
+          200,
+          JSON.stringify({ name: "onepipeline-cli", version: "1abc" }),
+        ),
+      }),
+    );
+    const env = contractEnv(bases(server.base));
+    for (const identifier of ["pypi:onepipeline-cli", "npm:onepipeline-cli"]) {
+      const run = await probe(identifier, { env });
+      assert.notEqual(
+        run.status,
+        0,
+        `${identifier} passed on something no consumer can hold a node against:\n${said(run)}`,
+      );
+      assert.equal(run.stdout, "", said(run));
+      assert.match(run.stderr, /ACTION: /, said(run));
+    }
+  });
+
+  it("answers nothing when every release a registry files is one nothing resolves to", async () => {
+    // The index has the crate on it, so this is not a 404 — but a yanked release
+    // and a prerelease are not what `cargo add onepipeline` gets, so there is no
+    // release currently served, which is the empty answer rather than a refusal.
+    const server = await serving(
+      registry({
+        "/on/ep/onepipeline": always(
+          200,
+          indexRecord("onepipeline", "0.16.3", true) +
+            indexRecord("onepipeline", "0.17.0-rc.1", false),
+        ),
+      }),
+    );
+    const run = await probe("crate:onepipeline", { env: contractEnv(bases(server.base)) });
+    assert.equal(
+      run.status,
+      0,
+      `a crate with nothing currently served was a failure:\n${said(run)}`,
+    );
+    assert.equal(run.stdout, "", `a yanked or prerelease version was answered:\n${said(run)}`);
   });
 
   it("does not read an answer it cannot parse as a registry with no release", async () => {

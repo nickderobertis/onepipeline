@@ -82,6 +82,29 @@ refuse() {
   exit "$3"
 }
 
+# An endpoint is external input as much as the identifier is — a mirror or a
+# test's fixture server names one — so each is held to the shape a request can be
+# made to before `curl` is handed it. An unset one never reaches here: it is the
+# public endpoint above, which is what the host's own environment always gets.
+endpoint() {
+  case "$2" in
+    http://?*|https://?*) ;;
+    *)
+      refuse "$1 is set to '$2', which is not an http(s) registry endpoint" \
+        "unset $1 to ask the public registry, or set it to a base URL such as 'https://index.crates.io'" 2
+      ;;
+  esac
+  case "$2" in
+    *[!0-9A-Za-z:/._~%?=+@-]*)
+      refuse "$1 is set to '$2', which holds a character no registry endpoint has" \
+        "unset $1 to ask the public registry, or set it to a base URL such as 'https://index.crates.io'" 2
+      ;;
+  esac
+}
+endpoint ONEPIPELINE_CRATES_INDEX "$crates_index"
+endpoint ONEPIPELINE_PYPI_API "$pypi_api"
+endpoint ONEPIPELINE_NPM_REGISTRY "$npm_registry"
+
 if [ "$#" -ne 1 ]; then
   refuse "expected exactly one registry-qualified identifier, got $#" "$usage" 2
 fi
@@ -265,7 +288,10 @@ END {
 '
 # llmlint: ignore-end[boundary_inputs_validated]
 
-scratch="$(mktemp -d)"
+if ! scratch="$(mktemp -d)"; then
+  refuse "cannot create the temporary directory a registry's answer is read in" \
+    "check that this host's temporary directory exists and is writable" 3
+fi
 trap 'rm -rf "$scratch"' EXIT
 body="$scratch/body"
 curl_errors="$scratch/curl"
@@ -317,8 +343,17 @@ fetch() {
 # serves for this repository comes from `Cargo.toml`, so this is deliberately
 # tight — a registry answering anything else is a registry this could not read.
 version_shaped() {
+  # A digit, a dot, and a digit at the front is the least any of these three
+  # registries serves: `1` is not a release of anything here, and `1abc` is a
+  # word. The rest of the string is held to the characters a version is spelled
+  # with, so nothing a registry sends can reach a consumer as an answer that is
+  # not one.
   case "$1" in
-    ""|[!0-9]*|*[!0-9A-Za-z.+-]*) return 1 ;;
+    [0-9]*.[0-9]*) ;;
+    *) return 1 ;;
+  esac
+  case "$1" in
+    *[!0-9A-Za-z.+-]*) return 1 ;;
   esac
   [ "${#1}" -le 64 ]
 }
@@ -375,7 +410,10 @@ ask_crates() {
   if ! fetch "$crates_index/$(crates_path "$name")" "the crates.io index"; then
     return 0
   fi
-  parsed="$(awk -v want="$name" "$json_walker$crates_records" "$body")"
+  if ! parsed="$(awk -v want="$name" "$json_walker$crates_records" "$body")"; then
+    refuse "the reader of the crates.io index for '$name' did not run" \
+      "check that an 'awk' this host can run is on PATH; this is not answered, and says nothing about whether a release happened" 3
+  fi
   best=""
   while read -r tag rest; do
     case "$tag" in
@@ -404,9 +442,20 @@ ask_crates() {
   fi
 }
 
-# The string member one registry's document holds, as `<tag> <value>`.
 member_of() {
   awk -v key1="$1" -v key2="$2" "$json_walker$json_member" "$body"
+}
+
+# What the reader made of one registry's answer, refusing when it did not run at
+# all: an answer nothing read is not an answer, and an empty one here would be
+# read as a release that has not happened.
+read_member() {
+  local answer
+  if ! answer="$(member_of "$1" "$2")"; then
+    refuse "the reader of $3's answer for '$name' did not run" \
+      "check that an 'awk' this host can run is on PATH; this is not answered, and says nothing about whether a release happened" 3
+  fi
+  printf '%s' "$answer"
 }
 
 # What PyPI serves as the current release of a distribution: its own `info.version`,
@@ -416,7 +465,7 @@ ask_pypi() {
   if ! fetch "$pypi_api/$name/json" "the PyPI API"; then
     return 0
   fi
-  answer="$(member_of info version)"
+  answer="$(read_member info version PyPI)"
   tag="${answer%% *}"
   value="${answer#* }"
   if [ "$tag" != "value" ] || ! version_shaped "$value"; then
@@ -434,7 +483,7 @@ ask_npm() {
   if ! fetch "$npm_registry/$name/latest" "the npm registry"; then
     return 0
   fi
-  answer="$(member_of version "")"
+  answer="$(read_member version "" npm)"
   tag="${answer%% *}"
   value="${answer#* }"
   if [ "$tag" != "value" ] || ! version_shaped "$value"; then
