@@ -250,6 +250,44 @@ fn a_refused_envelope_applies_none_of_its_commands_and_an_accepted_one_is_review
         2,
         "an accepted envelope was reviewed more than once: {seen:?}"
     );
+
+    // Two commands about one node are two entries under the op each carried,
+    // and both show the node as the envelope leaves it rather than as the
+    // command carried it — the amendment is on the added node in both, because
+    // that is the node this edit would dispatch.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([
+                {"op": "add", "node": agent("rework", &[])},
+                {"op": "amend", "id": "rework", "text": "the ruling"},
+            ])),
+        )
+        .exited(0)
+        .out_has("\"applied\"");
+    let seen = offered(&world);
+    let document = &seen.last().expect("the envelope was reviewed").1;
+    assert_eq!(
+        document["changes"]
+            .as_array()
+            .expect("the changes are a list")
+            .iter()
+            .map(|change| (
+                change["op"].as_str().expect("an op").to_string(),
+                change["node"]["id"].as_str().expect("a node").to_string(),
+                change["node"]["amendment"].clone()
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            ("add".to_string(), "rework".to_string(), json!("the ruling")),
+            (
+                "amend".to_string(),
+                "rework".to_string(),
+                json!("the ruling")
+            )
+        ],
+        "{document}"
+    );
     world.release("slow.go");
 }
 
