@@ -1,38 +1,25 @@
-// What this repository publishes, declared once and held to the release
-// configuration itself.
+// What this repository publishes, reconciled against the release configuration.
 //
-// A run that sequences work across repositories holds a node under `published`
-// adoption until the repository it depends on has *released* the work — and a
-// repository that declares no release target releases nothing as far as that
-// mechanism is concerned, so the hold silently stops happening and nobody learns
-// that it did. The declaration is `scripts/release-probe.sh`'s `TARGETS`, and
-// this is the gate that keeps it honest in both directions: a name this
-// repository publishes that no target covers, and a target naming something this
-// repository does not publish, each fail here.
+// The declaration is `scripts/release-probe.sh`'s `TARGETS`; the published set
+// here is *derived* — from the publish steps in `release.yml`, the workspace
+// members, the wheel's manifest, the launcher's manifest, and the platform
+// matrix — because an inventory transcribed into a check is the thing that goes
+// stale in silence. Each reconciliation therefore runs over
+// `releaseConfiguration()`, and the mutated-configuration journeys prove the
+// derivation notices a change rather than agreeing with itself.
 //
-// The published set is **derived from the release configuration** — the workflow
-// that publishes, the workspace members, the wheel's manifest, the launcher's
-// manifest, and the platform matrix — rather than transcribed into this file. An
-// inventory written by hand is exactly the thing that goes stale in silence,
-// which is the failure this whole check is about, so every reconciliation below
-// runs over `releaseConfiguration()` and the mutations that follow prove it
-// notices a change rather than agreeing with itself.
-//
-// The probe journeys drive the real script the way `src/release.rs` spawns one:
-// the file itself as a direct subprocess, one argument, this repository's root
-// as the working directory, and an environment of a search path and a home
-// directory. The one collaborator substituted is the registry — a fixture server
-// over real HTTP, exactly as `tests/linked_engines.rs` substitutes the crates.io
-// index — because what a public registry serves cannot be asked offline, and a
-// registry standing in for itself is what would then be under test. The real
-// registries are asked by `.github/workflows/published-smoke.yml`, which is where
-// this repository's network-touching verification lives.
-
+// The probe journeys spawn the real script the way `src/release.rs` spawns one.
+// The registry is the one collaborator substituted, over real HTTP, as
+// `tests/linked_engines.rs` substitutes the crates.io index: what a public
+// registry serves cannot be asked offline, and a fake registry standing in for
+// itself is what would then be under test. The real ones are asked weekly by
+// `.github/workflows/published-smoke.yml`.
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
-import { readFileSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, symlinkSync } from "node:fs";
 import { createServer } from "node:http";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { after, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -279,6 +266,28 @@ function indexRecord(name, version, yanked) {
  * fail every journey below rather than passing on the runner's ambient
  * environment. `extra` carries only the registry substitution.
  */
+/**
+ * A search path carrying everything the probe reaches for except one program.
+ *
+ * Symlinks to the real tools rather than shims: what is under test is what the
+ * probe does when a host cannot run the program, and a stand-in that answered
+ * would be the thing proven instead.
+ */
+const scratchPaths = [];
+function pathWithout(missing) {
+  const dir = mkdtempSync(join(tmpdir(), "release-probe-path-"));
+  scratchPaths.push(dir);
+  for (const tool of ["bash", "env", "mktemp", "curl", "sleep", "tr", "rm", "awk"]) {
+    if (tool === missing) continue;
+    const resolved = spawnSync("sh", ["-c", `command -v ${tool}`], {
+      encoding: "utf8",
+    }).stdout.trim();
+    assert.ok(resolved, `${tool} is not on this host's PATH, so the probe cannot run at all`);
+    symlinkSync(resolved, join(dir, tool));
+  }
+  return dir;
+}
+
 function contractEnv(extra = {}) {
   return { PATH: process.env.PATH, HOME: process.env.HOME, ...extra };
 }
@@ -474,6 +483,7 @@ describe("the release probe", () => {
   };
   after(() => {
     for (const server of servers) server.close();
+    for (const dir of scratchPaths) rmSync(dir, { recursive: true, force: true });
   });
 
   it("is an executable file at the path the contract fixes", () => {
@@ -678,25 +688,74 @@ describe("the release probe", () => {
   });
 
   it("refuses a version string that is not one rather than passing it on", async () => {
-    const server = await serving(
-      registry({
-        "/onepipeline-cli/json": always(
-          200,
-          JSON.stringify({ info: { name: "onepipeline-cli", version: "the latest one" } }),
-        ),
-        "/onepipeline-cli/latest": always(
-          200,
-          JSON.stringify({ name: "onepipeline-cli", version: "1abc" }),
-        ),
+    const cases = [
+      ["pypi:onepipeline-cli", "/onepipeline-cli/json", "the latest one"],
+      ["npm:onepipeline-cli", "/onepipeline-cli/latest", "1abc.2"],
+      // Longer than any release any of these registries has ever served: an
+      // answer a consumer carries into a plan is held to a length as well as to
+      // a shape.
+      ["npm:onepipeline-cli", "/onepipeline-cli/latest", `0.${"1".repeat(70)}.0`],
+    ];
+    for (const [identifier, path, version] of cases) {
+      const body = path.endsWith("/json")
+        ? JSON.stringify({ info: { name: "onepipeline-cli", version } })
+        : JSON.stringify({ name: "onepipeline-cli", version });
+      const server = await serving(registry({ [path]: always(200, body) }));
+      const run = await probe(identifier, { env: contractEnv(bases(server.base)) });
+      assert.notEqual(
+        run.status,
+        0,
+        `${identifier} passed on '${version}', which no consumer can hold a node against:\n${said(run)}`,
+      );
+      assert.equal(run.stdout, "", said(run));
+      assert.match(run.stderr, /ACTION: /, said(run));
+    }
+  });
+
+  it("refuses an endpoint override that is not a registry endpoint", async () => {
+    const server = await serving(releasedAt("0.16.3"));
+    for (const endpoint of ["file:///etc", `${server.base}/ ;rm -rf x`]) {
+      const run = await probe("npm:onepipeline-cli", {
+        env: contractEnv({ ...bases(server.base), ONEPIPELINE_NPM_REGISTRY: endpoint }),
+      });
+      assert.notEqual(
+        run.status,
+        0,
+        `'${endpoint}' was requested rather than refused:\n${said(run)}`,
+      );
+      assert.equal(run.stdout, "", said(run));
+      assert.match(run.stderr, /ACTION: /, said(run));
+    }
+  });
+
+  it("does not answer when the host gives it nowhere to read the answer", async () => {
+    const server = await serving(releasedAt("0.16.3"));
+    // `TMPDIR` is how a host says where that is; the host the contract describes
+    // passes none, and the probe then reads its answer under /tmp.
+    const run = await probe("crate:onepipeline", {
+      env: contractEnv({
+        ...bases(server.base),
+        TMPDIR: join(tmpdir(), "release-probe-nowhere-at-all"),
       }),
+    });
+    assert.notEqual(
+      run.status,
+      0,
+      `a host with no temporary directory was answered:\n${said(run)}`,
     );
-    const env = contractEnv(bases(server.base));
-    for (const identifier of ["pypi:onepipeline-cli", "npm:onepipeline-cli"]) {
+    assert.equal(run.stdout, "", said(run));
+    assert.match(run.stderr, /ACTION: /, said(run));
+  });
+
+  it("does not answer when the reader of a registry's document cannot run", async () => {
+    const server = await serving(releasedAt("0.16.3"));
+    const env = { ...contractEnv(bases(server.base)), PATH: pathWithout("awk") };
+    for (const identifier of declared) {
       const run = await probe(identifier, { env });
       assert.notEqual(
         run.status,
         0,
-        `${identifier} passed on something no consumer can hold a node against:\n${said(run)}`,
+        `${identifier} was answered on a host that could not read the document:\n${said(run)}`,
       );
       assert.equal(run.stdout, "", said(run));
       assert.match(run.stderr, /ACTION: /, said(run));
@@ -728,12 +787,8 @@ describe("the release probe", () => {
   it("does not read an answer it cannot parse as a registry with no release", async () => {
     const server = await serving(
       registry({
-        // A crates.io record filed under another crate — the page of a name this
-        // repository does not publish, served where its own belongs.
         "/on/ep/onepipeline": always(200, indexRecord("onevcs", "0.15.2", false)),
-        // A PyPI document with no version in it at all.
         "/onepipeline-cli/json": always(200, JSON.stringify({ info: { name: "onepipeline-cli" } })),
-        // An npm answer that is not JSON.
         "/onepipeline-cli/latest": always(200, "<html>not a manifest</html>"),
       }),
     );

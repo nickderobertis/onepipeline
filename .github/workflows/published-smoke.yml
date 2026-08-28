@@ -118,28 +118,17 @@ jobs:
             ${REQUESTED:+--expect-version "$REQUESTED"} \
             --label "npm onepipeline-cli on $RUNNER_OS/$RUNNER_ARCH"
 
-  # llmlint: ignore-block[live_tier_compiles_and_requires_credential] this live tier is
-  # credential-free by contract rather than by omission: the host spawns a release probe
-  # with `PATH` and `HOME` and nothing else, and every endpoint it reads is a public
-  # registry serving unauthenticated reads — so requiring a secret here would assert the
-  # opposite of the property this job exists to prove, and a probe that had grown a
-  # dependency on one would pass a job that supplied it. What the rule protects is still
-  # held: the tier cannot pass without reaching the registries, because it fails on a
-  # probe that did not answer and on a declared target no registry serves.
-  # Whether the release probe still answers the real registries.
-  #
-  # `scripts/release-probe.sh` is what a consuming run asks before it launches a
-  # node that depends on a release of this repository, and its three answers are
-  # driven offline in `npm/test/release-targets.test.mjs` against a fixture
-  # registry. What no test can stand in for is the registries themselves — the
-  # endpoints, their shapes, and what they serve today — so that half is asked
-  # here, on the schedule this repository already asks them on, rather than in the
-  # gate that must pass offline.
-  #
-  # Run exactly as the host runs it: the file as a direct subprocess, one
-  # argument, this repository's root, and an environment of `PATH` and `HOME`
-  # alone — so a probe that had grown a dependency on a credential, or on
-  # anything a runner happens to export, fails here.
+  # llmlint: ignore-block[live_tier_compiles_and_requires_credential] this tier is
+  # credential-free by contract: the host spawns a release probe with `PATH` and `HOME`
+  # alone against public registries, so requiring a secret here would assert the opposite
+  # of what the job proves. It still cannot pass without reaching the registries — it
+  # fails on a probe that did not answer, and on a declared target no registry serves.
+
+  # Whether the release probe still answers the real registries, which is what a
+  # consuming run asks before launching work that depends on a release of this
+  # repository. Its three answers are driven offline against a fixture registry
+  # in `npm/test/release-targets.test.mjs`; the registries themselves are what no
+  # test can stand in for, so they are asked here.
   release-probe:
     runs-on: ubuntu-latest
     defaults:

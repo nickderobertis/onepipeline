@@ -343,19 +343,13 @@ fetch() {
 # serves for this repository comes from `Cargo.toml`, so this is deliberately
 # tight — a registry answering anything else is a registry this could not read.
 version_shaped() {
-  # A digit, a dot, and a digit at the front is the least any of these three
-  # registries serves: `1` is not a release of anything here, and `1abc` is a
-  # word. The rest of the string is held to the characters a version is spelled
-  # with, so nothing a registry sends can reach a consumer as an answer that is
-  # not one.
-  case "$1" in
-    [0-9]*.[0-9]*) ;;
-    *) return 1 ;;
-  esac
-  case "$1" in
-    *[!0-9A-Za-z.+-]*) return 1 ;;
-  esac
-  [ "${#1}" -le 64 ]
+  # Numeric components separated by dots, then at most a prerelease or build
+  # suffix: `0.16.3`, npm's `0.17.0-rc.1`, and PyPI's normalized `0.17.0rc1` are
+  # answers; `1`, `1abc` and `1abc.2` are not, and neither is a page of prose a
+  # registry served where a version belonged.
+  local shape='^[0-9]+(\.[0-9]+){1,3}([-+.]?[0-9A-Za-z][0-9A-Za-z.+-]*)?$'
+  [ "${#1}" -le 64 ] || return 1
+  [[ "$1" =~ $shape ]]
 }
 
 # Order two `X.Y.Z` versions: 0 when the first is at least the second.
