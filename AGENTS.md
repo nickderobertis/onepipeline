@@ -133,10 +133,7 @@ That script is also the probe a consuming run asks before launching work that
 depends on a release of this one: a version on stdout, *nothing* for no release
 yet, and a non-zero exit for **not answered** — which is never the same answer
 and must never be collapsed into the second, because a consumer holds
-indefinitely on it. `npm/test/release-targets.test.mjs` derives what this
-repository publishes from the release workflow and the manifests and fails in
-both directions, so a new artifact is a red suite rather than a target nobody
-declared.
+indefinitely on it. `npm/test/release-targets.test.mjs` is the gate on that list.
 
 Bump policy, **pre-1.0**: `feat` → minor, `feat!` / `BREAKING CHANGE` → minor (a
 breaking change pre-1.0 is not yet a major), `fix` / `perf` / `refactor` /
