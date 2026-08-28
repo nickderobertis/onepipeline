@@ -575,7 +575,6 @@ impl HeldNodes {
         (!nodes.is_empty()).then_some(Self(nodes))
     }
 
-    /// The nodes as an advice line names them.
     fn named(&self) -> String {
         self.0.join(", ")
     }

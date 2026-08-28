@@ -2814,7 +2814,6 @@ fn a_run_held_up_by_a_judges_rejection_is_told_to_read_the_verdict_and_supersede
     let status = world.run(&["status", &run]);
     status.exited(0).out_has(&prescription);
 
-    // Neither of the two prescriptions this run is not given.
     for rendered in [&listing, &status] {
         rendered.out_lacks("adopt");
         rendered.out_lacks("requeue");
