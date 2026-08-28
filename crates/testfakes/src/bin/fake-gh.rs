@@ -255,14 +255,27 @@ fn user(args: &[String]) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// `gh run view --repo R --log --job N`
+/// `gh run view --repo R --log --job N [--allow-escape-sequences]`
+///
+/// A `gh` new enough to guard its output takes `--allow-escape-sequences` to
+/// print content carrying terminal escape sequences, and `onevcs` asks for it
+/// first because a CI job's log almost always carries colour. Accepted here and
+/// not merely tolerated: a host that refused it left the whole log fetch
+/// unanswered offline, which is how a check whose name the boundary refused went
+/// unnoticed — the call never got as far as the name.
 fn log(args: &[String]) -> ExitCode {
+    let escapes = args.iter().any(|arg| arg == "--allow-escape-sequences");
+    let bare: &[&str] = if escapes {
+        &["--log", "--allow-escape-sequences"]
+    } else {
+        &["--log"]
+    };
     if let Err(refusal) = shaped(
         args,
         "run view",
         2,
         &[("--repo", Shape::Named), ("--job", Shape::Named)],
-        &["--log"],
+        bare,
     ) {
         return refusal;
     }
@@ -808,13 +821,21 @@ impl Check {
     /// `NAME STATUS CONCLUSION REQUIRED`, four fields always. Nothing is
     /// defaulted: a line this program filled in for its author would answer a
     /// journey that was never written.
+    ///
+    /// The last three fields are taken from the *end* of the line, so everything
+    /// before them is the name however many words it is. Every GitHub matrix job
+    /// is named with whitespace — `check (macos-latest)`, `test-os
+    /// (windows-latest)` — so a host that could only report a one-word check name
+    /// would be a host no journey could meet the real ones on.
     fn parse(line: &str) -> Result<Self, String> {
         let fields: Vec<&str> = line.split_whitespace().collect();
-        let [name, status, conclusion, blocks] = fields[..] else {
+        if fields.len() < 4 {
             return Err(format!(
                 "a scripted check is `NAME STATUS CONCLUSION REQUIRED`, and {line:?} is not"
             ));
-        };
+        }
+        let (words, tail) = fields.split_at(fields.len() - 3);
+        let (name, status, conclusion, blocks) = (words.join(" "), tail[0], tail[1], tail[2]);
         let state =
             State::parse(status, conclusion).map_err(|why| format!("check {name:?}: {why}"))?;
         let blocks = match blocks {
@@ -828,7 +849,7 @@ impl Check {
             }
         };
         Ok(Check {
-            name: name.to_owned(),
+            name,
             state,
             blocks,
         })
