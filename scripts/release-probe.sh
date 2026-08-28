@@ -263,6 +263,7 @@ END {
   print "value " V1
 }
 '
+# llmlint: ignore-end[boundary_inputs_validated]
 
 scratch="$(mktemp -d)"
 trap 'rm -rf "$scratch"' EXIT
