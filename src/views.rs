@@ -2105,6 +2105,7 @@ mod tests {
             node_graph: String::new(),
             pr_author_graph: String::new(),
             node_validator: String::new(),
+            envelope_reviewer: String::new(),
             launcher: "claude-code".into(),
             session: "session-a".into(),
             pid,

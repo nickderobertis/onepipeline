@@ -234,6 +234,26 @@ command's own stderr as the reason. It is named by `--node-validator COMMAND`, b
 `ONEPIPELINE_NODE_VALIDATOR`, or by a launch config's `node_validator`, in that
 order of precedence; naming none is the default and runs no validator at all.
 
+A launch may also name an **envelope reviewer** — a second command of the host's
+own, offered the whole reply envelope once, after every command in it has passed
+this crate's own validation and the node validator above and before any of its
+edits is committed. One JSON document crosses its stdin: the run's goal, every
+node the envelope introduces or changes with the op that produced each, and the
+plan they are being edited into, as the envelope leaves it. That is the review no
+per-node check can make — two added nodes that duplicate each other, a contract
+seam between two nodes of one edit, the dependency edges the edit introduces, or
+whether the edited graph still delivers the goal. Exit `0` accepts it; a non-zero
+exit **refuses the whole envelope**, so no command of it half-applies, with the
+command's own stderr as the reason and every op and node it was reviewing named
+beside it. A reviewer that cannot be started refuses the envelope rather than
+letting it through **reviewed by nothing**. An accepted envelope is offered
+**once per envelope** — unlike the node validator's two offers, because this hook
+exists for a review a host plausibly answers with an agent, and because the
+submission check is the only place a refusal is still whole. It is named by
+`--envelope-reviewer COMMAND`, by `ONEPIPELINE_ENVELOPE_REVIEWER`, or by a launch
+config's `envelope_reviewer`, in that order of precedence; naming none is the
+default and runs no reviewer at all.
+
 Read-only views — `runs`, `status`, `host`, `monitor`, `results`, `goals`,
 `transcript`, `telemetry` — report unread surfaces, driver liveness, and
 provider health without touching a run. `status` says what each in-flight node

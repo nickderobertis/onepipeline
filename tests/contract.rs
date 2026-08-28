@@ -1683,9 +1683,15 @@ fn the_amendment_and_validator_surface_is_what_the_divergence_record_names() {
     let at = validator["config_schema_version"]
         .as_u64()
         .expect("entry 41 states the version the key arrived at");
-    assert_eq!(
-        u32::try_from(at).expect("a version fits"),
-        LAUNCH_CONFIG_SCHEMA_VERSION
+    // The version the key **arrived** at, which stays where it is when a later
+    // key moves the schema on: each key is refused by its own arrival version
+    // rather than by the schema's current number, so what has to hold here is
+    // that a document declaring it is still one this build reads.
+    let arrived = u32::try_from(at).expect("a version fits");
+    assert!(
+        LAUNCH_CONFIG_SCHEMA_VERSIONS_READ.contains(&arrived)
+            && arrived <= LAUNCH_CONFIG_SCHEMA_VERSION,
+        "entry 41 states the validator key arrived at schema {arrived}, which is not a          version this build reads"
     );
     let named: LaunchConfig = serde_json::from_value(json!({
         "schema_version": at,
@@ -1792,6 +1798,152 @@ fn the_amendment_and_validator_surface_is_what_the_divergence_record_names() {
             && prose.contains("naming none is the default and runs no validator at all"),
         "the README no longer states what a validator's answers mean"
     );
+}
+
+/// The envelope reviewer this build carries **beyond** the contract.
+///
+/// The contract is committed as approved and names none of it, so entry 45 is
+/// the only place it is written down — and a divergence nothing gates quietly
+/// stops being true. The entry's own block is the source: what parses here is
+/// what an operator would write in a config and what a host would read on the
+/// hook's stdin.
+#[test]
+fn the_envelope_reviewer_surface_is_what_the_divergence_record_names() {
+    let block = divergence_block("45.");
+    let reviewer = &block["reviewer"];
+
+    // Named three ways, with the config key at the version the entry states.
+    assert_eq!(reviewer["config_key"].as_str(), Some("envelope_reviewer"));
+    let at = reviewer["config_schema_version"]
+        .as_u64()
+        .expect("entry 45 states the version the key arrived at");
+    let arrived = u32::try_from(at).expect("a version fits");
+    assert!(
+        LAUNCH_CONFIG_SCHEMA_VERSIONS_READ.contains(&arrived)
+            && arrived <= LAUNCH_CONFIG_SCHEMA_VERSION,
+        "entry 45 states the reviewer key arrived at schema {arrived}, which is not a          version this build reads"
+    );
+    let named: LaunchConfig = serde_json::from_value(json!({
+        "schema_version": at,
+        "envelope_reviewer": "./scripts/review-envelope.sh",
+    }))
+    .expect("a launch config naming a reviewer parses");
+    assert_eq!(
+        named.envelope_reviewer.as_deref(),
+        Some("./scripts/review-envelope.sh")
+    );
+    // And every version below it is still one this build reads, so a config
+    // written before this hook existed still loads.
+    for version in LAUNCH_CONFIG_SCHEMA_VERSIONS_READ {
+        let earlier: LaunchConfig =
+            serde_json::from_value(json!({"schema_version": version})).expect("it parses");
+        assert_eq!(earlier.envelope_reviewer, None);
+    }
+
+    // The flag is the one `start` actually takes, asked of the parser rather
+    // than of a list beside it.
+    let flag = reviewer["flag"].as_str().expect("entry 45 names the flag");
+    let parsed = Cli::try_parse_from(["onepipeline", "start", "plan.json", flag, "review-edit"])
+        .expect("the flag entry 45 names is one `start` takes");
+    let Command::Start(started) = parsed.command else {
+        panic!("that is not a start")
+    };
+    assert_eq!(started.envelope_reviewer.as_deref(), Some("review-edit"));
+
+    // The document, built out of this crate's own published shapes: a host
+    // reading it reads a plan `Node` and a `Plan`, not a shape of this hook's
+    // own.
+    let document = &reviewer["document"];
+    let listed: BTreeSet<String> =
+        serde_json::from_value(reviewer["ops_listed_as_changes"].clone())
+            .expect("entry 45 names the ops it lists as changes");
+    let known: BTreeSet<String> = OPS
+        .iter()
+        .map(|op| (*op).to_string())
+        .chain(std::iter::once("amend".to_string()))
+        .collect();
+    assert!(
+        listed.is_subset(&known),
+        "entry 45 lists an op this build has no such thing as: {listed:?}"
+    );
+    let changes = document["changes"]
+        .as_array()
+        .expect("the document carries a changes list");
+    assert!(!changes.is_empty(), "{document}");
+    for change in changes {
+        let op = change["op"].as_str().expect("each change names its op");
+        assert!(
+            listed.contains(op),
+            "entry 45's document carries a change under `{op}`, which it does not list"
+        );
+        let written = change["node"].clone();
+        let node: Node = serde_json::from_value(written.clone())
+            .unwrap_or_else(|e| panic!("a changed node is a plan node: {e}"));
+        assert_eq!(
+            serde_json::to_value(&node).expect("serializes"),
+            written,
+            "a changed node does not round-trip as the entry writes it"
+        );
+    }
+    let written = document["plan"].clone();
+    let plan: Plan =
+        serde_json::from_value(written.clone()).expect("the plan under review is a plan");
+    assert_eq!(plan.schema_version, PLAN_SCHEMA_VERSION);
+    assert_eq!(
+        serde_json::to_value(&plan).expect("serializes"),
+        written,
+        "the plan under review does not round-trip as the entry writes it"
+    );
+    // The goal is hoisted out of the plan it is also part of, and says the same
+    // thing in both places — a document whose two copies disagreed would leave a
+    // reviewer judging the edit against a goal the run is not being run for.
+    assert_eq!(
+        document["goal"].as_str(),
+        plan.goal.as_ref().map(|goal| goal.text.as_str()),
+        "{document}"
+    );
+
+    // Offered once per accepted envelope, which is the property this hook does
+    // **not** inherit from the per-node validator's two offers.
+    assert_eq!(
+        reviewer["offers_per_accepted_envelope"].as_u64(),
+        Some(1),
+        "entry 45 no longer states how many times an accepted envelope is offered"
+    );
+
+    // The README is a **second copy** of all of this, in the prose an operator
+    // meets it in, and nothing compiles that. So the entry is held against it
+    // here: every spelling, in the order the entry proposes, and the four
+    // promises a host is relying on.
+    let readme = std::fs::read_to_string(repo_root().join("README.md")).expect("the README ships");
+    let prose = readme.split_whitespace().collect::<Vec<_>>().join(" ");
+    let precedence: Vec<String> = serde_json::from_value(reviewer["precedence"].clone())
+        .expect("entry 45 states the order it proposes");
+    let mut at: Vec<usize> = Vec::new();
+    for spelling in &precedence {
+        let named = reviewer[spelling.as_str()]
+            .as_str()
+            .expect("entry 45 names it");
+        at.push(prose.find(named).unwrap_or_else(|| {
+            panic!("the README does not name the reviewer's {spelling}, `{named}`")
+        }));
+    }
+    assert!(
+        at.windows(2).all(|pair| pair[0] < pair[1]),
+        "the README names the three spellings in an order entry 45 does not propose: \
+         {precedence:?} at {at:?}"
+    );
+    for promise in [
+        "refuses the whole envelope",
+        "once per envelope",
+        "reviewed by nothing",
+        "naming none is the default and runs no reviewer at all",
+    ] {
+        assert!(
+            prose.contains(promise),
+            "the README no longer states that the envelope reviewer {promise}"
+        );
+    }
 }
 
 #[test]

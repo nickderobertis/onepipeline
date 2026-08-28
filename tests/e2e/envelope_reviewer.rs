@@ -1,0 +1,394 @@
+//! The hook that reviews a whole reply envelope, driven end to end against a
+//! real reviewer program.
+//!
+//! The per-node validator beside it is handed one node serialized on its own —
+//! no goal, no siblings, no dependency edges, and no plan — so a reply carrying
+//! several related ops is seen as several unrelated nodes. Nothing checks two
+//! added nodes that duplicate each other, a contract seam between two nodes of
+//! one edit, the edges the edit introduces, or whether the edited graph still
+//! delivers the run's goal.
+//!
+//! What runs here is a **real** reviewer: a compiled program at the seam,
+//! reading the envelope off its stdin and answering with an exit status and its
+//! own words, exactly as a host's would.
+//! `crates/testfakes/src/bin/envelope-reviewer.rs` says why it is not a double.
+
+// llmlint: ignore-file[e2e_not_mocked] `World` substitutes `oneagentgraph` at its
+// subprocess boundary and nothing inside the crate under test, which is driven as a real
+// compiled binary. The reviewer is not a substitution either: it is the host's own
+// command, and this suite supplies a real one. `harness.rs` carries the same suppression
+// and the full rationale.
+
+use serde_json::{json, Value};
+
+use crate::harness::{agent, double, plan_of, repo_file, World, REFUSED};
+
+/// What entry 45 of the divergence record proposes, which is where the three
+/// spellings of this launch-level setting are written down.
+///
+/// Read rather than restated: the contract is committed as approved and names
+/// none of this, so that entry is the only source — and a journey that spelled
+/// the flag itself would go on passing after the record and the code disagreed.
+fn proposed() -> Value {
+    let record = std::fs::read_to_string(repo_file("docs/contract-divergences.md"))
+        .expect("the divergence record ships");
+    let entry = record
+        .split("\n## ")
+        .find(|entry| entry.starts_with("45."))
+        .expect("the record still carries entry 45");
+    let block = entry
+        .split("```json")
+        .nth(1)
+        .and_then(|rest| rest.split("```").next())
+        .expect("entry 45 carries the json block these journeys drive");
+    serde_json::from_str::<Value>(block).expect("entry 45's block is JSON")["reviewer"].clone()
+}
+
+/// One spelling out of that block, refused loudly when the entry stops naming
+/// it: a journey that fell back to a literal would prove the literal.
+fn spelling(named: &str) -> String {
+    proposed()[named]
+        .as_str()
+        .unwrap_or_else(|| panic!("entry 45 no longer names the reviewer's {named}"))
+        .to_string()
+}
+
+/// One copy of the real reviewer, under a name of this journey's choosing.
+///
+/// Three names for one program is how the precedence journey tells which
+/// reviewer a launch resolved: the program records the name it was invoked as
+/// and says it in every refusal, so the answer comes off the process that
+/// actually ran.
+fn reviewer_named(world: &World, name: &str) -> String {
+    let path = world
+        .root
+        .join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+    std::fs::copy(double("envelope-reviewer"), &path).expect("the reviewer is placed");
+    path.to_string_lossy().into_owned()
+}
+
+/// Every envelope the reviewer was offered, in order, each with the name the
+/// reviewer was invoked as.
+fn offered(world: &World) -> Vec<(String, Value)> {
+    let path = world.fakes.join("reviewer.jsonl");
+    // Absent is a reviewer that has not been invoked yet, and nothing else is:
+    // this file is the only witness to what crossed the stdin, so a journey that
+    // could not read it would report "nothing was offered" — which is exactly
+    // what several of the assertions below take as a pass.
+    let recorded = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => panic!(
+            "the reviewer's record at {} cannot be read ({error}), so what it was offered is \
+             unknown rather than nothing",
+            path.display()
+        ),
+    };
+    recorded
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let record: Value = serde_json::from_str(line).expect("the reviewer records JSON");
+            (
+                record["as"].as_str().expect("it names itself").to_string(),
+                record["envelope"].clone(),
+            )
+        })
+        .collect()
+}
+
+/// What the host's review says, in the sentence a manager reads. The reviewer
+/// prefixes it with the name it was invoked as and the node it objected to.
+const RULES: &str =
+    "its acceptance criterion contradicts a rule the target repository states in its own suite";
+
+fn envelope(commands: Value) -> String {
+    json!({"version": 1, "commands": commands}).to_string()
+}
+
+/// The two-node edit these journeys submit: a node, and a second one that
+/// depends on it. One envelope, two nodes, and an edge between them — which is
+/// exactly the shape no per-node check can see.
+fn two_related_nodes() -> Value {
+    json!([
+        {"op": "add", "node": agent("cover", &[])},
+        {"op": "add", "node": agent("verify", &["cover"])},
+    ])
+}
+
+/// Start a run whose one node is held open, so the graph is live while edits
+/// arrive.
+fn live_run(world: &World, name: &str, extra: &[&str]) -> String {
+    // A fresh hold each time: the rendezvous a previous run released is a file,
+    // and left in place it satisfies this run's hold the instant the dispatch
+    // reaches it — which is a run that settles rather than one an edit can reach.
+    let _ = std::fs::remove_file(world.fakes.join("slow.go"));
+    world.script("slow.wait", "hold");
+    let path = world.plan(name, &plan_of(name, vec![agent("slow", &[])]));
+    let mut args = vec!["start".to_string(), path.clone()];
+    args.extend(extra.iter().map(|arg| (*arg).to_string()));
+    args.push("--detach".to_string());
+    let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+    world.run(&borrowed).exited(0);
+    world.until("the held node to be running", |world| {
+        world
+            .run(&["status", name])
+            .stdout
+            .contains("slow: running")
+    });
+    name.to_string()
+}
+
+/// The journey the hook exists for: an envelope the host's review refuses is
+/// refused **whole**, and the same envelope goes through once the review is
+/// satisfied — carrying every node it changes, the plan, and the goal.
+#[test]
+fn a_refused_envelope_applies_none_of_its_commands_and_an_accepted_one_is_reviewed_once() {
+    let world = World::new("reviewer-refuses");
+    let reviewer = reviewer_named(&world, "review-edit");
+    let run = live_run(&world, "reviewerrefuses", &[&spelling("flag"), &reviewer]);
+
+    world.script("reviewer.refuse", RULES);
+    let refused = world.run_with_stdin(&["reply", &run], &envelope(two_related_nodes()));
+    refused
+        .exited(REFUSED)
+        .err_has(RULES)
+        // The node the reviewer objected to, in its own words: an envelope is no
+        // longer one command, so a refusal that named none leaves a manager with
+        // nothing to look at.
+        .err_has("node 'cover'")
+        // And what this crate handed it, so the objection can be located even
+        // when the reviewer is terse.
+        .err_has("add 'cover'")
+        .err_has("add 'verify'");
+
+    // Refused **whole**: neither node joined the graph, so no command of the
+    // envelope half-applied.
+    for node in ["cover", "verify"] {
+        world.run(&["results", &run]).exited(0).out_lacks(node);
+        world.run(&["status", &run]).exited(0).out_lacks(node);
+    }
+
+    // The document the reviewer read: both nodes it introduces with the op that
+    // produced each, the plan they are being edited into, and the run's goal.
+    let seen = offered(&world);
+    assert_eq!(
+        seen.len(),
+        1,
+        "the envelope was not reviewed once: {seen:?}"
+    );
+    let (invoked_as, document) = &seen[0];
+    assert_eq!(invoked_as, "review-edit");
+    assert_eq!(
+        document["goal"],
+        json!("Deliver reviewerrefuses"),
+        "{document}"
+    );
+    assert_eq!(
+        document["changes"]
+            .as_array()
+            .expect("the changes are a list")
+            .iter()
+            .map(|change| (
+                change["op"].as_str().expect("an op").to_string(),
+                change["node"]["id"].as_str().expect("a node").to_string()
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            ("add".to_string(), "cover".to_string()),
+            ("add".to_string(), "verify".to_string())
+        ],
+        "{document}"
+    );
+    // The prose and the edge, which is the half a per-node check cannot see.
+    assert!(
+        document["changes"][0]["node"]["task"]
+            .as_str()
+            .expect("the task crossed")
+            .contains("Acceptance criteria"),
+        "{document}"
+    );
+    assert_eq!(document["changes"][1]["node"]["deps"], json!(["cover"]));
+    // And the plan as the envelope leaves it: the node already running, plus
+    // both the envelope adds.
+    let planned: Vec<String> = document["plan"]["tasks"]
+        .as_array()
+        .expect("the plan carries its tasks")
+        .iter()
+        .map(|task| task["id"].as_str().expect("an id").to_string())
+        .collect();
+    for node in ["slow", "cover", "verify"] {
+        assert!(planned.contains(&node.to_string()), "{document}");
+    }
+
+    // With the review satisfied, the same envelope goes through and both nodes
+    // run. The reviewer narrates on stdout while it does, the way a review that
+    // reports what it checked does — and none of it reaches `reply`'s own
+    // stdout, which is a machine-readable verdict its caller parses.
+    std::fs::remove_file(world.fakes.join("reviewer.refuse")).expect("the review is satisfied");
+    let narration = "read the goal, 3 nodes, and 1 new edge";
+    world.script("reviewer.chatter", narration);
+    let applied = world.run_with_stdin(&["reply", &run], &envelope(two_related_nodes()));
+    applied
+        .exited(0)
+        .out_has("\"applied\"")
+        .out_lacks(narration);
+    let verdict: Value = serde_json::from_str(applied.stdout.trim())
+        .unwrap_or_else(|e| panic!("`reply` printed something other than its verdict: {e}"));
+    assert_eq!(verdict["state"], json!("applied"), "{verdict}");
+    world.until("the accepted nodes to settle", |world| {
+        let results = world.run(&["results", &run]).stdout;
+        ["cover", "verify"].iter().all(|node| {
+            results
+                .lines()
+                .any(|line| line.trim_start().starts_with(node) && line.contains("done"))
+        })
+    });
+
+    // Offered **once** for the accepted envelope, and deliberately: unlike the
+    // per-node validator, which the submission check and the reconciler both
+    // run, a review a host plausibly answers with an agent is not asked the same
+    // question twice — and the submission check is the only place a refusal is
+    // still whole.
+    let seen = offered(&world);
+    assert_eq!(
+        seen.len(),
+        2,
+        "an accepted envelope was reviewed more than once: {seen:?}"
+    );
+    world.release("slow.go");
+}
+
+/// A reviewer that cannot be started refuses the envelope rather than letting it
+/// through unreviewed, and a launch that configures none behaves exactly as it
+/// did before this hook existed.
+///
+/// The first is the whole reason this fails closed: accepting an envelope
+/// because the review could not be run would be the crate deciding that an
+/// unenforced rule is no rule, silently, on the path a manager reaches for under
+/// pressure.
+#[test]
+fn an_unstartable_reviewer_fails_closed_and_a_launch_naming_none_is_unchanged() {
+    let world = World::new("reviewer-closed");
+    let missing = world.root.join("no-such-reviewer");
+    let run = live_run(
+        &world,
+        "reviewerclosed",
+        &[&spelling("flag"), &missing.to_string_lossy()],
+    );
+
+    world
+        .run_with_stdin(&["reply", &run], &envelope(two_related_nodes()))
+        .exited(REFUSED)
+        .err_has("reviewed by nothing")
+        .err_has("could not be started");
+    world.run(&["results", &run]).exited(0).out_lacks("cover");
+    world.release("slow.go");
+
+    // The same envelope, into a run whose launch named no reviewer at all: the
+    // edits are applied exactly as they were before this hook, and nothing was
+    // asked about them.
+    let plain = live_run(&world, "reviewernone", &[]);
+    world
+        .run_with_stdin(&["reply", &plain], &envelope(two_related_nodes()))
+        .exited(0)
+        .out_has("\"applied\"");
+    assert!(
+        offered(&world).is_empty(),
+        "a launch that named no reviewer ran one"
+    );
+    world.release("slow.go");
+}
+
+/// The three names, in the order the record states, proven by driving them
+/// rather than by asserting the order in prose.
+///
+/// Each rung is added on top of the one below it and the answer is read off the
+/// program that actually ran, so what is proven is which reviewer the launch
+/// resolved rather than which one this crate believes it picked.
+#[test]
+fn the_flag_beats_the_environment_which_beats_the_config() {
+    let precedence: Vec<String> = serde_json::from_value(proposed()["precedence"].clone())
+        .expect("entry 45 states the precedence it proposes");
+    assert_eq!(
+        precedence,
+        vec!["flag", "environment", "config_key"],
+        "entry 45 proposes a different order than this journey drives"
+    );
+
+    let world = World::new("reviewer-precedence");
+    let by_flag = reviewer_named(&world, "by-flag");
+    let by_environment = reviewer_named(&world, "by-environment");
+    let by_config = reviewer_named(&world, "by-config");
+    let config = world.root.join("launch.yaml");
+    std::fs::write(
+        &config,
+        format!(
+            "schema_version: {}\n{}: {by_config}\n",
+            proposed()["config_schema_version"]
+                .as_u64()
+                .expect("entry 45 states the version the key arrived at"),
+            spelling("config_key"),
+        ),
+    )
+    .expect("the launch config is written");
+
+    // Every reviewer refuses, naming itself, so which one a launch resolved is
+    // readable off `reply`'s own stderr rather than out of any file.
+    world.script("reviewer.refuse", RULES);
+
+    for (which, extra, environment) in [
+        ("by-config", vec![], None),
+        ("by-environment", vec![], Some(by_environment.clone())),
+        (
+            "by-flag",
+            vec![spelling("flag"), by_flag.clone()],
+            Some(by_environment.clone()),
+        ),
+    ] {
+        let name = format!("precedence{which}").replace('-', "");
+        let path = world.plan(&name, &plan_of(&name, vec![agent("slow", &[])]));
+        // A fresh hold each time: the rendezvous the previous iteration released
+        // is a file, and left in place it satisfies this run's hold the instant
+        // the dispatch reaches it.
+        let _ = std::fs::remove_file(world.fakes.join("slow.go"));
+        world.script("slow.wait", "hold");
+        let mut args = vec![
+            "start".to_string(),
+            path.clone(),
+            "--launch-config".to_string(),
+            config.to_string_lossy().into_owned(),
+        ];
+        args.extend(extra);
+        args.push("--detach".to_string());
+        let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+        let mut command = world.cmd(&borrowed);
+        match &environment {
+            Some(value) => command.env(spelling("environment"), value),
+            None => command.env_remove(spelling("environment")),
+        };
+        world.run_on(command, "start").exited(0);
+        world.until("the held node to be running", |world| {
+            world
+                .run(&["status", &name])
+                .stdout
+                .contains("slow: running")
+        });
+
+        // A `reply` typed with *no* environment at all is judged by the reviewer
+        // the run was launched under, because it is resolved into the launch
+        // record rather than re-read here.
+        let mut reply = world.cmd(&["reply", &name]);
+        reply.env_remove(spelling("environment"));
+        let refused = world.run_with_stdin_on(reply, &envelope(two_related_nodes()));
+        refused
+            .exited(REFUSED)
+            .err_has(&format!("{which}: node 'cover': {RULES}"));
+        for other in ["by-flag", "by-environment", "by-config"] {
+            if other != which {
+                refused.err_lacks(other);
+            }
+        }
+        world.release("slow.go");
+    }
+}

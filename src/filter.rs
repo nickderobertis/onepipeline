@@ -52,21 +52,22 @@ const MATCHER_FIELDS: &str = "`source`, `kind`, `run_id`, `node`, `step`, `membe
 
 /// The launch-config schema version this build **writes**.
 ///
-/// **3** since a launch declares the command a node introduced by a live edit is
-/// checked by: `node_validator` is a key versions 1 and 2 never had, so a
-/// document carrying it is a different document and says so.
-pub const LAUNCH_CONFIG_SCHEMA_VERSION: u32 = 3;
+/// **4** since a launch declares the command a whole reply envelope is reviewed
+/// by: `envelope_reviewer` is a key versions 1 to 3 never had, so a document
+/// carrying it is a different document and says so.
+pub const LAUNCH_CONFIG_SCHEMA_VERSION: u32 = 4;
 
 /// Every launch-config version this build **reads**, newest first.
 ///
 /// The same rule the plan schema is read by, and for the same reason: a config
 /// is a file an operator wrote at a version, and what each version added is
 /// keyed to the version the document declares. An earlier config is a complete
-/// document — a version-1 one says nothing about drafting and a version-2 one
-/// says nothing about validating, which is what a launch naming neither means —
+/// document — a version-1 one says nothing about drafting, a version-2 one says
+/// nothing about validating a node, and a version-3 one says nothing about
+/// reviewing an envelope, which is what a launch naming none of them means —
 /// and naming a later key there is refused **by that field's name**, exactly as
 /// a key no version ever had is.
-pub const LAUNCH_CONFIG_SCHEMA_VERSIONS_READ: [u32; 3] = [LAUNCH_CONFIG_SCHEMA_VERSION, 2, 1];
+pub const LAUNCH_CONFIG_SCHEMA_VERSIONS_READ: [u32; 4] = [LAUNCH_CONFIG_SCHEMA_VERSION, 3, 2, 1];
 
 /// Each key younger than the schema itself: the version it arrived at, and
 /// whether a blank value is refused.
@@ -78,9 +79,9 @@ pub const LAUNCH_CONFIG_SCHEMA_VERSIONS_READ: [u32; 3] = [LAUNCH_CONFIG_SCHEMA_V
 /// unrelated key.
 ///
 /// The blank rule is **per key and not per schema**, for the same reason. It is
-/// `node_validator`'s alone: that key arrives with this version, so no config
-/// on disk carries a blank one, and refusing it costs nobody a launch that used
-/// to work. `pr_author_graph` has shipped since version 2 and a document
+/// the two hook keys': each was refused-when-blank from the version it arrived
+/// at, so no config on disk carries a blank one and refusing it costs nobody a
+/// launch that used to work. `pr_author_graph` has shipped since version 2 and a document
 /// already written may carry a blank one; whatever that meant then it goes on
 /// meaning, because a build that started refusing it would break a config over
 /// a key the operator did not change. What it means is settled where the value
@@ -89,6 +90,7 @@ pub const LAUNCH_CONFIG_SCHEMA_VERSIONS_READ: [u32; 3] = [LAUNCH_CONFIG_SCHEMA_V
 const KEYS_BY_VERSION: &[(&str, u32, BlankValue)] = &[
     ("pr_author_graph", 2, BlankValue::Kept),
     ("node_validator", 3, BlankValue::Refused),
+    ("envelope_reviewer", 4, BlankValue::Refused),
 ];
 
 /// What a key present and holding nothing means.
@@ -160,6 +162,21 @@ pub struct LaunchConfig {
     /// launch that named none is a document an earlier reader still accepts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_validator: Option<String>,
+    /// The command this launch reviews a whole reply envelope with, if any.
+    ///
+    /// The fourth launch-level decision, and it is written down beside a plan
+    /// for the reason the first three are: whether a run's edits are reviewed
+    /// against its goal and its plan before they are committed is a property of
+    /// how a team works rather than of one launch. `--envelope-reviewer` spells
+    /// the same thing for a launch that would rather say it inline and overrides
+    /// this, as does `ONEPIPELINE_ENVELOPE_REVIEWER` between them.
+    ///
+    /// A key [`LAUNCH_CONFIG_SCHEMA_VERSION`] added, so a document below it may
+    /// not carry one. Omitted when absent, so a config that names no reviewer
+    /// round-trips as the file wrote it — and so what this crate writes for a
+    /// launch that named none is a document an earlier reader still accepts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub envelope_reviewer: Option<String>,
 }
 
 impl Default for LaunchConfig {
@@ -169,6 +186,7 @@ impl Default for LaunchConfig {
             filters: Filters::default(),
             pr_author_graph: None,
             node_validator: None,
+            envelope_reviewer: None,
         }
     }
 }
@@ -211,9 +229,10 @@ impl LaunchConfig {
         // drafting graph and had it dropped would find that out from a change
         // request nobody drafted a body for, and one who wrote a validator would
         // find it out from a node nothing checked.
-        let carried: [(&str, Option<&String>); 2] = [
+        let carried: [(&str, Option<&String>); 3] = [
             ("pr_author_graph", config.pr_author_graph.as_ref()),
             ("node_validator", config.node_validator.as_ref()),
+            ("envelope_reviewer", config.envelope_reviewer.as_ref()),
         ];
         for (key, value) in carried {
             let Some((arrived, blank)) = KEYS_BY_VERSION
@@ -764,11 +783,12 @@ mod tests {
     /// without anyone deciding to move it. The earlier ones stay checked in for
     /// the half a single golden cannot pin — that a config written before the
     /// current version is still a document this build reads.
-    const GOLDEN: &str = include_str!("../tests/golden/launch-config-v3.json");
+    const GOLDEN: &str = include_str!("../tests/golden/launch-config-v4.json");
 
     /// The same document as each earlier version wrote it: the block it had, and
     /// no key that version never had, newest first.
-    const GOLDEN_EARLIER: [(u32, &str); 2] = [
+    const GOLDEN_EARLIER: [(u32, &str); 3] = [
+        (3, include_str!("../tests/golden/launch-config-v3.json")),
         (2, include_str!("../tests/golden/launch-config-v2.json")),
         (1, include_str!("../tests/golden/launch-config-v1.json")),
     ];
@@ -817,6 +837,7 @@ mod tests {
             filters: pinned_filters(),
             pr_author_graph: Some("./graphs/pr-author.yaml".to_string()),
             node_validator: Some("./scripts/check-node.sh".to_string()),
+            envelope_reviewer: Some("./scripts/review-envelope.sh".to_string()),
         }
     }
 
@@ -857,9 +878,11 @@ mod tests {
                     schema_version: version,
                     filters: pinned_filters(),
                     // Version 2 is the one that declared the drafting graph, and
-                    // it names one; version 1 never had the key at all.
+                    // it names one; version 1 never had the key at all. Version 3
+                    // declared the node validator the same way.
                     pr_author_graph: (version >= 2).then(|| "./graphs/pr-author.yaml".to_string()),
-                    node_validator: None,
+                    node_validator: (version >= 3).then(|| "./scripts/check-node.sh".to_string()),
+                    envelope_reviewer: None,
                 }
             );
             assert!(
@@ -884,13 +907,14 @@ mod tests {
         let named = LaunchConfig {
             pr_author_graph: Some("./graphs/pr-author.yaml".to_string()),
             node_validator: Some("./scripts/check-node.sh".to_string()),
+            envelope_reviewer: Some("./scripts/review-envelope.sh".to_string()),
             ..LaunchConfig::default()
         };
         let rendered = serde_json::to_string(&named).expect("it serialises");
         assert_eq!(
             rendered,
             format!(
-                r#"{{"schema_version":{LAUNCH_CONFIG_SCHEMA_VERSION},"pr_author_graph":"./graphs/pr-author.yaml","node_validator":"./scripts/check-node.sh"}}"#
+                r#"{{"schema_version":{LAUNCH_CONFIG_SCHEMA_VERSION},"pr_author_graph":"./graphs/pr-author.yaml","node_validator":"./scripts/check-node.sh","envelope_reviewer":"./scripts/review-envelope.sh"}}"#
             )
         );
         assert_eq!(
@@ -900,7 +924,7 @@ mod tests {
 
         let unnamed = LaunchConfig::default();
         let rendered = serde_json::to_string(&unnamed).expect("it serialises");
-        for key in ["pr_author_graph", "node_validator"] {
+        for key in ["pr_author_graph", "node_validator", "envelope_reviewer"] {
             assert!(
                 !rendered.contains(key),
                 "a launch that named no {key} was written one: {rendered}"
@@ -944,6 +968,7 @@ mod tests {
             assert!(minimal.filters.is_empty());
             assert_eq!(minimal.pr_author_graph, None);
             assert_eq!(minimal.node_validator, None);
+            assert_eq!(minimal.envelope_reviewer, None);
         }
     }
 
@@ -1026,6 +1051,7 @@ mod tests {
                 // The rest of the document is untouched by any of this.
                 assert!(read.filters.vcs.is_some(), "the block was dropped");
                 assert_eq!(read.node_validator, None);
+                assert_eq!(read.envelope_reviewer, None);
             }
         }
         std::fs::remove_dir_all(&root).ok();
@@ -1068,6 +1094,7 @@ mod tests {
         for (key, arrived, value) in [
             ("pr_author_graph", 2, "./graphs/pr-author.yaml"),
             ("node_validator", 3, "./scripts/check-node.sh"),
+            ("envelope_reviewer", 4, "./scripts/review-envelope.sh"),
         ] {
             let early = LaunchConfig::load(&written(
                 &format!("early-{key}.yaml"),
@@ -1086,23 +1113,27 @@ mod tests {
             .expect("the version that declares the key reads it");
             let named = match key {
                 "pr_author_graph" => read.pr_author_graph.as_deref(),
-                _ => read.node_validator.as_deref(),
+                "node_validator" => read.node_validator.as_deref(),
+                _ => read.envelope_reviewer.as_deref(),
             };
             assert_eq!(named, Some(value));
         }
 
-        // The key that arrives with this version, present and blank: a decision
-        // half-written rather than a launch that declared nothing.
-        let blank = LaunchConfig::load(&written(
-            "blank-node-validator.yaml",
-            &format!("schema_version: {LAUNCH_CONFIG_SCHEMA_VERSION}\nnode_validator: \"   \"\n"),
-        ))
-        .expect_err("a validator that names nothing is refused");
-        let said = blank.to_string();
-        assert!(
-            said.contains("`node_validator`") && said.contains("names nothing"),
-            "{said}"
-        );
+        // A hook key present and blank: a decision half-written rather than a
+        // launch that declared nothing. Both of them, because each is refused
+        // from the version it arrived at rather than only the newest one.
+        for key in ["node_validator", "envelope_reviewer"] {
+            let blank = LaunchConfig::load(&written(
+                &format!("blank-{key}.yaml"),
+                &format!("schema_version: {LAUNCH_CONFIG_SCHEMA_VERSION}\n{key}: \"   \"\n"),
+            ))
+            .expect_err("a hook that names nothing is refused");
+            let said = blank.to_string();
+            assert!(
+                said.contains(&format!("`{key}`")) && said.contains("names nothing"),
+                "{said}"
+            );
+        }
 
         let stray = LaunchConfig::load(&written(
             "stray.yaml",

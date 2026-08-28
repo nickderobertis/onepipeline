@@ -1,0 +1,35 @@
+{
+  "schema_version": 4,
+  "filters": {
+    "agentgraph": {
+      "exclude": [
+        {
+          "kind": "turn-activity"
+        }
+      ]
+    },
+    "vcs": {
+      "include": [
+        {
+          "kind": "gate-*"
+        },
+        {
+          "kind": "session-closed"
+        }
+      ]
+    },
+    "profiles": {
+      "monitor": {},
+      "planner": {
+        "include": [
+          {
+            "source": "pipeline"
+          }
+        ]
+      }
+    }
+  },
+  "pr_author_graph": "./graphs/pr-author.yaml",
+  "node_validator": "./scripts/check-node.sh",
+  "envelope_reviewer": "./scripts/review-envelope.sh"
+}

@@ -1852,3 +1852,141 @@ custom metadata, raise `CHECKED_MINIMUM` to it and turn the justfile's revision
 pin into a version.** Until then the floor is the honest one — the version the
 binary this build is checked against reports — rather than a number invented for a
 release nobody has published.
+
+## 45. A reply envelope is checked one command at a time, so nothing reviews the edit — OPEN
+
+**Proposal (for the planner who owns the contract): add a second, launch-level
+hook — an **envelope reviewer**, named by `--envelope-reviewer`,
+`ONEPIPELINE_ENVELOPE_REVIEWER`, and an `envelope_reviewer` key at launch-config
+schema 4 — invoked once per accepted reply envelope, after every command in it
+has passed this crate's own validation and the per-node validator of entry 41,
+and before any of its operations is committed.**
+
+Entry 41's validator closed the hole it was written for and cannot close this
+one. It is invoked **per command**, inside the compile step, and is handed one
+node serialized on its own: no goal, no siblings, no dependency edges, and no
+plan. So a reply carrying several related ops is seen as several unrelated
+nodes, and nothing checks two added nodes that duplicate each other, a contract
+seam *between* two nodes of one edit, the dependency edges the edit introduces,
+or whether the edited graph still delivers the run's goal. Those are the checks
+a plan-quality reviewer makes over a whole plan, and no per-command prompt can
+carry them.
+
+Measured: a manager under quota pressure took over a failed planner's work and
+wrote a node's acceptance criteria directly, with no research into the
+repository the node targeted. The criterion it wrote — that no dependency
+requirement in any manifest may change and the diff must touch the lockfile
+alone — contradicted a rule that repository states in its own test suite beside
+the assertion enforcing it. The dispatch correctly refused to weaken the check,
+stalled, and reported the conflict, costing a dispatch and a relaunch. A
+deterministic check cannot see that class of failure — the criterion is
+well-formed, and only the target repository knows it is wrong — and a per-node
+prompt cannot see the half of it that lives between nodes.
+
+One document crosses the reviewer's stdin: the run's **goal**, every node the
+envelope introduces or changes as a `changes` list carrying the **op** that
+produced each, and the **plan** they are being edited into, as the envelope
+leaves it — so the reviewer sees the graph the run would converge on rather than
+one it has to assemble, and which nodes are the edit rather than its context is
+the list rather than a diff it works out. The goal is hoisted out of the plan it
+is also part of, because it is what the whole envelope is judged against. The
+ops that put a node in `changes` are the four entry 41's validator is offered —
+`add`, `retry`, `amend`, a `requeue` carrying an amendment — plus `reparent`,
+which changes the edges a whole-plan review is about; a `requeue` is here on any
+amendment rather than on one touching `task`, because a changed turn budget is
+part of the node the reviewer reads. `drop`, `cancel`, `context`, `attest`,
+`complete`, and `finding` add no node to the list, and the plan is where a
+review sees what they did.
+
+Exit 0 accepts the envelope. A non-zero exit refuses it **whole** — no command
+of it half-applies — carrying the reviewer's own stderr, bounded and
+control-stripped exactly as entry 41's refusals are, and naming every op and
+node it was reviewing, because an envelope is no longer one command and a reason
+nobody can locate is a reason nobody can act on. *Which* node the reviewer
+objected to is the reviewer's own sentence to write, since only it knows;
+naming what it was given is this crate's half of that. Its stdout goes nowhere,
+because this runs inside `reply`, whose own stdout is a parsed verdict. It
+**fails closed**: a reviewer that cannot be started refuses the envelope, for the
+reason entry 41's validator does. A launch that configures none behaves exactly
+as it did before this hook.
+
+**An accepted envelope is offered once**, which is the one property that does not
+follow entry 41 — that validator is offered an accepted edit twice, at the
+submission check and again by the reconciler. Three reasons, pointing the same
+way. Asking twice is free for a read-only script; this hook exists for a review
+no deterministic check can make, so the host answering it is plausibly an agent,
+and a second offer is a second bill for one question. The submission check is
+also the only place a refusal can still be **whole**: the reconciler applies an
+envelope's commands one at a time and stops at the first refusal, so a reviewer
+consulted there would be answering about edits already committed. And it is the
+one door — every envelope carrying commands reaches the durable queue through
+that check — so once there is once per envelope rather than once per path. The
+code records this reasoning where it makes the choice.
+
+It is nameable three ways, in the order entry 41 states and for the same reason:
+the flag, then the environment variable, then the launch config field, then the
+shipped default of no reviewer at all. It is resolved **once**, at the launch,
+and retained in the launch record beside the validator — so a `reply` typed in
+another shell, and a driver a fresh `adopt` starts, use the reviewer the run was
+launched under.
+
+`envelope_reviewer` is a launch-config key versions 1 to 3 never had, so the
+version this build writes moves to **4**, the versions it reads keep 3, 2, and 1,
+and a document declaring an earlier one while carrying the key is refused **by
+that field's name** — exactly as a version-2 document carrying `node_validator`
+is. A key present and blank is refused by name too, as `node_validator` is: it
+arrives with this version, so no config on disk carries one. The hook arrives
+with a **minor** version bump, cut by `release-plz` from the `feat` commit that
+introduces it, exactly as entry 41's did.
+
+**What this crate does today is the block below, and the block is the source.**
+`tests/contract.rs` parses it out of this file and holds it against the types:
+the flag must be one `start` takes, the config key must parse at the version
+stated, and the document must be built out of this crate's own published shapes —
+each `changes[].node` a plan `Node` and `plan` a `Plan`, both round-tripping as
+written. `tests/e2e/envelope_reviewer.rs` reads the three spellings out of the
+same block and drives them against a real reviewer program, so what a reply
+actually hands a host is proven rather than asserted in prose.
+
+```json
+{
+  "reviewer": {
+    "flag": "--envelope-reviewer",
+    "environment": "ONEPIPELINE_ENVELOPE_REVIEWER",
+    "config_key": "envelope_reviewer",
+    "config_schema_version": 4,
+    "precedence": ["flag", "environment", "config_key"],
+    "offers_per_accepted_envelope": 1,
+    "ops_listed_as_changes": ["add", "amend", "reparent", "requeue", "retry"],
+    "document": {
+      "goal": "close the coverage gap",
+      "changes": [
+        {
+          "op": "add",
+          "node": {
+            "id": "cover",
+            "persona": "engineer",
+            "task": "## What\nadd the missing tests",
+            "deps": ["build"]
+          }
+        }
+      ],
+      "plan": {
+        "schema_version": 3,
+        "goal": {"text": "close the coverage gap"},
+        "name": "coverage",
+        "concurrency": 4,
+        "tasks": [
+          {"id": "build", "persona": "engineer", "task": "## What\nbuild it"},
+          {
+            "id": "cover",
+            "persona": "engineer",
+            "task": "## What\nadd the missing tests",
+            "deps": ["build"]
+          }
+        ]
+      }
+    }
+  }
+}
+```

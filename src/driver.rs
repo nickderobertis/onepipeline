@@ -422,6 +422,21 @@ fn start(args: &StartArgs) -> Result<i32> {
     let node_validator: Option<String> = named
         .map(|command| command.trim().to_string())
         .filter(|command| !command.is_empty());
+
+    // The envelope reviewer, resolved by the same three rungs and for the same
+    // reasons, so a launch names both hooks the one way. It is a second hook
+    // rather than a mode of the first: the validator judges one node on its own,
+    // and this one judges a whole envelope against the plan and the goal.
+    let asked = match args.envelope_reviewer.clone() {
+        flag @ Some(_) => flag,
+        None => match engine::configured_envelope_reviewer()? {
+            variable @ Some(_) => variable,
+            None => declared.envelope_reviewer.clone(),
+        },
+    };
+    let envelope_reviewer: Option<String> = asked
+        .map(|command| command.trim().to_string())
+        .filter(|command| !command.is_empty());
     // llmlint: ignore-end[invalid_states_unrepresentable]
     let node_graph_ref = resolve_graph(&engine::configured_node_graph(), &launch_dir)?;
     resolve_plan_graphs(&mut plan, &launch_dir)?;
@@ -495,6 +510,7 @@ fn start(args: &StartArgs) -> Result<i32> {
         node_graph: node_graph_ref,
         pr_author_graph: pr_author_graph_ref.unwrap_or_default(),
         node_validator: node_validator.unwrap_or_default(),
+        envelope_reviewer: envelope_reviewer.unwrap_or_default(),
         launcher: sys::launcher(),
         session: sys::launching_session(),
         // Claimed by this process immediately below, through the one writer of
@@ -1956,6 +1972,19 @@ fn submit(paths: &RunPaths, envelope: &Reply) -> Result<i32> {
         edits::compile(&mut projected, &frontier, command)?;
     }
 
+    // And, once every command in it has passed both, the envelope as a whole —
+    // offered to the reviewer this run was launched with, before anything of it
+    // is queued or committed, so a refusal turns the whole envelope away rather
+    // than half of it. The graph it is handed is the one the envelope leaves
+    // behind, which is what a review of the *edit* rather than of one node is
+    // about, and the plan it came from is where the run's goal is stated.
+    edits::offer_envelope_to_reviewer(
+        view.launch.envelope_reviewer(),
+        &envelope.commands,
+        &projected,
+        view.state.plan.as_ref(),
+    )?;
+
     // Whether a reconciler is running is asked by *taking the run's lock*, which
     // is the same question and the only answer that cannot be raced: with a
     // driver alive the lock is held and the command goes to its durable queue,
@@ -2435,6 +2464,7 @@ mod tests {
             node_graph: "graphs/node-scope.yaml".into(),
             pr_author_graph: String::new(),
             node_validator: String::new(),
+            envelope_reviewer: String::new(),
             launcher: "e2e".into(),
             session: "session-a".into(),
             pid,

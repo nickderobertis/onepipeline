@@ -134,6 +134,21 @@ pub struct StartArgs {
     /// to the rung below.
     #[arg(long, value_name = "COMMAND")]
     pub node_validator: Option<String>,
+    /// The command every reply envelope carrying edits is offered to whole,
+    /// after every one of its commands has passed this crate's own validation
+    /// and the node validator above.
+    ///
+    /// One document crosses its stdin: every node the envelope introduces or
+    /// changes with the op that produced each, the plan they are being edited
+    /// into, and the run's goal. Exit 0 accepts the envelope and a non-zero exit
+    /// refuses it whole, with the command's own stderr as the reason. Naming
+    /// none is the shipped default and is exactly what a launch did before this
+    /// flag existed. Given here it beats `ONEPIPELINE_ENVELOPE_REVIEWER` and the
+    /// launch config's own field — including when what it names is blank, which
+    /// is this launch saying it has none rather than a fall-through to the rung
+    /// below.
+    #[arg(long, value_name = "COMMAND")]
+    pub envelope_reviewer: Option<String>,
     /// How often the durable planner-update pacemaker comes due, in seconds.
     #[arg(long, value_name = "SECONDS", default_value_t = DEFAULT_HEARTBEAT_INTERVAL_SECONDS)]
     pub heartbeat_interval: u64,

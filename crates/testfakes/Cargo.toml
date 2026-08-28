@@ -106,6 +106,14 @@ path = "src/bin/fake-onetaskgraph.rs"
 name = "node-validator"
 path = "src/bin/node-validator.rs"
 
+# The second hook, and a real program for the same reason: `--envelope-reviewer`
+# names a command the host owns, and what it reads is a whole reply envelope —
+# every node the envelope changes, the plan they are being edited into, and the
+# run's goal. A stub inside the crate under test would prove none of that seam.
+[[bin]]
+name = "envelope-reviewer"
+path = "src/bin/envelope-reviewer.rs"
+
 [lib]
 name = "onepipeline_testfakes"
 path = "src/lib.rs"

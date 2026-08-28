@@ -41,6 +41,10 @@ Rules:
   pauses only the subtree depending on it.
 - `edits.rs` is the one validator both the submission check and the reconciler
   run, which is what makes "applied or rejected with a reason" true.
+  It also holds the two host hooks. The per-node validator fires inside
+  `compile`, so an accepted edit is offered twice — once at submission and once
+  at reconcile — and the envelope reviewer fires once, at the submission check
+  only, which is the one place a refusal can still turn a whole envelope away.
 - `projection.rs` folds the journal into the plan of record. The run's
   `plan.json` is its launch record and is never rewritten, and the store the
   plan was read from is never re-read to decide what the run is doing.
