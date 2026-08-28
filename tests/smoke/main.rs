@@ -7,7 +7,10 @@
 //! launch record naming a pid, and dispatched nothing. The publication path had
 //! the same gap and the same defect — this crate read `onevcs publish`'s stdout
 //! as JSON, which that command has never printed. **This is the tier that proves
-//! the composition against the world**, and there is exactly one journey in it.
+//! the composition against the world**: one lifecycle journey, here, and one
+//! journey in `release_probe.rs` asking the public registries what they serve for
+//! the artifacts this repository publishes — the other thing no offline fixture
+//! can stand in for.
 //!
 //! It is not run by `just test` or `just gate`: it lives in its own test binary,
 //! which those exclude, so an ordinary gate on a laptop pays nothing for it and
@@ -34,6 +37,8 @@
 
 #[path = "../e2e/harness.rs"]
 mod harness;
+
+mod release_probe;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
