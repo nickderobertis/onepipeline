@@ -1401,8 +1401,6 @@ pub fn apply(graph: &mut Graph, operation: &Operation) {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
-
     use super::*;
     use crate::plan::{NodeKind, Plan, Resume, PLAN_SCHEMA_VERSION};
 
@@ -2558,7 +2556,10 @@ mod tests {
             &std::fs::read_to_string(&seen).expect("the reviewer was handed a document"),
         )
         .expect("it is JSON");
-        assert_eq!(document["goal"], json!("ship the coverage floor"));
+        assert_eq!(
+            document["goal"],
+            serde_json::json!("ship the coverage floor")
+        );
         assert_eq!(
             document["changes"]
                 .as_array()
@@ -2577,14 +2578,17 @@ mod tests {
         );
         // The whole node, not a summary of it: the prose is what a plan-quality
         // review reads.
-        assert_eq!(document["changes"][0]["node"]["deps"], json!(["build"]));
+        assert_eq!(
+            document["changes"][0]["node"]["deps"],
+            serde_json::json!(["build"])
+        );
         assert_eq!(
             document["changes"][1]["node"]["amendment"],
-            json!("the ruling")
+            serde_json::json!("the ruling")
         );
         // And the plan as this envelope leaves it, carrying the launch's own
         // fields, so the reviewer sees the graph the run would converge on.
-        assert_eq!(document["plan"]["name"], json!("cover"));
+        assert_eq!(document["plan"]["name"], serde_json::json!("cover"));
         assert_eq!(
             document["plan"]["tasks"]
                 .as_array()
