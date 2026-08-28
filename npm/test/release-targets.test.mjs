@@ -86,7 +86,6 @@ function unpublishable(manifest) {
   return /^publish\s*=\s*false\s*$/m.test(section.split(/^\[/m)[0]);
 }
 
-/** The workspace members, from the one place `--workspace` takes them. */
 function workspaceMembers(cargo) {
   const line = cargo.match(/^members = (\[.*\])$/m);
   assert.ok(line, "no single-line `members = [...]` in the workspace manifest");
@@ -378,7 +377,6 @@ function said(run) {
   return `exit ${run.status}\n--- stdout ---\n${run.stdout}\n--- stderr ---\n${run.stderr}`;
 }
 
-/** A registry serving one released version of every target this repository has. */
 function releasedAt(version) {
   return registry({
     "/on/ep/onepipeline": always(

@@ -55,7 +55,6 @@ fn declared_targets() -> Vec<String> {
     declared
 }
 
-/// Everything the run said, so a failure names the whole answer.
 fn said(run: &Output) -> String {
     format!(
         "exit {:?}\n--- stdout ---\n{}\n--- stderr ---\n{}",

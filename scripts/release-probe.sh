@@ -281,8 +281,6 @@ END {
 # out as an exit status, which a consumer reads as *not answered*.
 body=""
 
-# Ask one registry for one document.
-#
 # Returns 0 with the document in `$body` for a 200, and 1 for a 404 — which is every
 # registry's way of saying it serves no such artifact, and the one status that is
 # an *answer* rather than a failure to get one. A refused, unreachable, or
@@ -358,7 +356,6 @@ version_shaped() {
   [[ "$1" =~ $shape ]]
 }
 
-# Order two `X.Y.Z` versions: 0 when the first is at least the second.
 at_least() {
   local -a left right
   local i
