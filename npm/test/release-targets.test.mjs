@@ -277,7 +277,6 @@ function indexRecord(name, version, yanked) {
   })}\n`;
 }
 
-/** Where one of the programs the probe reaches for lives on this host. */
 function hostTool(tool) {
   const resolved = spawnSync("sh", ["-c", `command -v ${tool}`], {
     encoding: "utf8",
@@ -376,7 +375,6 @@ function probe(identifier, { env = contractEnv(), args } = {}) {
   });
 }
 
-/** Everything a run said, so a failed assertion names the whole answer. */
 function said(run) {
   return `exit ${run.status}\n--- stdout ---\n${run.stdout}\n--- stderr ---\n${run.stderr}`;
 }
