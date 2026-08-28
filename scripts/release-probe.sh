@@ -227,6 +227,10 @@ function walk(s, k1, k2, k3,   i, n, c, key, vstart) {
 # release or a prerelease — and a refusal tag for a record this cannot read. The
 # tag comes first and holds no spaces, so `read -r tag rest` splits it.
 crates_records='
+# A blank line is not a record: the index ends with a newline, and a reader that
+# took the emptiness after it for an unreadable record would refuse every crate
+# on the registry.
+/^[[:space:]]*$/ { next }
 {
   walk($0, "name", "vers", "yanked")
   if (BAD) { print "not-json"; next }
@@ -271,30 +275,15 @@ END {
 '
 # llmlint: ignore-end[boundary_inputs_validated]
 
-if ! scratch="$(mktemp -d)"; then
-  refuse "cannot create the temporary directory a registry's answer is read in" \
-    "check that this host's temporary directory exists and is writable" 3
-fi
-# Cleanup that cannot unmake an answer. A failing `rm` in an EXIT trap would
-# otherwise carry its own status out of the script — turning a version already on
-# stdout into a non-zero exit, which a consumer reads as *not answered* and holds
-# on forever. So the status this exits with is the one it arrived with, and a
-# directory left behind is said rather than silently kept.
-cleanup() {
-  local status=$?
-  if ! rm -rf "$scratch" 2>/dev/null; then
-    echo "release-probe: could not remove the temporary directory $scratch" >&2
-    echo "ACTION: remove it by hand; the answer above stands, and this changed neither it nor this exit status" >&2
-  fi
-  exit "$status"
-}
-trap cleanup EXIT
-body="$scratch/body"
-curl_errors="$scratch/curl"
+# What the last registry read answered. A shell variable rather than a file, so
+# this needs no temporary directory to create, no trap to clear one up, and no
+# `mktemp` or `rm` on the host — and no cleanup that could carry its own failure
+# out as an exit status, which a consumer reads as *not answered*.
+body=""
 
 # Ask one registry for one document.
 #
-# Returns 0 with the body in `$body` for a 200, and 1 for a 404 — which is every
+# Returns 0 with the document in `$body` for a 200, and 1 for a 404 — which is every
 # registry's way of saying it serves no such artifact, and the one status that is
 # an *answer* rather than a failure to get one. A refused, unreachable, or
 # unexpected registry exits 3 from here: it is not answered, and there is no
@@ -304,7 +293,7 @@ curl_errors="$scratch/curl"
 # release happened, so a hiccup is retried; a status that will not change on a
 # retry is not.
 fetch() {
-  local url="$1" what="$2" attempt code detail
+  local url="$1" what="$2" attempt code detail answered
   detail=""
   attempt=1
   # A counted loop rather than `seq`: the host hands this a `PATH` and nothing
@@ -312,7 +301,14 @@ fetch() {
   # it for a release to be observed at all.
   while [ "$attempt" -le "$attempts" ]; do
     code=""
-    if code="$(curl -sS -o "$body" -w '%{http_code}' --max-time "$timeout" "$url" 2>"$curl_errors")"; then
+    # The status code comes back on the end of the document, as its own last
+    # line: a body of any shape can precede it, and the split below takes the
+    # code off the end rather than looking for it inside. curl's own diagnostic
+    # is joined to the same capture, so a failed attempt a later one recovers
+    # from stays out of this run's stderr.
+    if answered="$(curl -sS -w '\n%{http_code}' --max-time "$timeout" "$url" 2>&1)"; then
+      code="${answered##*$'\n'}"
+      body="${answered%$'\n'*}"
       case "$code" in
         200) return 0 ;;
         404) return 1 ;;
@@ -323,8 +319,7 @@ fetch() {
           ;;
       esac
     else
-      detail="$(<"$curl_errors")"
-      detail="${detail//$'\n'/ }"
+      detail="${answered//$'\n'/ }"
     fi
     if [ "$attempt" -ne "$attempts" ]; then
       # A backoff that did not happen is a retry that never waited, so a host
@@ -406,7 +401,7 @@ ask_crates() {
   if ! fetch "$CRATES_INDEX/$(crates_path "$name")" "the crates.io index"; then
     return 0
   fi
-  if ! parsed="$(awk -v want="$name" "$json_walker$crates_records" "$body")"; then
+  if ! parsed="$(printf '%s\n' "$body" | awk -v want="$name" "$json_walker$crates_records")"; then
     refuse "the reader of the crates.io index for '$name' did not run" \
       "check that an 'awk' this host can run is on PATH; this is not answered, and says nothing about whether a release happened" 3
   fi
@@ -439,7 +434,7 @@ ask_crates() {
 }
 
 member_of() {
-  awk -v key1="$1" -v key2="$2" "$json_walker$json_member" "$body"
+  printf '%s\n' "$body" | awk -v key1="$1" -v key2="$2" "$json_walker$json_member"
 }
 
 # What the reader made of one registry's answer, refusing when it did not run at

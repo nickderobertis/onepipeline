@@ -303,7 +303,7 @@ const scratchPaths = [];
 function fixturePath(base, { without } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "release-probe-path-"));
   scratchPaths.push(dir);
-  for (const tool of ["bash", "env", "mktemp", "sleep", "rm", "awk"]) {
+  for (const tool of ["bash", "sleep", "awk"]) {
     if (tool === without) continue;
     symlinkSync(hostTool(tool), join(dir, tool));
   }
@@ -782,20 +782,6 @@ describe("the release probe", () => {
     }
   });
 
-  it("does not answer when the host gives it nowhere to read the answer", async () => {
-    const server = await serving(releasedAt("0.16.3"));
-    const run = await probe("crate:onepipeline", {
-      env: contractEnv(fixturePath(server.base, { without: "mktemp" })),
-    });
-    assert.notEqual(
-      run.status,
-      0,
-      `a host with no temporary directory was answered:\n${said(run)}`,
-    );
-    assert.equal(run.stdout, "", said(run));
-    assert.match(run.stderr, /ACTION: /, said(run));
-  });
-
   it("does not answer when the reader of a registry's document cannot run", async () => {
     const server = await serving(releasedAt("0.16.3"));
     const env = contractEnv(fixturePath(server.base, { without: "awk" }));
@@ -833,19 +819,6 @@ describe("the release probe", () => {
       1,
       "a host that cannot pause asked the registry again anyway, which is a retry that never waited",
     );
-  });
-
-  it("does not unmake an answer it gave when it cannot clear up after itself", async () => {
-    // Cleanup runs after the version is already on stdout, so a failure there
-    // must not become the exit status: non-zero is *not answered*, which holds a
-    // consumer forever over a directory nobody removed.
-    const server = await serving(releasedAt("7.8.9"));
-    const run = await probe("npm:onepipeline-cli", {
-      env: contractEnv(fixturePath(server.base, { without: "rm" })),
-    });
-    assert.equal(run.status, 0, `a failed cleanup took the answer with it:\n${said(run)}`);
-    assert.equal(run.stdout, "7.8.9\n", said(run));
-    assert.match(run.stderr, /could not remove the temporary directory[\s\S]*ACTION: /, said(run));
   });
 
   it("answers nothing when every release a registry files is one nothing resolves to", async () => {
