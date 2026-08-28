@@ -562,6 +562,31 @@ struct Standing {
     work: WorkStanding,
 }
 
+/// One or more nodes an operator has to act on before a driver can move the run.
+///
+/// The invariant is the advice itself: a standing that says work is held names
+/// the work it means, and a list that could be empty would put a prescription
+/// naming nothing on an operator's screen.
+struct HeldNodes(Vec<String>);
+
+impl HeldNodes {
+    /// The nodes, or `None` where there are none — and so no standing to report.
+    fn of(nodes: Vec<String>) -> Option<Self> {
+        (!nodes.is_empty()).then_some(Self(nodes))
+    }
+
+    /// The nodes as an advice line names them.
+    fn named(&self) -> String {
+        self.0.join(", ")
+    }
+}
+
+// llmlint: ignore[invalid_states_unrepresentable] these are **prescriptions**, one per run,
+// and a run holding both parked and judge-rejected work has one thing to do first: requeue
+// what a requeue moves. Neither fact is lost by that ranking — `Standing::of` derives both
+// lists from the same statuses on every read — and what the type refuses to represent is a
+// view handing an operator two answers to one run, which is the contradiction this whole
+// reading exists to end.
 /// Mutually exclusive readings of the graph behind a run's word and advice.
 enum WorkStanding {
     /// Every node completed successfully.
@@ -574,11 +599,11 @@ enum WorkStanding {
     Outstanding,
     /// These nodes must be returned to the frontier before a driver can move
     /// the run again.
-    Parked(Vec<String>),
+    Parked(HeldNodes),
     /// A judge rejected these nodes' work, so nothing dispatches them as they
     /// stand and everything behind them is waiting on a decision a driver
     /// cannot make.
-    Rejected(Vec<String>),
+    Rejected(HeldNodes),
 }
 
 /// The nodes of a converged run whose work a judge rejected.
@@ -635,9 +660,9 @@ impl Standing {
         };
         let work = if converged && graph::state_of(&statuses) == graph::GraphState::Complete {
             WorkStanding::Complete
-        } else if !parked.is_empty() {
+        } else if let Some(parked) = HeldNodes::of(parked) {
             WorkStanding::Parked(parked)
-        } else if !rejected.is_empty() {
+        } else if let Some(rejected) = HeldNodes::of(rejected) {
             WorkStanding::Rejected(rejected)
         } else if !converged
             || statuses
@@ -686,10 +711,10 @@ enum Intervention<'a> {
     /// A fresh driver, and nothing else: work is waiting on the frontier for it.
     Adopt,
     /// The parked work returned to the frontier, and *then* a driver.
-    RequeueThenAdopt(&'a [String]),
+    RequeueThenAdopt(&'a HeldNodes),
     /// The judge's verdict read, and the node it rejected superseded. A driver
     /// is not the first step here and on its own is not a step at all.
-    ReviewThenSupersede(&'a [String]),
+    ReviewThenSupersede(&'a HeldNodes),
 }
 
 /// The prescription for a run nothing is driving whose unfinished work is
@@ -699,35 +724,31 @@ enum Intervention<'a> {
 /// pass until a `requeue`, so a driver adopted first derives an empty frontier
 /// and returns at exit 0 having dispatched nothing — which is what an advice
 /// line naming only `adopt` cost the operator who followed it, twice.
-fn requeue_then_adopt(run: &str, parked: &[String]) -> String {
+fn requeue_then_adopt(run: &str, parked: &HeldNodes) -> String {
     format!(
         "its unfinished work is parked, and no driver dispatches a parked node: return {} \
          to the frontier with a `requeue` on: onepipeline reply {run} — and only then \
          attach a fresh driver with: onepipeline adopt {run}",
-        parked.join(", ")
+        parked.named()
     )
 }
 
 /// The prescription for a run nothing is driving whose unfinished work is held
 /// up by nodes a judge rejected, phrased once for both views that give it.
 ///
-/// **The judgement is the content.** A judge's rejection is deliberately outside
-/// the publication attempt budget — re-dispatching one blind repeats the same
-/// work against the same bar — so nothing dispatches a rejected node as it
-/// stands, and a driver attached to this run derives a frontier it cannot move
-/// and settles again saying nothing new. That is what the `adopt` this replaces
-/// cost the operator who followed it, twice, on a run whose every unfinished
-/// node had been rejected: they learned neither that a judgement had happened
-/// nor that no driver could answer it. So the line names the nodes and the
-/// verdict to read, and the step after it is the planner's own — an `amend` to
-/// the task the judge scored, and a `retry` superseding the node.
-fn review_then_supersede(run: &str, rejected: &[String]) -> String {
+/// **The judgement is the content.** A rejection is deliberately outside the
+/// publication attempt budget — asking again repeats the same work against the
+/// same bar — so nothing dispatches the node as it stands, and a driver attached
+/// here settles having moved nothing, which is what the `adopt` this replaces
+/// cost an operator twice. What moves the run is the verdict, and then the
+/// planner's own `amend` and `retry`.
+fn review_then_supersede(run: &str, rejected: &HeldNodes) -> String {
     format!(
         "its unfinished work is held up by {}, whose work a judge rejected, and no driver \
          dispatches a rejected node as it stands: read the verdict with: onepipeline \
          results {run} — and decide from it, most likely amending the task and superseding \
          the node with an `amend` and a `retry` on: onepipeline reply {run}",
-        rejected.join(", ")
+        rejected.named()
     )
 }
 
@@ -3308,8 +3329,6 @@ mod tests {
             {"criterion": "the change builds", "kind": "boolean",
              "verdict": {"value": false, "reason": "cargo build fails"}},
         ]);
-        // The shape the incident had: the node a judge rejected, and behind it
-        // work that will never run while it stands.
         let held_up = Plan {
             tasks: vec![
                 Node {
@@ -3343,8 +3362,6 @@ mod tests {
                 skipped: Vec::new(),
             })
         };
-        // The judged run: the node is named, the judgement is said, and the step
-        // named is reading the verdict rather than attaching a driver.
         let judged = status_of("judged");
         for rendered in [&listing, &judged] {
             assert!(
@@ -3364,8 +3381,6 @@ mod tests {
             !judged.contains("adopt"),
             "a driver is prescribed for a frontier it cannot move:\n{judged}"
         );
-        // The run that failed with no judgement against it keeps the reading it
-        // had: nothing about it says a judge scored anything.
         let broke = status_of("brokeoff");
         assert!(
             !broke.contains("a judge rejected"),
