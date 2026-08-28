@@ -2777,3 +2777,95 @@ fn a_run_with_work_a_fresh_driver_could_schedule_is_still_told_to_adopt() {
 
     world.release("build.go");
 }
+
+/// A run nothing is driving whose unfinished work is held up by a node a judge
+/// rejected is told that a judgement happened, and what answers it.
+///
+/// The incident: an operator asked `adopt` to take up a run whose every
+/// unfinished node had been rejected by its judge, and got `unattended` at exit
+/// 3 — twice, doing what the views told them, for nothing. A judge's rejection
+/// is deliberately outside the publication attempt budget, so nothing dispatches
+/// a rejected node as it stands: a fresh driver derives a frontier it cannot
+/// move and settles again. Neither of the two prescriptions the views had said
+/// that a judgement had occurred, which is the fact the run's own state carried
+/// all along. Both views are read here, because the prescription is one
+/// prescription and a reader who compares them must not find two.
+#[test]
+fn a_run_held_up_by_a_judges_rejection_is_told_to_read_the_verdict_and_supersede() {
+    let world = World::new("views-rejected-advice");
+    // The judge scored the node's own acceptance criteria and failed it, which
+    // is what settles the dispatch: `later` is behind it and never runs.
+    world.script(
+        "build.verdict",
+        "false|the change builds|cargo build fails in src/views.rs\n",
+    );
+    world.script("build.fail", "1");
+    let run = settled(
+        &world,
+        "judgedrun",
+        vec![agent("build", &[]), agent("later", &["build"])],
+    );
+
+    // One prescription, spelled once here and asserted of every view that gives
+    // advice: two views that agreed about the run and disagreed about the answer
+    // is the defect this is the fix for.
+    let prescription = format!(
+        "its unfinished work is held up by build, whose work a judge rejected, and no \
+         driver dispatches a rejected node as it stands: read the verdict with: onepipeline \
+         results {run} — and decide from it, most likely amending the task and superseding \
+         the node with an `amend` and a `retry` on: onepipeline reply {run}"
+    );
+
+    let listing = world.run(&["runs"]);
+    listing.exited(0).out_has(&run).out_has(&prescription);
+    let status = world.run(&["status", &run]);
+    status.exited(0).out_has(&prescription);
+
+    // Neither of the two prescriptions this run is not given. An `adopt` here is
+    // the useless action the operator took twice, and a `requeue` names an idle
+    // the planner never asked for.
+    for rendered in [&listing, &status] {
+        rendered.out_lacks("adopt");
+        rendered.out_lacks("requeue");
+    }
+
+    // The verdict the advice sends a reader to is really there to be read: an
+    // advice line naming a command that answers nothing is the same defect in a
+    // new place.
+    world
+        .run(&["results", &run])
+        .exited(0)
+        .out_has("verdict: 'the change builds' failed — cargo build fails in src/views.rs");
+}
+
+/// A judge's rejection is what a run held up by one is told about, even where
+/// its graph still reads as work a fresh driver could pick up.
+///
+/// This is the reading the operator met: a human action nobody has attested
+/// keeps the run outstanding, so the advice was `adopt`, and the driver they
+/// attached derived a frontier it could not move — the rejected node is not
+/// dispatched as it stands, and the action is waiting on a person rather than on
+/// a driver. Both of the prescriptions this replaces are asserted absent,
+/// because the defect was being given one of them instead of the judgement.
+#[test]
+fn a_judges_rejection_outranks_the_advice_to_attach_a_fresh_driver() {
+    let world = World::new("views-rejected-outranks");
+    world.script(
+        "build.verdict",
+        "false|the change builds|cargo build fails in src/views.rs\n",
+    );
+    world.script("build.fail", "1");
+    let run = settled(
+        &world,
+        "heldrun",
+        vec![agent("build", &[]), human("approve", &[])],
+    );
+
+    for rendered in [world.run(&["runs"]), world.run(&["status", &run])] {
+        rendered.exited(0);
+        rendered.out_has("build, whose work a judge rejected");
+        rendered.out_has(&format!("onepipeline results {run}"));
+        rendered.out_lacks("attach a fresh driver");
+        rendered.out_lacks("adopt it or stop it");
+    }
+}

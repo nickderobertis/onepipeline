@@ -575,6 +575,35 @@ enum WorkStanding {
     /// These nodes must be returned to the frontier before a driver can move
     /// the run again.
     Parked(Vec<String>),
+    /// A judge rejected these nodes' work, so nothing dispatches them as they
+    /// stand and everything behind them is waiting on a decision a driver
+    /// cannot make.
+    Rejected(Vec<String>),
+}
+
+/// The nodes of a converged run whose work a judge rejected.
+///
+/// **Two records, because either alone names the wrong nodes.** The outcome says
+/// the dispatch ended on the *task's* own verdict rather than on the machinery
+/// or on a publication, which is the settlement a judgement produces; the failed
+/// verdict is the judgement itself, and without one a node that simply failed
+/// its task would be reported as judged by a judge that never scored it. Both
+/// are read off records these views already hold — the run's folded outcomes and
+/// the verdicts `oneagentgraph` copies onto the settlement — so nothing is
+/// opened to answer the question.
+fn rejected_by_a_judge(view: &RunView, statuses: &BTreeMap<String, NodeStatus>) -> Vec<String> {
+    statuses
+        .iter()
+        .filter(|(_, status)| **status == NodeStatus::Failed)
+        .filter(|(id, _)| {
+            matches!(
+                view.state.outcomes.get(*id).map(String::as_str),
+                Some(crate::engine::TASK_FAILED | crate::engine::TASK_FAILED_CHANGE_OPEN)
+            )
+        })
+        .filter(|(id, _)| !crate::report::failed_verdicts(&view.events, id).is_empty())
+        .map(|(id, _)| id.clone())
+        .collect()
 }
 
 impl Standing {
@@ -595,10 +624,21 @@ impl Standing {
         } else {
             Vec::new()
         };
+        // Read for a converged run alone, and for the same reason the park above
+        // is: a run with a node still ready, running, or pending has work a fresh
+        // driver moves, whatever else a judge rejected, and `adopt` is the whole
+        // of what it needs. This reading is for the frontier that cannot move.
+        let rejected = if converged {
+            rejected_by_a_judge(view, &statuses)
+        } else {
+            Vec::new()
+        };
         let work = if converged && graph::state_of(&statuses) == graph::GraphState::Complete {
             WorkStanding::Complete
         } else if !parked.is_empty() {
             WorkStanding::Parked(parked)
+        } else if !rejected.is_empty() {
+            WorkStanding::Rejected(rejected)
         } else if !converged
             || statuses
                 .values()
@@ -635,6 +675,7 @@ impl Standing {
         match &self.work {
             WorkStanding::Outstanding => Some(Intervention::Adopt),
             WorkStanding::Parked(nodes) => Some(Intervention::RequeueThenAdopt(nodes)),
+            WorkStanding::Rejected(nodes) => Some(Intervention::ReviewThenSupersede(nodes)),
             WorkStanding::Complete | WorkStanding::Settled => None,
         }
     }
@@ -646,6 +687,9 @@ enum Intervention<'a> {
     Adopt,
     /// The parked work returned to the frontier, and *then* a driver.
     RequeueThenAdopt(&'a [String]),
+    /// The judge's verdict read, and the node it rejected superseded. A driver
+    /// is not the first step here and on its own is not a step at all.
+    ReviewThenSupersede(&'a [String]),
 }
 
 /// The prescription for a run nothing is driving whose unfinished work is
@@ -661,6 +705,29 @@ fn requeue_then_adopt(run: &str, parked: &[String]) -> String {
          to the frontier with a `requeue` on: onepipeline reply {run} — and only then \
          attach a fresh driver with: onepipeline adopt {run}",
         parked.join(", ")
+    )
+}
+
+/// The prescription for a run nothing is driving whose unfinished work is held
+/// up by nodes a judge rejected, phrased once for both views that give it.
+///
+/// **The judgement is the content.** A judge's rejection is deliberately outside
+/// the publication attempt budget — re-dispatching one blind repeats the same
+/// work against the same bar — so nothing dispatches a rejected node as it
+/// stands, and a driver attached to this run derives a frontier it cannot move
+/// and settles again saying nothing new. That is what the `adopt` this replaces
+/// cost the operator who followed it, twice, on a run whose every unfinished
+/// node had been rejected: they learned neither that a judgement had happened
+/// nor that no driver could answer it. So the line names the nodes and the
+/// verdict to read, and the step after it is the planner's own — an `amend` to
+/// the task the judge scored, and a `retry` superseding the node.
+fn review_then_supersede(run: &str, rejected: &[String]) -> String {
+    format!(
+        "its unfinished work is held up by {}, whose work a judge rejected, and no driver \
+         dispatches a rejected node as it stands: read the verdict with: onepipeline \
+         results {run} — and decide from it, most likely amending the task and superseding \
+         the node with an `amend` and a `retry` on: onepipeline reply {run}",
+        rejected.join(", ")
     )
 }
 
@@ -735,6 +802,11 @@ pub fn runs(root: &Path, mine_only: bool, session: &str) -> String {
                     standing.word(),
                     requeue_then_adopt(&view.paths.run, parked)
                 ),
+                Intervention::ReviewThenSupersede(rejected) => format!(
+                    "    {} — its ledger is intact; {}\n",
+                    standing.word(),
+                    review_then_supersede(&view.paths.run, rejected)
+                ),
             });
             continue;
         }
@@ -780,6 +852,11 @@ pub fn status(survey: &Survey) -> String {
                     "  {}: nothing is driving this run and {}\n",
                     standing.word(),
                     requeue_then_adopt(&view.paths.run, parked)
+                ),
+                Intervention::ReviewThenSupersede(rejected) => format!(
+                    "  {}: nothing is driving this run and {}\n",
+                    standing.word(),
+                    review_then_supersede(&view.paths.run, rejected)
                 ),
             });
         }
@@ -3187,6 +3264,117 @@ mod tests {
                  the failure:\n{rendered}"
             );
         }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The advice for a run nothing is driving names the nodes a judge
+    /// **rejected**, and no other node that failed.
+    ///
+    /// Two records make a rejection, and this drives the run either one alone
+    /// would misname: a node that failed its own task with no judge verdict
+    /// against it is not a node a judge rejected, and reported as one it would
+    /// send a planner to read a verdict nobody wrote. The journey the operator
+    /// took is in `tests/e2e/views.rs`; what is held here is the discrimination.
+    #[test]
+    fn only_a_node_a_judge_rejected_is_named_as_one() {
+        let root = scratch("rejected-advice");
+        let failing = |node: &str, verdicts: Option<serde_json::Value>| {
+            let mut events = vec![event(
+                crate::journal::PipelineKind::NodeDispatched,
+                Some(node),
+                &[],
+            )];
+            if let Some(verdicts) = verdicts {
+                let mut settled = relayed(
+                    EventKind("member-settled".into()),
+                    Source::Agentgraph,
+                    Some(node),
+                    &[("completed", json!(false)), ("verdict", verdicts)],
+                );
+                settled.stream = "oneagentgraph-1".into();
+                events.push(settled);
+            }
+            events.push(event(
+                crate::journal::PipelineKind::NodeSettled,
+                Some(node),
+                &[
+                    ("status", json!("failed")),
+                    ("outcome", json!(crate::engine::TASK_FAILED)),
+                ],
+            ));
+            events
+        };
+        let rejection = json!([
+            {"criterion": "the change builds", "kind": "boolean",
+             "verdict": {"value": false, "reason": "cargo build fails"}},
+        ]);
+        // The shape the incident had: the node a judge rejected, and behind it
+        // work that will never run while it stands.
+        let held_up = Plan {
+            tasks: vec![
+                Node {
+                    id: "build".into(),
+                    ..Node::default()
+                },
+                Node {
+                    id: "later".into(),
+                    deps: vec!["build".into()],
+                    ..Node::default()
+                },
+            ],
+            ..plan()
+        };
+        for (run, verdicts) in [("judged", Some(rejection)), ("brokeoff", None)] {
+            let mut events = vec![event(
+                crate::journal::PipelineKind::RunStarted,
+                None,
+                &[("plan", json!(held_up))],
+            )];
+            events.extend(failing("build", verdicts));
+            write_run(&root, run, dead_pid(), &events);
+        }
+
+        let listing = runs(&root, false, "session-a");
+        let status_of = |run: &str| {
+            let paths = RunPaths::under(&root, run);
+            status(&Survey {
+                root: root.clone(),
+                views: vec![RunView::open(&paths).expect("the run reads back")],
+                skipped: Vec::new(),
+            })
+        };
+        // The judged run: the node is named, the judgement is said, and the step
+        // named is reading the verdict rather than attaching a driver.
+        let judged = status_of("judged");
+        for rendered in [&listing, &judged] {
+            assert!(
+                rendered.contains("build, whose work a judge rejected"),
+                "the rejected node is not named as one a judge rejected:\n{rendered}"
+            );
+            assert!(
+                rendered.contains("onepipeline results judged"),
+                "the verdict a planner has to read is not named:\n{rendered}"
+            );
+            assert!(
+                rendered.contains("superseding the node"),
+                "the step that moves the run is not named:\n{rendered}"
+            );
+        }
+        assert!(
+            !judged.contains("adopt"),
+            "a driver is prescribed for a frontier it cannot move:\n{judged}"
+        );
+        // The run that failed with no judgement against it keeps the reading it
+        // had: nothing about it says a judge scored anything.
+        let broke = status_of("brokeoff");
+        assert!(
+            !broke.contains("a judge rejected"),
+            "a node that failed its own task was reported as judged:\n{broke}"
+        );
+        assert!(
+            !listing.contains("onepipeline results brokeoff"),
+            "a run nothing judged was given the judgement's advice:\n{listing}"
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
