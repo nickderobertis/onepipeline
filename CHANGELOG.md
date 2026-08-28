@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0](https://github.com/nickderobertis/onepipeline/compare/v0.16.4...v0.17.0) - 2026-08-28
+
+### Added
+
+- *(edits)* offer a whole accepted edit to a validator, beside the per-command one ([#145](https://github.com/nickderobertis/onepipeline/pull/145))
+
 ## [0.16.4](https://github.com/nickderobertis/onepipeline/compare/v0.16.3...v0.16.4) - 2026-08-28
 
 ### Added
