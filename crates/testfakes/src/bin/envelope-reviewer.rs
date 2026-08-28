@@ -93,9 +93,19 @@ struct ChangedNode {
 
 /// A node as it crosses the reviewer's stdin: the whole plan node, because a
 /// plan-quality review reads the prose it is about to judge.
+///
+/// The three fields a review is actually about are named and each is refused
+/// blank — a node with an empty id, an empty persona, or an empty task states
+/// nothing a reviewer could judge, and reading one anyway would let a journey
+/// pass on a document nothing checked. Everything else a node carries is kept as
+/// written, because this is a host's reviewer and a host reads the whole node.
 #[derive(Debug, Deserialize)]
 struct OfferedNode {
     id: Named,
+    #[serde(default)]
+    persona: Option<Named>,
+    #[serde(default)]
+    task: Option<Named>,
     #[serde(flatten)]
     rest: serde_json::Map<String, serde_json::Value>,
 }
@@ -103,10 +113,18 @@ struct OfferedNode {
 impl OfferedNode {
     /// The node as this reviewer records it, which is the node as it arrived.
     fn recorded(&self) -> serde_json::Value {
-        let mut document = serde_json::Map::new();
-        document.insert("id".into(), serde_json::Value::from(self.id.0.clone()));
-        document.extend(self.rest.clone());
-        serde_json::Value::Object(document)
+        let named = [("persona", &self.persona), ("task", &self.task)]
+            .into_iter()
+            .filter_map(|(key, held)| {
+                held.as_ref()
+                    .map(|value| (key, serde_json::Value::from(value.0.clone())))
+            });
+        beside(
+            std::iter::once(("id", serde_json::Value::from(self.id.0.clone())))
+                .chain(named)
+                .collect(),
+            &self.rest,
+        )
     }
 }
 

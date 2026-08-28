@@ -19,6 +19,8 @@
 // command, and this suite supplies a real one. `harness.rs` carries the same suppression
 // and the full rationale.
 
+use std::collections::BTreeSet;
+
 use serde_json::{json, Value};
 
 use crate::harness::{agent, double, plan_of, repo_file, World, REFUSED};
@@ -408,7 +410,11 @@ fn the_ops_listed_as_changes_are_the_ones_the_record_names_and_no_others() {
         .expect("entry 45 names the ops it lists as changes");
     let world = World::new("reviewer-ops");
     let reviewer = reviewer_named(&world, "review-edit");
-    world.script("build.fail", "");
+    world.script("build.fail", "1");
+    // A second node that fails and is never retried, so there is a reference
+    // `attest` takes: that op accepts a waiting human action or a node that
+    // settled failed, and this run's held node is neither.
+    world.script("flaky.fail", "1");
     world.script("slow.wait", "hold");
     // `spare` waits on the held node throughout, so it is a node an edit can
     // still reach: unstarted, so it can be reparented, parked, and requeued.
@@ -419,6 +425,7 @@ fn the_ops_listed_as_changes_are_the_ones_the_record_names_and_no_others() {
             vec![
                 agent("slow", &[]),
                 agent("build", &[]),
+                agent("flaky", &[]),
                 agent("spare", &["slow"]),
             ],
         ),
@@ -427,13 +434,15 @@ fn the_ops_listed_as_changes_are_the_ones_the_record_names_and_no_others() {
         .run(&["start", &path, &spelling("flag"), &reviewer, "--detach"])
         .exited(0);
     let run = "reviewerops".to_string();
-    world.until("the node that fails to settle", |world| {
-        world
-            .run(&["results", &run])
-            .stdout
-            .lines()
-            .any(|line| line.trim_start().starts_with("build") && line.contains("failed"))
-    });
+    for failing in ["build", "flaky"] {
+        world.until("the node that fails to settle", |world| {
+            world
+                .run(&["results", &run])
+                .stdout
+                .lines()
+                .any(|line| line.trim_start().starts_with(failing) && line.contains("failed"))
+        });
+    }
 
     // One envelope per op, so what each contributes to the document is read off
     // that envelope's own review rather than untangled from a batch.
@@ -445,6 +454,10 @@ fn the_ops_listed_as_changes_are_the_ones_the_record_names_and_no_others() {
         // Listed: a requeue carrying any amendment changes the node a reviewer
         // reads, whether or not the amendment touches its task.
         json!({"op": "requeue", "id": "spare", "amend": {"max_turns": 9}}),
+        // And not listed without one: a requeue that amends nothing returns the
+        // node it parked exactly as it was.
+        json!({"op": "cancel", "id": "spare"}),
+        json!({"op": "requeue", "id": "spare"}),
         json!({"op": "context", "id": "spare", "note": "the fixture moved"}),
         // Last of the ops about `spare`, because it moves that node onto a
         // dependency that has already settled and so lets it run.
@@ -456,7 +469,36 @@ fn the_ops_listed_as_changes_are_the_ones_the_record_names_and_no_others() {
         // these move the plan without changing any node's definition, and the
         // plan is where the review sees them.
         json!({"op": "drop", "id": "extra", "dependents": "detach"}),
+        // The three ops that touch no node's definition at all: one clears a
+        // reference, and two report to the planner.
+        json!({"op": "attest", "ref": "flaky"}),
+        json!({"op": "finding", "message": "the plan still owes a rollback", "blocking": false}),
+        json!({"op": "complete", "reason": "the run has delivered its goal"}),
     ];
+    // Every op the live-edit protocol has today is in that table, named here so
+    // that an op added to the protocol and not to this journey reads as a gap
+    // rather than as a pass.
+    let driven: BTreeSet<String> = commands
+        .iter()
+        .map(|command| {
+            command["op"]
+                .as_str()
+                .expect("each names its op")
+                .to_string()
+        })
+        .collect();
+    assert_eq!(
+        driven,
+        [
+            "add", "amend", "attest", "cancel", "complete", "context", "drop", "finding",
+            "reparent", "requeue", "retry",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<BTreeSet<String>>(),
+        "this journey no longer drives every op the protocol has"
+    );
+
     for command in &commands {
         world
             .run_with_stdin(&["reply", &run], &envelope(json!([command])))
@@ -482,7 +524,7 @@ fn the_ops_listed_as_changes_are_the_ones_the_record_names_and_no_others() {
                 .collect()
         })
         .collect();
-    // The three that change no node contribute nothing, and every other
+    // Every op that changes no node contributes nothing, and every other
     // envelope contributes exactly the op it carried.
     assert_eq!(
         ops,
@@ -493,8 +535,13 @@ fn the_ops_listed_as_changes_are_the_ones_the_record_names_and_no_others() {
             vec![],
             vec!["requeue".to_string()],
             vec![],
+            vec![],
+            vec![],
             vec!["reparent".to_string()],
             vec!["add".to_string()],
+            vec![],
+            vec![],
+            vec![],
             vec![],
         ],
         "the ops listed as changes are not the ones the envelopes carried"
