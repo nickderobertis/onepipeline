@@ -580,13 +580,7 @@ impl HeldNodes {
     }
 }
 
-// llmlint: ignore[invalid_states_unrepresentable] these are **prescriptions**, one per run,
-// and a run holding both parked and judge-rejected work has one thing to do first: requeue
-// what a requeue moves. Neither fact is lost by that ranking — `Standing::of` derives both
-// lists from the same statuses on every read — and what the type refuses to represent is a
-// view handing an operator two answers to one run, which is the contradiction this whole
-// reading exists to end.
-/// Mutually exclusive readings of the graph behind a run's word and advice.
+/// The readings of the graph behind a run's word and advice.
 enum WorkStanding {
     /// Every node completed successfully.
     Complete,
@@ -596,13 +590,63 @@ enum WorkStanding {
     /// Something is ready, running, waiting, or blocked and a fresh driver can
     /// pick it up now or when its gate opens.
     Outstanding,
-    /// These nodes must be returned to the frontier before a driver can move
-    /// the run again.
+    /// Work no driver moves on its own, which is what the run is told about.
+    Held(HeldWork),
+}
+
+/// The work a converged run holds that no driver moves on its own.
+///
+/// Three inhabited cases and no fourth. A run can hold both kinds at once and
+/// they are different facts about it — parked work returns to the frontier on a
+/// `requeue`, and a node its judge rejected does not return on anything a driver
+/// does — so both are carried, and [`ranked`](Self::ranked) decides which is
+/// said rather than the reading throwing one away to decide.
+enum HeldWork {
+    /// Nodes a `requeue` returns to the frontier.
     Parked(HeldNodes),
-    /// A judge rejected these nodes' work, so nothing dispatches them as they
-    /// stand and everything behind them is waiting on a decision a driver
-    /// cannot make.
+    /// Nodes a judge rejected, which nothing dispatches as they stand.
     Rejected(HeldNodes),
+    /// Both, on the one run.
+    Both {
+        /// The parked half, which is the half that has an answer a driver acts on.
+        parked: HeldNodes,
+        /// The judged half, still true of the run and still unanswered by that.
+        rejected: HeldNodes,
+    },
+}
+
+impl HeldWork {
+    /// What a converged run holds, or `None` where it holds neither kind — which
+    /// is also the run that has no held standing to report.
+    fn of(parked: Vec<String>, rejected: Vec<String>) -> Option<Self> {
+        match (HeldNodes::of(parked), HeldNodes::of(rejected)) {
+            (Some(parked), Some(rejected)) => Some(Self::Both { parked, rejected }),
+            (Some(parked), None) => Some(Self::Parked(parked)),
+            (None, Some(rejected)) => Some(Self::Rejected(rejected)),
+            (None, None) => None,
+        }
+    }
+
+    /// Every prescription this held work carries, most urgent first.
+    ///
+    /// The order is the ranking and the head is the answer: a `requeue` is the
+    /// one of the two an operator can act on now — it returns work to the
+    /// frontier and a driver dispatches it — so a run holding both is told to
+    /// requeue, and meets the judgement on the read after that work has moved.
+    /// One run is given one answer, because [`Standing::intervention`] takes the
+    /// head; what the ranking does not do is decide by discarding the other
+    /// half.
+    fn ranked(&self) -> impl Iterator<Item = Intervention<'_>> {
+        let (parked, rejected) = match self {
+            Self::Parked(parked) => (Some(parked), None),
+            Self::Rejected(rejected) => (None, Some(rejected)),
+            Self::Both { parked, rejected } => (Some(parked), Some(rejected)),
+        };
+        parked
+            .map(Intervention::RequeueThenAdopt)
+            .into_iter()
+            .chain(rejected.map(Intervention::ReviewThenSupersede))
+    }
 }
 
 /// The nodes of a converged run whose work a judge rejected.
@@ -659,10 +703,8 @@ impl Standing {
         };
         let work = if converged && graph::state_of(&statuses) == graph::GraphState::Complete {
             WorkStanding::Complete
-        } else if let Some(parked) = HeldNodes::of(parked) {
-            WorkStanding::Parked(parked)
-        } else if let Some(rejected) = HeldNodes::of(rejected) {
-            WorkStanding::Rejected(rejected)
+        } else if let Some(held) = HeldWork::of(parked, rejected) {
+            WorkStanding::Held(held)
         } else if !converged
             || statuses
                 .values()
@@ -698,8 +740,9 @@ impl Standing {
         }
         match &self.work {
             WorkStanding::Outstanding => Some(Intervention::Adopt),
-            WorkStanding::Parked(nodes) => Some(Intervention::RequeueThenAdopt(nodes)),
-            WorkStanding::Rejected(nodes) => Some(Intervention::ReviewThenSupersede(nodes)),
+            // The head of the ranking, which held work always has: `HeldWork::of`
+            // answers `None` rather than build one holding nothing.
+            WorkStanding::Held(held) => held.ranked().next(),
             WorkStanding::Complete | WorkStanding::Settled => None,
         }
     }
