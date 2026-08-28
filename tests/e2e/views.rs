@@ -2777,3 +2777,165 @@ fn a_run_with_work_a_fresh_driver_could_schedule_is_still_told_to_adopt() {
 
     world.release("build.go");
 }
+
+/// A run nothing is driving whose unfinished work is held up by a node a judge
+/// rejected is told that a judgement happened, and what answers it.
+///
+/// A rejection is outside the publication attempt budget, so nothing dispatches
+/// the node as it stands and the `adopt` an operator took twice settled again
+/// having moved nothing. Both views are read, because one prescription that
+/// reads two ways is the defect this replaces.
+#[test]
+fn a_run_held_up_by_a_judges_rejection_is_told_to_read_the_verdict_and_supersede() {
+    let world = World::new("views-rejected-advice");
+    world.script(
+        "build.verdict",
+        "false|the change builds|cargo build fails in src/views.rs\n",
+    );
+    world.script("build.fail", "1");
+    let run = settled(
+        &world,
+        "judgedrun",
+        vec![agent("build", &[]), agent("later", &["build"])],
+    );
+
+    // One prescription, spelled once here and asserted of every view that gives
+    // advice: two views that agreed about the run and disagreed about the answer
+    // is the defect this is the fix for.
+    let prescription = format!(
+        "its unfinished work is held up by build, whose work a judge rejected, and no \
+         driver dispatches a rejected node as it stands: read the verdict with: onepipeline \
+         results {run} — and decide from it, most likely amending the task and superseding \
+         the node with an `amend` and a `retry` on: onepipeline reply {run}"
+    );
+
+    let listing = world.run(&["runs"]);
+    listing.exited(0).out_has(&run).out_has(&prescription);
+    let status = world.run(&["status", &run]);
+    status.exited(0).out_has(&prescription);
+
+    for rendered in [&listing, &status] {
+        rendered.out_lacks("adopt");
+        rendered.out_lacks("requeue");
+    }
+
+    // The verdict the advice sends a reader to is really there to be read: an
+    // advice line naming a command that answers nothing is the same defect in a
+    // new place.
+    world
+        .run(&["results", &run])
+        .exited(0)
+        .out_has("verdict: 'the change builds' failed — cargo build fails in src/views.rs");
+}
+
+/// The judgement outranks the advice to attach a driver, on a run whose waiting
+/// human action still reads as work a driver could pick up.
+///
+/// That reading is what prescribed `adopt` here, and adopting moves neither the
+/// rejected node nor an action waiting on a person.
+#[test]
+fn a_judges_rejection_outranks_the_advice_to_attach_a_fresh_driver() {
+    let world = World::new("views-rejected-outranks");
+    world.script(
+        "build.verdict",
+        "false|the change builds|cargo build fails in src/views.rs\n",
+    );
+    world.script("build.fail", "1");
+    let run = settled(
+        &world,
+        "heldrun",
+        vec![agent("build", &[]), human("approve", &[])],
+    );
+
+    for rendered in [world.run(&["runs"]), world.run(&["status", &run])] {
+        rendered.exited(0);
+        rendered.out_has("build, whose work a judge rejected");
+        rendered.out_has(&format!("onepipeline results {run}"));
+        rendered.out_lacks("attach a fresh driver");
+        rendered.out_lacks("adopt it or stop it");
+    }
+}
+
+/// A run holding both parked work and a judge's rejection is told to requeue
+/// first: a requeue is the one of the two that moves the run at all.
+///
+/// The ranking is the claim. A parked node returns to the frontier on a
+/// `requeue` and is dispatched; a rejected one is not dispatched until a planner
+/// has read the verdict, so a run with both is given the prescription that does
+/// something, and the run is not given two.
+#[test]
+fn a_run_that_is_both_parked_and_judged_is_told_to_requeue_first() {
+    let world = World::new("views-parked-and-rejected");
+    world.script("slow.turn-open", "");
+    world.script("slow.wait", "hold");
+    world.script("slow.stops-when-interrupted", "");
+    world.script(
+        "build.verdict",
+        "false|the change builds|cargo build fails in src/views.rs\n",
+    );
+    world.script("build.fail", "1");
+    let path = world.plan(
+        "bothrun",
+        &plan_of("bothrun", vec![agent("slow", &[]), agent("build", &[])]),
+    );
+    world.run(&["start", &path, "--detach"]).exited(0);
+    world.until("the held node's turn to open", |world| {
+        !world.events_of("bothrun", "turn-started").is_empty()
+    });
+
+    world
+        .run_with_stdin(
+            &["reply", "bothrun"],
+            &serde_json::json!({"version": 1, "commands": [{"op": "cancel", "id": "slow"}]})
+                .to_string(),
+        )
+        .exited(0);
+    world.until("the driver to close the run out", |world| {
+        world.run_file("bothrun", "result.json").is_file()
+    });
+
+    for rendered in [world.run(&["runs"]), world.run(&["status", "bothrun"])] {
+        rendered.exited(0);
+        rendered.out_has("onepipeline reply bothrun");
+        assert!(
+            named_in_order(&rendered.stdout, "requeue", "onepipeline adopt bothrun"),
+            "the run holding parked work is not told to requeue it first:\n{}",
+            rendered.stdout
+        );
+        rendered.out_lacks("whose work a judge rejected");
+    }
+}
+
+/// A node whose judge rejected it after its own dispatch opened a change request
+/// is named as rejected too.
+///
+/// It settles under a different word — `task-failed-change-open`, because a
+/// reviewer is waiting on the change the worker opened — and the judgement
+/// behind it is the same one, answered the same way.
+#[test]
+fn a_rejection_over_an_open_change_request_is_named_as_a_rejection() {
+    let world = World::new("views-rejected-change-open");
+    world.repository("change-open", &[]);
+    world.script("service.work", "the work its judge would not pass\n");
+    world.script(
+        "service.publishes",
+        "chore: the change the dispatch opened itself",
+    );
+    world.script(
+        "service.verdict",
+        "false|the change builds|cargo build fails in src/views.rs\n",
+    );
+    world.script("service.fail", "1");
+    let run = settled(&world, "openrun", vec![lifecycle("service", &[])]);
+
+    world
+        .run(&["results", &run])
+        .exited(0)
+        .out_has("task-failed-change-open");
+    for rendered in [world.run(&["runs"]), world.run(&["status", &run])] {
+        rendered.exited(0);
+        rendered.out_has("service, whose work a judge rejected");
+        rendered.out_lacks("attach a fresh driver");
+        rendered.out_lacks("adopt it or stop it");
+    }
+}
