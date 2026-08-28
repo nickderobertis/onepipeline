@@ -58,6 +58,15 @@ pub const EXECUTOR_RULES_ENV: &str = "ONEPIPELINE_EXECUTOR_RULES";
 /// than whatever this variable happens to say later.
 pub const NODE_VALIDATOR_ENV: &str = "ONEPIPELINE_NODE_VALIDATOR";
 
+/// The environment variable naming the command a whole reply envelope is
+/// reviewed by.
+///
+/// The middle rung of three, exactly as [`NODE_VALIDATOR_ENV`] is for the
+/// per-node hook: `--envelope-reviewer` beats it, it beats the launch config's
+/// own `envelope_reviewer`, and beneath all three is the shipped default of no
+/// reviewer at all. Read once, at the launch, and retained in the launch record.
+pub const ENVELOPE_REVIEWER_ENV: &str = "ONEPIPELINE_ENVELOPE_REVIEWER";
+
 /// The environment variable naming the directory a direct agent node runs in.
 pub const PROJECT_DIR_ENV: &str = "ONEPIPELINE_PROJECT_DIR";
 
@@ -2318,6 +2327,33 @@ pub(crate) fn configured_node_validator() -> Result<Option<String>> {
         Err(std::env::VarError::NotPresent) => Ok(None),
         Err(std::env::VarError::NotUnicode(_)) => Err(Error::Invalid(format!(
             "{NODE_VALIDATOR_ENV} holds something this build cannot read as text, so the \
+             command it names cannot be resolved — set it to the command, or unset it to \
+             declare that this launch has none"
+        ))),
+    }
+}
+// llmlint: ignore-end[invalid_states_unrepresentable]
+
+/// What [`ENVELOPE_REVIEWER_ENV`] says, when it says anything at all.
+///
+/// Read exactly as [`configured_node_validator`] reads its own rung, and for
+/// the same reasons: *set* rather than *usable*, so set-and-blank means "this
+/// launch names none" and stops the search rather than falling through to a
+/// config file that names one, and a value this build cannot read as text is
+/// refused at the boundary rather than discarded.
+///
+/// # Errors
+///
+/// [`Error::Invalid`] for a value this build cannot read as text.
+// llmlint: ignore-block[invalid_states_unrepresentable] the value is a `String` because
+// that is what an environment holds and what `LaunchRecord`'s schema declares; the one
+// invariant a newtype could carry is applied by the caller, for all three rungs at once.
+pub(crate) fn configured_envelope_reviewer() -> Result<Option<String>> {
+    match std::env::var(ENVELOPE_REVIEWER_ENV) {
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(Error::Invalid(format!(
+            "{ENVELOPE_REVIEWER_ENV} holds something this build cannot read as text, so the \
              command it names cannot be resolved — set it to the command, or unset it to \
              declare that this launch has none"
         ))),

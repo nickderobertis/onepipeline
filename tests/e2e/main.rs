@@ -31,6 +31,7 @@ mod context_delivery;
 mod crossdag;
 mod dispatch;
 mod driver;
+mod envelope_reviewer;
 mod filter;
 mod journal;
 mod lifecycle;

@@ -245,7 +245,7 @@ fn scenario(path: &std::path::Path) -> Option<String> {
 /// The largest trace a scenario may ask this validator to dump.
 ///
 /// Two orders of magnitude past the loudest journey and three past the caller's
-/// own `MAX_VALIDATOR_STDERR`, so every scenario worth writing fits under it —
+/// own `MAX_HOOK_STDERR`, so every scenario worth writing fits under it —
 /// and a file asking for more is a typo rather than a louder validator, which is
 /// worth saying before this program allocates it.
 const MAX_FLOOD_BYTES: usize = 1 << 20;

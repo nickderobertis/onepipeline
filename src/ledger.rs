@@ -498,6 +498,21 @@ pub struct LaunchRecord {
     /// what it wrote.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub node_validator: String,
+    /// The command a whole reply envelope is reviewed by before any of its
+    /// edits is committed, when the launch named one.
+    ///
+    /// **Resolved once, at the launch**, out of the flag, the environment, and
+    /// the launch config in that order — so an `adopt`, and a `reply` typed in
+    /// another shell, use the reviewer this run was launched under rather than
+    /// whatever the reading process's own environment says. Absent when the
+    /// launch named none, which is the shipped default and is exactly the
+    /// behaviour every run had before this field existed. Read it through
+    /// [`envelope_reviewer`](Self::envelope_reviewer) rather than testing this
+    /// field, for the reason [`graph`](Self::graph) is read through its own
+    /// accessor. Omitted when empty, like every other field added to this record
+    /// after it shipped, so a build that predates it still reads what it wrote.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub envelope_reviewer: String,
     /// The launcher, as the environment reported it.
     pub launcher: String,
     /// The launching session. A view labels a foreign one by
@@ -599,6 +614,16 @@ impl LaunchRecord {
     /// and this is the one place that absence becomes "there is none" again.
     pub fn node_validator(&self) -> Option<&str> {
         (!self.node_validator.is_empty()).then_some(self.node_validator.as_str())
+    }
+
+    /// The envelope reviewer this run was launched with, when it was launched
+    /// with one.
+    ///
+    /// The same reading [`observer_graph`](Self::observer_graph) has, and for
+    /// the same reason: an absent string field is written as no field at all,
+    /// and this is the one place that absence becomes "there is none" again.
+    pub fn envelope_reviewer(&self) -> Option<&str> {
+        (!self.envelope_reviewer.is_empty()).then_some(self.envelope_reviewer.as_str())
     }
 
     /// Whether `session` is the session that launched this run.
@@ -1421,6 +1446,7 @@ mod tests {
             node_graph: "graphs/node-scope.yaml".into(),
             pr_author_graph: String::new(),
             node_validator: String::new(),
+            envelope_reviewer: String::new(),
             launcher: "claude-code".into(),
             session: "a-session".into(),
             pid: 1,
@@ -1632,6 +1658,7 @@ mod tests {
             node_graph: String::new(),
             pr_author_graph: String::new(),
             node_validator: String::new(),
+            envelope_reviewer: String::new(),
             launcher: sys::UNKNOWN_LAUNCHER.into(),
             session: sys::UNKNOWN_LAUNCHER.into(),
             pid: 1,
@@ -1659,6 +1686,7 @@ mod tests {
             node_graph: String::new(),
             pr_author_graph: String::new(),
             node_validator: String::new(),
+            envelope_reviewer: String::new(),
             launcher: "claude-code".into(),
             session: "secret-session-id".into(),
             pid: 1,

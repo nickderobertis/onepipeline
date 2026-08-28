@@ -308,15 +308,118 @@ fn node_whose_task_is_new<'a>(command: &Command, graph: &'a Graph) -> Option<&'a
     graph.get(id)
 }
 
-/// How much of a validator's stderr reaches the refusal it becomes.
+/// How much of a hook's stderr reaches the refusal it becomes.
 ///
-/// A validator is an external program and its stderr is **external input**: it
-/// is read into this process, rendered into a refusal, surfaced to the planner,
+/// A hook is an external program and its stderr is **external input**: it is
+/// read into this process, rendered into a refusal, surfaced to the planner,
 /// and written to the journal, where every payload text this crate writes is
 /// already bounded. So it is bounded on the way in rather than after it has been
-/// held whole — a validator that printed a gigabyte would otherwise be a
-/// gigabyte in the memory of every `reply` that ran it.
-const MAX_VALIDATOR_STDERR: u64 = crate::event::MAX_PAYLOAD_TEXT_BYTES as u64;
+/// held whole — a hook that printed a gigabyte would otherwise be a gigabyte in
+/// the memory of every `reply` that ran it.
+const MAX_HOOK_STDERR: u64 = crate::event::MAX_PAYLOAD_TEXT_BYTES as u64;
+
+/// What one hook answered, once it has been run to completion.
+struct HookAnswer {
+    /// How it ended. This, and nothing else, is what decides the edit.
+    status: std::process::ExitStatus,
+    /// What it said on stderr, bounded on the way in and lossily decoded.
+    stderr: Vec<u8>,
+}
+
+impl HookAnswer {
+    /// The hook's own words, as a refusal carries them.
+    ///
+    /// Control characters stripped and the whole thing kept to one line: this
+    /// reaches a terminal, a planner's queue, and the journal, and a hook that
+    /// emitted escape sequences would be writing into all three. A hook that
+    /// said nothing is never reported silently either — a refusal nobody can act
+    /// on is the failure these hooks exist to end, so the exit code is at least
+    /// something to look at.
+    fn reason(&self) -> String {
+        self.reason_from(&String::from_utf8_lossy(&self.stderr))
+    }
+
+    /// The same, over one part of what it said.
+    ///
+    /// The envelope reviewer lifts the lines a hook declared its objection on
+    /// out of its stderr before quoting the rest, so the reason a refusal
+    /// carries is the reviewer's own sentence rather than that sentence with a
+    /// declaration read back in front of it. Everything else is identical, the
+    /// status fallback included: a hook whose every line was a declaration said
+    /// nothing a reader can act on, which is the case that fallback is for.
+    fn reason_from(&self, said: &str) -> String {
+        let said = crate::views::one_line(said).trim().to_string();
+        if !said.is_empty() {
+            return said;
+        }
+        format!(
+            "it exited {} and said nothing on stderr",
+            self.status
+                .code()
+                .map_or_else(|| "without a status".to_string(), |code| code.to_string())
+        )
+    }
+}
+
+/// Why a hook gave no answer at all, which is never an acceptance.
+enum HookFailure {
+    /// It could not be started: a launch configured wrongly.
+    NotStarted(std::io::Error),
+    /// It started and this process could not collect it.
+    NotCollected(std::io::Error),
+}
+
+/// Run one hook over one document and wait for its answer.
+///
+/// The mechanics both hooks share, so the two of them cannot drift into
+/// answering differently: the document crosses on the hook's stdin, its stdout
+/// goes nowhere — this runs inside `reply`, whose own stdout is the JSON verdict
+/// its caller parses — and its stderr is read [`MAX_HOOK_STDERR`] and no
+/// further. What each hook makes of the answer is its caller's, because only the
+/// caller knows what it was asking about.
+fn ask_hook(hook: &str, document: &str) -> std::result::Result<HookAnswer, HookFailure> {
+    let mut child = std::process::Command::new(hook)
+        .stdin(std::process::Stdio::piped())
+        // Never inherited and never held: a hook's narration is not the caller's
+        // answer, and this process's own stdout is a parsed verdict.
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(HookFailure::NotStarted)?;
+    if let Some(mut stdin) = child.stdin.take() {
+        // A hook that refuses without reading its input is answering, not
+        // failing, and the broken pipe that leaves here is not what decides the
+        // edit — the exit status below is.
+        use std::io::Write;
+        let _ = stdin.write_all(document.as_bytes());
+    }
+    // Bounded on the way in, and the rest of the pipe drained so the child is
+    // never left blocked on a reader that stopped reading.
+    let mut stderr = Vec::new();
+    if let Some(pipe) = child.stderr.take() {
+        use std::io::Read;
+        let mut bounded = pipe.take(MAX_HOOK_STDERR);
+        if let Err(e) = bounded.read_to_end(&mut stderr) {
+            // Neither fatal nor silent. The status below is what decides the
+            // edit, so a stderr this process could not finish reading is a
+            // refusal carrying less of the hook's trace and never an acceptance
+            // — and the manager is told the trace is short rather than left
+            // reading a truncation as all the hook said.
+            stderr.extend_from_slice(format!(" [its stderr stopped early: {e}]").as_bytes());
+        }
+        // Draining is not a read: it is here so the child is never left blocked
+        // on a reader that stopped reading, and a pipe that fails it is one that
+        // is already gone — which is the state draining is for.
+        let _ = std::io::copy(&mut bounded.into_inner(), &mut std::io::sink());
+    }
+    // llmlint: ignore[changed_behavior_has_e2e] this arm is this process failing to
+    // collect a child it started — an I/O failure of the parent, which no journey can
+    // provoke without breaking the harness that runs it. It is here so the failure is
+    // reported rather than read as a verdict, which is the same fail-closed rule the
+    // spawn above is driven for end to end.
+    let status = child.wait().map_err(HookFailure::NotCollected)?;
+    Ok(HookAnswer { status, stderr })
+}
 
 /// Offer one node to the validator this run's launch named, if it named one.
 ///
@@ -325,11 +428,10 @@ const MAX_VALIDATOR_STDERR: u64 = crate::event::MAX_PAYLOAD_TEXT_BYTES as u64;
 /// Exit 0 accepts the edit; a non-zero exit refuses it carrying the validator's
 /// own stderr, because the rules are the host's and only it can say which one
 /// this node broke. That stderr is external input and is treated as such: read
-/// to [`MAX_VALIDATOR_STDERR`] and no further, and stripped of control
-/// characters, because it is about to be a refusal on a terminal, a surface in a
-/// planner's queue, and a line in the journal. Its stdout goes nowhere at all:
-/// this runs inside `reply`, whose own stdout is the JSON verdict its caller
-/// parses.
+/// to [`MAX_HOOK_STDERR`] and no further, and stripped of control characters,
+/// because it is about to be a refusal on a terminal, a surface in a planner's
+/// queue, and a line in the journal. Its stdout goes nowhere at all: this runs
+/// inside `reply`, whose own stdout is the JSON verdict its caller parses.
 ///
 /// **Fails closed.** A validator that cannot be run is a launch configured
 /// wrongly; accepting the edit anyway would decide that an unenforced rule is no
@@ -345,83 +447,344 @@ fn offer_to_validator(validator: Option<&str>, command: &Command, node: &Node) -
     let op = crate::channel::op_of(command);
     let document = serde_json::to_string(node)
         .map_err(|e| refuse(format!("{op}: node '{}' does not serialize: {e}", node.id)))?;
-    let mut child = std::process::Command::new(validator)
-        .stdin(std::process::Stdio::piped())
-        // Never inherited and never held: a validator's narration is not the
-        // caller's answer, and this process's own stdout is a parsed verdict.
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| {
-            refuse(format!(
-                "{op}: the node validator '{validator}' this run was launched with could not \
-                 be started ({e}), so node '{}' was checked by nothing and the edit was not \
-                 applied",
-                node.id
-            ))
-        })?;
-    if let Some(mut stdin) = child.stdin.take() {
-        // A validator that refuses without reading its input is answering, not
-        // failing, and the broken pipe that leaves here is not what decides the
-        // edit — the exit status below is.
-        use std::io::Write;
-        let _ = stdin.write_all(document.as_bytes());
-    }
-    // Bounded on the way in, and the rest of the pipe drained so the child is
-    // never left blocked on a reader that stopped reading.
-    let mut stderr = Vec::new();
-    if let Some(pipe) = child.stderr.take() {
-        use std::io::Read;
-        let mut bounded = pipe.take(MAX_VALIDATOR_STDERR);
-        if let Err(e) = bounded.read_to_end(&mut stderr) {
-            // Neither fatal nor silent. The status below is what decides the
-            // edit, so a stderr this process could not finish reading is a
-            // refusal carrying less of the validator's trace and never an
-            // acceptance — and the manager is told the trace is short rather
-            // than left reading a truncation as all the validator said.
-            stderr.extend_from_slice(format!(" [its stderr stopped early: {e}]").as_bytes());
-        }
-        // Draining is not a read: it is here so the child is never left blocked
-        // on a reader that stopped reading, and a pipe that fails it is one that
-        // is already gone — which is the state draining is for.
-        let _ = std::io::copy(&mut bounded.into_inner(), &mut std::io::sink());
-    }
-    // llmlint: ignore[changed_behavior_has_e2e] this arm is this process failing to
-    // collect a child it started — an I/O failure of the parent, which no journey can
-    // provoke without breaking the harness that runs it. It is here so the failure is
-    // reported rather than read as a verdict, which is the same fail-closed rule the
-    // spawn above is driven for end to end.
-    let status = child.wait().map_err(|e| {
-        refuse(format!(
+    let answer = ask_hook(validator, &document).map_err(|failure| match failure {
+        HookFailure::NotStarted(e) => refuse(format!(
+            "{op}: the node validator '{validator}' this run was launched with could not \
+             be started ({e}), so node '{}' was checked by nothing and the edit was not \
+             applied",
+            node.id
+        )),
+        HookFailure::NotCollected(e) => refuse(format!(
             "{op}: the node validator '{validator}' did not answer for node '{}' ({e}), so the \
              edit was not applied",
             node.id
-        ))
+        )),
     })?;
-    if status.success() {
+    if answer.status.success() {
         return Ok(());
     }
-    // Control characters stripped and the whole thing kept to one line: this
-    // reaches a terminal, a planner's queue, and the journal, and a validator
-    // that emitted escape sequences would be writing into all three.
-    let said = crate::views::one_line(&String::from_utf8_lossy(&stderr))
-        .trim()
-        .to_string();
     Err(refuse(format!(
         "{op}: the node validator refused node '{}': {}",
         node.id,
-        match said.is_empty() {
-            // Never silent: a refusal nobody can act on is the failure this hook
-            // exists to end, so the exit code is at least something to look at.
-            true => format!(
-                "it exited {} and said nothing on stderr",
-                status
-                    .code()
-                    .map_or_else(|| "without a status".to_string(), |code| code.to_string())
-            ),
-            false => said,
-        }
+        answer.reason()
     )))
+}
+
+/// One node an envelope introduces or changes, as the reviewer is handed it.
+///
+/// The op is carried beside the node because the same node reads differently
+/// depending on how it got there: a node an `add` introduced is prose nothing
+/// has checked, and the same node under an `amend` is a bar that was moved on a
+/// node already in flight.
+// llmlint: ignore-block[invalid_states_unrepresentable] the op is a `&'static str` because
+// it is **produced** rather than accepted: every value comes from `channel::op_of`, which
+// is `Command`'s own discriminant already spelled for the wire and published as this
+// crate's one word for an op. An enum here could hold no value that one does not, and
+// would be a second vocabulary to keep in step with the first.
+#[derive(Debug, Serialize)]
+struct ChangedNode<'a> {
+    op: &'static str,
+    /// Not the node the command carried: the one the whole envelope leaves
+    /// behind. Two commands that touched one node are two entries, under the op
+    /// each carried, and both show the node as it will be dispatched.
+    node: &'a Node,
+}
+// llmlint: ignore-end[invalid_states_unrepresentable]
+
+/// The document the envelope reviewer reads on its stdin.
+///
+/// Everything a plan-quality review needs and no per-command check can carry:
+/// the goal the run is judged against, every node this one envelope introduces
+/// or changes with the op that produced each, and the plan they are being edited
+/// into — as the envelope leaves it, so a reviewer sees the graph the run would
+/// actually converge on rather than one it has to assemble. Which nodes are the
+/// edit and which are its context is [`changes`](Self::changes) rather than a
+/// diff the reviewer works out.
+///
+/// The goal is hoisted out of the plan it is also part of, because it is what
+/// the whole envelope is judged against: a reviewer reading this document should
+/// not have to know the plan schema to find the one sentence stating what the
+/// run is for.
+#[derive(Debug, Serialize)]
+struct EnvelopeUnderReview<'a> {
+    /// What the run is for, in the launching plan's own words. Omitted when the
+    /// plan states none, which is what a plan with no `goal` already means.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    goal: Option<&'a str>,
+    /// Every node this envelope introduces or changes, in the order the
+    /// envelope wrote them. Empty for an envelope that only drops, parks, or
+    /// asks for completion — those change the plan without putting new prose in
+    /// front of a dispatch, and the plan below is where the reviewer sees it.
+    changes: Vec<ChangedNode<'a>>,
+    plan: crate::plan::Plan,
+}
+
+/// The node one command introduces or changes, once the envelope has been
+/// compiled against the candidate graph.
+///
+/// A wider set than [`node_whose_task_is_new`]'s four, and deliberately: that
+/// one answers *whose task prose is unchecked*, which is the per-node question,
+/// while this one answers *what this envelope did to the graph*. So a `reparent`
+/// is here — it changes the edges a whole-plan review is about — and so is a
+/// `requeue` carrying any amendment, whose changed turn budget is part of the
+/// node the reviewer reads even though no per-node rule has an opinion about it.
+/// A `drop` names no node here because the node it names is gone from the plan
+/// below, which is where a review sees it; `cancel`, `context`, `attest`,
+/// `complete`, and `finding` leave every node's definition exactly as it was.
+fn node_the_command_changes<'a>(command: &Command, graph: &'a Graph) -> Option<&'a Node> {
+    let id = match command {
+        Command::Add { node } | Command::Retry { node, .. } => node.id.as_str(),
+        Command::Amend { id, .. } | Command::Reparent { id, .. } => id.as_str(),
+        Command::Requeue { id, amend } => {
+            amend.as_ref()?;
+            id.as_str()
+        }
+        _ => return None,
+    };
+    graph.get(id)
+}
+
+/// Offer one whole envelope to the reviewer this run's launch named, if it
+/// named one.
+///
+/// The seam the per-node validator cannot reach. That one is handed a single
+/// node serialized on its own, so a reply carrying several related ops is seen
+/// as several unrelated nodes: nothing checks two added nodes that duplicate
+/// each other, a contract seam *between* two nodes of one edit, the dependency
+/// edges the edit introduces, or whether the edited graph still delivers the
+/// run's goal. Those are the checks a plan-quality reviewer makes over a whole
+/// plan, and this is the invocation that can carry them —
+/// [`EnvelopeUnderReview`] is what crosses its stdin.
+///
+/// Exit 0 accepts the envelope. A non-zero exit refuses it **whole**: this runs
+/// before any of its commands is compiled into the journal, so no command of a
+/// refused envelope half-applies. The refusal carries the reviewer's own words,
+/// bounded and control-stripped exactly as the per-node validator's are, and
+/// names two sets that are not the same one: the node the reviewer **objected
+/// to**, declared on an [`OBJECTION_PREFIX`] line of its stderr, and every op
+/// and node the envelope **carried**. An envelope is no longer one command, so
+/// what it carried is not what the reviewer turned down, and a reader given only
+/// the first still cannot tell which node to go and change. A reviewer that
+/// declared no
+/// node is reported as having declared none, rather than having the whole
+/// envelope read back as its objection — those are different facts about a
+/// refusal and a reader acts differently on each.
+///
+/// **Fails closed**, for the reason the per-node validator does: a reviewer that
+/// cannot be started is a launch configured wrongly, and letting the envelope
+/// through would decide silently that an unenforced rule is no rule.
+///
+/// An accepted envelope is offered **once**, and this is the difference from the
+/// per-node validator, which is offered an accepted edit twice. Three reasons,
+/// and they point the same way. Asking twice is only free for a read-only script;
+/// this hook exists for a review no deterministic check can make, so the host
+/// answering it is plausibly an agent, and a second offer is a second bill for
+/// one question. The submission check is the only place a refusal can still be
+/// **whole** — the reconciler applies an envelope's commands one at a time and
+/// stops at the first refusal, so a reviewer consulted there would be answering
+/// about edits that are already committed. And it is the one door: every
+/// envelope carrying commands reaches the durable queue through this check, so
+/// once here is once per envelope rather than once per path.
+// llmlint: ignore-block[invalid_states_unrepresentable] the reviewer stays the
+// `Option<&str>` `offer_to_validator` takes beside it, and for the same reason: what a
+// launch record holds is a `String`, and *blank means this launch names none* is a rule of
+// the rungs rather than a state to be made unrepresentable — `driver::start` applies it
+// once for all three, `LaunchConfig::load` refuses a blank key outright, and this filter is
+// the last of the three rather than a reinterpretation of a value that got past them.
+pub(crate) fn offer_envelope_to_reviewer(
+    reviewer: Option<&str>,
+    commands: &[Command],
+    edited: &Graph,
+    launched_with: Option<&crate::plan::Plan>,
+) -> Result<()> {
+    let Some(reviewer) = reviewer.filter(|command| !command.trim().is_empty()) else {
+        return Ok(());
+    };
+    // The launching plan's own fields, for the two a graph does not carry. A run
+    // whose ledger has no plan — one launched before that was recorded — still
+    // gets a review of its edited graph, with the goal stated as absent rather
+    // than invented.
+    let source = launched_with.cloned().unwrap_or_else(|| crate::plan::Plan {
+        schema_version: crate::plan::PLAN_SCHEMA_VERSION,
+        goal: None,
+        name: None,
+        concurrency: edited.concurrency,
+        tasks: Vec::new(),
+    });
+    let under_review = EnvelopeUnderReview {
+        goal: source.goal.as_ref().map(|goal| goal.text.as_str()),
+        changes: commands
+            .iter()
+            .filter_map(|command| {
+                node_the_command_changes(command, edited).map(|node| ChangedNode {
+                    op: crate::channel::op_of(command),
+                    node,
+                })
+            })
+            .collect(),
+        plan: edited.to_plan(&source),
+    };
+    let document = serde_json::to_string(&under_review)
+        .map_err(|e| refuse(format!("this envelope does not serialize: {e}")))?;
+    let answer = ask_hook(reviewer, &document).map_err(|failure| match failure {
+        HookFailure::NotStarted(e) => refuse(format!(
+            "the envelope reviewer '{reviewer}' this run was launched with could not be \
+             started ({e}), so this envelope was reviewed by nothing and none of its edits \
+             were applied"
+        )),
+        HookFailure::NotCollected(e) => refuse(format!(
+            "the envelope reviewer '{reviewer}' did not answer ({e}), so none of this \
+             envelope's edits were applied"
+        )),
+    })?;
+    if answer.status.success() {
+        return Ok(());
+    }
+    // What the reviewer declared it objected to, held against the names this
+    // envelope actually carries — the same set `carried` prints below, so a node
+    // the refusal points at is one a reader finds again in the list beside it.
+    let said = String::from_utf8_lossy(&answer.stderr);
+    let objection = Objection::read(&said);
+    let envelope_named: BTreeSet<String> = commands
+        .iter()
+        .filter_map(crate::channel::target_of)
+        .collect();
+    Err(refuse(format!(
+        "the envelope reviewer refused this envelope{}, so none of its edits were applied — \
+         it carried {}: {}",
+        objection.against(&envelope_named),
+        carried(commands),
+        answer.reason_from(&objection.said)
+    )))
+}
+// llmlint: ignore-end[invalid_states_unrepresentable]
+
+/// What the envelope held, as its refusal names it: every op in it with the node
+/// that op is about.
+///
+/// Not what crossed the reviewer's stdin, which is a narrower thing:
+/// [`EnvelopeUnderReview`] lists only the nodes the envelope changes, and a
+/// `drop` or a `cancel` reaches the reviewer as the plan it leaves behind rather
+/// than as an op of its own. Every op is named here anyway, because a refusal is
+/// read by somebody looking for what to change and an envelope's `drop` is as
+/// much a reason to refuse it as its `add` is.
+fn carried(commands: &[Command]) -> String {
+    commands
+        .iter()
+        .map(|command| {
+            let op = crate::channel::op_of(command);
+            match crate::channel::target_of(command) {
+                Some(id) => format!("{op} '{id}'"),
+                None => op.to_string(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The line prefix a reviewer names the node it objected to on.
+///
+/// The refusal has to say *which* node, and only the reviewer can: it read the
+/// whole envelope and the objection is its own reasoning. So it declares the
+/// node on a line of its stderr reading `objection: cover` — one line per node,
+/// matched case-insensitively, anywhere in what it says, and repeatable for an
+/// objection that is about a seam between two of them.
+///
+/// A prefix on the stream a hook already has, rather than a second channel: this
+/// crate's half of the answer is an exit status and prose, its stdout is not
+/// available — `reply`'s own stdout is a parsed verdict — and a JSON answer
+/// would make every host's reviewer a serializer to say one node's name. A hook
+/// that declares nothing is not refused for it either; it is reported as having
+/// declared nothing, which is what the shell scripts written against this hook
+/// before the line existed do.
+const OBJECTION_PREFIX: &str = "objection:";
+
+/// What a reviewer declared it objected to, lifted out of what it said.
+#[derive(Debug)]
+struct Objection {
+    /// The names it declared, in the order it declared them and none twice.
+    /// Empty for a reviewer that declared none, which is a fact about the
+    /// refusal rather than a reason to invent one.
+    named: Vec<String>,
+    /// Everything else it said: its own sentence, with the declarations taken
+    /// out so a refusal does not read the same name back in front of it.
+    said: String,
+}
+
+impl Objection {
+    /// Read one reviewer's declarations out of its stderr.
+    fn read(stderr: &str) -> Self {
+        let mut named: Vec<String> = Vec::new();
+        let mut said: Vec<&str> = Vec::new();
+        for line in stderr.lines() {
+            let trimmed = line.trim();
+            let declared = trimmed
+                .get(..OBJECTION_PREFIX.len())
+                .filter(|start| start.eq_ignore_ascii_case(OBJECTION_PREFIX))
+                .map(|_| &trimmed[OBJECTION_PREFIX.len()..]);
+            let Some(declared) = declared else {
+                said.push(line);
+                continue;
+            };
+            // A declaration is external input on its way to a terminal, a
+            // planner's queue, and the journal, so it is control-stripped where
+            // the reviewer's prose beside it is. One that names nothing declares
+            // nothing — it is still lifted out of the prose, and a reviewer
+            // whose every declaration was blank named no node, which the refusal
+            // says outright rather than pointing at an empty name.
+            let name = crate::views::one_line(declared).trim().to_string();
+            if !name.is_empty() && !named.contains(&name) {
+                named.push(name);
+            }
+        }
+        Self {
+            named,
+            said: said.join("\n"),
+        }
+    }
+
+    /// How a refusal names what the reviewer objected to, against the names the
+    /// envelope put in front of it.
+    ///
+    /// Three different facts, and a reader acts differently on each: a node this
+    /// envelope changes is one to go and fix, a name it does not carry is a
+    /// reviewer pointing somewhere else — at a node already in the plan, or at
+    /// nothing — and no declaration at all is a refusal whose target is simply
+    /// unstated. Reporting the first for the third by listing every node the
+    /// envelope carried is the failure this whole line exists to end.
+    fn against(&self, envelope_named: &BTreeSet<String>) -> String {
+        let (changed, elsewhere): (Vec<&String>, Vec<&String>) = self
+            .named
+            .iter()
+            .partition(|name| envelope_named.contains(*name));
+        let unknown = |names| {
+            listed("the name", names)
+                .map(|named| format!("{named}, which no node this envelope changes goes by"))
+        };
+        match (listed("node", &changed), unknown(&elsewhere)) {
+            (Some(changed), Some(elsewhere)) => format!(" over {changed}, and over {elsewhere}"),
+            (Some(changed), None) => format!(" over {changed}"),
+            (None, Some(elsewhere)) => format!(" over {elsewhere}"),
+            (None, None) => " without declaring the node it objected to".to_string(),
+        }
+    }
+}
+
+/// One list of names as a refusal says it — `node 'a'`, `nodes 'a', 'b'` — and
+/// `None` for no names at all, which is a clause the sentence leaves out rather
+/// than an empty one it keeps.
+fn listed(noun: &str, names: &[&String]) -> Option<String> {
+    let (first, rest) = names.split_first()?;
+    let plural = match rest.is_empty() {
+        true => String::new(),
+        false => "s".to_string(),
+    };
+    let quoted = std::iter::once(first)
+        .chain(rest)
+        .map(|name| format!("'{name}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!("{noun}{plural} {quoted}"))
 }
 
 fn compile_into(
@@ -2053,7 +2416,7 @@ mod tests {
             "a validator wrote control characters into a refusal: {refusal:?}"
         );
         assert!(
-            refusal.len() <= MAX_VALIDATOR_STDERR as usize + 200,
+            refusal.len() <= MAX_HOOK_STDERR as usize + 200,
             "an unbounded validator wrote {} bytes into a refusal",
             refusal.len()
         );
@@ -2141,6 +2504,282 @@ mod tests {
             "{refusal}"
         );
         assert_eq!(graph, before, "an unchecked node reached the graph");
+    }
+
+    /// The whole envelope reaches the reviewer as one document: every node it
+    /// introduces or changes with the op that produced it, the plan they are
+    /// being edited into, and the run's goal.
+    ///
+    /// The document is what this hook exists for — a per-node check cannot see
+    /// two added nodes that duplicate each other, the edges between them, or
+    /// whether the edited graph still delivers the goal — so what crosses the
+    /// stdin is asserted rather than assumed.
+    #[test]
+    #[cfg(unix)]
+    fn the_reviewer_is_handed_every_changed_node_the_edited_plan_and_the_goal() {
+        let dir = scratch("reviewed");
+        let seen = dir.join("envelope.json");
+        let reviewer = validator(
+            &dir,
+            "review.sh",
+            &format!("cat > {}\nexit 0\n", seen.display()),
+        );
+        let launched_with = Plan {
+            schema_version: PLAN_SCHEMA_VERSION,
+            goal: Some(crate::plan::Goal {
+                text: "ship the coverage floor".into(),
+            }),
+            name: Some("cover".into()),
+            concurrency: 4,
+            tasks: vec![agent("build", &[])],
+        };
+        let mut graph = Graph::from_plan(&launched_with);
+        let commands = vec![
+            Command::Add {
+                node: agent("fresh", &["build"]),
+            },
+            Command::Amend {
+                id: "build".into(),
+                text: "the ruling".into(),
+            },
+            // Changes the plan without changing any node's definition, so it is
+            // the plan below rather than a change of its own.
+            Command::Cancel { id: "fresh".into() },
+        ];
+        for command in &commands {
+            compile(&mut graph, &Frontier::default(), command).expect("each command compiles");
+        }
+        offer_envelope_to_reviewer(Some(&reviewer), &commands, &graph, Some(&launched_with))
+            .expect("the reviewer accepted the envelope");
+
+        let document: Value = serde_json::from_str(
+            &std::fs::read_to_string(&seen).expect("the reviewer was handed a document"),
+        )
+        .expect("it is JSON");
+        assert_eq!(
+            document["goal"],
+            serde_json::json!("ship the coverage floor")
+        );
+        assert_eq!(
+            document["changes"]
+                .as_array()
+                .expect("the changes are a list")
+                .iter()
+                .map(|change| (
+                    change["op"].as_str().expect("an op").to_string(),
+                    change["node"]["id"].as_str().expect("a node").to_string()
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("add".to_string(), "fresh".to_string()),
+                ("amend".to_string(), "build".to_string())
+            ],
+            "{document}"
+        );
+        // The whole node, not a summary of it: the prose is what a plan-quality
+        // review reads.
+        assert_eq!(
+            document["changes"][0]["node"]["deps"],
+            serde_json::json!(["build"])
+        );
+        assert_eq!(
+            document["changes"][1]["node"]["amendment"],
+            serde_json::json!("the ruling")
+        );
+        // And the plan as this envelope leaves it, carrying the launch's own
+        // fields, so the reviewer sees the graph the run would converge on.
+        assert_eq!(document["plan"]["name"], serde_json::json!("cover"));
+        assert_eq!(
+            document["plan"]["tasks"]
+                .as_array()
+                .expect("the plan carries its tasks")
+                .iter()
+                .map(|task| task["id"].as_str().expect("an id").to_string())
+                .collect::<Vec<_>>(),
+            vec!["build".to_string(), "fresh".to_string()],
+            "{document}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A reviewer that refuses turns the whole envelope away, in its own words,
+    /// naming both the node it objected to and everything the envelope carried.
+    #[test]
+    #[cfg(unix)]
+    fn a_refused_envelope_carries_the_reviewers_words_and_names_what_it_objected_to() {
+        let dir = scratch("reviewer-refuses");
+        let objection = "it repeats the contract seam node 'build' already owns";
+        let reviewer = validator(
+            &dir,
+            "refuse.sh",
+            &format!(
+                "cat > /dev/null\nprintf '%s\\n%s\\n' \"{OBJECTION_PREFIX} fresh\" \
+                 \"{objection}\" >&2\nexit 1\n"
+            ),
+        );
+        let commands = vec![
+            Command::Add {
+                node: agent("fresh", &[]),
+            },
+            Command::Drop {
+                id: "build".into(),
+                dependents: Dependents::Detach,
+            },
+        ];
+        let graph = graph_of(vec![agent("fresh", &[])]);
+        let refusal = offer_envelope_to_reviewer(Some(&reviewer), &commands, &graph, None)
+            .expect_err("the reviewer refused the envelope")
+            .to_string();
+        assert!(
+            refusal.contains(objection),
+            "the words were lost: {refusal}"
+        );
+        assert!(
+            refusal.contains("none of its edits were applied"),
+            "{refusal}"
+        );
+        // The node it objected to, told apart from the other node the same
+        // envelope carried: an envelope is no longer one command, so a reason
+        // nobody can locate is one nobody can act on.
+        assert!(
+            refusal.contains("refused this envelope over node 'fresh',"),
+            "{refusal}"
+        );
+        // And every op the envelope carried beside it, which is not the same
+        // set as the one the reviewer turned down.
+        assert!(
+            refusal.contains("add 'fresh'") && refusal.contains("drop 'build'"),
+            "{refusal}"
+        );
+        // The declaration is lifted out of the sentence rather than read back
+        // into it.
+        assert!(!refusal.contains(OBJECTION_PREFIX), "{refusal}");
+
+        // A reviewer that says nothing is still an answer that has to be acted
+        // on, so the status is reported rather than a blank reason.
+        let silent = validator(&dir, "silent.sh", "cat > /dev/null\nexit 4\n");
+        let said = offer_envelope_to_reviewer(Some(&silent), &commands, &graph, None)
+            .expect_err("it refused")
+            .to_string();
+        assert!(said.contains("exited 4"), "{said}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// What a refusal says about the node the reviewer objected to, in every
+    /// shape a reviewer can leave that question in.
+    ///
+    /// The three are different facts and a reader acts differently on each: a
+    /// node this envelope changes is one to go and fix, a name it does not carry
+    /// is the reviewer pointing somewhere else, and no declaration at all is a
+    /// refusal whose target is unstated. Falling back to listing every node the
+    /// envelope carried would tell a reader the first when the truth is the
+    /// third, which is the failure the declaration exists to end.
+    #[test]
+    #[cfg(unix)]
+    fn a_refusal_tells_a_declared_node_from_a_stray_name_and_from_no_declaration() {
+        let dir = scratch("reviewer-objections");
+        let commands = vec![
+            Command::Add {
+                node: agent("fresh", &[]),
+            },
+            Command::Drop {
+                id: "build".into(),
+                dependents: Dependents::Detach,
+            },
+        ];
+        let graph = graph_of(vec![agent("fresh", &[])]);
+        for (which, declares, expected) in [
+            (
+                "nothing at all",
+                vec![],
+                "without declaring the node it objected to",
+            ),
+            (
+                "only a blank declaration",
+                vec![OBJECTION_PREFIX.to_string()],
+                "without declaring the node it objected to",
+            ),
+            (
+                "one node the envelope changes",
+                vec![format!("{OBJECTION_PREFIX} fresh")],
+                "over node 'fresh',",
+            ),
+            (
+                // Declared as the reviewer wrote it: the prefix is matched
+                // case-insensitively and the name is trimmed, because a host's
+                // reviewer writes a sentence rather than a wire format.
+                "two of them, its own way",
+                vec![
+                    "  Objection:   build  ".to_string(),
+                    format!("{OBJECTION_PREFIX} fresh"),
+                ],
+                "over nodes 'build', 'fresh',",
+            ),
+            (
+                "a name the envelope does not carry",
+                vec![format!("{OBJECTION_PREFIX} ghost")],
+                "over the name 'ghost', which no node this envelope changes goes by",
+            ),
+            (
+                "one of each",
+                vec![
+                    format!("{OBJECTION_PREFIX} fresh"),
+                    format!("{OBJECTION_PREFIX} ghost"),
+                ],
+                "over node 'fresh', and over the name 'ghost', which no node this envelope \
+                 changes goes by",
+            ),
+        ] {
+            let lines = declares
+                .iter()
+                .map(|line| format!("printf '%s\\n' \"{line}\" >&2\n"))
+                .collect::<String>();
+            let reviewer = validator(
+                &dir,
+                &format!("refuse-{}.sh", which.replace(' ', "-")),
+                &format!("cat > /dev/null\n{lines}printf 'the seam is wrong\\n' >&2\nexit 1\n"),
+            );
+            let refusal = offer_envelope_to_reviewer(Some(&reviewer), &commands, &graph, None)
+                .expect_err("the reviewer refused the envelope")
+                .to_string();
+            assert!(
+                refusal.contains(expected),
+                "a reviewer declaring {which} was reported as {refusal}"
+            );
+            // Its own sentence survives every shape of declaration, and no
+            // declaration is read back into it.
+            assert!(refusal.contains("the seam is wrong"), "{refusal}");
+            assert!(
+                !refusal.to_lowercase().contains(OBJECTION_PREFIX),
+                "{refusal}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A launch that named no reviewer is exactly the launch it was before this
+    /// hook existed, and one whose reviewer cannot be started refuses the
+    /// envelope rather than letting it through unreviewed.
+    #[test]
+    fn no_reviewer_changes_nothing_and_an_unstartable_one_fails_closed() {
+        let commands = vec![Command::Add {
+            node: agent("fresh", &[]),
+        }];
+        let graph = graph_of(vec![agent("fresh", &[])]);
+        for named in [None, Some("   ")] {
+            offer_envelope_to_reviewer(named, &commands, &graph, None)
+                .expect("a launch that named no reviewer commits the envelope as it always did");
+        }
+
+        let missing = std::env::temp_dir().join("onepipeline-no-such-envelope-reviewer");
+        let refusal =
+            offer_envelope_to_reviewer(Some(&missing.to_string_lossy()), &commands, &graph, None)
+                .expect_err("a reviewer that cannot be started refuses the envelope")
+                .to_string();
+        assert!(
+            refusal.contains("could not be started") && refusal.contains("reviewed by nothing"),
+            "{refusal}"
+        );
     }
 
     #[test]
