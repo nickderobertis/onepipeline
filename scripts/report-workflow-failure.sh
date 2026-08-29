@@ -49,6 +49,15 @@ case "$TITLE" in
     ;;
 esac
 
+# RUN_URL is optional, and it is the one input that becomes a link somebody will
+# click out of the issue. Refused unless it is an http(s) URL, rather than pasted
+# in as whatever arrived.
+if [ -n "${RUN_URL:-}" ] && ! [[ "$RUN_URL" =~ ^https?://[^[:space:]]+$ ]]; then
+  echo "report-workflow-failure: \$RUN_URL is \"$RUN_URL\", which is not an http(s) URL" >&2
+  echo "  ACTION: pass the failed run's own URL — in CI '\${{ github.server_url }}/\${{ github.repository }}/actions/runs/\${{ github.run_id }}' — or leave it unset. Nothing has been filed." >&2
+  exit 2
+fi
+
 # One place every `gh` failure is answered, because the causes that can
 # plausibly happen here need different answers and the exit code tells them
 # apart in none of them — only what `gh` wrote does. What it wrote is printed

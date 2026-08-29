@@ -181,6 +181,15 @@ describe("the reporter files a workflow_run failure", () => {
     assert.match(run.said, /Nothing has been filed/, run.said);
   });
 
+  it("refuses a RUN_URL that is not an http(s) URL rather than pasting it into the issue", () => {
+    const run = report({ env: { RUN_URL: "javascript:alert(1)" } });
+
+    assert.equal(run.status, 2, run.said);
+    assert.ok(!called(run, "issue "), `a link nobody should click is refused first:\n${run.said}`);
+    assert.match(run.said, /RUN_URL/, run.said);
+    assert.match(run.said, /Nothing has been filed/, run.said);
+  });
+
   it("refuses a REPO that is not an owner/name repository", () => {
     const run = report({ env: { REPO: "https://github.com/owner/repo" } });
 
@@ -270,6 +279,20 @@ describe("the workflow the reporter answers for", () => {
       !/^\s*(schedule:|- cron:)/m.test(workflow),
       "a cron survived the move, so the sweep this replaced is still running",
     );
+  });
+
+  it("binds every input the reporter declares it requires", () => {
+    // The workflow step restates that contract in YAML. Read the declaration out
+    // of the reporter — one list, in the file that answers for it — so an input
+    // added there and nowhere else fails here rather than at the one moment the
+    // reporter is needed.
+    const declared = readFileSync(REPORTER, "utf8").match(/^for required in (.+); do$/m)?.[1];
+    assert.ok(declared, "the reporter no longer declares its required inputs in one place");
+
+    const job = workflow.slice(workflow.indexOf("\n  report:"));
+    for (const name of declared.split(/\s+/)) {
+      assert.match(job, new RegExp(`^ +${name}:`, "m"), `the reporting job never sets ${name}`);
+    }
   });
 
   it("reports a failure from a checkout, with permission to write the issue", () => {
