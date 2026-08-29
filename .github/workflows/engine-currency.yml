@@ -3,30 +3,37 @@ name: Engine currency
 # Whether `Cargo.lock` still resolves the sibling engines `Cargo.toml` already
 # permits.
 #
-# No pull request can ask this: the answer changes when the *registry* moves and
-# not when this tree does. Hence a schedule — and hence no branch protection, so
-# that a release nobody here made cannot redden an unrelated pull request. A red
-# run is one `cargo update -p <spec>` and a commit; `just engines-current` prints
-# the spec and says where to record a floor if the gap holds one.
+# The answer changes when the *registry* moves and not when this tree does, so
+# this runs on a pull request that can have had nothing to do with the drift it
+# finds. That is deliberate, and it buys the thing a clock could not: on
+# 2026-08-24 a weekly run reported drift that was then found and relinked by hand
+# four days later, because nothing red was ever in front of anybody. Asked at
+# every push, drift is found at the next change instead of within a week.
+#
+# **A red run here does not block the pull request it appeared on.** No branch
+# protection requires this check — that is the same reason it once had a schedule,
+# and it survives the move intact: a release nobody here made must not stop an
+# unrelated change from merging. What closes a red run is one
+# `cargo update -p <spec>` and a commit, on any branch; `just engines-current`
+# prints the spec and says where to record a floor if the gap holds one.
 #
 # llmlint: ignore-file[changed_behavior_has_e2e] the subject of this workflow is the
-# schedule and the crates.io index — neither of which a test can stand in for without
-# the stand-in becoming what is under test. Everything it drives is proven locally and
-# offline: `tests/linked_engines.rs` runs the same script this calls through the same
-# recipe's entry point, against a lock that is current and a lock that is behind.
+# crates.io index, which a test cannot stand in for without the stand-in becoming what
+# is under test. Everything it drives is proven locally and offline:
+# `tests/linked_engines.rs` runs the same script this calls through the same recipe's
+# entry point, against a lock that is current and a lock that is behind.
 
 on:
-  schedule:
-    # Mondays, 08:00 UTC — a working-week morning, so a red run is seen, and an
-    # hour after `published-smoke.yml` so the two do not report at once.
-    - cron: "0 8 * * 1"
+  pull_request:
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: engine-currency
+  group: engine-currency-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:

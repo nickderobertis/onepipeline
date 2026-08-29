@@ -234,7 +234,7 @@ index_path() {
 # otherwise. It is checked against `json.loads` over all five engines' real index
 # files, and the shapes it refuses are driven in `tests/linked_engines.rs`. The
 # library the rule asks for does not exist in bash — the language this has to be
-# in, because a weekly workflow and a release job both reach it through a recipe
+# in, because a per-change workflow and a release job both reach it through a recipe
 # — and shelling out to one adds an interpreter to a release job whose whole
 # purpose is to be reachable without a build.
 index_versions() {
@@ -246,7 +246,7 @@ index_versions() {
       # A registry read is the one part of this that fails for reasons having
       # nothing to do with the lock, so it is retried — and curl's own diagnosis
       # is held here rather than left on stderr, because an attempt a later one
-      # recovers from is not something a weekly job should report.
+      # recovers from is not something this check should report.
       errors="$(mktemp)"
       for attempt in 1 2 3; do
         if body="$(curl -fsSL "$index/$path" 2>"$errors")"; then break; fi
