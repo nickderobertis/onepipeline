@@ -524,10 +524,15 @@ impl World {
         self.store_pages::<StoreQualified<StoreTask>>(&["task", "list", "--project", project])
     }
 
-    /// Read this world's project back through the real onetaskgraph binary.
-    pub fn store_project(&self, project: &str) -> Value {
-        let output = std::process::Command::new(onetaskgraph_binary())
-            .args(["project", "show", project, "--json"])
+    /// The real onetaskgraph binary, wired to the sources this world configures.
+    ///
+    /// The same declaration [`World::cmd`] hands the binary under test, plus whatever
+    /// [`World::with_env`] added — so a journey that configured a second source reads and
+    /// writes through it here exactly as the run does.
+    pub fn store_cmd(&self, args: &[&str]) -> Command {
+        let mut command = Command::new(onetaskgraph_binary());
+        command
+            .args(args)
             .env("XDG_CONFIG_HOME", self.root.join("xdg"))
             .env("ONETASKGRAPH_DEFAULT_SOURCES", STORE_SOURCE)
             .env(
@@ -544,6 +549,24 @@ impl World {
                 ),
                 self.store(),
             )
+            // Only what onetaskgraph's own settings layer reads, and last, so a journey
+            // that declared a second source reads through it here. `ONETASKGRAPH_BIN` is
+            // deliberately not forwarded: it is *onepipeline*'s key for naming this
+            // executable, which is already resolved above, and onetaskgraph would refuse
+            // it by name as a setting it has never heard of.
+            .envs(
+                self.environment
+                    .iter()
+                    .filter(|(key, _)| key.starts_with("ONETASKGRAPH_") && key != STORE_BINARY_ENV)
+                    .map(|(k, v)| (k, v)),
+            );
+        command
+    }
+
+    /// Read this world's project back through the real onetaskgraph binary.
+    pub fn store_project(&self, project: &str) -> Value {
+        let output = self
+            .store_cmd(&["project", "show", project, "--json"])
             .output()
             .expect("the real onetaskgraph reads the project");
         assert!(
@@ -554,6 +577,27 @@ impl World {
         let response: StoreResponse<StoreQualified<StoreProject>> =
             serde_json::from_slice(&output.stdout).expect("project show returns schema-valid JSON");
         json!({"items": response.items, "next": response.next})
+    }
+
+    /// The labels this world's project holds on each of its tasks, by node id.
+    ///
+    /// Keyed by `onepipeline.id` rather than by the store's own task id, because the
+    /// question a journey asks is whether the label a person put on *this node's* issue
+    /// survived a projection — and a projection is free to have written the task under a
+    /// different store id than the one it was authored at.
+    pub fn store_task_labels(&self, project: &str) -> BTreeMap<String, Value> {
+        self.store_tasks(project)
+            .into_iter()
+            .map(|task| {
+                (
+                    task["item"]["metadata"]["onepipeline.id"]
+                        .as_str()
+                        .expect("a projected task names its node")
+                        .to_owned(),
+                    task["item"]["labels"].clone(),
+                )
+            })
+            .collect()
     }
 
     /// Read one projected task's dependency edges through onetaskgraph.
@@ -574,24 +618,9 @@ impl World {
             if let Some(token) = &page {
                 args.extend(["--page".to_owned(), token.clone()]);
             }
-            let output = std::process::Command::new(onetaskgraph_binary())
-                .args(&args)
-                .env("XDG_CONFIG_HOME", self.root.join("xdg"))
-                .env("ONETASKGRAPH_DEFAULT_SOURCES", STORE_SOURCE)
-                .env(
-                    format!(
-                        "ONETASKGRAPH_SOURCES__{}__PLUGIN",
-                        STORE_SOURCE.to_uppercase()
-                    ),
-                    "local-md",
-                )
-                .env(
-                    format!(
-                        "ONETASKGRAPH_SOURCES__{}__CONFIG__ROOT",
-                        STORE_SOURCE.to_uppercase()
-                    ),
-                    self.store(),
-                )
+            let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+            let output = self
+                .store_cmd(&borrowed)
                 .output()
                 .expect("the real onetaskgraph reads a store page");
             assert!(
@@ -2675,6 +2704,36 @@ pub fn onetaskgraph_binary() -> PathBuf {
                     named.display()
                 ),
             }
+        })
+        .clone()
+}
+
+/// The **real** `onetaskgraph-source` program: the shipped host that serves any plugin of
+/// that build over the stdio plugin protocol.
+///
+/// Installed beside `onetaskgraph` by the same `cargo install` that `just bootstrap` runs,
+/// so it is resolved beside the binary this suite already found rather than provisioned a
+/// second time. A host without one **fails**, naming what to run, for the same reason
+/// [`onetaskgraph_binary`] does: it reads a folder of Markdown, with no network and no
+/// account, and a skip would be a pass nobody earned.
+pub fn onetaskgraph_source_binary() -> PathBuf {
+    static FOUND: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    FOUND
+        .get_or_init(|| {
+            let store = onetaskgraph_binary();
+            let beside = store.parent().and_then(|directory| {
+                ["onetaskgraph-source", "onetaskgraph-source.exe"]
+                    .into_iter()
+                    .map(|file| directory.join(file))
+                    .find(|candidate| candidate.is_file())
+            });
+            let named = beside.or_else(|| on_path("onetaskgraph-source"));
+            named.unwrap_or_else(|| {
+                panic!(
+                    "a label-strict destination is served by the real onetaskgraph-source,                      which is installed beside {} — run `just bootstrap`",
+                    store.display()
+                )
+            })
         })
         .clone()
 }

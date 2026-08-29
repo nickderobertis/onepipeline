@@ -448,6 +448,132 @@ fn a_settled_run_refuses_a_reply_nothing_will_ever_read() {
         .err_has("has settled");
 }
 
+/// The same refusal for a settled run whose driver **reads as alive**, because
+/// the refusal is a fact about the run and not about a process.
+///
+/// The journey above waits for the driver to exit, so the guard could be asked
+/// of the liveness verdict and still pass it. That verdict is a different
+/// question with a different answer at the same instant, and asking it delivered
+/// replies into settled runs.
+///
+/// This one holds that window open without racing anything, in the state the
+/// verdict is *designed* to give the benefit of the doubt to: a run driven from
+/// **another host**. A pid means nothing across machines, so this host will not
+/// call that driver dead however long ago it went — and the run has still
+/// settled, which its own `SETTLED` row already said.
+#[test]
+fn a_settled_run_refuses_a_reply_however_alive_its_driver_still_looks() {
+    const ELSEWHERE: &str = "a-host-this-is-not";
+    let world = World::new("channel-settled-elsewhere");
+    let path = world.plan("afar", &plan_of("afar", vec![agent("build", &[])]));
+    let mut launch = world.cmd(&["start", &path, "--attach"]);
+    launch.env("HOSTNAME", ELSEWHERE);
+    world
+        .run_on(launch, "start recorded on another host")
+        .exited(0);
+    assert!(
+        world.run_file("afar", "result.json").is_file(),
+        "the run never wrote its result: {:?}",
+        world.kinds("afar")
+    );
+
+    // What this host makes of that driver, which is the reading the refusal used
+    // to be decided by: nothing here can say it is gone.
+    world.run(&["status", "afar"]).exited(0).out_has("SETTLED");
+
+    world
+        .run_with_stdin(&["reply", "afar"], r#"{"completion":true,"reason":"done"}"#)
+        .exited(REFUSED)
+        .err_has("has settled");
+
+    // And nothing was queued for it, which is the half a `delivered` receipt was
+    // read as: no verdict on the durable queue, and nothing recorded that a
+    // planner replied.
+    assert!(
+        !world.run_file("afar", "channel/replies.jsonl").exists(),
+        "a reply nothing will ever read was queued anyway"
+    );
+    assert!(
+        world.events_of("afar", "planner-replied").is_empty(),
+        "the run recorded a reply it refused: {:?}",
+        world.kinds("afar")
+    );
+}
+
+/// A run still awaiting an answer takes a reply, whatever its driver is doing
+/// and whatever its graph has done.
+///
+/// The other side of the refusal above, and the reason it cannot simply be "this
+/// run has finished": a blocking surface is the run *asking* for the reply, and
+/// every node here has settled while the question about the run as a whole has
+/// not. Its driver is gone — this is `unattended`, the state a run is left in
+/// when the last node fails — so a guard reading either the graph or the process
+/// would refuse the one reply somebody is waiting on.
+#[test]
+fn a_run_awaiting_an_answer_takes_a_reply_though_its_graph_has_settled() {
+    use std::io::{BufRead, BufReader, Write};
+
+    let world = World::new("channel-settled-awaiting");
+    // The one node fails, so the graph converges with nothing ready and nothing
+    // waiting on a person: settled by every reading except the question below.
+    world.script("build.fail", "1");
+    let path = world.plan("asked", &plan_of("asked", vec![agent("build", &[])]));
+    world
+        .run(&["start", &path, "--attach"])
+        .exited(NOTHING_DRIVING)
+        .out_has("\"settlement\":\"unattended\"");
+    assert!(
+        world.run_file("asked", "result.json").is_file(),
+        "the run never wrote its result: {:?}",
+        world.kinds("asked")
+    );
+
+    // A blocking question about the run, raised after all of that.
+    let mut serving = world
+        .cmd(&["channel", "serve", "asked"])
+        .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "120")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the channel server starts");
+    let mut stdin = serving.stdin.take().expect("stdin is piped");
+    writeln!(
+        stdin,
+        r#"{{"kind":"blocker","message":"the last node failed; what now?"}}"#
+    )
+    .expect("the frame is written");
+    stdin.flush().expect("flushed");
+    world.until("the question to reach the planner", |world| {
+        !world
+            .events_of("asked", "planner-surface-queued")
+            .is_empty()
+    });
+    world.run(&["next", "asked"]).exited(0);
+
+    world
+        .run_with_stdin(
+            &["reply", "asked"],
+            r#"{"completion":false,"reason":"supersede it and try again"}"#,
+        )
+        .exited(0)
+        .out_has("\"delivered\"");
+
+    // Delivered means *reached the reader*: the verdict came out of the server
+    // holding the question, which is what a receipt claims and what the settled
+    // run above had none of.
+    let stdout = serving.stdout.take().expect("stdout is piped");
+    let verdict = BufReader::new(stdout)
+        .lines()
+        .map_while(std::result::Result::ok)
+        .find(|line| line.contains("reason"))
+        .expect("the server wrote a verdict");
+    assert!(verdict.contains("supersede it and try again"), "{verdict}");
+
+    drop(stdin);
+    ended(serving);
+}
+
 #[test]
 fn attest_completes_a_ready_waiting_human_action() {
     let world = World::new("channel-attest");

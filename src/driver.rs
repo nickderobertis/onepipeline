@@ -1912,7 +1912,13 @@ fn submit(paths: &RunPaths, envelope: &Reply) -> Result<i32> {
         // A settled run has no reader left, now or later, so queuing a reply to
         // it would park it where nothing drains it. A surface still awaiting an
         // answer outranks that: the run asked for the reply.
-        if channel.pending().is_none() && view.liveness().is_undriven() {
+        //
+        // Decided from the run's **own** settled state and never from the
+        // liveness verdict, which answers a different question: a driver writes
+        // the result, releases the lock, and only then exits, so a settled run
+        // reads as `ACTIVE` until it does — and a run driven from another host
+        // reads that way for good.
+        if channel.pending().is_none() && crate::views::has_settled(&view) {
             return Err(Error::Refused(format!(
                 "run '{}' has settled, so nothing will ever read a reply to it; \
                  no reply was queued",

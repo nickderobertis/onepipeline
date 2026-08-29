@@ -405,7 +405,9 @@ pub struct Settlement {
     /// The producer's own word, carried rather than re-vocabularised here: which
     /// classifications a harness draws is that layer's business, and a mapping in
     /// this one would rename a cause an operator has to look up in the harness's
-    /// own documentation. See [`dispatch_death_cause`].
+    /// own documentation. Taken from the death the producer published where it
+    /// published one — see [`MemberDeath`] — and read out of the failure's own
+    /// sentence where it did not: see [`dispatch_death_cause`].
     pub cause: Option<String>,
     /// The commit the node's branch was left at, when `onevcs` recorded one.
     pub head: Option<String>,
@@ -1787,6 +1789,10 @@ pub(crate) fn drain(
     // because which of them still has a live one is the sibling's answer rather
     // than something to infer here.
     let mut addresses: Vec<TurnAddress> = Vec::new();
+    // What the producer said killed this dispatch, if it said so at all. The
+    // **first** such envelope and not the last: a member that dies takes the run
+    // down with it, so the deaths after the first are the teardown it caused.
+    let mut death: Option<MemberDeath> = None;
     let mut asked_at: Option<Instant> = None;
     let mut killed = false;
     loop {
@@ -1797,6 +1803,9 @@ pub(crate) fn drain(
                     if !addresses.contains(&address) {
                         addresses.push(address);
                     }
+                }
+                if death.is_none() {
+                    death = MemberDeath::of(&envelope);
                 }
                 let _ = tx.send(Message::Event(Box::new(envelope)));
             }
@@ -1860,7 +1869,7 @@ pub(crate) fn drain(
             detail: asked_at.map(|_| stopped_how(killed, grace)),
             ..Settlement::plain(node, NodeStatus::Cancelled, None)
         },
-        Ok(outcome) => failed_task(node, &outcome, session.as_ref()),
+        Ok(outcome) => failed_task(node, &outcome, session.as_ref(), death.as_ref()),
         Err(error) => Settlement {
             detail: Some(error.to_string()),
             ..failed(node, INFRASTRUCTURE_FAILURE)
@@ -2041,6 +2050,64 @@ const MACHINERY: [&str; 3] = ["harness", "provider", "spawn"];
 const CLASSIFIED_IN: [(char, char); 2] = [('(', ')'), ('[', ']')];
 // llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
 
+/// What a producer said killed one of its members, off the `member-died`
+/// envelope it published while the dispatch was running.
+///
+/// The **stated** classification, as against the one [`dispatch_death_cause`]
+/// reads out of a sentence: this is the producer saying which of its members
+/// died and why, and that one is this crate reading standard error for want of
+/// anything better. The reading stays as the degrade path for a producer that
+/// publishes no such event.
+struct MemberDeath {
+    // llmlint: ignore[invalid_states_unrepresentable] a cause is the plain string every
+    // classification in this crate is, for the reason `NodeResult::cause` records: the
+    // word is the harness's and that vocabulary grows there, so what this crate does is
+    // check the value for what it does with it — `is_a_classification`, on both edges it
+    // crosses — and carry it. This is one of those edges, and the value it holds is the
+    // one `Settlement::cause` and the journal payload carry unchanged.
+    /// What killed the member, as its producer classified it: `oneagentgraph`'s
+    /// own `Cause`, carried as the word it was spelled with.
+    cause: String,
+}
+
+impl MemberDeath {
+    /// What a relayed envelope says killed a member, or `None` for an envelope
+    /// that is not one saying so.
+    ///
+    /// The kind is the sibling's own spelling rather than a literal, so a rename
+    /// there is a compile error here. The payload is **not** deserialized through
+    /// that library's `MemberDied`, and deliberately: the producer is a program
+    /// resolved on the `PATH` at dispatch time, so it may be a newer release than
+    /// the one this build links, and that type is `deny_unknown_fields` — a field
+    /// added there would turn every death it publishes into an unreadable payload
+    /// and settle the node `task-failed` again, which is what this exists to
+    /// stop. So the one value a settlement carries is read off the payload and
+    /// bounded by the check every other classification crosses.
+    // llmlint: ignore[changed_behavior_has_e2e] the two arms that answer `None` for an
+    // envelope that *is* a death are not reachable from any producer in this tree: this
+    // crate and `onevcs` publish no `member-died` at all, and `oneagentgraph` writes its
+    // `cause` through a closed enum, so a payload carrying a sentence, a control
+    // character, or no cause at all is a stream something else wrote. Reaching either end
+    // to end would mean hand-writing that envelope, which would prove the fixture, and
+    // dropping them would put another process's JSON on a rendered line unchecked. Held
+    // by this module's unit test, which drives every shape past the real reading. The
+    // arms a producer *does* reach are journeys:
+    // `boundary::a_published_death_decides_the_settlement_ahead_of_the_sentence_the_dispatch_exits_on`
+    // for a death that is read, and every `.died` journey for a producer that publishes
+    // none.
+    fn of(envelope: &Envelope) -> Option<Self> {
+        if envelope.source != crate::event::Source::Agentgraph
+            || envelope.kind.0 != oneagentgraph::event::EventKind::MemberDied.as_str()
+        {
+            return None;
+        }
+        let cause = envelope.payload.get("cause")?.as_str()?;
+        is_a_classification(cause).then(|| Self {
+            cause: cause.to_owned(),
+        })
+    }
+}
+
 /// The classification a dispatch death carries, lifted out of the failure's own
 /// detail — or `None` where that detail is the agent's own verdict on its task.
 ///
@@ -2126,16 +2193,26 @@ pub(crate) fn is_a_classification(word: &str) -> bool {
 /// Three outcomes in one order, and the order is the point. A change request the
 /// session opened wins outright — a reviewer is waiting on it whatever ended the
 /// dispatch that left it, and `task-failed` over an open change sends a planner to
-/// re-run work that is waiting to be read. Failing that, a detail that classifies
-/// itself settles [`DISPATCH_DIED`]; the branch is carried, never consulted, so a
-/// dispatch that died holding finished work and one whose workspace disappeared
+/// re-run work that is waiting to be read. Failing that, a death the producer
+/// **stated** — or, for a producer that stated none, a detail that classifies
+/// itself — settles [`DISPATCH_DIED`]; the branch is carried, never consulted, so
+/// a dispatch that died holding finished work and one whose workspace disappeared
 /// reach the same word.
+///
+/// The two sources of that classification are ranked and not merged, because one
+/// of them is evidence and the other is a reading: a [`MemberDeath`] is the
+/// producer saying which of its members died and why, on the stream this dispatch
+/// published while it ran, and [`dispatch_death_cause`] is this crate reading a
+/// sentence off standard error for want of anything better. So the stated one is
+/// taken wherever there is one, and the reading remains for the producer that
+/// says nothing.
 ///
 /// Every unknown degrades to the plain failure this arm always produced.
 fn failed_task(
     node: &str,
     outcome: &DispatchOutcome,
     session: Option<&onevcs::SessionToken>,
+    death: Option<&MemberDeath>,
 ) -> Settlement {
     let detail = (!outcome.detail.is_empty()).then(|| outcome.detail.clone());
     if let Some(url) = session.and_then(crate::vcs::change_opened_in) {
@@ -2145,7 +2222,8 @@ fn failed_task(
             ..failed(node, TASK_FAILED_CHANGE_OPEN)
         };
     }
-    let Some(cause) = dispatch_death_cause(&outcome.detail) else {
+    let stated = death.map(|death| death.cause.clone());
+    let Some(cause) = stated.or_else(|| dispatch_death_cause(&outcome.detail)) else {
         return Settlement {
             detail,
             ..failed(node, TASK_FAILED)
@@ -2970,6 +3048,75 @@ mod tests {
                 dispatch_death_cause(verdict),
                 None,
                 "{verdict:?} was read as a dispatch that died rather than a task that failed"
+            );
+        }
+    }
+
+    /// A death is read off the producer's own `member-died` and off nothing else.
+    ///
+    /// The end-to-end half is
+    /// `lifecycle::a_dispatch_whose_member_died_is_settled_from_the_classification_its_producer_published`,
+    /// which drives a producer that publishes one. What is held here is the
+    /// **boundary**: a relayed envelope is another process's JSON, and every way
+    /// of it not being a classification this crate will carry is a value no
+    /// producer in this tree emits — `oneagentgraph` writes its `cause` through a
+    /// closed enum, so a payload carrying a sentence, a control character, or no
+    /// cause at all can only come from something else on the stream.
+    #[test]
+    fn a_death_is_read_from_the_producers_own_event_and_not_from_anything_beside_it() {
+        let died = |source, kind: &str, cause| Envelope {
+            v: crate::event::ENVELOPE_VERSION,
+            ts: "2026-08-29T00:00:00.000Z".into(),
+            stream: "oneagentgraph-1".into(),
+            seq: 0,
+            source,
+            kind: crate::event::EventKind(kind.into()),
+            phase: None,
+            labels: Labels::default(),
+            payload: match cause {
+                Some(cause) => serde_json::json!({"rule": "provider-failure", "cause": cause})
+                    .as_object()
+                    .cloned()
+                    .expect("a payload is an object"),
+                None => serde_json::Map::new(),
+            },
+            artifacts: Vec::new(),
+        };
+        use crate::event::Source;
+        let member_died = oneagentgraph::event::EventKind::MemberDied.as_str();
+
+        assert_eq!(
+            MemberDeath::of(&died(
+                Source::Agentgraph,
+                member_died,
+                Some(serde_json::json!("quota"))
+            ))
+            .map(|death| death.cause),
+            Some("quota".to_owned())
+        );
+        for beside in [
+            // This crate's own kinds and `onevcs`'s are relayed onto the same
+            // store; only the producer that supervises members publishes a death.
+            died(Source::Pipeline, member_died, Some(json!("quota"))),
+            died(Source::Vcs, member_died, Some(json!("quota"))),
+            // A kind that is not a death, however it is labelled.
+            died(Source::Agentgraph, "member-settled", Some(json!("quota"))),
+            // A death this build cannot take a classification from. Each of these
+            // settles the node the way it settled before any of this existed.
+            died(Source::Agentgraph, member_died, None),
+            died(Source::Agentgraph, member_died, Some(json!(""))),
+            died(Source::Agentgraph, member_died, Some(json!("rate limited"))),
+            died(Source::Agentgraph, member_died, Some(json!("quota\n"))),
+            died(Source::Agentgraph, member_died, Some(json!(3))),
+            died(
+                Source::Agentgraph,
+                member_died,
+                Some(json!("q".repeat(CLASSIFICATION_LIMIT + 1))),
+            ),
+        ] {
+            assert!(
+                MemberDeath::of(&beside).is_none(),
+                "{beside:?} was read as a member this producer said had died"
             );
         }
     }

@@ -300,7 +300,7 @@ onevcs-testing = "0.4.17"
 
 [package]
 name = "onepipeline"
-version = "0.17.1"
+version = "0.17.2"
 edition = "2021"
 rust-version = "1.88"
 description = "Execute a task DAG over oneagentgraph and onevcs, merging their event streams into one."

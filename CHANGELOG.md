@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.2](https://github.com/nickderobertis/onepipeline/compare/v0.17.1...v0.17.2) - 2026-08-29
+
+### Fixed
+
+- *(writeback)* own what the plan declares and preserve what it does not ([#149](https://github.com/nickderobertis/onepipeline/pull/149))
+
 ## [0.17.1](https://github.com/nickderobertis/onepipeline/compare/v0.17.0...v0.17.1) - 2026-08-28
 
 ### Fixed

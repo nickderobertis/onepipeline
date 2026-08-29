@@ -3670,6 +3670,12 @@ fn a_dispatch_that_failed_after_opening_a_change_settles_carrying_that_change() 
 /// the settlement at all and the review nobody knows about waits; reported as the
 /// outcome that carries it, the classification is still on the detail for anyone
 /// who wants it.
+///
+/// The producer here says it both ways, as the real one does: the death on its
+/// own stream, which is what the settlement is classified from, and the sentence
+/// it exits on, which classifies itself too. So the ranking is proven over the
+/// producer's statement and over this crate's reading of its standard error
+/// alike, rather than over whichever of the two a fixture happened to state.
 #[test]
 fn a_change_request_open_for_review_outranks_the_word_for_a_dispatch_that_died() {
     let world = World::new("lifecycle-diedopen");
@@ -3680,8 +3686,8 @@ fn a_change_request_open_for_review_outranks_the_word_for_a_dispatch_that_died()
         "chore: the change the dispatch opened itself",
     );
     world.script(
-        "service.died",
-        "provider error (respond): harness failed (rate_limit)",
+        "service.died-as",
+        "provider-failure quota provider error (respond): harness failed (rate_limit)",
     );
     let run = settle(&world, "diedopen", vec![lifecycle("service", &[])]);
 
@@ -3824,6 +3830,89 @@ fn a_dispatch_that_died_before_anything_was_committed_names_its_branch_and_no_co
         "the dispatch died (auth) rather than failing its task; {branch} may carry finished work"
     );
     world.run(&["results", &run]).exited(0).out_has(&said);
+}
+
+/// A dispatch whose member died is settled from the classification its producer
+/// **published**, rather than from a sentence read off standard error.
+///
+/// A dispatch that goes green and then loses its provider writes no sentence this
+/// crate can classify, so it used to settle `task-failed` — the word a node whose
+/// judge rejected its work settles under, which sends a manager to re-run
+/// finished work. The classification was never missing: `oneagentgraph` publishes
+/// a `member-died` the moment one of its members goes, carrying the liveness rule
+/// and a typed cause.
+///
+/// So this journey's producer says what killed the member on its stream and says
+/// nothing classifiable in its exit sentence: the word and the cause here can
+/// only have come from the event. The branch and the commit are asserted beside
+/// them because they are the half a manager acts on, and the new word must not
+/// hide finished work.
+#[test]
+fn a_dispatch_whose_member_died_is_settled_from_the_classification_its_producer_published() {
+    let world = World::new("lifecycle-memberdied");
+    let repo = published_locally(&world);
+    world.script("service.work", "the work its judge never got to score\n");
+    world.script(
+        "service.publishes",
+        "chore: what the dispatch had finished when its provider went",
+    );
+    // The liveness rule that fired and the cause, in the sibling's own
+    // vocabulary — and then a sentence that classifies nothing, which is what
+    // makes this journey about the event: read for a classification, the detail
+    // below yields none and the node settles `task-failed`.
+    world.script(
+        "service.died-as",
+        "provider-failure quota the subscription behind this member is exhausted",
+    );
+    let run = settle(&world, "memberdied", vec![lifecycle("service", &[])]);
+
+    // The producer said it, so the run's own stream carries it: this is the
+    // record the engine used to relay and never read.
+    let died = world
+        .events_of(&run, "member-died")
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| panic!("the producer published no death\n{}", why(&world, &run)));
+    assert_eq!(died["payload"]["cause"], "quota", "{died}");
+
+    let node = world.run_json(&run, "result.json")["nodes"][0].clone();
+    assert_eq!(node["status"], "failed", "{node}");
+    assert_eq!(
+        node["outcome"], "dispatch-died",
+        "a dispatch that died to its provider settled under the word a rejected task settles \
+         under: {node}"
+    );
+    assert_eq!(
+        node["cause"], "quota",
+        "the classification the producer published was not carried onto the settlement: {node}"
+    );
+
+    // The work it had finished, which the new word does not hide.
+    let branch = node["branch"].as_str().expect("the node names its branch");
+    let head = node["head"]
+        .as_str()
+        .expect("the node names the commit its branch was left at");
+    assert_eq!(
+        head,
+        git(&world, &repo.checkout, &["rev-parse", branch]).trim(),
+        "the commit the settlement names is not the one the branch is at"
+    );
+
+    // And a manager tells the two apart in both views a run is read through,
+    // without opening the journal the death was published on.
+    let said = format!(
+        "the dispatch died (quota) rather than failing its task; {branch} may carry \
+         finished work, at {head}"
+    );
+    for view in ["results", "status"] {
+        let read = world.run(&[view, &run]);
+        read.exited(0).out_has(&said);
+        assert!(
+            !read.stdout.contains("task-failed"),
+            "`{view}` reported a dispatch that died as a task its agent failed:\n{}",
+            read.stdout
+        );
+    }
 }
 
 /// The same failure with nothing published settles exactly as it always did.
