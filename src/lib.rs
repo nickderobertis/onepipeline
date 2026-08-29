@@ -63,6 +63,7 @@ pub mod views;
 // reaches them through [`run`](crate::run).
 mod agentgraph;
 mod concurrency;
+mod criteria;
 mod crossdag;
 mod driver;
 mod edits;
@@ -71,7 +72,9 @@ mod graph;
 mod journal;
 mod ledger;
 mod lifecycle;
+mod plancheck;
 mod projection;
+mod refusal;
 mod release;
 mod sys;
 mod taskgraph;

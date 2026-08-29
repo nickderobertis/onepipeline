@@ -413,6 +413,16 @@ pub struct Settlement {
     pub head: Option<String>,
     /// The declared steps this attempt finished, for a continuation to skip.
     pub completed_steps: Vec<String>,
+    /// The criteria of this node's task that the tree its dispatch worked in
+    /// contradicts.
+    ///
+    /// Read where that tree is — a lifecycle node's worktree is released with
+    /// its session, so by the time the loop sees this settlement there may be
+    /// nothing left to read — and carried here because the loop is where a
+    /// finding is raised. It never reaches the journal as part of the
+    /// settlement: each one is raised as its own non-blocking surface, and none
+    /// of them changes how the node settled.
+    pub findings: Vec<crate::criteria::Finding>,
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
@@ -431,6 +441,7 @@ impl Settlement {
             cause: None,
             head: None,
             completed_steps: Vec::new(),
+            findings: Vec::new(),
         }
     }
 }
@@ -817,6 +828,13 @@ fn converge(
                 Message::Settled(settlement) => {
                     in_flight.remove(&settlement.node);
                     settle(paths, journal, &settlement)?;
+                    // After the settlement and never instead of it: a criterion
+                    // this could not read is silence, and one it read and found
+                    // contradicted is a finding on a node that has already
+                    // settled on its own outcome.
+                    for finding in &settlement.findings {
+                        raise(paths, journal, criterion_surface(&settlement.node, finding))?;
+                    }
                     *state = projection::fold(&journal::read(&paths.journal()));
                     // A node that settled may have readied its dependents, and a
                     // node that is ready again — a requeue, a retry — is announced
@@ -1632,7 +1650,11 @@ fn execute_direct(
         workspace: WorkspaceSpec::Path(project_dir()),
         cancel: cancel.clone(),
     };
-    attempt(executor, &node.id, cancel, tx, &request).settlement
+    let mut settlement = attempt(executor, &node.id, cancel, tx, &request).settlement;
+    // A direct node works in the project directory, which is the tree its
+    // criteria are read against — it cuts no branch of its own.
+    settlement.findings = crate::criteria::of_node(node, Some(&project_dir()));
+    settlement
 }
 
 /// How far one attempt got.
@@ -2520,6 +2542,23 @@ pub(crate) fn monitor_edit(command: &Command) -> Option<Surface> {
         queued_at: sys::now_millis(),
         workstream: crate::channel::target_of(command),
     })
+}
+
+/// What one contradicted criterion tells the planner.
+///
+/// Non-blocking, and raised beside the settlement rather than folded into it:
+/// the node settled on its dispatch's own verdict, and a mechanical read of the
+/// branch is evidence for the planner rather than a second verdict over it.
+fn criterion_surface(node: &str, finding: &crate::criteria::Finding) -> Surface {
+    Surface {
+        id: 0,
+        kind: crate::channel::SurfaceKind::Finding.as_str().into(),
+        message: finding.message(),
+        source: crate::channel::source::PROPOSAL.into(),
+        blocking: false,
+        queued_at: sys::now_millis(),
+        workstream: Some(node.to_owned()),
+    }
 }
 
 /// The surface one accepted `finding` op raises.

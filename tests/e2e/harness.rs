@@ -305,7 +305,7 @@ pub const MEMBER_TASK: &str = "{task}\n\nReport on this run and change nothing a
 /// spelling directly would be asserting that *this host's* temporary directory
 /// is reached without a symlink — true on Linux, false on macOS, and nothing to
 /// do with the crate under test.
-fn resolved(path: &Path) -> PathBuf {
+pub fn resolved(path: &Path) -> PathBuf {
     let canonical = std::fs::canonicalize(path)
         .unwrap_or_else(|error| panic!("{} cannot be resolved: {error}", path.display()));
     plain(&canonical)
@@ -514,6 +514,22 @@ impl World {
     pub fn run(&self, args: &[&str]) -> Run {
         Run::of(
             self.cmd(args).output().expect("the binary runs"),
+            args,
+            self,
+        )
+    }
+
+    /// The same, from a chosen working directory.
+    ///
+    /// For the one journey whose claim is about *where* a path is resolved: a
+    /// command that inherited this test process's directory would resolve a
+    /// relative path against the crate root and prove nothing.
+    pub fn run_from(&self, dir: &Path, args: &[&str]) -> Run {
+        Run::of(
+            self.cmd(args)
+                .current_dir(dir)
+                .output()
+                .expect("the binary runs"),
             args,
             self,
         )

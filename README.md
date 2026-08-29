@@ -109,6 +109,25 @@ dispatched, and an absent, unusable, or too-old install refuses the launch —
 naming the path, the version, the minimum, and how to install one — rather than
 becoming a run that fails on its first node.
 
+A plan is checkable before it is launched, and the check is the engine's own
+loader — every refusal `start` makes before it dispatches anything, and no other
+rule — so a consumer never has to re-implement it:
+
+```bash
+onepipeline plan check plans:tracked-release --check ./checks/review-bar --json
+```
+
+Each repeatable `--check` names an executable, resolved against the directory the
+verb ran in. It is handed the **loaded** plan as one JSON document on its stdin —
+every default resolved, each node carrying its task's own metadata map verbatim —
+with `ONEPIPELINE_PLAN_CHECK_SCHEMA=1` in its environment, and answers on stdout
+with `{"refusals": [...]}` and exit 0. Exit `0` is the loader and every check
+accepting, `1` is at least one refusal from either source, and `2` is a project
+that could not be read or a check that could not be run — which is reported
+separately from a refusal and never read as an accept. A loader refusal
+short-circuits: there is no loaded plan to hand a check, so each is reported as
+not run.
+
 The run's own record does not move: the journal, the ledger, and the graph a run
 is executing are still this crate's, projected from that journal under the run's
 ownership lock. Node status, settlement metadata, and accepted live graph edits

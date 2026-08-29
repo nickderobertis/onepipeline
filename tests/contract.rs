@@ -3289,6 +3289,91 @@ fn the_adoption_flags_are_exactly_the_open_divergence_the_record_names() {
         .expect_err("the proposed alternatives refuse each other");
 }
 
+/// The verb a consumer checks a plan with, and the flags the contract spells.
+///
+/// A test about the *surface* rather than about the loader: the journeys in
+/// `tests/e2e/plan_check.rs` drive what it does. This is the gate that stops the
+/// document and the argument parser drifting — a flag renamed here without the
+/// contract saying so is interface drift, and a consumer pins to the spelling.
+#[test]
+fn the_plan_check_verb_is_the_one_the_contract_spells() {
+    let contract = CONTRACT.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        contract.contains("`onepipeline plan check <SOURCE:PROJECT> [--check <PATH>]... [--json]`"),
+        "the contract no longer states the `plan check` command line"
+    );
+    for claim in [
+        "first the engine's own plan loader",
+        "`ONEPIPELINE_PLAN_CHECK_SCHEMA=1` in its environment",
+        "the registered checks do **not** run",
+        "carry `\"source\": \"engine\"`",
+    ] {
+        assert!(
+            contract.contains(claim),
+            "the contract no longer states '{claim}'"
+        );
+    }
+
+    let plan = Cli::command()
+        .get_subcommands()
+        .find(|sub| sub.get_name() == "plan")
+        .expect("the binary offers `plan`")
+        .clone();
+    let check = plan
+        .get_subcommands()
+        .find(|sub| sub.get_name() == "check")
+        .expect("`plan` offers `check`")
+        .clone();
+    let flags: BTreeSet<String> = check
+        .get_arguments()
+        .filter_map(|arg| arg.get_long().map(str::to_string))
+        .collect();
+    assert!(
+        flags.contains("check") && flags.contains("json"),
+        "{flags:?}"
+    );
+
+    // And it parses the way the contract writes it: repeatable `--check`, in the
+    // order the flags were given.
+    let parsed = Cli::parse_from([
+        "onepipeline",
+        "plan",
+        "check",
+        "otg:plan-store",
+        "--check",
+        "./first",
+        "--check",
+        "./second",
+        "--json",
+    ]);
+    let Command::Plan(onepipeline::cli::PlanCommand::Check(args)) = parsed.command else {
+        panic!("`plan check` did not parse as itself");
+    };
+    assert_eq!(args.project, "otg:plan-store");
+    assert!(args.json);
+    assert_eq!(
+        args.checks,
+        vec![PathBuf::from("./first"), PathBuf::from("./second")]
+    );
+}
+
+/// The settlement check the contract states, and the one thing it may not do.
+#[test]
+fn the_contract_states_the_literal_criteria_check_and_that_it_never_fails_a_node() {
+    let contract = CONTRACT.split_whitespace().collect::<Vec<_>>().join(" ");
+    for claim in [
+        "each criterion of its task — the bullets under its `## Acceptance criteria`",
+        "the run records a **finding** against the node",
+        "**never fails the node by itself**",
+        "produces no finding",
+    ] {
+        assert!(
+            contract.contains(claim),
+            "the contract no longer states '{claim}'"
+        );
+    }
+}
+
 #[test]
 fn the_smoke_scripts_command_list_is_the_binarys_whole_surface() {
     // The published-artifact smoke checks `--help` against a hand-written word

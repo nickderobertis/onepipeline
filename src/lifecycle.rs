@@ -94,9 +94,29 @@ pub fn execute(
     let mut endings: Vec<crate::vcs::Preserving> = Vec::new();
     let mut node = std::borrow::Cow::Borrowed(node);
     let mut attempt = std::num::NonZeroU32::MIN;
+    // What the attempt's own branch said about this node's criteria, read inside
+    // the attempt because the worktree is released with its session. Cleared
+    // between attempts: a re-dispatch works the same branch again, and what
+    // settles the node is what the last attempt read there.
+    let mut findings: Vec<crate::criteria::Finding> = Vec::new();
     loop {
-        let preserved = match attempt_once(executor, paths, launch, &node, references, cancel, tx) {
-            Attempt::Settled(settlement) => return settlement,
+        findings.clear();
+        let preserved = match attempt_once(
+            executor,
+            paths,
+            launch,
+            &node,
+            references,
+            cancel,
+            tx,
+            &mut findings,
+        ) {
+            Attempt::Settled(settlement) => {
+                return Settlement {
+                    findings,
+                    ..*settlement
+                }
+            }
             Attempt::Preserving(preserved) => preserved,
         };
         endings.push(preserved.outcome);
@@ -106,7 +126,10 @@ pub fn execute(
         // then settle as the cancellation rather than as the publication failure
         // that is the useful half of what happened.
         if attempt >= attempts || cancel.is_cancelled() {
-            return stopped_retrying(&node.id, &preserved, &endings);
+            return Settlement {
+                findings,
+                ..stopped_retrying(&node.id, &preserved, &endings)
+            };
         }
         attempt = attempt.saturating_add(1);
         // Another `node-dispatched` rather than a kind of its own, so a reader
@@ -123,7 +146,9 @@ pub fn execute(
 
 #[allow(
     clippy::too_many_arguments,
-    reason = "one attempt's whole context, which is `execute`'s own — see the reason there"
+    reason = "one attempt's whole context, which is `execute`'s own — see the reason there — \
+              plus what its branch said about the node's criteria, which only this function \
+              is inside the session to read"
 )]
 fn attempt_once(
     executor: &dyn Executor,
@@ -133,11 +158,12 @@ fn attempt_once(
     references: &[crate::plan::CrossRepoReference],
     cancel: &crate::executor::CancellationToken,
     tx: &Sender<Message>,
+    findings: &mut Vec<crate::criteria::Finding>,
 ) -> Attempt {
     let run = paths.run.as_str();
     let vcs_filter = launch.vcs_filter.as_ref();
     let Some(request) = crate::vcs::request_for(node) else {
-        return Attempt::Settled(Settlement {
+        return Attempt::settled(Settlement {
             detail: Some("a lifecycle node needs a repo".into()),
             ..Settlement::plain(&node.id, NodeStatus::Failed, Some(engine::INVALID_NODE))
         });
@@ -161,7 +187,7 @@ fn attempt_once(
     let steps = match dispatchable_steps(node) {
         Ok(steps) => steps,
         Err(reason) => {
-            return Attempt::Settled(Settlement {
+            return Attempt::settled(Settlement {
                 detail: Some(reason),
                 ..Settlement::plain(&node.id, NodeStatus::Failed, Some(engine::INVALID_NODE))
             })
@@ -210,7 +236,8 @@ fn attempt_once(
             // The session stays open for them and the follow does not: dropping
             // it here ends a process that would otherwise read a stream nobody
             // is waiting for, for as long as the driver lives.
-            return Attempt::Settled(Settlement {
+            *findings = crate::criteria::of_node(node, worktree.as_deref());
+            return Attempt::settled(Settlement {
                 branch,
                 completed_steps: completed,
                 ..Settlement::plain(&node.id, NodeStatus::Waiting, None)
@@ -268,8 +295,11 @@ fn attempt_once(
             }
         }
         if drained.settlement.status != NodeStatus::Done {
+            // Before the session goes: closing it releases the worktree, and the
+            // branch this node's criteria are read against is in it.
+            *findings = crate::criteria::of_node(node, worktree.as_deref());
             end_session(stream, tx, session.as_ref(), &whose, vcs_filter);
-            return Attempt::Settled(Settlement {
+            return Attempt::settled(Settlement {
                 branch,
                 completed_steps: completed,
                 ..drained.settlement
@@ -280,10 +310,15 @@ fn attempt_once(
         }
     }
 
+    // Every step has run, so the branch is what this attempt made of it — and
+    // the session that holds it is still open, which is the last moment there is
+    // to read it.
+    *findings = crate::criteria::of_node(node, worktree.as_deref());
+
     let Some(token) = session else {
         // Every step declared no diff, so there is nothing to publish and the
         // node settles on the existing no-changes outcome.
-        return Attempt::Settled(Settlement {
+        return Attempt::settled(Settlement {
             branch,
             ..Settlement::plain(&node.id, NodeStatus::Done, Some(engine::NO_CHANGES))
         });
@@ -368,7 +403,7 @@ fn publish(
     // `failed_publication` below instead, which is where the word and the routing
     // are decided together.
     let publication_failed = |detail: String| {
-        Attempt::Settled(Settlement {
+        Attempt::settled(Settlement {
             branch: branch.clone(),
             detail: Some(with_undrafted(detail)),
             ..Settlement::plain(
@@ -447,7 +482,7 @@ fn publish(
                 }),
                 _ => None,
             };
-            Attempt::Settled(Settlement {
+            Attempt::settled(Settlement {
                 // What the node settles on is its publication, exactly as
                 // before; a drafting failure only ever adds words to it.
                 detail: compared.map(&with_undrafted).or_else(|| undrafted.clone()),
@@ -590,7 +625,7 @@ fn unread_merge_path(
         "the merge path was read {reads} time{} and never answered",
         if reads.get() == 1 { "" } else { "s" }
     );
-    Attempt::Settled(Settlement {
+    Attempt::settled(Settlement {
         branch,
         head: crate::vcs::branch_head_in(token),
         detail: Some(compose(
@@ -610,8 +645,17 @@ fn unread_merge_path(
 /// needs exists only on the second and would otherwise be `Option`s on every
 /// settlement this crate makes.
 enum Attempt {
-    Settled(Settlement),
+    Settled(Box<Settlement>),
     Preserving(Box<Preserved>),
+}
+
+impl Attempt {
+    /// One settled attempt, boxed as the other case is: a settlement is much the
+    /// larger of the two, and an enum carrying it inline would move that whole
+    /// value through every return between here and the loop.
+    fn settled(settlement: Settlement) -> Self {
+        Self::Settled(Box::new(settlement))
+    }
 }
 
 /// A publication that failed and handed its branch back.
@@ -662,7 +706,7 @@ fn failed_publication(
     let failure = crate::vcs::failure_of(kind);
     let handed_back = matches!(retained, Some(onevcs::Retention::HandedBack(_)));
     let settled = || {
-        Attempt::Settled(Settlement {
+        Attempt::settled(Settlement {
             branch: branch.clone(),
             detail: Some(compose(&format!("onevcs: {reason}"), undrafted.as_deref())),
             ..Settlement::plain(node, NodeStatus::Failed, Some(failure.outcome()))

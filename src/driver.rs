@@ -77,6 +77,7 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
     use crate::cli::Command as Verb;
     match cli.command {
         Verb::Start(args) => start(&args),
+        Verb::Plan(crate::cli::PlanCommand::Check(args)) => crate::plancheck::check(&args),
         Verb::Adopt(args) => adopt(&args),
         Verb::DriveRun(args) => drive_run(&args),
         Verb::Channel(ChannelCommand::Serve(args)) => serve(&args),
