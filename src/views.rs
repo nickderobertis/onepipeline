@@ -560,6 +560,40 @@ struct Standing {
     liveness: DriverLiveness,
     /// What remains for a driver or planner to do.
     work: WorkStanding,
+    /// Whether the loop has anything left to converge.
+    ///
+    /// Carried beside [`work`](Self::work) rather than read off it, because the
+    /// two answer different questions and one of the readings is not a function
+    /// of the other: a converged run holding a ready human action is
+    /// [`WorkStanding::Outstanding`] — an `attest` moves it — and it has still
+    /// settled, its driver having written its result and gone.
+    convergence: Convergence,
+}
+
+/// Whether every node of a run's graph reached a state the loop is finished
+/// with, so no further pass is coming.
+///
+/// A named verdict rather than a bare flag, because it is what
+/// [`has_settled`] answers and what the channel refuses a reply on: read as the
+/// wrong polarity it queues a verdict where nothing drains it, or turns away the
+/// one reply a live run was waiting for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Convergence {
+    /// Nothing is left to converge: the run has settled.
+    Settled,
+    /// Something can still move, with or without a driver attached to move it.
+    Moving,
+}
+
+impl Convergence {
+    /// The verdict for a graph whose nodes have all settled, or not.
+    fn of(converged: bool) -> Self {
+        if converged {
+            Self::Settled
+        } else {
+            Self::Moving
+        }
+    }
 }
 
 /// One or more nodes an operator has to act on before a driver can move the run.
@@ -717,6 +751,7 @@ impl Standing {
         Self {
             liveness: view.liveness(),
             work,
+            convergence: Convergence::of(converged),
         }
     }
 
@@ -801,6 +836,30 @@ fn review_then_supersede(run: &str, rejected: &HeldNodes) -> String {
 /// there would send a planner to intervene in finished work.
 pub fn liveness_word(view: &RunView) -> &'static str {
     Standing::of(view).word()
+}
+
+/// Whether a run has **settled**: every node of its graph reached a state the
+/// loop is finished with, so there is no pass left to read anything handed to it.
+///
+/// A fact about the run rather than about a process, and deliberately so.
+/// [`DriverLiveness`] answers *who is driving*, which is a different question
+/// with a different answer at the same instant: a driver that has written the
+/// run's result and released its ownership lock is still in the process table
+/// for as long as it takes to exit, and reads as `ACTIVE` throughout. Anything
+/// deciding whether a run can still take work in — `reply` is the one that
+/// costs, because a reply queued for a run nobody will drive again is delivered
+/// to nothing — has to ask this instead, or its answer depends on the order in
+/// which a driver exits.
+///
+/// A run whose graph nothing has recorded has **not** settled: an empty status
+/// map is a run that has not started, and `Standing::of` states that reading
+/// once for every reader of it.
+///
+/// Crate-visible: what the contract names here is what a view *renders*, and this
+/// is a reading the channel's own refusal shares with them rather than a promise
+/// to a consumer.
+pub(crate) fn has_settled(view: &RunView) -> bool {
+    Standing::of(view).convergence == Convergence::Settled
 }
 
 /// What a view prints about the graph **watching** the run, beside the word for
