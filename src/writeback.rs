@@ -3,6 +3,35 @@
 //! The reconcile loop remains the only author of graph state: it hands immutable folded
 //! snapshots to this worker, and the worker only projects them. Store reads never feed back
 //! into scheduling, and a failed or slow write is reported and retried off the engine thread.
+//!
+//! # Ownership: the write-back owns exactly what the plan document declares
+//!
+//! A projection is a *total replacement* of the destination item, so every field it does
+//! not restate is a field it deletes. One rule decides each of them, and it is the plan
+//! document: what a plan declares, this worker owns and overwrites; what a plan does not
+//! model, it reads off the destination and writes back unchanged. The consequences are
+//! enumerated here rather than rediscovered per field, so the next field a destination item
+//! grows is decided by the rule instead of by whichever neighbour it was copied from.
+//!
+//! * **A task's title, body, status, dependency edges and engine metadata are declared** —
+//!   by the node the plan holds and the graph the run folded — so the projection replaces
+//!   them. That is the whole point of the projection.
+//! * **A project's title is not declared.** A plan's `name` is reserved project metadata,
+//!   never the board's own heading, so the destination's title is read and written back. In
+//!   particular it is *not* the project's native identifier: on a store where those two
+//!   coincide the difference is invisible, and on one where they do not, writing the
+//!   identifier renames a person's board to a machine id.
+//! * **A project's description is not declared**, so the destination's `content` is read and
+//!   written back.
+//! * **Labels are not modelled by a plan at all** — neither a project's nor a task's — so
+//!   both are read off the destination and written back. A destination may refuse a write
+//!   whose labels differ from the ones it holds, so a projection that dropped them would
+//!   stop reaching the board the moment anybody labelled one of its items.
+//! * **Metadata a plan does not name is not declared**, so the destination's own keys
+//!   survive and only the reserved `onepipeline.*` keys this worker owns are rewritten.
+//!
+//! What the destination alone owns — its native id, URL and timestamps — is never written
+//! by anybody, so it is neither replaced nor carried.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -333,12 +362,21 @@ fn destination_project(
     Ok(project.item)
 }
 
+/// What the destination already holds for one plan node.
+///
+/// The id is what a projection writes back onto; the labels are what it carries forward
+/// unchanged, because no plan models them.
+struct Origin {
+    id: String,
+    labels: Vec<DestinationLabel>,
+}
+
 fn destination_origins(
     binary: &Path,
     launch_dir: &Path,
     run_dir: &Path,
     snapshot: &Snapshot,
-) -> Result<BTreeMap<String, String>, String> {
+) -> Result<BTreeMap<String, Origin>, String> {
     let mut origins = BTreeMap::new();
     let mut page: Option<String> = None;
     let mut cursors = BTreeSet::new();
@@ -387,8 +425,15 @@ fn destination_origins(
                 .and_then(Value::as_str)
                 .filter(|id| !id.is_empty())
                 .ok_or_else(|| format!("task '{}' has no onepipeline.id", task.id.as_str()))?;
+            let node = node.to_owned();
             if origins
-                .insert(node.to_owned(), task.id.as_str().to_owned())
+                .insert(
+                    node.clone(),
+                    Origin {
+                        id: task.id.as_str().to_owned(),
+                        labels: task.item.labels,
+                    },
+                )
                 .is_some()
             {
                 return Err(format!("project has more than one task for node '{node}'"));
@@ -498,26 +543,28 @@ struct DestinationProject {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DestinationProjectItem {
+    /// Not declared by a plan, so it is preserved rather than replaced.
+    title: String,
+    /// Not declared by a plan, so it is preserved rather than replaced.
+    content: Option<String>,
+    /// Not modelled by a plan at all, so they are preserved rather than dropped.
+    labels: Vec<DestinationLabel>,
+    /// Only the reserved keys this worker owns are rewritten; the rest are preserved.
+    metadata: BTreeMap<String, Value>,
     // llmlint: ignore-block[invalid_states_unrepresentable] These fields enumerate the
     // compiled sibling's complete, deny-unknown machine response but are not inputs this
     // projection interprets. onetaskgraph owns and validates its native id, URL, timestamps,
-    // and repository identities; write-back consumes only content and metadata below.
+    // and repository identities, and a project's status is not a plan's to state.
     #[serde(rename = "id")]
     _id: String,
-    #[serde(rename = "title")]
-    _title: String,
-    content: Option<String>,
     #[serde(rename = "status")]
     _status: DestinationStatus,
-    #[serde(rename = "labels")]
-    _labels: Vec<DestinationLabel>,
     #[serde(rename = "url")]
     _url: Option<String>,
     #[serde(rename = "created_at")]
     _created_at: Option<String>,
     #[serde(rename = "updated_at")]
     _updated_at: Option<String>,
-    metadata: BTreeMap<String, Value>,
     #[serde(rename = "repositories")]
     _repositories: Vec<String>,
     // llmlint: ignore-end[invalid_states_unrepresentable]
@@ -533,6 +580,14 @@ struct DestinationTask {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DestinationTaskItem {
+    /// Not modelled by a plan at all, so they are preserved rather than dropped.
+    labels: Vec<DestinationLabel>,
+    /// Read for `onepipeline.id`, which is how a destination task names its plan node.
+    metadata: BTreeMap<String, Value>,
+    // llmlint: ignore-block[invalid_states_unrepresentable] A task's title, body, status,
+    // project and repositories are declared by the plan, so the projection replaces them
+    // and never reads the destination's; the remaining fields are onetaskgraph's own. They
+    // are enumerated because the sibling's machine response denies unknown fields.
     #[serde(rename = "id")]
     _id: String,
     #[serde(rename = "title")]
@@ -541,8 +596,6 @@ struct DestinationTaskItem {
     _content: Option<String>,
     #[serde(rename = "status")]
     _status: DestinationStatus,
-    #[serde(rename = "labels")]
-    _labels: Vec<DestinationLabel>,
     #[serde(rename = "project")]
     _project: Option<String>,
     #[serde(rename = "url")]
@@ -551,9 +604,9 @@ struct DestinationTaskItem {
     _created_at: Option<String>,
     #[serde(rename = "updated_at")]
     _updated_at: Option<String>,
-    metadata: BTreeMap<String, Value>,
     #[serde(rename = "repositories")]
     _repositories: Vec<String>,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
 }
 
 #[derive(Deserialize)]
@@ -576,20 +629,27 @@ enum DestinationStatusCategory {
     Unknown,
 }
 
-#[derive(Deserialize)]
+/// One label a destination item carries, read back and written unchanged.
+///
+/// Serialized as well as deserialized: a preserved label is written into the shadow
+/// document whole, so the destination's own label id and colour survive the round trip
+/// rather than being reduced to a name the store would have to re-resolve.
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct DestinationLabel {
-    #[serde(rename = "id")]
-    _id: String,
-    #[serde(rename = "name")]
-    _name: String,
-    #[serde(rename = "color")]
-    _color: Option<String>,
+    id: String,
+    name: String,
+    color: Option<String>,
 }
 
+/// Build the shadow project a `project copy` then projects onto the destination.
+///
+/// Every field written here is decided by the module's ownership rule: a plan-declared
+/// field is restated from the snapshot, and a field no plan models is carried over from
+/// the destination item this was read against.
 fn write_shadow(
     snapshot: &Snapshot,
-    origins: &BTreeMap<String, String>,
+    origins: &BTreeMap<String, Origin>,
     destination_project: &DestinationProjectItem,
 ) -> Result<(), String> {
     let projects = snapshot.dir.join("projects");
@@ -612,7 +672,9 @@ fn write_shadow(
     document(
         &projects.join(format!("{}.md", project_file(&snapshot.project))),
         &json!({
-            "title": snapshot.project.native(), "metadata": project_metadata
+            "title": destination_project.title,
+            "labels": destination_project.labels,
+            "metadata": project_metadata
         }),
         destination_project.content.as_deref().unwrap_or_default(),
     )?;
@@ -640,8 +702,9 @@ fn write_shadow(
         wire.remove("id");
         let mut metadata = Map::new();
         metadata.insert("onepipeline.id".into(), json!(id));
-        if let Some(origin) = origins.get(id) {
-            metadata.insert("onetaskgraph.origin".into(), json!(origin));
+        let origin = origins.get(id);
+        if let Some(origin) = origin {
+            metadata.insert("onetaskgraph.origin".into(), json!(origin.id));
         }
         for (key, value) in wire {
             metadata.insert(format!("onepipeline.{key}"), value);
@@ -673,6 +736,12 @@ fn write_shadow(
         front.insert("title".into(), json!(title));
         front.insert("project".into(), json!(project_file(&snapshot.project)));
         front.insert("status".into(), json!(category(status)));
+        // A node the plan has just added has no destination item yet, so there is nothing
+        // to preserve and the created task starts with none.
+        front.insert(
+            "labels".into(),
+            json!(origin.map(|origin| origin.labels.as_slice()).unwrap_or(&[])),
+        );
         front.insert("depends_on".into(), json!(local_deps));
         front.insert("metadata".into(), Value::Object(metadata));
         if let Some(repo) = repo {
@@ -782,10 +851,14 @@ fn encoded(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Pending, Snapshot, TaskCategory, WorkerState};
+    use super::{
+        write_shadow, DestinationProjectItem, Origin, Pending, Snapshot, TaskCategory, WorkerState,
+    };
     use crate::graph::NodeStatus;
+    use crate::plan::Node;
+    use serde_json::{json, Value};
     use std::collections::BTreeMap;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     fn snapshot(status: NodeStatus) -> Snapshot {
         Snapshot {
@@ -831,5 +904,219 @@ mod tests {
                 "docs/contract.md no longer names the projected status category `{native}`"
             );
         }
+    }
+
+    /// One scratch directory a shadow projection is written into.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "onepipeline-writeback-{name}-{}",
+            crate::sys::pid()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        dir
+    }
+
+    /// The destination project a projection is written against.
+    ///
+    /// Built out of the sibling's own machine response rather than by naming fields, so
+    /// the shape this projection reads is the shape `project show --json` answers in.
+    fn destination(title: &str, labels: &[&str]) -> DestinationProjectItem {
+        serde_json::from_value(json!({
+            "id": "board",
+            "title": title,
+            "content": "A person's own description.",
+            "status": {"category": "backlog", "name": "backlog"},
+            "labels": labels
+                .iter()
+                .map(|name| json!({"id": name, "name": name, "color": null}))
+                .collect::<Vec<_>>(),
+            "url": null,
+            "created_at": null,
+            "updated_at": null,
+            "metadata": {"authored.note": "keep this value"},
+            "repositories": [],
+        }))
+        .expect("the sibling's own project response")
+    }
+
+    /// The front matter and body of one document a projection wrote.
+    fn written(path: &Path) -> (Value, String) {
+        let document = std::fs::read_to_string(path)
+            .unwrap_or_else(|error| panic!("{} was not written: {error}", path.display()));
+        let (front, body) = document
+            .strip_prefix("---\n")
+            .expect("a projected document opens its front matter")
+            .split_once("---\n")
+            .expect("a projected document closes its front matter");
+        (
+            serde_norway::from_str(front).expect("the front matter is YAML"),
+            body.to_owned(),
+        )
+    }
+
+    /// A snapshot of one plan node, folded to `status`.
+    fn projection(dir: &Path, status: NodeStatus) -> Snapshot {
+        let node: Node = serde_json::from_value(json!({
+            "id": "build",
+            "title": "feat: build it",
+            "task": "## What\nBuild it.",
+            "persona": "engineer",
+            "deps": ["design"],
+        }))
+        .expect("a plan node");
+        Snapshot {
+            project: "plans:board".parse().expect("a qualified project"),
+            dir: dir.to_path_buf(),
+            nodes: BTreeMap::from([("build".to_owned(), node)]),
+            statuses: BTreeMap::from([("build".to_owned(), status)]),
+            settlements: BTreeMap::new(),
+            project_metadata: BTreeMap::from([("onepipeline.concurrency".into(), json!(4))]),
+        }
+    }
+
+    /// Where a projection wrote the project and the one task of `projection`.
+    fn documents(dir: &Path) -> (PathBuf, PathBuf) {
+        let project = super::project_file(&"plans:board".parse().expect("a qualified project"));
+        (
+            dir.join("projects").join(format!("{project}.md")),
+            dir.join("tasks")
+                .join(&project)
+                .join(format!("{}.md", super::task_file("build"))),
+        )
+    }
+
+    /// The rule's second consequence: a project's title is not a plan's to state, so the
+    /// destination's own title is what the projection writes back.
+    ///
+    /// A store whose native identifier *is* its title cannot tell this apart from writing
+    /// the identifier, so the destination here is one where the two differ.
+    #[test]
+    fn a_projection_writes_back_the_destination_projects_own_title() {
+        let dir = scratch("project-title");
+        let snapshot = projection(&dir, NodeStatus::Done);
+        write_shadow(
+            &snapshot,
+            &BTreeMap::new(),
+            &destination("A person's own board", &[]),
+        )
+        .expect("the shadow project is written");
+
+        let (front, body) = written(&documents(&dir).0);
+        assert_eq!(
+            front["title"], "A person's own board",
+            "the projection renamed the destination project"
+        );
+        assert_ne!(
+            front["title"],
+            json!(snapshot.project.native()),
+            "the projection wrote the project's native identifier as its title"
+        );
+        assert_eq!(
+            body, "A person's own description.",
+            "the projection replaced the destination's description"
+        );
+        assert_eq!(
+            front["metadata"]["authored.note"], "keep this value",
+            "the projection dropped metadata no plan declares"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The rule's fourth consequence, for a project: labels are not modelled by a plan, so
+    /// the destination's own are carried through whole rather than dropped.
+    #[test]
+    fn a_projection_carries_the_destination_projects_labels_through_whole() {
+        let dir = scratch("project-labels");
+        write_shadow(
+            &projection(&dir, NodeStatus::Done),
+            &BTreeMap::new(),
+            &destination("A person's own board", &["planning", "q3"]),
+        )
+        .expect("the shadow project is written");
+
+        let (front, _) = written(&documents(&dir).0);
+        assert_eq!(
+            front["labels"],
+            json!([
+                {"id": "planning", "name": "planning", "color": null},
+                {"id": "q3", "name": "q3", "color": null},
+            ]),
+            "the projection dropped the destination project's labels"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The same consequence for a task, read off the destination task the node projects
+    /// onto — and nothing at all for a node the destination has no task for yet.
+    #[test]
+    fn a_projection_carries_a_destination_tasks_labels_through_and_invents_none() {
+        let dir = scratch("task-labels");
+        write_shadow(
+            &projection(&dir, NodeStatus::Done),
+            &BTreeMap::from([(
+                "build".to_owned(),
+                Origin {
+                    id: "plans:board/002-build".to_owned(),
+                    labels: serde_json::from_value(json!([
+                        {"id": "needs-review", "name": "needs-review", "color": "d73a4a"}
+                    ]))
+                    .expect("the sibling's own labels"),
+                },
+            )]),
+            &destination("A person's own board", &[]),
+        )
+        .expect("the shadow project is written");
+        let (front, _) = written(&documents(&dir).1);
+        assert_eq!(
+            front["labels"],
+            json!([{"id": "needs-review", "name": "needs-review", "color": "d73a4a"}]),
+            "the projection dropped the destination task's labels"
+        );
+        assert_eq!(
+            front["metadata"]["onetaskgraph.origin"], "plans:board/002-build",
+            "the projection lost the destination task it writes onto"
+        );
+
+        write_shadow(
+            &projection(&dir, NodeStatus::Done),
+            &BTreeMap::new(),
+            &destination("A person's own board", &[]),
+        )
+        .expect("the shadow project is written for a node with no destination task");
+        let (front, _) = written(&documents(&dir).1);
+        assert_eq!(
+            front["labels"],
+            json!([]),
+            "the projection invented labels for a task the destination does not hold"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The rule's first consequence: everything a plan *does* declare is replaced, which is
+    /// what the projection is for. Held beside the preservation tests so neither can be
+    /// satisfied by writing less.
+    #[test]
+    fn a_projection_replaces_every_field_the_plan_declares() {
+        let dir = scratch("declared");
+        write_shadow(
+            &projection(&dir, NodeStatus::Running),
+            &BTreeMap::new(),
+            &destination("A person's own board", &[]),
+        )
+        .expect("the shadow project is written");
+
+        let (front, body) = written(&documents(&dir).1);
+        assert_eq!(front["title"], "feat: build it");
+        assert_eq!(body, "## What\nBuild it.");
+        assert_eq!(front["status"], "in progress");
+        assert_eq!(
+            front["depends_on"],
+            json!([super::task_file("design")]),
+            "the projection lost the plan's dependency edge"
+        );
+        assert_eq!(front["metadata"]["onepipeline.id"], "build");
+        assert_eq!(front["metadata"]["onepipeline.persona"], "engineer");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
