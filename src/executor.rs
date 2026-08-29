@@ -297,12 +297,10 @@ impl Executor for LocalExecutor {
 /// promised: the spelling below is not a contract and no consumer may derive one
 /// path from another.
 ///
-/// It exists because a dispatch that has nowhere of its own invents one, and
-/// what it invents collides. Three did in a day: two deterministic tiers
-/// deadlocked on one lock with both logs frozen, two whole-suite runs wrote into
-/// one log and left `SIGTERM` lines that read exactly like test failures, and one
-/// worker read another workstream's coverage output as its own. None of those
-/// announce what they are.
+/// A dispatch with nowhere of its own invents somewhere, and every dispatch on a
+/// host invents it out of the same few facts; divergence 47 in
+/// [the divergence record](../../../docs/contract-divergences.md) is what the
+/// collisions cost, and the proposal this answers.
 pub(crate) const NODE_SCRATCH_DIR_ENV: &str = "ONEPIPELINE_NODE_SCRATCH_DIR";
 
 /// What every dispatch this executor makes carries in its own environment.
@@ -319,16 +317,9 @@ pub(crate) const NODE_SCRATCH_DIR_ENV: &str = "ONEPIPELINE_NODE_SCRATCH_DIR";
 /// address.
 ///
 /// The **scratch directory** is per dispatch, which that same note says a pair
-/// coming through here must never be. It is carried anyway, and what it costs is
-/// recorded as divergence 21 in
-/// [the divergence record](../../../docs/contract-divergences.md): the subprocess
-/// backend sets it on the command it spawns and it is exactly per dispatch there,
-/// while the library backend has no per-launch environment to set it in — the
-/// sibling composes a member's from the hosting process's — so a driver running
-/// two dispatches in-process shares one value between them until that seam grows
-/// one. The directory is still made per dispatch either way, so nothing is
-/// destroyed by the sharing; what a second concurrent in-process dispatch may
-/// read is a path to a directory of its sibling's rather than its own.
+/// coming through here must never be. It is carried anyway, and what that costs
+/// on the library backend — which has no per-launch environment to set it in — is
+/// divergence 47's closing paragraph.
 ///
 /// # Errors
 ///
@@ -362,6 +353,18 @@ fn dispatch_env(labels: &Labels) -> Result<Vec<(String, String)>> {
 /// is one no other dispatch has been given — which a name minted from a pid and a
 /// counter alone would not be, because a host reissues pids and a counter starts
 /// again in every process.
+// llmlint: ignore-block[changed_behavior_has_e2e] two arms here are not reachable from
+// any command a user can type. A dispatch with **no run** is the contract's own example
+// and this seam's own tests — every dispatch a run makes carries its id, which is the same
+// reason `register_dispatch` records nothing for one — so a journey would have to be a
+// caller of this function rather than a run. And a scratch directory that cannot be
+// **created** needs a run root that holds a run whose `scratch` is a file: a runs root
+// that is unusable fails long before this, when the run's own directory is made. Both are
+// driven against the real filesystem by
+// `tests::every_dispatch_is_given_a_directory_of_its_own_and_no_two_share_one`. What a
+// user reaches — the directory itself, per dispatch, across a requeue — is
+// `scratch::a_dispatch_is_given_an_absolute_writable_directory_of_its_own` and
+// `scratch::every_dispatch_of_one_node_is_given_its_own_directory_and_none_is_taken_away`.
 fn node_scratch_dir(labels: &Labels) -> Result<PathBuf> {
     /// Enough numbers that walking past every directory a run has already made is
     /// never the reason a dispatch fails, and few enough that a base directory
@@ -406,7 +409,7 @@ fn node_scratch_dir(labels: &Labels) -> Result<PathBuf> {
             ),
         ),
     })
-}
+} // llmlint: ignore-end[changed_behavior_has_e2e]
 
 /// Record this dispatch in its run's registry, and hold the entry open.
 ///

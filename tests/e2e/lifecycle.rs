@@ -3992,11 +3992,8 @@ fn a_verdict_that_delimits_a_token_without_naming_the_machinery_stays_a_task_fai
 /// the node is not settled as a provider death, and the work it finished rides
 /// the settlement.
 ///
-/// The most expensive defect this classification has produced. One field —
-/// `member-died`'s `cause` — was trusted over the `status: ok`, `exit_code: 0`,
-/// billed-usage record sitting beside it: two finished dispatches were settled as
-/// deaths, about $24.72 of billed work was discarded, and both completion reports
-/// were lost. The record was never missing; nothing read it.
+/// What trusting the classification over the record cost is divergence 48; the
+/// record was never missing, and nothing read it.
 ///
 /// So this journey's producer publishes both, exactly as the incident did: the
 /// turn opens, closes on its own billed record, and the producer then reports the

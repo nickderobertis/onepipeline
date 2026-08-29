@@ -2224,17 +2224,27 @@ fn member_of(envelope: &Envelope) -> &str {
         .unwrap_or_default()
 }
 
-/// Whether a turn's own usage says the provider billed for it.
+/// The figures on a turn's usage that say the provider billed for it.
 ///
-/// Any of the figures the sibling declares, because they are independently
-/// optional: a provider that reported tokens and no price still ran the turn, and
-/// a turn billed nothing at all is a turn nothing was spent on. Read field by
-/// field rather than through that library's `Usage`, for [`MemberDeath::of`]'s
+/// Three of the five the sibling declares, and the two left out are the choice: a
+/// prompt served from the provider's cache was not *billed* for at the price the
+/// other three carry, so a turn whose only non-zero figure is a cache read is not
+/// evidence a turn ran and was paid for. The three that are here are independently
+/// optional on the wire — a provider that reported tokens and no price still ran
+/// the turn — so any of them settles it.
+///
+/// Field names rather than that library's `Usage`, for [`MemberDeath::of`]'s
 /// reason: the producer is resolved on the `PATH`, so it may be a newer release
-/// than this build links and that type is `deny_unknown_fields`.
+/// than this build links and that type is `deny_unknown_fields`. What keeps the
+/// names true is
+/// [`tests::the_usage_figures_this_crate_reads_are_the_ones_the_producer_writes`],
+/// which asks the linked `Usage` what it serializes to and fails on a rename.
+const BILLED_FIGURES: [&str; 3] = ["input_tokens", "output_tokens", "cost_usd"];
+
+/// Whether a turn's own usage says the provider billed for it.
 fn was_billed(usage: Option<&Value>) -> bool {
     let Some(usage) = usage else { return false };
-    ["input_tokens", "output_tokens", "cost_usd"]
+    BILLED_FIGURES
         .into_iter()
         .filter_map(|figure| usage.get(figure))
         .any(|figure| figure.as_f64().is_some_and(|spent| spent > 0.0))
@@ -2243,14 +2253,13 @@ fn was_billed(usage: Option<&Value>) -> bool {
 /// What the producer said killed a dispatch, once it has been reconciled against
 /// the record of the turn it names.
 ///
-/// The reconciliation is the middle variant, and it exists because one
-/// classification field was trusted over the `status: ok`, `exit_code: 0`,
-/// billed-usage record sitting beside it: two finished dispatches were settled as
-/// deaths, about $24.72 of billed work was discarded, and both completion reports
-/// were lost. A `provider-failure` is the producer saying its member exited
-/// **without a report it could settle on**, and a turn record that closed says the
-/// opposite about that same turn — so where both arrive, the record is what the
-/// dispatch actually did and the classification is not acted on.
+/// The reconciliation is the middle variant. A `provider-failure` is the producer
+/// saying its member exited **without a report it could settle on**, and a turn
+/// record that closed says the opposite about that same turn — so where both
+/// arrive, the record is what the dispatch actually did and the classification is
+/// not acted on. Divergence 48 in
+/// [the divergence record](../../../docs/contract-divergences.md) is what
+/// trusting the classification over the record cost.
 ///
 /// Only the provider rule is reconciled this way. A heartbeat that stopped, a
 /// stall, and a signal are all statements about the member *after* whatever turn
@@ -3317,6 +3326,39 @@ mod tests {
                 MemberDeath::of(&beside).is_none(),
                 "{beside:?} was read as a member this producer said had died"
             );
+        }
+    }
+
+    /// The usage figures this crate reads off a turn record are the ones the
+    /// linked producer writes.
+    ///
+    /// The drift gate for [`BILLED_FIGURES`], which is the one place this crate
+    /// names a sibling's payload fields rather than deserializing them. The
+    /// spelling comes from that library's own type here, so a field renamed
+    /// upstream fails this rather than quietly making every turn look unbilled —
+    /// which would put back exactly the settlement the reconciliation removes.
+    #[test]
+    fn the_usage_figures_this_crate_reads_are_the_ones_the_producer_writes() {
+        let written = serde_json::to_value(oneagentgraph::event::Usage {
+            input_tokens: Some(1),
+            output_tokens: Some(1),
+            cache_read_tokens: Some(1),
+            cache_write_tokens: Some(1),
+            cost_usd: Some(1.0),
+        })
+        .expect("the sibling's usage serializes");
+        for figure in BILLED_FIGURES {
+            assert!(
+                written.get(figure).is_some(),
+                "the producer no longer writes {figure:?}: {written}"
+            );
+        }
+        // And the two this crate deliberately does not read are still the two it
+        // was deciding about, rather than names that have since become something
+        // else.
+        for cached in ["cache_read_tokens", "cache_write_tokens"] {
+            assert!(written.get(cached).is_some(), "{written}");
+            assert!(!BILLED_FIGURES.contains(&cached));
         }
     }
 

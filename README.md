@@ -199,8 +199,14 @@ Every node dispatch carries `ONEPIPELINE_NODE_SCRATCH_DIR` in its own
 environment: an absolute path to a directory that exists and is writable before
 the dispatch's first turn, unique to that dispatch — a retry, a requeue and a
 resumed pin of the same node each get their own — and never removed while that
-dispatch runs. Nothing else is promised: the spelling of the path is not part of
-the contract and no consumer may derive one path from another.
+dispatch runs. Nothing beyond that is promised, and the spelling of the path least
+of all: no consumer may derive one path from another.
+
+Both of the last two paragraphs describe this build rather than the approved
+[contract](docs/contract.md), which names neither. Each is a proposal to the
+planner who owns that document — divergences 48 and 47 in
+[the divergence record](docs/contract-divergences.md) — and that record, not this
+one, is where what they change and what they cost is settled.
 
 The planner supervises over the channel:
 
