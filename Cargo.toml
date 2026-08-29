@@ -184,10 +184,12 @@ resolver = "2"
 #   crate relays that sentence: `src/lifecycle.rs`'s `unread_merge_path` hands the
 #   node `onevcs`'s own reason verbatim, which offers the `publish-branch` that
 #   would republish it. Nothing here decides a landing, so nothing here moved.
-# - `onevcs` 0.15.8 is the newest the registry carries and the release
-#   `onevcs-testing` 0.4.17 requires exactly, so the pair resolves to it from
-#   either end. `^0.15` already admitted the three fixes above: the resolution
-#   held this build at 0.15.4, not the declaration.
+# - `onevcs` 0.16.0 carries `read_release_declaration` and the `declaration`
+#   module beside it: the canonical `release-targets.toml` schema, which
+#   `tests/release_targets.rs` holds this repository's own declaration to rather
+#   than restating the shape here. A **requirement** and not a lock floor, because
+#   `^0.15` excludes it — pre-1.0 the minor is the breaking position.
+#   `onevcs-testing` 0.4.20 requires exactly it, so both pins move together.
 #
 # **Every pin in this block is declared at the newest release the registry
 # carries**, because this repository resolves no engine at two versions and so
@@ -264,7 +266,7 @@ resolver = "2"
 # second with no registry at all.
 [workspace.dependencies]
 oneagentgraph = "0.3.12"
-onevcs = "0.15.8"
+onevcs = "0.16.0"
 # **Not a third sibling this crate composes** — nothing here launches, calls, or
 # spawns onejudge. It is one vocabulary: the verdicts a two-party member settles
 # on, which `oneagentgraph` copies onto the `member-settled` this crate relays.
@@ -296,7 +298,7 @@ oneharness-core = "0.12"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.4.17"
+onevcs-testing = "0.4.20"
 
 [package]
 name = "onepipeline"

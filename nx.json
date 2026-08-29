@@ -20,6 +20,7 @@
       "{workspaceRoot}/src/**/*",
       "{workspaceRoot}/tests/**/*",
       "{workspaceRoot}/docs/contract.md",
+      "{workspaceRoot}/release-targets.toml",
       "{workspaceRoot}/Cargo.toml",
       "{workspaceRoot}/Cargo.lock",
       "{workspaceRoot}/rust-toolchain.toml",

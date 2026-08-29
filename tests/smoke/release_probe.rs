@@ -20,10 +20,11 @@
 //! registry that cannot be reached, a probe that could not answer, and a declared
 //! target no registry serves are each a failure naming what to do about it.
 
-use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::time::{Duration, Instant};
+
+use onevcs::read_release_declaration;
 
 /// The sixty seconds the release-target contract allows one answer.
 const BOUND: Duration = Duration::from_secs(60);
@@ -34,25 +35,24 @@ fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-/// Every artifact this repository publishes, read out of the probe's own
-/// declaration rather than listed again here.
+/// Every artifact this repository publishes, read out of `release-targets.toml`
+/// rather than listed again here — and read with the canonical reader, so this
+/// asks the registries about exactly the identifiers a consumer would.
 fn declared_targets() -> Vec<String> {
-    let script = fs::read_to_string(repo_root().join("scripts/release-probe.sh"))
-        .expect("the release probe is checked in at scripts/release-probe.sh");
-    let declared: Vec<String> = script
-        .lines()
-        .skip_while(|line| *line != "TARGETS=(")
-        .skip(1)
-        .take_while(|line| *line != ")")
-        .map(|line| line.trim().to_string())
-        .filter(|line| !line.is_empty())
-        .collect();
+    let declared = read_release_declaration(&repo_root()).expect(
+        "release-targets.toml is checked in at this repository's root and reads as the \
+         canonical schema; tests/release_targets.rs is the offline check on that",
+    );
     assert!(
-        !declared.is_empty(),
-        "scripts/release-probe.sh declares no release targets in its `TARGETS=(` array, so a \
-         consumer waiting on a release of this repository is told nothing"
+        !declared.targets.is_empty(),
+        "release-targets.toml declares no [[target]], so a consumer waiting on a release of \
+         this repository is told nothing"
     );
     declared
+        .targets
+        .iter()
+        .map(|target| target.id.to_string())
+        .collect()
 }
 
 fn said(run: &Output) -> String {

@@ -1,12 +1,15 @@
 // What this repository publishes, reconciled against the release configuration.
 //
-// The declaration is `scripts/release-probe.sh`'s `TARGETS`; the published set
-// here is *derived* — from the publish steps in `release.yml`, the workspace
-// members, the wheel's manifest, the launcher's manifest, and the platform
-// matrix — because an inventory transcribed into a check is the thing that goes
-// stale in silence. Each reconciliation therefore runs over
-// `releaseConfiguration()`, and the mutated-configuration journeys prove the
-// derivation notices a change rather than agreeing with itself.
+// The declaration is `release-targets.toml` at this repository's root — the one
+// document that says what this repository publishes, written against the
+// canonical release-target schema and held to it by `tests/release_targets.rs`
+// through `onevcs`'s own reader. The published set here is *derived* — from the
+// publish steps in `release.yml`, the workspace members, the wheel's manifest,
+// the launcher's manifest, and the platform matrix — because an inventory
+// transcribed into a check is the thing that goes stale in silence. Each
+// reconciliation therefore runs over `releaseConfiguration()`, and the
+// mutated-configuration journeys prove the derivation notices a change rather
+// than agreeing with itself.
 //
 // The probe journeys spawn the real script the way `src/release.rs` spawns one,
 // under that environment exactly: a search path and a home directory. The
@@ -19,7 +22,15 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
-import { mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -37,15 +48,106 @@ function read(...parts) {
 }
 
 /**
- * The targets the probe declares, read out of the probe itself.
+ * The declaration, read out of the one document that carries it.
  *
- * One list, in the file that answers for it: a copy here would be a second
- * inventory to drift, which is what this check exists to prevent.
+ * A copy of the names here would be a second inventory to drift, which is what
+ * this check exists to prevent — so every name below comes from
+ * `release-targets.toml`, the same file `scripts/release-probe.sh` reads the
+ * identifiers it answers for out of.
+ *
+ * It takes the fields this suite reconciles and validates what it takes: a line
+ * that is not an assignment, a key given twice, and a value of the wrong type are
+ * each a failure here rather than a field quietly read as absent. What it
+ * deliberately does *not* do is decide which fields the schema requires — that is
+ * `onevcs`'s canonical reader's answer and `tests/release_targets.rs` asks it, so
+ * a copy of the schema here would be the second opinion this document replaces.
  */
-function declaredTargets(script = read("scripts", "release-probe.sh")) {
-  const block = script.match(/^TARGETS=\(\n([\s\S]*?)^\)$/m);
-  assert.ok(block, "no `TARGETS=(` array in scripts/release-probe.sh");
-  return block[1].split(/\s+/).filter(Boolean);
+function declaration(text = read("release-targets.toml")) {
+  const blocks = [{ table: "", lines: [] }];
+  for (const line of text.split("\n")) {
+    if (line.trimStart().startsWith("#")) continue;
+    const header = line.trim().match(/^\[\[([a-z_]+)\]\]$/);
+    if (header) blocks.push({ table: header[1], lines: [] });
+    else blocks[blocks.length - 1].lines.push(line);
+  }
+
+  const readTable = (block) => {
+    const where = block.table === "" ? "the top-level table" : `[[${block.table}]]`;
+    const held = new Map();
+    for (let at = 0; at < block.lines.length; at++) {
+      if (block.lines[at].trim() === "") continue;
+      const assignment = block.lines[at].match(/^([a-z_]+) = (.*)$/);
+      assert.ok(
+        assignment,
+        `release-targets.toml has a line in ${where} that is not a key: ${block.lines[at]}`,
+      );
+      const [, key, opening] = assignment;
+      assert.ok(!held.has(key), `release-targets.toml gives ${key} twice in ${where}`);
+      let raw = opening;
+      // A list is the one value that spans lines; every other one is written whole.
+      while (raw.startsWith("[") && !raw.trimEnd().endsWith("]")) {
+        at += 1;
+        assert.ok(at < block.lines.length, `release-targets.toml never closes ${key} in ${where}`);
+        raw += block.lines[at];
+      }
+      try {
+        held.set(key, JSON.parse(raw.replace(/,(\s*)\]$/, "$1]")));
+      } catch {
+        assert.fail(`release-targets.toml gives ${key} in ${where} a value it cannot hold: ${raw}`);
+      }
+    }
+    return { table: block.table, held, where };
+  };
+
+  const read_all = blocks.map(readTable);
+  const of = (name) => read_all.filter((block) => block.table === name);
+  const typed = (block, key, type, fallback) => {
+    const value = block.held.get(key);
+    if (value === undefined && fallback !== undefined) return fallback;
+    const held = Array.isArray(value) ? "array" : typeof value;
+    assert.equal(held, type, `release-targets.toml's ${block.where} has no ${key} ${type}`);
+    return value;
+  };
+
+  const [top] = of("");
+  assert.ok(top, "release-targets.toml has no top-level table");
+  return {
+    schemaVersion: typed(top, "schema_version", "number"),
+    probe: typed(top, "probe", "string"),
+    targets: of("target").map((block) => ({
+      id: typed(block, "id", "string"),
+      name: typed(block, "name", "string"),
+      covers: typed(block, "covers", "array", []),
+    })),
+    retired: of("retired").map((block) => ({ id: typed(block, "id", "string") })),
+  };
+}
+
+function declaredTargets(declared = declaration()) {
+  return declared.targets.map((target) => target.id);
+}
+
+/**
+ * The two ways the declaration's `covers` and the launcher can disagree.
+ *
+ * `covers` is the schema's field for a name a target's release also ships that
+ * nothing depends on by name, and here that is exactly the five per-platform
+ * packages the launcher resolves at its own exact version. So the two are one
+ * fact written twice, and either can move without the other: `uncovered` is a
+ * package the launcher pulls in that the declaration does not mention, and
+ * `unresolved` is a name the declaration claims the launcher ships that it no
+ * longer does.
+ */
+function coverage(declared, config) {
+  const launcher = declared.targets.find((target) => target.id === `npm:${config.launcher.name}`);
+  assert.ok(launcher, `release-targets.toml declares no npm:${config.launcher.name}`);
+  const resolved = Object.keys(config.launcher.optionalDependencies ?? {}).map(
+    (name) => `npm:${name}`,
+  );
+  return {
+    uncovered: resolved.filter((id) => !launcher.covers.includes(id)),
+    unresolved: launcher.covers.filter((id) => !resolved.includes(id)),
+  };
 }
 
 /**
@@ -293,15 +395,36 @@ function hostTool(tool) {
  * curl's, over real HTTP.
  *
  * `without` leaves one program off, which is how a host that cannot run what the
- * probe needs is driven.
+ * probe needs is driven. `awkReadsNoStream` leaves `awk` on but able to read only
+ * a file, which is the one way to reach the *registry* document's reader on a
+ * host where the declaration's reader still ran: the probe reads its own
+ * declaration from a file operand and every registry answer from a pipe, so an
+ * `awk` that refuses a stream fails exactly the second of the two.
  */
 const scratchPaths = [];
-function fixturePath(base, { without } = {}) {
+function fixturePath(base, { without, awkReadsNoStream } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "release-probe-path-"));
   scratchPaths.push(dir);
   for (const tool of ["bash", "sleep", "awk"]) {
     if (tool === without) continue;
+    if (tool === "awk" && awkReadsNoStream) continue;
     symlinkSync(hostTool(tool), join(dir, tool));
+  }
+  if (awkReadsNoStream) {
+    writeFileSync(
+      join(dir, "awk"),
+      `#!/usr/bin/env bash
+set -euo pipefail
+for arg in "$@"; do
+  if [ -f "$arg" ]; then
+    exec ${hostTool("awk")} "$@"
+  fi
+done
+echo "fixture awk: this host's awk cannot read a document handed to it on a pipe" >&2
+exit 127
+`,
+      { mode: 0o755 },
+    );
   }
   if (without === "curl") return dir;
 
@@ -351,10 +474,10 @@ function contractEnv(path) {
  * journeys point it at is served from this process — a blocking spawn would hold
  * the event loop that has to answer the request the probe is waiting on.
  */
-function probe(identifier, { env = contractEnv(), args } = {}) {
+function probe(identifier, { env = contractEnv(), args, script = PROBE } = {}) {
   const argv = args ?? (identifier === undefined ? [] : [identifier]);
   const started = Date.now();
-  const child = spawn(PROBE, argv, { cwd: REPO_ROOT, env });
+  const child = spawn(script, argv, { cwd: REPO_ROOT, env });
   let stdout = "";
   let stderr = "";
   child.stdout.setEncoding("utf8");
@@ -407,8 +530,87 @@ describe("the release targets this repository declares", () => {
   const config = releaseConfiguration();
   const declared = declaredTargets();
 
+  it("is one document, at the root, written against the canonical schema", () => {
+    const declared = declaration();
+    assert.equal(
+      declared.schemaVersion,
+      1,
+      "release-targets.toml declares no schema_version, so a reader cannot know its shape",
+    );
+    assert.equal(
+      declared.probe,
+      "scripts/release-probe.sh",
+      "release-targets.toml names the script that answers what a registry serves for one id",
+    );
+    for (const target of declared.targets) {
+      assert.ok(target.name, `${target.id} carries no short name for a consumer to wait on`);
+    }
+    const names = declared.targets.map((target) => target.name);
+    assert.equal(new Set(names).size, names.length, "two targets take one short name");
+  });
+
+  it("leaves no second copy of these names in the probe it replaced", () => {
+    // The probe used to carry the same list as a `TARGETS=(...)` bash array, which
+    // is the one shape a host-side reader cannot take without executing the file.
+    // It reads this document now, so a bare identifier on a line of its own in
+    // that script is that inventory grown back.
+    const script = read("scripts", "release-probe.sh");
+    assert.ok(
+      script.includes('awk "$declared_targets" "$declaration"'),
+      "scripts/release-probe.sh no longer reads release-targets.toml",
+    );
+    assert.deepEqual(
+      script.split("\n").filter((line) => /^\s*[a-z]+:[A-Za-z0-9][A-Za-z0-9._-]*\s*$/.test(line)),
+      [],
+      "scripts/release-probe.sh carries release-target identifiers of its own again; it reads " +
+        "them out of release-targets.toml, which is the only declaration of them",
+    );
+  });
+
+  it("covers exactly the per-platform packages its launcher resolves", () => {
+    assert.deepEqual(coverage(declaration(), config), { uncovered: [], unresolved: [] });
+  });
+
+  it("fails on a per-platform package the declaration does not cover", () => {
+    const declared = declaration();
+    const launcher = declared.targets.find((target) => target.id === "npm:onepipeline-cli");
+    const thinned = {
+      ...declared,
+      targets: declared.targets.map((target) =>
+        target === launcher
+          ? {
+              ...target,
+              covers: target.covers.filter((id) => id !== "npm:onepipeline-cli-win32-x64"),
+            }
+          : target,
+      ),
+    };
+    assert.deepEqual(coverage(thinned, config), {
+      uncovered: ["npm:onepipeline-cli-win32-x64"],
+      unresolved: [],
+    });
+  });
+
+  it("fails on a covered package the launcher has stopped resolving", () => {
+    const orphaned = {
+      ...config,
+      launcher: {
+        ...config.launcher,
+        optionalDependencies: Object.fromEntries(
+          Object.entries(config.launcher.optionalDependencies).filter(
+            ([name]) => name !== "onepipeline-cli-darwin-arm64",
+          ),
+        ),
+      },
+    };
+    assert.deepEqual(coverage(declaration(), orphaned), {
+      uncovered: [],
+      unresolved: ["npm:onepipeline-cli-darwin-arm64"],
+    });
+  });
+
   it("names every target as a registry-qualified identifier", () => {
-    assert.ok(declared.length > 0, "scripts/release-probe.sh declares no release targets");
+    assert.ok(declared.length > 0, "release-targets.toml declares no release targets");
     for (const identifier of declared) {
       assert.ok(
         parseTarget(identifier),
@@ -427,7 +629,7 @@ describe("the release targets this repository declares", () => {
       assert.ok(
         config.workflow.includes(step.marker),
         `release.yml no longer carries ${step.where}; if this repository has stopped ` +
-          `publishing to ${registry}, drop its target from scripts/release-probe.sh`,
+          `publishing to ${registry}, drop its [[target]] from release-targets.toml`,
       );
       assert.ok(published[registry].length > 0, `no ${registry} name derived from the workflow`);
     }
@@ -447,7 +649,7 @@ describe("the release targets this repository declares", () => {
       undeclared,
       [],
       `this repository publishes ${undeclared.join(", ")}, which no declared release target ` +
-        "covers — declare it in scripts/release-probe.sh's TARGETS, or, for a per-platform " +
+        "covers — declare it as a [[target]] in release-targets.toml, or, for a per-platform " +
         "package, resolve it from the launcher that already is a target",
     );
   });
@@ -798,9 +1000,108 @@ describe("the release probe", () => {
     }
   });
 
-  it("does not answer when the reader of a registry's document cannot run", async () => {
+  it("does not answer when it cannot read its own declaration", async () => {
+    // The declaration is the first thing the probe reads, so a host that cannot
+    // read it has said nothing about any target — and reading an unread document
+    // as a repository that publishes nothing would refuse every real target.
     const server = await serving(releasedAt("0.16.3"));
     const env = contractEnv(fixturePath(server.base, { without: "awk" }));
+    for (const identifier of declared) {
+      const run = await probe(identifier, { env });
+      assert.notEqual(
+        run.status,
+        0,
+        `${identifier} was answered on a host that could not read the declaration:\n${said(run)}`,
+      );
+      assert.equal(run.stdout, "", said(run));
+      assert.match(
+        run.stderr,
+        /release-probe: cannot read the release declaration[\s\S]*\nACTION: /,
+        said(run),
+      );
+    }
+  });
+
+  it("does not answer from a checkout carrying no declaration it can read", async () => {
+    // The probe finds its declaration beside itself rather than under whatever
+    // working directory it was spawned in, so each of these is the same script in
+    // a checkout that says something different about what this repository
+    // publishes — and none of them may answer, because "nobody has said" and
+    // "there is no release" are the two answers a consumer acts differently on.
+    const server = await serving(releasedAt("0.16.3"));
+    const env = contractEnv(fixturePath(server.base));
+    const checkouts = [
+      {
+        what: "no declaration at all",
+        document: null,
+        reason: /cannot read the release declaration/,
+      },
+      {
+        what: "a target whose id is not registry-qualified",
+        document: 'schema_version = 1\n\n[[target]]\nid = "onepipeline"\n',
+        reason: /names no \[\[target\]\] identifier this could read/,
+      },
+      {
+        what: "nothing but a retired artifact",
+        document: 'schema_version = 1\n\n[[retired]]\nid = "crate:gone"\nwhy = "withdrawn"\n',
+        reason: /names no \[\[target\]\] identifier this could read/,
+      },
+    ];
+
+    for (const checkout of checkouts) {
+      const elsewhere = mkdtempSync(join(tmpdir(), "release-probe-checkout-"));
+      scratchPaths.push(elsewhere);
+      mkdirSync(join(elsewhere, "scripts"));
+      const copied = join(elsewhere, "scripts", "release-probe.sh");
+      writeFileSync(copied, read("scripts", "release-probe.sh"), { mode: 0o755 });
+      if (checkout.document !== null) {
+        writeFileSync(join(elsewhere, "release-targets.toml"), checkout.document);
+      }
+
+      const run = await probe("crate:onepipeline", { env, script: copied });
+      assert.notEqual(
+        run.status,
+        0,
+        `a checkout with ${checkout.what} was answered:\n${said(run)}`,
+      );
+      assert.equal(run.stdout, "", said(run));
+      assert.match(run.stderr, checkout.reason, said(run));
+      assert.match(run.stderr, /\nACTION: /, said(run));
+    }
+  });
+
+  it("does not answer for a declared target on a registry it cannot ask", async () => {
+    // The declaration is where a registry this script does not reach now comes
+    // from, so it is refused rather than assumed: answering empty for a registry
+    // nothing here asks is the one answer this file may never give by accident.
+    const elsewhere = mkdtempSync(join(tmpdir(), "release-probe-registry-"));
+    scratchPaths.push(elsewhere);
+    mkdirSync(join(elsewhere, "scripts"));
+    const copied = join(elsewhere, "scripts", "release-probe.sh");
+    writeFileSync(copied, read("scripts", "release-probe.sh"), { mode: 0o755 });
+    writeFileSync(
+      join(elsewhere, "release-targets.toml"),
+      'schema_version = 1\n\n[[target]]\nid = "docker:onepipeline"\n',
+    );
+
+    const server = await serving(releasedAt("0.16.3"));
+    const run = await probe("docker:onepipeline", {
+      env: contractEnv(fixturePath(server.base)),
+      script: copied,
+    });
+    assert.notEqual(run.status, 0, `a registry the probe cannot ask was answered:\n${said(run)}`);
+    assert.equal(run.stdout, "", said(run));
+    assert.match(
+      run.stderr,
+      /the registry 'docker', which this does not know how to ask/,
+      said(run),
+    );
+    assert.match(run.stderr, /\nACTION: /, said(run));
+  });
+
+  it("does not answer when the reader of a registry's document cannot run", async () => {
+    const server = await serving(releasedAt("0.16.3"));
+    const env = contractEnv(fixturePath(server.base, { awkReadsNoStream: true }));
     for (const identifier of declared) {
       const run = await probe(identifier, { env });
       assert.notEqual(
@@ -809,7 +1110,11 @@ describe("the release probe", () => {
         `${identifier} was answered on a host that could not read the document:\n${said(run)}`,
       );
       assert.equal(run.stdout, "", said(run));
-      assert.match(run.stderr, /ACTION: /, said(run));
+      assert.match(
+        run.stderr,
+        /release-probe: the reader of [\s\S]*did not run\nACTION: /,
+        said(run),
+      );
     }
   });
 
