@@ -44,7 +44,13 @@ use std::process::{Command, ExitCode, Stdio};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-/// The refusal this destination makes, worded as the shipped one is.
+// llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] The rule below belongs
+// to `onetaskgraph`'s `github-projects` destination, which is another repository's crate,
+// is not linked here, and can only be reached through a credentialled GitHub board — so
+// there is no shared type to generate from and no gate this offline tier could run. What
+// is restated is one sentence of *behaviour*, quoted verbatim in the module doc above, and
+// the journey that drives this program asserts the refusal's own wording rather than
+// trusting it. The alternative is not a gate; it is having no destination that refuses.
 const DIFFER: &str = "destination labels differ from the labels being written";
 
 // llmlint: ignore-block[boundary_inputs_validated] These shapes deliberately **ignore**
@@ -166,7 +172,6 @@ impl std::fmt::Display for Label {
     }
 }
 
-/// One end of the pipe to the hosted `local-md` plugin.
 struct Host {
     input: std::process::ChildStdin,
     output: BufReader<std::process::ChildStdout>,
@@ -197,7 +202,6 @@ fn stop(why: &str) -> ExitCode {
     ExitCode::FAILURE
 }
 
-/// Refuse one request: this source understood it and will not do it.
 fn refuse(id: &Value, message: &str) {
     let response = json!({"id": id, "error": {"kind": "refused", "message": message}});
     println!("{response}");
@@ -207,7 +211,7 @@ fn main() -> ExitCode {
     let stdin = std::io::stdin();
     let mut lines = stdin.lock().lines();
     let Some(Ok(first)) = lines.next() else {
-        return ExitCode::SUCCESS;
+        return stop("standard input ended before the handshake");
     };
     let handshake: Handshake = match serde_json::from_str(&first) {
         Ok(value) => value,
@@ -258,43 +262,57 @@ fn main() -> ExitCode {
 
     let ending = relay(&mut host, lines);
     drop(host.input);
-    let _ = host.child.wait();
-    ending
+    // The hosted plugin is where every read and write actually happened, so its own ending
+    // is this source's: a host that died reporting something must not be reported as a
+    // clean close by the process that carried its answers.
+    let ending = ending.and_then(|()| match host.child.wait() {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => Err(format!("the hosted local-md plugin exited {status}")),
+        Err(error) => Err(format!(
+            "cannot wait for the hosted local-md plugin: {error}"
+        )),
+    });
+    match ending {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(why) => stop(&why),
+    }
 }
 
 /// Carry every later request to the hosted plugin, refusing the writes this source refuses.
-fn relay(host: &mut Host, lines: impl Iterator<Item = std::io::Result<String>>) -> ExitCode {
+fn relay(
+    host: &mut Host,
+    lines: impl Iterator<Item = std::io::Result<String>>,
+) -> Result<(), String> {
     for line in lines {
         let Ok(line) = line else {
-            return stop("standard input could not be read");
+            return Err("standard input could not be read".to_owned());
         };
         // A line this side cannot read is a violation of the framing rather than a request
         // to answer: there is no id to answer under, and inventing one would be a second
         // response to somebody.
         let request: Request = match serde_json::from_str(&line) {
             Ok(request) => request,
-            Err(error) => return stop(&format!("unreadable request: {error}")),
+            Err(error) => return Err(format!("unreadable request: {error}")),
         };
         match judged(host, &request) {
             Judgement::Refused(why) => refuse(&request.id, &why),
-            Judgement::Unreadable(why) => return stop(&why),
+            Judgement::Unreadable(why) => return Err(why),
             Judgement::Relay => {
                 let relayed = json!({
                     "id": request.id, "method": request.method, "params": request.params,
                 });
                 let Some(answered) = host.ask(&relayed) else {
-                    return stop("the hosted local-md plugin stopped");
+                    return Err("the hosted local-md plugin stopped".to_owned());
                 };
                 println!("{answered}");
             }
         }
     }
-    ExitCode::SUCCESS
+    Ok(())
 }
 
 /// What this destination does with one request before the store sees it.
 enum Judgement {
-    /// Carry it to the hosted plugin.
     Relay,
     /// Refuse it: the labels being written are not the labels the item carries.
     Refused(String),
@@ -358,6 +376,8 @@ fn judged(host: &mut Host, request: &Request) -> Judgement {
         named(&item.labels),
     ))
 }
+
+// llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
 
 fn named(labels: &[Label]) -> String {
     labels

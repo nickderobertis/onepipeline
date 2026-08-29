@@ -98,7 +98,7 @@ fn a_run_launches_from_a_local_markdown_project_and_executes_the_graph_it_holds(
 /// is byte-identical to preserving it, and no assertion could tell a right answer from a
 /// wrong one — which is how the rename shipped.
 #[test]
-fn settlement_preserves_authored_project_content() {
+fn settlement_preserves_everything_the_plan_does_not_declare() {
     let world = World::new("store-project-content");
     for (name, body) in [
         ("project-with-content", "A person's project description.\n"),
@@ -380,14 +380,12 @@ fn a_label_strict_destination_accepts_the_settlement_projection() {
     );
 }
 
-/// Author one store document's labels, leaving everything else it says alone.
 fn label(path: &std::path::Path, labels: &[&str]) {
     amend(path, |front| {
         front.insert("labels".to_owned(), json!(labels));
     });
 }
 
-/// Rewrite one store document's front matter, leaving its body byte for byte.
 fn amend(path: &std::path::Path, edit: impl FnOnce(&mut serde_json::Map<String, Value>)) {
     let document = std::fs::read_to_string(path)
         .unwrap_or_else(|error| panic!("{} is readable: {error}", path.display()));
