@@ -2019,3 +2019,58 @@ than asserted in prose.
   }
 }
 ```
+
+## 46. A dispatch death is classified off standard error, and the producer's own statement of it is relayed and never read — OPEN
+
+**Proposal (for the planner who owns the contract): amend the `dispatch-died`
+sentence to say the word and its `cause` are taken from the producer's own
+`member-died` event where the producer published one, and from the failure's
+detail where it did not.**
+
+The contract fixes the mechanism as well as the outcome:
+
+> A dispatch that ended for a reason that is **not the agent's verdict on its
+> task** settles `dispatch-died` and not `task-failed`, chosen by classifying the
+> failure's own detail rather than by inspecting the branch.
+
+That mechanism is lossy in the case it exists for. The detail is the graph run's
+standard error, and this crate reads a delimited token out of it only where the
+sentence also names the machinery — so a producer whose sentence classifies
+nothing settles `task-failed`, which is the word a node whose *judge rejected its
+work* settles under. Measured: two nodes of one workstream reached a full green
+gate, recorded exit 0, then died to their provider, and both were reported as
+agents that had failed their tasks; eight of that workstream's fourteen nodes had
+to be verified and landed by hand off readings of that kind.
+
+The classification was never missing. `oneagentgraph` publishes a `member-died`
+the moment one of its members goes, and its payload carries the liveness `rule`
+that fired and a **typed, closed** `cause` — `auth`, `rate_limit`, `quota`,
+`spawn`, `protocol`, and the rest. This crate relays that envelope into the run's
+journal and, before this, read nothing off it: the one statement of what killed
+the dispatch that came from the layer that knows was on the run's own stream, and
+the settlement was decided from a sentence instead.
+
+So the code now takes the producer's stated death first and the detail only where
+there is no such event, which keeps every producer that publishes none settling
+exactly as it did. Everything the contract *promises* about the outcome is
+unchanged and better served — the word is still `dispatch-died` and never
+`task-failed`, `cause` is still the producer's own classification carried as the
+producer spelled it, `branch` and `head` still ride the settlement, and the
+per-node views still name the cause and where the work is. What diverges is the
+one clause naming the source: the contract says the detail, and the code says the
+producer's statement of it, falling back to the detail.
+
+The cause is carried as the **string the producer wrote** rather than
+deserialized through that library's `Cause`, and deliberately: the producing
+program is resolved on the `PATH` at dispatch time and may be a newer release
+than the one this build links, and its payload type is `deny_unknown_fields` — so
+reading the payload through it would turn a cause added upstream into an
+unreadable envelope and settle the node `task-failed` again, which is the report
+this exists to stop. The value crosses the same token check every other relayed
+classification does.
+
+Driven end to end by
+`lifecycle::a_dispatch_whose_member_died_is_settled_from_the_classification_its_producer_published`,
+against a producer that publishes the death on its stream and says nothing
+classifiable in its exit sentence, so the word and the cause can only have come
+from the event.

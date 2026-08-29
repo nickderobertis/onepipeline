@@ -3826,6 +3826,94 @@ fn a_dispatch_that_died_before_anything_was_committed_names_its_branch_and_no_co
     world.run(&["results", &run]).exited(0).out_has(&said);
 }
 
+/// A dispatch whose member died is settled from the classification its producer
+/// **published**, rather than from a sentence read off standard error.
+///
+/// Two nodes of one workstream reached a full green gate, recorded exit 0, and
+/// then died to their provider — and both settled `task-failed`, which is the
+/// word a node whose judge rejected its work settles under. Eight of that
+/// workstream's fourteen nodes had to be verified and landed by hand off the back
+/// of readings like that one.
+///
+/// The classification was never missing: `oneagentgraph` publishes a
+/// `member-died` the moment one of its members goes, carrying the liveness rule
+/// that fired and a typed cause — `auth`, `rate_limit`, `quota`, `spawn` — and
+/// this crate relayed that event into the journal and then settled the node off
+/// the dispatch's stderr instead. So this journey's producer says what killed the
+/// member on its stream and says nothing classifiable in its exit sentence: the
+/// word and the cause here can only have come from the event.
+///
+/// The rest of the settlement is what it has always been, which is the half a
+/// manager acts on: the branch the dispatch left behind and the commit `onevcs`
+/// recorded it at, so finished work is not lost behind the new word.
+#[test]
+fn a_dispatch_whose_member_died_is_settled_from_the_classification_its_producer_published() {
+    let world = World::new("lifecycle-memberdied");
+    let repo = published_locally(&world);
+    world.script("service.work", "the work its judge never got to score\n");
+    world.script(
+        "service.publishes",
+        "chore: what the dispatch had finished when its provider went",
+    );
+    // The liveness rule that fired and the cause, in the sibling's own
+    // vocabulary — and then a sentence that classifies nothing, which is what
+    // makes this journey about the event: read for a classification, the detail
+    // below yields none and the node settles `task-failed`.
+    world.script(
+        "service.died-as",
+        "provider-failure quota the subscription behind this member is exhausted",
+    );
+    let run = settle(&world, "memberdied", vec![lifecycle("service", &[])]);
+
+    // The producer said it, so the run's own stream carries it: this is the
+    // record the engine used to relay and never read.
+    let died = world
+        .events_of(&run, "member-died")
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| panic!("the producer published no death\n{}", why(&world, &run)));
+    assert_eq!(died["payload"]["cause"], "quota", "{died}");
+
+    let node = world.run_json(&run, "result.json")["nodes"][0].clone();
+    assert_eq!(node["status"], "failed", "{node}");
+    assert_eq!(
+        node["outcome"], "dispatch-died",
+        "a dispatch that died to its provider settled under the word a rejected task settles \
+         under: {node}"
+    );
+    assert_eq!(
+        node["cause"], "quota",
+        "the classification the producer published was not carried onto the settlement: {node}"
+    );
+
+    // The work it had finished, which the new word does not hide.
+    let branch = node["branch"].as_str().expect("the node names its branch");
+    let head = node["head"]
+        .as_str()
+        .expect("the node names the commit its branch was left at");
+    assert_eq!(
+        head,
+        git(&world, &repo.checkout, &["rev-parse", branch]).trim(),
+        "the commit the settlement names is not the one the branch is at"
+    );
+
+    // And a manager tells the two apart in both views a run is read through,
+    // without opening the journal the death was published on.
+    let said = format!(
+        "the dispatch died (quota) rather than failing its task; {branch} may carry \
+         finished work, at {head}"
+    );
+    for view in ["results", "status"] {
+        let read = world.run(&[view, &run]);
+        read.exited(0).out_has(&said);
+        assert!(
+            !read.stdout.contains("task-failed"),
+            "`{view}` reported a dispatch that died as a task its agent failed:\n{}",
+            read.stdout
+        );
+    }
+}
+
 /// The same failure with nothing published settles exactly as it always did.
 ///
 /// The pair is the point: an outcome that is *distinct* is only distinct if the

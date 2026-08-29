@@ -582,6 +582,16 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         outlived_by(dir, &key);
     }
 
+    // The same death, said the way the sibling says it: a `member-died` envelope
+    // on the stream this dispatch is relaying, naming the liveness rule that
+    // fired and the classified cause. Scripted `<key>.died-as`, one
+    // `RULE CAUSE [DETAIL...]` line. Apart from `<key>.died` because that one is
+    // a producer that publishes *nothing* of the sort and leaves a reader its
+    // stderr — which is the older shape, and still the degrade path.
+    if let Some(script) = fake::node_script(dir, &key, "died-as") {
+        return died_as(args, &node, step.as_deref(), &script);
+    }
+
     // The same death, after a turn that ran: a worker that wrote its work, said
     // what it did, and was then ended by something that is not its own verdict.
     // Scripted apart from `<key>.fail` because that one is the *agent's* verdict —
@@ -641,6 +651,89 @@ fn died(reason: &str) -> ExitCode {
         }
     );
     ExitCode::from(u8::try_from(oneagentgraph::error::EXIT_MEMBER_FAILED).unwrap_or(1))
+}
+
+/// The same death, published the way the sibling publishes one: a `member-died`
+/// envelope naming the liveness rule that fired and the classified cause, and
+/// then the stderr and the exit status [`died`] writes.
+///
+/// Both halves, because the real CLI writes both — the event is what a relaying
+/// consumer reads and the sentence is what a person reading a terminal does — and
+/// a double that wrote only the one under test would let the crate pass a journey
+/// no producer could have produced.
+///
+/// The payload is composed through the sibling's **own** [`MemberDied`], and the
+/// script's two words are read through that library's own [`Rule`] and [`Cause`]:
+/// a classification this double spelled itself would be an oracle for a
+/// vocabulary nothing publishes, and one it accepted leniently would let a
+/// journey state a death the real library cannot produce.
+///
+/// [`MemberDied`]: oneagentgraph::event::MemberDied
+/// [`Rule`]: oneagentgraph::member::Rule
+/// [`Cause`]: oneagentgraph::event::Cause
+fn died_as(args: &[String], node: &str, step: Option<&str>, script: &str) -> ExitCode {
+    let line = script.trim();
+    let mut columns = line.splitn(3, char::is_whitespace);
+    let (Some(rule), Some(cause)) = (columns.next(), columns.next()) else {
+        fake::fail(&format!(
+            "a `.died-as` script reads {line:?}, which is not `RULE CAUSE [DETAIL...]`"
+        ));
+    };
+    let rule = oneagentgraph::member::Rule::named(rule).unwrap_or_else(|| {
+        fake::fail(&format!(
+            "a `.died-as` script names the liveness rule {rule:?}, which this graph has no \
+             reading of"
+        ))
+    });
+    let cause: oneagentgraph::event::Cause =
+        serde_json::from_value(cause.into()).unwrap_or_else(|error| {
+            fake::fail(&format!(
+                "a `.died-as` script names the cause {cause:?}: {error}"
+            ))
+        });
+    let detail = columns
+        .next()
+        .unwrap_or("the member died")
+        .trim()
+        .to_owned();
+    let (bounded, truncated) = oneagentgraph::event::bound_text(&detail);
+    let payload = oneagentgraph::event::MemberDied {
+        rule: rule.as_str().to_owned(),
+        cause,
+        detail: bounded,
+        truncated,
+        // A member this graph ran in-library was never a process of its own, so
+        // it left none of the three facts one leaves behind — which is exactly
+        // what the sibling writes for the two-party member a node-scope graph
+        // runs.
+        exit_code: None,
+        disposition: None,
+        stderr_tail: None,
+    };
+    let envelope = oneagentgraph::event::Envelope {
+        v: oneagentgraph::event::ENVELOPE_VERSION,
+        ts: fake::now(),
+        stream: stream(),
+        // Above the refusals, which are above every seq `emit` uses: a chain
+        // steps past its candidates and *then* the member it could not serve
+        // dies, and a producer's seq is its own statement of that order.
+        seq: 200,
+        source: oneagentgraph::event::Source::Agentgraph,
+        kind: oneagentgraph::event::EventKind::MemberDied,
+        labels: serde_json::from_value(serde_json::Value::Object(member_labels(args, node, step)))
+            .unwrap_or_else(|error| fake::fail(&format!("the labels are not labels: {error}"))),
+        payload: match serde_json::to_value(&payload) {
+            Ok(serde_json::Value::Object(payload)) => payload,
+            other => fake::fail(&format!("a death is not an object: {other:?}")),
+        },
+        artifacts: Vec::new(),
+    };
+    println!(
+        "{}",
+        serde_json::to_string(&envelope)
+            .unwrap_or_else(|error| fake::fail(&format!("the envelope will not write: {error}")))
+    );
+    died(&detail)
 }
 
 /// Publish one `fallback-advanced` per candidate an identity chain stepped past.
