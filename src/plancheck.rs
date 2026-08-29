@@ -16,7 +16,7 @@
 //! check that could not be **run** is reported separately again, because reading
 //! it as an accept is the one answer that stops anybody looking.
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -55,11 +55,47 @@ const NOT_ANSWERED: i32 = EXIT_REFUSED;
 /// path the `--check` flag named, verbatim.
 pub const ENGINE: &str = "engine";
 
+/// Which side made one refusal.
+///
+/// Two cases rather than a string that is one of them by convention: the wire
+/// value `engine` is reserved, and a `String` there would let a check registered
+/// at a path spelled `engine` be indistinguishable inside this process from the
+/// loader itself. What the two serialise to is the contract's, and it is written
+/// at the boundary rather than carried around.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Source {
+    /// The plan loader this crate runs.
+    Engine,
+    /// A registered check, named by the path its `--check` flag gave.
+    Check(String),
+}
+
+impl Serialize for Source {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        match self {
+            Self::Engine => serializer.serialize_str(ENGINE),
+            Self::Check(path) => serializer.serialize_str(path),
+        }
+    }
+}
+
+impl std::fmt::Display for Source {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Engine => formatter.write_str(ENGINE),
+            Self::Check(path) => formatter.write_str(path),
+        }
+    }
+}
+
 /// One refusal, from either side, as the answer carries it.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 struct Reported {
-    /// `engine`, or the check's path as it was given.
-    source: String,
+    /// Which side made it.
+    source: Source,
     /// Always present, and null where the refusal is about no one node.
     node: Option<String>,
     /// Always present, and null where it is about no one field.
@@ -293,7 +329,7 @@ fn print(args: &PlanCheckArgs, accepted: bool, refusals: &[Reported], unrunnable
 
 fn engine_refusal(refusal: Refusal) -> Reported {
     Reported {
-        source: ENGINE.to_owned(),
+        source: Source::Engine,
         node: refusal.node,
         field: refusal.field,
         reason: Reason(refusal.message),
@@ -374,23 +410,46 @@ fn offer(path: &Path, document: &Value) -> std::result::Result<Vec<Reported>, Un
         let _ = stdin.write_all(&written);
     }
     drop(child.stdin.take());
-    let output = child
-        .wait_with_output()
+    // Both streams, bounded and read at once. A check is somebody else's
+    // program: reading either without a bound lets it exhaust this process's
+    // memory before a byte of it has been validated, and reading them one after
+    // the other deadlocks against a check that fills the pipe this one is not
+    // draining. Each handle is dropped at its bound, which is what stops a check
+    // that keeps writing rather than leaving it blocked on a pipe nobody reads.
+    let mut out = child.stdout.take();
+    let reading = std::thread::spawn({
+        let mut err = child.stderr.take();
+        // Dropped inside the thread, at its bound, for the reason above.
+        move || err.as_mut().map(bounded).unwrap_or_default()
+    });
+    let stdout = out.as_mut().map(bounded).unwrap_or_default();
+    drop(out);
+    let stderr_bytes = reading.join().unwrap_or_default();
+    let status = child
+        .wait()
         .map_err(|error| cannot(None, format!("{named} could not be waited for: {error}")))?;
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-    if !output.status.success() {
-        return Err(cannot(output.status.code(), stderr));
+    let stderr = String::from_utf8_lossy(&stderr_bytes.said)
+        .trim()
+        .to_owned();
+    if !status.success() {
+        return Err(cannot(status.code(), stderr));
+    }
+    if stdout.past_the_bound {
+        return Err(cannot(
+            status.code(),
+            format!("answered with more than the {MAX_ANSWER_BYTES} bytes this build reads"),
+        ));
     }
     // The keys the contract states as **always present**, checked before the
     // answer is typed: serde reads an absent `Option` field as null, so a check
     // omitting `node`, `field`, or `refusals` itself would otherwise be read as
     // having said something it did not.
-    let answered: Value = serde_json::from_slice(&output.stdout).map_err(|error| {
+    let answered: Value = serde_json::from_slice(&stdout.said).map_err(|error| {
         cannot(
-            output.status.code(),
+            status.code(),
             format!(
                 "answered with something this build cannot read: {error}; it said {:?}{}",
-                String::from_utf8_lossy(&output.stdout).trim(),
+                String::from_utf8_lossy(&stdout.said).trim(),
                 if stderr.is_empty() {
                     String::new()
                 } else {
@@ -401,16 +460,16 @@ fn offer(path: &Path, document: &Value) -> std::result::Result<Vec<Reported>, Un
     })?;
     if let Some(key) = absent_key(&answered) {
         return Err(cannot(
-            output.status.code(),
+            status.code(),
             format!("answered with no `{key}`, which a check's answer always carries"),
         ));
     }
     let answer: Answer = serde_json::from_value(answered).map_err(|error| {
         cannot(
-            output.status.code(),
+            status.code(),
             format!(
                 "answered with something this build cannot read: {error}; it said {:?}{}",
-                String::from_utf8_lossy(&output.stdout).trim(),
+                String::from_utf8_lossy(&stdout.said).trim(),
                 if stderr.is_empty() {
                     String::new()
                 } else {
@@ -423,7 +482,7 @@ fn offer(path: &Path, document: &Value) -> std::result::Result<Vec<Reported>, Un
         .refusals
         .into_iter()
         .map(|refusal| Reported {
-            source: named.clone(),
+            source: Source::Check(named.clone()),
             node: refusal.node,
             field: refusal.field,
             reason: refusal.reason,
@@ -451,6 +510,38 @@ fn absent_key(answered: &Value) -> Option<String> {
         }
     }
     None
+}
+
+/// The most of one check's stdout or stderr this build reads.
+///
+/// A refusals list is a handful of sentences and a diagnosis is a few lines, so
+/// this is past anything a check has to say by any margin — and it is the bound
+/// that keeps somebody else's program from exhausting this process before a byte
+/// of what it wrote has been validated.
+const MAX_ANSWER_BYTES: u64 = 1 << 20;
+
+/// One bounded read of a check's stream.
+#[derive(Default)]
+struct Bounded {
+    /// What it said, up to [`MAX_ANSWER_BYTES`].
+    said: Vec<u8>,
+    /// Whether there was more, which makes the answer one this build cannot
+    /// read rather than a truncated one it acts on.
+    past_the_bound: bool,
+}
+
+/// Read one stream to the bound, and say whether it reached it.
+fn bounded(stream: &mut impl std::io::Read) -> Bounded {
+    let mut said = Vec::new();
+    // One past the bound, so a stream that is exactly it is not reported as
+    // having overrun.
+    let read = stream.take(MAX_ANSWER_BYTES + 1).read_to_end(&mut said);
+    let past_the_bound = read.is_ok() && said.len() as u64 > MAX_ANSWER_BYTES;
+    said.truncate(usize::try_from(MAX_ANSWER_BYTES).unwrap_or(usize::MAX));
+    Bounded {
+        said,
+        past_the_bound,
+    }
 }
 
 /// A relative path against the working directory; anything else as it was given.

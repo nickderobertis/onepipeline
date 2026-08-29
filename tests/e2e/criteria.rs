@@ -259,3 +259,54 @@ fn a_direct_nodes_criteria_are_read_against_the_project_directory() {
     assert!(found[0].1.contains("complete_dataset: true"), "{found:?}");
     assert_eq!(settled(&world, name, "audit").0, "done");
 }
+
+/// A publication that failed leaving its work behind is re-dispatched, and what
+/// settles the node is the **last** attempt's reading of its branch.
+///
+/// The branch is the same one across every attempt, so a reading that
+/// accumulated would report one criterion once per attempt. The budget is two,
+/// and the merge path refuses every push, so the node spends it and settles on
+/// the last failure — with exactly the one finding that branch earns.
+#[test]
+fn a_re_dispatched_node_settles_with_the_last_attempts_reading_of_its_branch() {
+    let world = World::new("criteria-retry").with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "2");
+    // A merge path that refuses the publishing push: a preserving failure, so
+    // the node is asked again on the branch it already wrote.
+    world.repository("local-direct", &["false"]);
+    world.script("again.work", "complete_dataset: false\n");
+
+    let name = "retried";
+    let project = world.plan(
+        name,
+        &plan_of(
+            name,
+            vec![measured("again", "again.md", "complete_dataset: true")],
+        ),
+    );
+    world.run(&["start", &project, "--attach"]);
+    world.until("the run to settle", |world| {
+        world.run_file(name, "result.json").is_file()
+    });
+
+    // Two dispatches of the one node, which is what the budget bought.
+    let dispatched = world
+        .events_of(name, "node-dispatched")
+        .iter()
+        .filter(|event| event["labels"]["node"] == "again")
+        .count();
+    assert_eq!(dispatched, 2, "the node was not re-dispatched");
+
+    let found = findings(&world, name);
+    assert_eq!(
+        found.len(),
+        1,
+        "the branch was read once per settlement, not once per attempt: {found:?}"
+    );
+    assert_eq!(found[0].0, "again", "{found:?}");
+    assert!(found[0].1.contains("again.md"), "{found:?}");
+    // And the node settled on the publication that spent the budget, which the
+    // reading changed nothing about.
+    let (status, outcome) = settled(&world, name, "again");
+    assert_eq!(status, "failed");
+    assert_eq!(outcome, "push-rejected");
+}
