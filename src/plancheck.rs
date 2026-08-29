@@ -107,18 +107,15 @@ struct Reported {
 }
 
 /// One registered check that could not be run.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq)]
 struct Unrunnable {
     /// The path as it was given.
     check: String,
-    /// Its exit status, or null where there was no process to have one.
-    exit_code: Option<i32>,
-    /// What it said for itself.
-    stderr: String,
-    /// Whether this verb ever tried to start it, which decides the exit status
-    /// and is not part of the answer's own shape.
-    #[serde(skip)]
+    /// How far this verb got with it, which is also where an exit status lives:
+    /// only a check something ran can have one.
     ran: Ran,
+    /// What it said for itself, or why it never said anything.
+    stderr: String,
 }
 
 /// How far this verb got with one registered check.
@@ -126,13 +123,46 @@ struct Unrunnable {
 /// The distinction the exit status turns on, in the type rather than in the
 /// wording of a message: a check that was **attempted** and could not be run
 /// leaves what it would have said unknown, and a check the loader's own refusal
-/// stopped was never asked, so the refusal is what the status reports.
+/// stopped was never asked, so the refusal is what the status reports. The exit
+/// status hangs off the first case alone, because a check nothing started cannot
+/// have one, and a type that let it carry one would be a state the answer can
+/// print and nothing can mean.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Ran {
-    /// This verb tried to start it.
-    Attempted,
+    /// This verb tried to start it, carrying the status it exited with where it
+    /// got far enough to have one.
+    Attempted(Option<i32>),
     /// The loader refused first, so there was no loaded plan to hand it.
     StoppedByTheLoader,
+}
+
+impl Ran {
+    /// The status the answer carries, which is null for anything nothing ran.
+    fn exit_code(self) -> Option<i32> {
+        match self {
+            Self::Attempted(code) => code,
+            Self::StoppedByTheLoader => None,
+        }
+    }
+
+    /// Whether this verb tried to start the check.
+    fn attempted(self) -> bool {
+        matches!(self, Self::Attempted(_))
+    }
+}
+
+impl Serialize for Unrunnable {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut answer = serializer.serialize_struct("Unrunnable", 3)?;
+        answer.serialize_field("check", &self.check)?;
+        answer.serialize_field("exit_code", &self.ran.exit_code())?;
+        answer.serialize_field("stderr", &self.stderr)?;
+        answer.end()
+    }
 }
 
 /// What one registered check answered with.
@@ -188,7 +218,7 @@ impl<'de> Deserialize<'de> for Reason {
 
 /// Read one project, run every registered check over it, and report.
 pub(crate) fn check(args: &PlanCheckArgs) -> Result<i32> {
-    match read(args) {
+    match load_and_check(args) {
         Ok((refusals, unrunnable)) => Ok(report(args, &refusals, &unrunnable)),
         // The project could not be read at all — no binary, a store that
         // answered badly, an id naming nothing. `--json` still prints exactly
@@ -205,11 +235,12 @@ pub(crate) fn check(args: &PlanCheckArgs) -> Result<i32> {
     }
 }
 
-/// The loader, and every registered check it leaves something to hand.
+/// Run the loader, and then every registered check it leaves something to hand.
 ///
-/// `Err` is the project not being readable at all, which is a different answer
-/// from a plan the schema refuses: see [`Load`].
-fn read(args: &PlanCheckArgs) -> Result<(Vec<Reported>, Vec<Unrunnable>)> {
+/// It **spawns** each of those checks, which is the half of this verb that is
+/// not a read at all. `Err` is the project not being readable, which is a
+/// different answer from a plan the schema refuses: see [`Load`].
+fn load_and_check(args: &PlanCheckArgs) -> Result<(Vec<Reported>, Vec<Unrunnable>)> {
     let store = Store::resolve()?;
     let project: QualifiedId = args.project.parse()?;
 
@@ -243,11 +274,10 @@ fn read(args: &PlanCheckArgs) -> Result<(Vec<Reported>, Vec<Unrunnable>)> {
             .iter()
             .map(|path| Unrunnable {
                 check: path.display().to_string(),
-                exit_code: None,
+                ran: Ran::StoppedByTheLoader,
                 stderr: "the plan loader refused the project, so there was no loaded plan to \
                          hand this check; it did not run"
                     .to_owned(),
-                ran: Ran::StoppedByTheLoader,
             })
             .collect(),
     ))
@@ -265,7 +295,7 @@ fn report(args: &PlanCheckArgs, refusals: &[Reported], unrunnable: &[Unrunnable]
     // it would have said is unknown, and nothing else in the answer stands in
     // for it. A check the loader's own refusal stopped was never asked, and the
     // refusal it was stopped by is what the status reports.
-    if unrunnable.iter().any(|report| report.ran == Ran::Attempted) {
+    if unrunnable.iter().any(|report| report.ran.attempted()) {
         NOT_ANSWERED
     } else if refusals.is_empty() {
         ACCEPTED
@@ -315,7 +345,7 @@ fn print(args: &PlanCheckArgs, accepted: bool, refusals: &[Reported], unrunnable
         eprintln!(
             "{}: could not be run ({}): {}",
             report.check,
-            report.exit_code.map_or_else(
+            report.ran.exit_code().map_or_else(
                 || "no exit status".to_owned(),
                 |code| format!("exit {code}")
             ),
@@ -380,9 +410,8 @@ fn offer(path: &Path, document: &Value) -> std::result::Result<Vec<Reported>, Un
     let named = path.display().to_string();
     let cannot = |exit_code: Option<i32>, stderr: String| Unrunnable {
         check: named.clone(),
-        exit_code,
+        ran: Ran::Attempted(exit_code),
         stderr,
-        ran: Ran::Attempted,
     };
     // Against the working directory this command was run from, which is also the
     // one the check itself runs in: a consumer registers a check beside the plan
@@ -428,9 +457,15 @@ fn offer(path: &Path, document: &Value) -> std::result::Result<Vec<Reported>, Un
     let status = child
         .wait()
         .map_err(|error| cannot(None, format!("{named} could not be waited for: {error}")))?;
-    let stderr = String::from_utf8_lossy(&stderr_bytes.said)
-        .trim()
-        .to_owned();
+    // The overrun is said rather than dropped: a diagnosis cut off at the bound
+    // reads as the whole of what a check said, and a reader acting on it would
+    // be acting on a sentence that stops mid-word.
+    let stderr = match String::from_utf8_lossy(&stderr_bytes.said).trim() {
+        said if stderr_bytes.past_the_bound => {
+            format!("{said} […truncated at the {MAX_ANSWER_BYTES} bytes this build reads]")
+        }
+        said => said.to_owned(),
+    };
     if !status.success() {
         return Err(cannot(status.code(), stderr));
     }
@@ -530,6 +565,16 @@ struct Bounded {
     past_the_bound: bool,
 }
 
+/// How much past the bound a stream is drained before the handle is dropped.
+///
+/// What is **kept** is bounded by [`MAX_ANSWER_BYTES`]; what is *read* runs on a
+/// little further, discarded, so a check that answered too much still gets to
+/// finish writing and exit for itself. Without it the dropped pipe kills the
+/// check mid-sentence and its overrun is reported as a bare signal exit instead
+/// of as the answer nobody could read. A check still writing past this is one
+/// nothing is waiting for any longer, and dropping the handle is what ends it.
+const DRAIN_BYTES: u64 = 8 * MAX_ANSWER_BYTES;
+
 /// Read one stream to the bound, and say whether it reached it.
 fn bounded(stream: &mut impl std::io::Read) -> Bounded {
     let mut said = Vec::new();
@@ -538,6 +583,10 @@ fn bounded(stream: &mut impl std::io::Read) -> Bounded {
     let read = stream.take(MAX_ANSWER_BYTES + 1).read_to_end(&mut said);
     let past_the_bound = read.is_ok() && said.len() as u64 > MAX_ANSWER_BYTES;
     said.truncate(usize::try_from(MAX_ANSWER_BYTES).unwrap_or(usize::MAX));
+    if past_the_bound {
+        // Nothing is kept: this only lets the writer finish.
+        let _ = std::io::copy(&mut stream.take(DRAIN_BYTES), &mut std::io::sink());
+    }
     Bounded {
         said,
         past_the_bound,

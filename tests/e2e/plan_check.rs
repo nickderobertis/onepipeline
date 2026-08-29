@@ -409,6 +409,13 @@ fn a_check_that_could_not_be_run_is_reported_as_such_and_exits_two() {
             json!({"refusals": [{"reason": "the bar omits the appendix"}]})
         ),
     );
+    // An answer past the bound this build reads. A check is somebody else's
+    // program, and one that answers with a megabyte is one nothing can act on.
+    let endless = check_script(
+        &world,
+        "endless",
+        "cat > /dev/null\nprintf '{\"refusals\": ['\nyes '{\"node\": null, \"field\": null,          \"reason\": \"padding\"},' | head -c 1200000",
+    );
     // An answer shaped right and saying nothing: `reason` is the whole of what a
     // refusal is, so a blank one is an answer this build cannot read rather than
     // a refusal with no words.
@@ -430,6 +437,7 @@ fn a_check_that_could_not_be_run_is_reported_as_such_and_exits_two() {
         (&babbling, true, "not-json"),
         (&wordless, true, "blank"),
         (&inventive, true, "verdict"),
+        (&endless, true, "bytes this build reads"),
         (&terse, true, "refusals[].node"),
         (&unopenable, false, "cannot be run"),
     ] {

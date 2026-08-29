@@ -204,9 +204,14 @@ fn a_workstream_waiting_at_a_human_step_has_its_branch_read() {
                 "repo": "service",
                 "title": "feat: hold for a person",
                 "steps": [
+                    // The criterion is wrapped across two lines, which is what
+                    // a long one looks like: it names its file on one and its
+                    // literal on the next, and reading them apart would make the
+                    // pair unreadable.
                     {"id": "write", "persona": "engineer",
                      "task": "## What\nWrite it.\n\n## Acceptance criteria\n\
-                              - the row in `held-write.md` is `complete_dataset: true`.\n"},
+                              - the shared journey row in `held-write.md`\n  \
+                              reads `complete_dataset: true`.\n"},
                     {"id": "sign", "kind": "human", "deps": ["write"],
                      "task": "Sign it off, which only a person can do."}
                 ]
@@ -242,7 +247,7 @@ fn a_direct_nodes_criteria_are_read_against_the_project_directory() {
 
     let mut audit = crate::harness::agent("audit", &[]);
     audit["task"] = json!(
-        "## What\nAudit the dataset.\n\n## Why\nIt has been wrong before.\n\n         ## Acceptance criteria\n- the shared journey row in `dataset.yaml` is          `complete_dataset: true`.\n"
+        "## What\nAudit the dataset.\n\n## Why\nIt has been wrong before.\n\n         ## Acceptance criteria\n* the shared journey row in `dataset.yaml` is          `complete_dataset: true`.\n"
     );
 
     let name = "direct";
