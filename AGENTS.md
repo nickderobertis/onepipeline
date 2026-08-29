@@ -117,6 +117,14 @@ job or a matrix is added or renamed** — GitHub holds the required set, nothing
 reconciles it against the workflow, and a leg nobody required is advisory, which
 auto-merge lands straight past.
 
+`ci.yml` is the whole of that set. `engine-currency.yml` also runs on every pull
+request and is deliberately **not** required: what it asks is whether the
+registry has moved past this lock, so its answer changes without this tree
+changing and a release nobody here made would otherwise block an unrelated
+merge. Red there is closed by one `cargo update -p <spec>` on any branch, never
+by requiring it here. `published-smoke.yml` gates nothing either — it runs after
+`release.yml` completes, and reports by opening an issue.
+
 **Releases are fully automated; the only human action is merging a PR.**
 `release-plz` is the single version driver: it opens a release PR, and merging it
 tags `vX.Y.Z` and cuts the GitHub Release. That Release — created with a PAT,
