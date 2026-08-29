@@ -2211,8 +2211,8 @@ impl TurnRecords {
 }
 
 /// The key a relayed envelope's records pair under: the member it was stamped
-/// with, the empty name for a producer that stamped none, and `None` for a label
-/// this build cannot read as a member.
+/// with, [`UNSTAMPED_MEMBER`] for a producer that stamped none, and `None` for a
+/// label this build cannot read as a member.
 ///
 /// The third answer is a refusal rather than a default. The label is another
 /// process's JSON and this key is what a turn record and a death are correlated
@@ -2221,11 +2221,23 @@ impl TurnRecords {
 /// same three apart, for the same reason on the rendering side.
 fn member_of(envelope: &Envelope) -> Option<&str> {
     match envelope.labels.extra.get("member") {
-        None => Some(""),
-        Some(Value::String(member)) => Some(member),
+        None => Some(UNSTAMPED_MEMBER),
+        // The same token check every other relayed string in this module crosses,
+        // for the same reason: this is another process's JSON, and a member name
+        // is a graph identifier — `worker`, `check-in` — so a paragraph or a
+        // control character is not one, whatever it is. Bounded here because the
+        // value becomes a map key held for the life of the dispatch.
+        Some(Value::String(member)) => is_a_classification(member).then_some(member.as_str()),
         Some(_) => None,
     }
 }
+
+/// The key a producer that stamped no member pairs its records under.
+///
+/// Deliberately a name no member can have — [`member_of`] refuses an empty
+/// label — so a single-sided producer's records pair with each other and with
+/// nothing else.
+const UNSTAMPED_MEMBER: &str = "";
 
 /// The figures on a turn's usage a non-zero one of which says the provider did
 /// work for it.
@@ -3510,17 +3522,29 @@ mod tests {
         let mut unstamped = TurnRecords::default();
         unstamped.read(&of(started, None, json!({"turn": 1})));
         unstamped.read(&of(completed, None, billed.clone()));
-        assert!(unstamped.contradicts_a_death_of(""));
+        assert!(unstamped.contradicts_a_death_of(UNSTAMPED_MEMBER));
 
         // A label present and unreadable is refused rather than folded onto the
         // unstamped key: a stranger's record would otherwise contradict a real
-        // member's death.
-        let mut unreadable = TurnRecords::default();
-        let mut opened = of(started, None, json!({"turn": 1}));
-        opened.labels.extra.insert("member".into(), json!(7));
-        unreadable.read(&opened);
-        unreadable.read(&of(completed, None, billed.clone()));
-        assert!(!unreadable.contradicts_a_death_of(""));
+        // member's death. Every way of not being a member name, including the two
+        // that are strings.
+        for label in [
+            json!(7),
+            json!(""),
+            json!("a name with spaces in it"),
+            json!("worker\n"),
+            json!("m".repeat(CLASSIFICATION_LIMIT + 1)),
+        ] {
+            let mut unreadable = TurnRecords::default();
+            let mut opened = of(started, None, json!({"turn": 1}));
+            opened.labels.extra.insert("member".into(), label.clone());
+            unreadable.read(&opened);
+            let mut closed = of(completed, None, billed.clone());
+            closed.labels.extra.insert("member".into(), label);
+            unreadable.read(&closed);
+            assert!(!unreadable.contradicts_a_death_of(UNSTAMPED_MEMBER));
+            assert!(!unreadable.contradicts_a_death_of("worker"));
+        }
 
         // Everything that says nothing about a turn is folded as nothing: another
         // producer's stream, and a kind with no turn on it.
