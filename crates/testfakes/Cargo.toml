@@ -97,6 +97,16 @@ path = "src/bin/fake-oneharness.rs"
 name = "fake-onetaskgraph"
 path = "src/bin/fake-onetaskgraph.rs"
 
+# Not a double at all either: a **real** `onetaskgraph` source. It speaks that
+# product's own stdio plugin protocol and serves every read and write out of the
+# real `local-md` plugin, hosted in the shipped `onetaskgraph-source` program —
+# what it adds is one destination's *rule*, the label strictness `github-projects`
+# enforces and no local store does, so a projection that dropped a label fails a
+# journey here instead of silently stopping at a board nobody can reach offline.
+[[bin]]
+name = "label-strict-source"
+path = "src/bin/label-strict-source.rs"
+
 # Not a double at all: a **real** node validator, as `--node-validator` names
 # one. The hook's promise is that a command the consuming host names is run, and
 # that host's own validator reads documents this crate has never seen — so what

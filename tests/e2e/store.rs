@@ -87,12 +87,18 @@ fn a_run_launches_from_a_local_markdown_project_and_executes_the_graph_it_holds(
         .out_has("Deliver it from a folder of Markdown");
 }
 
-/// Write-back owns the projection keys it adds to a plan-store item, not the prose a
-/// person authored around them. Drive both sides of that distinction through the installed
-/// CLI and real local-md store: settlement must arrive without changing either a present
-/// project body or an absent one.
+/// Write-back owns exactly what the plan document declares, and preserves everything the
+/// plan does not model. Drive that rule through the installed CLI and a real local-md
+/// store: a settlement must arrive without renaming the project, without changing a
+/// present project body or an absent one, and without dropping a label from the project or
+/// from any task in it.
+///
+/// The destination here is deliberately one where a project's **title is not its native
+/// identifier**. On a store where those two coincide, writing the identifier as the title
+/// is byte-identical to preserving it, and no assertion could tell a right answer from a
+/// wrong one — which is how the rename shipped.
 #[test]
-fn settlement_preserves_authored_project_content() {
+fn settlement_preserves_everything_the_plan_does_not_declare() {
     let world = World::new("store-project-content");
     for (name, body) in [
         ("project-with-content", "A person's project description.\n"),
@@ -102,12 +108,23 @@ fn settlement_preserves_authored_project_content() {
             name,
             &plan_of(name, vec![crate::harness::agent("work", &[])]),
         );
+        // The title a person gave the board, which is not the identifier the store holds
+        // it under and is not derivable from it.
+        let titled = format!("Ship {name}, as a person titled it");
         let path = world.store().join("projects").join(format!("{name}.md"));
         let original = std::fs::read_to_string(&path)
             .expect("the authored project document")
             .replacen(
+                &format!("title: {}", json!(name)),
+                &format!("title: {}", json!(titled)),
+                1,
+            )
+            .replacen(
                 "metadata: {",
-                "metadata: {\"authored.note\":\"keep this value\",",
+                &format!(
+                    "labels: {}\nmetadata: {{\"authored.note\":\"keep this value\",",
+                    json!(["planning", "q3"])
+                ),
                 1,
             );
         let (front, _) = original
@@ -115,7 +132,44 @@ fn settlement_preserves_authored_project_content() {
             .expect("the fixture's front matter delimiter");
         std::fs::write(&path, format!("{front}---\n{body}")).expect("the project body is authored");
         let authored_document = std::fs::read_to_string(&path).expect("the authored document");
+        // And a label on the plan's own task, which is the label an operator adds to one
+        // issue and which a projection that wrote none would silently delete.
+        let task = world.store().join("tasks").join(name).join("000-work.md");
+        let authored_task = std::fs::read_to_string(&task)
+            .expect("the authored task document")
+            .replacen(
+                "metadata: {",
+                &format!("labels: {}\nmetadata: {{", json!(["needs-review"])),
+                1,
+            );
+        std::fs::write(&task, &authored_task).expect("the task label is authored");
+
         let before = world.store_project(&project)["items"][0]["item"].clone();
+        let labels_before = world.store_task_labels(&project);
+        assert_eq!(
+            before["title"], titled,
+            "the fixture did not author a title of its own for {project}"
+        );
+        assert_ne!(
+            before["title"], name,
+            "the fixture's title is the project's own identifier, which proves nothing"
+        );
+        assert_eq!(
+            before["labels"],
+            json!([
+                {"id": "planning", "name": "planning", "color": null},
+                {"id": "q3", "name": "q3", "color": null},
+            ]),
+            "the fixture did not author the project's labels for {project}"
+        );
+        assert_eq!(
+            labels_before,
+            std::collections::BTreeMap::from([(
+                "work".to_owned(),
+                json!([{"id": "needs-review", "name": "needs-review", "color": null}])
+            )]),
+            "the fixture did not author the task's labels for {project}"
+        );
 
         world.run(&["start", &project, "--attach"]).settled();
         world.until_store("the settlement to reach the project", |world| {
@@ -126,6 +180,19 @@ fn settlement_preserves_authored_project_content() {
         });
 
         let after = world.store_project(&project)["items"][0]["item"].clone();
+        assert_eq!(
+            after["title"], before["title"],
+            "settlement renamed the project for {project}"
+        );
+        assert_eq!(
+            after["labels"], before["labels"],
+            "settlement changed the project's labels for {project}"
+        );
+        assert_eq!(
+            world.store_task_labels(&project),
+            labels_before,
+            "settlement changed a task's labels for {project}"
+        );
         assert_eq!(
             after["content"], before["content"],
             "settlement changed authored content for {project}"
@@ -168,6 +235,170 @@ fn settlement_preserves_authored_project_content() {
             "settlement changed the source document body for {project}"
         );
     }
+}
+
+/// A destination that **refuses** a write whose labels differ from the ones it holds still
+/// accepts this projection, run after run.
+///
+/// That refusal is the shipped `github-projects` rule — *"GitHub issue labels differ from
+/// the labels being written"* — and it is why a dropped label is a defect rather than an
+/// untidiness: an operator who puts one label on a plan's issue would otherwise stop every
+/// later settlement from ever reaching that board, silently, because a failed projection
+/// reaches only the driver's own log.
+///
+/// Nothing offline can reach GitHub, so the destination here is a **real** `onetaskgraph`
+/// source carrying that rule: `label-strict-source` speaks the product's own stdio plugin
+/// protocol, serves every read and write out of the real `local-md` plugin hosted in the
+/// shipped `onetaskgraph-source`, and adds the refusal. The run drives it as its plan's
+/// own project, so the projection this build produces is the one that destination judges.
+#[test]
+fn a_label_strict_destination_accepts_the_settlement_projection() {
+    let world = World::new("store-writeback-label-strict");
+    let store = world.store();
+    let world = world
+        // Both sources, exactly as an operator's own configuration would declare them: the
+        // board this run launches from is the strict one.
+        .with_env("ONETASKGRAPH_DEFAULT_SOURCES", "plans,strict")
+        .with_env("ONETASKGRAPH_SOURCES__STRICT__PLUGIN", "subprocess")
+        .with_env(
+            "ONETASKGRAPH_SOURCES__STRICT__CONFIG__COMMAND",
+            &double("label-strict-source").to_string_lossy(),
+        )
+        .with_env(
+            "ONETASKGRAPH_SOURCES__STRICT__CONFIG__SETTINGS__HOST",
+            &crate::harness::onetaskgraph_source_binary().to_string_lossy(),
+        )
+        .with_env(
+            "ONETASKGRAPH_SOURCES__STRICT__CONFIG__SETTINGS__ROOT",
+            &store.to_string_lossy(),
+        );
+
+    let name = "label-strict";
+    world.plan(
+        name,
+        &plan_of(
+            name,
+            vec![
+                crate::harness::agent("work", &[]),
+                crate::harness::agent("later", &["work"]),
+            ],
+        ),
+    );
+    label(
+        &world.store().join("projects").join(format!("{name}.md")),
+        &["roadmap"],
+    );
+    for file in ["000-work.md", "001-later.md"] {
+        label(
+            &world.store().join("tasks").join(name).join(file),
+            &["needs-review"],
+        );
+    }
+    // The same folder of Markdown, reached through the strict destination rather than
+    // directly, which is the project this run launches from.
+    let project = format!("strict:{name}");
+    let before = world.store_project(&project)["items"][0]["item"].clone();
+    let labels_before = world.store_task_labels(&project);
+    assert_eq!(
+        labels_before.len(),
+        2,
+        "the strict destination did not serve the plan's own tasks"
+    );
+
+    // Detached, so the projection's own reports are on the driver's log where this
+    // journey can read them — which is exactly where a refusal would have gone unread.
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the run to settle", |world| {
+        world.run_file(name, "result.json").is_file()
+    });
+    world.until_store(
+        "both settlements to reach the strict destination",
+        |world| {
+            let tasks = world.store_tasks(&project);
+            tasks.len() == 2
+                && tasks
+                    .iter()
+                    .all(|task| task["item"]["metadata"]["onepipeline.settlement"].is_object())
+        },
+    );
+
+    // The destination never refused, so the run's own log carries no projection failure at
+    // all — the failure mode this journey exists for is a projection that stops arriving.
+    let log = std::fs::read_to_string(world.run_file(name, "driver.log"))
+        .expect("the driver log is readable");
+    assert!(
+        !log.contains("onetaskgraph write-back failed"),
+        "the strict destination refused a projection: {log}"
+    );
+    let after = world.store_project(&project)["items"][0]["item"].clone();
+    assert_eq!(
+        after["labels"], before["labels"],
+        "settlement changed the strict destination project's labels"
+    );
+    assert_eq!(
+        after["title"], before["title"],
+        "settlement renamed the strict destination project"
+    );
+    assert_eq!(
+        world.store_task_labels(&project),
+        labels_before,
+        "settlement changed a strict destination task's labels"
+    );
+
+    // And the acceptance above means something only if this destination would have
+    // refused. A projection of the shape this build used to write — the same project, onto
+    // the same destination item, carrying no labels — is one an operator can state as a
+    // project of their own and copy across with the shipped verb, and this destination
+    // refuses it.
+    let dropped = world.root.join("a-projection-that-dropped-them");
+    std::fs::create_dir_all(dropped.join("projects")).expect("a folder for the projection");
+    std::fs::write(
+        dropped.join("projects").join("board.md"),
+        format!("---\ntitle: {name}\nmetadata:\n  onetaskgraph.origin: {project}\n---\n"),
+    )
+    .expect("the projection is authored");
+    let refused = world
+        .store_cmd(&[
+            "project",
+            "copy",
+            "a-projection:board",
+            "--to",
+            "strict",
+            "--no-tasks",
+            "--set",
+            "sources.a-projection.plugin=local-md",
+            "--set",
+            &format!("sources.a-projection.config.root={}", dropped.display()),
+        ])
+        .output()
+        .expect("the real onetaskgraph runs the copy");
+    let said = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        !refused.status.success() && said.contains("labels differ from the labels being written"),
+        "the destination accepted a projection that dropped its labels, so this journey \
+         could not have told a right answer from a wrong one: {said}"
+    );
+}
+
+fn label(path: &std::path::Path, labels: &[&str]) {
+    amend(path, |front| {
+        front.insert("labels".to_owned(), json!(labels));
+    });
+}
+
+fn amend(path: &std::path::Path, edit: impl FnOnce(&mut serde_json::Map<String, Value>)) {
+    let document = std::fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("{} is readable: {error}", path.display()));
+    let (front, body) = document
+        .strip_prefix("---\n")
+        .expect("a store document opens its front matter")
+        .split_once("---\n")
+        .expect("a store document closes its front matter");
+    let mut parsed: serde_json::Map<String, Value> =
+        serde_norway::from_str(front).expect("the front matter is YAML");
+    edit(&mut parsed);
+    let rendered = serde_norway::to_string(&parsed).expect("the front matter renders");
+    std::fs::write(path, format!("---\n{rendered}---\n{body}")).expect("the document is written");
 }
 
 /// Losing the store is a projection failure, never an execution failure. The worker reports
