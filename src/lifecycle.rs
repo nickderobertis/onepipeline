@@ -95,12 +95,12 @@ pub fn execute(
     let mut node = std::borrow::Cow::Borrowed(node);
     let mut attempt = std::num::NonZeroU32::MIN;
     // What the attempt's own branch said about this node's criteria, read inside
-    // the attempt because the worktree is released with its session. Cleared
-    // between attempts: a re-dispatch works the same branch again, and what
-    // settles the node is what the last attempt read there.
+    // the attempt because the worktree is released with its session. Every
+    // ending `attempt_once` can reach past its first two lines writes it, so a
+    // re-dispatch replaces the previous attempt's reading rather than adding to
+    // it: what settles the node is what the last attempt read on that branch.
     let mut findings: Vec<crate::criteria::Finding> = Vec::new();
     loop {
-        findings.clear();
         let preserved = match attempt_once(
             executor,
             paths,

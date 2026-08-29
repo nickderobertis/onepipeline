@@ -198,18 +198,30 @@ fn backticked(criterion: &str) -> Vec<String> {
 /// A token that is absolute, that climbs out of the tree, or that names anything
 /// but a plain file of a readable size names no file here — the criterion then
 /// carries it as a literal, which is what an ordinary backticked value is.
+///
+/// **Every component is read without following a link.** A criterion is prose an
+/// agent wrote and the tree is one an agent worked in, so an in-tree symlink
+/// pointing outside it would be a criterion reading a file the node never
+/// touched — and reporting *that* file's contents as this branch's is the one
+/// wrong answer this check must not give. `report::retain` refuses a symlink for
+/// the same reason: a name that delivers a different file than it states.
 fn read_named(tree: &Path, token: &str) -> Option<String> {
     if token.is_empty() || Path::new(token).is_absolute() {
         return None;
     }
     let mut path = PathBuf::from(tree);
     for component in Path::new(token).components() {
-        match component {
-            std::path::Component::Normal(part) => path.push(part),
-            _ => return None,
+        let std::path::Component::Normal(part) = component else {
+            return None;
+        };
+        path.push(part);
+        // Each directory on the way as well as the file itself: a link halfway
+        // along the path leaves the rest of it outside the tree just as surely.
+        if std::fs::symlink_metadata(&path).ok()?.is_symlink() {
+            return None;
         }
     }
-    let metadata = std::fs::metadata(&path).ok()?;
+    let metadata = std::fs::symlink_metadata(&path).ok()?;
     if !metadata.is_file() || metadata.len() > MAX_FILE_BYTES {
         return None;
     }
@@ -318,6 +330,31 @@ mod tests {
         );
         assert_eq!(found.len(), 1, "{found:?}");
         assert!(found[0].criterion.contains("reads"), "{found:?}");
+    }
+
+    /// A link inside the tree names a file the node's dispatch never touched, so
+    /// the criterion carries the token as a literal instead of reading through
+    /// it — reporting that file's contents as this branch's is the one wrong
+    /// answer this check must not give.
+    #[cfg(unix)]
+    #[test]
+    fn an_in_tree_symlink_pointing_outside_it_names_no_file() {
+        let dir = tree("symlink", ROW);
+        let elsewhere = dir.join("elsewhere.yaml");
+        std::fs::write(&elsewhere, "complete_dataset: true\n").expect("the outside file");
+        let inside = tree("symlink-tree", &[]);
+        std::os::unix::fs::symlink(&elsewhere, inside.join("journeys.yaml"))
+            .expect("the link is made");
+        // The link reads `complete_dataset: true`, so a check that followed it
+        // would find the criterion met and say nothing.
+        let found = findings(
+            ["## Acceptance criteria\n- `journeys.yaml` says `complete_dataset: true`.\n"],
+            Some(&inside),
+        );
+        assert!(
+            found.is_empty(),
+            "a link was followed rather than left as a literal: {found:?}"
+        );
     }
 
     #[test]

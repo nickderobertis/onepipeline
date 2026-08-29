@@ -64,8 +64,10 @@ struct Reported {
     node: Option<String>,
     /// Always present, and null where it is about no one field.
     field: Option<String>,
-    /// Why. Never empty.
-    reason: String,
+    /// Why. Never empty: an engine refusal's is the sentence `start` prints,
+    /// composed here, and a check's is [`Reason`], which refuses a blank one
+    /// where it arrives.
+    reason: Reason,
 }
 
 /// One registered check that could not be run.
@@ -114,14 +116,38 @@ struct Answer {
 /// One refusal a registered check made.
 ///
 /// `node` and `field` are `Option` because their **value** may be null, not
-/// because the key may be absent: an `Option` field with no `serde` default is
-/// required to be there, which is what the contract says of both.
+/// because the key may be absent: [`absent_key`] holds every one of the three to
+/// being *there*, which is what the contract says of each.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AnswerRefusal {
     node: Option<String>,
     field: Option<String>,
-    reason: String,
+    reason: Reason,
+}
+
+/// A refusal's own words, which are never empty.
+///
+/// The invariant is in the type rather than in a pass afterwards: a blank reason
+/// is a refusal that says nothing, and reading one is how a consumer ends up
+/// with a plan refused for no stated cause. Deserialising is where it is
+/// enforced, because that is where the value arrives.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+struct Reason(String);
+
+impl<'de> Deserialize<'de> for Reason {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let said = String::deserialize(deserializer)?;
+        if said.trim().is_empty() {
+            return Err(serde::de::Error::custom(
+                "a refusal's reason is the whole of what it says, and this one is blank",
+            ));
+        }
+        Ok(Self(said))
+    }
 }
 
 /// Read one project, run every registered check over it, and report.
@@ -244,11 +270,13 @@ fn print(args: &PlanCheckArgs, accepted: bool, refusals: &[Reported], unrunnable
                 .as_ref()
                 .map(|field| format!("`{field}`: "))
                 .unwrap_or_default(),
-            refusal.reason
+            refusal.reason.0
         );
     }
+    // A check that could not be run is the exit-2 diagnosis rather than an
+    // answer about the plan, so it goes where this binary's diagnoses go.
     for report in unrunnable {
-        println!(
+        eprintln!(
             "{}: could not be run ({}): {}",
             report.check,
             report.exit_code.map_or_else(
@@ -268,7 +296,7 @@ fn engine_refusal(refusal: Refusal) -> Reported {
         source: ENGINE.to_owned(),
         node: refusal.node,
         field: refusal.field,
-        reason: refusal.message,
+        reason: Reason(refusal.message),
     }
 }
 
@@ -323,8 +351,10 @@ fn offer(path: &Path, document: &Value) -> std::result::Result<Vec<Reported>, Un
     // Against the working directory this command was run from, which is also the
     // one the check itself runs in: a consumer registers a check beside the plan
     // it is checking, and a path that resolved against anything else would name
-    // a different file to the two sides.
-    let resolved = resolve(path);
+    // a different file to the two sides. A directory this process cannot read is
+    // a boundary that could not be established, so the check is one that could
+    // not be run rather than one resolved against something else.
+    let resolved = resolve(path).map_err(|why| cannot(None, why))?;
     let mut child = Command::new(&resolved)
         .env(SCHEMA_ENV, SCHEMA_VERSION)
         .stdin(Stdio::piped())
@@ -389,14 +419,6 @@ fn offer(path: &Path, document: &Value) -> std::result::Result<Vec<Reported>, Un
             ),
         )
     })?;
-    for refusal in &answer.refusals {
-        if refusal.reason.trim().is_empty() {
-            return Err(cannot(
-                output.status.code(),
-                "answered with a refusal carrying no reason".to_owned(),
-            ));
-        }
-    }
     Ok(answer
         .refusals
         .into_iter()
@@ -432,9 +454,17 @@ fn absent_key(answered: &Value) -> Option<String> {
 }
 
 /// A relative path against the working directory; anything else as it was given.
-fn resolve(path: &Path) -> PathBuf {
+fn resolve(path: &Path) -> std::result::Result<PathBuf, String> {
     if path.is_absolute() {
-        return path.to_path_buf();
+        return Ok(path.to_path_buf());
     }
-    std::env::current_dir().map_or_else(|_| path.to_path_buf(), |dir| dir.join(path))
+    std::env::current_dir()
+        .map(|dir| dir.join(path))
+        .map_err(|error| {
+            format!(
+                "{} is relative and this process cannot read its own working directory, so there \
+             is nothing to resolve it against: {error}",
+                path.display()
+            )
+        })
 }

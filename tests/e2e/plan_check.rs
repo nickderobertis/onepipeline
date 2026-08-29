@@ -428,7 +428,7 @@ fn a_check_that_could_not_be_run_is_reported_as_such_and_exits_two() {
     for (check, exit_named, said) in [
         (&failing, true, "the check broke"),
         (&babbling, true, "not-json"),
-        (&wordless, true, "carrying no reason"),
+        (&wordless, true, "blank"),
         (&inventive, true, "verdict"),
         (&terse, true, "refusals[].node"),
         (&unopenable, false, "cannot be run"),
@@ -468,12 +468,14 @@ fn a_check_that_could_not_be_run_is_reported_as_such_and_exits_two() {
                 "a check no process ran for still carries the key: {answered}"
             );
         }
-        // The human output names the path and what it said.
+        // The human diagnosis names the path and what it said, on stderr —
+        // which is where this binary's diagnoses go, and it leaves stdout to
+        // the answer about the plan.
         world
             .run(&["plan", "check", &project, "--check", &as_str(check)])
             .exited(REFUSED)
-            .out_has(&as_str(check))
-            .out_has("could not be run");
+            .err_has(&as_str(check))
+            .err_has("could not be run");
     }
 }
 

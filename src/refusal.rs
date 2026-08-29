@@ -14,6 +14,13 @@
 use crate::error::Error;
 
 /// One refusal the plan loader made.
+// llmlint: ignore[invalid_states_unrepresentable] `message` is a plain `String` because
+// it is never external input: every value is `format!`ed by one of the three constructors
+// below, out of a sentence written in this crate's own source, and the only way to build
+// one is through them. A non-empty newtype here would restate what the constructors
+// already make true and would need a fallible or panicking conversion at each of them. The
+// reason a *consumer's* check states does arrive from outside, and that one is validated
+// in its own type — `plancheck::Reason`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Refusal {
     /// The node it is about, where it is about one. A task carrying no node id
