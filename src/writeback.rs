@@ -365,9 +365,11 @@ fn destination_project(
 /// What the destination already holds for one plan node.
 ///
 /// The id is what a projection writes back onto; the labels are what it carries forward
-/// unchanged, because no plan models them.
+/// unchanged, because no plan models them. The id keeps the type it was read through:
+/// every id the store answers with crossed [`QualifiedId`]'s boundary, and narrowing it to
+/// a `String` here would let an unqualified one be written back.
 struct Origin {
-    id: String,
+    id: QualifiedId,
     labels: Vec<DestinationLabel>,
 }
 
@@ -430,7 +432,7 @@ fn destination_origins(
                 .insert(
                     node.clone(),
                     Origin {
-                        id: task.id.as_str().to_owned(),
+                        id: task.id,
                         labels: task.item.labels,
                     },
                 )
@@ -704,7 +706,7 @@ fn write_shadow(
         metadata.insert("onepipeline.id".into(), json!(id));
         let origin = origins.get(id);
         if let Some(origin) = origin {
-            metadata.insert("onetaskgraph.origin".into(), json!(origin.id));
+            metadata.insert("onetaskgraph.origin".into(), json!(origin.id.as_str()));
         }
         for (key, value) in wire {
             metadata.insert(format!("onepipeline.{key}"), value);
@@ -906,7 +908,6 @@ mod tests {
         }
     }
 
-    /// One scratch directory a shadow projection is written into.
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "onepipeline-writeback-{name}-{}",
@@ -940,7 +941,6 @@ mod tests {
         .expect("the sibling's own project response")
     }
 
-    /// The front matter and body of one document a projection wrote.
     fn written(path: &Path) -> (Value, String) {
         let document = std::fs::read_to_string(path)
             .unwrap_or_else(|error| panic!("{} was not written: {error}", path.display()));
@@ -955,7 +955,6 @@ mod tests {
         )
     }
 
-    /// A snapshot of one plan node, folded to `status`.
     fn projection(dir: &Path, status: NodeStatus) -> Snapshot {
         let node: Node = serde_json::from_value(json!({
             "id": "build",
@@ -975,7 +974,6 @@ mod tests {
         }
     }
 
-    /// Where a projection wrote the project and the one task of `projection`.
     fn documents(dir: &Path) -> (PathBuf, PathBuf) {
         let project = super::project_file(&"plans:board".parse().expect("a qualified project"));
         (
@@ -1057,7 +1055,7 @@ mod tests {
             &BTreeMap::from([(
                 "build".to_owned(),
                 Origin {
-                    id: "plans:board/002-build".to_owned(),
+                    id: "plans:board/002-build".parse().expect("a qualified task"),
                     labels: serde_json::from_value(json!([
                         {"id": "needs-review", "name": "needs-review", "color": "d73a4a"}
                     ]))

@@ -284,7 +284,6 @@ fn a_label_strict_destination_accepts_the_settlement_projection() {
             ],
         ),
     );
-    // The one label an operator put on the board, and one on an issue in it.
     label(
         &world.store().join("projects").join(format!("{name}.md")),
         &["roadmap"],
@@ -346,34 +345,30 @@ fn a_label_strict_destination_accepts_the_settlement_projection() {
         "settlement changed a strict destination task's labels"
     );
 
-    // And the destination really is strict: the projection this run produced, with its
-    // labels taken back out, is refused by the very same source that just accepted it.
-    let shadow = world.run_file(name, "writeback");
-    let projected = std::fs::read_dir(shadow.join("projects"))
-        .expect("the run's own shadow project")
-        .next()
-        .expect("one shadow project")
-        .expect("a readable shadow project")
-        .path();
-    let shadow_id = projected
-        .file_stem()
-        .expect("the shadow project's file name")
-        .to_string_lossy()
-        .into_owned();
-    unlabel(&projected);
+    // And the acceptance above means something only if this destination would have
+    // refused. A projection of the shape this build used to write — the same project, onto
+    // the same destination item, carrying no labels — is one an operator can state as a
+    // project of their own and copy across with the shipped verb, and this destination
+    // refuses it.
+    let dropped = world.root.join("a-projection-that-dropped-them");
+    std::fs::create_dir_all(dropped.join("projects")).expect("a folder for the projection");
+    std::fs::write(
+        dropped.join("projects").join("board.md"),
+        format!("---\ntitle: {name}\nmetadata:\n  onetaskgraph.origin: {project}\n---\n"),
+    )
+    .expect("the projection is authored");
     let refused = world
         .store_cmd(&[
             "project",
             "copy",
-            &format!("onepipeline-writeback:{shadow_id}"),
+            "a-projection:board",
             "--to",
             "strict",
+            "--no-tasks",
             "--set",
-            "sources.onepipeline-writeback.plugin=local-md",
-            &format!(
-                "--set=sources.onepipeline-writeback.config.root={}",
-                shadow.display()
-            ),
+            "sources.a-projection.plugin=local-md",
+            "--set",
+            &format!("sources.a-projection.config.root={}", dropped.display()),
         ])
         .output()
         .expect("the real onetaskgraph runs the copy");
@@ -389,13 +384,6 @@ fn a_label_strict_destination_accepts_the_settlement_projection() {
 fn label(path: &std::path::Path, labels: &[&str]) {
     amend(path, |front| {
         front.insert("labels".to_owned(), json!(labels));
-    });
-}
-
-/// Take a store document's labels back out, which is what a projection used to write.
-fn unlabel(path: &std::path::Path) {
-    amend(path, |front| {
-        front.remove("labels");
     });
 }
 

@@ -22,14 +22,118 @@
 //!
 //! * `host` — the `onetaskgraph-source` executable that hosts the real `local-md` plugin.
 //! * `root` — the folder of Markdown that plugin serves.
+//!
+//! **What is typed here and what is not** is the protocol's own division. The handshake
+//! and the write are what this program *interprets*, so both are parsed into the shapes
+//! below and a line that is not one of them is refused rather than guessed at. A request
+//! of any other method is what it *relays*, and relaying is the whole of what it does with
+//! one: its parameters stay the JSON they arrived as, because narrowing a message this
+//! program only carries would make it refuse a method the hosted plugin serves and it does
+//! not — which is the one failure a proxy must not have.
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 /// The refusal this destination makes, worded as the shipped one is.
 const DIFFER: &str = "destination labels differ from the labels being written";
+
+/// The `SourceError` kinds this program itself reports. The hosted plugin's own errors are
+/// relayed whole and never re-spelled here.
+#[derive(Clone, Copy)]
+enum Kind {
+    /// The configuration for this source is invalid.
+    Config,
+    /// This source understood the request and refused it.
+    Refused,
+    /// The hosted plugin could not be reached.
+    Unavailable,
+}
+
+impl Kind {
+    fn wire(self) -> &'static str {
+        match self {
+            Self::Config => "config",
+            Self::Refused => "refused",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+/// The handshake, as far as this program reads it: its own settings, and the fields the
+/// hosted plugin's handshake has to carry through unchanged.
+#[derive(Deserialize)]
+struct Handshake {
+    id: Value,
+    params: HandshakeParams,
+}
+
+#[derive(Deserialize)]
+struct HandshakeParams {
+    protocol_version: u32,
+    #[serde(default)]
+    engine: Value,
+    source_name: String,
+    config: Settings,
+}
+
+/// This source's own `config:` block: what to host, and what it serves.
+#[derive(Deserialize)]
+struct Settings {
+    host: String,
+    root: String,
+}
+
+/// One request off the engine's wire.
+///
+/// `params` stays JSON deliberately: every method but the two writes is relayed, and a
+/// proxy that narrowed a message it only carries would refuse what the hosted plugin
+/// serves.
+#[derive(Deserialize)]
+struct Request {
+    id: Value,
+    method: String,
+    params: Value,
+}
+
+/// A write, which is the one request this program interprets rather than relays.
+#[derive(Deserialize)]
+struct WriteParams {
+    write: ItemWrite,
+}
+
+#[derive(Deserialize)]
+struct ItemWrite {
+    /// The item at this source to update, or `null` to create one.
+    target: Option<String>,
+    item: WrittenItem,
+}
+
+#[derive(Deserialize)]
+struct WrittenItem {
+    labels: Vec<Value>,
+}
+
+/// The hosted plugin's answer to a `get_task` or `get_project`.
+#[derive(Deserialize)]
+struct Held {
+    /// Absent where the plugin answered an error rather than an item, and `null` inside
+    /// where it answered that the store holds no such item.
+    result: Option<HeldItem>,
+}
+
+#[derive(Deserialize)]
+struct HeldItem {
+    #[serde(rename = "task", alias = "project")]
+    item: Option<HeldLabels>,
+}
+
+#[derive(Deserialize)]
+struct HeldLabels {
+    labels: Vec<Value>,
+}
 
 /// One end of the pipe to the hosted `local-md` plugin.
 struct Host {
@@ -52,9 +156,10 @@ impl Host {
     }
 }
 
-/// Answer one request without asking the store: a refusal, or a protocol complaint.
-fn answer(id: &Value, error: &str, kind: &str) {
-    let response = json!({"id": id, "error": {"kind": kind, "message": error}});
+/// Answer one request without asking the store: a refusal, or a complaint about the
+/// configuration or the host.
+fn answer(id: &Value, kind: Kind, message: &str) {
+    let response = json!({"id": id, "error": {"kind": kind.wire(), "message": message}});
     println!("{response}");
 }
 
@@ -64,36 +169,30 @@ fn main() {
     let Some(Ok(first)) = lines.next() else {
         return;
     };
-    let handshake: Value = match serde_json::from_str(&first) {
+    // A handshake this shape cannot hold is refused rather than guessed at, and there is
+    // no id to answer under but the one the line itself carries.
+    let handshake: Handshake = match serde_json::from_str(&first) {
         Ok(value) => value,
         Err(error) => {
-            answer(
-                &json!("0"),
-                &format!("unreadable handshake: {error}"),
-                "config",
-            );
+            let id = serde_json::from_str::<Value>(&first)
+                .map_or_else(|_| json!("0"), |value| value["id"].clone());
+            answer(&id, Kind::Config, &format!("unreadable handshake: {error}"));
             return;
         }
     };
-    let id = handshake["id"].clone();
-    let settings = &handshake["params"]["config"];
-    let (Some(host), Some(root)) = (settings["host"].as_str(), settings["root"].as_str()) else {
-        answer(
-            &id,
-            "this source's settings name a `host` executable and a `root` folder",
-            "config",
-        );
-        return;
-    };
 
-    let spawned = Command::new(host)
+    let spawned = Command::new(&handshake.params.config.host)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn();
     let mut child = match spawned {
         Ok(child) => child,
         Err(error) => {
-            answer(&id, &format!("cannot run {host}: {error}"), "config");
+            answer(
+                &handshake.id,
+                Kind::Config,
+                &format!("cannot run {}: {error}", handshake.params.config.host),
+            );
             return;
         }
     };
@@ -110,66 +209,110 @@ fn main() {
         "id": "strict-initialize",
         "method": "initialize",
         "params": {
-            "protocol_version": handshake["params"]["protocol_version"],
-            "engine": handshake["params"]["engine"],
-            "source_name": handshake["params"]["source_name"],
-            "config": {"kind": "local-md", "config": {"root": root}},
+            "protocol_version": handshake.params.protocol_version,
+            "engine": handshake.params.engine,
+            "source_name": handshake.params.source_name,
+            "config": {"kind": "local-md", "config": {"root": handshake.params.config.root}},
             "secrets": {},
         },
     });
     let Some(mut answered) = host.ask(&hosted) else {
         answer(
-            &id,
+            &handshake.id,
+            Kind::Unavailable,
             "the hosted local-md plugin did not start",
-            "unavailable",
         );
         return;
     };
-    answered["id"] = id;
+    answered["id"] = handshake.id;
     println!("{answered}");
 
     for line in lines {
         let Ok(line) = line else { break };
-        let Ok(request) = serde_json::from_str::<Value>(&line) else {
-            continue;
+        // A line this side cannot read is a violation of the framing rather than a request
+        // to answer: there is no id to answer under, and inventing one would be a second
+        // response to somebody. Say so where diagnostics go, and close the connection.
+        let request: Request = match serde_json::from_str(&line) {
+            Ok(request) => request,
+            Err(error) => {
+                eprintln!("label-strict-source: unreadable request: {error}");
+                break;
+            }
         };
-        let id = request["id"].clone();
-        if let Some(refusal) = refused(&mut host, &request) {
-            answer(&id, &refusal, "refused");
-            continue;
+        match refused(&mut host, &request) {
+            Refusal::Yes(why) => answer(&request.id, Kind::Refused, &why),
+            Refusal::Unreadable(why) => answer(&request.id, Kind::Config, &why),
+            Refusal::No => {
+                let relayed = json!({
+                    "id": request.id, "method": request.method, "params": request.params,
+                });
+                let Some(answered) = host.ask(&relayed) else {
+                    answer(
+                        &request.id,
+                        Kind::Unavailable,
+                        "the hosted local-md plugin stopped",
+                    );
+                    break;
+                };
+                println!("{answered}");
+            }
         }
-        let Some(answered) = host.ask(&request) else {
-            answer(&id, "the hosted local-md plugin stopped", "unavailable");
-            break;
-        };
-        println!("{answered}");
     }
 
     drop(host.input);
     let _ = host.child.wait();
 }
 
-/// Whether this destination refuses the write in `request`, and why.
+/// What this destination does with one request before the store sees it.
+enum Refusal {
+    /// Relay it.
+    No,
+    /// Refuse it: the labels being written are not the labels the item carries.
+    Yes(String),
+    /// Refuse it as a message this source cannot act on, naming what could not be read.
+    Unreadable(String),
+}
+
+/// Whether this destination refuses the write in `request`.
 ///
 /// The rule is the shipped `github-projects` one: an update whose labels are not the
 /// labels the destination item already carries is refused before anything is written.
 /// A create has no item to disagree with, and a read is not a write.
-fn refused(host: &mut Host, request: &Value) -> Option<String> {
-    let reading = match request["method"].as_str()? {
+fn refused(host: &mut Host, request: &Request) -> Refusal {
+    let reading = match request.method.as_str() {
         "write_task" => "get_task",
         "write_project" => "get_project",
-        _ => return None,
+        _ => return Refusal::No,
     };
-    let write = &request["params"]["write"];
-    let target = write["target"].as_str()?;
+    let write: WriteParams = match serde_json::from_value(request.params.clone()) {
+        Ok(write) => write,
+        Err(error) => {
+            return Refusal::Unreadable(format!(
+                "this write is not one this source can read: {error}"
+            ))
+        }
+    };
+    let ItemWrite { target, item } = write.write;
+    let Some(target) = target else {
+        return Refusal::No;
+    };
     let held = host.ask(&json!({
         "id": "strict-held",
         "method": reading,
         "params": {"id": target},
-    }))?;
-    let item = held["result"].get(reading.trim_start_matches("get_"))?;
-    let held = item.get("labels")?;
-    let writing = write["item"].get("labels")?;
-    (held != writing)
-        .then(|| format!("{DIFFER}: {target} carries {held} and the write carries {writing}"))
+    }));
+    let held = held.and_then(|answered| serde_json::from_value::<Held>(answered).ok());
+    // No item to disagree with — the store holds none, or would not say — is left to the
+    // store, which owns the refusal for a target it does not hold.
+    let Some(held) = held.and_then(|held| held.result).and_then(|held| held.item) else {
+        return Refusal::No;
+    };
+    if held.labels == item.labels {
+        return Refusal::No;
+    }
+    Refusal::Yes(format!(
+        "{DIFFER}: {target} carries {} and the write carries {}",
+        json!(held.labels),
+        json!(item.labels),
+    ))
 }
