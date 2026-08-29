@@ -636,6 +636,11 @@ enum DestinationStatusCategory {
 /// Serialized as well as deserialized: a preserved label is written into the shadow
 /// document whole, so the destination's own label id and colour survive the round trip
 /// rather than being reduced to a name the store would have to re-resolve.
+// llmlint: ignore-block[invalid_states_unrepresentable] These three are onetaskgraph's own
+// strings, and this projection neither mints nor interprets one — it reads a label off the
+// destination and writes the same label back. Narrowing them here would turn a label the
+// store legitimately holds into a projection failure, which is the defect this type exists
+// to fix rather than a stricter form of the fix.
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct DestinationLabel {
@@ -643,6 +648,7 @@ struct DestinationLabel {
     name: String,
     color: Option<String>,
 }
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 /// Build the shadow project a `project copy` then projects onto the destination.
 ///
