@@ -212,6 +212,16 @@ pub struct RunState {
     /// every fall-through reads as fatal, and a reader is sent at a
     /// subscription that never blocked a turn.
     pub served: BTreeMap<String, Vec<Served>>,
+    /// The replacement each superseded node was retried under.
+    ///
+    /// A `retry` takes the node it supersedes out of the graph in the same edit,
+    /// so every view that reads the graph loses it — while the run's store still
+    /// carries the `node-settled` that failed it, with nothing beside that record
+    /// saying the node was replaced. A reader of the stream, the run's own
+    /// monitor included, met a `failed` node and proposed retrying work that had
+    /// already been redone and merged. This is what makes the supersession
+    /// readable wherever that settlement is.
+    pub superseded: BTreeMap<String, String>,
     /// What each node's dispatch is doing *now*, from the relayed stream.
     ///
     /// The one question no event of this crate's own can answer: a
@@ -741,13 +751,19 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
                     // whichever side took it, so folding it here too would
                     // count one request twice.
                     Operation::CompletionRequested { .. } => {}
-                    Operation::RetryRequested { node, .. } => {
+                    Operation::RetryRequested {
+                        node, replacement, ..
+                    } => {
                         // What the supersession did to the node it replaced. The
                         // node itself leaves the graph with the same edit, so
                         // this is what the run's record says became of it.
                         state
                             .recorded
                             .insert(node.clone(), Recorded::At(NodeStatus::Cancelled));
+                        // And which node carries its work now, which is the half
+                        // no status word can say: `cancelled` is also what a
+                        // `drop` leaves, and the two take opposite actions.
+                        state.superseded.insert(node.clone(), replacement.clone());
                     }
                     Operation::NodeParked { node } => {
                         // What the node was *before* the park decides which park

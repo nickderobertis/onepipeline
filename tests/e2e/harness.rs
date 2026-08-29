@@ -2110,6 +2110,23 @@ impl World {
         self.runs.join(run).join(relative)
     }
 
+    /// Every entry in a run's dispatch registry, by the file it is in.
+    ///
+    /// The registry is what says which process each of a run's dispatches is
+    /// running in, and it is what the host view decides a row's liveness from —
+    /// so a journey about that decision reaches for these rather than for the
+    /// run's ownership lock, which names the driver and not the work.
+    pub fn dispatch_records(&self, run: &str) -> Vec<PathBuf> {
+        let mut found: Vec<PathBuf> = std::fs::read_dir(self.run_file(run, "dispatches"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .collect();
+        found.sort();
+        found
+    }
+
     /// A JSON document inside a run's directory.
     pub fn run_json(&self, run: &str, relative: &str) -> Value {
         let path = self.run_file(run, relative);
@@ -3954,8 +3971,10 @@ fn dump_into(out: &mut String, dir: &Path, indent: &str) {
             Ok(bytes) if bytes.is_empty() => out.push_str(&format!("{held}(empty)\n")),
             Ok(bytes) => match String::from_utf8(bytes) {
                 Ok(text) => {
-                    let lines: Vec<&str> =
-                        text.lines().filter(|line| !line.trim().is_empty()).collect();
+                    let lines: Vec<&str> = text
+                        .lines()
+                        .filter(|line| !line.trim().is_empty())
+                        .collect();
                     for line in lines.iter().take(DUMP_LINE_CEILING) {
                         out.push_str(&format!("{held}{line}\n"));
                     }

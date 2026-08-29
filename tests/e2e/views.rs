@@ -1743,6 +1743,98 @@ fn a_run_whose_record_carries_a_field_this_build_never_had_is_still_reported() {
     world.run(&["results", &run]).exited(0).out_has(&run);
 }
 
+/// A run root an **older build** wrote is read, and whatever is still unreadable
+/// is a count with a reason rather than a line each.
+///
+/// Two halves of one reading, and the same reading both times: a whole-root view
+/// exists to answer *what is running on this machine*, and it answered by burying
+/// that. A third of the run roots on one host — 141 of 433 — predated the launch
+/// record's `launcher` key, so every one of them was refused by name, and the 141
+/// lines naming them pushed the live verdict off the top of the view. The key is
+/// now defaulted, so those roots are read; the ones that genuinely cannot be are
+/// summarised.
+#[test]
+fn an_older_run_root_is_read_and_the_rest_are_counted_rather_than_listed_a_line_each() {
+    let world = World::new("views-older-roots");
+    let run = settled(&world, "readable", vec![agent("build", &[])]);
+
+    // llmlint: ignore-block[tests_mirror_real_usage] no verb of this build writes a launch
+    // record without the key this build always writes — that is what makes it an older
+    // build's record — so the only way to hold one is to take the key off the record this
+    // build's own run wrote. Every other root here is the filesystem state a crash between
+    // the directory and its record leaves. The run beside them is launched and settled
+    // through the CLI, and every claim is read off the CLI.
+    let older = "from-an-older-build";
+    let mut record = world.run_json(&run, "launch.json");
+    record["run_id"] = serde_json::json!(older);
+    assert!(
+        record
+            .as_object_mut()
+            .expect("a launch record")
+            .remove("launcher")
+            .is_some(),
+        "the record this build wrote names no launcher to take away: {record}"
+    );
+    std::fs::create_dir_all(world.runs.join(older)).expect("a run root");
+    std::fs::write(
+        world.runs.join(older).join("launch.json"),
+        record.to_string(),
+    )
+    .expect("a launch record from a build that predates the launcher");
+
+    // And enough roots this build genuinely cannot read that naming each one
+    // would be the whole of the view.
+    let unreadable = 20;
+    for nth in 0..unreadable {
+        let root = world.runs.join(format!("half-written-{nth:02}"));
+        std::fs::create_dir_all(&root).expect("a run root with no launch");
+    }
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    for view in [vec!["runs"], vec!["status"], vec!["goals"]] {
+        let rendered = world.run(&view);
+        rendered
+            .exited(0)
+            // The run that was always read, and the one that used to be refused.
+            .out_has(&run)
+            .out_has(older)
+            // The count, with a reason on the same line.
+            .out_has("20 run root(s) skipped")
+            .out_has("half-written-")
+            .out_has("a run root records the launch that owns it")
+            .out_has("and 17 more");
+        let skipped: Vec<&str> = rendered
+            .stdout
+            .lines()
+            .filter(|line| line.contains("half-written-"))
+            .collect();
+        assert_eq!(
+            skipped.len(),
+            1,
+            "the roots this build could not read take {} lines rather than one:\n{}",
+            skipped.len(),
+            rendered.stdout
+        );
+        // And the live verdict is not pushed off by them: the run's own line
+        // comes before anything about a root that was refused.
+        let verdict = rendered
+            .stdout
+            .lines()
+            .position(|line| line.contains(&run))
+            .expect("the readable run is on the view");
+        let refusals = rendered
+            .stdout
+            .lines()
+            .position(|line| line.contains("run root(s) skipped"))
+            .expect("the refused roots are on the view");
+        assert!(
+            verdict < refusals,
+            "the roots this build could not read came before what is running:\n{}",
+            rendered.stdout
+        );
+    }
+}
+
 /// A root whose every run was refused is not a root with nothing in it.
 ///
 /// The two used to render identically, and only one of them means there is
@@ -1806,9 +1898,12 @@ fn mine_filtering_everything_out_is_not_the_same_as_a_root_that_could_not_be_rea
 
 /// A stopped run's dispatches are not live dispatches.
 ///
-/// The one proof that does not depend on a process at all: the run's own ledger
-/// records that it was ended, and a row rendered from it afterwards claims a
-/// worker the stop was aimed at.
+/// The proof is the dispatch's own registry entry rather than the run's stop
+/// record: a `stop` that reports `signalled` listed the run's process tree,
+/// signalled it, and watched it go, so the entry each dispatch left names a pid
+/// this host can prove is gone. Reading the *stop* instead is what made the row
+/// permanently wrong — a stop record outlives the adoption that answers it, and
+/// the journey below is the run that proves it.
 #[test]
 fn host_never_renders_a_dispatch_of_a_run_that_was_stopped() {
     let world = World::new("views-stopped");
@@ -1827,47 +1922,110 @@ fn host_never_renders_a_dispatch_of_a_run_that_was_stopped() {
         .out_has("no live dispatches")
         .out_has("1 stale registry entry ignored")
         .out_has("halted/build")
-        .out_has("the run was stopped");
+        .out_has("is gone");
     world.release("build.go");
 }
 
-// llmlint: ignore-block[tests_mirror_real_usage] every state below is one held ownership
-// lock a live driver did not release, and no command produces one on demand — a verb that
-// could would be a verb that kills a live driver mid-dispatch: **a lock whose pid is a
-// reaped process**, **one whose start token is another process's**, **one taken on another
-// host**, **one from a build that predates the start token**, **one that is not JSON**, and
-// **one that is a directory**. Nothing is assembled by hand: the lock the live driver took
-// is read back and each answer changes exactly one fact about it, with the removal
-// asserting it removed something. The run is real, its dispatch is genuinely in flight, and
-// every claim afterwards is read off the CLI.
+/// And a run stopped and then **adopted** is running what its fresh driver
+/// dispatched.
+///
+/// The defect this states, in the shape an operator meets it: `stop` then
+/// `adopt` is the documented way back from a driver that is not working, and the
+/// stop record it leaves is permanent. Judged against that record, every
+/// dispatch the *fresh* driver made read as a worker the stop was aimed at — so
+/// `host` answered `no live dispatches` and listed live work as stale, on a run
+/// an operator had just taken over and was watching to see whether the takeover
+/// worked.
+#[test]
+fn host_renders_the_live_dispatches_of_a_run_that_was_stopped_and_then_adopted() {
+    let world = World::new("views-stopped-adopted");
+    world.script("build.wait", "hold");
+    let path = world.plan("retaken", &plan_of("retaken", vec![agent("build", &[])]));
+    world.run(&["start", &path, "--detach"]).exited(0);
+    world.until("the dispatch to be in flight", |world| {
+        !world.events_of("retaken", "node-dispatched").is_empty()
+    });
+    world.run(&["stop", "retaken"]).exited(0);
+
+    // An adoption attaches, so the adopting driver is left running: it is the
+    // process holding the run while the view below is read.
+    let mut adopting = world
+        .cmd(&["adopt", "retaken"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the adopting driver starts");
+    // Waited for on the registry rather than on the journal: the record naming
+    // the process the work is in is written by the executor as the dispatch
+    // starts, and it is what the view below is read from.
+    world.until(
+        "the fresh dispatch to record where it is running",
+        |world| world.dispatch_records("retaken").len() > 1,
+    );
+
+    let rendered = world.run(&["host"]);
+    rendered.exited(0).out_has("retaken").out_has("build");
+    assert!(
+        !rendered.stdout.contains("no live dispatches")
+            && !rendered.stdout.contains("stale registry"),
+        "an adopted run's live dispatch was reported as one the stop before it ended:\n{}",
+        rendered.stdout
+    );
+
+    let _ = adopting.kill();
+    let _ = adopting.wait();
+    world.release("build.go");
+}
+
+// llmlint: ignore-block[tests_mirror_real_usage] every state below is one registry entry
+// a dispatch that ended did not take with it, and no command produces one on demand — a
+// verb that could would be a verb that kills a live dispatch: **an entry whose pid is a
+// reaped process**, **one whose start token is another process's**, **one recorded on
+// another host**, **one from a build that predates the start token**, **one that is not
+// JSON**, and **a registry with nothing in it**. Nothing is assembled by hand: the entry
+// the live dispatch wrote is read back and each answer changes exactly one fact about it,
+// with the removal asserting it removed something. The run is real, its dispatch is
+// genuinely in flight, and every claim afterwards is read off the CLI.
 /// A `host` row is a claim that a dispatch exists **now**, and it is acted on —
 /// an operator leaves the work alone, or ends it. So the row is rendered only
-/// while this host can prove the run behind it is still being driven: the
-/// ownership lock's pid, and the start token that says the pid is still the
-/// process that took it.
+/// while this host can prove the process the work is in is still that process:
+/// the pid the dispatch's own registry entry names, and the start token that
+/// says the pid is still it.
 #[test]
-fn host_never_renders_a_dispatch_whose_driver_this_host_can_prove_is_gone() {
+fn host_never_renders_a_dispatch_this_host_can_prove_has_ended() {
     let world = World::new("views-ghosted");
     world.script("build.wait", "hold");
     let path = world.plan("ghosted", &plan_of("ghosted", vec![agent("build", &[])]));
     world.run(&["start", &path, "--detach"]).exited(0);
-    world.until("the dispatch to be in flight", |world| {
-        !world.events_of("ghosted", "node-dispatched").is_empty()
+    // Waited for on the registry rather than on the journal: the record naming
+    // the process the work is in is written by the executor as the dispatch
+    // starts, and it is what the view below is read from.
+    world.until("the dispatch to record where it is running", |world| {
+        !world.dispatch_records("ghosted").is_empty()
     });
 
-    // A driver is holding the run, so the dispatch is exactly what the row says.
+    // A dispatch is running, so the row is exactly what it says.
     world.run(&["host"]).exited(0).out_has("build");
 
-    // Now the driver dies without releasing what it held, which is the only
-    // thing that changes.
-    let lock = world.run_file("ghosted", "owner.lock");
-    // The lock exactly as the live driver took it, kept so each answer below
+    // Now the process the work is in goes without the entry going with it, which
+    // is the only thing that changes.
+    let entries = world.dispatch_records("ghosted");
+    assert_eq!(
+        entries.len(),
+        1,
+        "the run recorded {} dispatches where this journey needs exactly one: {entries:?}",
+        entries.len()
+    );
+    let entry = entries[0].clone();
+    // The entry exactly as the live dispatch wrote it, kept so each answer below
     // changes one fact about it and nothing else.
-    let held = world.run_json("ghosted", "owner.lock");
+    let held: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&entry).expect("the registry entry"))
+            .expect("a dispatch record");
     let rewrite = |edit: &dyn Fn(&mut serde_json::Value)| {
         let mut record = held.clone();
         edit(&mut record);
-        std::fs::write(&lock, record.to_string()).expect("the lock is rewritten");
+        std::fs::write(&entry, record.to_string()).expect("the registry entry is rewritten");
     };
     rewrite(&|record| record["pid"] = serde_json::json!(reaped_pid()));
 
@@ -1883,10 +2041,11 @@ fn host_never_renders_a_dispatch_whose_driver_this_host_can_prove_is_gone() {
         .out_has(&world.runs.display().to_string());
 
     // A pid the host has since handed to something else: the pid is live and it
-    // is not the process that took the lock. Proved stale, for a different
-    // reason — and the reason a pid alone was never enough.
+    // is not the process the dispatch was recorded in. Proved stale, for a
+    // different reason — and the reason a pid alone was never enough.
     rewrite(&|record| {
-        record["started"] = serde_json::json!("the process that took it, which is not this one");
+        record["started"] =
+            serde_json::json!("the process it was recorded in, which is not this one");
     });
     world
         .run(&["host"])
@@ -1906,42 +2065,33 @@ fn host_never_renders_a_dispatch_whose_driver_this_host_can_prove_is_gone() {
             rendered.stdout
         );
     };
-    // A lock taken on another machine, where a pid means nothing.
+    // A dispatch recorded on another machine, where a pid means nothing.
     rewrite(&|record| record["host"] = serde_json::json!("some-other-host"));
     unproven("some-other-host");
-    // A lock from a build that predates the start token. Taking away a field
-    // this build always writes would arrange nothing, so the removal has to have
-    // removed something.
+    // An entry whose stamp proves nothing. The field is required — a record that
+    // cannot prove its own pid is unusable rather than weaker — so this is the
+    // shape it takes: present, and empty. Blanking a field this build always
+    // fills would arrange nothing, so it has to have had something in it.
     rewrite(&|record| {
         assert!(
-            record
-                .as_object_mut()
-                .expect("a lock record")
-                .remove("started")
-                .is_some(),
-            "the lock this build took carries no start token to take away: {record}"
+            record["started"]
+                .as_str()
+                .is_some_and(|held| !held.is_empty()),
+            "the entry this build wrote carries no start token to take away: {record}"
         );
+        record["started"] = serde_json::json!("");
     });
     unproven("no start token");
-    // A lock this build cannot read at all. Still a claim — it is what stops a
-    // second writer — but it proves nothing about a *dispatch*, and a row is a
-    // claim that one exists.
-    std::fs::write(&lock, "not json at all").expect("the lock is rewritten");
+    // An entry this build cannot read at all. Still a claim that work is
+    // somewhere — it is what a `stop` would aim at — and it proves nothing about
+    // whether that work is running.
+    std::fs::write(&entry, "not json at all").expect("the registry entry is rewritten");
     unproven("cannot be read");
-    // A lock that is there and is not a lock: absent is a proof that nothing
-    // drives the run, and this is not absence.
-    std::fs::remove_file(&lock).expect("the lock is removed");
-    std::fs::create_dir_all(&lock).expect("a lock that is a directory");
-    unproven("is not a file");
-    std::fs::remove_dir_all(&lock).expect("the lock is removed");
-
-    // And with nothing holding the run at all, nothing is driving it.
-    world
-        .run(&["host"])
-        .exited(0)
-        .out_has("no live dispatches")
-        .out_has("1 stale registry entry ignored")
-        .out_has("nothing holds the run's ownership lock");
+    // And with the registry holding nothing, the run says a dispatch is in
+    // flight and no process claims it: absence of an entry is not a proof that
+    // the work ended.
+    std::fs::remove_file(&entry).expect("the registry entry is removed");
+    unproven("holds no entry for it");
     world.release("build.go");
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
@@ -2033,40 +2183,47 @@ fn host_renders_a_live_dispatch_read_from_a_different_zone_than_its_driver_recor
     world.release("build.go");
 }
 
-/// And a live dispatch whose ownership lock another build wrote is one too.
+/// And a live dispatch whose registry entry another build wrote is one too.
 ///
-/// The lock is what proves a *dispatch* is being driven, so a key this build
-/// does not know used to answer `the run's ownership lock cannot be read` — the
-/// run reads as one nothing can prove is running, on a host where it plainly is.
-/// A field it does not know is now ignored, and the row is the row.
+/// The entry is what proves a *dispatch* is running, so a key this build does
+/// not know would answer `the run's dispatch registry cannot be read` — the run
+/// reads as one nothing can prove is running, on a host where it plainly is. A
+/// field it does not know is ignored, and the row is the row.
 #[test]
-fn host_renders_a_live_dispatch_whose_lock_another_build_wrote() {
-    let world = World::new("views-newer-lock");
+fn host_renders_a_live_dispatch_whose_registry_entry_another_build_wrote() {
+    let world = World::new("views-newer-entry");
     world.script("build.wait", "hold");
     let path = world.plan(
-        "newer-lock",
-        &plan_of("newer-lock", vec![agent("build", &[])]),
+        "newer-entry",
+        &plan_of("newer-entry", vec![agent("build", &[])]),
     );
     world.run(&["start", &path, "--detach"]).exited(0);
-    world.until("the dispatch to be in flight", |world| {
-        !world.events_of("newer-lock", "node-dispatched").is_empty()
+    // Waited for on the registry rather than on the journal: the record naming
+    // the process the work is in is written by the executor as the dispatch
+    // starts, and it is what the view below is read from.
+    world.until("the dispatch to record where it is running", |world| {
+        !world.dispatch_records("newer-entry").is_empty()
     });
 
     // llmlint: ignore-block[tests_mirror_real_usage] no verb of this build writes a key
-    // this build does not have, so the only way to hold a lock another build took is to
-    // put the key on the one this build's own driver took. The run, the dispatch, and the
-    // claim below are the real binary end to end.
-    let lock = world.run_file("newer-lock", "owner.lock");
+    // this build does not have, so the only way to hold an entry another build wrote is to
+    // put the key on the one this build's own dispatch wrote. The run, the dispatch, and
+    // the claim below are the real binary end to end.
+    let entries = world.dispatch_records("newer-entry");
+    let entry = entries
+        .first()
+        .expect("the dispatch recorded itself")
+        .clone();
     let mut written: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&lock).expect("the run's ownership lock"))
-            .expect("an ownership lock");
+        serde_json::from_str(&std::fs::read_to_string(&entry).expect("the registry entry"))
+            .expect("a dispatch record");
     written["claimed_for"] = serde_json::json!("a build that came later");
-    std::fs::write(&lock, written.to_string()).expect("a lock another build took");
+    std::fs::write(&entry, written.to_string()).expect("an entry another build wrote");
     // llmlint: ignore-end[tests_mirror_real_usage]
 
     let rendered = world.run(&["host"]);
-    rendered.exited(0).out_has("newer-lock").out_has("build");
-    rendered.out_lacks("ownership lock cannot be read");
+    rendered.exited(0).out_has("newer-entry").out_has("build");
+    rendered.out_lacks("dispatch registry cannot be read");
     rendered.out_lacks("no live dispatches");
     world.release("build.go");
 }

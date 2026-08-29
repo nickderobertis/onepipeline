@@ -1020,12 +1020,31 @@ Re-reading it needs one of two answers, and this crate can reach neither:
   is not reachable for the branches that need it.
 
 Until one exists, **no view claims to know where a change is now.** Every line
-that carries an unlanded node dates its answer to the settlement, says nothing
-has re-read it since, and names the change to open —
+that carries an unlanded node dates its answer to the settlement, says no later
+read has said otherwise, and names the change to open —
 `views::landed_phrase`, `RunView::summary`, and the `status` line, all held by
 `a_change_that_merged_after_settlement_is_reported_as_of_settlement_not_as_now`.
 That is the honest half of what the change asked for: the stale fact is no longer
 asserted, and it still cannot be corrected from here.
+
+**Since: one read of it is reachable, and only one.** `onevcs::release_status`
+takes the four-spelling reference this crate already resolves work by and answers
+`not landed` before it looks at any release at all — so it carries that library's
+own four-tier landing decision, made against the publication checkout's own
+history, across the seam. A driver asks it once, as the run closes out, of every
+change the run recorded unlanded: `vcs::landed_now`, `engine`'s `landings_now`,
+and `views::landings_the_run_re_read`, which is what puts the answer on the views
+beside the report. `a_change_that_merges_before_the_run_settles_is_read_again_and_reported_landed`
+drives it end to end over a real origin.
+
+What that does **not** reach, and why this stays open: the answer is only
+available where this host has release configuration for the repository, because
+that call selects a release target before it returns the landing it already
+decided — a repository nobody has declared targets for is refused, and a refusal
+is *undecided* rather than "not landed". It is asked once, at close-out, so it is
+still not "where is this now" for a run in flight or for one that finished an
+hour ago. Both halves are what a landing read of its own — the proposal above —
+would settle.
 
 ## 34. A drafting dispatch that produced no body was reported nowhere — RESOLVED
 

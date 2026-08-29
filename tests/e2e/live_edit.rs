@@ -190,6 +190,135 @@ fn retry_cancel_requeue_and_drop_are_projected_after_their_rulings() {
     world.release("root.go");
 }
 
+/// A node a `retry` superseded reads as **superseded**, everywhere the run is
+/// read — and a node that failed and was never retried still reads as the
+/// failure it is.
+///
+/// The reading this replaces. A supersession takes the node out of the graph in
+/// the same edit that adds its replacement, so every view built from the graph
+/// lost it entirely — while the `node-settled` that failed it stayed in the
+/// store, which is the only account a reader who went looking could find. On one
+/// run eleven entries read `failed` and not one was a node anybody could retry;
+/// three of them had had their work merged, by the replacement that superseded
+/// them. The run's own monitor twice began composing a retry for work that had
+/// already been redone.
+///
+/// So the node is reported, with what became of it, and the run still says
+/// plainly which of its failures is a real one.
+#[test]
+fn a_node_a_retry_superseded_reads_as_superseded_and_one_that_was_not_still_reads_failed() {
+    let world = World::new("edit-superseded");
+    // Two nodes that fail the same way. One is retried and one is not, which is
+    // the whole comparison.
+    world.script("lost.fail", "1");
+    world.script("kept.fail", "1");
+    let run = "superseded";
+    let path = world.plan(
+        run,
+        &plan_of(run, vec![agent("lost", &[]), agent("kept", &[])]),
+    );
+    world.run(&["start", &path, "--attach"]).settled();
+
+    // Both failed, which is the state the supersession is applied to.
+    let mut failed: Vec<String> = world
+        .events_of(run, "node-settled")
+        .iter()
+        .filter(|event| event["payload"]["status"] == "failed")
+        .filter_map(|event| event["labels"]["node"].as_str().map(str::to_owned))
+        .collect();
+    failed.sort();
+    assert_eq!(
+        failed,
+        vec!["kept".to_string(), "lost".to_string()],
+        "the run did not settle two failed nodes, so there is nothing to tell apart: {}",
+        world.dump()
+    );
+
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &envelope(json!([{"op": "retry", "id": "lost", "node": {
+                "id": "lost-2", "persona": "engineer", "task": "## What\nRedo it."
+            }}])),
+        )
+        .exited(0);
+    // A fresh driver runs the replacement, so the run settles with the
+    // supersession's work done and the untouched failure still standing.
+    world.run(&["adopt", run]).settled();
+
+    // The per-node view: the superseded node is named, it says what became of
+    // it, and it is not one of the run's failures.
+    let results = world.run(&["results", run]);
+    results
+        .exited(0)
+        .out_has("lost                     superseded — retried as lost-2")
+        .out_has("kept                     failed");
+    assert!(
+        !results
+            .stdout
+            .lines()
+            .any(|line| line.trim_start().starts_with("lost ") && line.contains("failed")),
+        "a node whose work was redone and whose replacement settled was reported as a \
+         failure:\n{}",
+        results.stdout
+    );
+
+    // The run's own report, which is what a consumer parses.
+    let nodes = world.run_json(run, "result.json")["nodes"]
+        .as_array()
+        .expect("the run's result names its nodes")
+        .clone();
+    let node = |id: &str| {
+        nodes
+            .iter()
+            .find(|node| node["id"] == id)
+            .unwrap_or_else(|| panic!("the run's result has no node {id:?}: {nodes:?}"))
+            .clone()
+    };
+    assert_eq!(node("lost")["status"], json!("cancelled"), "{nodes:?}");
+    assert_eq!(node("lost")["superseded_by"], json!("lost-2"), "{nodes:?}");
+    assert_eq!(node("kept")["status"], json!("failed"), "{nodes:?}");
+    assert!(
+        node("kept").get("superseded_by").is_none(),
+        "a node nothing superseded carries a replacement: {}",
+        node("kept")
+    );
+
+    // And the stream a monitor reads, which is where the settlement that failed
+    // the node still is and where the retry proposal came from.
+    let stream = world.run(&["monitor", run, "--all"]);
+    stream.exited(0);
+    assert!(
+        stream
+            .stdout
+            .lines()
+            .filter(|line| line.contains("graph:lost ") && line.contains("node-settled"))
+            .all(|line| line.contains("superseded, retried as lost-2")),
+        "a settlement of a superseded node reads on the stream as a live failure:\n{}",
+        stream.stdout
+    );
+
+    // The other half of the reading: what a planner may still retry. The node
+    // whose work was redone is not offered — there is nothing left of it to ask
+    // for — and the one that failed and was never retried is.
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &envelope(json!([{"op": "retry", "id": "lost", "node": {
+                "id": "lost-3", "persona": "engineer", "task": "## What\nAgain."
+            }}])),
+        )
+        .exited(REFUSED);
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &envelope(json!([{"op": "retry", "id": "kept", "node": {
+                "id": "kept-2", "persona": "engineer", "task": "## What\nRedo it."
+            }}])),
+        )
+        .exited(0);
+}
+
 #[test]
 fn cancel_parks_a_node_and_requeue_returns_it_to_the_frontier() {
     let world = World::new("edit-park");
@@ -477,11 +606,21 @@ fn retry_supersedes_a_running_node_and_redirects_its_dependents() {
     );
 
     // The superseded node left the graph with the same edit that replaced it,
-    // exactly as a `drop` would take it — and nothing dispatched it again.
-    assert!(
-        !ids.contains(&"flaky"),
-        "the superseded node is still in the graph: {ids:?}"
-    );
+    // exactly as a `drop` would take it — and nothing dispatched it again. It is
+    // still *reported*, because a node the run has an account of and does not
+    // name at all is one a reader has to go and reconstruct: what it says is
+    // that the node was replaced, and by which node.
+    let superseded = result["nodes"]
+        .as_array()
+        .expect("nodes")
+        .iter()
+        .find(|node| node["id"] == "flaky")
+        .expect("the run's result says what became of the node it superseded");
+    assert_eq!(superseded["status"], "cancelled", "{superseded}");
+    assert_eq!(superseded["superseded_by"], "flaky-2", "{superseded}");
+    // And it is not one of the run's outstanding nodes: the graph settled
+    // without it, which is the whole reason it had to leave.
+    assert_eq!(result["state"], "complete", "{result}");
     let dispatched: Vec<Value> = world
         .events_of(&run, "node-dispatched")
         .into_iter()

@@ -340,6 +340,45 @@ pub fn landing_of(outcome: &PublishOutcome) -> Option<crate::graph::Landing> {
     }
 }
 
+/// Whether the work on one branch has reached its base **now**, where the
+/// sibling can say so.
+///
+/// A node's `landing` is an observation made at its settlement, and the moment
+/// passes: a change request a person merges an hour later leaves the run
+/// reporting work that reached nobody. This is the re-read — asked once, when
+/// the run settles, of the one read on `onevcs`'s public surface that answers
+/// from the publication checkout's own history rather than from anything this
+/// crate holds.
+///
+/// **`Some` only for a landing the sibling found.** `NotLanded` is that library
+/// saying the work has not reached its base, which is what the settlement
+/// already recorded; each of the three release answers is it having found the
+/// landing commit and gone on to ask about a release, which it could not do for
+/// work that had not landed. Everything else — the question it would not answer,
+/// and a refusal, which is what a host with no release configuration for this
+/// repository gives — is *undecided*, and leaves the settlement's own dated claim
+/// standing rather than replacing it with a guess. That is the same reading
+/// `crate::release`'s `Answer::of` makes of the same call, for the same reason: a
+/// question that could not be put is not an answer.
+///
+/// The **branch** is the reference, because that is the spelling the sibling
+/// resolves work by — see `crate::release::Dependency::reference`, which asks the
+/// same library the same way.
+///
+/// Divergence 33 in `docs/contract-divergences.md` records what this reaches and
+/// what it still does not.
+pub fn landed_now(branch: &str) -> Option<crate::graph::Landing> {
+    use onevcs::ReleaseStatus;
+    match onevcs::release_status(branch, None) {
+        Ok(
+            ReleaseStatus::Released { .. }
+            | ReleaseStatus::NotReleased { .. }
+            | ReleaseStatus::AwaitingHumanStep { .. },
+        ) => Some(crate::graph::Landing::Landed),
+        Ok(ReleaseStatus::NotLanded | ReleaseStatus::NotAnswered { .. }) | Err(_) => None,
+    }
+}
+
 /// Where a human reads the change a publication produced, when there is one.
 ///
 /// A change request that is open, or that the host is holding, names its URL. A
