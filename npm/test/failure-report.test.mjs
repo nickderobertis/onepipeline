@@ -39,7 +39,7 @@ if [ -n "\${GH_ERROR:-}" ] || [ -n "\${GH_FAIL_SILENT:-}" ]; then
   [ -z "\${GH_ERROR:-}" ] || printf '%s\\n' "$GH_ERROR" >&2
   exit 1
 fi
-echo "${WROTE_TO}"
+echo "\${GH_WROTE:-${WROTE_TO}}"
 exit 0
 `;
 
@@ -137,6 +137,16 @@ describe("the reporter files a workflow_run failure", () => {
       !run.calls.some((call) => call.includes("Run:")),
       `an empty run link reached the issue body:\n${run.said}`,
     );
+  });
+
+  it("says what gh answered when a write comes back without a URL", () => {
+    // The write happened, so refusing would lose a filed issue; the log has to
+    // stop claiming a destination it was never given.
+    const run = report({ env: { GH_WROTE: "created" } });
+
+    assert.equal(run.status, 0, run.said);
+    assert.ok(called(run, "issue create "), run.said);
+    assert.match(run.said, /gh answered with no URL: created/, run.said);
   });
 
   it("does not comment a smoke failure onto an issue that merely resembles its own", () => {

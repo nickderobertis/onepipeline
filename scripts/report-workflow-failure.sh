@@ -128,15 +128,25 @@ while IFS=$'\t' read -r number title; do
 done <<<"$listed"
 
 # On success `gh` answers with the URL it wrote to, which is the one thing a
-# reader of this log actually wants next.
+# reader of this log actually wants next — so the answer is read back rather than
+# assumed. A write whose answer is not a URL still happened, so this reports what
+# `gh` actually said instead of refusing something already filed.
+wrote_to() {
+  if [[ "$1" =~ ^https://[^[:space:]]+$ ]]; then
+    printf '%s' "$1"
+  else
+    printf 'filed, but gh answered with no URL: %s' "${1:-(nothing)}"
+  fi
+}
+
 if [ -n "$existing" ]; then
   status=0
   where="$(gh issue comment "$existing" --repo "$REPO" --body "$body" 2>"$gh_stderr")" || status=$?
   [ "$status" -eq 0 ] || gh_failed "commenting on #$existing" "$status" "$(cat "$gh_stderr")"
-  echo "report-workflow-failure: commented on #$existing — $where"
+  echo "report-workflow-failure: commented on #$existing — $(wrote_to "$where")"
 else
   status=0
   where="$(gh issue create --repo "$REPO" --title "$TITLE" --body "$body" 2>"$gh_stderr")" || status=$?
   [ "$status" -eq 0 ] || gh_failed "opening an issue titled \"$TITLE\"" "$status" "$(cat "$gh_stderr")"
-  echo "report-workflow-failure: opened a new issue — $where"
+  echo "report-workflow-failure: opened a new issue — $(wrote_to "$where")"
 fi
