@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+# File a failed workflow run as one GitHub issue, commented on each further
+# failure rather than opened again.
+#
+# A file rather than inline workflow YAML because the create-vs-comment branch is
+# real behavior: `npm/test/failure-report.test.mjs` drives both halves against a
+# stubbed `gh`. Every refusal below names a next action, because this runs only
+# when something is already wrong and a reporter that dies quietly takes the
+# finding down with it.
+#
+# Reads (all required except RUN_URL):
+#   REPO      owner/name to file against
+#   TITLE     the issue title, which is also how an existing one is found
+#   BODY      the issue or comment body
+#   RUN_URL   appended to the body when set
+# `gh` must be authenticated — GH_TOKEN in CI.
+#
+# Exits 0 having filed or commented and printed where; 2 on a caller error — a
+# missing or malformed input, refused before anything is filed; 1 when `gh` did.
+set -euo pipefail
+
+for required in REPO TITLE BODY; do
+  if [ -z "${!required:-}" ]; then
+    echo "report-workflow-failure: \$$required is empty or unset, so there is nothing to file" >&2
+    echo "  ACTION: the caller supplies all three. In CI that is the reporting step in the workflow that failed — give it 'env: $required: …'. By hand: REPO=owner/name TITLE=… BODY=… bash scripts/report-workflow-failure.sh" >&2
+    exit 2
+  fi
+done
+
+# REPO is external input — a workflow's `github.repository`, or whatever a hand
+# run passes — and it is both the repository every write below addresses and a
+# value interpolated into a search query. Checked for the shape `gh` documents,
+# so a wrong one is refused here rather than filed somewhere unintended.
+if ! [[ "$REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
+  echo "report-workflow-failure: \$REPO is \"$REPO\", which is not an owner/name repository" >&2
+  echo "  ACTION: pass it as owner/name — in CI that is 'REPO: \${{ github.repository }}'. Nothing has been filed." >&2
+  exit 2
+fi
+
+# TITLE reaches GitHub's search language below, where a bare word like `in:` or
+# `-label` is an operator rather than text. It is sent as a quoted phrase for
+# that reason, which leaves exactly two characters it cannot carry: a double
+# quote would end the phrase, and a newline is not a title.
+case "$TITLE" in
+  *'"'* | *$'\n'*)
+    echo "report-workflow-failure: \$TITLE carries a double quote or a newline, which the search query it is embedded in cannot express" >&2
+    echo "  ACTION: title the issue without either — the reporting step in the workflow that failed sets \$TITLE. Nothing has been filed." >&2
+    exit 2
+    ;;
+esac
+
+# RUN_URL is optional, and it is the one input that becomes a link somebody will
+# click out of the issue. Refused unless it is an http(s) URL, rather than pasted
+# in as whatever arrived.
+if [ -n "${RUN_URL:-}" ] && ! [[ "$RUN_URL" =~ ^https?://[^[:space:]]+$ ]]; then
+  echo "report-workflow-failure: \$RUN_URL is \"$RUN_URL\", which is not an http(s) URL" >&2
+  echo "  ACTION: pass the failed run's own URL — in CI '\${{ github.server_url }}/\${{ github.repository }}/actions/runs/\${{ github.run_id }}' — or leave it unset. Nothing has been filed." >&2
+  exit 2
+fi
+
+# One place every `gh` failure is answered, because the causes that can
+# plausibly happen here need different answers and the exit code tells them
+# apart in none of them — only what `gh` wrote does. What it wrote is printed
+# either way, so a cause nobody predicted is still diagnosable.
+#   $1 what was being attempted, $2 gh's exit status, $3 what gh wrote
+gh_failed() {
+  local what="$1" status="$2" said="$3"
+  echo "report-workflow-failure: $what failed (gh exited $status)" >&2
+  if [ -n "$said" ]; then
+    printf '%s\n' "$said" | sed 's/^/    gh: /' >&2
+  else
+    echo "    gh: (said nothing)" >&2
+  fi
+  case "$said" in
+    *"gh auth login"* | *"authentication"* | *"HTTP 401"* | *"Bad credentials"*)
+      echo "  ACTION: this run has no usable credential. In CI, pass 'env: GH_TOKEN: \${{ github.token }}' to the step; locally, run 'gh auth login'." >&2
+      ;;
+    *"HTTP 403"* | *"Resource not accessible"* | *"not authorized"*)
+      echo "  ACTION: the credential works but may not write issues on $REPO. Give the job 'permissions: issues: write' — a job gets no more than it declares — and check that issues are enabled on the repository." >&2
+      ;;
+    *"HTTP 404"*)
+      echo "  ACTION: '$REPO' did not resolve — check \$REPO for a typo, and that the token can see a private repository." >&2
+      ;;
+    *"HTTP 422"* | *"Validation Failed"* | *"Invalid search query"*)
+      echo "  ACTION: GitHub rejected the request itself rather than the caller — \$TITLE is the likeliest cause, since it is interpolated into a search query. Reproduce with: gh issue list --repo $REPO --state open --search '\"$TITLE\" in:title'" >&2
+      ;;
+    *)
+      echo "  ACTION: reproduce the command above with 'gh --repo $REPO' and read its error. The three causes worth ruling out first are the credential ('gh auth status'), the job's 'issues: write' permission, and \$TITLE." >&2
+      ;;
+  esac
+  echo "  The failure being reported is NOT lost: it is the red run at ${RUN_URL:-<no RUN_URL was passed>}." >&2
+  exit 1
+}
+
+body="$BODY"
+[ -n "${RUN_URL:-}" ] && body="$body"$'\n\n'"Run: $RUN_URL"
+
+gh_stderr="$(mktemp)"
+trap 'rm -f "$gh_stderr"' EXIT
+
+# `--search "\"<title>\" in:title"` rather than a label: a label has to exist first,
+# and a reporter that has to create one before it can report a failure has one
+# more way to fail while reporting a failure. The search is a fuzzy one, so the
+# exact title is matched below rather than trusted from it.
+status=0
+listed="$(gh issue list --repo "$REPO" --state open --search "\"$TITLE\" in:title" \
+  --json number,title --jq '.[] | "\(.number)\t\(.title)"' 2>"$gh_stderr")" || status=$?
+[ "$status" -eq 0 ] || gh_failed "looking for an open issue titled \"$TITLE\"" "$status" "$(cat "$gh_stderr")"
+
+# The title is compared here rather than inside the `--jq` program: `gh`'s
+# built-in jq takes no `--arg`, so an embedded title would be jq source built
+# from an input, and a title carrying a quote would be a filter rather than a
+# string. The number is likewise checked before it is used to address anything.
+existing=""
+while IFS=$'\t' read -r number title; do
+  [ -n "$number" ] || continue
+  case "$number" in
+    *[!0-9]*)
+      echo "report-workflow-failure: gh listed an issue whose number is not a number (\"$number\")" >&2
+      echo "  ACTION: 'gh issue list --repo $REPO --state open --json number,title' no longer answers what this expects — refusing rather than addressing a comment at it. Check the installed gh version." >&2
+      exit 1
+      ;;
+  esac
+  if [ "$title" = "$TITLE" ]; then
+    existing="$number"
+    break
+  fi
+done <<<"$listed"
+
+# On success `gh` answers with the URL it wrote to, which is the one thing a
+# reader of this log actually wants next — so the answer is read back rather than
+# assumed. A write whose answer is not a URL still happened, so this reports what
+# `gh` actually said instead of refusing something already filed.
+wrote_to() {
+  if [[ "$1" =~ ^https://[^[:space:]]+$ ]]; then
+    printf '%s' "$1"
+  else
+    printf 'filed, but gh answered with no URL: %s' "${1:-(nothing)}"
+  fi
+}
+
+if [ -n "$existing" ]; then
+  status=0
+  where="$(gh issue comment "$existing" --repo "$REPO" --body "$body" 2>"$gh_stderr")" || status=$?
+  [ "$status" -eq 0 ] || gh_failed "commenting on #$existing" "$status" "$(cat "$gh_stderr")"
+  echo "report-workflow-failure: commented on #$existing — $(wrote_to "$where")"
+else
+  status=0
+  where="$(gh issue create --repo "$REPO" --title "$TITLE" --body "$body" 2>"$gh_stderr")" || status=$?
+  [ "$status" -eq 0 ] || gh_failed "opening an issue titled \"$TITLE\"" "$status" "$(cat "$gh_stderr")"
+  echo "report-workflow-failure: opened a new issue — $(wrote_to "$where")"
+fi

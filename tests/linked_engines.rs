@@ -9,8 +9,8 @@
 //!
 //! # Why these drive the script rather than read it
 //!
-//! The script *is* the deliverable — a weekly workflow and a release job both
-//! reach it through a recipe — so what has to be proven is its exit code and
+//! The script *is* the deliverable — a per-change workflow and a release job
+//! both reach it through a recipe — so what has to be proven is its exit code and
 //! its output, and it is run here exactly as they run it. What is substituted
 //! is one collaborator: the crates.io sparse index, which decides what a
 //! requirement permits *today* and cannot be asked that offline. `--index`
@@ -276,7 +276,8 @@ fn linked_engines(args: &[&str]) -> Output {
         .expect("bash runs scripts/linked-engines.sh")
 }
 
-/// A recipe, run the way the release job and the weekly workflow run it —
+/// A recipe, run the way the release job and the engine-currency workflow run
+/// it —
 /// through `just`, with the registry named by `ONEPIPELINE_CRATES_INDEX`, which
 /// is the override a caller with no option to pass has.
 fn recipe(name: &str, index: &str) -> Output {
@@ -1144,9 +1145,9 @@ fn registry(index: &str, refusals: usize) -> String {
 /// as unread rather than as a finding.
 ///
 /// The retry exists because a registry read fails for reasons that have nothing
-/// to do with the lock, and this job runs on a weekly schedule and on every
-/// release — a single refused request turning either red would train its reader
-/// to ignore it.
+/// to do with the lock, and this job runs on every pull request, every push to
+/// the default branch, and every release — a single refused request turning any
+/// of those red would train its reader to ignore it.
 #[test]
 fn a_registry_that_hiccups_is_retried_and_one_that_never_answers_is_not_a_finding() {
     let tree = tree("over-http", &CARET_SHAPES);
@@ -1162,7 +1163,7 @@ fn a_registry_that_hiccups_is_retried_and_one_that_never_answers_is_not_a_findin
     assert!(
         recovered.status.success() && recovered.stderr.is_empty(),
         "one refused request is a registry hiccup, not a stale lock, and not something a \
-         weekly job should say anything about:\n{}",
+         per-change job should say anything about:\n{}",
         said(&recovered)
     );
 
@@ -1200,7 +1201,8 @@ fn a_registry_that_hiccups_is_retried_and_one_that_never_answers_is_not_a_findin
 
 /// Both recipes are entry points to this check rather than restatements of it.
 ///
-/// The weekly workflow and the release job reach it only through `just`, so
+/// The engine-currency workflow and the release job reach it only through
+/// `just`, so
 /// what they actually run is the recipe: one naming a different script, or the
 /// wrong mode, would leave every test above proving a file nothing calls. The
 /// fixture index reaches them through `ONEPIPELINE_CRATES_INDEX`, which is the
