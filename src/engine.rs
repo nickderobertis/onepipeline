@@ -386,6 +386,14 @@ pub struct NodeResult {
     /// consumer branches on the key rather than on a field that is there for
     /// every node and meaningless for most. This field is what
     /// [`RUN_RESULT_SCHEMA_VERSION`] `5` records.
+    //
+    // llmlint: ignore[invalid_states_unrepresentable] a node id is the plain string every
+    // identifier on this record already is — `id` beside it above all — for the reason the
+    // block above states of `cause` and `head`: this is the *wire* shape of a document
+    // builds other than this one parse, and a newtype here would put a type of this
+    // crate's on it. The value is not unchecked either: it is a replacement id the
+    // reconciler validated against the live graph — non-blank, and not already taken —
+    // before it committed the retry that produced it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub superseded_by: Option<String>,
 }
@@ -2660,7 +2668,7 @@ fn watch_for_quiet(
 /// has got to rather than what one round did.
 fn record_result(paths: &RunPaths, state: &RunState, settled: GraphState) -> Result<RunResult> {
     let statuses = state.statuses();
-    let landings = landings_now(state);
+    let landings = landings_after_asking_again(state);
     let mut nodes: Vec<NodeResult> = state
         .graph
         .iter()
@@ -2716,7 +2724,12 @@ fn record_result(paths: &RunPaths, state: &RunState, settled: GraphState) -> Res
     Ok(result)
 }
 
-/// Every node's landing as the run settles, rather than as each node settled.
+/// Every node's landing after the run has asked again about the ones that had
+/// not landed.
+///
+/// Named for the asking rather than for the answer, because the answer is not
+/// uniformly fresh: a change the sibling would not answer about keeps the claim
+/// its settlement made, and a name promising "now" would say otherwise of it.
 ///
 /// A `landing` is an observation of a moment. `onevcs publish` answers
 /// `ChangeOpen` or `Queued`, this crate records `unlanded`, and the run neither
@@ -2732,7 +2745,7 @@ fn record_result(paths: &RunPaths, state: &RunState, settled: GraphState) -> Res
 /// nothing. An answer the sibling will not give leaves the settlement's own
 /// claim standing — see [`crate::vcs::landed_now`], which is where the reading
 /// is.
-fn landings_now(state: &RunState) -> BTreeMap<String, Landing> {
+fn landings_after_asking_again(state: &RunState) -> BTreeMap<String, Landing> {
     let mut landings = state.landings.clone();
     let unlanded: Vec<String> = landings
         .iter()

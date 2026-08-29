@@ -221,6 +221,14 @@ pub struct RunState {
     /// monitor included, met a `failed` node and proposed retrying work that had
     /// already been redone and merged. This is what makes the supersession
     /// readable wherever that settlement is.
+    //
+    // llmlint: ignore[invalid_states_unrepresentable] both sides are node ids, and a node
+    // id is the plain `String` every map on this struct is keyed by — `recorded`,
+    // `outcomes`, `branches`, and the rest — for the reason `src/error.rs`'s file-level
+    // suppression states: a `NodeId` newtype is a public item `docs/contract.md` does not
+    // name. Neither side is unchecked: both come off an `edit-committed` the reconciler
+    // wrote, which validated the superseded node against the live graph and refused a
+    // replacement id that was blank or already taken.
     pub superseded: BTreeMap<String, String>,
     /// What each node's dispatch is doing *now*, from the relayed stream.
     ///

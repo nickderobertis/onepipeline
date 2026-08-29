@@ -255,10 +255,10 @@ pub fn liveness(launch: &LaunchRecord, state: &RunState, paths: &RunPaths) -> Dr
 ///
 /// The journal's answer is each node's settlement, which is an observation of a
 /// moment; `result.json` is what the run said as it closed out, and a driver
-/// re-reads every unlanded change there before it writes one — see
-/// `engine`'s `landings_now`. Without this the two disagreed about one run: the
-/// report a consumer parses said `landed` and the view an operator opens said
-/// `NOT landed`, which is the same reader confusion in a new place.
+/// re-reads every unlanded change there before it writes one — see `engine`'s
+/// `landings_after_asking_again`. Without this the two disagreed about one run:
+/// the report a consumer parses said `landed` and the view an operator opens
+/// said `NOT landed`, which is the same reader confusion in a new place.
 ///
 /// **Only ever `unlanded` → `landed`.** A change that reached its base has
 /// reached it and a base does not stop carrying what it carries, so taking the
@@ -1707,17 +1707,7 @@ impl Registry {
             }
             Self::Read(by_node) => by_node,
         };
-        let Some(records) = by_node.get(node) else {
-            // The run says a dispatch is in flight and no process claims it.
-            // Deliberately not a proof of staleness: the entry is written by the
-            // executor as the dispatch starts, so a reader between those two
-            // writes would report live work as ended.
-            return Proof::Unproven(
-                "the run's dispatch registry holds no entry for it, so nothing here says which \
-                 process it is in"
-                    .to_string(),
-            );
-        };
+        let records = by_node.get(node).map(Vec::as_slice).unwrap_or_default();
         let mut unproven = None;
         let mut stale = None;
         for record in records {
@@ -1730,9 +1720,15 @@ impl Registry {
         match (unproven, stale) {
             (Some(why), _) => Proof::Unproven(why),
             (None, Some(why)) => Proof::Stale(why),
-            // `dispatches_of` answers a node's key only where it found an entry
-            // under it, so the list behind one is never empty.
-            (None, None) => Proof::Unproven("the run recorded no dispatch for it".to_string()),
+            // No entry at all: the run says a dispatch is in flight and no
+            // process claims it. Deliberately not a proof of staleness — the
+            // entry is written by the executor as the dispatch starts, so a
+            // reader between those two writes would report live work as ended.
+            (None, None) => Proof::Unproven(
+                "the run's dispatch registry holds no entry for it, so nothing here says which \
+                 process it is in"
+                    .to_string(),
+            ),
         }
     }
 }
@@ -2171,21 +2167,18 @@ pub fn results(view: &RunView) -> String {
 /// proposal to redo work that had already been redone and merged.
 ///
 /// So the account is here, and it says what became of the node rather than what
-/// its last dispatch scored. The branch rides the line because it is where the
-/// work is, and a supersession inherits it: the replacement continues that
-/// branch, which is exactly why re-dispatching the superseded node is the wrong
-/// move.
+/// its last dispatch scored. The replacement is named because it is where the
+/// work went: a supersession inherits the superseded node's branch, so the line
+/// above for that node is where the work is — which is exactly why re-dispatching
+/// this one is the wrong move.
 fn superseded_lines(view: &RunView) -> String {
     let mut out = String::new();
     for (node, replacement) in &view.state.superseded {
         out.push_str(&format!(
-            "  {:<24} superseded — retried as {replacement}",
-            one_line(node)
+            "  {:<24} superseded — retried as {}\n",
+            one_line(node),
+            one_line(replacement)
         ));
-        if let Some(branch) = view.state.branches.get(node) {
-            out.push_str(&format!(", which continues {branch}"));
-        }
-        out.push('\n');
     }
     out
 }

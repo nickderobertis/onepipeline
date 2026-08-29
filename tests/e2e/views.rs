@@ -2004,7 +2004,6 @@ fn host_never_renders_a_dispatch_this_host_can_prove_has_ended() {
         !world.dispatch_records("ghosted").is_empty()
     });
 
-    // A dispatch is running, so the row is exactly what it says.
     world.run(&["host"]).exited(0).out_has("build");
 
     // Now the process the work is in goes without the entry going with it, which

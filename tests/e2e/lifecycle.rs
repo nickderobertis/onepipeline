@@ -4216,6 +4216,16 @@ fn a_change_that_merges_before_the_run_settles_is_read_again_and_reported_landed
          than reading it again as the run closed out: {closed}\n{}",
         why(&world, run)
     );
+    // And the view an operator opens says the same thing the report a consumer
+    // parses does: two readers of one run that disagree about where its work is
+    // are the whole reason any of this is read again.
+    let results = world.run(&["results", run]);
+    results.exited(0).out_has("landed on its base");
+    results.out_lacks("NOT landed");
+    world
+        .run(&["runs"])
+        .exited(0)
+        .out_lacks("not landed as of settlement");
 }
 
 /// A change request this crate cannot read the record of settles the failure it
