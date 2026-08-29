@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.4](https://github.com/nickderobertis/onepipeline/compare/v0.17.3...v0.17.4) - 2026-08-29
+
+### Changed
+
+- *(release)* declare release targets in the canonical release-targets.toml ([#154](https://github.com/nickderobertis/onepipeline/pull/154))
+
+### Fixed
+
+- *(ci)* read back what gh answered a write with, rather than printing it as a URL ([#153](https://github.com/nickderobertis/onepipeline/pull/153))
+
 ## [0.17.3](https://github.com/nickderobertis/onepipeline/compare/v0.17.2...v0.17.3) - 2026-08-29
 
 ### Fixed
