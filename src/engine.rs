@@ -1791,8 +1791,7 @@ pub(crate) fn drain(
     let mut addresses: Vec<TurnAddress> = Vec::new();
     // What the producer said killed this dispatch, if it said so at all. The
     // **first** such envelope and not the last: a member that dies takes the run
-    // down with it, so the deaths after the first are the teardown it caused and
-    // the first is the one that ended the dispatch.
+    // down with it, so the deaths after the first are the teardown it caused.
     let mut death: Option<MemberDeath> = None;
     let mut asked_at: Option<Instant> = None;
     let mut killed = false;
@@ -2054,18 +2053,18 @@ const CLASSIFIED_IN: [(char, char); 2] = [('(', ')'), ('[', ']')];
 /// What a producer said killed one of its members, off the `member-died`
 /// envelope it published while the dispatch was running.
 ///
-/// The **stated** classification, as against the one
-/// [`dispatch_death_cause`] reads out of a sentence: `oneagentgraph` publishes
-/// this event the moment one of its members dies, and its payload says which
-/// liveness rule fired and what killed the member, classified. A dispatch that
-/// died to its provider is therefore a fact on the run's own stream rather than
-/// something to infer from standard error — which is what the engine used to do,
-/// and why a node that had gone green and then lost its provider settled
-/// `task-failed`, indistinguishable from one whose judge rejected its work.
-///
-/// The stderr reading stays as the degrade path, for a producer that publishes
-/// no such event.
+/// The **stated** classification, as against the one [`dispatch_death_cause`]
+/// reads out of a sentence: this is the producer saying which of its members
+/// died and why, and that one is this crate reading standard error for want of
+/// anything better. The reading stays as the degrade path for a producer that
+/// publishes no such event.
 struct MemberDeath {
+    // llmlint: ignore[invalid_states_unrepresentable] a cause is the plain string every
+    // classification in this crate is, for the reason `NodeResult::cause` records: the
+    // word is the harness's and that vocabulary grows there, so what this crate does is
+    // check the value for what it does with it — `is_a_classification`, on both edges it
+    // crosses — and carry it. This is one of those edges, and the value it holds is the
+    // one `Settlement::cause` and the journal payload carry unchanged.
     /// What killed the member, as its producer classified it: `oneagentgraph`'s
     /// own `Cause`, carried as the word it was spelled with.
     cause: String,
@@ -2081,9 +2080,21 @@ impl MemberDeath {
     /// resolved on the `PATH` at dispatch time, so it may be a newer release than
     /// the one this build links, and that type is `deny_unknown_fields` — a field
     /// added there would turn every death it publishes into an unreadable payload
-    /// and settle the node `task-failed` again, which is the exact report this
-    /// exists to stop. So the one value a settlement carries is read off the
-    /// payload and bounded by the check every other classification crosses.
+    /// and settle the node `task-failed` again, which is what this exists to
+    /// stop. So the one value a settlement carries is read off the payload and
+    /// bounded by the check every other classification crosses.
+    // llmlint: ignore[changed_behavior_has_e2e] the two arms that answer `None` for an
+    // envelope that *is* a death are not reachable from any producer in this tree: this
+    // crate and `onevcs` publish no `member-died` at all, and `oneagentgraph` writes its
+    // `cause` through a closed enum, so a payload carrying a sentence, a control
+    // character, or no cause at all is a stream something else wrote. Reaching either end
+    // to end would mean hand-writing that envelope, which would prove the fixture, and
+    // dropping them would put another process's JSON on a rendered line unchecked. Held
+    // by this module's unit test, which drives every shape past the real reading. The
+    // arms a producer *does* reach are journeys:
+    // `boundary::a_published_death_decides_the_settlement_ahead_of_the_sentence_the_dispatch_exits_on`
+    // for a death that is read, and every `.died` journey for a producer that publishes
+    // none.
     fn of(envelope: &Envelope) -> Option<Self> {
         if envelope.source != crate::event::Source::Agentgraph
             || envelope.kind.0 != oneagentgraph::event::EventKind::MemberDied.as_str()

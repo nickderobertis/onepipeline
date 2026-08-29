@@ -187,6 +187,56 @@ fn a_dispatch_that_died_producing_nothing_is_not_reported_as_an_agent_that_faile
         .out_has("the dispatch died (spawn-error) rather than failing its task");
 }
 
+/// A death the producer **published** decides the settlement, and the first one
+/// does: what the dispatch printed on the way out does not get a say.
+///
+/// Two rankings in one journey, because a real death produces both at once. A
+/// member that dies takes its graph down with it, so a second death arrives
+/// behind the first carrying the teardown's own cause — and settling from that
+/// one would report every death as a cancellation. And the sentence the run exits
+/// on classifies itself here, differently from the event: the event is the
+/// producer saying which of its members died and why, and the sentence is this
+/// crate reading standard error for want of anything better, so the reading never
+/// overrules the statement.
+#[test]
+fn a_published_death_decides_the_settlement_ahead_of_the_sentence_the_dispatch_exits_on() {
+    let world = World::new("boundary-diedfirst");
+    // The member that died, and then the teardown it caused. The first line's
+    // detail is what the run exits saying, and it classifies itself as something
+    // else — which is exactly the reading that must not win.
+    world.script(
+        "build.died-as",
+        "provider-failure quota harness failed (rate_limit)\n\
+         signalled cancelled the graph was torn down behind it\n",
+    );
+    let run = settle(&world, "diedfirst", vec![agent("build", &[])]);
+
+    let deaths = world.events_of(&run, "member-died");
+    assert_eq!(
+        deaths.len(),
+        2,
+        "this journey's producer published one death, so nothing ranked them: {deaths:?}"
+    );
+    assert_eq!(deaths[0]["payload"]["cause"], "quota", "{:?}", deaths[0]);
+    assert_eq!(
+        deaths[1]["payload"]["cause"], "cancelled",
+        "{:?}",
+        deaths[1]
+    );
+
+    let node = world.run_json(&run, "result.json")["nodes"][0].clone();
+    assert_eq!(node["outcome"], "dispatch-died", "{node}");
+    assert_eq!(
+        node["cause"], "quota",
+        "the settlement took the teardown's cause or the exit sentence's over the death \
+         the producer published: {node}"
+    );
+    world
+        .run(&["results", &run])
+        .exited(0)
+        .out_has("the dispatch died (quota) rather than failing its task");
+}
+
 /// The same failure with a verdict of the agent's own settles exactly as it did.
 ///
 /// The pair is the point: a word that is *distinct* is only distinct if the

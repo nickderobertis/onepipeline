@@ -1913,13 +1913,11 @@ fn submit(paths: &RunPaths, envelope: &Reply) -> Result<i32> {
         // it would park it where nothing drains it. A surface still awaiting an
         // answer outranks that: the run asked for the reply.
         //
-        // Decided from the run's **own** settled state and never from whether a
-        // process is alive. A driver writes the run's result and releases its
-        // ownership lock before it exits, so between those two moments a run
-        // that has settled reads as `ACTIVE` — and this refusal, asked of the
-        // liveness verdict, answered `{"reply":0,"state":"delivered"}` for a
-        // reply nothing would ever drain. It is a race in the driver's exit,
-        // which is why it reproduced on some runs of one journey and not others.
+        // Decided from the run's **own** settled state and never from the
+        // liveness verdict, which answers a different question: a driver writes
+        // the result, releases the lock, and only then exits, so a settled run
+        // reads as `ACTIVE` until it does — and a run driven from another host
+        // reads that way for good.
         if channel.pending().is_none() && crate::views::has_settled(&view) {
             return Err(Error::Refused(format!(
                 "run '{}' has settled, so nothing will ever read a reply to it; \

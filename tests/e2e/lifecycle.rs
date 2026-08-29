@@ -3670,6 +3670,12 @@ fn a_dispatch_that_failed_after_opening_a_change_settles_carrying_that_change() 
 /// the settlement at all and the review nobody knows about waits; reported as the
 /// outcome that carries it, the classification is still on the detail for anyone
 /// who wants it.
+///
+/// The producer here says it both ways, as the real one does: the death on its
+/// own stream, which is what the settlement is classified from, and the sentence
+/// it exits on, which classifies itself too. So the ranking is proven over the
+/// producer's statement and over this crate's reading of its standard error
+/// alike, rather than over whichever of the two a fixture happened to state.
 #[test]
 fn a_change_request_open_for_review_outranks_the_word_for_a_dispatch_that_died() {
     let world = World::new("lifecycle-diedopen");
@@ -3680,8 +3686,8 @@ fn a_change_request_open_for_review_outranks_the_word_for_a_dispatch_that_died()
         "chore: the change the dispatch opened itself",
     );
     world.script(
-        "service.died",
-        "provider error (respond): harness failed (rate_limit)",
+        "service.died-as",
+        "provider-failure quota provider error (respond): harness failed (rate_limit)",
     );
     let run = settle(&world, "diedopen", vec![lifecycle("service", &[])]);
 
@@ -3829,23 +3835,18 @@ fn a_dispatch_that_died_before_anything_was_committed_names_its_branch_and_no_co
 /// A dispatch whose member died is settled from the classification its producer
 /// **published**, rather than from a sentence read off standard error.
 ///
-/// Two nodes of one workstream reached a full green gate, recorded exit 0, and
-/// then died to their provider — and both settled `task-failed`, which is the
-/// word a node whose judge rejected its work settles under. Eight of that
-/// workstream's fourteen nodes had to be verified and landed by hand off the back
-/// of readings like that one.
+/// A dispatch that goes green and then loses its provider writes no sentence this
+/// crate can classify, so it used to settle `task-failed` — the word a node whose
+/// judge rejected its work settles under, which sends a manager to re-run
+/// finished work. The classification was never missing: `oneagentgraph` publishes
+/// a `member-died` the moment one of its members goes, carrying the liveness rule
+/// and a typed cause.
 ///
-/// The classification was never missing: `oneagentgraph` publishes a
-/// `member-died` the moment one of its members goes, carrying the liveness rule
-/// that fired and a typed cause — `auth`, `rate_limit`, `quota`, `spawn` — and
-/// this crate relayed that event into the journal and then settled the node off
-/// the dispatch's stderr instead. So this journey's producer says what killed the
-/// member on its stream and says nothing classifiable in its exit sentence: the
-/// word and the cause here can only have come from the event.
-///
-/// The rest of the settlement is what it has always been, which is the half a
-/// manager acts on: the branch the dispatch left behind and the commit `onevcs`
-/// recorded it at, so finished work is not lost behind the new word.
+/// So this journey's producer says what killed the member on its stream and says
+/// nothing classifiable in its exit sentence: the word and the cause here can
+/// only have come from the event. The branch and the commit are asserted beside
+/// them because they are the half a manager acts on, and the new word must not
+/// hide finished work.
 #[test]
 fn a_dispatch_whose_member_died_is_settled_from_the_classification_its_producer_published() {
     let world = World::new("lifecycle-memberdied");

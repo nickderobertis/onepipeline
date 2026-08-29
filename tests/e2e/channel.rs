@@ -451,21 +451,16 @@ fn a_settled_run_refuses_a_reply_nothing_will_ever_read() {
 /// The same refusal for a settled run whose driver **reads as alive**, because
 /// the refusal is a fact about the run and not about a process.
 ///
-/// The incident: `onepipeline reply` answered `{"reply":0,"state":"delivered"}`
-/// for a run that had already written its result, and a manager read that as
-/// confirmation that a verdict had landed. The guard was asked of the *liveness*
-/// verdict, which is a different question with a different answer at the same
-/// instant — a driver writes the run's result, releases its lock, and only then
-/// exits, so a settled run reads as `ACTIVE` for as long as that takes. Nothing
-/// about that window is stable, which is why the journey above failed twice and
-/// then passed on the same commit.
+/// The journey above waits for the driver to exit, so the guard could be asked
+/// of the liveness verdict and still pass it. That verdict is a different
+/// question with a different answer at the same instant, and asking it delivered
+/// replies into settled runs.
 ///
-/// This one holds the window open without racing anything, in the state the
+/// This one holds that window open without racing anything, in the state the
 /// verdict is *designed* to give the benefit of the doubt to: a run driven from
 /// **another host**. A pid means nothing across machines, so this host will not
-/// call that driver dead — the run reads as `ACTIVE` here for good, whatever
-/// became of the process elsewhere — and the run has still settled. The `runs`
-/// row already said so, in the word `SETTLED`; only the refusal disagreed.
+/// call that driver dead however long ago it went — and the run has still
+/// settled, which its own `SETTLED` row already said.
 #[test]
 fn a_settled_run_refuses_a_reply_however_alive_its_driver_still_looks() {
     const ELSEWHERE: &str = "a-host-this-is-not";

@@ -560,15 +560,40 @@ struct Standing {
     liveness: DriverLiveness,
     /// What remains for a driver or planner to do.
     work: WorkStanding,
-    /// Whether the graph converged: every node of it reached a state the loop is
-    /// finished with, so no further pass is coming.
+    /// Whether the loop has anything left to converge.
     ///
     /// Carried beside [`work`](Self::work) rather than read off it, because the
     /// two answer different questions and one of the readings is not a function
     /// of the other: a converged run holding a ready human action is
     /// [`WorkStanding::Outstanding`] — an `attest` moves it — and it has still
     /// settled, its driver having written its result and gone.
-    converged: bool,
+    convergence: Convergence,
+}
+
+/// Whether every node of a run's graph reached a state the loop is finished
+/// with, so no further pass is coming.
+///
+/// A named verdict rather than a bare flag, because it is what
+/// [`has_settled`] answers and what the channel refuses a reply on: read as the
+/// wrong polarity it queues a verdict where nothing drains it, or turns away the
+/// one reply a live run was waiting for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Convergence {
+    /// Nothing is left to converge: the run has settled.
+    Settled,
+    /// Something can still move, with or without a driver attached to move it.
+    Moving,
+}
+
+impl Convergence {
+    /// The verdict for a graph whose nodes have all settled, or not.
+    fn of(converged: bool) -> Self {
+        if converged {
+            Self::Settled
+        } else {
+            Self::Moving
+        }
+    }
 }
 
 /// One or more nodes an operator has to act on before a driver can move the run.
@@ -726,7 +751,7 @@ impl Standing {
         Self {
             liveness: view.liveness(),
             work,
-            converged,
+            convergence: Convergence::of(converged),
         }
     }
 
@@ -834,7 +859,7 @@ pub fn liveness_word(view: &RunView) -> &'static str {
 /// is a reading the channel's own refusal shares with them rather than a promise
 /// to a consumer.
 pub(crate) fn has_settled(view: &RunView) -> bool {
-    Standing::of(view).converged
+    Standing::of(view).convergence == Convergence::Settled
 }
 
 /// What a view prints about the graph **watching** the run, beside the word for
