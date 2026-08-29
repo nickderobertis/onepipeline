@@ -196,8 +196,10 @@ resolver = "2"
 #   registry serves. This repository is a producer, so the resolution decides the
 #   number `release-targets.toml` states.
 #   `the_linked_onevcs_reads_the_release_declaration_schema_this_repository_writes`
-#   holds it and does not compile below the floor. `^0.16` already admitted the
-#   release, so only the resolution moved; `onevcs-testing` 0.4.22 requires
+#   in `src/agentgraph.rs`, beside the `oneagentgraph` floors, holds it — written
+#   in items 0.16.0 exports too, so below the floor it compiles and fails naming
+#   the refusal rather than a constant that was added. `^0.16` already admitted
+#   the release, so only the resolution moved; `onevcs-testing` 0.4.22 requires
 #   exactly this `onevcs`, so both pins move together.
 #
 # **Every pin in this block is declared at the newest release the registry

@@ -13,7 +13,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use onevcs::declaration::{FILE, OLDEST_SCHEMA_VERSION, SCHEMA_VERSION};
+use onevcs::declaration::{FILE, SCHEMA_VERSION};
 use onevcs::{read_release_declaration, validate_release_declaration};
 
 /// The repository root, which is where the schema fixes the document.
@@ -75,67 +75,6 @@ fn the_checked_in_declaration_is_what_the_canonical_reader_accepts() {
         !declared.targets.is_empty(),
         "{FILE} declares no [[target]], which a consumer cannot tell from nobody having said \
          anything"
-    );
-}
-
-/// The linked `onevcs` reads the schema this repository's declaration is written
-/// against.
-///
-/// The floor `onevcs` 0.16.2 holds is with the pin in `Cargo.toml`. It reaches
-/// this repository because it is a *producer*: the number `release-targets.toml`
-/// states is the one the linked build writes. Below the floor
-/// [`OLDEST_SCHEMA_VERSION`] is not a symbol and this does not compile.
-#[test]
-fn the_linked_onevcs_reads_the_release_declaration_schema_this_repository_writes() {
-    assert_eq!(
-        (OLDEST_SCHEMA_VERSION, SCHEMA_VERSION),
-        (1, 2),
-        "the linked onevcs does not read release declarations across the range this \
-         repository's own document is written inside: the pair ships in 0.16.2, and \
-         `Cargo.toml` requires the newest release, which is above that floor — so \
-         `Cargo.lock` is behind the manifest too and `cargo update -p onevcs` is the whole \
-         of the fix; `just engines-current` names it without running the suite"
-    );
-
-    // A version-1 declaration is still read, which is the half of the pair that
-    // keeps a consumer able to read the siblings that have not moved their own
-    // document.
-    let older = mutate(
-        &document(),
-        "\nschema_version = 2\n",
-        "\nschema_version = 1\n",
-    );
-    let declared = validate_release_declaration(&older, FILE).unwrap_or_else(|error| {
-        panic!(
-            "the linked onevcs refuses a schema_version {OLDEST_SCHEMA_VERSION} declaration, so \
-             a consumer reading the repositories that have not moved theirs learns nothing \
-             about what they publish: {error}"
-        )
-    });
-    assert_eq!(declared.schema_version, OLDEST_SCHEMA_VERSION);
-
-    // And the identifier the version number exists for: npm serves a scoped
-    // package, and 0.16.0 refused the spelling outright as a name no registry
-    // serves. Driven through the reader, so this asserts what a declaration
-    // naming one is *read* as rather than what a parser accepts in isolation.
-    let scoped = mutate(
-        &document(),
-        "id = \"npm:onepipeline-cli\"",
-        "id = \"npm:@onepipeline/cli\"",
-    );
-    let declared = validate_release_declaration(&scoped, FILE).unwrap_or_else(|error| {
-        panic!(
-            "the linked onevcs refuses `npm:@onepipeline/cli`, a name npm genuinely serves, so \
-             a producer here could not declare a scoped package it publishes: {error}"
-        )
-    });
-    assert!(
-        declared
-            .targets
-            .iter()
-            .any(|target| target.id.name() == "@onepipeline/cli"),
-        "the scoped identifier was read as some other name, so what a consumer would wait on \
-         is not what the document declared"
     );
 }
 
