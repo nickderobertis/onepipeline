@@ -1,18 +1,12 @@
 #!/usr/bin/env bash
-# Announce a failed workflow run as a GitHub issue.
+# File a failed workflow run as one GitHub issue, commented on each further
+# failure rather than opened again.
 #
-# A `workflow_run` leg has no pull request to turn red and nobody waiting on it,
-# so a failure that announces itself nowhere is one nobody reads — which is the
-# same as not running the check at all. This gives it somewhere to be seen.
-#
-# One open issue, commented on each further failure, so a bad week at a registry
-# is one thread rather than one issue per release. A file rather than inline
-# workflow YAML because the create-vs-comment branch is real behavior:
-# `npm/test/failure-report.test.mjs` drives both halves against a stubbed `gh`.
-#
-# Every refusal below says what broke AND what to do about it, for the same
-# reason the script exists: it runs only when something is already wrong, so a
-# reporter that dies quietly takes the finding down with it.
+# A file rather than inline workflow YAML because the create-vs-comment branch is
+# real behavior: `npm/test/failure-report.test.mjs` drives both halves against a
+# stubbed `gh`. Every refusal below names a next action, because this runs only
+# when something is already wrong and a reporter that dies quietly takes the
+# finding down with it.
 #
 # Reads (all required except RUN_URL):
 #   REPO      owner/name to file against
@@ -20,6 +14,9 @@
 #   BODY      the issue or comment body
 #   RUN_URL   appended to the body when set
 # `gh` must be authenticated — GH_TOKEN in CI.
+#
+# Exits 0 having filed or commented and printed where; 2 on a caller error — a
+# missing or malformed input, refused before anything is filed; 1 when `gh` did.
 set -euo pipefail
 
 for required in REPO TITLE BODY; do
@@ -29,6 +26,16 @@ for required in REPO TITLE BODY; do
     exit 2
   fi
 done
+
+# REPO is external input — a workflow's `github.repository`, or whatever a hand
+# run passes — and it is both the repository every write below addresses and a
+# value interpolated into a search query. Checked for the shape `gh` documents,
+# so a wrong one is refused here rather than filed somewhere unintended.
+if ! [[ "$REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
+  echo "report-workflow-failure: \$REPO is \"$REPO\", which is not an owner/name repository" >&2
+  echo "  ACTION: pass it as owner/name — in CI that is 'REPO: \${{ github.repository }}'. Nothing has been filed." >&2
+  exit 2
+fi
 
 # One place every `gh` failure is answered, because the causes that can
 # plausibly happen here need different answers and the exit code tells them
@@ -67,8 +74,8 @@ gh_failed() {
 body="$BODY"
 [ -n "${RUN_URL:-}" ] && body="$body"$'\n\n'"Run: $RUN_URL"
 
-said="$(mktemp)"
-trap 'rm -f "$said"' EXIT
+gh_stderr="$(mktemp)"
+trap 'rm -f "$gh_stderr"' EXIT
 
 # `--search "<title> in:title"` rather than a label: a label has to exist first,
 # and a reporter that has to create one before it can report a failure has one
@@ -76,8 +83,8 @@ trap 'rm -f "$said"' EXIT
 # exact title is matched below rather than trusted from it.
 status=0
 listed="$(gh issue list --repo "$REPO" --state open --search "$TITLE in:title" \
-  --json number,title --jq '.[] | "\(.number)\t\(.title)"' 2>"$said")" || status=$?
-[ "$status" -eq 0 ] || gh_failed "looking for an open issue titled \"$TITLE\"" "$status" "$(cat "$said")"
+  --json number,title --jq '.[] | "\(.number)\t\(.title)"' 2>"$gh_stderr")" || status=$?
+[ "$status" -eq 0 ] || gh_failed "looking for an open issue titled \"$TITLE\"" "$status" "$(cat "$gh_stderr")"
 
 # The title is compared here rather than inside the `--jq` program: `gh`'s
 # built-in jq takes no `--arg`, so an embedded title would be jq source built
@@ -103,12 +110,12 @@ done <<<"$listed"
 # reader of this log actually wants next.
 if [ -n "$existing" ]; then
   status=0
-  where="$(gh issue comment "$existing" --repo "$REPO" --body "$body" 2>"$said")" || status=$?
-  [ "$status" -eq 0 ] || gh_failed "commenting on #$existing" "$status" "$(cat "$said")"
+  where="$(gh issue comment "$existing" --repo "$REPO" --body "$body" 2>"$gh_stderr")" || status=$?
+  [ "$status" -eq 0 ] || gh_failed "commenting on #$existing" "$status" "$(cat "$gh_stderr")"
   echo "report-workflow-failure: commented on #$existing — $where"
 else
   status=0
-  where="$(gh issue create --repo "$REPO" --title "$TITLE" --body "$body" 2>"$said")" || status=$?
-  [ "$status" -eq 0 ] || gh_failed "opening an issue titled \"$TITLE\"" "$status" "$(cat "$said")"
+  where="$(gh issue create --repo "$REPO" --title "$TITLE" --body "$body" 2>"$gh_stderr")" || status=$?
+  [ "$status" -eq 0 ] || gh_failed "opening an issue titled \"$TITLE\"" "$status" "$(cat "$gh_stderr")"
   echo "report-workflow-failure: opened a new issue — $where"
 fi

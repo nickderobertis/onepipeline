@@ -3,19 +3,16 @@ name: Engine currency
 # Whether `Cargo.lock` still resolves the sibling engines `Cargo.toml` already
 # permits.
 #
-# The answer changes when the *registry* moves and not when this tree does, so
-# this runs on a pull request that can have had nothing to do with the drift it
-# finds. That is deliberate, and it buys the thing a clock could not: on
-# 2026-08-24 a weekly run reported drift that was then found and relinked by hand
-# four days later, because nothing red was ever in front of anybody. Asked at
-# every push, drift is found at the next change instead of within a week.
+# The answer changes when the registry moves rather than when this tree does, so
+# this asks at every change instead of on a clock: drift is found at the next
+# push rather than up to a week later, at the cost of surfacing on pull requests
+# that had nothing to do with it.
 #
-# **A red run here does not block the pull request it appeared on.** No branch
-# protection requires this check — that is the same reason it once had a schedule,
-# and it survives the move intact: a release nobody here made must not stop an
-# unrelated change from merging. What closes a red run is one
-# `cargo update -p <spec>` and a commit, on any branch; `just engines-current`
-# prints the spec and says where to record a floor if the gap holds one.
+# **A red run does not block the pull request it appeared on.** No branch
+# protection requires this check, so a release nobody here made cannot stop an
+# unrelated change from merging. One `cargo update -p <spec>` and a commit, on any
+# branch, closes it; `just engines-current` prints the spec and says where to
+# record a floor if the gap holds one.
 #
 # llmlint: ignore-file[changed_behavior_has_e2e] the subject of this workflow is the
 # crates.io index, which a test cannot stand in for without the stand-in becoming what

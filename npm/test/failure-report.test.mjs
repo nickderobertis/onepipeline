@@ -1,23 +1,11 @@
-// The reporter that gives a `workflow_run` failure somewhere to be seen.
+// The reporter that gives a `workflow_run` failure somewhere to be seen, driven
+// as a subprocess the way `published-smoke.yml`'s reporting step drives it.
 //
-// `published-smoke.yml` runs when `release.yml` completes, so it has no pull
-// request to redden and nobody waiting on it: a red run announces itself only if
-// something files it. `scripts/report-workflow-failure.sh` is that something, and
-// the one time it matters is the one time nobody is watching it work — it runs
-// exactly when the thing it reports on is already broken.
-//
-// So both of its branches are driven here as a subprocess, the way the workflow
-// step drives it: no open issue (it must CREATE one) and its own issue already
-// open (it must COMMENT, never open a second, or a bad week at a registry becomes
-// a pile of issues nobody reads). `gh` is the one collaborator substituted, and it
-// is substituted on the search path rather than intercepted inside the script —
-// the real boundary is filing issues into this repository, which a check cannot
-// cross without opening a real issue every run. The stub is exercised as the real
-// thing: the assertions read the argv the reporter actually invoked.
-//
-// The last journeys here cover the failure side, because a reporter that dies
-// quietly takes the finding down with it: a refused input, and a `gh` that fails
-// on each of the three calls the reporter makes.
+// `gh` is the one collaborator substituted, and it is substituted on the search
+// path rather than intercepted inside the script: the real boundary is filing
+// issues into this repository, which a check cannot cross without opening a real
+// issue on every run. The stub is therefore exercised as the real thing — the
+// assertions read the argv the reporter actually invoked.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -34,32 +22,33 @@ const WORKFLOW = join(REPO_ROOT, ".github", "workflows", "published-smoke.yml");
 // exactly and one that only looks like it.
 const TITLE = "Published smoke is failing";
 const RUN_URL = "https://example.invalid/run/1";
+const WROTE_TO = "https://example.invalid/issues/7";
 
 // A `gh` that records the arguments it was given and answers `issue list` from a
-// file, so a journey picks which branch the reporter should take. `GH_ERROR`
-// turns it into a `gh` that fails, and `GH_FAIL_LIST` decides whether the listing
-// fails too or only the write that follows it.
+// file, so a journey picks the reporter's branch by choosing what the host says
+// rather than by telling it which to take. `GH_ERROR` — or `GH_FAIL_SILENT`, for
+// the `gh` that fails saying nothing — turns it into one that refuses, and
+// `GH_FAIL_LIST` decides whether the listing refuses too or only the write.
 const FAKE_GH = `#!/usr/bin/env bash
 printf '%s\\n' "$*" >>"$GH_CALLS"
 if [ "\${1:-}" = "issue" ] && [ "\${2:-}" = "list" ] && [ -z "\${GH_FAIL_LIST:-}" ]; then
   cat "$GH_EXISTING"
-  [ -z "\${GH_ERROR:-}" ] || exit 0
   exit 0
 fi
-if [ -n "\${GH_ERROR:-}" ]; then
-  printf '%s\\n' "$GH_ERROR" >&2
+if [ -n "\${GH_ERROR:-}" ] || [ -n "\${GH_FAIL_SILENT:-}" ]; then
+  [ -z "\${GH_ERROR:-}" ] || printf '%s\\n' "$GH_ERROR" >&2
   exit 1
 fi
-echo "https://example.invalid/issues/7"
+echo "${WROTE_TO}"
 exit 0
 `;
 
 /**
- * Run the reporter the way the workflow step runs it, with `gh` stubbed on PATH.
+ * Run the reporter with `gh` stubbed on PATH.
  *
  * `existing` is what `gh issue list` prints — the `number<TAB>title` lines the
- * reporter's `--jq` program produces — so a journey chooses the branch by
- * choosing what the host answers, not by telling the reporter which to take.
+ * reporter's own `--jq` program produces — and `env` overrides what the workflow
+ * step passes.
  */
 function report({ existing = "", env = {} } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "onepipeline-report-"));
@@ -90,6 +79,7 @@ function report({ existing = "", env = {} } = {}) {
     });
     return {
       status: run.status,
+      stdout: run.stdout,
       said: `exit ${run.status}\n--- stdout ---\n${run.stdout}\n--- stderr ---\n${run.stderr}`,
       calls: readFileSync(calls, "utf8").split("\n").filter(Boolean),
     };
@@ -104,7 +94,7 @@ function called(run, prefix) {
 }
 
 describe("the reporter files a workflow_run failure", () => {
-  it("opens an issue when there is none open, and puts the run behind it", () => {
+  it("opens an issue when there is none open, and says where it went", () => {
     const run = report();
 
     assert.equal(run.status, 0, run.said);
@@ -117,6 +107,8 @@ describe("the reporter files a workflow_run failure", () => {
       run.calls.some((call) => call.includes(RUN_URL)),
       `the red run's URL has to reach the issue body, or the finding is unreachable from it:\n${run.said}`,
     );
+    assert.match(run.stdout, /opened a new issue/, run.said);
+    assert.ok(run.stdout.includes(WROTE_TO), `the log does not say where it filed:\n${run.said}`);
   });
 
   it("comments on its own open issue rather than opening a second one", () => {
@@ -127,6 +119,11 @@ describe("the reporter files a workflow_run failure", () => {
     assert.ok(
       !called(run, "issue create "),
       `a second issue per failure is the pile this exists to avoid:\n${run.said}`,
+    );
+    assert.match(run.stdout, /commented on #41/, run.said);
+    assert.ok(
+      run.stdout.includes(WROTE_TO),
+      `the log does not say where it commented:\n${run.said}`,
     );
   });
 
@@ -147,18 +144,31 @@ describe("the reporter files a workflow_run failure", () => {
     assert.ok(!called(run, "issue comment "), run.said);
   });
 
-  it("refuses a missing input by name, without filing an empty issue", () => {
-    const run = report({ env: { TITLE: "" } });
+  // A caller error is refused before anything is filed, and says which input it
+  // was: the caller is a workflow step nobody is reading at the time.
+  for (const missing of ["REPO", "TITLE", "BODY"]) {
+    it(`refuses a missing ${missing} by name, without filing an empty issue`, () => {
+      const run = report({ env: { [missing]: "" } });
+
+      assert.equal(run.status, 2, run.said);
+      assert.ok(!called(run, "issue "), `a refused run must not call gh at all:\n${run.said}`);
+      assert.match(run.said, new RegExp(missing), run.said);
+      assert.match(run.said, /ACTION:/, run.said);
+    });
+  }
+
+  it("refuses a REPO that is not an owner/name repository", () => {
+    const run = report({ env: { REPO: "https://github.com/owner/repo" } });
 
     assert.equal(run.status, 2, run.said);
-    assert.ok(!called(run, "issue "), `a refused run must not call gh at all:\n${run.said}`);
-    assert.match(run.said, /TITLE/, run.said);
-    assert.match(run.said, /ACTION:/, run.said);
+    assert.ok(!called(run, "issue "), `a malformed repository must be refused first:\n${run.said}`);
+    assert.match(run.said, /REPO/, run.said);
+    assert.match(run.said, /Nothing has been filed/, run.said);
   });
 
   // Each `gh` failure is answered with what it was doing, what `gh` said, and the
-  // next action that answer calls for — and, whatever went wrong, with the red run
-  // the reporter was reporting, which is the finding that must not be lost.
+  // next action that particular answer calls for — and, whatever went wrong, with
+  // the red run it was reporting, which is the finding that must not be lost.
   const ghFailures = [
     {
       what: "the listing, with no credential",
@@ -168,6 +178,24 @@ describe("the reporter files a workflow_run failure", () => {
       },
       existing: "",
       expects: [/looking for an open issue/, /gh auth login/, /GH_TOKEN/],
+    },
+    {
+      what: "the listing, saying nothing at all",
+      env: { GH_FAIL_SILENT: "1", GH_FAIL_LIST: "1" },
+      existing: "",
+      expects: [/said nothing/, /ACTION:/],
+    },
+    {
+      what: "the listing, on a repository that did not resolve",
+      env: { GH_ERROR: "HTTP 404: Not Found", GH_FAIL_LIST: "1" },
+      existing: "",
+      expects: [/HTTP 404/, /owner\/repo/, /typo/],
+    },
+    {
+      what: "the listing, on a query GitHub rejected",
+      env: { GH_ERROR: "HTTP 422: Validation Failed", GH_FAIL_LIST: "1" },
+      existing: "",
+      expects: [/HTTP 422/, /TITLE/],
     },
     {
       what: "the create, with no permission",
@@ -187,11 +215,11 @@ describe("the reporter files a workflow_run failure", () => {
     it(`does not report a filed issue when gh fails on ${what}`, () => {
       const run = report({ existing, env });
 
-      assert.notEqual(run.status, 0, run.said);
+      assert.equal(run.status, 1, run.said);
       for (const expected of expects) {
         assert.match(run.said, expected, run.said);
       }
-      assert.match(run.said, new RegExp(RUN_URL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), run.said);
+      assert.ok(run.said.includes(RUN_URL), `the finding it was reporting is lost:\n${run.said}`);
     });
   }
 });
@@ -211,16 +239,16 @@ describe("the workflow the reporter answers for", () => {
   });
 
   it("reports a failure from a checkout, with permission to write the issue", () => {
-    const report = workflow.slice(workflow.indexOf("\n  report:"));
-    assert.ok(report.includes("if: failure()"), "the reporting job does not run on a failure");
-    assert.ok(report.includes("issues: write"), "the reporting job cannot write an issue");
-    const checkout = report.indexOf("uses: actions/checkout@v4");
+    const job = workflow.slice(workflow.indexOf("\n  report:"));
+    assert.ok(job.includes("if: failure()"), "the reporting job does not run on a failure");
+    assert.ok(job.includes("issues: write"), "the reporting job cannot write an issue");
+    const checkout = job.indexOf("uses: actions/checkout@v4");
     assert.ok(
-      checkout !== -1 && checkout < report.indexOf("report-workflow-failure.sh"),
+      checkout !== -1 && checkout < job.indexOf("report-workflow-failure.sh"),
       "the reporting job runs the script without checking the repository out first, so the file it runs is not in its workspace",
     );
     assert.ok(
-      report.includes("run: bash scripts/report-workflow-failure.sh"),
+      job.includes("run: bash scripts/report-workflow-failure.sh"),
       "the reporting job does not run the reporter this suite proves",
     );
   });
