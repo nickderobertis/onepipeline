@@ -73,13 +73,6 @@ _crate-bootstrap:
 # bootstrap, so `check` itself stays offline; the e2e suite **fails** without one
 # rather than skipping, because a plan read through a stand-in would prove the
 # stand-in.
-#
-# `onetaskgraph-source` — the shipped host that serves any plugin of that build over
-# the stdio plugin protocol — comes from the same install and is resolved beside the
-# binary, which is what lets a journey drive a *real* source of that product with a
-# destination rule of its own (`crates/testfakes/src/bin/label-strict-source.rs`).
-# The last branch copies it too, because a `ONETASKGRAPH_BIN` at a path of its own
-# would otherwise leave the host behind in the cargo root.
 _ensure-onetaskgraph:
     @resolved="${ONETASKGRAPH_BIN:-$(command -v onetaskgraph 2>/dev/null || true)}"; \
       cargo_root="${CARGO_HOME:-$HOME/.cargo}"; \
@@ -99,8 +92,6 @@ _ensure-onetaskgraph:
       if [[ -n "$resolved" && "$resolved" != */bin/onetaskgraph ]]; then \
         cp "$cargo_root/bin/onetaskgraph" "$resolved"; \
         chmod +x "$resolved"; \
-        cp "$cargo_root/bin/onetaskgraph-source" "$(dirname "$resolved")/onetaskgraph-source"; \
-        chmod +x "$(dirname "$resolved")/onetaskgraph-source"; \
       fi
 
 # These are test runners, not rules: their version cannot change the gate's
