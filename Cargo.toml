@@ -189,7 +189,25 @@ resolver = "2"
 #   `tests/release_targets.rs` holds this repository's own declaration to rather
 #   than restating the shape here. A **requirement** and not a lock floor, because
 #   `^0.15` excludes it — pre-1.0 the minor is the breaking position.
-#   `onevcs-testing` 0.4.20 requires exactly it, so both pins move together.
+# - `onevcs` 0.16.2 moves that schema to **version 2** and splits its one version
+#   number into a pair: `SCHEMA_VERSION` is what a producer writes, and the new
+#   `OLDEST_SCHEMA_VERSION` is the oldest a consumer still reads — so a reader
+#   spans a range of shapes rather than knowing one, and a version-1 document does
+#   not stop being read when version 2 starts being written. What version 2 added
+#   is which identifiers a `target.id` or a `covers` entry may express — npm's
+#   scoped `@scope/name`, which 0.16.0 refused outright as a name no registry
+#   serves — and no key at all. This repository is a **producer** of that
+#   document, and `tests/release_targets.rs` holds `release-targets.toml` to the
+#   version the linked build writes, so the resolution here is what decides the
+#   number this repository's own declaration states: it says `2` because of this
+#   pin, and said `1` because of the one before it.
+#   `the_linked_onevcs_reads_the_release_declaration_schema_this_repository_writes`
+#   in that suite is the floor — below it `OLDEST_SCHEMA_VERSION` is not a symbol
+#   at all, so a resolution behind this one does not compile, and the scoped
+#   identifier it accepts is one 0.16.0 refuses. The requirement then in force,
+#   `^0.16`, already admitted it, so only the resolution moved.
+#   `onevcs-testing` 0.4.22 requires exactly `onevcs` 0.16.2, so both pins move
+#   together — and two `onevcs` copies is a compile error rather than a skew.
 #
 # **Every pin in this block is declared at the newest release the registry
 # carries**, because this repository resolves no engine at two versions and so
@@ -241,19 +259,31 @@ resolver = "2"
 # own launch-time `Bounds::from_env`, and the rule that bound governs, driven
 # over real processes under a bound the environment sets small.
 #
-# `oneagentgraph` 0.3.12 requires `oneharness-core 0.12.1` and `onejudge 0.6.1`.
-# The latter still requires `oneharness-core 0.12.0`, whose caret requirement
-# admits 0.12.1, so the pins below let the graph resolve **one** turn engine. A
-# split one is invisible to a currency check, which reads each copy separately
-# and calls both current.
+# `oneagentgraph` 0.3.13 requires `oneharness-core 0.12.1` and `onejudge 0.6.1`,
+# and the `onejudge` pin below is the release *that* requirement resolves to.
+# 0.6.2 still requires `oneharness-core 0.12.0`, whose caret requirement admits
+# 0.12.1, so the pins below let the graph resolve **one** turn engine. A split one
+# is invisible to a currency check, which reads each copy separately and calls
+# both current.
 #
-# 0.3.12 is also the release that **carries `onejudge` past 0.5** — 0.6.0 adds
-# `Settings::settle_on_noop`, defaulting to what every 0.5 build did. The pin
-# below must be the version that pin resolves to, because `src/report.rs` coerces
-# between the two libraries' types and only type-checks against one copy, so the
-# two move together or `onejudge` resolves twice. The `0.5.4` it replaces was the
-# constraint rather than a lagging lock: pre-1.0 the minor is the breaking
-# position, so `^0.5.4` excluded every 0.6.x and no refresh could have reached one.
+# Neither `oneagentgraph` 0.3.13 nor `onejudge` 0.6.2 is a floor, and that is the
+# answer to the question the currency check asks and cannot settle rather than a
+# gap in this block. The whole of 0.3.13's difference from 0.3.12 is that
+# repository's own `published-smoke` workflow and the move of its release
+# declaration into `release-targets.toml`; the whole of 0.6.2's difference from
+# 0.6.1 is that same declaration move. Nothing under either library's `src/`
+# changed, so there is no behaviour here for this crate to depend on and no test
+# below records one — a floor written for a release that moved no surface would
+# describe a release note rather than a build this crate does not work.
+#
+# `oneagentgraph` 0.3.12, one release below it, is what **carried `onejudge` past
+# 0.5** — 0.6.0 adds `Settings::settle_on_noop`, defaulting to what every 0.5
+# build did. The pin below must be the version that pin resolves to, because
+# `src/report.rs` coerces between the two libraries' types and only type-checks
+# against one copy, so the two move together or `onejudge` resolves twice. The
+# `0.5.4` it replaced was the constraint rather than a lagging lock: pre-1.0 the
+# minor is the breaking position, so `^0.5.4` excluded every 0.6.x and no refresh
+# could have reached one.
 #
 # Two floors inside that unification. `onejudge` 0.5.2, because `src/report.rs`
 # reads the text a turn reported off `member-settled` rather than the harness's
@@ -265,23 +295,23 @@ resolver = "2"
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
 # second with no registry at all.
 [workspace.dependencies]
-oneagentgraph = "0.3.12"
-onevcs = "0.16.0"
+oneagentgraph = "0.3.13"
+onevcs = "0.16.2"
 # **Not a third sibling this crate composes** — nothing here launches, calls, or
 # spawns onejudge. It is one vocabulary: the verdicts a two-party member settles
 # on, which `oneagentgraph` copies onto the `member-settled` this crate relays.
 # It adds nothing to the dependency graph, because `oneagentgraph` already builds
 # it — and it must resolve to the version *that* pin does. `src/report.rs` is
 # where the build fails if it ever resolves to two, and why.
-onejudge = "0.6.1"
+onejudge = "0.6.2"
 # **Test-support only**, and named for one reason: `crates/testfakes`'s
 # `oneharness` double writes the report onejudge reads back, and that report is
 # oneharness's own typed contract. Written by hand it would be fifty fields of
 # copied wire shape that goes on parsing after the producer changed it — which is
 # the failure every other pin in this block is taken to avoid.
 #
-# The reader is **onejudge**, so this pin is whatever onejudge links: at 0.6.1 it
-# requires `oneharness-core 0.12.0`, while `oneagentgraph` 0.3.12 requires
+# The reader is **onejudge**, so this pin is whatever onejudge links: at 0.6.2 it
+# requires `oneharness-core 0.12.0`, while `oneagentgraph` 0.3.13 requires
 # 0.12.1, so the shared `0.12` requirement resolves one compatible copy and the
 # double writes the one its consumer parses. If onejudge's pin moves and this
 # one does not, `tests/e2e/turns.rs` fails on a report shape onejudge cannot read
@@ -298,7 +328,7 @@ oneharness-core = "0.12"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.4.20"
+onevcs-testing = "0.4.22"
 
 [package]
 name = "onepipeline"
