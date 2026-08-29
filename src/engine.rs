@@ -2926,6 +2926,69 @@ mod tests {
     use crate::plan::{Plan, PLAN_SCHEMA_VERSION};
     use crate::projection::Recorded;
 
+    /// The two things this change publishes outside the crate are spelled the
+    /// same in the README, in the divergence record, and here.
+    ///
+    /// The gate the publication budget's own has, for the same reason: an
+    /// environment variable is set from outside this crate by a name nothing
+    /// compiles, and a settlement word is read out of a run's result by one. Both
+    /// are stated in three documents, each further from the constant than the
+    /// last, and the README is the copy an operator actually meets. Each is
+    /// asserted from the constant, so a rename fails here rather than leaving
+    /// three documents describing a build that no longer exists.
+    ///
+    /// The **divergence record** rather than the contract, deliberately: neither
+    /// is in `docs/contract.md`, both are proposals to the planner who owns it,
+    /// and that is exactly the status the two entries state. A gate against the
+    /// contract would be a gate against a document that must not carry them yet.
+    #[test]
+    fn the_scratch_variable_and_the_provider_word_are_spelled_one_way_in_every_document() {
+        let read = |relative: &str| {
+            std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(relative))
+                .unwrap_or_else(|error| panic!("{relative} ships: {error}"))
+        };
+        let readme = read("README.md");
+        let divergences = read("docs/contract-divergences.md");
+        let contract = read("docs/contract.md");
+
+        for named in [
+            crate::executor::NODE_SCRATCH_DIR_ENV,
+            PROVIDER_FAILED,
+            // The word it narrows, which is what makes the narrowing legible: a
+            // README naming only the new one would read as a rename.
+            DISPATCH_DIED,
+        ] {
+            let quoted = format!("`{named}`");
+            assert!(
+                readme.contains(&quoted),
+                "the README does not name {quoted}"
+            );
+            assert!(
+                divergences.contains(&quoted),
+                "docs/contract-divergences.md does not name {quoted}"
+            );
+        }
+        // And the two the contract does not carry are still the two it does not
+        // carry, so the README's "open divergence" is true when a reader reads it.
+        for open in [crate::executor::NODE_SCRATCH_DIR_ENV, PROVIDER_FAILED] {
+            assert!(
+                !contract.contains(open),
+                "docs/contract.md now names {open:?}, so the README must stop calling it an \
+                 open divergence and the entry must be marked ruled on"
+            );
+        }
+        assert!(
+            readme.contains("open divergence 47") && readme.contains("open divergence 48"),
+            "the README does not say which entries these two are waiting on"
+        );
+        for entry in ["## 47. ", "## 48. "] {
+            assert!(
+                divergences.contains(entry),
+                "docs/contract-divergences.md has no entry {entry:?}"
+            );
+        }
+    }
+
     /// The bound on re-dispatching a node whose publication keeps failing is
     /// named in the contract that publishes it, under the spelling an operator
     /// sets.
