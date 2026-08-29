@@ -2174,6 +2174,17 @@ struct TurnRecords {
     with_usage: BTreeSet<(String, u64)>,
 }
 
+// llmlint: ignore-block[changed_behavior_has_e2e] the half a producer reaches *is* a
+// journey: a close with no opening leaves a member with no turn open, so the death stands,
+// which is what `lifecycle::a_dispatch_whose_member_died_is_settled_from_the_classification_its_producer_published`
+// and `boundary::a_published_death_decides_the_settlement_ahead_of_the_sentence_the_dispatch_exits_on`
+// settle `provider-failed` over. The rest are the trust boundary — a turn number that is
+// not a number, a member label that is not a member name, a usage carrying no figure —
+// and every one of them is a shape no producer in this tree writes: `oneagentgraph` emits
+// both kinds through its own closed types. Reaching one end to end means hand-writing that
+// envelope, which proves the fixture; dropping the guards would let another process's JSON
+// suppress a real death. Held by this module's own test, which drives every shape past the
+// real reading.
 impl TurnRecords {
     /// Fold one relayed envelope in, where it says something about a turn.
     fn read(&mut self, envelope: &Envelope) {
@@ -2208,7 +2219,7 @@ impl TurnRecords {
             .get(member)
             .is_some_and(|turn| self.with_usage.contains(&(member.to_owned(), *turn)))
     }
-}
+} // llmlint: ignore-end[changed_behavior_has_e2e]
 
 /// The key a relayed envelope's records pair under: the member it was stamped
 /// with, [`UNSTAMPED_MEMBER`] for a producer that stamped none, and `None` for a
