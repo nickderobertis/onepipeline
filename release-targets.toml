@@ -10,12 +10,9 @@
 # is the registry rather than the artifact: nothing else tells the two
 # `onepipeline-cli` targets apart.
 
-# `schema_version` is what this document states about its own shape, not a second
-# gate its identifiers are put through. `2` is the shape a producer writes at the
-# `onevcs` this build links; what moved from `1` is which identifiers a `target.id`
-# or a `covers` entry may express — npm's scoped `@scope/name` — and no key at all,
-# so a consumer still reading version 1 reads this document as the shape it knows
-# and loses nothing, because nothing here is spelled scoped.
+# `2` is the shape a producer writes at the `onevcs` this build links. Nothing
+# here is spelled scoped — the `@scope/name` identifiers version 2 added — so a
+# consumer still reading version 1 reads this document as the shape it knows.
 schema_version = 2
 
 # What a public registry currently serves for one `id` below. It reads those ids

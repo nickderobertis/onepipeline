@@ -78,25 +78,13 @@ fn the_checked_in_declaration_is_what_the_canonical_reader_accepts() {
     );
 }
 
-/// The linked `onevcs` reads the release-declaration schema this repository
-/// writes.
+/// The linked `onevcs` reads the schema this repository's declaration is written
+/// against.
 ///
-/// The floor `onevcs` 0.16.2 holds, and why it is carried by `Cargo.lock` rather
-/// than by the requirement, are with the pin in `Cargo.toml`. It is the one
-/// engine gap in that refresh that moved a library surface: 0.16.0 knew a single
-/// schema version and refused anything a name it did not recognise, and 0.16.2
-/// reads a **range** — [`OLDEST_SCHEMA_VERSION`] up to the [`SCHEMA_VERSION`] a
-/// producer writes — with npm's scoped `@scope/name` newly expressible in a
-/// `target.id`.
-///
-/// This crate depends on the move because it is a *producer*: the number
-/// `release-targets.toml` states is the one the linked build writes, and
-/// `the_checked_in_declaration_is_what_the_canonical_reader_accepts` above holds
-/// the file to it. Below the floor this does not compile at all —
-/// `OLDEST_SCHEMA_VERSION` is not a symbol there — which is why the scoped
-/// identifier is asserted through the reader rather than through
-/// `declaration::RegistryId`'s own parser: a refusal is what 0.16.0 answers, and
-/// a value is what this one does.
+/// The floor `onevcs` 0.16.2 holds is with the pin in `Cargo.toml`. It reaches
+/// this repository because it is a *producer*: the number `release-targets.toml`
+/// states is the one the linked build writes. Below the floor
+/// [`OLDEST_SCHEMA_VERSION`] is not a symbol and this does not compile.
 #[test]
 fn the_linked_onevcs_reads_the_release_declaration_schema_this_repository_writes() {
     assert_eq!(

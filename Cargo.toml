@@ -190,24 +190,15 @@ resolver = "2"
 #   than restating the shape here. A **requirement** and not a lock floor, because
 #   `^0.15` excludes it — pre-1.0 the minor is the breaking position.
 # - `onevcs` 0.16.2 moves that schema to **version 2** and splits its one version
-#   number into a pair: `SCHEMA_VERSION` is what a producer writes, and the new
-#   `OLDEST_SCHEMA_VERSION` is the oldest a consumer still reads — so a reader
-#   spans a range of shapes rather than knowing one, and a version-1 document does
-#   not stop being read when version 2 starts being written. What version 2 added
-#   is which identifiers a `target.id` or a `covers` entry may express — npm's
-#   scoped `@scope/name`, which 0.16.0 refused outright as a name no registry
-#   serves — and no key at all. This repository is a **producer** of that
-#   document, and `tests/release_targets.rs` holds `release-targets.toml` to the
-#   version the linked build writes, so the resolution here is what decides the
-#   number this repository's own declaration states: it says `2` because of this
-#   pin, and said `1` because of the one before it.
+#   number into the pair a reader spans: `OLDEST_SCHEMA_VERSION` up to the
+#   `SCHEMA_VERSION` a producer writes. Version 2 adds no key — what it adds is
+#   npm's scoped `@scope/name` in a `target.id`, which 0.16.0 refused as a name no
+#   registry serves. This repository is a producer, so the resolution decides the
+#   number `release-targets.toml` states.
 #   `the_linked_onevcs_reads_the_release_declaration_schema_this_repository_writes`
-#   in that suite is the floor — below it `OLDEST_SCHEMA_VERSION` is not a symbol
-#   at all, so a resolution behind this one does not compile, and the scoped
-#   identifier it accepts is one 0.16.0 refuses. The requirement then in force,
-#   `^0.16`, already admitted it, so only the resolution moved.
-#   `onevcs-testing` 0.4.22 requires exactly `onevcs` 0.16.2, so both pins move
-#   together — and two `onevcs` copies is a compile error rather than a skew.
+#   holds it and does not compile below the floor. `^0.16` already admitted the
+#   release, so only the resolution moved; `onevcs-testing` 0.4.22 requires
+#   exactly this `onevcs`, so both pins move together.
 #
 # **Every pin in this block is declared at the newest release the registry
 # carries**, because this repository resolves no engine at two versions and so
@@ -266,24 +257,18 @@ resolver = "2"
 # is invisible to a currency check, which reads each copy separately and calls
 # both current.
 #
-# Neither `oneagentgraph` 0.3.13 nor `onejudge` 0.6.2 is a floor, and that is the
-# answer to the question the currency check asks and cannot settle rather than a
-# gap in this block. The whole of 0.3.13's difference from 0.3.12 is that
-# repository's own `published-smoke` workflow and the move of its release
-# declaration into `release-targets.toml`; the whole of 0.6.2's difference from
-# 0.6.1 is that same declaration move. Nothing under either library's `src/`
-# changed, so there is no behaviour here for this crate to depend on and no test
-# below records one — a floor written for a release that moved no surface would
-# describe a release note rather than a build this crate does not work.
+# Neither 0.3.13 nor `onejudge` 0.6.2 is a floor: nothing under either library's
+# `src/` moved in the gap below it — each is that repository's own CI and the
+# move of its release declaration into `release-targets.toml` — so no test here
+# records one.
 #
-# `oneagentgraph` 0.3.12, one release below it, is what **carried `onejudge` past
-# 0.5** — 0.6.0 adds `Settings::settle_on_noop`, defaulting to what every 0.5
-# build did. The pin below must be the version that pin resolves to, because
-# `src/report.rs` coerces between the two libraries' types and only type-checks
-# against one copy, so the two move together or `onejudge` resolves twice. The
-# `0.5.4` it replaced was the constraint rather than a lagging lock: pre-1.0 the
-# minor is the breaking position, so `^0.5.4` excluded every 0.6.x and no refresh
-# could have reached one.
+# 0.3.12, below it, is the release that **carries `onejudge` past 0.5** — 0.6.0
+# adds `Settings::settle_on_noop`, defaulting to what every 0.5 build did. The pin
+# below must be the version that pin resolves to, because `src/report.rs` coerces
+# between the two libraries' types and only type-checks against one copy, so the
+# two move together or `onejudge` resolves twice. The `0.5.4` it replaces was the
+# constraint rather than a lagging lock: pre-1.0 the minor is the breaking
+# position, so `^0.5.4` excluded every 0.6.x and no refresh could have reached one.
 #
 # Two floors inside that unification. `onejudge` 0.5.2, because `src/report.rs`
 # reads the text a turn reported off `member-settled` rather than the harness's
