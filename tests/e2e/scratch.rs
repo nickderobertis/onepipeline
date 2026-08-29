@@ -6,12 +6,9 @@
 //! to that dispatch, and not removed while it runs. The spelling of the path is
 //! not promised, so nothing here asserts one.
 
-// llmlint: ignore-file[e2e_not_mocked] `World` substitutes the two *siblings* at their
-// subprocess boundary and nothing inside the crate under test, which is driven as a real
-// compiled binary. The dispatched agent is what reads this variable, and the double is
-// what stands in for one: it takes the value out of its own environment exactly as an
-// agent would, uses the directory, and puts what it saw on the run's own stream.
-// `harness.rs` carries the same suppression and the full rationale.
+// llmlint: ignore-file[e2e_not_mocked] the dispatched agent is what reads this variable,
+// and the double is what stands in for one: it takes the value out of its own environment
+// exactly as an agent would. `harness.rs` carries the same suppression and the rationale.
 
 use crate::harness::{agent, lifecycle, plan_of, World};
 

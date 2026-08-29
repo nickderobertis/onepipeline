@@ -297,10 +297,9 @@ impl Executor for LocalExecutor {
 /// promised: the spelling below is not a contract and no consumer may derive one
 /// path from another.
 ///
-/// A dispatch with nowhere of its own invents somewhere, and every dispatch on a
-/// host invents it out of the same few facts; divergence 47 in
-/// [the divergence record](../../../docs/contract-divergences.md) is what the
-/// collisions cost, and the proposal this answers.
+/// Divergence 47 in
+/// [the divergence record](../../../docs/contract-divergences.md) is why, and the
+/// proposal this answers.
 pub(crate) const NODE_SCRATCH_DIR_ENV: &str = "ONEPIPELINE_NODE_SCRATCH_DIR";
 
 /// What every dispatch this executor makes carries in its own environment.
@@ -317,15 +316,11 @@ pub(crate) const NODE_SCRATCH_DIR_ENV: &str = "ONEPIPELINE_NODE_SCRATCH_DIR";
 /// [`Error::Ledger`] where the scratch directory cannot be made: a promised
 /// directory that is not there would fail the agent's writes one at a time, and
 /// those failures read as the agent's own work going wrong.
-// llmlint: ignore[changed_behavior_has_e2e] the pair *is* driven end to end on both
-// backends — `scratch::a_dispatch_is_given_an_absolute_writable_directory_of_its_own` and
-// `scratch::every_dispatch_of_one_node_is_given_its_own_directory_and_none_is_taken_away`
-// over the subprocess one, and
-// `dispatch::a_dispatchs_scratch_directory_reaches_the_turn_the_library_backend_runs` over
-// the library one. What has no journey is two *concurrent* library-backend dispatches,
-// and deliberately: what such a journey would observe is the shortfall divergence 47
-// records rather than behaviour this crate promises, so a test asserting it would pin a
-// defect in place and have to be deleted by the change that closes it.
+// llmlint: ignore-block[changed_behavior_has_e2e] the journeys in `tests/e2e/scratch.rs`
+// and `dispatch::a_dispatchs_scratch_directory_reaches_the_turn_the_library_backend_runs`
+// drive both backends. The one case with no journey is two *concurrent* library-backend
+// dispatches, where what a test would assert is divergence 47's shortfall rather than
+// anything this crate promises.
 fn dispatch_env(labels: &Labels) -> Result<Vec<(String, String)>> {
     let mut env: Vec<(String, String)> = labels
         .run_id
@@ -337,32 +332,20 @@ fn dispatch_env(labels: &Labels) -> Result<Vec<(String, String)>> {
         node_scratch_dir(labels)?.display().to_string(),
     ));
     Ok(env)
-}
+} // llmlint: ignore-end[changed_behavior_has_e2e]
 
 /// Make this dispatch's own scratch directory, and answer where it is.
 ///
-/// Under the run's own directory where there is a run, so the scratch a run made
-/// is thrown away with the run rather than accumulating under a shared temporary
-/// root nobody owns; under the process's temporary directory for a dispatch
-/// outside a run, which has no run directory to sit in.
+/// Under the run's own directory, so a run's scratch is thrown away with the run.
 ///
-/// Uniqueness is the directory's *creation*, not its name: `create_dir` refuses a
-/// directory that is already there, so the first spelling this process can create
-/// is one no other dispatch has been given — which a name minted from a pid and a
-/// counter alone would not be, because a host reissues pids and a counter starts
-/// again in every process.
-// llmlint: ignore-block[changed_behavior_has_e2e] two arms here are not reachable from
-// any command a user can type. A dispatch with **no run** is the contract's own example
-// and this seam's own tests — every dispatch a run makes carries its id, which is the same
-// reason `register_dispatch` records nothing for one — so a journey would have to be a
-// caller of this function rather than a run. And a scratch directory that cannot be
-// **created** needs a run root that holds a run whose `scratch` is a file: a runs root
-// that is unusable fails long before this, when the run's own directory is made. Both are
-// driven against the real filesystem by
-// `tests::every_dispatch_is_given_a_directory_of_its_own_and_no_two_share_one`. What a
-// user reaches — the directory itself, per dispatch, across a requeue — is
-// `scratch::a_dispatch_is_given_an_absolute_writable_directory_of_its_own` and
-// `scratch::every_dispatch_of_one_node_is_given_its_own_directory_and_none_is_taken_away`.
+/// Uniqueness is the directory's *creation*, not its name: `create_dir` refuses
+/// one that is already there, which a name minted from a pid and a counter would
+/// not — a host reissues pids and a counter starts again in every process.
+// llmlint: ignore-block[changed_behavior_has_e2e] no command reaches the two arms below:
+// every dispatch a run makes carries its id, and a `scratch` that will not be created
+// needs a run directory that exists holding a file by that name. Both are driven against
+// the real filesystem by
+// `tests::every_dispatch_is_given_a_directory_of_its_own_and_no_two_share_one`.
 fn node_scratch_dir(labels: &Labels) -> Result<PathBuf> {
     /// Enough numbers that walking past every directory a run has already made is
     /// never the reason a dispatch fails, and few enough that a base directory

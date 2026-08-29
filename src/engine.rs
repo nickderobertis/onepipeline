@@ -2170,8 +2170,8 @@ impl MemberDeath {
 struct TurnRecords {
     /// The turn each member last opened.
     open: BTreeMap<String, u64>,
-    /// The members and turns whose own record completed reporting usage.
-    used: BTreeSet<(String, u64)>,
+    /// The members and turns whose close carried a [`USAGE_FIGURES`] figure.
+    with_usage: BTreeSet<(String, u64)>,
 }
 
 impl TurnRecords {
@@ -2192,7 +2192,7 @@ impl TurnRecords {
         } else if kind == oneagentgraph::event::EventKind::TurnCompleted.as_str()
             && has_a_usage_figure(envelope.payload.get("usage"))
         {
-            self.used.insert((member, turn));
+            self.with_usage.insert((member, turn));
         }
     }
 
@@ -2206,7 +2206,7 @@ impl TurnRecords {
     fn contradicts_a_death_of(&self, member: &str) -> bool {
         self.open
             .get(member)
-            .is_some_and(|turn| self.used.contains(&(member.to_owned(), *turn)))
+            .is_some_and(|turn| self.with_usage.contains(&(member.to_owned(), *turn)))
     }
 }
 
@@ -2263,18 +2263,11 @@ fn has_a_usage_figure(usage: Option<&Value>) -> bool {
 /// What the producer said killed a dispatch, once it has been reconciled against
 /// the record of the turn it names.
 ///
-/// The reconciliation is the middle variant. A `provider-failure` is the producer
-/// saying its member exited **without a report it could settle on**, and a turn
-/// record that closed says the opposite about that same turn — so where both
-/// arrive, the record is what the dispatch actually did and the classification is
-/// not acted on. Divergence 48 in
-/// [the divergence record](../../../docs/contract-divergences.md) is what
-/// trusting the classification over the record cost.
-///
-/// Only the provider rule is reconciled this way. A heartbeat that stopped, a
-/// stall, and a signal are all statements about the member *after* whatever turn
-/// it had completed, so a completed turn beside one of those is not a
-/// contradiction at all.
+/// Only the provider rule is reconciled — see divergence 48 in
+/// [the divergence record](../../../docs/contract-divergences.md) — because only
+/// it is a claim about a turn: a heartbeat, a stall and a signal are statements
+/// about the member *after* whatever turn it completed, so a closed turn beside
+/// one of those contradicts nothing.
 enum Death {
     /// The producer published one, and the turn record does not contradict it.
     Published(MemberDeath),

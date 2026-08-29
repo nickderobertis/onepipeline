@@ -717,15 +717,9 @@ fn adoption_retains_node_overrides_for_later_dispatches() {
 /// The scratch directory a node dispatch is promised reaches the turn the
 /// **library backend** runs.
 ///
-/// The backend production takes, and the one where a per-dispatch environment
-/// pair is hard: `oneagentgraph 0.2.18` onwards composes a member's environment
-/// from the hosting process's rather than from the launch it was given, so a pair
-/// set only in the map handed to the sibling reaches nothing. Divergence 47's
-/// closing paragraph is what that costs and what is left of it; this is the half
-/// that has to be true either way — a turn that ran was handed a real directory.
-///
-/// Read off the turn process itself, which is the harness child at the bottom of
-/// the stack: what it holds is what an agent would hold. No
+/// The backend production takes, and the one divergence 47 says a per-dispatch
+/// pair is hard on. Read off the turn process itself, the harness child at the
+/// bottom of the stack, so what is asserted is what an agent would hold. No
 /// `ONEPIPELINE_ONEAGENTGRAPH_BIN`, because its absence is what selects this
 /// backend.
 #[test]
