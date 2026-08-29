@@ -126,6 +126,19 @@ describe("the reporter files a workflow_run failure", () => {
     );
   });
 
+  it("files without a run link when there is no run to link to", () => {
+    // RUN_URL is the one optional input: a hand run reporting something it saw
+    // has no run of its own, and must still be able to file.
+    const run = report({ env: { RUN_URL: "" } });
+
+    assert.equal(run.status, 0, run.said);
+    assert.ok(called(run, "issue create "), `expected an 'issue create' call:\n${run.said}`);
+    assert.ok(
+      !run.calls.some((call) => call.includes("Run:")),
+      `an empty run link reached the issue body:\n${run.said}`,
+    );
+  });
+
   it("does not comment a smoke failure onto an issue that merely resembles its own", () => {
     // `--search … in:title` is fuzzy, so it answers with near misses. Commenting
     // onto somebody else's thread is worse than opening a second issue.
@@ -139,8 +152,14 @@ describe("the reporter files a workflow_run failure", () => {
   it("refuses an issue id that is not a number rather than addressing a comment at it", () => {
     const run = report({ existing: `not-a-number\t${TITLE}\n` });
 
-    assert.notEqual(run.status, 0, run.said);
-    assert.ok(!called(run, "issue comment "), run.said);
+    assert.equal(run.status, 1, run.said);
+    assert.ok(!called(run, "issue comment "), `a comment was addressed at it anyway:\n${run.said}`);
+    assert.match(
+      run.said,
+      /not-a-number/,
+      `the refusal does not name what gh listed:\n${run.said}`,
+    );
+    assert.match(run.said, /ACTION: .*gh issue list/, run.said);
   });
 
   // A caller error is refused before anything is filed, and says which input it
