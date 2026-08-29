@@ -239,7 +239,7 @@ impl Executor for LocalExecutor {
         let filters = launched_with(&req.labels)?
             .map(|record| record.filters)
             .unwrap_or_default();
-        let env = dispatch_env(&req.labels)?;
+        let env = prepare_dispatch_env(&req.labels)?;
         let mut run = GraphRun::start(&Launch {
             graph: &req.graph.0,
             task: &req.task,
@@ -302,7 +302,8 @@ impl Executor for LocalExecutor {
 /// proposal this answers.
 pub(crate) const NODE_SCRATCH_DIR_ENV: &str = "ONEPIPELINE_NODE_SCRATCH_DIR";
 
-/// What every dispatch this executor makes carries in its own environment.
+/// Compose what every dispatch this executor makes carries in its own
+/// environment, **making** the scratch directory one of those pairs names.
 ///
 /// The **run id** is what the operator's `ask-manager` wrapper addresses a
 /// manager by, and a dispatch outside a run carries none for the same reason it
@@ -321,7 +322,7 @@ pub(crate) const NODE_SCRATCH_DIR_ENV: &str = "ONEPIPELINE_NODE_SCRATCH_DIR";
 // drive both backends. The one case with no journey is two *concurrent* library-backend
 // dispatches, where what a test would assert is divergence 47's shortfall rather than
 // anything this crate promises.
-fn dispatch_env(labels: &Labels) -> Result<Vec<(String, String)>> {
+fn prepare_dispatch_env(labels: &Labels) -> Result<Vec<(String, String)>> {
     let mut env: Vec<(String, String)> = labels
         .run_id
         .iter()
@@ -668,7 +669,7 @@ mod tests {
         };
 
         let scratch = |labels: &Labels| {
-            let env = dispatch_env(labels).expect("the dispatch's environment is composed");
+            let env = prepare_dispatch_env(labels).expect("the dispatch's environment is composed");
             let (_, value) = env
                 .iter()
                 .find(|(key, _)| key == NODE_SCRATCH_DIR_ENV)
@@ -703,7 +704,10 @@ mod tests {
         let blocked = root.join("blocked");
         std::fs::write(&blocked, "not a directory").expect("the blocking file is written");
         std::env::set_var(crate::ledger::RUNS_DIR_ENV, &blocked);
-        assert!(matches!(dispatch_env(&labels), Err(Error::Ledger { .. })));
+        assert!(matches!(
+            prepare_dispatch_env(&labels),
+            Err(Error::Ledger { .. })
+        ));
 
         std::env::remove_var(crate::ledger::RUNS_DIR_ENV);
         let _ = std::fs::remove_dir_all(&root);

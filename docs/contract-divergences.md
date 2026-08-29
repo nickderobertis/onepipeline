@@ -2092,7 +2092,7 @@ like test failures, and one worker read another workstream's coverage output as
 its own. None of those announce what they are — a frozen log reads as a hung
 command, and another workstream's numbers read as yours.
 
-So `executor::dispatch_env`, which already composes the ask seam's run id into
+So `executor::prepare_dispatch_env`, which already composes the ask seam's run id into
 every node dispatch, composes one more name:
 
 > **`ONEPIPELINE_NODE_SCRATCH_DIR`** is exported into the environment of every
