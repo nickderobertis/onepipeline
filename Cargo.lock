@@ -955,9 +955,9 @@ dependencies = [
 
 [[package]]
 name = "onevcs"
-version = "0.15.8"
+version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9588434db60ace5f73f70a540a355de9e2a6e730c75fae9b1abac3e83fa005f"
+checksum = "2766f989ba27032e4cb39c5fd38d4bf336bf5de8ec321b4190cd5f5b2feb3e30"
 dependencies = [
  "clap",
  "dunce",
@@ -973,15 +973,16 @@ dependencies = [
  "tempfile",
  "thiserror",
  "time",
+ "toml",
  "url",
  "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "onevcs-testing"
-version = "0.4.17"
+version = "0.4.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6a0eb2a459594fda002e54419d02d6470b401788dcfdee5e456de259f61ac8d"
+checksum = "a9c5c9f4fee2a6c66f1d4c4dba82150953563159a6720c1d927c4eeab26fab42"
 dependencies = [
  "onevcs",
  "serde",

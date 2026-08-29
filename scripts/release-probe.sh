@@ -2,6 +2,10 @@
 # What a public registry currently serves for one artifact this repository
 # publishes.
 #
+# **What it answers for is not written here.** It reads the `[[target]]`
+# identifiers out of `release-targets.toml` at this repository's root, which is
+# also the document naming this script as its `probe`.
+#
 # A run of this crate holds a node under `published` adoption until every
 # dependency it names has *released* the work it depends on — see
 # `src/release.rs`. That hold is answered, per repository, by that repository's
@@ -9,9 +13,9 @@
 # `script` form and is spawned exactly as `src/release.rs` spawns one: a direct
 # subprocess, no shell interposed, this repository's root as the working
 # directory, and an environment carrying `PATH` and `HOME` (plus the two Windows
-# equivalents) and nothing else — no credential of any kind. Every target below
-# is on a public registry, so an unauthenticated read is all this needs and all
-# it may have.
+# equivalents) and nothing else — no credential of any kind. Every target the
+# declaration names is on a public registry, so an unauthenticated read is all
+# this needs and all it may have.
 #
 # **Three answers, and the third is not the second.**
 #
@@ -23,7 +27,8 @@
 # that a release has not happened, so nothing here answers "no release" for a
 # question it could not put: an identifier this does not recognise, a registry
 # that did not answer, and an answer it could not read are each non-zero. The
-# exit codes are 2 for the identifier and 3 for the registry; both are "not
+# exit codes are 2 for the identifier, 3 for the registry, and 4 for this
+# repository's own declaration when this cannot read it; all three are "not
 # answered", and a caller needs no more than "non-zero".
 #
 # It answers well inside the sixty seconds the contract allows: one request, at
@@ -34,27 +39,55 @@
 #   release-probe.sh <registry>:<name>
 set -euo pipefail
 
-# **Every artifact this repository publishes**, as the registry-qualified
-# identifiers a consumer names them by. The qualification is load-bearing rather
-# than decorative: this repository serves `onepipeline-cli` from *two* registries
-# on two cadences, so an unqualified name would be two artifacts and a consumer
-# waiting on it could not say which one it got.
+# The declaration, beside this script rather than under the caller's working
+# directory. The host spawns a probe with this repository's root as its working
+# directory, but the file this reads is one a *checkout* carries, and its place in
+# that checkout is fixed relative to this script — so anchoring on `$0` answers
+# the same document however the script was reached.
+case "$0" in
+  */*) here="${0%/*}" ;;
+  *) here="." ;;
+esac
+declaration="$here/../release-targets.toml"
+
+# One line per `[[target]]` identifier, and `!` for a document this cannot read.
 #
-# A target is a **consumable**: something a dependent names in order to depend on
-# it. The five per-platform npm packages `scripts/npm-build.mjs` builds are not
-# targets — nobody depends on `onepipeline-cli-linux-x64`; the launcher resolves
-# it at the launcher's own exact version — so they are covered by
-# `npm:onepipeline-cli` and are deliberately absent here.
+# Deliberately narrow rather than a TOML implementation in awk: it takes `id`
+# only inside a `[[target]]` table, requires the value to be a quoted
+# `<registry>:<name>` and nothing else on the line, and refuses the document
+# outright otherwise. Whether the document is *valid* is decided by `onevcs`'s
+# canonical reader, in `tests/release_targets.rs`; this one only has to agree with
+# it about the identifiers or refuse.
 #
-# `npm/test/release-targets.test.mjs` is what holds this list to what the release
-# workflow and the manifests actually publish, in both directions, so a name that
-# starts publishing without being declared here fails the suite rather than
-# quietly earning a consumer no hold at all.
-TARGETS=(
-  crate:onepipeline
-  pypi:onepipeline-cli
-  npm:onepipeline-cli
-)
+# llmlint: ignore-block[boundary_inputs_validated] this is the validation the rule
+# asks for, at the level this consults: it tracks which table each line belongs to
+# so a `[[retired]]` id is never read as a published one, requires each identifier
+# to match the shape a registry serves, and refuses the document rather than
+# answering from part of it. The library the rule would prefer does not exist in
+# bash — the language this has to be in, because the host spawns it as a direct
+# subprocess with no toolchain, no build, and no interpreter it did not find on
+# `PATH` — and every shape it refuses is driven in
+# `npm/test/release-targets.test.mjs`.
+declared_targets='
+{
+  line = $0
+  sub(/^[ \t]+/, "", line)
+  sub(/[ \t]+$/, "", line)
+  if (line == "" || substr(line, 1, 1) == "#") next
+  if (substr(line, 1, 1) == "[") { sub(/[ \t]*#.*$/, "", line); table = line; next }
+  if (table != "[[target]]") next
+  if (line !~ /^id[ \t]*=/) next
+  sub(/^id[ \t]*=[ \t]*/, "", line)
+  if (line !~ /^"[^"]*"([ \t]*#.*)?$/) { bad = 1; exit }
+  sub(/^"/, "", line)
+  sub(/".*$/, "", line)
+  if (line !~ /^[A-Za-z0-9][A-Za-z0-9_-]*:[A-Za-z0-9][A-Za-z0-9._@\/-]*$/) { bad = 1; exit }
+  print line
+  found = 1
+}
+END { if (bad || !found) print "!" }
+'
+# llmlint: ignore-end[boundary_inputs_validated]
 
 # Where each registry is asked, fixed here and settable from nowhere else. The
 # host hands this `PATH` and `HOME` and nothing else, so an environment variable
@@ -78,15 +111,38 @@ NPM_REGISTRY="https://registry.npmjs.org"
 attempts=3
 timeout=8
 
-usage="run 'release-probe.sh <registry>:<name>', where the identifier is one of: ${TARGETS[*]}"
-
-# Not answered. Both exits are non-zero, which is the whole of what a caller
-# reads; the code separates the identifier from the registry for a person.
+# Not answered. Every exit here is non-zero, which is the whole of what a caller
+# reads; the code separates the identifier from the registry, and both from this
+# repository's own declaration, for a person.
 refuse() {
   echo "release-probe: $1" >&2
   echo "ACTION: $2" >&2
   exit "$3"
 }
+
+# Every identifier this answers for, in the declaration's own publication order.
+# Its reasoning — the qualification, and what is a `covers` entry rather than a
+# target — is in that document, where a reader without this script can read it.
+TARGETS=()
+
+# A declaration this cannot read is **not answered**, and never an empty set of
+# targets: answering "not an artifact this repository publishes" for every
+# identifier would refuse a real target, and answering nothing would be worse.
+if ! read_targets="$(awk "$declared_targets" "$declaration" 2>&1)"; then
+  refuse "cannot read the release declaration at '$declaration': ${read_targets//$'\n'/ }" \
+    "check that '$declaration' is checked in and that an 'awk' this host can run is on PATH; this is not answered, and says nothing about whether a release happened" 4
+fi
+if [ "$read_targets" = "!" ] || [ -z "$read_targets" ]; then
+  refuse "'$declaration' names no [[target]] identifier this could read" \
+    "check that every [[target]] in '$declaration' carries an id of the form <registry>:<name>; this is not answered, and says nothing about whether a release happened" 4
+fi
+while read -r target; do
+  if [ -n "$target" ]; then
+    TARGETS+=("$target")
+  fi
+done <<<"$read_targets"
+
+usage="run 'release-probe.sh <registry>:<name>', where the identifier is one of: ${TARGETS[*]}"
 
 if [ "$#" -ne 1 ]; then
   refuse "expected exactly one registry-qualified identifier, got $#" "$usage" 2
@@ -105,7 +161,7 @@ done
 # never happened.
 if [ "$recognised" != true ]; then
   refuse "'$identifier' is not an artifact this repository publishes, so this cannot say whether it is released" \
-    "$usage; a target this repository has started publishing is declared in this file's TARGETS" 2
+    "$usage; a target this repository has started publishing is declared in release-targets.toml at this repository's root" 2
 fi
 
 registry="${identifier%%:*}"
@@ -495,9 +551,10 @@ case "$registry" in
   pypi) ask_pypi ;;
   npm) ask_npm ;;
   *)
-    # Unreachable through TARGETS, and refused rather than assumed: a target
-    # declared for a registry nothing here asks would otherwise answer empty,
-    # which is the one answer this file may never give by accident.
+    # Unreachable through the declaration's own targets, and refused rather
+    # than assumed: a target declared for a registry nothing here asks would
+    # otherwise answer empty, which is the one answer this file may never give
+    # by accident.
     refuse "'$identifier' names the registry '$registry', which this does not know how to ask" \
       "$usage" 2
     ;;

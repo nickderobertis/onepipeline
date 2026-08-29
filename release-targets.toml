@@ -1,0 +1,54 @@
+# What this repository publishes, and the name each registry serves it under.
+# The canonical release-target schema; `tests/release_targets.rs` holds this file
+# to it through `onevcs`'s own reader, and `npm/test/release-targets.test.mjs`
+# reconciles it against the real release configuration in both directions.
+#
+# **The registry qualification in every `id` is load-bearing rather than
+# decorative.** This repository serves `onepipeline-cli` from *two* registries on
+# two cadences, so an unqualified name would be two artifacts and a consumer
+# waiting on it could not say which one it got. It is also why each short `name`
+# is the registry rather than the artifact: nothing else tells the two
+# `onepipeline-cli` targets apart.
+
+schema_version = 1
+
+# What a public registry currently serves for one `id` below. It reads those ids
+# back out of this document, so there is one list rather than two to drift apart.
+probe = "scripts/release-probe.sh"
+
+[[target]]
+id = "crate:onepipeline"
+name = "crate"
+what = "The onepipeline library and the `onepipeline` binary, as a Rust dependent takes them with `cargo add onepipeline`."
+published_by = ".github/workflows/release.yml — the `publish-crate` job's `cargo publish`, under Cargo.toml's [package] name."
+manifest = "Cargo.toml"
+
+[[target]]
+id = "pypi:onepipeline-cli"
+name = "pypi"
+what = "The standalone `onepipeline` binary as maturin `bin`-bindings wheels, installed with `pip install onepipeline-cli`."
+published_by = ".github/workflows/release.yml — the `publish-pypi` job's pypa/gh-action-pypi-publish step, from pyproject.toml's [project] name."
+manifest = "pyproject.toml"
+
+# The five per-platform packages `scripts/npm-build.mjs` builds are `covers`
+# entries rather than targets of their own: nobody depends on
+# `onepipeline-cli-linux-x64`, because the launcher resolves exactly one of them
+# at its own exact version through `optionalDependencies`.
+[[target]]
+id = "npm:onepipeline-cli"
+name = "npm"
+what = "The `onepipeline` binary as an npm launcher, installed with `npm install -g onepipeline-cli`."
+published_by = ".github/workflows/release.yml — the `publish-npm` job's scripts/publish-npm.sh step, from npm/onepipeline-cli/package.json's name."
+manifest = "npm/onepipeline-cli/package.json"
+covers = [
+  "npm:onepipeline-cli-linux-x64",
+  "npm:onepipeline-cli-linux-arm64",
+  "npm:onepipeline-cli-darwin-x64",
+  "npm:onepipeline-cli-darwin-arm64",
+  "npm:onepipeline-cli-win32-x64",
+]
+
+# Entries of neither kind: `crates/testfakes` carries `publish = false` and
+# reaches no registry, and the `onepipeline-<triple>` GitHub Release archives are
+# manual downloads no `<registry>:<name>` names. No `[[retired]]` — nothing
+# published here has been withdrawn.
