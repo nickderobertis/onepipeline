@@ -39,7 +39,7 @@ if [ -n "\${GH_ERROR:-}" ] || [ -n "\${GH_FAIL_SILENT:-}" ]; then
   [ -z "\${GH_ERROR:-}" ] || printf '%s\\n' "$GH_ERROR" >&2
   exit 1
 fi
-echo "\${GH_WROTE:-${WROTE_TO}}"
+echo "\${GH_WROTE-${WROTE_TO}}"
 exit 0
 `;
 
@@ -139,15 +139,21 @@ describe("the reporter files a workflow_run failure", () => {
     );
   });
 
-  it("says what gh answered when a write comes back without a URL", () => {
-    // The write happened, so refusing would lose a filed issue; the log has to
-    // stop claiming a destination it was never given.
-    const run = report({ env: { GH_WROTE: "created" } });
+  // The write happened, so refusing would lose a filed issue; the log has to stop
+  // claiming a destination it was never given, whether gh answered with something
+  // that is not a URL or with nothing at all.
+  for (const [wrote, expected] of [
+    ["created", /gh answered with no URL: created/],
+    ["", /gh answered with no URL: \(nothing\)/],
+  ]) {
+    it(`says what gh answered when a write comes back with "${wrote}"`, () => {
+      const run = report({ env: { GH_WROTE: wrote } });
 
-    assert.equal(run.status, 0, run.said);
-    assert.ok(called(run, "issue create "), run.said);
-    assert.match(run.said, /gh answered with no URL: created/, run.said);
-  });
+      assert.equal(run.status, 0, run.said);
+      assert.ok(called(run, "issue create "), run.said);
+      assert.match(run.said, expected, run.said);
+    });
+  }
 
   it("does not comment a smoke failure onto an issue that merely resembles its own", () => {
     // `--search … in:title` is fuzzy, so it answers with near misses. Commenting
