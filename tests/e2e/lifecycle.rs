@@ -3847,6 +3847,11 @@ fn a_dispatch_that_died_before_anything_was_committed_names_its_branch_and_no_co
 /// only have come from the event. The branch and the commit are asserted beside
 /// them because they are the half a manager acts on, and the new word must not
 /// hide finished work.
+///
+/// The liveness rule the producer names is `provider-failure`, so the word is
+/// `provider-failed` rather than the general `dispatch-died`: what a person reads
+/// afterwards decides where they go looking, and `task-failed` sent them after
+/// what the work got wrong when nothing was wrong with the work at all.
 #[test]
 fn a_dispatch_whose_member_died_is_settled_from_the_classification_its_producer_published() {
     let world = World::new("lifecycle-memberdied");
@@ -3878,7 +3883,7 @@ fn a_dispatch_whose_member_died_is_settled_from_the_classification_its_producer_
     let node = world.run_json(&run, "result.json")["nodes"][0].clone();
     assert_eq!(node["status"], "failed", "{node}");
     assert_eq!(
-        node["outcome"], "dispatch-died",
+        node["outcome"], "provider-failed",
         "a dispatch that died to its provider settled under the word a rejected task settles \
          under: {node}"
     );
@@ -3901,8 +3906,8 @@ fn a_dispatch_whose_member_died_is_settled_from_the_classification_its_producer_
     // And a manager tells the two apart in both views a run is read through,
     // without opening the journal the death was published on.
     let said = format!(
-        "the dispatch died (quota) rather than failing its task; {branch} may carry \
-         finished work, at {head}"
+        "the provider killed the dispatch (quota), so nothing here is the work's fault; \
+         {branch} may carry finished work, at {head}"
     );
     for view in ["results", "status"] {
         let read = world.run(&[view, &run]);
@@ -3913,6 +3918,11 @@ fn a_dispatch_whose_member_died_is_settled_from_the_classification_its_producer_
             read.stdout
         );
     }
+    // And the word itself, on the view a manager reads a settled run through.
+    world
+        .run(&["results", &run])
+        .exited(0)
+        .out_has("provider-failed");
 }
 
 /// The same failure with nothing published settles exactly as it always did.
@@ -3976,6 +3986,187 @@ fn a_verdict_that_delimits_a_token_without_naming_the_machinery_stays_a_task_fai
         node["cause"].is_null(),
         "an agent's own verdict was carried as a producer's classification: {node}"
     );
+}
+
+/// A `provider-failure` the turn's own record contradicts is **not acted on**:
+/// the node is not settled as a provider death, and the work it finished rides
+/// the settlement.
+///
+/// The most expensive defect this classification has produced. One field —
+/// `member-died`'s `cause` — was trusted over the `status: ok`, `exit_code: 0`,
+/// billed-usage record sitting beside it: two finished dispatches were settled as
+/// deaths, about $24.72 of billed work was discarded, and both completion reports
+/// were lost. The record was never missing; nothing read it.
+///
+/// So this journey's producer publishes both, exactly as the incident did: the
+/// turn opens, closes on its own billed record, and the producer then reports the
+/// member as having exited without a report it could settle on. `provider-failure`
+/// says that turn produced nothing; the record for that turn says it produced
+/// something and was paid for. Where they disagree the record wins, because it is
+/// what the dispatch *did* rather than what a supervisor made of it.
+///
+/// What the node settles as is the plain failure — nothing here can say the work
+/// passed a bar no report was settled against — but it settles carrying the
+/// commit its branch was left at, so nobody has to open the journal to find out
+/// whether there is finished work behind it.
+#[test]
+fn a_provider_death_the_turns_own_record_contradicts_is_not_settled_as_one() {
+    let world = World::new("lifecycle-deathcontradicted");
+    let repo = published_locally(&world);
+    world.script(
+        "service.work",
+        "the work its provider was said to have taken\n",
+    );
+    world.script(
+        "service.publishes",
+        "chore: what the dispatch had finished when it was called dead",
+    );
+    // The turn opens, which is what makes the close below a record *of a turn*
+    // rather than a stray close: a death names no turn, so the turn a death is
+    // about is the one its member had open.
+    world.script("service.asked-bytes", "16");
+    // And then the producer says the member exited without a report — of the very
+    // turn that had just closed on one.
+    world.script(
+        "service.died-as",
+        "provider-failure unclassified the turn exited 0 without a report",
+    );
+    let run = settle(&world, "deathcontradicted", vec![lifecycle("service", &[])]);
+
+    // Both halves are on the run's own record, which is the whole premise: the
+    // classification the engine used to act on, and the turn record beside it.
+    let died = world
+        .events_of(&run, "member-died")
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| panic!("the producer published no death\n{}", why(&world, &run)));
+    assert_eq!(died["payload"]["rule"], "provider-failure", "{died}");
+    let closed = world
+        .events_of(&run, "turn-completed")
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| panic!("the producer closed no turn\n{}", why(&world, &run)));
+    assert!(
+        closed["payload"]["usage"]["output_tokens"]
+            .as_u64()
+            .is_some_and(|billed| billed > 0),
+        "this journey's turn record carries no billed usage, so it contradicts nothing: {closed}"
+    );
+
+    let node = world.run_json(&run, "result.json")["nodes"][0].clone();
+    assert_ne!(
+        node["outcome"], "provider-failed",
+        "a node whose own turn record reported a completed, billed turn was settled as one \
+         its provider killed: {node}"
+    );
+    assert_eq!(
+        node["outcome"], "task-failed",
+        "the contradicted death was acted on some other way: {node}"
+    );
+    assert!(
+        node["cause"].is_null(),
+        "a classification the record contradicts was carried onto the settlement anyway: {node}"
+    );
+
+    // And the work it finished is on the settlement, so nobody re-runs it.
+    let branch = node["branch"].as_str().expect("the node names its branch");
+    let head = node["head"]
+        .as_str()
+        .expect("the node names the commit its branch was left at");
+    assert_eq!(
+        head,
+        git(&world, &repo.checkout, &["rev-parse", branch]).trim(),
+        "the commit the settlement names is not the one the branch is at"
+    );
+}
+
+/// The new word names provider deaths and **only** those: a node that failed its
+/// own task, and a node that died to something that is not its provider, each
+/// settle exactly as they always did.
+///
+/// One run, three nodes, one difference between them. Without the neighbours the
+/// word proves nothing: a settlement that called every failure a provider death
+/// would pass every assertion about the provider half, and the reader it was
+/// added for would be no better off than under the word it replaced. The third
+/// node is the near miss — a death the producer published, under a liveness rule
+/// that is not the provider one — because that is the one a narrowing gets wrong
+/// by being too wide.
+#[test]
+fn a_task_its_agent_failed_and_a_dispatch_its_provider_killed_settle_under_different_words() {
+    let world = World::new("lifecycle-twowords");
+    published_locally(&world);
+    // The agent's own verdict on its own task, in a sentence that classifies
+    // nothing: this is a node whose work is what went wrong.
+    world.script("rejected.work", "the work its judge would not pass\n");
+    world.script("rejected.fail", "1");
+    // And the provider taking a member out from under a node whose work nobody
+    // ever judged.
+    world.script("killed.work", "the work its provider never let it finish\n");
+    world.script(
+        "killed.died-as",
+        "provider-failure rate_limit the subscription behind this member is exhausted",
+    );
+    // A death its producer published under a different rule: the member stopped
+    // answering its supervisor, which is not the provider going.
+    world.script(
+        "stalled.work",
+        "the work its supervisor stopped hearing about\n",
+    );
+    world.script(
+        "stalled.died-as",
+        "heartbeat timeout this member was not confirmed alive inside its deadline",
+    );
+    let run = settle(
+        &world,
+        "twowords",
+        vec![
+            lifecycle("rejected", &[]),
+            lifecycle("killed", &[]),
+            lifecycle("stalled", &[]),
+        ],
+    );
+
+    let outcome = |id: &str| {
+        world.run_json(&run, "result.json")["nodes"]
+            .as_array()
+            .expect("the result names its nodes")
+            .iter()
+            .find(|node| node["id"] == id)
+            .unwrap_or_else(|| panic!("no node {id}\n{}", why(&world, &run)))
+            .clone()
+    };
+    assert_eq!(
+        outcome("rejected")["outcome"],
+        "task-failed",
+        "a node whose agent failed its own task stopped settling under the word for it\n{}",
+        why(&world, &run)
+    );
+    assert_eq!(
+        outcome("killed")["outcome"],
+        "provider-failed",
+        "a node its provider killed settled under the word for a task that failed\n{}",
+        why(&world, &run)
+    );
+    assert_eq!(
+        outcome("stalled")["outcome"],
+        "dispatch-died",
+        "a death under a rule that is not the provider's took the provider's word\n{}",
+        why(&world, &run)
+    );
+    assert_eq!(
+        outcome("stalled")["cause"],
+        "timeout",
+        "{}",
+        why(&world, &run)
+    );
+
+    // And a manager reading one view meets all three words, each on its own node.
+    world
+        .run(&["results", &run])
+        .exited(0)
+        .out_has("task-failed")
+        .out_has("provider-failed")
+        .out_has("dispatch-died");
 }
 
 /// A verdict that **does** name the machinery is read as the machinery, because

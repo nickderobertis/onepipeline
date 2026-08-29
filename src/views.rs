@@ -1138,10 +1138,17 @@ pub fn status(survey: &Survey) -> String {
     out
 }
 
-/// What a node that settled [`DISPATCH_DIED`] says, in one sentence.
+/// What a node that settled [`DISPATCH_DIED`] or [`PROVIDER_FAILED`] says, in one
+/// sentence.
 ///
 /// Named once because `results` and `status` both say it, and a manager reading
 /// one after the other must not meet two accounts of the same node.
+///
+/// The two words open the sentence differently and end it identically, because
+/// the difference between them is *what* killed the dispatch and the half a
+/// reader acts on is the same either way. `provider-failed` says the provider
+/// killed it outright: `task-failed` used to send that reader looking for what
+/// the work got wrong, when nothing was wrong with the work at all.
 ///
 /// It names the producer's own classification first, because that is what decides
 /// whether anything is worth re-running: a rate limit twenty seconds after the
@@ -1160,10 +1167,12 @@ pub fn status(survey: &Survey) -> String {
 /// of the line of a node whose agent really did fail its task.
 ///
 /// [`DISPATCH_DIED`]: crate::engine::DISPATCH_DIED
+/// [`PROVIDER_FAILED`]: crate::engine::PROVIDER_FAILED
 fn dispatch_died_phrase(state: &RunState, id: &str, branch: Option<&str>) -> Option<String> {
-    if state.outcomes.get(id).map(String::as_str) != Some(crate::engine::DISPATCH_DIED) {
-        return None;
-    }
+    let word = match state.outcomes.get(id).map(String::as_str) {
+        Some(word @ (crate::engine::DISPATCH_DIED | crate::engine::PROVIDER_FAILED)) => word,
+        _ => return None,
+    };
     let classified = match state.causes.get(id) {
         Some(cause) => format!(" ({cause})"),
         // llmlint: ignore[changed_behavior_has_e2e] no invocation a user can type reaches
@@ -1184,9 +1193,15 @@ fn dispatch_died_phrase(state: &RunState, id: &str, branch: Option<&str>) -> Opt
         // work to redo.
         (None, _) => "it left no branch, so nothing of it survived".to_owned(),
     };
-    Some(format!(
-        "the dispatch died{classified} rather than failing its task; {where_the_work_is}"
-    ))
+    // The provider death says what it was rather than what it was not, because
+    // that is the reading `task-failed` used to deny it: nothing was wrong with
+    // the work, so "rather than failing its task" is not the contrast to draw.
+    let how = if word == crate::engine::PROVIDER_FAILED {
+        format!("the provider killed the dispatch{classified}, so nothing here is the work's fault")
+    } else {
+        format!("the dispatch died{classified} rather than failing its task")
+    };
+    Some(format!("{how}; {where_the_work_is}"))
 }
 
 /// How long a node's cancellation has been waiting on the dispatch it asked to

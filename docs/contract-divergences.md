@@ -11,8 +11,8 @@ the contract**, and `docs/contract.md` was amended to carry each ruling. They st
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–22, 33 and 35–40 are open**. Each states what the code does today and
-the proposal it is waiting on. Most are questions for a *producer* rather than for
+Entries **10–22, 33, 35–40 and 46–48 are open**. Each states what the code does
+today and the proposal it is waiting on. Most are questions for a *producer* rather than for
 this crate, because `oneagentgraph` and `onevcs` are independent tools that expose
 general integration hooks only and nothing in them may know about this one; the
 rest — 36 to 40 — are for the planner who owns the contract, and name the sentence
@@ -2074,3 +2074,125 @@ Driven end to end by
 against a producer that publishes the death on its stream and says nothing
 classifiable in its exit sentence, so the word and the cause can only have come
 from the event.
+
+## 47. A dispatch has nowhere of its own to write, and what it invents collides — OPEN
+
+**Proposal (for the planner who owns the contract): state
+`ONEPIPELINE_NODE_SCRATCH_DIR` beside the run id in what a node dispatch's
+environment carries.**
+
+The contract says what a dispatch is given — its graph, its task, its labels, its
+controls and its workspace — and says nothing about a place of its own to write.
+So a dispatch that needs one invents it, and what it invents collides, because
+every dispatch of every run on a host invents it out of the same few facts. Three
+collided in one day and not one of the three failures read as what it was: two
+deterministic tiers deadlocked against one lock with both logs frozen, two
+whole-suite runs wrote into one log and left `SIGTERM` lines that read exactly
+like test failures, and one worker read another workstream's coverage output as
+its own. None of those announce what they are — a frozen log reads as a hung
+command, and another workstream's numbers read as yours.
+
+So `executor::dispatch_env`, which already composes the ask seam's run id into
+every node dispatch, composes one more name:
+
+> **`ONEPIPELINE_NODE_SCRATCH_DIR`** is exported into the environment of every
+> node dispatch. Its value is an **absolute path** to a directory that **exists
+> and is writable** before the dispatch's first turn runs. It is **unique to that
+> dispatch** — a retry, a requeue, and a resumed pin of the same node each get a
+> different directory, as does every node of every other run — and it is **never
+> removed while that dispatch is running**. The engine creates it; the dispatch
+> may write anything it likes below it. Nothing else is promised: the spelling of
+> the path is not part of the contract and no consumer may derive one path from
+> another.
+
+The directory sits under the run's own directory where there is a run, so a run's
+scratch is thrown away with the run rather than accumulating under a shared
+temporary root nobody owns, and under the process's temporary directory for a
+dispatch outside one. Uniqueness is the directory's **creation** rather than its
+name: `create_dir` refuses one that is already there, so the first spelling this
+process can create is one no other dispatch was given — which a name minted from a
+pid and a counter would not be, because a host reissues pids and a counter starts
+again in every process.
+
+Driven end to end by
+`scratch::a_dispatch_is_given_an_absolute_writable_directory_of_its_own`, which
+reads the value out of the run's own store and the directory off the filesystem,
+and by
+`scratch::two_dispatches_of_one_node_are_given_two_directories_and_neither_is_taken_away`,
+which is the retry — the one pair of dispatches that agree on every name a path
+could have been derived from.
+
+**What could not be compiled exactly as written: the library backend has no
+per-launch environment.** The subprocess backend sets the pair on the command it
+spawns and the promise holds exactly. `oneagentgraph` 0.2.18 onwards composes a
+member's environment from the *hosting* process's, so `crate::agentgraph::export`
+puts a launch's pairs on this process — which is why that function's note says a
+per-node value must never come through it, and this is the first one that does.
+A driver running two dispatches concurrently **in-process** therefore shares one
+value between them: each still gets a directory of its own made for it, so nothing
+is destroyed, but the second may read a path naming its sibling's. Closing it
+needs a per-member environment on the sibling's launch request, which is that
+producer's contract rather than this one's, and is the proposal this entry carries
+to them.
+
+## 48. A node its provider killed settles under the word for work that failed — OPEN
+
+**Proposal (for the planner who owns the contract): narrow the `dispatch-died`
+sentence with a `provider-failed` of its own, and state that a published death is
+reconciled against the record of the turn it names before anything acts on it.**
+
+Two defects on one classification field, and they are the engine's half of the
+most expensive one this crate has produced.
+
+**The word.** A node a provider killed settled `task-failed` — or, since entry
+46, `dispatch-died` — while the journal beside it said `provider-failure` in the
+producer's own liveness vocabulary. `task-failed` sends the reader to look for
+what the work got wrong, when nothing was wrong with the work at all; the general
+`dispatch-died` covers a heartbeat that stopped, a stall and a signal too, so it
+does not say it either. So a death whose rule is `oneagentgraph`'s own
+`Rule::ProviderFailure` now settles **`provider-failed`**, carrying the same
+`cause`, `branch` and `head` the general word does, and `results` and `status`
+both say what it means in one sentence. Every other death still settles
+`dispatch-died`, and a node that failed its own task still settles `task-failed`,
+so the new word names provider deaths and nothing else.
+
+**The death.** `provider-failure` is the producer saying its member *exited
+without a report it could settle on*. That is a claim about a turn, and the turn
+has a record: `oneagentgraph` closes a turn only on a harness record it could
+settle on — a run that reported `ok` and exited `0` — and the close carries what
+that one turn was billed. Where a turn is both opened and closed with billed
+usage on this dispatch's own stream, the record says the opposite of the death
+about that same turn. One field was trusted over that record: two finished
+dispatches were settled as deaths, about $24.72 of billed work was discarded, and
+both completion reports were lost — one of them on a turn whose own record read
+`status: ok`, `exit_code: 0`, `cost_usd: 12.11` and a completion message saying
+the work was green.
+
+So a `provider-failure` is reconciled against the record for the turn it names
+before it is acted on, and where the record contradicts it the death is not read
+at all — neither from the event nor from the sentence the dispatch exits on, which
+is the same producer saying the same thing less precisely. The turn a death is
+about is the one its member had **open**, because a `member-died` names none; a
+member with no turn open has no record to reconcile against and its death stands
+unchanged. Only the provider rule is reconciled this way: a heartbeat, a stall and
+a signal are statements about the member *after* whatever turn it completed, so a
+completed turn beside one of those contradicts nothing.
+
+A node whose death was contradicted settles the plain `task-failed` — nothing here
+can say the work passed a bar no report was ever settled against — carrying the
+commit its branch was left at, so nobody has to open the journal to find out
+whether there is finished work behind it.
+
+What diverges is the settlement vocabulary, which the contract fixes: it names
+`dispatch-died` and not `provider-failed`, and it says nothing about reconciling a
+death against a turn record. Everything else it promises is unchanged.
+
+Driven end to end by
+`lifecycle::a_provider_death_the_turns_own_record_contradicts_is_not_settled_as_one`,
+whose producer publishes both halves exactly as the incident did, by
+`lifecycle::a_task_its_agent_failed_and_a_dispatch_its_provider_killed_settle_under_different_words`,
+which is the pair without which the word proves nothing, and by
+`lifecycle::a_dispatch_whose_member_died_is_settled_from_the_classification_its_producer_published`
+and
+`boundary::a_published_death_decides_the_settlement_ahead_of_the_sentence_the_dispatch_exits_on`,
+which carry the new word through the results and the read-only views.

@@ -411,6 +411,13 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         (None, _) => node.clone(),
     };
 
+    // The scratch directory the engine promised this dispatch, taken as the
+    // dispatch itself takes it: out of its own environment, before anything else
+    // this program does. Recorded for every dispatch — including one scripted to
+    // produce nothing, which publishes no envelope a journey could read the value
+    // off — so a journey can compare what two dispatches of one node were given.
+    scratch_dir(&key);
+
     // A dispatch scripted to produce *nothing* produces nothing at all — not
     // even the announcement a turn opens with. That is the whole case boundary
     // retry exists for, and a double that spoke first would turn every one of
@@ -1171,6 +1178,59 @@ fn write_work(args: &[String], name: &str, body: &str) {
 /// Published **whole and unflagged** however long: what happens to an over-long
 /// text after this is the relay's to decide, and a double that pre-cut it would
 /// answer that question for the code under test.
+/// The scratch directory this dispatch was given, proven usable and recorded.
+///
+/// Three things a journey cannot check any other way, done here because here is
+/// where the dispatch is. The variable has to *be* there and name an absolute
+/// path — a dispatch is handed one or it is not, and this program is what a
+/// dispatch is. The directory has to be **writable when the first turn runs**,
+/// which is what the marker written into it proves; a path to a directory that is
+/// not there would fail here rather than a dozen assertions later. And every
+/// dispatch appends its own to one file, so a journey reads what two dispatches
+/// of one node were given rather than inferring it from one that spoke.
+///
+/// The marker carries this dispatch's own key and nothing derived from the path,
+/// so a journey reading two markers is reading two dispatches rather than two
+/// spellings of one.
+fn scratch_dir(key: &str) -> std::path::PathBuf {
+    let named = match std::env::var(SCRATCH_DIR_ENV) {
+        Ok(value) if !value.is_empty() => std::path::PathBuf::from(value),
+        _ => fake::fail(&format!(
+            "{SCRATCH_DIR_ENV} is unset: this dispatch was given nowhere of its own to write"
+        )),
+    };
+    if !named.is_absolute() {
+        fake::fail(&format!(
+            "{SCRATCH_DIR_ENV} holds {}, which is not an absolute path",
+            named.display()
+        ));
+    }
+    if let Err(error) = std::fs::write(named.join("marker"), format!("{key}\n")) {
+        fake::fail(&format!(
+            "{SCRATCH_DIR_ENV} names {}, which this dispatch cannot write to: {error}",
+            named.display()
+        ));
+    }
+    fake::append(
+        &fake::script_dir().join(SCRATCH_LOG),
+        &format!("{key} {}", named.display()),
+    );
+    named
+}
+
+/// The variable the engine names a dispatch's own scratch directory in.
+///
+/// Spelled here rather than taken from the crate under test: this program stands
+/// in for a dispatched agent, and an agent reads the name out of the operator's
+/// documentation. A double that imported the constant would go on agreeing with
+/// the engine through a rename no agent could have followed.
+const SCRATCH_DIR_ENV: &str = "ONEPIPELINE_NODE_SCRATCH_DIR";
+
+/// Where every dispatch appends the scratch directory it was given, under the
+/// scenario's own script directory: one `KEY PATH` line per dispatch, in the
+/// order the dispatches ran.
+const SCRATCH_LOG: &str = "scratch-dirs";
+
 fn asked(dir: &std::path::Path, key: &str) -> Option<serde_json::Value> {
     let bytes = fake::node_script(dir, key, "asked-bytes")?;
     let instruction = match bytes.trim().parse::<usize>() {
@@ -1529,6 +1589,10 @@ fn emit(
             // including the rendered planner-context section.
             "task": task,
             "dir": fake::flag(args, "--dir"),
+            // The scratch directory this dispatch read out of its own
+            // environment, on the run's own record: a journey asserts the
+            // promise from the store rather than from this program's files.
+            "scratch_dir": std::env::var(SCRATCH_DIR_ENV).ok(),
             // What this turn was told to do instead, while it was running.
             "redirected": redirected,
         }),

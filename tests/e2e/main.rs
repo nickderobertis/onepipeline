@@ -39,6 +39,7 @@ mod live_edit;
 mod node_validator;
 mod plan;
 mod real_vcs;
+mod scratch;
 mod session;
 mod session_reuse;
 mod shipped;
