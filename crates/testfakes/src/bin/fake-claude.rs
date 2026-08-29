@@ -214,17 +214,9 @@ fn turn(args: &[String], dir: &std::path::Path) -> ExitCode {
         Err(error) => return fake::refuse(&format!("claude has no working directory: {error}")),
     };
     let member = std::env::var(fake::MEMBER_ENV).unwrap_or_default();
-    // The scratch directory the engine promised this dispatch, as it reaches the
-    // process that actually runs the turn: this one is the harness child, the
-    // deepest thing in the stack, so what it holds is what an agent would hold
-    // however the graph above it was started.
-    //
-    // Empty is a real answer and the only lenient one: this double also runs the
-    // observer graph's turns, which are not node dispatches and are promised
-    // nothing. A value that is *there* is held to the whole promise here rather
-    // than in a journey's assertion, because a turn is where the promise is made
-    // and a double that recorded an unusable path would have a journey assert on
-    // it a page later.
+    // Empty for the observer graph's turns, which are not node dispatches and are
+    // promised nothing; anything else is held to the whole promise here, where the
+    // turn is.
     let scratch = std::env::var("ONEPIPELINE_NODE_SCRATCH_DIR").unwrap_or_default();
     if !scratch.is_empty() {
         let at = std::path::Path::new(&scratch);

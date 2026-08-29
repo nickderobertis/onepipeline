@@ -305,29 +305,18 @@ pub(crate) const NODE_SCRATCH_DIR_ENV: &str = "ONEPIPELINE_NODE_SCRATCH_DIR";
 
 /// What every dispatch this executor makes carries in its own environment.
 ///
-/// Two pairs, and they are not the same kind of value. The **run id** is a
-/// dispatched agent's one supported way to put a blocking question to its
-/// manager: the operator's `ask-manager` wrapper reads it out of its own
-/// environment and refuses without one. Declared here so every dispatch carries
-/// it rather than left to what the driver process happens to hold — only a run
-/// launched with an observer graph ever put it there — and constant for the life
-/// of a driver, which is the case [`export`](crate::agentgraph) allows on the
-/// process the library backend runs in. A dispatch outside a run carries no pair,
-/// for the same reason it registers nothing: there is no run for the wrapper to
-/// address.
-///
-/// The **scratch directory** is per dispatch, which that same note says a pair
-/// coming through here must never be. It is carried anyway, and what that costs
-/// on the library backend — which has no per-launch environment to set it in — is
-/// divergence 47's closing paragraph.
+/// The **run id** is what the operator's `ask-manager` wrapper addresses a
+/// manager by, and a dispatch outside a run carries none for the same reason it
+/// registers nothing. It is constant for the life of a driver, which is the case
+/// [`export`](crate::agentgraph) allows. The **scratch directory** is per
+/// dispatch, which that same note says a pair coming through here must never be;
+/// divergence 47's closing paragraph is what carrying it anyway costs.
 ///
 /// # Errors
 ///
-/// [`Error::Ledger`] where the scratch directory cannot be made. A dispatch whose
-/// promised directory is not there would hand the agent a path to nothing, which
-/// is worse than the collisions this replaces: the agent would write to it, the
-/// writes would fail one at a time, and the failures would read as its own work
-/// going wrong.
+/// [`Error::Ledger`] where the scratch directory cannot be made: a promised
+/// directory that is not there would fail the agent's writes one at a time, and
+/// those failures read as the agent's own work going wrong.
 // llmlint: ignore[changed_behavior_has_e2e] the pair *is* driven end to end on both
 // backends — `scratch::a_dispatch_is_given_an_absolute_writable_directory_of_its_own` and
 // `scratch::every_dispatch_of_one_node_is_given_its_own_directory_and_none_is_taken_away`

@@ -1816,7 +1816,8 @@ pub(crate) fn drain(
                         // by the time a death arrives is the record for the turn
                         // that death is about.
                         death = if published.from_provider
-                            && turns.contradicts_a_death_of(member_of(&envelope))
+                            && member_of(&envelope)
+                                .is_some_and(|member| turns.contradicts_a_death_of(member))
                         {
                             Death::Contradicted
                         } else {
@@ -2182,12 +2183,14 @@ impl TurnRecords {
         let Some(turn) = envelope.payload.get("turn").and_then(Value::as_u64) else {
             return;
         };
-        let member = member_of(envelope).to_owned();
+        let Some(member) = member_of(envelope).map(str::to_owned) else {
+            return;
+        };
         let kind = &envelope.kind.0;
         if kind == oneagentgraph::event::EventKind::TurnStarted.as_str() {
             self.open.insert(member, turn);
         } else if kind == oneagentgraph::event::EventKind::TurnCompleted.as_str()
-            && reports_usage(envelope.payload.get("usage"))
+            && has_a_usage_figure(envelope.payload.get("usage"))
         {
             self.used.insert((member, turn));
         }
@@ -2207,24 +2210,25 @@ impl TurnRecords {
     }
 }
 
-/// The member a relayed envelope was stamped with, or the empty name for one a
-/// producer stamped none on.
+/// The key a relayed envelope's records pair under: the member it was stamped
+/// with, the empty name for a producer that stamped none, and `None` for a label
+/// this build cannot read as a member.
 ///
-/// The label lives in `extra` because this crate's own envelope does not declare
-/// `member`; `projection::member_label` reads the same place, and keeps the three
-/// answers apart because a *view* has to say which it met. Nothing here renders
-/// it — it is a key two records are paired on — so the two unstamped cases pair
-/// under one name rather than becoming two members that never match.
-fn member_of(envelope: &Envelope) -> &str {
-    envelope
-        .labels
-        .extra
-        .get("member")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
+/// The third answer is a refusal rather than a default. The label is another
+/// process's JSON and this key is what a turn record and a death are correlated
+/// on, so folding an unreadable one onto the unstamped key would let a stranger's
+/// record contradict a real member's death — `projection::member_label` keeps the
+/// same three apart, for the same reason on the rendering side.
+fn member_of(envelope: &Envelope) -> Option<&str> {
+    match envelope.labels.extra.get("member") {
+        None => Some(""),
+        Some(Value::String(member)) => Some(member),
+        Some(_) => None,
+    }
 }
 
-/// The figures on a turn's usage that say the provider did work for it.
+/// The figures on a turn's usage a non-zero one of which says the provider did
+/// work for it.
 ///
 /// Three of the five the sibling declares, and the two left out are the choice: a
 /// prompt served from the provider's cache is what a turn is charged *less* for,
@@ -2241,14 +2245,14 @@ fn member_of(envelope: &Envelope) -> &str {
 /// which asks the linked `Usage` what it serializes to and fails on a rename.
 const USAGE_FIGURES: [&str; 3] = ["input_tokens", "output_tokens", "cost_usd"];
 
-/// Whether a turn's own record reports the provider consumed anything for it.
+/// Whether a turn's usage carries a non-zero [`USAGE_FIGURES`] figure.
 ///
-/// Deliberately not "whether it was charged": a `cost_usd` is one of the three
-/// figures and none of them is required, so a provider that counts tokens and
-/// prices nothing reports a turn that ran without saying what it cost. What this
-/// answers is what the reconciliation needs — that a turn really happened — and a
-/// price would be a stronger claim than the wire supports.
-fn reports_usage(usage: Option<&Value>) -> bool {
+/// The literal question, because every stronger one would be a claim the wire
+/// does not support: `cost_usd` is optional, so "was it charged" is unanswerable
+/// for a provider that counts tokens and prices nothing, and "does it report
+/// usage" would take a cache-only record — which is the one shape here that is
+/// deliberately not evidence a turn ran.
+fn has_a_usage_figure(usage: Option<&Value>) -> bool {
     let Some(usage) = usage else { return false };
     USAGE_FIGURES
         .into_iter()
@@ -3376,7 +3380,7 @@ mod tests {
     /// whose producer publishes both, and
     /// `lifecycle::a_task_its_agent_failed_and_a_dispatch_its_provider_killed_settle_under_different_words`,
     /// which holds the three words apart. What is held here is the **reading**:
-    /// which records pair, which do not, and which figures count as billed. Every
+    /// which records pair, which do not, and which figures count. Every
     /// shape below is one a producer can put on that stream, and the pairing is
     /// what decides whether about $24.72 of finished work is thrown away.
     #[test]
@@ -3451,6 +3455,16 @@ mod tests {
         unstamped.read(&of(started, None, json!({"turn": 1})));
         unstamped.read(&of(completed, None, billed.clone()));
         assert!(unstamped.contradicts_a_death_of(""));
+
+        // A label present and unreadable is refused rather than folded onto the
+        // unstamped key: a stranger's record would otherwise contradict a real
+        // member's death.
+        let mut unreadable = TurnRecords::default();
+        let mut opened = of(started, None, json!({"turn": 1}));
+        opened.labels.extra.insert("member".into(), json!(7));
+        unreadable.read(&opened);
+        unreadable.read(&of(completed, None, billed.clone()));
+        assert!(!unreadable.contradicts_a_death_of(""));
 
         // Everything that says nothing about a turn is folded as nothing: another
         // producer's stream, and a kind with no turn on it.

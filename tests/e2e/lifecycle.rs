@@ -3992,20 +3992,13 @@ fn a_verdict_that_delimits_a_token_without_naming_the_machinery_stays_a_task_fai
 /// the node is not settled as a provider death, and the work it finished rides
 /// the settlement.
 ///
-/// What trusting the classification over the record cost is divergence 48; the
-/// record was never missing, and nothing read it.
+/// The producer publishes both, as the incident did: `provider-failure` says the
+/// member exited without a report, and the record for the turn it had open says
+/// that turn closed on one. Divergence 48 is what trusting the first cost.
 ///
-/// So this journey's producer publishes both, exactly as the incident did: the
-/// turn opens, closes on its own billed record, and the producer then reports the
-/// member as having exited without a report it could settle on. `provider-failure`
-/// says that turn produced nothing; the record for that turn says it produced
-/// something and was paid for. Where they disagree the record wins, because it is
-/// what the dispatch *did* rather than what a supervisor made of it.
-///
-/// What the node settles as is the plain failure — nothing here can say the work
-/// passed a bar no report was settled against — but it settles carrying the
-/// commit its branch was left at, so nobody has to open the journal to find out
-/// whether there is finished work behind it.
+/// It settles the plain failure, because nothing here can say the work passed a
+/// bar no report was settled against — carrying the commit its branch was left
+/// at, which is the half that stops anyone re-running finished work.
 #[test]
 fn a_provider_death_the_turns_own_record_contradicts_is_not_settled_as_one() {
     let world = World::new("lifecycle-deathcontradicted");
@@ -4081,13 +4074,10 @@ fn a_provider_death_the_turns_own_record_contradicts_is_not_settled_as_one() {
 /// own task, and a node that died to something that is not its provider, each
 /// settle exactly as they always did.
 ///
-/// One run, three nodes, one difference between them. Without the neighbours the
-/// word proves nothing: a settlement that called every failure a provider death
-/// would pass every assertion about the provider half, and the reader it was
-/// added for would be no better off than under the word it replaced. The third
-/// node is the near miss — a death the producer published, under a liveness rule
-/// that is not the provider one — because that is the one a narrowing gets wrong
-/// by being too wide.
+/// Without the neighbours the word proves nothing: a settlement that called every
+/// failure a provider death would pass every assertion about the provider half.
+/// The third node is the near miss a too-wide narrowing gets wrong — a death the
+/// producer published, under a rule that is not the provider one.
 #[test]
 fn a_task_its_agent_failed_and_a_dispatch_its_provider_killed_settle_under_different_words() {
     let world = World::new("lifecycle-twowords");
