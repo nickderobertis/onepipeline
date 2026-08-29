@@ -534,7 +534,7 @@ describe("the release targets this repository declares", () => {
     const declared = declaration();
     assert.equal(
       declared.schemaVersion,
-      1,
+      2,
       "release-targets.toml declares no schema_version, so a reader cannot know its shape",
     );
     assert.equal(

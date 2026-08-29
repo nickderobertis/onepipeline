@@ -2222,6 +2222,103 @@ mod tests {
         });
     }
 
+    /// The linked `onevcs` reads the schema this repository's declaration is
+    /// written against.
+    ///
+    /// The floor `onevcs` 0.16.2 holds is with the pin in `Cargo.toml`. It sits
+    /// beside the `oneagentgraph` floors above because a floor is one fact —
+    /// which release a resolution may not fall below, and why — whichever engine
+    /// carries it. It reaches this repository because it is a *producer* of that
+    /// document: the number `release-targets.toml` states is the one the linked
+    /// build writes, and `tests/release_targets.rs` holds the file to it.
+    ///
+    /// Every assertion is written in items the *older* resolution also has —
+    /// [`validate_release_declaration`] and [`SCHEMA_VERSION`], which 0.16.0
+    /// exports too — and the scoped identifier is asserted **first**. That is
+    /// this test's own concern rather than an accident: naming the release's new
+    /// `OLDEST_SCHEMA_VERSION` would make this a *compile* error below the floor,
+    /// and a compile error says a constant was added, not that the behaviour this
+    /// crate depends on is missing. Below the floor this compiles and fails
+    /// naming the refusal.
+    ///
+    /// [`validate_release_declaration`]: onevcs::validate_release_declaration
+    /// [`SCHEMA_VERSION`]: onevcs::declaration::SCHEMA_VERSION
+    #[test]
+    fn the_linked_onevcs_reads_the_release_declaration_schema_this_repository_writes() {
+        use onevcs::declaration::{FILE, SCHEMA_VERSION};
+
+        /// The checked-in declaration with exactly one thing changed, so a
+        /// refusal is attributable to that change rather than to a fixture
+        /// written to fail — and a mutation that stopped applying fails here
+        /// rather than leaving the document untouched and asserting nothing.
+        fn declared_with(find: &str, replace: &str) -> String {
+            let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(FILE);
+            let document = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("{FILE} is checked in at this root: {error}"));
+            assert_eq!(
+                document.matches(find).count(),
+                1,
+                "{FILE} no longer carries `{find}` exactly once, so this mutates nothing"
+            );
+            document.replace(find, replace)
+        }
+
+        /// What every assertion here has to say, because it is the only thing
+        /// that fixes any of them.
+        const MOVE_THE_LOCK: &str = "`Cargo.toml` requires the newest release, which is \
+             above this floor, so a resolution that fails here is behind the manifest too and \
+             `cargo update -p onevcs` is the whole of the fix; `just engines-current` names \
+             it without running the suite";
+
+        // The identifier the schema moved for: npm serves a scoped package, and
+        // 0.16.0 refuses the spelling outright as a name no registry serves.
+        // Driven through the reader, so this asserts what a declaration naming
+        // one is *read* as rather than what a parser accepts in isolation — and
+        // asserted before the version number, so a resolution below the floor
+        // fails here, on the behaviour, rather than on the constant that
+        // accompanies it.
+        let scoped = declared_with(
+            "id = \"npm:onepipeline-cli\"",
+            "id = \"npm:@onepipeline/cli\"",
+        );
+        let read = onevcs::validate_release_declaration(&scoped, FILE).unwrap_or_else(|error| {
+            panic!(
+                "the linked onevcs refuses `npm:@onepipeline/cli`, a name npm genuinely \
+                 serves, so a producer here cannot declare a scoped package it publishes: \
+                 {error}. {MOVE_THE_LOCK}"
+            )
+        });
+        assert!(
+            read.targets
+                .iter()
+                .any(|target| target.id.name() == "@onepipeline/cli"),
+            "the scoped identifier was read as some other name, so what a consumer would wait \
+             on is not what the document declared"
+        );
+
+        // And the version a producer writes, which is what decides the number
+        // `release-targets.toml` states. 0.16.0 writes 1.
+        assert_eq!(
+            SCHEMA_VERSION, 2,
+            "the linked onevcs writes a release-declaration schema this repository's own \
+             document is not written against. {MOVE_THE_LOCK}"
+        );
+
+        // The other half of the range the release split out: a version-1
+        // declaration does not stop being read when version 2 starts being
+        // written, which is what keeps a consumer able to read the siblings that
+        // have not moved their own document.
+        let older = declared_with("\nschema_version = 2\n", "\nschema_version = 1\n");
+        let read = onevcs::validate_release_declaration(&older, FILE).unwrap_or_else(|error| {
+            panic!(
+                "the linked onevcs refuses a schema_version 1 declaration, so a consumer \
+                 reading the repositories that have not moved theirs learns nothing about \
+                 what they publish: {error}"
+            )
+        });
+        assert_eq!(read.schema_version, 1);
+    }
+
     /// The linked `oneagentgraph` holds the `engineer` bar to what a dispatch
     /// can settle inside its own run.
     ///

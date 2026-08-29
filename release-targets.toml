@@ -10,7 +10,10 @@
 # is the registry rather than the artifact: nothing else tells the two
 # `onepipeline-cli` targets apart.
 
-schema_version = 1
+# `2` is the shape a producer writes at the `onevcs` this build links. Nothing
+# here is spelled scoped — the `@scope/name` identifiers version 2 added — so a
+# consumer still reading version 1 reads this document as the shape it knows.
+schema_version = 2
 
 # What a public registry currently serves for one `id` below. It reads those ids
 # back out of this document, so there is one list rather than two to drift apart.
