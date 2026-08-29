@@ -332,7 +332,7 @@ fn a_check_that_refuses_makes_the_verb_exit_one_and_carries_every_field() {
             "cat > /dev/null\nprintf '%s' '{}'",
             json!({"refusals": [
                 {"node": "build", "field": "task", "reason": "the bar omits the appendix"},
-                {"reason": "the plan states no review record"}
+                {"node": null, "field": null, "reason": "the plan states no review record"}
             ]})
         ),
     );
@@ -389,6 +389,26 @@ fn a_check_that_could_not_be_run_is_reported_as_such_and_exits_two() {
         "cat > /dev/null\necho 'the check broke' >&2\nexit 3",
     );
     let babbling = check_script(&world, "babbling", "cat > /dev/null\necho not-json");
+    // An answer carrying a key this build does not know. Read leniently it would
+    // be dropped and the check would read as an accept, which is the false pass
+    // this verb exists to stop.
+    let inventive = check_script(
+        &world,
+        "inventive",
+        &format!(
+            "cat > /dev/null\nprintf '%s' '{}'",
+            json!({"refusals": [], "verdict": "fine"})
+        ),
+    );
+    // An answer omitting a key the contract states as always present.
+    let terse = check_script(
+        &world,
+        "terse",
+        &format!(
+            "cat > /dev/null\nprintf '%s' '{}'",
+            json!({"refusals": [{"reason": "the bar omits the appendix"}]})
+        ),
+    );
     // An answer shaped right and saying nothing: `reason` is the whole of what a
     // refusal is, so a blank one is an answer this build cannot read rather than
     // a refusal with no words.
@@ -397,7 +417,7 @@ fn a_check_that_could_not_be_run_is_reported_as_such_and_exits_two() {
         "wordless",
         &format!(
             "cat > /dev/null\nprintf '%s' '{}'",
-            json!({"refusals": [{"reason": "   "}]})
+            json!({"refusals": [{"node": null, "field": null, "reason": "   "}]})
         ),
     );
     // Written, and deliberately not made executable.
@@ -409,6 +429,8 @@ fn a_check_that_could_not_be_run_is_reported_as_such_and_exits_two() {
         (&failing, true, "the check broke"),
         (&babbling, true, "not-json"),
         (&wordless, true, "carrying no reason"),
+        (&inventive, true, "verdict"),
+        (&terse, true, "refusals[].node"),
         (&unopenable, false, "cannot be run"),
     ] {
         let run = world.run(&[
@@ -610,4 +632,86 @@ fn a_check_path_is_resolved_against_the_directory_the_verb_ran_from() {
             .expect("the check recorded its directory"),
         crate::harness::resolved(&here).to_string_lossy()
     );
+}
+
+/// A project this build cannot read at all is exit 2, and `--json` still prints
+/// exactly one object.
+///
+/// A consumer parses this verb's stdout without first asking which failure it
+/// met, so the object is unconditional and the diagnosis is on stderr — which is
+/// where every other refusal this binary makes goes.
+#[test]
+fn a_project_that_cannot_be_read_is_exit_two_and_still_answers_with_one_object() {
+    let world = World::new("plancheck-unreadable");
+    // A source this world has and a project it does not.
+    let missing = format!("{STORE_SOURCE}:nothing-here");
+    let run = world.run(&["plan", "check", &missing, "--json"]);
+    run.exited(REFUSED);
+    let answered = answer(&run);
+    assert_shape(&answered);
+    assert_eq!(answered["project"], json!(missing), "{answered}");
+    assert_eq!(answered["accepted"], json!(false), "{answered}");
+    assert!(
+        !run.stderr.trim().is_empty(),
+        "nothing said what went wrong"
+    );
+
+    // And an id that is not qualified at all, which this build cannot even parse.
+    let run = world.run(&["plan", "check", "unqualified", "--json"]);
+    run.exited(REFUSED);
+    assert_shape(&answer(&run));
+    run.err_has("qualified onetaskgraph id");
+}
+
+/// A refusing check beside one that could not be run: exit 2 wins, and both are
+/// still in the answer.
+///
+/// The two are different facts and a status can only carry one, so the one that
+/// carries less information wins — a refusal is a thing the consumer knows, and
+/// a check that could not be run is a thing nobody knows.
+#[test]
+fn a_refusal_beside_an_unrunnable_check_exits_two_and_reports_both() {
+    let world = World::new("plancheck-both");
+    let project = world.plan(
+        "sound",
+        &plan_of("sound", vec![crate::harness::agent("build", &[])]),
+    );
+    let refuses = refusing_check(
+        &world,
+        "refuses",
+        "build",
+        "task",
+        "the appendix is missing",
+    );
+    let breaks = check_script(
+        &world,
+        "breaks",
+        "cat > /dev/null\necho 'the check broke' >&2\nexit 4",
+    );
+
+    let run = world.run(&[
+        "plan",
+        "check",
+        &project,
+        "--check",
+        &as_str(&refuses),
+        "--check",
+        &as_str(&breaks),
+        "--json",
+    ]);
+    run.exited(REFUSED);
+    let answered = answer(&run);
+    assert_shape(&answered);
+    assert_eq!(answered["accepted"], json!(false), "{answered}");
+    let refused = refusals(&answered);
+    assert_eq!(refused.len(), 1, "{answered}");
+    assert_eq!(
+        refused[0]["reason"],
+        json!("the appendix is missing"),
+        "{answered}"
+    );
+    let could_not = unrunnable(&answered);
+    assert_eq!(could_not.len(), 1, "{answered}");
+    assert_eq!(could_not[0]["check"], json!(as_str(&breaks)), "{answered}");
+    assert_eq!(could_not[0]["exit_code"], json!(4), "{answered}");
 }

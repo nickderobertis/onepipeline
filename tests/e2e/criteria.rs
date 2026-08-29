@@ -145,3 +145,117 @@ fn a_criterion_the_branch_contradicts_is_a_finding_that_does_not_change_the_sett
         "a criterion finding blocked the run: {blocking:?}"
     );
 }
+
+/// A dispatch that **failed** still has its branch read.
+///
+/// The worktree goes when its session closes, so the read happens inside the
+/// attempt or not at all — and a node that failed is exactly where a criterion
+/// naming a literal is worth reporting, because the branch is what a
+/// re-dispatch continues.
+#[test]
+fn a_failed_dispatch_still_has_its_branch_read_for_the_criteria_it_names() {
+    let world = World::new("criteria-failed");
+    world.repository("local-direct", &[]);
+    world.script("breaks.work", "complete_dataset: false\n");
+    // The dispatch writes its work and then fails, which is what a worker that
+    // committed and then could not finish leaves behind.
+    world.script("breaks.fail", "1");
+
+    let name = "failing";
+    let project = world.plan(
+        name,
+        &plan_of(
+            name,
+            vec![measured("breaks", "breaks.md", "complete_dataset: true")],
+        ),
+    );
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the run to settle", |world| {
+        world.run_file(name, "result.json").is_file()
+    });
+
+    let found = findings(&world, name);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].0, "breaks", "{found:?}");
+    assert!(found[0].1.contains("breaks.md"), "{found:?}");
+    // The node failed on its dispatch, exactly as it would have without the
+    // read: the finding is beside the settlement and never over it.
+    assert_eq!(settled(&world, name, "breaks").0, "failed");
+}
+
+/// A workstream held at a human step has its branch read too.
+///
+/// It settles `waiting` with the session still open for the person, which is a
+/// different ending from every other one here — and the branch it is holding is
+/// what that person is about to look at.
+#[test]
+fn a_workstream_waiting_at_a_human_step_has_its_branch_read() {
+    let world = World::new("criteria-waiting");
+    world.repository("local-direct", &[]);
+    world.script("held.write.work", "complete_dataset: false\n");
+
+    let name = "waiting";
+    let project = world.plan(
+        name,
+        &plan_of(
+            name,
+            vec![json!({
+                "id": "held",
+                "repo": "service",
+                "title": "feat: hold for a person",
+                "steps": [
+                    {"id": "write", "persona": "engineer",
+                     "task": "## What\nWrite it.\n\n## Acceptance criteria\n\
+                              - the row in `held-write.md` is `complete_dataset: true`.\n"},
+                    {"id": "sign", "kind": "human", "deps": ["write"],
+                     "task": "Sign it off, which only a person can do."}
+                ]
+            })],
+        ),
+    );
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the run to settle", |world| {
+        world.run_file(name, "result.json").is_file()
+    });
+
+    assert_eq!(settled(&world, name, "held").0, "waiting");
+    let found = findings(&world, name);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].0, "held", "{found:?}");
+    assert!(found[0].1.contains("held-write.md"), "{found:?}");
+}
+
+/// A direct node's criteria are read against the project directory.
+///
+/// It cuts no branch of its own, so the tree its dispatch worked in is the
+/// directory the launch names — and that is where a criterion of its task points.
+#[test]
+fn a_direct_nodes_criteria_are_read_against_the_project_directory() {
+    let world = World::new("criteria-direct");
+    // What the launch directory holds, which is what this node's dispatch works
+    // in and what its criterion names.
+    std::fs::write(
+        world.project.join("dataset.yaml"),
+        "complete_dataset: false\n",
+    )
+    .expect("the project file is written");
+
+    let mut audit = crate::harness::agent("audit", &[]);
+    audit["task"] = json!(
+        "## What\nAudit the dataset.\n\n## Why\nIt has been wrong before.\n\n         ## Acceptance criteria\n- the shared journey row in `dataset.yaml` is          `complete_dataset: true`.\n"
+    );
+
+    let name = "direct";
+    let project = world.plan(name, &plan_of(name, vec![audit]));
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the run to settle", |world| {
+        world.run_file(name, "result.json").is_file()
+    });
+
+    let found = findings(&world, name);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].0, "audit", "{found:?}");
+    assert!(found[0].1.contains("dataset.yaml"), "{found:?}");
+    assert!(found[0].1.contains("complete_dataset: true"), "{found:?}");
+    assert_eq!(settled(&world, name, "audit").0, "done");
+}

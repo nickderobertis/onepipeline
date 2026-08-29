@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::cli::PlanCheckArgs;
-use crate::error::{Error, Result, EXIT_QUEUED, EXIT_REFUSED, EXIT_SUCCESS};
+use crate::error::{Result, EXIT_QUEUED, EXIT_REFUSED, EXIT_SUCCESS};
 use crate::refusal::Refusal;
 use crate::taskgraph::{Load, QualifiedId, Store};
 
@@ -77,113 +77,160 @@ struct Unrunnable {
     exit_code: Option<i32>,
     /// What it said for itself.
     stderr: String,
+    /// Whether this verb ever tried to start it, which decides the exit status
+    /// and is not part of the answer's own shape.
+    #[serde(skip)]
+    ran: Ran,
+}
+
+/// How far this verb got with one registered check.
+///
+/// The distinction the exit status turns on, in the type rather than in the
+/// wording of a message: a check that was **attempted** and could not be run
+/// leaves what it would have said unknown, and a check the loader's own refusal
+/// stopped was never asked, so the refusal is what the status reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ran {
+    /// This verb tried to start it.
+    Attempted,
+    /// The loader refused first, so there was no loaded plan to hand it.
+    StoppedByTheLoader,
 }
 
 /// What one registered check answered with.
 ///
 /// External input, so an answer this build cannot read is a check that could not
 /// be run rather than one that accepted: `deny_unknown_fields` is what makes a
-/// misspelled key say so instead of being dropped into an empty accept.
+/// misspelled key say so instead of being dropped into an empty accept, and
+/// **no key here carries a default** — the contract states each one as always
+/// present, and a missing `refusals` read as an empty list is exactly the false
+/// accept this verb exists to stop.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Answer {
-    #[serde(default)]
     refusals: Vec<AnswerRefusal>,
 }
 
 /// One refusal a registered check made.
+///
+/// `node` and `field` are `Option` because their **value** may be null, not
+/// because the key may be absent: an `Option` field with no `serde` default is
+/// required to be there, which is what the contract says of both.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AnswerRefusal {
-    #[serde(default)]
     node: Option<String>,
-    #[serde(default)]
     field: Option<String>,
     reason: String,
 }
 
 /// Read one project, run every registered check over it, and report.
 pub(crate) fn check(args: &PlanCheckArgs) -> Result<i32> {
+    match read(args) {
+        Ok((refusals, unrunnable)) => Ok(report(args, &refusals, &unrunnable)),
+        // The project could not be read at all — no binary, a store that
+        // answered badly, an id naming nothing. `--json` still prints exactly
+        // one object, because a consumer parses this verb's stdout without first
+        // asking which failure it met; the diagnosis goes to stderr, where every
+        // other refusal this binary makes goes.
+        Err(error) => {
+            eprintln!("onepipeline: {error}");
+            // Not accepted: a project nothing could read is the one answer that
+            // must never look like a plan that passed.
+            print(args, false, &[], &[]);
+            Ok(NOT_ANSWERED)
+        }
+    }
+}
+
+/// The loader, and every registered check it leaves something to hand.
+///
+/// `Err` is the project not being readable at all, which is a different answer
+/// from a plan the schema refuses: see [`Load`].
+fn read(args: &PlanCheckArgs) -> Result<(Vec<Reported>, Vec<Unrunnable>)> {
     let store = Store::resolve()?;
     let project: QualifiedId = args.project.parse()?;
 
-    let mut refusals: Vec<Reported> = Vec::new();
-    let mut unrunnable: Vec<Unrunnable> = Vec::new();
     // A check is handed the *loaded* plan, so a loader refusal leaves nothing to
     // hand it. Reporting each as not run is the whole point: a check that never
     // ran has said nothing, and reading its silence as an accept is what a
     // drifting re-implementation already did once.
-    match store.read_plan(&project) {
+    let refusal = match store.read_plan(&project) {
         Err(Load::Unreadable(error)) => return Err(error),
-        Err(Load::Refused(refusal)) => {
-            refusals.push(engine_refusal(refusal));
-            for path in &args.checks {
-                unrunnable.push(Unrunnable {
-                    check: path.display().to_string(),
-                    exit_code: None,
-                    stderr: "not run: the plan loader refused the project, so there was no \
-                             loaded plan to hand it"
-                        .to_owned(),
-                });
-            }
-        }
-        Ok(read) => {
-            if let Err(refusal) = crate::graph::check(&read.plan) {
-                refusals.push(engine_refusal(refusal));
-                for path in &args.checks {
-                    unrunnable.push(Unrunnable {
-                        check: path.display().to_string(),
-                        exit_code: None,
-                        stderr: "not run: the plan loader refused the project, so there was no \
-                                 loaded plan to hand it"
-                            .to_owned(),
-                    });
-                }
-            } else {
+        Err(Load::Refused(refusal)) => Some(refusal),
+        Ok(read) => match crate::graph::check(&read.plan) {
+            Err(refusal) => Some(refusal),
+            Ok(()) => {
                 let document = document(&read);
+                let mut refusals = Vec::new();
+                let mut unrunnable = Vec::new();
                 for path in &args.checks {
                     match offer(path, &document) {
                         Ok(answered) => refusals.extend(answered),
                         Err(why) => unrunnable.push(why),
                     }
                 }
+                return Ok((refusals, unrunnable));
             }
-        }
-    }
+        },
+    };
+    let refusal = refusal.expect("this arm is only reached where the loader refused");
+    Ok((
+        vec![engine_refusal(refusal)],
+        args.checks
+            .iter()
+            .map(|path| Unrunnable {
+                check: path.display().to_string(),
+                exit_code: None,
+                stderr: "the plan loader refused the project, so there was no loaded plan to \
+                         hand this check; it did not run"
+                    .to_owned(),
+                ran: Ran::StoppedByTheLoader,
+            })
+            .collect(),
+    ))
+}
 
+/// Print the answer and say what the status is.
+fn report(args: &PlanCheckArgs, refusals: &[Reported], unrunnable: &[Unrunnable]) -> i32 {
+    print(
+        args,
+        refusals.is_empty() && unrunnable.is_empty(),
+        refusals,
+        unrunnable,
+    );
     // A check that was *attempted* and could not be run is the exit-2 case: what
     // it would have said is unknown, and nothing else in the answer stands in
-    // for it. A check the loader's own refusal stopped is not attempted, and the
-    // refusal it was stopped by is what the exit code reports.
-    let attempted = unrunnable
-        .iter()
-        .any(|report| !report.stderr.starts_with("not run:"));
-    let accepted = refusals.is_empty() && unrunnable.is_empty();
-    let code = if attempted {
+    // for it. A check the loader's own refusal stopped was never asked, and the
+    // refusal it was stopped by is what the status reports.
+    if unrunnable.iter().any(|report| report.ran == Ran::Attempted) {
         NOT_ANSWERED
     } else if refusals.is_empty() {
         ACCEPTED
     } else {
         REFUSED
-    };
+    }
+}
 
+/// Write the answer, as one JSON object or as a line per refusal.
+fn print(args: &PlanCheckArgs, accepted: bool, refusals: &[Reported], unrunnable: &[Unrunnable]) {
     if args.json {
+        // The project as it was named: an id this build could not even parse is
+        // still the one the caller asked about.
         let answer = json!({
-            "project": project.as_str(),
+            "project": args.project,
             "accepted": accepted,
             "refusals": refusals,
             "unrunnable": unrunnable,
         });
-        println!(
-            "{}",
-            serde_json::to_string(&answer).map_err(|error| Error::Invalid(format!(
-                "the answer will not serialise: {error}"
-            )))?
-        );
-        return Ok(code);
+        // Built from `json!` over types that serialise, so there is nothing here
+        // that can fail to render — and a check that answered would rather be
+        // reported than lost to a fallible print.
+        println!("{answer}");
+        return;
     }
 
-    for refusal in &refusals {
+    for refusal in refusals {
         println!(
             "{}: {}{}{}",
             refusal.source,
@@ -200,7 +247,7 @@ pub(crate) fn check(args: &PlanCheckArgs) -> Result<i32> {
             refusal.reason
         );
     }
-    for report in &unrunnable {
+    for report in unrunnable {
         println!(
             "{}: could not be run ({}): {}",
             report.check,
@@ -212,9 +259,8 @@ pub(crate) fn check(args: &PlanCheckArgs) -> Result<i32> {
         );
     }
     if accepted {
-        println!("{}: accepted", project.as_str());
+        println!("{}: accepted", args.project);
     }
-    Ok(code)
 }
 
 fn engine_refusal(refusal: Refusal) -> Reported {
@@ -272,6 +318,7 @@ fn offer(path: &Path, document: &Value) -> std::result::Result<Vec<Reported>, Un
         check: named.clone(),
         exit_code,
         stderr,
+        ran: Ran::Attempted,
     };
     // Against the working directory this command was run from, which is also the
     // one the check itself runs in: a consumer registers a check beside the plan
@@ -304,7 +351,31 @@ fn offer(path: &Path, document: &Value) -> std::result::Result<Vec<Reported>, Un
     if !output.status.success() {
         return Err(cannot(output.status.code(), stderr));
     }
-    let answer: Answer = serde_json::from_slice(&output.stdout).map_err(|error| {
+    // The keys the contract states as **always present**, checked before the
+    // answer is typed: serde reads an absent `Option` field as null, so a check
+    // omitting `node`, `field`, or `refusals` itself would otherwise be read as
+    // having said something it did not.
+    let answered: Value = serde_json::from_slice(&output.stdout).map_err(|error| {
+        cannot(
+            output.status.code(),
+            format!(
+                "answered with something this build cannot read: {error}; it said {:?}{}",
+                String::from_utf8_lossy(&output.stdout).trim(),
+                if stderr.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (stderr: {stderr})")
+                }
+            ),
+        )
+    })?;
+    if let Some(key) = absent_key(&answered) {
+        return Err(cannot(
+            output.status.code(),
+            format!("answered with no `{key}`, which a check's answer always carries"),
+        ));
+    }
+    let answer: Answer = serde_json::from_value(answered).map_err(|error| {
         cannot(
             output.status.code(),
             format!(
@@ -336,6 +407,28 @@ fn offer(path: &Path, document: &Value) -> std::result::Result<Vec<Reported>, Un
             reason: refusal.reason,
         })
         .collect())
+}
+
+/// The first key the contract requires that this answer does not carry.
+///
+/// Presence only: what each one *is* is the schema's, which reads it next. An
+/// answer that is not an object at all, or whose `refusals` is not a list, has
+/// no key to name and is left to that reading to refuse by type.
+fn absent_key(answered: &Value) -> Option<String> {
+    let object = answered.as_object()?;
+    if !object.contains_key("refusals") {
+        return Some("refusals".to_owned());
+    }
+    let refusals = object.get("refusals")?.as_array()?;
+    for refusal in refusals {
+        let stated = refusal.as_object()?;
+        for key in ["node", "field", "reason"] {
+            if !stated.contains_key(key) {
+                return Some(format!("refusals[].{key}"));
+            }
+        }
+    }
+    None
 }
 
 /// A relative path against the working directory; anything else as it was given.

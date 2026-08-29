@@ -121,7 +121,8 @@ Each repeatable `--check` names an executable, resolved against the directory th
 verb ran in. It is handed the **loaded** plan as one JSON document on its stdin —
 every default resolved, each node carrying its task's own metadata map verbatim —
 with `ONEPIPELINE_PLAN_CHECK_SCHEMA=1` in its environment, and answers on stdout
-with `{"refusals": [...]}` and exit 0. Exit `0` is the loader and every check
+with `{"refusals": [...]}` and exit 0, `node` and `field` present on each and
+null where it is about neither. Exit `0` is the loader and every check
 accepting, `1` is at least one refusal from either source, and `2` is a project
 that could not be read or a check that could not be run — which is reported
 separately from a refusal and never read as an accept. A loader refusal
