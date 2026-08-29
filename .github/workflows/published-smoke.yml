@@ -1,27 +1,43 @@
 name: Published smoke
 
-# What the registries serve as `latest`, installed and smoke-tested weekly.
+# What the registries serve as `latest`, installed and smoke-tested the moment a
+# release of this repository finishes.
 #
 # release.yml's verify jobs prove a version at publish time. This proves it is
 # still installable *now*: a yanked wheel, an unpublished platform package, a
-# registry that lost a tag, or a runner image whose Python or Node moved on all
-# surface here rather than in a user's terminal. It installs exactly the way the
-# README tells users to and runs the same scripts/smoke-published.sh every other
-# tier runs, so a green run means the documented path works.
+# dist-tag pointing at a build that never shipped, a registry that lost a tag, or
+# a runner image whose Python or Node moved on all surface here rather than in a
+# user's terminal. It installs exactly the way the README tells users to and runs
+# the same scripts/smoke-published.sh every other tier runs, so a green run means
+# the documented path works.
 #
-# Manual dispatch takes an optional version, for confirming a specific release.
+# `workflow_run` on release.yml completing, rather than a sweep on a clock: a
+# release is the event that can make this answer newly wrong, so asking then asks
+# at the moment it could have changed instead of up to a week afterwards. A
+# release that ended red is smoked too — `latest` is then whatever the registries
+# are still serving, and whether that installs is exactly as worth asking.
+#
+# A `workflow_run` leg has no pull request to redden and nobody waiting on it, so
+# `report` below is where a failure is seen: one issue, commented on each further
+# failure rather than opened again.
+#
+# Manual dispatch takes an optional version, for confirming a specific release
+# and for re-asking after a registry incident.
 #
 # llmlint: ignore-file[changed_behavior_has_e2e] this workflow's subject is the public
 # registries themselves — what npm and PyPI serve to a fresh machine. There is no local
 # stand-in for that; a test could only assert against a fake registry, and the fake is
-# what would then be under test. The scripts it drives are covered locally: the smoke
-# script by ci.yml's `install` and `wheel` jobs on every pull request, and the retry
-# wrapper by every release.
+# what would then be under test. Everything it drives is covered locally: the smoke
+# script by ci.yml's `install` and `wheel` jobs on every pull request, the retry wrapper
+# by every release, and the reporter's create-vs-comment branch by
+# `npm/test/failure-report.test.mjs`, which drives both halves against a stubbed `gh`.
 
 on:
-  schedule:
-    # Mondays, 07:00 UTC — a working-week morning, so a red run is seen.
-    - cron: "0 7 * * 1"
+  workflow_run:
+    # `release.yml`'s own `name:`, which is what this matches on — renaming that
+    # workflow without renaming it here leaves this triggered by nothing.
+    workflows: ["Release"]
+    types: [completed]
   workflow_dispatch:
     inputs:
       version:
@@ -117,3 +133,36 @@ jobs:
           bash scripts/smoke-published.sh \
             ${REQUESTED:+--expect-version "$REQUESTED"} \
             --label "npm onepipeline-cli on $RUNNER_OS/$RUNNER_ARCH"
+
+  # Somewhere for a failure to be seen. `needs` both matrices so one job answers
+  # for the whole run, and `failure()` rather than `always()` so a cancelled run
+  # — which is somebody cancelling it — files nothing.
+  report:
+    name: report a failure
+    needs: [pypi, npm]
+    if: failure()
+    runs-on: ubuntu-latest
+    permissions:
+      # A job's permissions replace the workflow's rather than adding to them,
+      # so `contents: read` is restated here for the checkout below.
+      contents: read
+      issues: write
+    steps:
+      # The reporter is a file in this tree rather than inline YAML, so this job
+      # has to check the repository out to reach it — and so that its
+      # create-vs-comment branch is driven by a test rather than only by the one
+      # run where something is already broken.
+      - uses: actions/checkout@v4
+      - name: Open or comment on the failure issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TITLE: Published smoke is failing
+          BODY: >-
+            What PyPI or npm serves as `latest` did not install and run. Open the
+            run to see which legs are red: a single-platform failure is usually a
+            missing wheel or platform package rather than a bad version, and a
+            failure on every leg usually means the version the registry points at
+            is not one that shipped.
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bash scripts/report-workflow-failure.sh
