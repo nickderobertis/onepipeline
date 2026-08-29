@@ -1100,7 +1100,7 @@ pub fn status(survey: &Survey) -> String {
                     .get(id)
                     .and_then(|node| node.branch.clone())
             });
-            if let Some(died) = dispatch_died_phrase(&view.state, id, branch.as_deref()) {
+            if let Some(died) = death_phrase(&view.state, id, branch.as_deref()) {
                 out.push_str(&format!("  {id}: {died}\n"));
             }
             for record in chain_records(&view.state, id) {
@@ -1168,7 +1168,7 @@ pub fn status(survey: &Survey) -> String {
 ///
 /// [`DISPATCH_DIED`]: crate::engine::DISPATCH_DIED
 /// [`PROVIDER_FAILED`]: crate::engine::PROVIDER_FAILED
-fn dispatch_died_phrase(state: &RunState, id: &str, branch: Option<&str>) -> Option<String> {
+fn death_phrase(state: &RunState, id: &str, branch: Option<&str>) -> Option<String> {
     let word = match state.outcomes.get(id).map(String::as_str) {
         Some(word @ (crate::engine::DISPATCH_DIED | crate::engine::PROVIDER_FAILED)) => word,
         _ => return None,
@@ -1959,7 +1959,7 @@ pub fn results(view: &RunView) -> String {
         // detail is the producer's own sentence about how the dispatch ended, and
         // this says what that means for the node — which used to be a thing a
         // manager derived by opening `events.jsonl` and counting commits.
-        if let Some(died) = dispatch_died_phrase(&view.state, &node.id, branch.as_deref()) {
+        if let Some(died) = death_phrase(&view.state, &node.id, branch.as_deref()) {
             out.push_str(&format!("      died: {died}\n"));
         }
         if let Some(detail) = view

@@ -414,7 +414,7 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     // The scratch directory the engine promised this dispatch, taken as the
     // dispatch itself takes it: out of its own environment, and before any
     // scripted behaviour, so a dispatch scripted to produce nothing uses it too.
-    scratch_dir(&key);
+    use_the_scratch_dir(&key);
 
     // A dispatch scripted to produce *nothing* produces nothing at all — not
     // even the announcement a turn opens with. That is the whole case boundary
@@ -1120,7 +1120,8 @@ fn session_records(args: &[String], script: &str) {
     }
 }
 
-/// Take the scratch directory this dispatch was given, and use it.
+/// Take the scratch directory this dispatch was given, write into it, and answer
+/// where it is.
 ///
 /// An agent is handed one or it is not, so a dispatch that is handed nothing —
 /// or a relative path, which names a different place from wherever the agent
@@ -1128,7 +1129,7 @@ fn session_records(args: &[String], script: &str) {
 /// marker is what makes this a *use* of the directory rather than a look at it:
 /// the promise is that it is writable before the first turn, and the only way to
 /// find that out is to write.
-fn scratch_dir(key: &str) -> std::path::PathBuf {
+fn use_the_scratch_dir(key: &str) -> std::path::PathBuf {
     let named = match std::env::var(SCRATCH_DIR_ENV) {
         Ok(value) if !value.is_empty() => std::path::PathBuf::from(value),
         _ => fake::fail(&format!(
