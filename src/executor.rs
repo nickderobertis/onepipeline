@@ -328,6 +328,15 @@ pub(crate) const NODE_SCRATCH_DIR_ENV: &str = "ONEPIPELINE_NODE_SCRATCH_DIR";
 /// is worse than the collisions this replaces: the agent would write to it, the
 /// writes would fail one at a time, and the failures would read as its own work
 /// going wrong.
+// llmlint: ignore[changed_behavior_has_e2e] the pair *is* driven end to end on both
+// backends — `scratch::a_dispatch_is_given_an_absolute_writable_directory_of_its_own` and
+// `scratch::every_dispatch_of_one_node_is_given_its_own_directory_and_none_is_taken_away`
+// over the subprocess one, and
+// `dispatch::a_dispatchs_scratch_directory_reaches_the_turn_the_library_backend_runs` over
+// the library one. What has no journey is two *concurrent* library-backend dispatches,
+// and deliberately: what such a journey would observe is the shortfall divergence 47
+// records rather than behaviour this crate promises, so a test asserting it would pin a
+// defect in place and have to be deleted by the change that closes it.
 fn dispatch_env(labels: &Labels) -> Result<Vec<(String, String)>> {
     let mut env: Vec<(String, String)> = labels
         .run_id

@@ -412,8 +412,8 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     };
 
     // The scratch directory the engine promised this dispatch, taken as the
-    // dispatch itself takes it: out of its own environment, before anything else
-    // this program does.
+    // dispatch itself takes it: out of its own environment, and before any
+    // scripted behaviour, so a dispatch scripted to produce nothing uses it too.
     scratch_dir(&key);
 
     // A dispatch scripted to produce *nothing* produces nothing at all — not
@@ -1120,6 +1120,51 @@ fn session_records(args: &[String], script: &str) {
     }
 }
 
+/// Take the scratch directory this dispatch was given, and use it.
+///
+/// An agent is handed one or it is not, so a dispatch that is handed nothing —
+/// or a relative path, which names a different place from wherever the agent
+/// happens to be — refuses here rather than a dozen assertions later. Writing the
+/// marker is what makes this a *use* of the directory rather than a look at it:
+/// the promise is that it is writable before the first turn, and the only way to
+/// find that out is to write.
+fn scratch_dir(key: &str) -> std::path::PathBuf {
+    let named = match std::env::var(SCRATCH_DIR_ENV) {
+        Ok(value) if !value.is_empty() => std::path::PathBuf::from(value),
+        _ => fake::fail(&format!(
+            "{SCRATCH_DIR_ENV} is unset: this dispatch was given nowhere of its own to write"
+        )),
+    };
+    if !named.is_absolute() {
+        fake::fail(&format!(
+            "{SCRATCH_DIR_ENV} holds {}, which is not an absolute path",
+            named.display()
+        ));
+    }
+    if let Err(error) = std::fs::write(named.join(SCRATCH_MARKER), format!("{key}\n")) {
+        fake::fail(&format!(
+            "{SCRATCH_DIR_ENV} names {}, which this dispatch cannot write to: {error}",
+            named.display()
+        ));
+    }
+    named
+}
+
+/// The variable the engine names a dispatch's own scratch directory in.
+///
+/// Spelled here rather than taken from the crate under test: this program stands
+/// in for a dispatched agent, and an agent reads the name out of the operator's
+/// documentation. A double that imported the constant would go on agreeing with
+/// the engine through a rename no agent could have followed.
+const SCRATCH_DIR_ENV: &str = "ONEPIPELINE_NODE_SCRATCH_DIR";
+
+/// What a dispatch writes into the directory it was given, under its own key.
+///
+/// The name is this program's own and no journey spells it: what a journey reads
+/// is that the directory still holds *what its dispatch wrote*, which is the
+/// promise, rather than a file name the two sides would have to agree on.
+const SCRATCH_MARKER: &str = "marker";
+
 /// Write one document into the dispatch's workspace.
 ///
 /// `--dir` is this process's external input, and these writes are the one thing
@@ -1176,51 +1221,6 @@ fn write_work(args: &[String], name: &str, body: &str) {
 /// Published **whole and unflagged** however long: what happens to an over-long
 /// text after this is the relay's to decide, and a double that pre-cut it would
 /// answer that question for the code under test.
-/// Take the scratch directory this dispatch was given, and use it.
-///
-/// An agent is handed one or it is not, so a dispatch that is handed nothing —
-/// or a relative path, which names a different place from wherever the agent
-/// happens to be — refuses here rather than a dozen assertions later. Writing the
-/// marker is what makes this a *use* of the directory rather than a look at it:
-/// the promise is that it is writable before the first turn, and the only way to
-/// find that out is to write.
-fn scratch_dir(key: &str) -> std::path::PathBuf {
-    let named = match std::env::var(SCRATCH_DIR_ENV) {
-        Ok(value) if !value.is_empty() => std::path::PathBuf::from(value),
-        _ => fake::fail(&format!(
-            "{SCRATCH_DIR_ENV} is unset: this dispatch was given nowhere of its own to write"
-        )),
-    };
-    if !named.is_absolute() {
-        fake::fail(&format!(
-            "{SCRATCH_DIR_ENV} holds {}, which is not an absolute path",
-            named.display()
-        ));
-    }
-    if let Err(error) = std::fs::write(named.join(SCRATCH_MARKER), format!("{key}\n")) {
-        fake::fail(&format!(
-            "{SCRATCH_DIR_ENV} names {}, which this dispatch cannot write to: {error}",
-            named.display()
-        ));
-    }
-    named
-}
-
-/// The variable the engine names a dispatch's own scratch directory in.
-///
-/// Spelled here rather than taken from the crate under test: this program stands
-/// in for a dispatched agent, and an agent reads the name out of the operator's
-/// documentation. A double that imported the constant would go on agreeing with
-/// the engine through a rename no agent could have followed.
-const SCRATCH_DIR_ENV: &str = "ONEPIPELINE_NODE_SCRATCH_DIR";
-
-/// What a dispatch writes into the directory it was given, under its own key.
-///
-/// The name is this program's own and no journey spells it: what a journey reads
-/// is that the directory still holds *what its dispatch wrote*, which is the
-/// promise, rather than a file name the two sides would have to agree on.
-const SCRATCH_MARKER: &str = "marker";
-
 fn asked(dir: &std::path::Path, key: &str) -> Option<serde_json::Value> {
     let bytes = fake::node_script(dir, key, "asked-bytes")?;
     let instruction = match bytes.trim().parse::<usize>() {

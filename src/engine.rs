@@ -2156,9 +2156,9 @@ impl MemberDeath {
 ///
 /// The **record** a death is reconciled against. `oneagentgraph` closes a turn
 /// only on a harness record it could settle on — a run that reported `ok` and
-/// exited `0` — and the close carries what that one turn was billed, so a turn
-/// that is open *and* closed on this stream is a turn whose own record said the
-/// work finished and was paid for.
+/// exited `0` — and the close carries what that one turn consumed, so a turn that
+/// is open *and* closed on this stream is a turn whose own record said the work
+/// finished and the provider was spent on.
 ///
 /// Keyed by the member as well as the turn, because a graph runs several and a
 /// turn number is only unique within one. A producer that stamps no member is one
@@ -2169,8 +2169,8 @@ impl MemberDeath {
 struct TurnRecords {
     /// The turn each member last opened.
     open: BTreeMap<String, u64>,
-    /// The members and turns whose own record completed carrying billed usage.
-    billed: BTreeSet<(String, u64)>,
+    /// The members and turns whose own record completed reporting usage.
+    used: BTreeSet<(String, u64)>,
 }
 
 impl TurnRecords {
@@ -2187,14 +2187,14 @@ impl TurnRecords {
         if kind == oneagentgraph::event::EventKind::TurnStarted.as_str() {
             self.open.insert(member, turn);
         } else if kind == oneagentgraph::event::EventKind::TurnCompleted.as_str()
-            && was_billed(envelope.payload.get("usage"))
+            && reports_usage(envelope.payload.get("usage"))
         {
-            self.billed.insert((member, turn));
+            self.used.insert((member, turn));
         }
     }
 
     /// Whether the turn this member had open is one its own record says
-    /// completed, and was billed for.
+    /// completed, and reported usage for.
     ///
     /// The turn the member **had open**, because a death names none: a
     /// `member-died` says which member went and why, so the turn it is about is
@@ -2203,7 +2203,7 @@ impl TurnRecords {
     fn contradicts_a_death_of(&self, member: &str) -> bool {
         self.open
             .get(member)
-            .is_some_and(|turn| self.billed.contains(&(member.to_owned(), *turn)))
+            .is_some_and(|turn| self.used.contains(&(member.to_owned(), *turn)))
     }
 }
 
@@ -2224,14 +2224,14 @@ fn member_of(envelope: &Envelope) -> &str {
         .unwrap_or_default()
 }
 
-/// The figures on a turn's usage that say the provider billed for it.
+/// The figures on a turn's usage that say the provider did work for it.
 ///
 /// Three of the five the sibling declares, and the two left out are the choice: a
-/// prompt served from the provider's cache was not *billed* for at the price the
-/// other three carry, so a turn whose only non-zero figure is a cache read is not
-/// evidence a turn ran and was paid for. The three that are here are independently
-/// optional on the wire — a provider that reported tokens and no price still ran
-/// the turn — so any of them settles it.
+/// prompt served from the provider's cache is what a turn is charged *less* for,
+/// so a turn whose only non-zero figure is a cache read is not evidence the
+/// provider ran one. The three here are independently optional on the wire — a
+/// provider that counted tokens and reported no price still ran the turn — so any
+/// of them settles it.
 ///
 /// Field names rather than that library's `Usage`, for [`MemberDeath::of`]'s
 /// reason: the producer is resolved on the `PATH`, so it may be a newer release
@@ -2239,12 +2239,18 @@ fn member_of(envelope: &Envelope) -> &str {
 /// names true is
 /// [`tests::the_usage_figures_this_crate_reads_are_the_ones_the_producer_writes`],
 /// which asks the linked `Usage` what it serializes to and fails on a rename.
-const BILLED_FIGURES: [&str; 3] = ["input_tokens", "output_tokens", "cost_usd"];
+const USAGE_FIGURES: [&str; 3] = ["input_tokens", "output_tokens", "cost_usd"];
 
-/// Whether a turn's own usage says the provider billed for it.
-fn was_billed(usage: Option<&Value>) -> bool {
+/// Whether a turn's own record reports the provider consumed anything for it.
+///
+/// Deliberately not "whether it was charged": a `cost_usd` is one of the three
+/// figures and none of them is required, so a provider that counts tokens and
+/// prices nothing reports a turn that ran without saying what it cost. What this
+/// answers is what the reconciliation needs — that a turn really happened — and a
+/// price would be a stronger claim than the wire supports.
+fn reports_usage(usage: Option<&Value>) -> bool {
     let Some(usage) = usage else { return false };
-    BILLED_FIGURES
+    USAGE_FIGURES
         .into_iter()
         .filter_map(|figure| usage.get(figure))
         .any(|figure| figure.as_f64().is_some_and(|spent| spent > 0.0))
@@ -2269,7 +2275,7 @@ enum Death {
     /// The producer published one, and the turn record does not contradict it.
     Published(MemberDeath),
     /// The producer published a `provider-failure` the record for that turn
-    /// contradicts: the turn completed, and it was billed.
+    /// contradicts: the turn completed, reporting usage.
     Contradicted,
     /// The producer published none. The sentence the dispatch exited on is all
     /// there is, and [`dispatch_death_cause`] is the reading of it.
@@ -3332,7 +3338,7 @@ mod tests {
     /// The usage figures this crate reads off a turn record are the ones the
     /// linked producer writes.
     ///
-    /// The drift gate for [`BILLED_FIGURES`], which is the one place this crate
+    /// The drift gate for [`USAGE_FIGURES`], which is the one place this crate
     /// names a sibling's payload fields rather than deserializing them. The
     /// spelling comes from that library's own type here, so a field renamed
     /// upstream fails this rather than quietly making every turn look unbilled —
@@ -3347,7 +3353,7 @@ mod tests {
             cost_usd: Some(1.0),
         })
         .expect("the sibling's usage serializes");
-        for figure in BILLED_FIGURES {
+        for figure in USAGE_FIGURES {
             assert!(
                 written.get(figure).is_some(),
                 "the producer no longer writes {figure:?}: {written}"
@@ -3358,7 +3364,7 @@ mod tests {
         // else.
         for cached in ["cache_read_tokens", "cache_write_tokens"] {
             assert!(written.get(cached).is_some(), "{written}");
-            assert!(!BILLED_FIGURES.contains(&cached));
+            assert!(!USAGE_FIGURES.contains(&cached));
         }
     }
 

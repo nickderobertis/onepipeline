@@ -218,7 +218,29 @@ fn turn(args: &[String], dir: &std::path::Path) -> ExitCode {
     // process that actually runs the turn: this one is the harness child, the
     // deepest thing in the stack, so what it holds is what an agent would hold
     // however the graph above it was started.
+    //
+    // Empty is a real answer and the only lenient one: this double also runs the
+    // observer graph's turns, which are not node dispatches and are promised
+    // nothing. A value that is *there* is held to the whole promise here rather
+    // than in a journey's assertion, because a turn is where the promise is made
+    // and a double that recorded an unusable path would have a journey assert on
+    // it a page later.
     let scratch = std::env::var("ONEPIPELINE_NODE_SCRATCH_DIR").unwrap_or_default();
+    if !scratch.is_empty() {
+        let at = std::path::Path::new(&scratch);
+        if !at.is_absolute() || !at.is_dir() {
+            fake::fail(&format!(
+                "this turn was given the scratch directory {scratch:?}, which is not an \
+                 absolute path to a directory that exists"
+            ));
+        }
+        if let Err(error) = std::fs::write(at.join("turn"), &prompt) {
+            fake::fail(&format!(
+                "this turn cannot write to the scratch directory {scratch:?} it was given: \
+                 {error}"
+            ));
+        }
+    }
     fake::record(
         dir,
         "claude-turn",
