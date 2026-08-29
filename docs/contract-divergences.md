@@ -2117,10 +2117,13 @@ again in every process.
 Driven end to end by
 `scratch::a_dispatch_is_given_an_absolute_writable_directory_of_its_own`, which
 reads the value out of the run's own store and the directory off the filesystem,
-and by
-`scratch::two_dispatches_of_one_node_are_given_two_directories_and_neither_is_taken_away`,
-which is the retry — the one pair of dispatches that agree on every name a path
-could have been derived from.
+by
+`scratch::every_dispatch_of_one_node_is_given_its_own_directory_and_none_is_taken_away`,
+which is the requeue — the one set of dispatches that agree on every name a path
+could have been derived from — and by
+`dispatch::a_dispatchs_scratch_directory_reaches_the_turn_the_library_backend_runs`,
+which reads it off the harness child at the bottom of the *library* backend's
+stack, where a per-dispatch pair is hard.
 
 **What could not be compiled exactly as written: the library backend has no
 per-launch environment.** The subprocess backend sets the pair on the command it

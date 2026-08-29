@@ -714,6 +714,61 @@ fn adoption_retains_node_overrides_for_later_dispatches() {
     );
 }
 
+/// The scratch directory a node dispatch is promised reaches the turn the
+/// **library backend** runs.
+///
+/// The backend production takes, and the one where a per-dispatch environment
+/// pair is hard: `oneagentgraph 0.2.18` onwards composes a member's environment
+/// from the hosting process's rather than from the launch it was given, so a pair
+/// set only in the map handed to the sibling reaches nothing. Divergence 47's
+/// closing paragraph is what that costs and what is left of it; this is the half
+/// that has to be true either way — a turn that ran was handed a real directory.
+///
+/// Read off the turn process itself, which is the harness child at the bottom of
+/// the stack: what it holds is what an agent would hold. No
+/// `ONEPIPELINE_ONEAGENTGRAPH_BIN`, because its absence is what selects this
+/// backend.
+#[test]
+fn a_dispatchs_scratch_directory_reaches_the_turn_the_library_backend_runs() {
+    let world = World::new("real-scratch");
+    world.write_graphs();
+    let path = world.plan("scratch", &plan_of("scratch", vec![agent("build", &[])]));
+    world
+        .run_on_agentgraph(&[
+            "start",
+            &path,
+            "--attach",
+            "--dag-graph",
+            &world.dag_graph(),
+        ])
+        .exited(0)
+        .settled();
+
+    let turns = world.turns();
+    let worker = turns
+        .iter()
+        .find(|turn| turn.member == "worker")
+        .unwrap_or_else(|| panic!("the node's own member never ran a turn: {turns:?}"));
+    let at = std::path::Path::new(&worker.scratch);
+    assert!(
+        at.is_absolute(),
+        "the turn was handed {:?}, which is not an absolute path\n{}",
+        worker.scratch,
+        world.dump()
+    );
+    assert!(
+        at.is_dir(),
+        "the turn was handed {}, which is not a directory that exists\n{}",
+        at.display(),
+        world.dump()
+    );
+    std::fs::write(
+        at.join("written"),
+        "by a journey standing where the turn stood",
+    )
+    .unwrap_or_else(|error| panic!("{} is not writable: {error}", at.display()));
+}
+
 /// A whole run, dispatched through the real sibling: the plan is launched, its
 /// driver is a real graph run, the node's dispatch is another, and a member runs
 /// in each.

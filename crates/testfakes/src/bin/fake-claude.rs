@@ -214,10 +214,15 @@ fn turn(args: &[String], dir: &std::path::Path) -> ExitCode {
         Err(error) => return fake::refuse(&format!("claude has no working directory: {error}")),
     };
     let member = std::env::var(fake::MEMBER_ENV).unwrap_or_default();
+    // The scratch directory the engine promised this dispatch, as it reaches the
+    // process that actually runs the turn: this one is the harness child, the
+    // deepest thing in the stack, so what it holds is what an agent would hold
+    // however the graph above it was started.
+    let scratch = std::env::var("ONEPIPELINE_NODE_SCRATCH_DIR").unwrap_or_default();
     fake::record(
         dir,
         "claude-turn",
-        &[prompt.clone(), cwd.display().to_string(), member],
+        &[prompt.clone(), cwd.display().to_string(), member, scratch],
     );
 
     // Stamp a process to the graph-run root, above this member's scratch. The

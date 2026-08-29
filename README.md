@@ -193,20 +193,16 @@ the reader looking for what the work got wrong. That classification is reconcile
 against the record of the turn it names before anything acts on it — a turn that
 opened, closed, and was billed says the dispatch produced what the death says it
 did not, and where the two disagree the record wins and the node is not settled as
-a provider death.
+a provider death. Not in the approved contract yet: open divergence 48.
 
 Every node dispatch carries `ONEPIPELINE_NODE_SCRATCH_DIR` in its own
 environment: an absolute path to a directory that exists and is writable before
 the dispatch's first turn, unique to that dispatch — a retry, a requeue and a
 resumed pin of the same node each get their own — and never removed while that
 dispatch runs. Nothing beyond that is promised, and the spelling of the path least
-of all: no consumer may derive one path from another.
+of all: no consumer may derive one path from another. Not in the approved contract
+yet either: open divergence 47.
 
-Both of the last two paragraphs describe this build rather than the approved
-[contract](docs/contract.md), which names neither. Each is a proposal to the
-planner who owns that document — divergences 48 and 47 in
-[the divergence record](docs/contract-divergences.md) — and that record, not this
-one, is where what they change and what they cost is settled.
 
 The planner supervises over the channel:
 
