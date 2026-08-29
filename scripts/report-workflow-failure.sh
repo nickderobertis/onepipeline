@@ -37,6 +37,18 @@ if ! [[ "$REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
   exit 2
 fi
 
+# TITLE reaches GitHub's search language below, where a bare word like `in:` or
+# `-label` is an operator rather than text. It is sent as a quoted phrase for
+# that reason, which leaves exactly two characters it cannot carry: a double
+# quote would end the phrase, and a newline is not a title.
+case "$TITLE" in
+  *'"'* | *$'\n'*)
+    echo "report-workflow-failure: \$TITLE carries a double quote or a newline, which the search query it is embedded in cannot express" >&2
+    echo "  ACTION: title the issue without either — the reporting step in the workflow that failed sets \$TITLE. Nothing has been filed." >&2
+    exit 2
+    ;;
+esac
+
 # One place every `gh` failure is answered, because the causes that can
 # plausibly happen here need different answers and the exit code tells them
 # apart in none of them — only what `gh` wrote does. What it wrote is printed
@@ -61,7 +73,7 @@ gh_failed() {
       echo "  ACTION: '$REPO' did not resolve — check \$REPO for a typo, and that the token can see a private repository." >&2
       ;;
     *"HTTP 422"* | *"Validation Failed"* | *"Invalid search query"*)
-      echo "  ACTION: GitHub rejected the request itself rather than the caller — \$TITLE is the likeliest cause, since it is interpolated into a search query. Reproduce with: gh issue list --repo $REPO --state open --search '$TITLE in:title'" >&2
+      echo "  ACTION: GitHub rejected the request itself rather than the caller — \$TITLE is the likeliest cause, since it is interpolated into a search query. Reproduce with: gh issue list --repo $REPO --state open --search '\"$TITLE\" in:title'" >&2
       ;;
     *)
       echo "  ACTION: reproduce the command above with 'gh --repo $REPO' and read its error. The three causes worth ruling out first are the credential ('gh auth status'), the job's 'issues: write' permission, and \$TITLE." >&2
@@ -77,12 +89,12 @@ body="$BODY"
 gh_stderr="$(mktemp)"
 trap 'rm -f "$gh_stderr"' EXIT
 
-# `--search "<title> in:title"` rather than a label: a label has to exist first,
+# `--search "\"<title>\" in:title"` rather than a label: a label has to exist first,
 # and a reporter that has to create one before it can report a failure has one
 # more way to fail while reporting a failure. The search is a fuzzy one, so the
 # exact title is matched below rather than trusted from it.
 status=0
-listed="$(gh issue list --repo "$REPO" --state open --search "$TITLE in:title" \
+listed="$(gh issue list --repo "$REPO" --state open --search "\"$TITLE\" in:title" \
   --json number,title --jq '.[] | "\(.number)\t\(.title)"' 2>"$gh_stderr")" || status=$?
 [ "$status" -eq 0 ] || gh_failed "looking for an open issue titled \"$TITLE\"" "$status" "$(cat "$gh_stderr")"
 

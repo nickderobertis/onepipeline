@@ -34,8 +34,10 @@ name: Published smoke
 
 on:
   workflow_run:
-    # `release.yml`'s own `name:`, which is what this matches on — renaming that
-    # workflow without renaming it here leaves this triggered by nothing.
+    # `release.yml`'s own `name:`, which is what this matches on. Spelled apart,
+    # nothing fails — this is simply triggered by nothing — so
+    # `npm/test/failure-report.test.mjs` reads that name out of release.yml and
+    # reconciles it with this line.
     workflows: ["Release"]
     types: [completed]
   workflow_dispatch:

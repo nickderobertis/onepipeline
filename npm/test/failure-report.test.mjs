@@ -88,7 +88,6 @@ function report({ existing = "", env = {} } = {}) {
   }
 }
 
-/** Whether the reporter made a `gh` call starting with these words. */
 function called(run, prefix) {
   return run.calls.some((call) => call.startsWith(prefix));
 }
@@ -156,6 +155,31 @@ describe("the reporter files a workflow_run failure", () => {
       assert.match(run.said, /ACTION:/, run.said);
     });
   }
+
+  it("sends the title to the search as a quoted phrase, so a bare operator is text", () => {
+    // `in:`, `-label` and friends are search operators when they arrive bare, so
+    // an unquoted title is a query the caller did not write.
+    const run = report();
+
+    const listed = run.calls.find((call) => call.startsWith("issue list "));
+    assert.ok(listed, `expected an 'issue list' call:\n${run.said}`);
+    assert.ok(
+      listed.includes(`"${TITLE}" in:title`),
+      `the title reaches GitHub's search language unquoted:\n${run.said}`,
+    );
+  });
+
+  it("refuses a title the quoted search phrase cannot carry", () => {
+    const run = report({ env: { TITLE: 'Published "smoke" is failing' } });
+
+    assert.equal(run.status, 2, run.said);
+    assert.ok(
+      !called(run, "issue "),
+      `a title that cannot be searched for is refused first:\n${run.said}`,
+    );
+    assert.match(run.said, /TITLE/, run.said);
+    assert.match(run.said, /Nothing has been filed/, run.said);
+  });
 
   it("refuses a REPO that is not an owner/name repository", () => {
     const run = report({ env: { REPO: "https://github.com/owner/repo" } });
@@ -226,10 +250,20 @@ describe("the reporter files a workflow_run failure", () => {
 
 describe("the workflow the reporter answers for", () => {
   const workflow = readFileSync(WORKFLOW, "utf8");
+  const release = readFileSync(join(REPO_ROOT, ".github", "workflows", "release.yml"), "utf8");
 
   it("asks the registries when a release completes, and on no schedule", () => {
+    // `workflow_run` matches on the triggering workflow's `name:`, which lives in
+    // release.yml. Read it from there: spelled apart, nothing fails — the smoke
+    // is simply triggered by nothing, which is the silence this change ends.
+    const releaseName = release.match(/^name: (.+)$/m)?.[1];
+    assert.ok(releaseName, "release.yml has no `name:` for a workflow_run to match on");
+
     assert.match(workflow, /^ {2}workflow_run:$/m, "the smoke is not triggered by a workflow run");
-    assert.match(workflow, /^ {4}workflows: \["Release"\]$/m, "it does not name release.yml");
+    assert.ok(
+      workflow.includes(`workflows: ["${releaseName}"]`),
+      `the smoke waits on a workflow named something other than release.yml's "${releaseName}"`,
+    );
     assert.match(workflow, /^ {2}workflow_dispatch:$/m, "the manual entry point is gone");
     assert.match(workflow, /^ {6}version:$/m, "the dispatch lost its version input");
     assert.ok(
