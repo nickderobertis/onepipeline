@@ -284,7 +284,8 @@ resolver = "2"
 # over real processes under a bound the environment sets small.
 #
 # `oneagentgraph` 0.3.13 requires `oneharness-core 0.12.1` and `onejudge 0.6.1`,
-# and the `onejudge` pin below is the release *that* requirement resolves to.
+# and the `onejudge` pin below tracks the release *that* requirement resolves to —
+# 0.6.2 for this one.
 # 0.6.2 still requires `oneharness-core 0.12.0`, whose caret requirement admits
 # 0.12.1, so the pins below let the graph resolve **one** turn engine. A split one
 # is invisible to a currency check, which reads each copy separately and calls
@@ -316,6 +317,20 @@ resolver = "2"
 # `a_classification_the_harness_record_contradicts_settles_rather_than_dies` is
 # what holds the floor.
 #
+# `oneagentgraph` 0.3.15 and `onejudge` 0.7.0 are **one release**, and the reason
+# the `onejudge` pin moves with it: they add a `note` seam — a role-addressed note
+# delivered to both parties of a conversation — and 0.3.15 requires `onejudge 0.7`,
+# which pre-1.0 is the breaking position, so `^0.6.2` admitted none of it and the
+# graph would have carried two turn engines rather than one.
+#
+# Not a floor, and nothing here changes: no verb of this crate delivers a note.
+# What it does reach is the other half of that file, `control::interrupt`, and
+# 0.3.15 leaves that as it was — `control.json` moves to schema **2** for an
+# endpoint that is optional, so a member binding none and a record written before
+# the seam existed both fall through to the interrupt `src/agentgraph.rs` already
+# sends. `tests/e2e/dispatch.rs`'s interrupt journeys drive it against the linked
+# library and are what would say otherwise.
+#
 # 0.3.12, below it, is the release that **carries `onejudge` past 0.5** — 0.6.0
 # adds `Settings::settle_on_noop`, defaulting to what every 0.5 build did. The pin
 # below must be the version that pin resolves to, because `src/report.rs` coerces
@@ -342,7 +357,7 @@ onevcs = "0.18.0"
 # It adds nothing to the dependency graph, because `oneagentgraph` already builds
 # it — and it must resolve to the version *that* pin does. `src/report.rs` is
 # where the build fails if it ever resolves to two, and why.
-onejudge = "0.6.2"
+onejudge = "0.7.0"
 # **Test-support only**, and named for one reason: `crates/testfakes`'s
 # `oneharness` double writes the report onejudge reads back, and that report is
 # oneharness's own typed contract. Written by hand it would be fifty fields of

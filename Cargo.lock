@@ -879,9 +879,9 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "oneagentgraph"
-version = "0.3.14"
+version = "0.3.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d766f45cc79edcd26a3104221988085ecf46e0eb44f052a5c4c26f93221836e"
+checksum = "f447a2e5af83c978a8db52eb35f256bfed138ff5834656707a04524e71e959cf"
 dependencies = [
  "clap",
  "libc",
@@ -920,9 +920,9 @@ dependencies = [
 
 [[package]]
 name = "onejudge"
-version = "0.6.2"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "109be15b8caa436d53459e4cd9124b56b3e8b19fa67b07dca825d806cb468073"
+checksum = "1c0bcac1c62a16eec9709dd09a4eba570aa3039548651c522bd55b3d5e240823"
 dependencies = [
  "clap",
  "oneharness-core",
@@ -1583,7 +1583,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.52.0",
