@@ -3357,21 +3357,34 @@ fn the_plan_check_verb_is_the_one_the_contract_spells() {
     );
 }
 
-/// The README's own copy of the `plan check` interface, gated against the two
-/// things it is a copy *of*.
+/// The README's own copy of the `plan check` interface, reconciled clause by
+/// clause with the contract it copies.
 ///
 /// The README states the wire and the exit codes in an operator's prose, which
 /// is a second copy of the contract — and a consumer writes a check against
-/// whichever of the two it read. So every claim that passage makes is asserted
-/// here against its source: the wire against the contract itself, the exit codes
-/// against the constants the binary exits with, and the flags against the
-/// argument parser that offers them.
+/// whichever of the two it read. A gate that sampled a few phrases out of that
+/// passage would let the copy drift in everything it did not sample, so this
+/// reconciles the **whole** passage: every backticked token it writes has to be
+/// one the contract's own plan-check paragraph writes, every claim it makes in
+/// prose is paired with the contract clause that licenses it, the exit codes are
+/// asserted against the constants the binary exits with **and** against the
+/// contract, the flags against the argument parser that offers them, and the
+/// example it shows against the parser that has to accept it.
+///
+/// The contract side is that one paragraph rather than the whole document: a
+/// token this passage uses is only licensed by the passage it is a copy of.
 #[test]
 fn the_readmes_plan_check_passage_is_a_gated_copy_of_the_contract() {
     let raw = std::fs::read_to_string(repo_root().join("README.md")).expect("the README ships");
     // Wrapped prose on both sides, so match on words rather than line breaks.
     let readme = raw.split_whitespace().collect::<Vec<_>>().join(" ");
-    let contract = CONTRACT.split_whitespace().collect::<Vec<_>>().join(" ");
+    let contract = CONTRACT
+        .lines()
+        .find(|line| line.contains("**A plan is checkable without launching it"))
+        .expect("the contract has a plan-check paragraph")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     let passage = readme
         .split_once("A plan is checkable before it is launched")
         .expect("the README has a plan-check passage")
@@ -3381,34 +3394,142 @@ fn the_readmes_plan_check_passage_is_a_gated_copy_of_the_contract() {
         .0
         .to_string();
 
-    // The wire, which is the contract's to state: every claim the README makes
-    // about it is one the contract makes too.
-    for claim in [
-        "`ONEPIPELINE_PLAN_CHECK_SCHEMA=1` in its environment",
-        "repeatable `--check <PATH>`",
-        "carry `\"source\": \"engine\"`",
-        "never read as an accept",
+    // The invocation the passage shows is one the binary accepts, taken out of
+    // the prose so a fence marker is not read as one of its tokens. A README
+    // that showed a command the parser refuses is the drift a reader meets
+    // first.
+    let (before, rest) = passage
+        .split_once("```bash ")
+        .expect("the passage shows an example invocation");
+    let (example, after) = rest
+        .split_once(" ```")
+        .expect("that example's fence closes");
+    let parsed = Cli::try_parse_from(example.split_whitespace()).unwrap_or_else(|error| {
+        panic!("the README shows `{example}`, which does not parse: {error}")
+    });
+    assert!(
+        matches!(
+            parsed.command,
+            Command::Plan(onepipeline::cli::PlanCommand::Check(_))
+        ),
+        "the README's example is not a `plan check`: {example}"
+    );
+    let prose = format!("{before}{after}");
+
+    // The wire, mechanically: every backticked run in the passage is one the
+    // contract's own paragraph writes. No hand-picked list, so a field, a key, a
+    // flag, or a literal added to the README without the contract stating it
+    // fails here. A run the README elides with `...` is reconciled by the parts
+    // it did write, because an elision is a shortening of the contract's shape
+    // rather than a claim of its own.
+    for token in backticked_runs(&prose) {
+        for part in token
+            .split("...")
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+        {
+            assert!(
+                contract.contains(part),
+                "the README's plan-check passage writes `{token}`, and the contract's \
+                 plan-check paragraph does not state '{part}'"
+            );
+        }
+    }
+
+    // And the prose, clause by clause: each claim the passage makes, paired with
+    // the contract clause it is a copy of. The two are worded for different
+    // readers, so each side is asserted against its own document — and either
+    // one rewritten without the other fails this.
+    for (stated, licensed) in [
+        (
+            "every refusal `start` makes before it dispatches anything, and no other rule",
+            "every refusal `onepipeline start` would make before dispatching anything, and no other rule",
+        ),
+        (
+            "Each repeatable `--check <PATH>` names an executable, resolved against the directory the verb ran in",
+            "a repeatable `--check <PATH>` flag naming an executable, resolved against the working directory `plan check` was run from",
+        ),
+        (
+            "handed the **loaded** plan as one JSON document on its stdin",
+            "spawned with the loaded plan as a single JSON document on its **stdin**",
+        ),
+        ("every default resolved", "with every default already resolved"),
+        (
+            "each node carrying its task's own metadata map verbatim",
+            "the store's own metadata map for that task, verbatim",
+        ),
+        (
+            "`ONEPIPELINE_PLAN_CHECK_SCHEMA=1` in its environment",
+            "`ONEPIPELINE_PLAN_CHECK_SCHEMA=1` in its environment",
+        ),
+        (
+            "answers on stdout with `{\"refusals\": [...]}`",
+            "On **stdout** a check answers with one JSON object, `{\"refusals\":",
+        ),
+        ("and exit 0", "A check that ran answers with exit status **0**"),
+        (
+            "`node` and `field` present on each and null where it is about neither",
+            "`node` and `field` are always present and may be null",
+        ),
+        (
+            "Engine refusals come first and carry `\"source\": \"engine\"`",
+            "Engine refusals come first and carry `\"source\": \"engine\"`",
+        ),
+        (
+            "each check's follow in the order its flags were given, under the path as it was given",
+            "each check's refusals follow in flag order and carry `\"source\": \"<the path as given>\"`",
+        ),
+        (
+            "`--json` prints them as one object carrying `project`, `accepted`, `refusals` and `unrunnable`, always all four",
+            "`{\"project\": <string>, \"accepted\": <bool>, \"refusals\": [{\"source\",\"node\",\"field\",\"reason\"}, ...], \"unrunnable\":",
+        ),
+        (
+            "reported separately from a refusal",
+            "which is reported separately from a refusal",
+        ),
+        ("never read as an accept", "is never read as an accept"),
+        (
+            "A loader refusal short-circuits: there is no loaded plan to hand a check, so each is reported as not run",
+            "there is no loaded plan to hand it: the registered checks do **not** run, and each is reported as not run",
+        ),
     ] {
         assert!(
-            passage.contains(claim),
-            "the README's plan-check passage no longer states '{claim}'"
+            prose.contains(stated),
+            "the README's plan-check passage no longer states '{stated}'"
         );
         assert!(
-            contract.contains(claim),
-            "the README states '{claim}' and the contract does not"
+            contract.contains(licensed),
+            "the README states '{stated}', and the contract's plan-check paragraph \
+             no longer states '{licensed}'"
         );
     }
 
     // The exit codes, which are the binary's: the README names the numbers this
-    // build actually exits with.
-    for (code, meaning) in [
-        (EXIT_SUCCESS, "the loader and every check accepting"),
-        (EXIT_QUEUED, "at least one refusal from either source"),
-        (EXIT_REFUSED, "a project that could not be read"),
+    // build actually exits with, and the contract names the same three.
+    for (code, meaning, stated) in [
+        (
+            EXIT_SUCCESS,
+            "the loader and every check accepting",
+            "**0** — the loader and every check accepted",
+        ),
+        (
+            EXIT_QUEUED,
+            "at least one refusal from either source",
+            "**1** — at least one refusal, from either source",
+        ),
+        (
+            EXIT_REFUSED,
+            "a project that could not be read",
+            "**2** — the project could not be read at all, or a registered check could not be run",
+        ),
     ] {
         assert!(
-            passage.contains(&format!("`{code}` is {meaning}")),
+            prose.contains(&format!("`{code}` is {meaning}")),
             "the README's plan-check passage no longer maps exit {code} to {meaning}"
+        );
+        assert!(
+            contract.contains(stated),
+            "the contract's plan-check paragraph no longer states '{stated}'"
         );
     }
 
@@ -3429,10 +3550,30 @@ fn the_readmes_plan_check_passage_is_a_gated_copy_of_the_contract() {
         // Either alone or with the value it takes, which is how the passage
         // writes the one that has a value.
         assert!(
-            passage.contains(&format!("`--{flag}`")) || passage.contains(&format!("`--{flag} ")),
+            prose.contains(&format!("`--{flag}`")) || prose.contains(&format!("`--{flag} ")),
             "the README's plan-check passage does not name `--{flag}`, which the verb takes"
         );
     }
+}
+
+/// Every backticked run in one piece of prose, in the order it wrote them.
+///
+/// An unterminated backtick ends the scan: what follows it is not a run, and
+/// reading to the end of the text as though it were would let any prose past
+/// this gate.
+fn backticked_runs(prose: &str) -> Vec<String> {
+    let mut runs = Vec::new();
+    let mut rest = prose;
+    while let Some((_, after)) = rest.split_once('`') {
+        let Some((run, tail)) = after.split_once('`') else {
+            break;
+        };
+        if !run.trim().is_empty() {
+            runs.push(run.to_string());
+        }
+        rest = tail;
+    }
+    runs
 }
 
 /// The settlement check the contract states, and the one thing it may not do.
