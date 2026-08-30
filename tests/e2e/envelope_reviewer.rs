@@ -109,6 +109,14 @@ fn two_related_nodes() -> Value {
     ])
 }
 
+/// What a consumer of this run's nodes is told to do about their release.
+///
+/// Stated on the **plan** rather than on a node, which is what makes it a
+/// witness here: it is one of the fields a graph does not hold, so a plan
+/// composed out of an edited graph carries it only if the write-back put it
+/// back.
+const PLAN_INSTRUCTION: &str = "Bump the pin for {{repository}}, then re-run the lock.";
+
 /// Start a run whose one node is held open, so the graph is live while edits
 /// arrive.
 fn live_run(world: &World, name: &str, extra: &[&str]) -> String {
@@ -117,7 +125,12 @@ fn live_run(world: &World, name: &str, extra: &[&str]) -> String {
     // reaches it — which is a run that settles rather than one an edit can reach.
     let _ = std::fs::remove_file(world.fakes.join("slow.go"));
     world.script("slow.wait", "hold");
-    let path = world.plan(name, &plan_of(name, vec![agent("slow", &[])]));
+    let mut plan = plan_of(name, vec![agent("slow", &[])]);
+    // A plan-level field a graph does not carry, so what the reviewer is handed
+    // proves the write-back kept it rather than composing a plan out of the
+    // graph alone. The goal beside it is the other one.
+    plan["release_instruction"] = json!(PLAN_INSTRUCTION);
+    let path = world.plan(name, &plan);
     let mut args = vec!["start".to_string(), path.clone()];
     args.extend(extra.iter().map(|arg| (*arg).to_string()));
     args.push("--detach".to_string());
@@ -214,6 +227,14 @@ fn a_refused_envelope_applies_none_of_its_commands_and_an_accepted_one_is_review
     for node in ["slow", "cover", "verify"] {
         assert!(planned.contains(&node.to_string()), "{document}");
     }
+    // And the plan-level fields a graph does not carry, which the write-back
+    // puts back: the goal above, and the instruction this run's own consumers
+    // would be given.
+    assert_eq!(
+        document["plan"]["release_instruction"],
+        json!(PLAN_INSTRUCTION),
+        "the plan the reviewer read lost a field the graph does not carry: {document}"
+    );
 
     // With the review satisfied, the same envelope goes through and both nodes
     // run. The reviewer narrates on stdout while it does, the way a review that
