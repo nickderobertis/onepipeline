@@ -1878,7 +1878,8 @@ fn projected_words(world: &World, project: &str) -> BTreeMap<String, String> {
         .collect()
 }
 
-/// A node that landed is **closed** on the board, and says what closed it.
+/// A node that published a change is **closed** on the board, and says what closed it —
+/// whether that change landed or is still open for a person.
 ///
 /// A status alone cannot say whether the work reached anybody: a change request left open
 /// for review settles a node exactly as a merge does, so a reader closing work on the word
@@ -1886,7 +1887,7 @@ fn projected_words(world: &World, project: &str) -> BTreeMap<String, String> {
 /// commit a merge landed at, and the URL an open change is read in — and beside them a
 /// node with no change of its own, which claims neither.
 #[test]
-fn a_landed_node_is_closed_carrying_the_change_that_closed_it() {
+fn a_published_node_is_closed_carrying_the_change_that_closed_it_landed_or_not() {
     for (policy, landing, key) in [
         ("local-direct", "landed", "onepipeline.landing_commit"),
         ("change-open", "unlanded", "onepipeline.change_url"),
@@ -1982,14 +1983,8 @@ fn a_landed_node_is_closed_carrying_the_change_that_closed_it() {
 
 /// A projection that fails reaches the planner, and changes nothing about the run.
 ///
-/// The incident this closes. A failed projection was one line on the driver's standard
-/// error, which a detached run writes to a log nobody opens — and the run settled
-/// identically either way. A run settled `complete`, reported `1/1 done SETTLED complete`,
-/// and its projection had failed outright: a green run was evidence about the run and
-/// nothing at all about the board.
-///
-/// So both halves are asserted: the surface arrives, naming the project, the items and the
-/// reason — and the run's own settlement is exactly what it would have been.
+/// Both halves, because either one alone is the defect: a surface naming the project, the
+/// items and the reason, and a run whose settlement is exactly what it would have been.
 #[test]
 fn a_projection_that_fails_raises_a_planner_surface_and_settles_the_run_unchanged() {
     let world = World::new("store-writeback-surface");
@@ -2092,17 +2087,13 @@ fn a_projection_that_fails_raises_a_planner_surface_and_settles_the_run_unchange
 /// The rule every store fixture in this suite is built to, held against fixtures that
 /// break it.
 ///
-/// This is on the issue as a **root cause** rather than as a bug: the specific defects it
-/// found are fixed, and the class that produced them is what this closes. Two defects
-/// passed a worker, a judge, a monitor and a manager because under a one-project fixture
-/// whose native id was its own title, a right answer and a wrong answer were the same
-/// bytes. A check that passed such a fixture would be the thing it exists to prevent, so
-/// each degenerate shape is stated here and the check has to name it.
-// llmlint: ignore[tests_mirror_real_usage] there is no user-facing command behind this and
-// deliberately so: what it holds is the rule the *fixtures* of this suite are built to, and
-// the only way to prove that rule can fail is to hand it a fixture that breaks it. Driving
-// the CLI here would exercise the projection this rule exists to make checkable, which
-// every journey above already does.
+/// A check that passed a one-project, id-equals-title fixture would be the thing it exists
+/// to prevent, so each degenerate shape is stated here and the check has to name it.
+// llmlint: ignore-block[tests_mirror_real_usage] there is no user-facing command behind
+// this and deliberately so: what it holds is the rule the *fixtures* of this suite are
+// built to, and the only way to prove that rule can fail is to hand it a fixture that
+// breaks it. Driving the CLI here would exercise the projection this rule exists to make
+// checkable, which every journey above already does.
 #[test]
 fn a_store_fixture_that_could_not_tell_a_right_answer_from_a_wrong_one_is_refused() {
     let world = World::new("store-fixture-rule");
@@ -2157,6 +2148,8 @@ fn a_store_fixture_that_could_not_tell_a_right_answer_from_a_wrong_one_is_refuse
     );
 }
 
+// llmlint: ignore-end[tests_mirror_real_usage]
+
 /// One project document, written straight rather than through [`World::plan`]: what is
 /// being checked here is the rule, so the fixture has to be able to break it.
 fn author_project(store: &std::path::Path, identifier: &str, title: &str) {
@@ -2170,20 +2163,16 @@ fn author_project(store: &std::path::Path, identifier: &str, title: &str) {
 }
 
 /// No assertion in these journeys is a bare presence assertion over metadata the writer
-/// added.
+/// added: a presence assertion passes whatever the projection wrote, so it cannot fail on
+/// a deletion.
 ///
-/// The third of the fixture defects, and the one no fixture rule can catch: `store.rs`
-/// asserted that the metadata the writer added `is_object()`, and **a presence assertion
-/// cannot fail on a deletion**. It passes whatever the projection wrote, so it was never
-/// asking the question it appeared to ask.
-///
-/// Waiting for a projection to arrive is a different thing and stays allowed: a predicate
-/// handed to `until_store` is a condition to wait on, and the assertions follow it. So
-/// what is checked is the assertion macros alone, and this names any that remain.
-// llmlint: ignore[tests_mirror_real_usage] the subject here is this file's own assertions,
-// which is the only place the defect lives: an assertion that passes whatever the projection
-// wrote cannot be caught by running anything, because it passes. Nothing about the crate
-// under test is asserted, and nothing about it could be.
+/// Waiting for a projection to arrive is a different thing and stays allowed — a predicate
+/// handed to `until_store` is a condition to wait on, and the assertions follow it — so
+/// what is checked is the assertion macros alone.
+// llmlint: ignore-block[tests_mirror_real_usage] the subject here is this file's own
+// assertions, which is the only place the defect lives: an assertion that passes whatever
+// the projection wrote cannot be caught by running anything, because it passes. Nothing
+// about the crate under test is asserted, and nothing about it could be.
 #[test]
 fn no_write_back_assertion_is_a_bare_presence_check_over_projected_metadata() {
     let source = include_str!("store.rs");
@@ -2242,3 +2231,4 @@ fn assertions(source: &str) -> Vec<String> {
     }
     found
 }
+// llmlint: ignore-end[tests_mirror_real_usage]

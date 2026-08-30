@@ -897,6 +897,13 @@ fn converge(
         watch_for_quiet(paths, journal, stall_after, &mut in_flight)?;
     }
 
+    // llmlint: ignore-block[changed_behavior_has_e2e] the real-store journey drives the
+    // terminal projection failing and the surface reaching the planner before the run
+    // settles. What it cannot drive is a projection *slow* enough to outlast this bounded
+    // window without failing: that needs the real sibling suspended mid-command, which is
+    // host-level process control rather than an input either CLI exposes, and the window
+    // itself is the best-effort boundary the contract already fixes — a store that has not
+    // answered has said nothing to report.
     if let Some(writeback) = &writeback {
         writeback.publish(paths, launch, state);
         writeback.wait_briefly();
@@ -906,6 +913,7 @@ fn converge(
         // the failure has to reach the planner before this driver stops.
         report_unprojected(paths, journal, writeback)?;
     }
+    // llmlint: ignore-end[changed_behavior_has_e2e]
     Ok(graph::state_of(&state.statuses()))
 }
 
@@ -2912,12 +2920,17 @@ fn criterion_finding(checked: &CriterionChecked, holds: &str) -> Surface {
 
 /// Raise every projection that failed since this was last asked.
 ///
-/// Non-blocking, and it changes nothing about the run: the projection is best
-/// effort by contract, so a store that refused a write is not a node settlement
-/// and not a scheduling decision. What it *is* is a board that no longer says
-/// what happened, which nothing else tells anybody — the worker's own report is
-/// one line on the driver's standard error, and a detached run writes that to a
-/// log nobody opens.
+/// What it raises is **non-blocking**: a board that is behind holds no dependents
+/// back, because the projection is best effort by contract and a store that
+/// refused a write is not a node settlement and not a scheduling decision. What
+/// it *is* is a board that no longer says what happened, which nothing else tells
+/// anybody — the worker's own report is one line on the driver's standard error,
+/// and a detached run writes that to a log nobody opens.
+///
+/// A [`raise`] that *fails* is propagated, exactly as every other one in this
+/// loop is: that is the run's own ledger refusing a write, which is not this
+/// worker's news arriving badly but the record this driver holds the lock on
+/// being unwritable.
 fn report_unprojected(
     paths: &RunPaths,
     journal: &mut Journal,

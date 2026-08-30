@@ -1642,16 +1642,9 @@ impl World {
             metadata.insert(reserved(key), value.clone());
         }
         let title = plan.get("name").and_then(Value::as_str).unwrap_or(name);
-        // The identifier the store holds the project under, which is deliberately
-        // **not** its title. On a store where those two coincide a projection that
-        // wrote the identifier as the title is byte-identical to one that
-        // preserved a person's heading, and no assertion anywhere could tell them
-        // apart — which is how that rename shipped. See [`undiscriminating`],
-        // which is what refuses a fixture without it.
         let identifier = project_id(name);
         // A second project, so that "which project did it read?" is a question a
-        // fixture can answer. Written before the plan's own so every store this
-        // suite builds holds one, and only once per world.
+        // fixture can answer. Only once per world.
         self.decoy_project();
         self.write_item(
             &self

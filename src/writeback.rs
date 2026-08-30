@@ -65,6 +65,18 @@ use crate::projection::RunState;
 use crate::taskgraph::{QualifiedId, BINARY_ENV};
 
 const SHADOW_SOURCE: &str = "onepipeline-writeback";
+/// The reserved key saying whether the change a node published reached its base.
+///
+/// Named once, and held against the document that records them by
+/// [`tests::every_word_and_key_this_projection_writes_is_named_by_the_divergence`]:
+/// `docs/contract.md` fixes a narrower vocabulary than this projection writes, so
+/// what these three and the words below are reconciled against is
+/// `docs/contract-divergences.md`, where that departure is recorded.
+const LANDING_KEY: &str = "onepipeline.landing";
+/// The reserved key naming the commit a landed change reached its base at.
+const LANDING_COMMIT_KEY: &str = "onepipeline.landing_commit";
+/// The reserved key naming where a person reads the change a node published.
+const CHANGE_URL_KEY: &str = "onepipeline.change_url";
 // Cross-platform runners have measured real sibling commands taking longer than ten seconds
 // under suite-wide contention. This remains a backstop for an unreachable store, not a
 // latency target: projection stays off the reconcile loop while the child runs.
@@ -104,22 +116,21 @@ struct Snapshot {
 
 /// One projection that failed, as the planner is told about it.
 ///
-/// Carried out of the worker rather than printed there: the worker runs on a
+/// Carried out of the worker rather than raised there: the worker runs on a
 /// thread of its own and the journal has one writer, so what it produces is this
-/// record and the reconcile loop raises the surface. A failed projection used to
-/// reach one line of the driver's standard error — which a detached run writes to
-/// a log nobody opens — while the run settled `complete` either way, so a green
-/// run was evidence about the run and nothing at all about the board.
+/// record and the reconcile loop raises the surface.
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct Unprojected {
     /// The onetaskgraph project the projection could not reach.
     pub project: QualifiedId,
-    // llmlint: ignore[invalid_states_unrepresentable] a node id is the plain string every
-    // identifier in this crate is, for the reason `NodeResult::superseded_by` records: these
-    // are the ids of the plan this run is executing, read straight off the snapshot the
-    // worker was projecting, and the only thing done with them is naming them on a surface.
     /// The items it was carrying, by plan node id.
+    // llmlint: ignore-block[invalid_states_unrepresentable] a node id is the plain string
+    // every identifier in this crate is, for the reason `NodeResult::superseded_by` records:
+    // these are the ids of the plan this run is executing, read straight off the snapshot
+    // the worker was projecting, and the only thing done with them is naming them on a
+    // surface.
     pub items: Vec<String>,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
     /// What the sibling, or this worker, said went wrong.
     pub reason: String,
 }
@@ -809,13 +820,13 @@ fn write_shadow(
         // already carried — carries none of these keys at all rather than an
         // empty value a reader would have to interpret.
         if let Some(landing) = snapshot.landings.get(id) {
-            metadata.insert("onepipeline.landing".into(), json!(landing.as_str()));
+            metadata.insert(LANDING_KEY.into(), json!(landing.as_str()));
         }
         if let Some(commit) = snapshot.landing_commits.get(id) {
-            metadata.insert("onepipeline.landing_commit".into(), json!(commit));
+            metadata.insert(LANDING_COMMIT_KEY.into(), json!(commit));
         }
         if let Some(url) = snapshot.change_urls.get(id) {
-            metadata.insert("onepipeline.change_url".into(), json!(url));
+            metadata.insert(CHANGE_URL_KEY.into(), json!(url));
         }
         let local_deps: Vec<String> = deps
             .iter()
@@ -990,7 +1001,8 @@ fn encoded(value: &str) -> String {
 mod tests {
     use super::{
         projected, write_shadow, DestinationLabel, DestinationProjectItem, Landing, Origin,
-        Pending, ProjectedStatus, Snapshot, WorkerState,
+        Pending, ProjectedStatus, Snapshot, WorkerState, CHANGE_URL_KEY, LANDING_COMMIT_KEY,
+        LANDING_KEY,
     };
     use crate::graph::NodeStatus;
     use crate::plan::Node;
@@ -1019,6 +1031,57 @@ mod tests {
 
         assert!(pending.queue(first.clone()));
         assert!(pending.latest.as_ref() == Some(&first));
+    }
+
+    /// Every word this projection writes, in the one arrangement that states them:
+    /// the list, and an exhaustive match over it, so a ninth status stops this
+    /// compiling until it is named here too.
+    fn every_projected_word() -> Vec<String> {
+        [
+            ProjectedStatus::Todo,
+            ProjectedStatus::InProgress,
+            ProjectedStatus::Done,
+            ProjectedStatus::Failed,
+            ProjectedStatus::ProviderFailed,
+            ProjectedStatus::Cancelled,
+            ProjectedStatus::Parked,
+            ProjectedStatus::Skipped,
+        ]
+        .into_iter()
+        .inspect(|status| match status {
+            ProjectedStatus::Todo
+            | ProjectedStatus::InProgress
+            | ProjectedStatus::Done
+            | ProjectedStatus::Failed
+            | ProjectedStatus::ProviderFailed
+            | ProjectedStatus::Cancelled
+            | ProjectedStatus::Parked
+            | ProjectedStatus::Skipped => {}
+        })
+        .map(word)
+        .collect()
+    }
+
+    /// The projection writes a vocabulary wider than the approved contract fixes,
+    /// and three reserved keys beside the settlement it already carried. Both are
+    /// recorded as a divergence, and this is the gate that keeps the record and
+    /// the code from parting: a word or a key the document does not name is one
+    /// nobody proposed.
+    #[test]
+    fn every_word_and_key_this_projection_writes_is_named_by_the_divergence() {
+        let divergence = include_str!("../docs/contract-divergences.md");
+        for word in every_projected_word() {
+            assert!(
+                divergence.contains(&format!("`{word}`")),
+                "docs/contract-divergences.md does not name the projected status `{word}`"
+            );
+        }
+        for key in [LANDING_KEY, LANDING_COMMIT_KEY, CHANGE_URL_KEY] {
+            assert!(
+                divergence.contains(&format!("`{key}`")),
+                "docs/contract-divergences.md does not name the reserved key `{key}`"
+            );
+        }
     }
 
     /// The four words that *are* onetaskgraph's own normalised categories stay
