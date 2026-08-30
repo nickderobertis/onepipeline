@@ -307,6 +307,15 @@ resolver = "2"
 # second with no registry at all.
 [workspace.dependencies]
 oneagentgraph = "0.3.13"
+# **Held at 0.16.2 while the requirement already permits 0.16.3**, so
+# `just engines-current` is red here until that gap is closed upstream rather
+# than by a `cargo update`. 0.16.3's `session_holders` deletes every record whose
+# owner process has exited with nothing working inside its run root — the state a
+# stopped run leaves — and `src/concurrency.rs` reads that enumeration on every
+# launch, so the read destroys the record a retry needs. Five journeys fail on it,
+# `session_reuse::a_retry_takes_up_the_session_a_stopped_run_left_its_work_in`
+# most plainly: the retry cuts a second session instead of taking up the one
+# holding the work. Moving the lock is a proposal to `onevcs`, not an edit here.
 onevcs = "0.16.2"
 # **Not a third sibling this crate composes** — nothing here launches, calls, or
 # spawns onejudge. It is one vocabulary: the verdicts a two-party member settles
