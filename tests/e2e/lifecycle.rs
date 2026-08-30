@@ -3994,7 +3994,7 @@ fn a_verdict_that_delimits_a_token_without_naming_the_machinery_stays_a_task_fai
 ///
 /// The producer publishes both, as the incident did: `provider-failure` says the
 /// member exited without a report, and the record for the turn it had open says
-/// that turn closed on one. Divergence 48 is what trusting the first cost.
+/// that turn closed on one. Divergence 49 is what trusting the first cost.
 ///
 /// It settles the plain failure, because nothing here can say the work passed a
 /// bar no report was settled against — carrying the commit its branch was left

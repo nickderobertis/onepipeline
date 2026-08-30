@@ -302,7 +302,7 @@ impl Executor for LocalExecutor {
 /// promised: the spelling below is not a contract and no consumer may derive one
 /// path from another.
 ///
-/// Divergence 47 in
+/// Divergence 48 in
 /// [the divergence record](../../../docs/contract-divergences.md) is why, and the
 /// proposal this answers.
 pub(crate) const NODE_SCRATCH_DIR_ENV: &str = "ONEPIPELINE_NODE_SCRATCH_DIR";
