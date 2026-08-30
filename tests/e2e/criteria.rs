@@ -402,6 +402,57 @@ fn a_file_the_branch_will_not_give_up_is_the_check_declining_to_answer() {
     assert_eq!(findings(&world, &run), Vec::<String>::new());
 }
 
+/// A file past what the check will read is declined; the same file under it is
+/// compared.
+///
+/// An extension is all a criterion's path has to look like, and a branch also
+/// carries build output and vendored archives wearing lettered ones — so a
+/// mistyped criterion can name an artifact, and pulling a whole artifact into
+/// memory to search it for a literal is not a comparison anybody asked for.
+/// Both files here hold exactly what the criteria ask for, so what tells the two
+/// answers apart is the size and nothing else.
+#[test]
+fn a_file_past_what_the_check_will_read_is_declined_and_a_smaller_one_is_read() {
+    let world = World::new("criteria-bounded");
+    let repository = world.repository("local-direct", &[]);
+    let mut bulk = String::from("complete_dataset: true\n");
+    // One byte past the bound is enough; the padding is what carries it there.
+    bulk.push_str(&"-".repeat(1 << 20));
+    committed(&world, &repository, "bulk.md", bulk.as_bytes());
+    committed(&world, &repository, "small.md", b"complete_dataset: true\n");
+    world.script("service.work", "complete_dataset: false\n");
+    let run = settle(
+        &world,
+        "bounded",
+        vec![node_bounded_by(&[
+            "the shared journey row in `bulk.md` is `complete_dataset: true`",
+            "the shared journey row in `small.md` is `complete_dataset: true`",
+        ])],
+    );
+
+    let compared = comparisons(&world, &run);
+    assert_eq!(compared.len(), 2, "{compared:?}");
+    let oversized = compared
+        .iter()
+        .find(|payload| payload["file"] == "bulk.md")
+        .unwrap_or_else(|| panic!("`bulk.md` was never read: {compared:?}"));
+    assert_eq!(oversized["answer"], "unread", "{oversized}");
+    assert!(
+        oversized["reason"]
+            .as_str()
+            .is_some_and(|why| why.contains("bulk.md") && why.contains("past the")),
+        "the refusal does not say the file was too big to read: {oversized}"
+    );
+    let read = compared
+        .iter()
+        .find(|payload| payload["file"] == "small.md")
+        .unwrap_or_else(|| panic!("`small.md` was never read: {compared:?}"));
+    assert_eq!(read["answer"], "match", "{read}");
+
+    // Neither is work that disagreed, so nobody is asked to rule on one.
+    assert_eq!(findings(&world, &run), Vec::<String>::new());
+}
+
 /// A path that is lexically inside the branch and resolves outside it.
 ///
 /// The lexical rules cannot see this one: `notes.md` names no directory and
