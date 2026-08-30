@@ -231,14 +231,27 @@ fn load_and_check(args: &PlanCheckArgs) -> Result<Answered> {
         Ok(read) => match crate::graph::check(&read.plan) {
             Err(refusal) => refusal,
             Ok(()) => {
-                let document = document(&read);
                 let mut refusals = Vec::new();
                 let mut unrunnable = Vec::new();
-                for path in &args.checks {
-                    match offer(path, &document) {
-                        Ok(answered) => refusals.extend(answered),
-                        Err(why) => unrunnable.push(why),
+                // A document this build cannot write is one no check can be
+                // handed, so every registered check is one that could not be run
+                // rather than one handed a plan with a node missing from it.
+                // Where none is registered there is nobody it could not be handed
+                // to, and the loader's acceptance stands on its own.
+                match document(&read) {
+                    Ok(document) => {
+                        for path in &args.checks {
+                            match offer(path, &document) {
+                                Ok(answered) => refusals.extend(answered),
+                                Err(why) => unrunnable.push(why),
+                            }
+                        }
                     }
+                    Err(why) => unrunnable.extend(args.checks.iter().map(|path| Unrunnable {
+                        check: path.display().to_string(),
+                        exit_code: None,
+                        stderr: why.clone(),
+                    })),
                 }
                 return Ok(Answered::Checked {
                     refusals,
@@ -439,28 +452,41 @@ fn engine_refusal(refusal: Refusal) -> Reported {
 /// store's own metadata map for that task beside it, verbatim: a consumer's
 /// checks read keys outside this crate's reserved namespace, and dropping them
 /// would leave those checks unable to run here at all.
-fn document(read: &crate::taskgraph::Read) -> Value {
-    let tasks: Vec<Value> = read
-        .plan
-        .tasks
-        .iter()
-        .map(|node| {
-            let mut written = serde_json::to_value(node).unwrap_or_else(|_| json!({}));
-            if let Some(map) = written.as_object_mut() {
-                map.insert(
-                    "metadata".to_owned(),
-                    json!(read.metadata.get(&node.id).cloned().unwrap_or_default()),
-                );
-            }
-            written
-        })
-        .collect();
-    json!({
+///
+/// Written to bytes here, once, rather than per check: what each check is handed
+/// is one document, and serializing it once is what makes that true by
+/// construction. `Err` is a document this build could not write at all — the
+/// caller turns that into every registered check being one that could not be
+/// run, because a node quietly replaced by an empty object would hand a check a
+/// plan that is not the one the engine loaded, and a check reading that answers
+/// about something nobody asked it about.
+fn document(read: &crate::taskgraph::Read) -> std::result::Result<Vec<u8>, String> {
+    let mut tasks = Vec::with_capacity(read.plan.tasks.len());
+    for node in &read.plan.tasks {
+        let mut written = serde_json::to_value(node).map_err(|error| {
+            format!(
+                "the loaded node {} could not be written as JSON, so there is no document to \
+                 hand a check: {error}",
+                node.id
+            )
+        })?;
+        if let Some(map) = written.as_object_mut() {
+            map.insert(
+                "metadata".to_owned(),
+                json!(read.metadata.get(&node.id).cloned().unwrap_or_default()),
+            );
+        }
+        tasks.push(written);
+    }
+    serde_json::to_vec(&json!({
         "schema_version": read.plan.schema_version,
         "name": read.plan.name,
         "goal": read.plan.goal,
         "concurrency": read.plan.concurrency,
         "tasks": tasks,
+    }))
+    .map_err(|error| {
+        format!("the loaded plan could not be written as JSON, so there is no document to hand a check: {error}")
     })
 }
 
@@ -469,7 +495,7 @@ fn document(read: &crate::taskgraph::Read) -> Value {
 /// `Ok` is a check that **ran** — whatever its refusals list holds. Everything
 /// else is a check that could not be run: a path that is not there or not
 /// executable, a non-zero exit, or an answer this build cannot read.
-fn offer(path: &Path, document: &Value) -> std::result::Result<Vec<Reported>, Unrunnable> {
+fn offer(path: &Path, document: &[u8]) -> std::result::Result<Vec<Reported>, Unrunnable> {
     let named = path.display().to_string();
     let cannot = |exit_code: Option<i32>, stderr: String| Unrunnable {
         check: named.clone(),
@@ -479,10 +505,8 @@ fn offer(path: &Path, document: &Value) -> std::result::Result<Vec<Reported>, Un
     // Against the working directory this command was run from, which is also the
     // one the check itself runs in: a consumer registers a check beside the plan
     // it is checking, and a path that resolved against anything else would name
-    // a different file to the two sides. A directory this process cannot read is
-    // a boundary that could not be established, so the check is one that could
-    // not be run rather than one resolved against something else.
-    let resolved = resolve(path).map_err(|why| cannot(None, why))?;
+    // a different file to the two sides.
+    let resolved = resolve(path);
     let mut child = Command::new(&resolved)
         .env(SCHEMA_ENV, SCHEMA_VERSION)
         .stdin(Stdio::piped())
@@ -495,11 +519,10 @@ fn offer(path: &Path, document: &Value) -> std::result::Result<Vec<Reported>, Un
                 format!("{} cannot be run: {error}", resolved.display()),
             )
         })?;
-    let written = serde_json::to_vec(document).unwrap_or_default();
     if let Some(stdin) = child.stdin.as_mut() {
         // A check that read what it wanted and closed its stdin is answering,
         // not failing, so a broken pipe here is left to the answer to settle.
-        let _ = stdin.write_all(&written);
+        let _ = stdin.write_all(document);
     }
     drop(child.stdin.take());
     // Both streams, bounded and read at once. A check is somebody else's
@@ -531,7 +554,24 @@ fn offer(path: &Path, document: &Value) -> std::result::Result<Vec<Reported>, Un
         })?;
     let stdout = out.as_mut().map(bounded).unwrap_or_default();
     drop(out);
-    let stderr_bytes = reading.join().unwrap_or_default();
+    // A reader that panicked has read nothing, and nothing is exactly what a
+    // check that wrote no stderr leaves behind — so the two are kept apart here
+    // rather than collapsed into one empty string: this check could not be read,
+    // which is a check that could not be run.
+    let stderr_bytes = match reading.join() {
+        Ok(read) => read,
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(cannot(
+                None,
+                format!(
+                    "{named} ran, and the thread reading its stderr panicked, so nothing here \
+                     can read what it answered"
+                ),
+            ));
+        }
+    };
     let status = child
         .wait()
         .map_err(|error| cannot(None, format!("{named} could not be waited for: {error}")))?;
@@ -672,17 +712,19 @@ fn bounded(stream: &mut impl std::io::Read) -> Bounded {
 }
 
 /// A relative path against the working directory; anything else as it was given.
-fn resolve(path: &Path) -> std::result::Result<PathBuf, String> {
+///
+/// Said as `./<path>` rather than read off `current_dir`, and the difference is
+/// not cosmetic in either direction. It is the **same** directory: this process
+/// never changes the child's, so the leading `.` the OS resolves is the one
+/// `current_dir` would have named. And it is what keeps a bare `check.sh` a file
+/// beside the plan instead of a PATH lookup — `Command::new` searches PATH for a
+/// name carrying no separator, so a consumer naming its check the way it names
+/// its plan would otherwise run whatever the environment had by that name. What
+/// goes with the syscall is a failure this verb could report but nothing could
+/// ever drive: a working directory it cannot read.
+fn resolve(path: &Path) -> PathBuf {
     if path.is_absolute() {
-        return Ok(path.to_path_buf());
+        return path.to_path_buf();
     }
-    std::env::current_dir()
-        .map(|dir| dir.join(path))
-        .map_err(|error| {
-            format!(
-                "{} is relative and this process cannot read its own working directory, so there \
-             is nothing to resolve it against: {error}",
-                path.display()
-            )
-        })
+    Path::new(".").join(path)
 }
