@@ -571,14 +571,39 @@ fn a_release_of_retried_work_is_attributed_through_the_newest_session_of_its_bra
     world.releases(&automated(&script));
     releases_at(&answer, "0.1.0");
 
-    // The run that goes first: it lands its work on a pinned branch and ends,
-    // leaving that branch — and the session that made it — behind.
+    // The run that goes first: it lands its work on a pinned branch and leaves
+    // that branch — and the session that made it — behind, **still going** while
+    // this journey reads what it left, held open by a node of its own.
+    //
+    // Held for the reason the stranger's run above is, and the reading below is
+    // the one that needs it: `onevcs` forgets the record of a session whose
+    // owner process has gone and whose run root nobody is inside, and the launch
+    // that asks who holds the engine repository — the run below — is what
+    // forgets it. That record is what the sibling's reader resolves a session's
+    // landing through, so a superseded session read after its run went is handed
+    // a stream with no releases correlated to it at all.
+    //
+    // Which of the two questions retains a record is not the same on every host.
+    // Being *inside* a run root is a question a host has to be able to answer
+    // about a process it did not start, and one that cannot answer it at all
+    // reads every run root as empty — so there the owner process is the only
+    // thing that can retain a record, and a run allowed to end takes the
+    // superseded copy's answer with it. A held run is the one arrangement that
+    // retains it wherever this journey runs.
     let mut stranded = lifecycle("stranded", &[]);
     stranded["repo"] = json!(ENGINE);
     stranded["branch"] = json!(RETRIED);
-    let first = start(&world, "adoption-retried-first", vec![stranded]);
+    world.script("keeper.wait", "hold");
+    let first = start(
+        &world,
+        "adoption-retried-first",
+        vec![stranded, crate::harness::agent("keeper", &[])],
+    );
     world.until("the first attempt to land", |world| {
-        !world.events_of(&first, "node-settled").is_empty()
+        world
+            .events_of(&first, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "stranded")
     });
     let superseded = session_of(&world, &first, "stranded");
     let first_landing = landing_commit(&world, &first, "stranded");
@@ -653,7 +678,9 @@ fn a_release_of_retried_work_is_attributed_through_the_newest_session_of_its_bra
     }
 
     world.release("consumer.go");
+    world.release("keeper.go");
     world.run(&["stop", &run]).exited(0);
+    world.run(&["stop", &first]).exited(0);
 }
 
 /// The branch two sessions work on, one after the other.
