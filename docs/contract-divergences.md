@@ -11,7 +11,7 @@ the contract**, and `docs/contract.md` was amended to carry each ruling. They st
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–22, 33, 35–40 and 46–49 are open**. Each states what the code does
+Entries **10–22, 33, 35–40 and 46–50 are open**. Each states what the code does
 today and the proposal it is waiting on. Most are questions for a *producer*
 rather than for this crate, because `oneagentgraph` and `onevcs` are independent
 tools that expose general integration hooks only and nothing in them may know
@@ -2368,3 +2368,70 @@ and
 `boundary::a_published_death_decides_the_settlement_ahead_of_the_sentence_the_dispatch_exits_on`,
 which carry the new word through the results and the read-only views.
 
+## 50. A settled node reaches its board under a word for something else — OPEN
+
+**Proposal: the status a node is projected under is the settlement's own word,
+and the change that closed it is recorded beside it.**
+
+The contract fixes what write-back writes, in the sentence beginning *"Status
+writes back; the journal does not move"*:
+
+> As a node's state changes, onepipeline writes that state onto its task's status
+> category: `todo` while it waits, `in-progress` while it is dispatched, `done`
+> when it settles done, and `cancelled` when it is parked or dropped.
+
+Compiled exactly, that says two things a person reading a board acts on wrongly.
+A node that **failed** is not named at all, so it took `done` — the same word a
+merged node gets, with only a nested `outcome: task-failed` to disagree — and a
+manager reviewing a board saw one word for work that merged and work that was
+thrown away. And `cancelled` covers both a park and a drop, so a node the planner
+idled and a node the engine stopped are indistinguishable, though only one of
+them is coming back.
+
+So the code writes the settlement's own word: `done` for a node that is done,
+`failed` for a task failure, `provider-failed` for the provider death entry 49
+introduced, `cancelled` for a cancel, `parked` for a planner's own idle, and
+`skipped` for a node a failed dependency made unsafe. `todo` and `in progress`
+are unchanged.
+
+**What that costs, and why it is the cheaper of the two.** A onetaskgraph status
+is a *name* and a normalised *category*, a `project copy` carries both, and a
+destination refuses a pair it would read differently — so a name outside that
+seven-word vocabulary can only be written where the destination normalises it the
+same way this shadow does. Four of the eight words this projection writes *are* a
+category — `todo`, `in progress`, `done` and `cancelled` — and are unaffected. The
+other four — `failed`, `provider-failed`, `parked` and `skipped` — are names the
+vocabulary has none of: a store that does not know one reads it as the `unknown`
+category and keeps the name, which is what
+the shadow source's own default mapping produces, so the copy is accepted and the
+word arrives. The alternative — writing `failed` under the `done` category —
+requires the operator's own store to declare that mapping first, and until it did,
+**every projection after any node failed would be refused outright**. A board that
+stopped updating is strictly worse than one carrying a status category a filter
+cannot place beside a name that says exactly what happened.
+
+**Beside the word, what closed the node.** The contract says only that "the
+settlement detail goes to reserved metadata", and it did: the whole settlement
+payload, nested, under one key. Nothing on the item named the change. So a settled
+node now also carries `onepipeline.landing` (`landed` or `unlanded`),
+`onepipeline.landing_commit` (the commit the change reached its base at) and
+`onepipeline.change_url` (where a person reads it) — each written **only where the
+run observed one**, so a node with no change of its own carries none of the three
+rather than an empty value a reader would have to interpret.
+
+**And a projection that fails now says so to somebody.** The contract's "write-back
+is best effort and retried off the reconcile loop: a slow or unavailable store is
+reported and never changes an edit ruling, a node settlement, or a scheduling
+decision" is unchanged in every part except *reported*: that was one line on the
+driver's standard error, which a detached run writes to a log nobody opens, and the
+run settled identically either way. A failed projection now also raises a
+non-blocking planner surface naming the project, the items it was carrying and the
+reason. It still changes no ruling, no settlement and no scheduling decision.
+
+What diverges is the projected vocabulary — 8 words where the contract names 4 —
+and the 3 reserved keys beside the settlement. Everything else the sentence
+promises is unchanged.
+
+Driven end to end by `store::every_settlement_reaches_the_board_under_its_own_word`,
+`store::a_published_node_is_closed_carrying_the_change_that_closed_it_landed_or_not`, and
+`store::a_projection_that_fails_raises_a_planner_surface_and_settles_the_run_unchanged`.
