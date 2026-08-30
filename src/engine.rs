@@ -2623,7 +2623,7 @@ pub(crate) fn finding_surface(
 fn criterion_payload(checked: &CriterionChecked) -> serde_json::Map<String, serde_json::Value> {
     let mut payload = journal::payload(&[
         ("criterion", json!(bounded(&checked.check.criterion))),
-        ("file", json!(bounded(&checked.check.file))),
+        ("file", json!(bounded(checked.check.file.as_str()))),
         ("expected", json!(bounded(&checked.check.literal))),
         ("answer", json!(checked.answer.as_str())),
     ]);
@@ -2666,7 +2666,7 @@ fn criterion_finding(checked: &CriterionChecked, holds: &str) -> Surface {
              failed on this: it is a reading of the branch, for you to rule on.",
             node = checked.node,
             criterion = bounded(&checked.check.criterion),
-            file = bounded(&checked.check.file),
+            file = bounded(checked.check.file.as_str()),
             expected = bounded(&checked.check.literal),
         ),
         source: crate::channel::source::PROPOSAL.into(),

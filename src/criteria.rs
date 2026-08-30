@@ -41,9 +41,68 @@ pub(crate) struct Checkable {
     /// than this module's reading of it.
     pub criterion: String,
     /// The file it named, relative to the node's branch.
-    pub file: String,
+    pub file: BranchPath,
     /// The literal it said that file holds.
     pub literal: String,
+}
+
+/// A path a criterion named, which is a file on the node's own branch.
+///
+/// A newtype and not a `String`, because the difference is what this check is
+/// allowed to open: an absolute path, one climbing out with `..`, a Windows
+/// drive prefix, and a path with whitespace in it are **not** files on the
+/// branch, and a bare string would leave every one of them representable after
+/// parsing and re-checkable only by whoever remembered to. [`BranchPath::named`]
+/// is the only constructor, so a value of this type has already been refused
+/// each of them.
+///
+/// It is a *lexical* promise, which is the half a string can keep. What the
+/// branch resolves it to is the other half and is checked where it is opened —
+/// see [`answer`], which refuses a symlink out of the worktree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BranchPath(String);
+
+impl BranchPath {
+    /// The path a backticked span names on the branch, or `None` where the span
+    /// is not one.
+    ///
+    /// A path has no whitespace and either a directory separator or a lettered
+    /// extension. Deliberately not a version: `0.17.5` ends in a dot and a digit
+    /// and is a value, while `Cargo.toml` ends in a dot and letters and is a
+    /// file — so "the version in `Cargo.toml` is `0.17.5`" reads as the one file
+    /// and the one literal it is, rather than as two paths [`parse`] then
+    /// declines.
+    ///
+    /// The escapes are spelled here so that every host reads a criterion the
+    /// same way rather than each one reading its own separators.
+    fn named(span: &str) -> Option<Self> {
+        if span.is_empty()
+            || span.chars().any(char::is_whitespace)
+            || span.starts_with('/')
+            || span.contains('\\')
+            // A Windows drive prefix on the host that has them, and nothing a
+            // criterion means by a *file* anywhere else.
+            || span.contains(':')
+            || span.split('/').any(|segment| segment == "..")
+        {
+            return None;
+        }
+        let lettered_extension = span
+            .rsplit('/')
+            .next()
+            .and_then(|name| name.rsplit_once('.'))
+            .is_some_and(|(stem, extension)| {
+                !stem.is_empty()
+                    && !extension.is_empty()
+                    && extension.chars().all(|c| c.is_ascii_alphabetic())
+            });
+        (span.contains('/') || lettered_extension).then(|| Self(span.to_string()))
+    }
+
+    /// The path as the criterion wrote it, for a payload and a finding to quote.
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 /// What reading the branch answered.
@@ -125,14 +184,31 @@ pub(crate) fn checkable(task: &str) -> Vec<Checkable> {
 /// Read one criterion off the branch.
 ///
 /// `root` is the worktree the node's session opened, which is that branch
-/// checked out. A path is resolved under it and never above it — [`parse`]
-/// declines a criterion naming an absolute path or one climbing out — so this
-/// reads the node's own work and nothing else on the machine.
+/// checked out, and what this opens is **inside it**. Two halves, because a path
+/// is two things: [`BranchPath`] refuses the spellings that leave lexically, and
+/// this refuses the ones that leave once the branch has resolved them — a
+/// committed symlink pointing at `/etc/passwd` is a relative path by every
+/// lexical rule there is. Both the root and the resolved path are canonicalized
+/// and the second must be under the first; anything else is the check declining
+/// to answer, which is what it does with every other file it cannot read.
 pub(crate) fn answer(root: &Path, check: &Checkable) -> Answer {
-    match std::fs::read_to_string(root.join(&check.file)) {
-        Err(error) => Answer::Unread {
-            reason: error.to_string(),
-        },
+    let declined = |reason: String| Answer::Unread { reason };
+    let (root, path) = match (
+        root.canonicalize(),
+        root.join(check.file.as_str()).canonicalize(),
+    ) {
+        (Ok(root), Ok(path)) => (root, path),
+        (Err(error), _) | (_, Err(error)) => return declined(error.to_string()),
+    };
+    if !path.starts_with(&root) {
+        return declined(format!(
+            "`{}` resolves to {}, which is outside the node's branch",
+            check.file.as_str(),
+            path.display()
+        ));
+    }
+    match std::fs::read_to_string(&path) {
+        Err(error) => declined(error.to_string()),
         Ok(text) if text.contains(&check.literal) => Answer::Match,
         Ok(text) => Answer::Mismatch {
             holds: holds(&text, &check.literal),
@@ -227,15 +303,15 @@ fn parse(criterion: &str) -> Option<Checkable> {
     let [first, second] = spans[..] else {
         return None;
     };
-    let (file, literal) = match (path_shaped(first), path_shaped(second)) {
-        (true, false) => (first, second),
-        (false, true) => (second, first),
+    let (file, literal) = match (BranchPath::named(first), BranchPath::named(second)) {
+        (Some(file), None) => (file, second),
+        (None, Some(file)) => (file, first),
         // Two paths, or none: nothing here says which is the value.
         _ => return None,
     };
     (!literal.is_empty()).then(|| Checkable {
         criterion: criterion.to_string(),
-        file: file.to_string(),
+        file,
         literal: literal.to_string(),
     })
 }
@@ -256,44 +332,6 @@ fn negated(criterion: &str) -> bool {
         || lowered
             .split(|c: char| !c.is_alphanumeric() && c != '\'')
             .any(|word| WORDS.contains(&word) || word.ends_with("n't"))
-}
-
-/// Whether a backticked span names a file on the branch.
-///
-/// A path has no whitespace and either a directory separator or a lettered
-/// extension. Deliberately not a version: `0.17.5` ends in a dot and a digit and
-/// is a value, while `Cargo.toml` ends in a dot and letters and is a file — so
-/// "the version in `Cargo.toml` is `0.17.5`" reads as the one file and the one
-/// literal it is, rather than as two paths this module then declines.
-///
-/// An absolute path, and one climbing out of the worktree with `..`, are not
-/// files on the branch: the check reads the node's own work, so a criterion
-/// naming anything else is declined here rather than resolved and read.
-fn path_shaped(span: &str) -> bool {
-    if span.is_empty()
-        || span.chars().any(char::is_whitespace)
-        // Escapes, spelled so that every host reads a criterion the same way
-        // rather than each one reading its own separators: a leading `/`, a
-        // segment climbing out, a backslash, and a colon — which is a Windows
-        // drive prefix on the host that has them and is nothing a criterion here
-        // means by a *file* anywhere else.
-        || span.starts_with('/')
-        || span.contains('\\')
-        || span.contains(':')
-        || span.split('/').any(|segment| segment == "..")
-    {
-        return false;
-    }
-    let lettered_extension = span
-        .rsplit('/')
-        .next()
-        .and_then(|name| name.rsplit_once('.'))
-        .is_some_and(|(stem, extension)| {
-            !stem.is_empty()
-                && !extension.is_empty()
-                && extension.chars().all(|c| c.is_ascii_alphabetic())
-        });
-    span.contains('/') || lettered_extension
 }
 
 #[cfg(test)]
@@ -317,7 +355,7 @@ mod tests {
                 criterion: "the shared journey row in `tests/e2e/shared.rs` is \
                             `complete_dataset: true`"
                     .to_string(),
-                file: "tests/e2e/shared.rs".to_string(),
+                file: BranchPath("tests/e2e/shared.rs".to_string()),
                 literal: "complete_dataset: true".to_string(),
             }]
         );
@@ -327,7 +365,7 @@ mod tests {
     fn the_file_and_the_literal_are_read_off_the_sentence_in_either_order() {
         let found = checkable(&task("`0.17.5` is the version `Cargo.toml` declares"));
         assert_eq!(found.len(), 1, "{found:?}");
-        assert_eq!(found[0].file, "Cargo.toml");
+        assert_eq!(found[0].file.as_str(), "Cargo.toml");
         assert_eq!(found[0].literal, "0.17.5");
     }
 
@@ -411,7 +449,7 @@ mod tests {
         };
         let files: Vec<String> = checkable_of(&node)
             .into_iter()
-            .map(|check| check.file)
+            .map(|check| check.file.as_str().to_string())
             .collect();
         assert_eq!(files, ["notes.md", "version.txt", "rows.csv"]);
     }
@@ -422,7 +460,7 @@ mod tests {
         std::fs::write(dir.join("notes.md"), "state: done\n").expect("the file writes");
         let check = |literal: &str| Checkable {
             criterion: format!("`notes.md` holds `{literal}`"),
-            file: "notes.md".into(),
+            file: BranchPath("notes.md".into()),
             literal: literal.into(),
         };
         assert_eq!(answer(&dir, &check("state: done")), Answer::Match);
@@ -447,7 +485,7 @@ mod tests {
         std::fs::create_dir(dir.join("rows.md")).expect("a directory where a file was named");
         let check = Checkable {
             criterion: "`rows.md` holds `state: done`".into(),
-            file: "rows.md".into(),
+            file: BranchPath("rows.md".into()),
             literal: "state: done".into(),
         };
         let answered = answer(&dir, &check);
@@ -455,10 +493,47 @@ mod tests {
         // And a file that is not there at all: nothing was compared, so nothing
         // is reported as a comparison.
         let absent = Checkable {
-            file: "gone.md".into(),
+            file: BranchPath("gone.md".into()),
             ..check
         };
         assert_eq!(answer(&dir, &absent).as_str(), "unread");
+    }
+
+    /// A path that is lexically inside the branch and resolves outside it.
+    ///
+    /// The lexical rules cannot see this one: `notes.md` names no directory and
+    /// climbs out of nothing, and what makes it an escape is a symlink somebody
+    /// committed. Unix-only because that is where the suite can commit one; the
+    /// containment check itself is platform-independent.
+    #[cfg(unix)]
+    #[test]
+    fn a_path_the_branch_resolves_outside_the_worktree_is_not_read() {
+        let dir = tempdir("symlink");
+        let outside = dir.join("outside");
+        std::fs::create_dir_all(&outside).expect("somewhere off the branch");
+        std::fs::write(outside.join("secret.md"), "state: done\n").expect("the file writes");
+        let branch = dir.join("worktree");
+        std::fs::create_dir_all(&branch).expect("a worktree");
+        std::os::unix::fs::symlink(outside.join("secret.md"), branch.join("notes.md"))
+            .expect("a symlink out of the worktree");
+
+        let check = Checkable {
+            criterion: "`notes.md` holds `state: done`".into(),
+            file: BranchPath("notes.md".into()),
+            literal: "state: done".into(),
+        };
+        // The file it points at holds exactly what the criterion names, so a
+        // check that followed it would answer `match` on evidence off the
+        // branch. It declines instead, and says where the path went.
+        let answered = answer(&branch, &check);
+        assert_eq!(answered.as_str(), "unread", "{answered:?}");
+        let Answer::Unread { reason } = answered else {
+            panic!("the check did not decline")
+        };
+        assert!(
+            reason.contains("outside the node's branch"),
+            "the refusal does not say the path left the branch: {reason}"
+        );
     }
 
     #[test]
@@ -470,7 +545,7 @@ mod tests {
             &dir,
             &Checkable {
                 criterion: "`notes.md` holds `state: done`".into(),
-                file: "notes.md".into(),
+                file: BranchPath("notes.md".into()),
                 literal: "state: done".into(),
             },
         ) else {

@@ -243,57 +243,254 @@ fn criteria_this_check_cannot_parse_are_reported_nowhere() {
 fn a_file_the_branch_will_not_give_up_is_the_check_declining_to_answer() {
     let world = World::new("criteria-unread");
     let repository = world.repository("local-direct", &[]);
-    // A directory where the criterion names a file. It is on the branch — this
-    // journey commits it and pushes it — so the check reaches it, opens it, and
-    // gets nothing it can compare.
-    unreadable(&world, &repository, "rows.md");
+    // Three ways a branch withholds a file, all three on the branch this node
+    // settles on: a directory where the criterion named a file, a file that is
+    // not text, and — by naming it and committing nothing — a file that is not
+    // there. They reach the check as three different refusals from the operating
+    // system and have to come back as the same answer.
+    committed(
+        &world,
+        &repository,
+        "rows.md/keep.txt",
+        b"this path is a directory\n",
+    );
+    committed(&world, &repository, "bytes.md", &[0xff, 0xfe, 0x00, 0x9f]);
     world.script("service.work", "complete_dataset: false\n");
     let run = settle(
         &world,
         "unread",
         vec![node_bounded_by(&[
             "the shared journey row in `rows.md` is `complete_dataset: true`",
+            "the shared journey row in `bytes.md` is `complete_dataset: true`",
+            "the shared journey row in `absent.md` is `complete_dataset: true`",
         ])],
     );
 
     // The third answer, in the run's own record, told apart from both the
     // others: nothing was compared, so nothing disagreed.
     let compared = comparisons(&world, &run);
-    assert_eq!(compared.len(), 1, "{compared:?}");
-    assert_eq!(compared[0]["answer"], "unread", "{compared:?}");
-    assert_ne!(compared[0]["answer"], "match");
-    assert_ne!(compared[0]["answer"], "mismatch");
-    assert!(
-        compared[0]["reason"]
-            .as_str()
-            .is_some_and(|why| !why.is_empty()),
-        "the check declined to answer and said nothing about why: {compared:?}"
-    );
-    assert!(
-        compared[0].get("holds").is_none(),
-        "a file nobody could read was reported as holding something: {compared:?}"
-    );
+    assert_eq!(compared.len(), 3, "{compared:?}");
+    for named in ["rows.md", "bytes.md", "absent.md"] {
+        let answered = compared
+            .iter()
+            .find(|payload| payload["file"] == named)
+            .unwrap_or_else(|| panic!("`{named}` was never read: {compared:?}"));
+        assert_eq!(answered["answer"], "unread", "{answered}");
+        assert_ne!(answered["answer"], "match");
+        assert_ne!(answered["answer"], "mismatch");
+        assert!(
+            answered["reason"]
+                .as_str()
+                .is_some_and(|why| !why.is_empty()),
+            "the check declined to answer and said nothing about why: {answered}"
+        );
+        assert!(
+            answered.get("holds").is_none(),
+            "a file nobody could read was reported as holding something: {answered}"
+        );
+    }
 
     // A file that could not be read is not work that disagreed, so nobody is
     // asked to rule on it.
     assert_eq!(findings(&world, &run), Vec::<String>::new());
 }
 
-/// Commit a directory where a criterion will name a file.
+/// Put one file on the branch every session of this repository is cut from.
 ///
-/// git tracks files rather than directories, so the directory is made by
-/// committing something inside it — which is exactly how one arrives in a real
-/// tree, and leaves the named path unreadable as a file for any reader.
-fn unreadable(world: &World, repository: &Repository, path: &str) {
-    let blocked = repository.checkout.join(path);
-    std::fs::create_dir_all(&blocked).expect("a directory where a file was named");
-    std::fs::write(blocked.join("keep.txt"), "this path is a directory\n")
-        .expect("the directory has something in it to be committed");
+/// Bytes rather than text, because two of the journeys here need a path that is
+/// not readable *as* text: `rows.md/keep.txt` makes `rows.md` a directory — git
+/// tracks files rather than directories, so that is how one arrives in a real
+/// tree — and `bytes.md` is committed as bytes no reader can decode.
+fn committed(world: &World, repository: &Repository, path: &str, body: &[u8]) {
+    let file = repository.checkout.join(path);
+    if let Some(parent) = file.parent() {
+        std::fs::create_dir_all(parent).expect("the directories above the file");
+    }
+    std::fs::write(&file, body).expect("the file is written into the checkout");
     git(world, &repository.checkout, &["add", "-A"]);
     git(
         world,
         &repository.checkout,
-        &["commit", "-m", "chore: a directory where a file was named"],
+        &["commit", "-m", &format!("chore: commit {path}")],
     );
     git(world, &repository.checkout, &["push", "origin", "main"]);
+}
+
+#[test]
+fn a_bar_stated_in_an_amendment_or_in_a_step_is_read_and_read_once() {
+    let world = World::new("criteria-sources");
+    world.repository("local-direct", &[]);
+    // Both steps write, so what the branch holds when the node settles is both
+    // step's files beside the seed file the repository has carried all along.
+    world.script("service.implement.work", "complete_dataset: false\n");
+    world.script("service.verify.work", "rows: 3\n");
+    let bar = |criteria: &[&str]| {
+        format!(
+            "## What\nWork.\n\n## Acceptance criteria\n\n{}\n",
+            criteria
+                .iter()
+                .map(|criterion| format!("- {criterion}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+    };
+    // The one criterion two documents state. A node with steps takes its task
+    // from them, so the sources here are the amendment binding the node and the
+    // steps' own bars.
+    let shared = "the row in `README.md` is `the repository under test`";
+    let node = json!({
+        "id": "service",
+        "repo": "service",
+        "title": "feat: ship the row",
+        "amendment": bar(&["the row in `service-verify.md` is `rows: 4`"]),
+        "steps": [
+            {"id": "implement", "persona": "engineer", "task": bar(&[shared])},
+            {
+                "id": "verify",
+                "persona": "reviewer",
+                "deps": ["implement"],
+                "task": bar(&[shared, "the row in `service-implement.md` is `complete_dataset: true`"]),
+            },
+        ],
+    });
+    let run = settle(&world, "sources", vec![node]);
+
+    // Every source was read, and the one criterion two of them state was read
+    // once: a bar restated is one bar, and comparing it twice would put two
+    // findings on the queue for one thing said once.
+    let mut files: Vec<String> = comparisons(&world, &run)
+        .iter()
+        .filter_map(|payload| {
+            payload["file"]
+                .as_str()
+                .map(std::string::ToString::to_string)
+        })
+        .collect();
+    files.sort();
+    assert_eq!(
+        files,
+        ["README.md", "service-implement.md", "service-verify.md"]
+    );
+
+    // And each answered on its own evidence: the amendment's names a value the
+    // second step did not write, the second step's names one the first did not,
+    // and the shared one names the seed file, which holds exactly what it says.
+    let answer_for = |named: &str| {
+        comparisons(&world, &run)
+            .into_iter()
+            .find(|payload| payload["file"] == named)
+            .unwrap_or_else(|| panic!("`{named}` was never read"))["answer"]
+            .clone()
+    };
+    assert_eq!(answer_for("service-verify.md"), "mismatch");
+    assert_eq!(answer_for("service-implement.md"), "mismatch");
+    assert_eq!(answer_for("README.md"), "match");
+    assert_eq!(findings(&world, &run).len(), 2);
+}
+
+#[test]
+fn a_node_that_failed_its_dispatch_is_still_read_against_its_bar() {
+    let world = writing("criteria-failed", "complete_dataset: false\n");
+    // The agent's own verdict on its task: it wrote its work and then failed.
+    world.script("service.fail", "1");
+    let run = settle(
+        &world,
+        "failed",
+        vec![node_bounded_by(&[
+            "the shared journey row in `service.md` is `complete_dataset: true`",
+        ])],
+    );
+
+    // The node settled on its dispatch, exactly as it would have without this
+    // check …
+    assert_eq!(settled_as(&world, &run)["status"], "failed");
+    assert_eq!(settled_as(&world, &run)["outcome"], "task-failed");
+    // … and the branch it left behind was still read, because a node that failed
+    // is a node somebody is about to look at.
+    let compared = comparisons(&world, &run);
+    assert_eq!(compared.len(), 1, "{compared:?}");
+    assert_eq!(compared[0]["answer"], "mismatch", "{compared:?}");
+    assert_eq!(findings(&world, &run).len(), 1);
+}
+
+/// A required check the host reports as red, which is what CI failing looks like
+/// to a change request the host was asked to land.
+const RED: &str = "llmlint completed failure required";
+
+#[test]
+fn a_node_redispatched_after_a_failed_publication_is_read_once_at_its_settlement() {
+    let world = World::new("criteria-retry");
+    // `change-auto` watches the host's own checks to their conclusion, which is
+    // where a red one fails the publication while leaving the work on its
+    // branch — the case the node is asked again for.
+    world.repository("change-auto", &[]);
+    world.script("service.work", "complete_dataset: false\n");
+    world.script("gh.checks", RED);
+
+    // Detached, so the world can move while the run is going: the host reports
+    // the check red, and once it has, this test makes it green the way a re-run
+    // of CI would, and the attempt that follows meets a different answer.
+    let path = world.plan(
+        "retry",
+        &plan_of(
+            "retry",
+            vec![node_bounded_by(&[
+                "the shared journey row in `service.md` is `complete_dataset: true`",
+            ])],
+        ),
+    );
+    world.run(&["start", &path, "--detach"]).exited(0);
+    let run = "retry".to_string();
+    world.until("the host to report its check red", |world| {
+        world
+            .events_of(&run, "change-check")
+            .iter()
+            .any(|event| event["payload"]["conclusion"] == "failure")
+    });
+    std::fs::remove_file(world.fakes.join("gh.checks")).expect("the red check is cleared");
+    world.script("gh.merged", "");
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+
+    // It was dispatched more than once, and the branch it was asked again on is
+    // the one that already contradicted its bar …
+    let dispatched = world.events_of(&run, "node-dispatched");
+    assert!(
+        dispatched.len() >= 2,
+        "the publication was never re-dispatched: {dispatched:?}"
+    );
+    assert_eq!(settled_as(&world, &run)["status"], "done");
+
+    // … so a check made per *attempt* would have reported it twice. It is made
+    // where the node settles: one comparison, one finding.
+    let compared = comparisons(&world, &run);
+    assert_eq!(compared.len(), 1, "{compared:?}");
+    assert_eq!(compared[0]["answer"], "mismatch", "{compared:?}");
+    assert_eq!(findings(&world, &run).len(), 1);
+}
+
+#[test]
+fn a_node_with_no_branch_to_read_reports_nothing() {
+    let world = World::new("criteria-nobranch");
+    world.repository("local-direct", &[]);
+    // Every step declares no diff, so no session opens and there is no branch:
+    // the criterion names a file that exists on the base, and is still not read,
+    // because what this check reads is the node's own work.
+    let node = json!({
+        "id": "service",
+        "repo": "service",
+        "title": "feat: change nothing",
+        "steps": [{
+            "id": "note",
+            "expects_no_diff": true,
+            "task": "## What\nChange nothing.\n\n## Acceptance criteria\n\n\
+                     - the row in `README.md` is `complete_dataset: true`\n",
+        }],
+    });
+    let run = settle(&world, "nobranch", vec![node]);
+
+    assert_eq!(settled_as(&world, &run)["status"], "done");
+    assert_eq!(comparisons(&world, &run), Vec::<Value>::new());
+    assert_eq!(findings(&world, &run), Vec::<String>::new());
 }

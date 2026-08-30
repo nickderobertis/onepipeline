@@ -2136,6 +2136,16 @@ sound work, and a tier that cries wolf is one a reader learns to skim, which
 costs more than the tier is worth. Under-reaching is recoverable; over-reaching
 trains the reader to ignore it.
 
+**What it opens is inside the node's branch, checked twice.** A criterion's path
+is validated where it is parsed — no absolute path, no `..`, no drive prefix, no
+whitespace — and the type carrying it has no other constructor, so an unvalidated
+path is not representable past that point. That is the lexical half; the other is
+that a branch resolves paths, and a committed symlink at `notes.md` pointing at
+`/etc/passwd` is relative by every lexical rule there is. So the read
+canonicalizes the worktree and the path and refuses one that is not under the
+other, as the same third answer below rather than as a comparison against
+something off the branch.
+
 **A file the branch will not give up is a third answer.** Absent, a directory, or
 not text: the check compared nothing, and says so. `unread` is carried through the
 run's own record as its own word beside `match` and `mismatch`, and is never
@@ -2179,4 +2189,10 @@ test cannot reach them and the gate lives where it can.
 Driven end to end by `tests/e2e/criteria.rs`, against a real branch: a criterion
 the branch contradicts, the same criterion on a branch that holds it, a node
 whose settlement is unchanged beside the finding, prose that is reported nowhere,
-and a file the branch will not give up.
+the three ways a branch withholds a file, a bar stated in an amendment and in two
+steps and read once each, a node whose dispatch failed being read all the same, a
+node with no branch reporting nothing, and a node re-dispatched after a failed
+publication being read once at its settlement rather than once per attempt. The
+containment refusal is held by
+`criteria::tests::a_path_the_branch_resolves_outside_the_worktree_is_not_read`,
+which needs a committed symlink and so lives where the suite can make one.
