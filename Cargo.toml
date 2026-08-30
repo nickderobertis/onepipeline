@@ -65,6 +65,16 @@ resolver = "2"
 #   `tests/e2e/shipped.rs` reads each shipped persona through the sibling's own
 #   `Persona::parse` and layers it onto a base, so a file in the wrong spelling
 #   fails rather than reads differently.
+# - `oneagentgraph` 0.3.15 publishes `oneagentgraph::control::note`, which hands
+#   one role-addressed note to a named member of a graph run and answers what that
+#   member's conversation did with it. It is the delivery half of the approved
+#   delivery-seam contract and there is no verb behind it — the sibling's command
+#   line has no `note` — so it is a **compile floor** rather than a version this
+#   build could compose an installed executable at. Below it a manager's note
+#   reaches the worker by interrupt and the judge not at all, which is the seam
+#   `src/note.rs` exists to end. `tests/e2e/note.rs` drives it against the real
+#   sibling and a real two-party conversation, so a pin below 0.3.15 fails rather
+#   than reads differently.
 # - `onevcs` 0.2.8 raises `provenance::SUBJECT_LIMIT` from 72 to 120, which
 #   `src/graph.rs` reads to refuse an unpublishable node title at plan load — so
 #   the `onevcs` pin also decides which titles a plan may state. Below it a load
@@ -282,7 +292,7 @@ resolver = "2"
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
 # second with no registry at all.
 [workspace.dependencies]
-oneagentgraph = "0.3.13"
+oneagentgraph = "0.3.15"
 onevcs = "0.16.2"
 # **Not a third sibling this crate composes** — nothing here launches, calls, or
 # spawns onejudge. It is one vocabulary: the verdicts a two-party member settles
@@ -290,7 +300,16 @@ onevcs = "0.16.2"
 # It adds nothing to the dependency graph, because `oneagentgraph` already builds
 # it — and it must resolve to the version *that* pin does. `src/report.rs` is
 # where the build fails if it ever resolves to two, and why.
-onejudge = "0.6.2"
+#
+# 0.7.0 is a second vocabulary beside the verdicts, and a **compile floor**: it
+# publishes `onejudge::note`, whose `Addressee`, `Note`, `Criterion`, `Accepted`
+# and `Undelivered` are the approved delivery-seam contract's own shapes.
+# `src/note.rs` re-exports them through `oneagentgraph::note` rather than
+# restating them — a second declaration is a shape that drifts, and a note that
+# satisfied the copy would still be refused by the conversation it was written
+# for. `oneagentgraph` 0.3.15 requires the same release, so the one resolution
+# rule above already holds the pair together.
+onejudge = "0.7.0"
 # **Test-support only**, and named for one reason: `crates/testfakes`'s
 # `oneharness` double writes the report onejudge reads back, and that report is
 # oneharness's own typed contract. Written by hand it would be fifty fields of

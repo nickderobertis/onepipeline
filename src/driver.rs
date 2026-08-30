@@ -1899,12 +1899,147 @@ fn reply(args: &ReplyArgs) -> Result<i32> {
     submit(&paths, &envelope)
 }
 
+/// What one submitted envelope became.
+///
+/// Three answers rather than an exit code, because two callers read it: `reply`
+/// prints the state it names and returns the code that goes with it, and
+/// [`crate::note::deliver`] reads what the delivery answered out of it. The
+/// operations ride along where the submitting process is the one that compiled
+/// them — a caller that has them needs no second read of the record to find out
+/// what it just did.
+enum Submitted {
+    /// A commandless verdict, queued for whichever reader the run owes one.
+    Answered {
+        /// The reply's id in the channel.
+        reply: u64,
+    },
+    /// Every command applied.
+    Applied {
+        /// `0` where this process applied them itself, and the queue id where the
+        /// run's own reconciler did.
+        reply: u64,
+        /// What they compiled to, where this process is what compiled them.
+        operations: Option<Vec<edits::Operation>>,
+    },
+    /// Accepted and durable, and not reconciled within the reply timeout. Still
+    /// queued: **not** an instruction to send it again.
+    Queued {
+        /// The reply's id in the channel.
+        reply: u64,
+    },
+}
+
 /// Validate a reply, queue it, and report which of the two true things happened.
+fn submit(paths: &RunPaths, envelope: &Reply) -> Result<i32> {
+    match submit_envelope(paths, envelope)? {
+        Submitted::Answered { reply } => {
+            println!("{}", json!({"reply": reply, "state": "delivered"}));
+            Ok(EXIT_SUCCESS)
+        }
+        Submitted::Applied { reply, .. } => {
+            println!("{}", json!({"reply": reply, "state": "applied"}));
+            Ok(EXIT_SUCCESS)
+        }
+        Submitted::Queued { reply } => {
+            println!("{}", json!({"reply": reply, "state": "queued"}));
+            Ok(EXIT_QUEUED)
+        }
+    }
+}
+
+/// Deliver one note through the channel's own path, and answer what the
+/// conversation said.
+///
+/// [`crate::note::deliver`]'s whole implementation, kept here because it is the
+/// submission path rather than a second one beside it: the op a planner types and
+/// the call a consumer makes are validated by one check, judged by one reconciler,
+/// and recorded once.
+///
+/// # Errors
+///
+/// [`Error::Refused`] for a note that was not delivered, in the conversation's own
+/// words; or the reason the ask was not one this run could act on.
+pub(crate) fn deliver_note_envelope(
+    paths: &RunPaths,
+    envelope: &Reply,
+) -> Result<crate::note::Delivered> {
+    let [Command::Note { id, text, .. }] = &envelope.commands[..] else {
+        return Err(Error::Refused(
+            "a note is delivered one at a time, and this envelope carries something else"
+                .to_string(),
+        ));
+    };
+    let (id, text) = (id.clone(), text.clone());
+    match submit_envelope(paths, envelope)? {
+        // Compiled here, so what it answered is in hand.
+        Submitted::Applied {
+            operations: Some(operations),
+            ..
+        } => reached_in(&operations)
+            .map(crate::note::Delivered::To)
+            .ok_or_else(|| {
+                Error::Refused(format!(
+                    "note: node '{id}': the delivery recorded no disposition"
+                ))
+            }),
+        // Compiled by the run's own reconciler, which recorded it: the record is
+        // written before the outcome this returned on, so it is there to be read.
+        Submitted::Applied {
+            operations: None, ..
+        } => last_note_delivered(paths, &id, &text)
+            .map(crate::note::Delivered::To)
+            .ok_or_else(|| {
+                Error::Refused(format!(
+                    "note: node '{id}': the run applied the note and recorded no disposition \
+                     for it"
+                ))
+            }),
+        Submitted::Queued { .. } => Ok(crate::note::Delivered::Queued),
+        Submitted::Answered { .. } => Err(Error::Refused(
+            "a note carries a command, and this envelope was answered as a verdict".to_string(),
+        )),
+    }
+}
+
+/// The disposition one compiled note recorded.
+fn reached_in(operations: &[edits::Operation]) -> Option<crate::note::Reached> {
+    operations.iter().find_map(|operation| match operation {
+        edits::Operation::NoteDelivered { reached, .. } => Some(reached.clone()),
+        _ => None,
+    })
+}
+
+/// What the run recorded for the last note of this text delivered to this node.
+fn last_note_delivered(
+    paths: &RunPaths,
+    node: &str,
+    text: &crate::note::NoteText,
+) -> Option<crate::note::Reached> {
+    journal::read(&paths.journal())
+        .into_iter()
+        .rev()
+        .filter(|envelope| envelope.kind.0 == journal::PipelineKind::EditCommitted.as_str())
+        .find_map(|envelope| {
+            let operations: Vec<edits::Operation> =
+                serde_json::from_value(envelope.payload.get("operations")?.clone()).ok()?;
+            operations.iter().find_map(|operation| match operation {
+                edits::Operation::NoteDelivered {
+                    node: recorded,
+                    text: said,
+                    reached,
+                    ..
+                } if recorded == node && said == text => Some(reached.clone()),
+                _ => None,
+            })
+        })
+}
+
+/// Validate a reply and queue it, or apply it, and say which happened.
 ///
 /// The author's op allowlist is enforced here, before anything is queued: a
 /// monitor that asks for an op it may not issue is refused with the reason, and
 /// nothing durable is written on its behalf.
-fn submit(paths: &RunPaths, envelope: &Reply) -> Result<i32> {
+fn submit_envelope(paths: &RunPaths, envelope: &Reply) -> Result<Submitted> {
     let view = RunView::open(paths)?;
     let channel = ChannelState::new(paths);
 
@@ -1949,8 +2084,7 @@ fn submit(paths: &RunPaths, envelope: &Reply) -> Result<i32> {
                 )?;
             }
         }
-        println!("{}", json!({"reply": id, "state": "delivered"}));
-        return Ok(EXIT_SUCCESS);
+        return Ok(Submitted::Answered { reply: id });
     }
 
     if envelope.version != Some(crate::channel::REPLY_ENVELOPE_VERSION) {
@@ -2005,8 +2139,27 @@ fn submit(paths: &RunPaths, envelope: &Reply) -> Result<i32> {
         Ok(lock) => {
             let mut journal = Journal::open(paths);
             let mut graph = view.state.graph.clone();
+            let mut compiled: Vec<edits::Operation> = Vec::new();
             for command in &envelope.commands {
-                let operations = edits::compile(&mut graph, &frontier, command)?;
+                // Nothing is driving this run, so nothing of it is in flight —
+                // the note is still asked of the member the node's last dispatch
+                // reported, and the conversation's own account of how it ended is
+                // what refuses it.
+                let operations = match apply_here(
+                    paths,
+                    &mut journal,
+                    &mut graph,
+                    &frontier,
+                    envelope.author,
+                    command,
+                ) {
+                    Ok(operations) => operations,
+                    Err(error) => {
+                        lock.release();
+                        return Err(error);
+                    }
+                };
+                compiled.extend(operations.iter().cloned());
                 journal.emit(
                     journal::PipelineKind::EditCommitted,
                     journal::labels(&paths.run, None),
@@ -2057,8 +2210,10 @@ fn submit(paths: &RunPaths, envelope: &Reply) -> Result<i32> {
             }
             lock.release();
             channel.answer_if_verdict(envelope)?;
-            println!("{}", json!({"reply": 0, "state": "applied"}));
-            Ok(EXIT_SUCCESS)
+            Ok(Submitted::Applied {
+                reply: 0,
+                operations: Some(compiled),
+            })
         }
         Err(Error::Locked { .. }) => {
             let id = channel.submit(envelope.author, &envelope.commands)?;
@@ -2067,8 +2222,10 @@ fn submit(paths: &RunPaths, envelope: &Reply) -> Result<i32> {
                 if let Some(outcome) = channel.outcome_of(id) {
                     channel.answer_if_verdict(envelope)?;
                     if outcome.applied {
-                        println!("{}", json!({"reply": id, "state": "applied"}));
-                        return Ok(EXIT_SUCCESS);
+                        return Ok(Submitted::Applied {
+                            reply: id,
+                            operations: None,
+                        });
                     }
                     return Err(Error::Refused(
                         outcome
@@ -2086,10 +2243,47 @@ fn submit(paths: &RunPaths, envelope: &Reply) -> Result<i32> {
             // waiting for the edits — so it is delivered here as it is on every
             // other path, and only the edits are reported still queued.
             channel.answer_if_verdict(envelope)?;
-            println!("{}", json!({"reply": id, "state": "queued"}));
-            Ok(EXIT_QUEUED)
+            Ok(Submitted::Queued { reply: id })
         }
         Err(other) => Err(other),
+    }
+}
+
+/// Compile one command in the process that is applying it, delivering what only a
+/// delivery can answer.
+///
+/// The reconciler's [`compile_and_deliver`](crate::engine) for the other side of
+/// the same fork: when nothing is driving a run, `reply` becomes its single writer
+/// and has to do everything the loop would have done — including handing a note to
+/// the node's conversation, and recording the refusal when it will never be read.
+fn apply_here(
+    paths: &RunPaths,
+    journal: &mut Journal,
+    graph: &mut crate::graph::Graph,
+    frontier: &Frontier,
+    author: Author,
+    command: &Command,
+) -> Result<Vec<edits::Operation>> {
+    let operations = edits::compile(graph, frontier, command)?;
+    let Command::Note {
+        id,
+        addressee,
+        text,
+        criterion,
+    } = command
+    else {
+        return Ok(operations);
+    };
+    match engine::deliver_manager_note(paths, *addressee, id, text, criterion.as_ref(), None) {
+        Ok(operations) => Ok(operations),
+        Err(error) => {
+            // The refusal is the run's record as much as the caller's answer: a
+            // note that reached nobody is exactly what a manager needs to find in
+            // the journal afterwards, and with nothing driving the run this is the
+            // only writer that can put it there.
+            engine::record_rejection(paths, journal, author, command, &error)?;
+            Err(error)
+        }
     }
 }
 

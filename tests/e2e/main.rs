@@ -38,6 +38,7 @@ mod journal;
 mod lifecycle;
 mod live_edit;
 mod node_validator;
+mod note;
 mod plan;
 mod real_vcs;
 mod scratch;

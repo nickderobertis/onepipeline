@@ -2435,3 +2435,130 @@ promises is unchanged.
 Driven end to end by `store::every_settlement_reaches_the_board_under_its_own_word`,
 `store::a_published_node_is_closed_carrying_the_change_that_closed_it_landed_or_not`, and
 `store::a_projection_that_fails_raises_a_planner_surface_and_settles_the_run_unchanged`.
+
+## 51. A correction reaches one party of a node's dispatch, and never both — OPEN
+
+**Proposal (for the planner who owns the contract): add a `note` op to the reply
+envelope — and **not** to the `monitor` allowlist — carrying `id`, a required
+`addressee`, `text`, and an optional `criterion`; publish the same delivery on
+this crate's own surface as `onepipeline::note`; and answer a note that reached
+nobody with a refusal rather than with silence.**
+
+The two levers a manager has are each half of one job. `context` is delivered by
+interrupting the live agent turn, so it reaches the *worker* and never the judge,
+and it says of itself that it adds no acceptance criteria. `amend` becomes part of
+the node's effective task, so it binds the *judge* — and composes the task of the
+dispatch that follows it, which is exactly the turn a live correction is not.
+Neither reaches both parties, and a manager who needs one to has to kill a running
+dispatch to get it. Measured: a ruling delivered by `context` at 15:50:23Z was
+contradicted by that node's own judge at 15:57:19Z, reviewing against a task that
+never mentioned it; the worker then held two instructions of equal authority, and
+resolving it took a retry that killed a live, gate-green dispatch in order to
+change its bar.
+
+**Almost none of what a note does is this crate's.** The two-party conversation is
+`onejudge`'s, the member running it `oneagentgraph`'s, and the approved
+delivery-seam contract puts the note's shapes and its routing there: `onejudge`
+0.7.0 publishes `onejudge::note` and `oneagentgraph` 0.3.15 publishes
+`oneagentgraph::control::note`, which hands one note to a named member of a graph
+run and answers what the conversation did with it. Both are **compile floors** of
+this build. So the shapes below are that seam's, re-exported and not restated — a
+second declaration is a shape that drifts, and a note that satisfied the copy
+would still be refused by the conversation it was written for.
+
+What this crate owns is the three things that seam cannot know: **which node** a
+note is for, **which member** that node's dispatch is running, and **what the run
+records** about what came back.
+
+* It is delivered to whoever is live. The worker's live turn is reopened carrying
+  it *before the judge is consulted*, so the judge receives it together with the
+  worker's response rather than ahead of one; the judge's live turn has its
+  decision re-taken with the note in hand, and the note rides that response to the
+  worker; between turns, the next turn to open takes it.
+* The party that receives it is told **which role it is for**. `addressee` is
+  required and never inferred, because a note whose addressee is guessed is one the
+  judge may read as work for itself — so a note addressed to the worker's task is
+  presented to the judge as an update to the *worker's* task.
+* A `criterion` it carries enters the acceptance criteria that conversation's judge
+  decides against, at both of `onejudge`'s judging sites, rather than appearing
+  only as narration.
+* **Undelivered is an error.** A note arriving once the node's dispatch has
+  completed is refused, in the conversation's own words — which name how it ended
+  and what the caller can do instead — and the run records that non-delivery as an
+  `edit-rejected` and a planner surface, exactly as any other refused edit. The
+  silence it replaces has its own measured price: a note reached a node after the
+  worker had reported completion, was accepted with nothing said, the worker did
+  another forty minutes of correct work, and the node was failed for a completion
+  report that preceded its own subsequent commits.
+
+A note is asked of the member the node's **last** dispatch reported, live or not.
+That is what makes the refusal the conversation's own rather than this crate's
+guess that there was nothing to ask: a settled member answers with the outcome the
+run recorded for it. A node no dispatch has ever reported a member for is the one
+case this crate composes itself, and it says which case it is.
+
+**`context` and `amend` are unchanged**, in name and in meaning. A note does not
+move the node's stored bar: the criterion it binds is in force for the conversation
+it was delivered into, which is the conversation whose verdict the manager is
+correcting, and `amend` is still the op for a ruling that has to survive a
+re-dispatch. That the two are different ops is the whole of the distinction being
+instructed rather than merely available.
+
+It is **not** on the monitor allowlist, for `amend`'s reason: a note may bind a
+criterion the node's judge decides against, which is a decomposition decision the
+observer's own persona reserves to the planner. The observer keeps `context`, which
+reaches the worker and binds nothing.
+
+**On this crate's own surface, not only in the envelope's vocabulary.**
+`onepipeline::note::deliver(&RunPaths, node, &Note)` is the same delivery a
+consumer composing this engine makes without writing JSON — and it *is* the op: it
+submits through the same channel, is judged by the same reconciler, and is recorded
+once, so the two spellings cannot come to mean different things. It answers
+`Delivered::To(Reached)` — which party took it — or `Delivered::Queued` for an
+envelope the run's reconciler had not answered inside the reply timeout, which is
+durable and is not an instruction to send it again.
+
+`note` arrives with a **minor** version bump, cut by `release-plz` from the `feat`
+commit that introduces it, exactly as entries 39, 40 and 41 did.
+
+**What this crate does today is the block below, and the block is the source.**
+`tests/contract.rs` parses it out of this file and holds it against the types: the
+op named here must be one this build accepts and the contract's own list does not,
+must round-trip as written, and must be allowed for exactly the authors named; a
+blank note and an unusable criterion must be refused at the envelope's boundary;
+and the dispositions must be exactly the ones the seam's own `Accepted` carries.
+`tests/e2e/note.rs` drives the whole seam against the real `oneagentgraph` and a
+real two-party conversation.
+
+```json
+{
+  "ops": [
+    {
+      "op": "note",
+      "id": "build",
+      "addressee": "worker",
+      "text": "the reviewer asked for a smaller diff; stop editing src/old.rs",
+      "criterion": "`version.txt` holds `v: 2`"
+    },
+    {
+      "op": "note",
+      "id": "build",
+      "addressee": "supervisor",
+      "text": "the four comment lines are out of scope: do not fail the node for them"
+    }
+  ],
+  "monitor_may_issue": [],
+  "addressees": ["worker", "supervisor", "both"],
+  "reached": ["queued", "worker", "supervisor", "judged-with"],
+  "refused": [
+    {"op": "note", "id": "build", "addressee": "worker", "text": "   "},
+    {"op": "note", "id": "build", "addressee": "sponsor", "text": "ship it"},
+    {"op": "note", "id": "build", "text": "ship it"}
+  ],
+  "api": {
+    "module": "onepipeline::note",
+    "call": "deliver",
+    "answers": ["To", "Queued"]
+  }
+}
+```

@@ -32,6 +32,7 @@ use onepipeline::filter::{
     EventFilter, Filters, LaunchConfig, Matcher, LAUNCH_CONFIG_SCHEMA_VERSION,
     LAUNCH_CONFIG_SCHEMA_VERSIONS_READ,
 };
+use onepipeline::note::{Addressee, Delivered, Note, Reached};
 use onepipeline::plan::{
     Node, NodeKind, Plan, Resume, Step, AMENDMENT_HEADING, CROSS_REPO_REFERENCES_HEADING,
     PLANNER_CONTEXT_HEADING, PLAN_SCHEMA_VERSION, PLAN_SCHEMA_VERSIONS_READ,
@@ -1265,6 +1266,7 @@ fn op_of(command: &Edit) -> &'static str {
         Edit::Complete { .. } => "complete",
         Edit::Context { .. } => "context",
         Edit::Amend { .. } => "amend",
+        Edit::Note { .. } => "note",
         Edit::Finding { .. } => "finding",
     }
 }
@@ -3523,4 +3525,146 @@ fn the_readmes_interface_claims_match_the_code_they_describe() {
             "`{view}` is not a command the binary offers"
         );
     }
+}
+
+/// The note delivery seam this build carries **beyond** the contract is exactly
+/// what the divergence record proposes.
+///
+/// The contract is committed as approved and names none of it, so entry 51 is the
+/// only place it is written down — and a divergence nothing gates quietly stops
+/// being true. The entry's own block is the source: what parses here is what a
+/// planner would type, and the refusals are what a planner would be told.
+#[test]
+fn the_note_delivery_surface_is_what_the_divergence_record_names() {
+    let block = divergence_block("51.");
+
+    // The op, as the wire carries it, and the authors it is for.
+    let fixtures: Vec<Value> =
+        serde_json::from_value(block["ops"].clone()).expect("entry 51 names the op it adds");
+    let monitor_may: BTreeSet<String> = serde_json::from_value(block["monitor_may_issue"].clone())
+        .expect("entry 51 says which of them the monitor may issue");
+    assert!(!fixtures.is_empty(), "{block}");
+    for fixture in &fixtures {
+        let op = fixture["op"].as_str().expect("the fixture names its op");
+        assert!(
+            !OPS.contains(&op),
+            "`{op}` is on the contract's own list, so it is no divergence"
+        );
+        let edit: Edit = serde_json::from_value(fixture.clone())
+            .unwrap_or_else(|e| panic!("`{op}` deserializes: {e}"));
+        assert_eq!(op_of(&edit), op, "`{op}` deserialized into another variant");
+        assert_eq!(
+            &serde_json::to_value(&edit).expect("serializes"),
+            fixture,
+            "`{op}` round-trips unchanged"
+        );
+        allows(Author::Planner, &edit)
+            .unwrap_or_else(|e| panic!("the planner was refused `{op}`: {e}"));
+        let verdict = allows(Author::Monitor, &edit);
+        if monitor_may.contains(op) {
+            verdict.unwrap_or_else(|e| panic!("the monitor was refused `{op}`: {e}"));
+            continue;
+        }
+        // Refused, and the refusal names the op and what to do instead — an
+        // observer told only "no" has nothing to act on.
+        let refusal = verdict
+            .expect_err(&format!("the monitor was allowed `{op}`"))
+            .to_string();
+        assert!(
+            refusal.contains(op) && refusal.contains("Surface it to the planner"),
+            "the refusal does not name `{op}` and what to do instead: {refusal}"
+        );
+    }
+
+    // The whole envelope a planner sends, parsed as one: a `note` is an edit like
+    // any other and travels the same way.
+    let envelope: Reply =
+        serde_json::from_value(json!({"version": 1, "commands": block["ops"].clone()}))
+            .expect("entry 51's ops travel in a reply envelope");
+    assert_eq!(envelope.commands.len(), fixtures.len());
+
+    // Every addressee the seam has, spelled as the entry writes them — and the
+    // spelling is the seam's own rather than a second one this crate keeps.
+    let addressees: Vec<String> = serde_json::from_value(block["addressees"].clone())
+        .expect("entry 51 names the addressees");
+    for named in &addressees {
+        let parsed: Addressee = serde_json::from_value(json!(named))
+            .unwrap_or_else(|e| panic!("`{named}` is an addressee: {e}"));
+        assert_eq!(parsed.as_str(), named, "`{named}` round-trips");
+    }
+    assert!(addressees.contains(&"worker".to_string()));
+
+    // And every disposition, likewise: what a delivery can answer is the set the
+    // record carries, so a party added upstream cannot land here unnamed.
+    let reached: Vec<String> =
+        serde_json::from_value(block["reached"].clone()).expect("entry 51 names the dispositions");
+    let carried = [
+        Reached::Queued,
+        Reached::Worker,
+        Reached::Supervisor,
+        Reached::JudgedWith {
+            completion_reason: "the work is done".into(),
+        },
+    ];
+    assert_eq!(
+        carried
+            .iter()
+            .map(|one| one.as_str().to_string())
+            .collect::<Vec<_>>(),
+        reached,
+        "entry 51 names dispositions this build does not carry, or the other way round"
+    );
+    for one in &carried {
+        let written = serde_json::to_value(one).expect("a disposition serializes");
+        let read: Reached = serde_json::from_value(written.clone()).expect("and reads back");
+        assert_eq!(&read, one, "{written} did not round-trip");
+    }
+
+    // The boundary: an envelope this seam cannot act on is refused where it
+    // arrives, by the seam's own newtypes, rather than somewhere later.
+    let refused: Vec<Value> =
+        serde_json::from_value(block["refused"].clone()).expect("entry 51 names what is refused");
+    for fixture in &refused {
+        let read = serde_json::from_value::<Edit>(fixture.clone());
+        assert!(
+            read.is_err(),
+            "the envelope's boundary accepted a note it cannot deliver: {fixture}"
+        );
+    }
+
+    // The same delivery on this crate's own surface, named as the entry names it.
+    // A note carrying an unusable criterion is unrepresentable here too, so the
+    // two spellings refuse the same things.
+    let api = &block["api"];
+    assert_eq!(api["module"].as_str(), Some("onepipeline::note"));
+    let note = Note::to(Addressee::Worker, "stop editing src/old.rs");
+    assert!(!note.binds());
+    assert_eq!(note.addressee, Addressee::Worker);
+    let bound = note
+        .clone()
+        .binding("`version.txt` holds `v: 2`")
+        .expect("a criterion the seam accepts");
+    assert!(bound.binds());
+    assert!(
+        Note::new(Addressee::Worker, "  ").is_err(),
+        "a blank note is not a note"
+    );
+    // The two answers, by the names the entry proposes.
+    let answers: Vec<String> =
+        serde_json::from_value(api["answers"].clone()).expect("entry 51 names what it answers");
+    let spelled = [
+        format!("{:?}", Delivered::To(Reached::Worker)),
+        format!("{:?}", Delivered::Queued),
+    ];
+    for (answer, spelled) in answers.iter().zip(spelled.iter()) {
+        assert!(
+            spelled.starts_with(answer),
+            "entry 51 names `{answer}`, which this build spells `{spelled}`"
+        );
+    }
+    assert_eq!(answers.len(), spelled.len());
+    // The call itself is the one the entry names, asked of the compiler rather
+    // than of a list beside it.
+    assert_eq!(api["call"].as_str(), Some("deliver"));
+    let _: fn(&RunPaths, &str, &Note) -> onepipeline::Result<Delivered> = onepipeline::note::deliver;
 }
