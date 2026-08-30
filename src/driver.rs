@@ -1901,25 +1901,37 @@ fn reply(args: &ReplyArgs) -> Result<i32> {
 
 /// What one submitted envelope became.
 ///
-/// Three answers rather than an exit code, because two callers read it: `reply`
+/// An answer rather than an exit code, because two callers read it: `reply`
 /// prints the state it names and returns the code that goes with it, and
-/// [`crate::note::deliver`] reads what the delivery answered out of it. The
-/// operations ride along where the submitting process is the one that compiled
-/// them — a caller that has them needs no second read of the record to find out
-/// what it just did.
+/// [`crate::note::deliver`] reads what the delivery answered out of it.
+///
+/// **Applied is two variants and not one with an `Option`**, because which
+/// process applied the commands decides both of the other two facts and they do
+/// not vary independently: the process that compiled them has them in hand and
+/// has no queue id, and the one that handed them to the run's reconciler has the
+/// queue id and never sees what they became. A single variant carrying both as
+/// options would spell two more states — a local apply with nothing compiled, a
+/// reconciled one carrying operations — that no path can reach and every reader
+/// would still have to answer for.
 enum Submitted {
     /// A commandless verdict, queued for whichever reader the run owes one.
     Answered {
         /// The reply's id in the channel.
         reply: u64,
     },
-    /// Every command applied.
-    Applied {
-        /// `0` where this process applied them itself, and the queue id where the
-        /// run's own reconciler did.
+    /// Every command applied **by this process**, which took the run's ownership
+    /// lock because nothing was driving it.
+    AppliedHere {
+        /// What they compiled to. In hand, so a caller needs no second read of
+        /// the record to find out what it just did.
+        operations: Vec<edits::Operation>,
+    },
+    /// Every command applied **by the run's own reconciler**, which is the
+    /// writer while a driver holds the run. What they became is in its record
+    /// rather than here.
+    AppliedByRun {
+        /// The reply's id in the channel.
         reply: u64,
-        /// What they compiled to, where this process is what compiled them.
-        operations: Option<Vec<edits::Operation>>,
     },
     /// Accepted and durable, and not reconciled within the reply timeout. Still
     /// queued: **not** an instruction to send it again.
@@ -1936,7 +1948,13 @@ fn submit(paths: &RunPaths, envelope: &Reply) -> Result<i32> {
             println!("{}", json!({"reply": reply, "state": "delivered"}));
             Ok(EXIT_SUCCESS)
         }
-        Submitted::Applied { reply, .. } => {
+        // `0` is this process's own apply: there was no queue to put it in, so
+        // there is no id in the channel to name.
+        Submitted::AppliedHere { .. } => {
+            println!("{}", json!({"reply": 0, "state": "applied"}));
+            Ok(EXIT_SUCCESS)
+        }
+        Submitted::AppliedByRun { reply } => {
             println!("{}", json!({"reply": reply, "state": "applied"}));
             Ok(EXIT_SUCCESS)
         }
@@ -1972,10 +1990,7 @@ pub(crate) fn deliver_note_envelope(
     let (id, text) = (id.clone(), text.clone());
     match submit_envelope(paths, envelope)? {
         // Compiled here, so what it answered is in hand.
-        Submitted::Applied {
-            operations: Some(operations),
-            ..
-        } => reached_in(&operations)
+        Submitted::AppliedHere { operations } => reached_in(&operations)
             .map(crate::note::Delivered::To)
             .ok_or_else(|| {
                 Error::Refused(format!(
@@ -1984,9 +1999,7 @@ pub(crate) fn deliver_note_envelope(
             }),
         // Compiled by the run's own reconciler, which recorded it: the record is
         // written before the outcome this returned on, so it is there to be read.
-        Submitted::Applied {
-            operations: None, ..
-        } => last_note_delivered(paths, &id, &text)
+        Submitted::AppliedByRun { .. } => last_note_delivered(paths, &id, &text)
             .map(crate::note::Delivered::To)
             .ok_or_else(|| {
                 Error::Refused(format!(
@@ -2218,9 +2231,8 @@ fn submit_envelope(paths: &RunPaths, envelope: &Reply) -> Result<Submitted> {
             }
             lock.release();
             channel.answer_if_verdict(envelope)?;
-            Ok(Submitted::Applied {
-                reply: 0,
-                operations: Some(compiled),
+            Ok(Submitted::AppliedHere {
+                operations: compiled,
             })
         }
         Err(Error::Locked { .. }) => {
@@ -2230,10 +2242,7 @@ fn submit_envelope(paths: &RunPaths, envelope: &Reply) -> Result<Submitted> {
                 if let Some(outcome) = channel.outcome_of(id) {
                     channel.answer_if_verdict(envelope)?;
                     if outcome.applied {
-                        return Ok(Submitted::Applied {
-                            reply: id,
-                            operations: None,
-                        });
+                        return Ok(Submitted::AppliedByRun { reply: id });
                     }
                     return Err(Error::Refused(
                         outcome
