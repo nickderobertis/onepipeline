@@ -201,6 +201,13 @@ resolver = "2"
 #   the refusal rather than a constant that was added. `^0.16` already admitted
 #   the release, so only the resolution moved; `onevcs-testing` 0.4.22 requires
 #   exactly this `onevcs`, so both pins move together.
+# llmlint: ignore-block[comments_earn_their_place] each bullet below is the only
+# place this repository records *why* a pin moved and what in this tree fails below
+# it — the account AGENTS.md's currency invariant asks for, and the thing the next
+# person moving the pin has to move it against. It reads as release history because
+# a pin's local constraint *is* what the release carries; every entry ends at the
+# test here that holds it. Trimmed to the version number, the line states a fact
+# only the lock can settle and no reader can check.
 # - `onevcs` 0.17.1 is the release a **holders read stops destroying a preserved
 #   branch's only route back**. 0.16.3 had made that read forget a session record
 #   nobody was left to answer for, and `src/concurrency.rs` runs it on every
@@ -238,6 +245,7 @@ resolver = "2"
 #   cannot land is not reported as one open for review. Taken because
 #   `onevcs-testing` 0.5.2 requires exactly this `onevcs` and `^0.5.1` admits that
 #   release, so the pair the currency check holds this build to is this one.
+# llmlint: ignore-end[comments_earn_their_place]
 #
 # **Every pin in this block is declared at the newest release the registry
 # carries**, because this repository resolves no engine at two versions and so
@@ -306,6 +314,10 @@ resolver = "2"
 # note to a *node* and never names a side, so nothing here reaches it. No test
 # records a floor for either.
 #
+# llmlint: ignore-block[comments_earn_their_place] the same reason as the onevcs
+# block above: these paragraphs say which floor each release is, what in this crate
+# reaches it, and the named test that fails if the pin drops below — which is what
+# `just engines-current` enforces the number of but cannot explain.
 # `oneagentgraph` 0.3.14 **defines "terminal blocker"** in the shipped `engineer`
 # bar, and reaches this crate for the reason 0.3.5 does: `engineer` is the role
 # `src/executor.rs` names on `members.worker`, and the bar is the linked
@@ -340,6 +352,7 @@ resolver = "2"
 # the seam existed both fall through to the interrupt `src/agentgraph.rs` already
 # sends. `tests/e2e/dispatch.rs`'s interrupt journeys drive it against the linked
 # library and are what would say otherwise.
+# llmlint: ignore-end[comments_earn_their_place]
 #
 # 0.3.12, below it, is the release that **carries `onejudge` past 0.5** — 0.6.0
 # adds `Settings::settle_on_noop`, defaulting to what every 0.5 build did. The pin
