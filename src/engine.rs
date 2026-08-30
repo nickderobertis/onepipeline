@@ -2234,8 +2234,11 @@ impl MemberDeath {
 /// record readable rather than silently unmatchable.
 #[derive(Debug, Default)]
 struct TurnRecords {
-    /// The turn each member last opened.
-    open: BTreeMap<String, u64>,
+    /// The turn each member last **started**, kept whether or not it went on to
+    /// close: a completion is recorded beside this rather than taken out of it,
+    /// because the two together are the question — the turn a member was last on,
+    /// and whether that same turn closed billed.
+    last_started: BTreeMap<String, u64>,
     /// The members and turns whose close carried a **non-zero**
     /// [`USAGE_FIGURES`] figure, which is the whole of what "billed" means here:
     /// a close carrying no usage, or a usage whose every figure is nought, is
@@ -2244,7 +2247,7 @@ struct TurnRecords {
 }
 
 // llmlint: ignore-block[changed_behavior_has_e2e] the half a producer reaches *is* a
-// journey: a close with no opening leaves a member with no turn open, so the death stands,
+// journey: a close with no start leaves a member with no turn recorded, so the death stands,
 // which is what `lifecycle::a_dispatch_whose_member_died_is_settled_from_the_classification_its_producer_published`
 // and `boundary::a_published_death_decides_the_settlement_ahead_of_the_sentence_the_dispatch_exits_on`
 // settle `provider-failed` over. The rest are the trust boundary — a turn number that is
@@ -2268,7 +2271,7 @@ impl TurnRecords {
         };
         let kind = &envelope.kind.0;
         if kind == oneagentgraph::event::EventKind::TurnStarted.as_str() {
-            self.open.insert(member, turn);
+            self.last_started.insert(member, turn);
         } else if kind == oneagentgraph::event::EventKind::TurnCompleted.as_str()
             && has_a_usage_figure(envelope.payload.get("usage"))
         {
@@ -2276,15 +2279,15 @@ impl TurnRecords {
         }
     }
 
-    /// Whether the turn this member had open is one its own record says
+    /// Whether the turn this member was last on is one its own record says
     /// completed, and reported usage for.
     ///
-    /// The turn the member **had open**, because a death names none: a
-    /// `member-died` says which member went and why, so the turn it is about is
-    /// the one that member was on. A member with no turn open has no record to
-    /// reconcile against, and a death naming one stands.
+    /// The turn it was **last on**, because a death names none: a `member-died`
+    /// says which member went and why, so the turn it is about is the one that
+    /// member had reached. A member that started none has no record to reconcile
+    /// against, and a death naming one stands.
     fn contradicts_a_death_of(&self, member: &str) -> bool {
-        self.open
+        self.last_started
             .get(member)
             .is_some_and(|turn| self.with_billed_usage.contains(&(member.to_owned(), *turn)))
     }
