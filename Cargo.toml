@@ -264,6 +264,38 @@ resolver = "2"
 # move of its release declaration into `release-targets.toml` — so no test here
 # records one.
 #
+# `oneagentgraph` 0.3.14 **defines "terminal blocker"** in the shipped `engineer`
+# bar. Until it, a judge released the conversation on whatever the worker called
+# terminal, keeping the done-when verdict false — so a dispatch that lost one
+# command to a timeout, or one tool call to a network that would have answered on
+# the retry, was settled `failed` and its finished work discarded when one more
+# turn would have cleared it. 0.3.14 says terminal is what nothing the worker can
+# do inside the run would clear, and rules the retryable failures out by name.
+# It reaches this crate for the reason 0.3.5 does: `engineer` is the role
+# `src/executor.rs` names on `members.worker`, and the bar is the linked
+# library's file, so the resolution decides which one a judge is handed.
+# `src/agentgraph.rs`'s
+# `the_linked_oneagentgraph_releases_a_dispatch_only_on_a_blocker_it_cannot_retry_past`
+# holds it, and asserts the release the definition governs as well as the
+# definition, so a resolution that answered the same defect by dropping the
+# release outright — stranding a genuinely blocked worker — fails there too.
+#
+# The **other half of 0.3.14 is not assertable from here, and is written down
+# instead**. `src/judge.rs` now reads a producer's provider-failure
+# classification against the oneharness record for the same turn, and declines to
+# publish `member-died` where the record says that turn completed and was billed;
+# `oneharness-core` 0.12.2, which the lock below carries for the same reason,
+# stops the producer stamping the classification in the first place. Both matter
+# to this crate directly — `graphs/node-scope.yaml`'s worker is a `kind: onejudge`
+# member, so every dispatch runs through that judge, and `src/lifecycle.rs`
+# settles a node `failed` on the death it publishes, which is how a node was lost
+# on a `rate_limit` while its own turn had exited `0` and billed. Neither seam is
+# public — `Reconciled` and `is_refusal`'s effect are both internal, and
+# `crates/testfakes`'s double writes its `RunResult` as a struct literal rather
+# than through the constructor that reconciles — so no offline test here observes
+# either, and the record below is what says why a resolution beneath them is a
+# build this crate does not work.
+#
 # 0.3.12, below it, is the release that **carries `onejudge` past 0.5** — 0.6.0
 # adds `Settings::settle_on_noop`, defaulting to what every 0.5 build did. The pin
 # below must be the version that pin resolves to, because `src/report.rs` coerces

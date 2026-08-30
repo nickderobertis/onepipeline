@@ -2319,6 +2319,36 @@ mod tests {
         assert_eq!(read.schema_version, 1);
     }
 
+    /// The `engineer` bar as the judge reviewing a dispatch is handed it, with
+    /// its wrapping collapsed.
+    ///
+    /// Read through [`merge`] rather than off the YAML, because the merged
+    /// config is what a judge is handed; a bar that arrived some other way is
+    /// not the one under review. Every item named is one the resolutions *below*
+    /// each floor asserted against this string also export, so a stale lock
+    /// fails those tests naming the resolution to move rather than failing to
+    /// compile on a symbol that was added.
+    ///
+    /// [`merge`]: oneagentgraph::persona::merge
+    fn shipped_engineer_stance() -> String {
+        let document = oneagentgraph::persona::shipped("engineer")
+            .expect("the linked oneagentgraph ships the role this crate dispatches under");
+        let persona = oneagentgraph::persona::Persona::parse(document, "engineer")
+            .expect("the shipped engineer role loads");
+        // An empty base, so what the merge leaves under `user:` is the shipped
+        // role's own bar rather than an operator's layered under it.
+        let effective = oneagentgraph::persona::merge("{}\n", "an empty base config", &persona)
+            .expect("the shipped engineer role layers onto a base config");
+        // A bar is a wrapped block scalar, so match on its words and not its
+        // line breaks.
+        effective["user"]["persona"]
+            .as_str()
+            .expect("the engineer role hands its judge a stance")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
     /// The linked `oneagentgraph` holds the `engineer` bar to what a dispatch
     /// can settle inside its own run.
     ///
@@ -2331,32 +2361,13 @@ mod tests {
     /// fail its review. The requirement is above that floor, so a resolution
     /// below it is behind the manifest too and moving the lock is the fix.
     ///
-    /// Read through [`merge`] rather than off the YAML, because the merged
-    /// config is what a judge is handed; a bar that arrived some other way is
-    /// not the one under review. Both halves are asserted — that the demand is
-    /// gone, and that what replaced it still reviews the change the member
-    /// produced — so a resolution that softened the bar rather than narrowing
-    /// it fails here too.
-    ///
-    /// [`merge`]: oneagentgraph::persona::merge
+    /// Both halves are asserted — that the demand is gone, and that what
+    /// replaced it still reviews the change the member produced — so a
+    /// resolution that softened the bar rather than narrowing it fails here too.
+    /// [`shipped_engineer_stance`] says where the bar is read from and why.
     #[test]
     fn the_linked_oneagentgraph_holds_the_engineer_bar_to_what_a_dispatch_can_prove() {
-        let document = oneagentgraph::persona::shipped("engineer")
-            .expect("the linked oneagentgraph ships the role this crate dispatches under");
-        let persona = oneagentgraph::persona::Persona::parse(document, "engineer")
-            .expect("the shipped engineer role loads");
-        // An empty base, so what the merge leaves under `user:` is the shipped
-        // role's own bar rather than an operator's layered under it.
-        let effective = oneagentgraph::persona::merge("{}\n", "an empty base config", &persona)
-            .expect("the shipped engineer role layers onto a base config");
-        // A bar is a wrapped block scalar, so match on its words and not its
-        // line breaks.
-        let stance = effective["user"]["persona"]
-            .as_str()
-            .expect("the engineer role hands its judge a stance")
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
+        let stance = shipped_engineer_stance();
 
         assert!(
             !stance.contains("proven end to end"),
@@ -2377,6 +2388,64 @@ mod tests {
                  narrowing what it may ask for has softened what it must:\n{stance}"
             );
         }
+    }
+
+    /// The linked `oneagentgraph` releases a dispatch on a blocker only when the
+    /// dispatch could not have cleared it by running the thing again.
+    ///
+    /// The same `engineer` bar as the test above, and the same reason it reaches
+    /// this crate: it is the linked library's file, so the resolution decides
+    /// which bar a judge is handed. Until 0.3.14 that bar released the
+    /// conversation on whatever the worker *called* terminal, with the final
+    /// verdict false — so a run that timed out once, or lost a tool call to a
+    /// network that would have answered on the retry, was settled `failed` and
+    /// its finished work discarded, when one more turn would have cleared it.
+    /// 0.3.14 defines the word: terminal is what nothing the worker can do
+    /// inside the run would clear, and a retryable failure is explicitly not it.
+    ///
+    /// Both halves again. The narrowed definition has to be *there*, and the
+    /// release it governs has to still be there — a resolution that answered the
+    /// same defect by dropping the terminal-blocker release outright would strand
+    /// a genuinely blocked worker in a conversation it cannot leave, which is the
+    /// opposite mistake and fails here too.
+    #[test]
+    fn the_linked_oneagentgraph_releases_a_dispatch_only_on_a_blocker_it_cannot_retry_past() {
+        let stance = shipped_engineer_stance();
+
+        assert!(
+            !stance.contains(
+                "When the worker clearly reports a terminal blocker it cannot resolve within \
+                 this run"
+            ),
+            "the linked oneagentgraph's `engineer` bar still releases a dispatch on whatever the \
+             worker calls terminal, so a run this engine drives is settled `failed` on a timed \
+             out command or a tool call that would have answered on the retry: the definition \
+             ships in 0.3.14, and `Cargo.toml` requires the newest release, which is above that \
+             floor — so `Cargo.lock` is behind the manifest too and `cargo update -p \
+             oneagentgraph` is the whole of the fix:\n{stance}"
+        );
+        assert!(
+            stance.contains(
+                "A blocker is terminal only when nothing the worker can do inside this run would \
+                 clear it"
+            ),
+            "the linked oneagentgraph's `engineer` bar does not say what makes a blocker \
+             terminal, so nothing holds a judge to the distinction: `cargo update -p \
+             oneagentgraph`, which `just engines-current` names without running this \
+             suite:\n{stance}"
+        );
+        assert!(
+            stance.contains("anything else the worker could simply run again are not terminal"),
+            "the linked oneagentgraph's `engineer` bar defines a terminal blocker without ruling \
+             the retryable failures out of it, which is the half that costs a node its finished \
+             work:\n{stance}"
+        );
+        assert!(
+            stance.contains("Begin that verdict's reason with `terminal blocker reported:`"),
+            "the linked oneagentgraph's `engineer` bar no longer releases a genuinely blocked \
+             worker at all, so narrowing what counts as terminal has stranded the case it was \
+             narrowed around:\n{stance}"
+        );
     }
 
     /// An envelope is the same value whichever way it crossed.
