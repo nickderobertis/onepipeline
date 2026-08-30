@@ -505,11 +505,26 @@ fn offer(path: &Path, document: &Value) -> std::result::Result<Vec<Reported>, Un
     // draining. Each handle is dropped at its bound, which is what stops a check
     // that keeps writing rather than leaving it blocked on a pipe nobody reads.
     let mut out = child.stdout.take();
-    let reading = std::thread::spawn({
-        let mut err = child.stderr.take();
+    let mut err = child.stderr.take();
+    let reading = std::thread::Builder::new()
         // Dropped inside the thread, at its bound, for the reason above.
-        move || err.as_mut().map(bounded).unwrap_or_default()
-    });
+        .spawn(move || err.as_mut().map(bounded).unwrap_or_default())
+        .map_err(|error| {
+            // A host that cannot start this thread is a host this check cannot
+            // be read on: what is left is to read the two streams one after the
+            // other, which is the deadlock the thread is here to avoid. So the
+            // check is one that could not be run — and the process started for
+            // it is ended rather than left holding a pipe nobody drains.
+            let _ = child.kill();
+            let _ = child.wait();
+            cannot(
+                None,
+                format!(
+                    "{named} ran, and this process could not start the thread that reads its \
+                     stderr, so nothing here can read what it answered: {error}"
+                ),
+            )
+        })?;
     let stdout = out.as_mut().map(bounded).unwrap_or_default();
     drop(out);
     let stderr_bytes = reading.join().unwrap_or_default();
