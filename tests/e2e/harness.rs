@@ -1844,7 +1844,7 @@ impl World {
             &self
                 .store()
                 .join("tasks")
-                .join(project)
+                .join(project_file(project))
                 .join(format!("{file}.md")),
             &[
                 ("title", json!("a task of another plan")),
