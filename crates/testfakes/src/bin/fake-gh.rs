@@ -581,7 +581,17 @@ fn list(args: &[String], dir: &Path) -> ExitCode {
         .filter(|change| change.repo == flag("--repo"))
         .filter(|change| change.head == flag("--head"))
         .filter(|change| change.base == flag("--base"))
-        .filter(|change| recorded(dir, &change.number.to_string()) == Some(Change::Open))
+        // A **draft** is open, which is what the host reports and what makes a
+        // second publication of the same branch adopt it rather than try to open
+        // a second change request beside it — which is how a draft comes never to
+        // be lifted. `--state open` selects it on the real host too: drafts are
+        // excluded by `--draft`, never by the state.
+        .filter(|change| {
+            matches!(
+                recorded(dir, &change.number.to_string()),
+                Some(Change::Open | Change::Draft)
+            )
+        })
         .map(|change| {
             let head = head_of(dir, &change);
             serde_json::json!({

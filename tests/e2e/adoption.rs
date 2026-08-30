@@ -2304,3 +2304,330 @@ fn landing_commit(world: &World, run: &str, node: &str) -> String {
         .and_then(|event| event["payload"]["sha"].as_str().map(str::to_string))
         .unwrap_or_else(|| panic!("nothing recorded where {node}'s work landed"))
 }
+
+/// The rules this host publishes under when a journey needs a **change request**
+/// to exist at all.
+///
+/// A draft is a state of a change request, so `local-direct` — which reaches the
+/// base with git alone and opens none — has nothing to draft and `onevcs` refuses
+/// a reason under it by name. The consumer therefore publishes `change-auto`,
+/// which is also the policy that would arm the host's own merge on the change if
+/// anything let it: "nothing merges a draft" is only worth asserting where
+/// something would have.
+///
+/// Everything else stays `local-direct`, because the *dependency's* work has to
+/// really reach its base branch for `onevcs` to resolve it as landed and answer
+/// anything about a release of it at all — and a `change-*` publication here
+/// lands through the `gh` stand-in, which moves no git ref.
+fn consumer_opens_a_change(world: &World) {
+    std::fs::write(
+        world.onevcs_home().join("rules.yml"),
+        "version: 3\n\
+         rules:\n\
+         \x20 - match: {host: github.com, owner: owner, name: service}\n\
+         \x20   publication: change-auto\n\
+         \x20   approvals: none\n\
+         default:\n\
+         \x20 publication: local-direct\n\
+         \x20 approvals: none\n",
+    )
+    .expect("the rules file is written");
+}
+
+/// The two repositories every draft journey needs, publishing the way
+/// [`consumer_opens_a_change`] describes.
+fn two_repositories_opening_a_change(world: &World) -> (Repository, Repository) {
+    let (engine, consumer) = two_repositories(world);
+    consumer_opens_a_change(world);
+    (engine, consumer)
+}
+
+/// Every `gh` invocation this world's stand-in recorded, as its argument list.
+fn gh_calls(world: &World) -> Vec<Vec<String>> {
+    world
+        .invocations()
+        .into_iter()
+        .filter(|call| call["tool"] == "gh")
+        .filter_map(|call| {
+            Some(
+                call["args"]
+                    .as_array()?
+                    .iter()
+                    .filter_map(|arg| arg.as_str().map(str::to_string))
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+/// One node's newest settlement.
+fn settlement_of(world: &World, run: &str, node: &str) -> Value {
+    world
+        .events_of(run, "node-settled")
+        .into_iter()
+        .filter(|event| event["labels"]["node"] == node)
+        .next_back()
+        .unwrap_or_else(|| panic!("{node} has not settled"))
+}
+
+/// A fast-adoption node whose awaited release **has not happened** goes as far as
+/// it can and stops: the change request opens as a draft carrying the reason, the
+/// node settles `complete-but-draft`, and nothing merges it.
+///
+/// The failure this closes is the worst one available, because it is a success:
+/// the node used to settle `done` and the host used to land its change, with the
+/// temporary git pin it was launched against now permanent in a base branch and
+/// no reader able to tell it had ever been temporary.
+///
+/// The run is the other half. It is **not finished** — its own views say so and
+/// say what each node is waiting on — because a run that reported settled here
+/// would be a run whose operator has no reason to look again.
+#[test]
+fn a_fast_node_whose_release_is_not_out_settles_complete_but_draft_and_nothing_merges_it() {
+    let world = watching("adoption-draft-held");
+    world.write_graphs();
+    let (engine_repo, _consumer) = two_repositories_opening_a_change(&world);
+    let (script, answer) = world.probe_in(&engine_repo, ENGINE);
+    world.releases(&automated(&script));
+    // The version that was out when the engine's work landed, and the version
+    // that is out when the consumer publishes: the same one. Nothing has been
+    // released since, which is the whole condition.
+    releases_at(&answer, "0.1.0");
+
+    let run = start(
+        &world,
+        "adoption-draft-held",
+        vec![engine(), consumer(Some("fast"))],
+    );
+    world.until("both nodes to settle", |world| {
+        world.events_of(&run, "node-settled").len() == 2
+    });
+
+    // The node is complete and is not done: every step ran and the branch is
+    // published, and the one thing left is outside this run.
+    let settled = settlement_of(&world, &run, "consumer");
+    assert_eq!(
+        settled["payload"]["status"],
+        json!("complete-but-draft"),
+        "the node did not settle as a draft: {settled}"
+    );
+    assert_eq!(settled["payload"]["outcome"], json!("change-draft"));
+    assert_eq!(settled["payload"]["landing"], json!("unlanded"));
+    let detail = settled["payload"]["detail"]
+        .as_str()
+        .expect("a draft settlement says why");
+    assert!(
+        detail.contains("github.com/owner/engine") && detail.contains("crate"),
+        "the settlement does not name the dependency and the target it awaits: {detail}"
+    );
+
+    // The draft was **requested of the host**, and the reason travelled with the
+    // publication rather than being written into the change request's body.
+    let calls = gh_calls(&world);
+    let created: Vec<&Vec<String>> = calls
+        .iter()
+        .filter(|call| call.first().map(String::as_str) == Some("pr"))
+        .filter(|call| call.get(1).map(String::as_str) == Some("create"))
+        .collect();
+    assert_eq!(created.len(), 1, "{created:?}");
+    assert!(
+        created[0].iter().any(|arg| arg == "--draft"),
+        "the change request was not opened as a draft: {:?}",
+        created[0]
+    );
+
+    // And nothing merged it. `change-auto` is the policy that asks the host to
+    // land the change once its checks pass, so a publication that did not stop
+    // here would have.
+    assert!(
+        !calls
+            .iter()
+            .any(|call| call.first().map(String::as_str) == Some("pr")
+                && call.get(1).map(String::as_str) == Some("merge")),
+        "a change held as a draft was handed to the host to merge: {calls:?}"
+    );
+    assert!(
+        !calls
+            .iter()
+            .any(|call| call.get(1).map(String::as_str) == Some("ready")),
+        "the draft was lifted while the release it waits on is still out: {calls:?}"
+    );
+
+    // The sibling's own record of the hold is in the merged store, stamped with
+    // the node it belongs to and rewritten in nothing else.
+    let drafted = world.events_of(&run, "change-drafted");
+    assert_eq!(drafted.len(), 1, "{drafted:?}");
+    assert_eq!(drafted[0]["labels"]["node"], json!("consumer"));
+    assert_eq!(
+        drafted[0]["payload"]["awaiting"],
+        json!("github.com/owner/engine")
+    );
+    assert_eq!(drafted[0]["payload"]["target"], json!("crate"));
+
+    // The **run** is not finished, and reads as waiting rather than as stalled.
+    let results = world.run(&["results", &run]);
+    results.exited(0);
+    assert!(
+        results.stdout.contains("waiting"),
+        "a run holding a draft reported as something other than waiting:\n{}",
+        results.stdout
+    );
+    assert!(
+        results.stdout.contains("complete-but-draft")
+            && results.stdout.contains("github.com/owner/engine"),
+        "`results` does not say which dependency the node waits on:\n{}",
+        results.stdout
+    );
+    let status = world.run(&["status", &run]);
+    status.exited(0);
+    assert!(
+        status.stdout.contains("complete and held as a draft")
+            && status.stdout.contains("neither stalled nor finished")
+            && status.stdout.contains("github.com/owner/engine"),
+        "`status` does not report the run as waiting on a named release:\n{}",
+        status.stdout
+    );
+    assert!(
+        !status.stdout.contains("SETTLED"),
+        "a run whose node is held as a draft reported as settled:\n{}",
+        status.stdout
+    );
+
+    // And the same state is readable through this crate's own API rather than
+    // only off a rendered line: a host that pins this engine reads the run store
+    // it writes through these, and a state only the command line could see would
+    // be one such a host has no way to act on.
+    let paths = onepipeline::views::RunPaths::under(&world.runs, &run);
+    let view = onepipeline::views::RunView::open(&paths).expect("the run reads back");
+    assert_eq!(
+        view.state
+            .statuses()
+            .get("consumer")
+            .map(|status| status.as_str()),
+        Some("complete-but-draft"),
+        "the API does not report the node as held"
+    );
+    assert!(
+        onepipeline::views::results(&view).contains("github.com/owner/engine"),
+        "the API's own rendering does not say what the node waits on"
+    );
+
+    world.run(&["stop", &run]).exited(0);
+}
+
+/// The release arrives, and the draft is lifted by a **new worker on the branch
+/// the node already published** — not by a fresh branch beside it, and not by
+/// anything a person does.
+///
+/// This is the other half of settling late, and the half that makes it
+/// recoverable rather than merely safe. The node was left complete, so what the
+/// arrival buys is one dispatch: the note names the version, the worker moves the
+/// pin, and the publication that carries no reason any more is what `onevcs`
+/// lifts the draft on. The node then settles `done` and the run finishes.
+#[test]
+fn a_release_that_arrives_puts_a_worker_back_on_the_same_branch_and_lifts_the_draft() {
+    let world = watching("adoption-draft-lifted");
+    world.write_graphs();
+    let (engine_repo, consumer_repo) = two_repositories_opening_a_change(&world);
+    let (script, answer) = world.probe_in(&engine_repo, ENGINE);
+    world.releases(&automated(&script));
+    releases_at(&answer, "0.1.0");
+    // What the host does once the change is no longer a draft: land it. Scripted
+    // from the start, so nothing about the merge changes when the draft lifts —
+    // what changes is whether a merge is asked for at all.
+    world.script("gh.merged", "");
+
+    let run = start(
+        &world,
+        "adoption-draft-lifted",
+        vec![engine(), consumer(Some("fast"))],
+    );
+    world.until("the consumer to be held as a draft", |world| {
+        settled_status(world, &run, "consumer") == Some("complete-but-draft".to_owned())
+    });
+    let held_on = branch_of(&world, &run, "consumer");
+    assert_eq!(
+        tasks_of(&world, "consumer").len(),
+        1,
+        "the node was dispatched more than once before any release arrived"
+    );
+
+    // The worker's second turn writes something the first did not, so the branch
+    // it is put back on visibly moves: this is the pin being moved, which is the
+    // whole of what the second dispatch is for.
+    world.script("consumer.work", "consumer pins the released engine 0.2.0\n");
+
+    // The release happens. Nobody replies, nobody requeues, nothing is edited.
+    releases_at(&answer, "0.2.0");
+    world.until("the run to finish", |world| {
+        settled_status(world, &run, "consumer") == Some("done".to_owned())
+    });
+
+    // A second dispatch really ran, and it ran **on the branch the draft is on**.
+    let dispatched = tasks_of(&world, "consumer");
+    assert_eq!(dispatched.len(), 2, "{dispatched:?}");
+    assert!(
+        dispatched[1].contains("## Planner context")
+            && dispatched[1].contains("github.com/owner/engine — crate 0.2.0")
+            && dispatched[1].contains("Move from the git pin to that released version"),
+        "the worker that lifts the draft was not told which version arrived:\n{}",
+        dispatched[1]
+    );
+    assert_eq!(
+        branch_of(&world, &run, "consumer"),
+        held_on,
+        "the release cut a second branch beside the change request it was meant to lift"
+    );
+
+    // The draft was lifted at the host, once, on the change the first publication
+    // opened — and only after the release, never before.
+    let calls = gh_calls(&world);
+    let readied: Vec<&Vec<String>> = calls
+        .iter()
+        .filter(|call| call.get(1).map(String::as_str) == Some("ready"))
+        .collect();
+    assert_eq!(readied.len(), 1, "{readied:?}");
+    let opened: Vec<&Vec<String>> = calls
+        .iter()
+        .filter(|call| call.get(1).map(String::as_str) == Some("create"))
+        .collect();
+    assert_eq!(
+        opened.len(),
+        1,
+        "the second dispatch opened a second change request: {opened:?}"
+    );
+    assert!(
+        world.events_of(&run, "draft-lifted").len() == 1,
+        "the sibling did not record the lift: {:?}",
+        world.kinds(&run)
+    );
+
+    // And the node is complete and undrafted: its change landed, and what reached
+    // the base is the work the *second* worker left on that branch.
+    let settled = settlement_of(&world, &run, "consumer");
+    assert_eq!(settled["payload"]["outcome"], json!("merged"), "{settled}");
+    assert_eq!(settled["payload"]["landing"], json!("landed"), "{settled}");
+    assert_eq!(
+        world.events_of(&run, "node-settled").len(),
+        3,
+        "the draft settlement and the completion are not two records of one node"
+    );
+    let _ = consumer_repo;
+}
+
+/// The word one node's newest settlement carried, or nothing if it has not
+/// settled at all.
+///
+/// Polled, so it answers rather than panicking on a node this run has not settled
+/// yet — which is every node for as long as a journey is waiting for one.
+fn settled_status(world: &World, run: &str, node: &str) -> Option<String> {
+    world
+        .events_of(run, "node-settled")
+        .into_iter()
+        .filter(|event| event["labels"]["node"] == node)
+        .next_back()?
+        .get("payload")?
+        .get("status")?
+        .as_str()
+        .map(str::to_string)
+}
