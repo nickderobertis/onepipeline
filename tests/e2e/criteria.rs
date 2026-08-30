@@ -2,11 +2,9 @@
 //! is.
 //!
 //! A criterion naming a literal value in a named file is checkable by reading
-//! that file, and one shipped negated in the code it named passed a worker, a
-//! judge, a monitor and a manager because nobody made the check. These journeys
-//! drive the compiled binary over a real repository: the branch is git's, the
-//! worktree is `onevcs`'s, and what the dispatch wrote there is what the
-//! criterion is read against.
+//! that file. These journeys drive the compiled binary over a real repository:
+//! the branch is git's, the worktree is `onevcs`'s, and what the dispatch wrote
+//! there is what the criterion is read against.
 
 // llmlint: ignore-file[e2e_not_mocked] the crate under test is the compiled binary and the
 // repository side is the real `onevcs` over real git. `oneagentgraph` is substituted at its

@@ -1,11 +1,9 @@
 //! The mechanically-checkable half of a node's review bar.
 //!
 //! A criterion that names both a file and a literal value — *"`config.yaml`
-//! carries `complete_dataset: true`"* — is checkable by reading that file, and
-//! one shipped negated in the code it named passed a worker, a judge, a monitor
-//! and a manager because nobody made the check. It is a grep, so this makes it:
-//! when a node settles, each criterion of its task is read against the tree that
-//! node's dispatch worked in.
+//! carries `complete_dataset: true`"* — is checkable by reading that file, so
+//! this reads it: when a node settles, each criterion of its task is read
+//! against the tree that node's dispatch worked in.
 //!
 //! **A mismatch is a finding and never a verdict.** A mechanical check that
 //! failed a node would be a new way for correct work to be failed on a demand
