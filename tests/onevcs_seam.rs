@@ -236,7 +236,7 @@ fn every_operation_this_crate_performs_is_served_by_the_provider_seam() {
         holding.drafts
     );
     assert!(
-        holding.merges.get(&drafted_id).is_none() && holding.made_ready.is_empty(),
+        !holding.merges.contains_key(&drafted_id) && holding.made_ready.is_empty(),
         "a change held as a draft was merged or made ready: {:?} {:?}",
         holding.merges,
         holding.made_ready

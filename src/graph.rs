@@ -1028,7 +1028,6 @@ mod tests {
         NodeStatus::Skipped,
     ];
 
-
     /// The draft settlement vocabulary this build carries is exactly what the
     /// divergence record proposes, and `docs/contract.md` names none of it.
     ///

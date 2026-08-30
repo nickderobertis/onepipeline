@@ -2365,8 +2365,7 @@ fn settlement_of(world: &World, run: &str, node: &str) -> Value {
     world
         .events_of(run, "node-settled")
         .into_iter()
-        .filter(|event| event["labels"]["node"] == node)
-        .next_back()
+        .rfind(|event| event["labels"]["node"] == node)
         .unwrap_or_else(|| panic!("{node} has not settled"))
 }
 
@@ -2628,8 +2627,7 @@ fn settled_status(world: &World, run: &str, node: &str) -> Option<String> {
     world
         .events_of(run, "node-settled")
         .into_iter()
-        .filter(|event| event["labels"]["node"] == node)
-        .next_back()?
+        .rfind(|event| event["labels"]["node"] == node)?
         .get("payload")?
         .get("status")?
         .as_str()
@@ -2688,7 +2686,9 @@ fn a_fast_node_whose_release_was_already_out_settles_done_with_no_draft() {
     assert_eq!(settled["payload"]["outcome"], json!("merged"), "{settled}");
     let calls = gh_calls(&world);
     assert!(
-        !calls.iter().any(|call| call.iter().any(|arg| arg == "--draft")),
+        !calls
+            .iter()
+            .any(|call| call.iter().any(|arg| arg == "--draft")),
         "the host was asked to hold a change whose release is out: {calls:?}"
     );
     assert!(
@@ -2756,7 +2756,9 @@ fn a_published_node_is_never_held_as_a_draft_and_settles_done_on_its_release() {
     );
     let calls = gh_calls(&world);
     assert!(
-        !calls.iter().any(|call| call.iter().any(|arg| arg == "--draft")),
+        !calls
+            .iter()
+            .any(|call| call.iter().any(|arg| arg == "--draft")),
         "the host was asked to draft a published-adoption node's change: {calls:?}"
     );
 }

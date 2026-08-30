@@ -99,14 +99,32 @@ fn live_holders_refuse_unless_acknowledged_and_stale_holders_do_not_refuse() {
     world.run(&["stop", "second"]).exited(0);
     world.release("build.go");
 
+    // A launch meeting a holder nobody is left to answer for is **not refused**,
+    // and that is the half of this pair the launcher decides.
+    //
+    // What it no longer *says* is the sibling's own decision: since `onevcs`
+    // 0.16.3 a record whose owner process has gone with nothing working inside
+    // its run root is forgotten where it is read rather than listed, so by the
+    // time this launch asks who holds the repository there is no holder to report
+    // at all. The launcher still reports a stale one where the sibling still
+    // reports one — a record its opening process is alive to answer for — which
+    // this world has no way to leave behind: every process it starts is either
+    // still driving (and so a *live* holder, which is the refusal above) or gone.
     let stale_plan = world.plan("third", &plan_of("third", vec![lifecycle()]));
-    world
-        .run_on(
-            world.cmd(&["start", &stale_plan, "--detach"]),
-            "start stale",
-        )
-        .exited(0)
-        .err_has("stale repository holder")
-        .err_has(&live_token)
-        .err_has("proceeding");
+    let past = world.run_on(
+        world.cmd(&["start", &stale_plan, "--detach"]),
+        "start stale",
+    );
+    past.exited(0);
+    assert!(
+        !past.stderr.contains("concurrent project work refused"),
+        "a holder nobody is left to answer for refused a launch:\n{}",
+        past.stderr
+    );
+    assert!(
+        !past.stderr.contains(&live_token),
+        "the sibling still reports the session whose owner is gone and whose run root \
+         nothing is working in, so this journey is no longer about what it says:\n{}",
+        past.stderr
+    );
 }

@@ -2461,6 +2461,27 @@ cannot be published while the patch stands, and the node holding it settles
 `complete-but-draft`. Both go in the same change that moves the two requirements to
 the release.
 
+**What the pin also brought, and one question for `onevcs` in it.** The commit
+carrying the draft surface sits on top of `onevcs` 0.16.3, which changed two things
+about sessions: a close now commits whatever the worktree still holds under the
+incomplete-step provenance before removing it, and `session holders` **forgets** a
+record whose owner process has gone with nothing working inside its run root rather
+than listing it. Four journeys here were written against the behaviour before it and
+now state the behaviour after it, each saying so where it says it.
+
+One of the four is a **loss** rather than a restatement, and it is the sibling's to
+rule on. The contract's launch interlock is `onevcs session holders`, so asking who
+holds a repository is the first thing every launch does — and that read is now what
+prunes the record `onevcs`'s own `open_session` would have taken up. A `retry` over
+work a stopped run stranded therefore continues the branch from its own tip instead
+of resuming the session that already holds a clone and a worktree for it. The work
+still reaches the base, which is what an operator is owed; what is spent is a fresh
+clone and a fresh gate. **Proposal for `onevcs`: prune spent records somewhere other
+than the read every consumer is required to make**, or answer the enumeration
+without removing what it enumerates.
+`session_reuse::a_retry_takes_up_the_session_a_stopped_run_left_its_work_in` is where
+that is held, and it names this paragraph.
+
 Driven end to end by `adoption::a_fast_node_whose_release_is_not_out_settles_complete_but_draft_and_nothing_merges_it`,
 which drives a node to completion against an unreleased dependency and holds the
 settlement, the host's own `--draft`, the absence of any merge, and both views;
