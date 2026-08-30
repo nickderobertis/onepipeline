@@ -2175,21 +2175,47 @@ fn author_project(store: &std::path::Path, identifier: &str, title: &str) {
 // about the crate under test is asserted, and nothing about it could be.
 #[test]
 fn no_write_back_assertion_is_a_bare_presence_check_over_projected_metadata() {
-    let source = include_str!("store.rs");
-    let mut bare: Vec<String> = Vec::new();
-    for invocation in assertions(source) {
-        let presence = ["is_object()", "is_string()", "is_array()", "is_some()"]
-            .iter()
-            .any(|shape| invocation.contains(shape));
-        if presence && invocation.contains("onepipeline.") {
-            bare.push(invocation.split_whitespace().collect::<Vec<_>>().join(" "));
-        }
-    }
+    // Both files that assert against a projection, so a journey moved between them is
+    // still read.
+    let bare: Vec<String> = [include_str!("store.rs"), include_str!("live_edit.rs")]
+        .into_iter()
+        .flat_map(bare_presence_assertions)
+        .collect();
     assert!(
         bare.is_empty(),
         "these assertions pass whatever the projection wrote, so they cannot fail on a \
          deletion: {bare:#?}"
     );
+
+    // And the reading has teeth: a planted one has to be found, or an empty answer above
+    // means nothing. Assembled rather than written out, because this file is one of the
+    // two the reading above is over — a literal one here would be found there.
+    let planted = bare_presence_assertions(&format!(
+        "{macro_name}(\n    task[\"metadata\"][\"onepipeline.settlement\"].is_object(),\n    \
+         \"it arrived\"\n);",
+        macro_name = ["assert", "!"].concat(),
+    ));
+    assert_eq!(
+        planted.len(),
+        1,
+        "the reading does not find a bare presence assertion, so it proves nothing: \
+         {planted:#?}"
+    );
+}
+
+/// Every assertion in one source that asks only whether metadata the writer added is
+/// *there*.
+fn bare_presence_assertions(source: &str) -> Vec<String> {
+    assertions(source)
+        .into_iter()
+        .filter(|invocation| {
+            invocation.contains("onepipeline.")
+                && ["is_object()", "is_string()", "is_array()", "is_some()"]
+                    .iter()
+                    .any(|shape| invocation.contains(shape))
+        })
+        .map(|invocation| invocation.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect()
 }
 
 /// Every `assert` macro invocation in a source file, as its own text.
