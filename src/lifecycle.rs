@@ -1174,10 +1174,8 @@ pub(crate) fn stamp(labels: &mut Labels, known: &Labels) {
 
 /// How long ending a session waits for the terminator its stream ends with.
 ///
-/// It is a wait that costs nothing in the ordinary case: the first read is made
-/// the moment the follow has been collected, and a session whose terminator is
-/// already written answers on it. What the grace bounds is the case this exists
-/// for — a close that has not written one *yet*, or has not written one at all.
+/// Nothing in the ordinary case: a session whose terminator is written answers on
+/// the first read. The grace bounds the case where none is.
 const TERMINATOR_GRACE: Duration = Duration::from_secs(5);
 
 /// How often that wait re-reads the stream, and re-asks a close that refused.
@@ -1186,20 +1184,11 @@ const TERMINATOR_POLL: Duration = Duration::from_millis(250);
 /// Close the session, and collect what its stream said.
 ///
 /// Closing comes first, because it is what ends the follow *and* what writes the
-/// session's last record: closing marks the session closed and emits
-/// `session-closed`, and the follow ends as soon as it reads a session closed. A
-/// follow can therefore end cleanly having relayed everything but the tail — so
-/// the stream is always read again afterwards, from the point the follow reached.
-///
-/// **Again, rather than once more.** A single re-read makes the terminator's
-/// arrival conditional on that one read having gone well, and every way it can go
-/// badly hands back an empty batch: a stream that cannot be opened, a batch the
-/// sibling's typed reader refuses over one line, and a close that refused and
-/// wrote no terminator at all. Each of those settled the node in silence with a
-/// hole in its record, which reads to a later reader as a publication that never
-/// ended. So the read is repeated until the stream carries the terminator or the
-/// grace runs out, and a session that ends without one is *said* rather than
-/// left to be noticed.
+/// session's last record — so a follow can end cleanly having relayed everything
+/// but the tail, and the stream is read again afterwards from the point it
+/// reached. **Again, rather than once more**: every way a read can go badly hands
+/// back an empty batch, so one read made the last record conditional on that read
+/// having gone well, and a node settled in silence with a hole in its record.
 fn end_session(
     stream: Option<crate::vcs::Follower>,
     tx: &Sender<Message>,
@@ -1241,6 +1230,10 @@ fn relay_session_events(
     let mut relayed = followed_through;
     let mut refused = refused;
     let deadline = Instant::now() + TERMINATOR_GRACE;
+    // llmlint: ignore-block[changed_behavior_has_e2e] every lifecycle journey drives the
+    // first pass. A second one needs a stream that gains its last record late or never,
+    // which no plan can ask for — `a_session_whose_terminator_arrives_late_still_relays_it_and_one_with_none_says_so`
+    // holds both, against a real stream through the real reader.
     loop {
         // The same filter the follow was opened with: this read covers the tail of
         // the *same* stream, so a run that filtered what it followed and not what
@@ -1283,6 +1276,7 @@ fn relay_session_events(
         }
         std::thread::sleep(TERMINATOR_POLL);
     }
+    // llmlint: ignore-end[changed_behavior_has_e2e]
 }
 
 /// The part of what a read handed back that a follow did not already relay.
@@ -1301,11 +1295,10 @@ fn beyond(envelopes: Vec<Envelope>, followed_through: &crate::vcs::Watermarks) -
 
 /// Close the session, and answer with what refused it.
 ///
-/// Best effort in the sense that mattered and still does: the refusal settles no
-/// node, because a node that already failed must not be reported as a different
-/// failure because its cleanup also failed. It is *kept* rather than dropped
-/// because it is the one thing that explains a session stream with no terminator
-/// on it, and because it says whether asking again could answer differently.
+/// Still best effort where it mattered — the refusal settles no node, so a node
+/// that already failed is not reported as a different failure because its cleanup
+/// also failed. It is kept because it is the one thing that explains a stream with
+/// no terminator on it.
 fn close(token: Option<&onevcs::SessionToken>) -> Option<String> {
     crate::vcs::session_close(token?)
         .err()
@@ -1687,30 +1680,11 @@ mod tests {
     /// store, and a session that never writes one is **said** rather than left as
     /// a hole in it.
     ///
-    /// This is the window `end_session` exists for. The follow reads the stream
-    /// and only *then* asks whether the session closed, so it can end cleanly
-    /// having relayed everything but the last record — and the read that covers
-    /// that window is the only thing standing between a settled node and a store
-    /// whose publication looks like it never ended. A single read made that cover
-    /// conditional on nothing going wrong once: an unopenable stream, a batch the
-    /// sibling's typed reader refuses over one line, and a close that wrote no
-    /// terminator at all each hand back an empty batch, and each settled the node
-    /// in silence.
-    ///
     /// Driven against the stream **file**, because that is what decides: no
-    /// journey can make a real `onevcs` close write its terminator late or not at
-    /// all, and the sibling is not doubled here — the reader under test is its
-    /// own, reading a real stream through the real seam.
+    /// journey can make a real close write its terminator late or not at all. The
+    /// sibling is not doubled — the reader under test is its own.
     ///
-    /// One test for all three cases rather than three: `ONEVCS_HOME` is
-    /// process-global, and the guard says so.
-    // llmlint: ignore-block[changed_behavior_has_e2e] the happy half of this — a session
-    // whose terminator is already written when the read comes — is what every lifecycle
-    // journey drives, `real_vcs::a_launchs_vcs_filter_reaches_the_real_sibling_and_narrows_what_it_relays`
-    // included, which is the journey that reported this gap. The other two halves are a
-    // stream that gains its last record late and one that never gains it, and neither is
-    // reachable from outside: a close either writes the record or refuses, and nothing a
-    // plan can say chooses which.
+    /// One test for all three cases: `ONEVCS_HOME` is process-global.
     #[test]
     fn a_session_whose_terminator_arrives_late_still_relays_it_and_one_with_none_says_so() {
         let _home = crate::vcs::scratch_home_held();
