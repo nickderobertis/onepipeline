@@ -1956,6 +1956,59 @@ fn the_envelope_reviewer_surface_is_what_the_divergence_record_names() {
     );
 }
 
+/// The criterion check this build carries **beyond** the contract is exactly what
+/// the divergence record proposes.
+///
+/// The contract is committed as approved and names none of it, so entry 47 is the
+/// only place it is written down — and a divergence nothing gates quietly stops
+/// being true. The kind is held against the enum that emits it and against the
+/// contract's own list, and the surface a mismatch is raised under against the
+/// kinds this build parses: a check that started reporting under a kind no
+/// reader recognises would be a finding nobody is handed.
+#[test]
+fn the_criterion_check_is_what_the_divergence_record_names() {
+    let block = divergence_block("47.");
+
+    let kinds: Vec<String> =
+        serde_json::from_value(block["event_kinds"].clone()).expect("entry 47 names its kinds");
+    assert!(!kinds.is_empty());
+    for kind in &kinds {
+        assert!(
+            PipelineKind::from_wire(&EventKind(kind.clone())).is_some(),
+            "`{kind}` is not a kind this crate emits"
+        );
+        assert!(
+            !CONTRACT.contains(&format!("`{kind}`")),
+            "the contract names `{kind}`, so it is no divergence"
+        );
+    }
+
+    // A mismatch is a finding and not a kind of its own: the planner already has
+    // one word for "something a watcher saw and decided you should know", and a
+    // second would be a queue a reader has to learn to read.
+    let raised = block["surface_kind"]
+        .as_str()
+        .expect("entry 47 names the surface a mismatch is raised under");
+    let parsed: SurfaceKind = serde_json::from_value(json!(raised))
+        .unwrap_or_else(|e| panic!("`{raised}` is a kind this build parses: {e}"));
+    assert_eq!(parsed, SurfaceKind::Finding);
+
+    // Three answers, kept apart. The words themselves are private vocabulary and
+    // are held against the enum that spells them by the module's own test; what
+    // is checkable from out here is that the entry proposes three distinct ones
+    // rather than folding "could not read it" into "it disagreed".
+    let answers: BTreeSet<String> =
+        serde_json::from_value(block["answers"].clone()).expect("entry 47 names its answers");
+    assert_eq!(
+        answers,
+        ["match", "mismatch", "unread"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<BTreeSet<String>>(),
+        "entry 47 no longer keeps a file it could not read apart from one that disagreed"
+    );
+}
+
 #[test]
 fn every_op_deserializes_with_the_fields_the_protocol_requires() {
     let envelopes: Vec<(&str, Value)> = vec![
@@ -2302,7 +2355,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
     // undocumented wire; a kind the contract lists and the enum does not carry is
     // a promise nothing keeps. `PIPELINE_KINDS` is what `Journal::emit` accepts,
     // so this is the emitted set and not a second copy of it.
-    assert_eq!(PIPELINE_KINDS.len(), 23, "the closed set changed size");
+    assert_eq!(PIPELINE_KINDS.len(), 24, "the closed set changed size");
     let listed: BTreeSet<String> = backticked()
         .into_iter()
         .filter(|token| {
@@ -2311,9 +2364,13 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
         .collect();
     // The kinds the contract does not list are exactly the ones the divergence
     // record proposes, and no others: a kind neither document names fails here.
-    let proposed: BTreeSet<String> =
-        serde_json::from_value(divergence_block("40.")["event_kinds"].clone())
-            .expect("entry 40 names the kinds it adds");
+    let proposed: BTreeSet<String> = ["40.", "47."]
+        .into_iter()
+        .flat_map(|entry| {
+            serde_json::from_value::<Vec<String>>(divergence_block(entry)["event_kinds"].clone())
+                .unwrap_or_else(|e| panic!("entry {entry} names the kinds it adds: {e}"))
+        })
+        .collect();
     let undocumented: BTreeSet<String> = PIPELINE_KINDS
         .iter()
         .map(|kind| kind.as_str().to_string())

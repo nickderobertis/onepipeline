@@ -210,6 +210,14 @@ fn attempt_once(
             // The session stays open for them and the follow does not: dropping
             // it here ends a process that would otherwise read a stream nobody
             // is waiting for, for as long as the driver lives.
+            //
+            // Read against its criteria here, because this is where the node
+            // settles and the person about to act is the reader a finding is
+            // for: a branch that contradicts the bar is worth knowing *before*
+            // an approval, not after. And it is the only place: the attempt that
+            // follows an attestation dispatches nothing where the human step was
+            // last, so it opens no session and has no branch in hand to read.
+            check_criteria(node, worktree.as_deref(), tx);
             return Attempt::Settled(Settlement {
                 branch,
                 completed_steps: completed,
@@ -268,6 +276,9 @@ fn attempt_once(
             }
         }
         if drained.settlement.status != NodeStatus::Done {
+            // The node is settling on this, so the branch it settles on is read
+            // against its own criteria before the session that holds it goes.
+            check_criteria(node, worktree.as_deref(), tx);
             end_session(stream, tx, session.as_ref(), &whose, vcs_filter);
             return Attempt::Settled(Settlement {
                 branch,
@@ -301,8 +312,45 @@ fn attempt_once(
         &token,
         branch,
     );
+    // Only where this attempt is the node's answer. A publication that failed
+    // leaving the work on its branch is asked again, and reporting a criterion
+    // against every attempt of a node that is still being re-dispatched would
+    // put three findings on the queue for one branch nobody has settled on yet.
+    if matches!(attempted, Attempt::Settled(_)) {
+        check_criteria(node, worktree.as_deref(), tx);
+    }
     end_session(stream, tx, Some(&token), &whose, vcs_filter);
     attempted
+}
+
+/// Hand [`crate::criteria`]'s reading of this node's branch to the loop.
+///
+/// **When**, which is all this call site decides. Every caller is a settlement
+/// `attempt_once` has already made, so nothing here can change one; and it is
+/// once per settlement rather than once per node, which differ only for a
+/// workstream held at a human step and dispatched again afterwards — two
+/// settlements, and not the same branch between them.
+///
+/// No worktree is no branch to read: every step declared no diff, the session
+/// never opened, or the remaining steps were all done on a previous attempt.
+/// Silence rather than an unread answer — nothing was named that could not be
+/// read.
+fn check_criteria(node: &Node, worktree: Option<&std::path::Path>, tx: &Sender<Message>) {
+    // Both halves of "there is something to read, on behalf of somebody": a
+    // branch in hand, and a node the graph carries to report it against.
+    let (Some(worktree), Some(whose)) = (worktree, crate::graph::NodeRef::of(node)) else {
+        return;
+    };
+    for check in crate::criteria::checkable_of(node) {
+        let answer = crate::criteria::answer(worktree, &check);
+        let _ = tx.send(Message::CriterionChecked(Box::new(
+            engine::CriterionChecked {
+                node: whose.clone(),
+                check,
+                answer,
+            },
+        )));
+    }
 }
 
 /// Draft the change request's body, then publish through `onevcs`.
