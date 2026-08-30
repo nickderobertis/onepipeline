@@ -532,10 +532,15 @@ describe("the release targets this repository declares", () => {
 
   it("is one document, at the root, written against the canonical schema", () => {
     const declared = declaration();
+    // The version the document is written against is the linked `onevcs`'s, and
+    // nothing here can read that crate's `SCHEMA_VERSION` — `tests/release_targets.rs`
+    // holds the same file to it directly. This literal is the golden that moves with
+    // it, so a schema the engine bumped and this document did not state is a
+    // mismatch here rather than a shape a reader guesses at.
     assert.equal(
       declared.schemaVersion,
-      2,
-      "release-targets.toml declares no schema_version, so a reader cannot know its shape",
+      3,
+      "release-targets.toml states no schema_version, or not the one this build's onevcs writes",
     );
     assert.equal(
       declared.probe,
