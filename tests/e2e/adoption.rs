@@ -334,13 +334,31 @@ fn the_siblings_other_two_release_kinds_reach_this_run_through_the_public_sessio
     world.releases(&both_styles(&script));
     releases_at(&answer, "0.1.0");
 
-    // Somebody else's work in the same repository, landed by a run of its own.
-    // The releases that carry it are recorded on the same identity's record as
-    // this run's, which is the confusion the correlation exists to prevent.
+    // Somebody else's work in the same repository, landed by a run of its own —
+    // a run that is **still going** when this journey reads what it left, held
+    // open by a node of its own exactly as the run below is.
+    //
+    // A finished run is not the same arrangement, and it is not one this journey
+    // can be written against. `onevcs` forgets the record of a session whose
+    // owner process has gone and whose run root nobody is inside, and the next
+    // launch that asks who holds the engine repository — which is the launch of
+    // the run below — is what forgets it. That record is what the sibling's
+    // own reader resolves a session's landing through, so reading this session
+    // after it went would hand back a stream with no releases correlated to it
+    // at all: a release that was recorded, and a journey that could only report
+    // it as one that never happened.
     let stranger = elsewhere_in_the_engine_repository();
-    let other_run = start(&world, "adoption-relayed-stranger", vec![stranger]);
+    world.script("keeper.wait", "hold");
+    let other_run = start(
+        &world,
+        "adoption-relayed-stranger",
+        vec![stranger, crate::harness::agent("keeper", &[])],
+    );
     world.until("the stranger's work to land", |world| {
-        !world.events_of(&other_run, "node-settled").is_empty()
+        world
+            .events_of(&other_run, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "stranger")
     });
     let strangers_landing = landing_commit(&world, &other_run, "stranger");
     let strangers_branch = branch_of(&world, &other_run, "stranger");
@@ -368,9 +386,20 @@ fn the_siblings_other_two_release_kinds_reach_this_run_through_the_public_sessio
     // target answers for each, so the identity's record carries one apiece.
     releases_at(&answer, "0.2.0");
     for reference in [&strangers_branch, &landed] {
-        world.on_onevcs(|| {
+        let answered = world.on_onevcs(|| {
             onevcs::release_status(reference, None).expect("the sibling answers about the landing")
         });
+        // Held where the release is made rather than only where it is read back:
+        // every other answer this can give — not landed, not released, a probe
+        // that could not answer — leaves the identity's record with nothing on it
+        // for this landing, and a journey that noticed that later could only say
+        // that a release had not arrived. Here it says which reference was not
+        // released and what `onevcs` said instead.
+        assert!(
+            matches!(answered, onevcs::ReleaseStatus::Released { .. }),
+            "the sibling did not read {reference} as released, so nothing recorded a release \
+             of that landing: {answered:?}"
+        );
     }
     // And the human step somebody records, which is the second kind — and the
     // one that ends the held node's wait.
@@ -511,7 +540,9 @@ fn the_siblings_other_two_release_kinds_reach_this_run_through_the_public_sessio
         .out_has("release-acknowledged");
 
     world.release("consumer.go");
+    world.release("keeper.go");
     world.run(&["stop", &run]).exited(0);
+    world.run(&["stop", &other_run]).exited(0);
 }
 
 /// A branch two sessions have worked on has its release attributed through the
