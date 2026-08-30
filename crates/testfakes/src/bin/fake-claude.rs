@@ -238,9 +238,12 @@ fn turn(args: &[String], dir: &std::path::Path) -> ExitCode {
     // dispatch could overwrite would be overwritten by then.
     if !scratch.is_empty() {
         if let Some(parties) = fake::node_script(dir, "turn", "concurrent") {
-            let parties = parties.trim().parse::<usize>().unwrap_or_else(|error| {
-                fake::fail(&format!("turn.concurrent is not a party count: {error}"))
-            });
+            let parties = parties
+                .trim()
+                .parse::<std::num::NonZeroUsize>()
+                .unwrap_or_else(|error| {
+                    fake::fail(&format!("turn.concurrent is not a party count: {error}"))
+                });
             // The party is the scratch directory itself, so what the barrier
             // file holds afterwards is the set of directories that were live at
             // one instant — the fact under test, recorded by the turns rather

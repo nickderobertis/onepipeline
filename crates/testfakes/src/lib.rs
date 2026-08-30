@@ -382,7 +382,11 @@ fn rendezvous_timeout() -> std::time::Duration {
 /// One arrival is one **line**, so `party` is flattened onto one: arrivals are
 /// counted by line, and a party whose name carried a newline would be counted as
 /// two and release a barrier nobody else had reached.
-pub fn barrier(path: &Path, party: &str, parties: usize) {
+///
+/// `parties` is a [`NonZeroUsize`](std::num::NonZeroUsize) because a barrier of
+/// nought releases before anybody arrives, which is a rendezvous that holds
+/// nothing and an assertion after it that proves nothing.
+pub fn barrier(path: &Path, party: &str, parties: std::num::NonZeroUsize) {
     let arrived = |path: &Path| {
         std::fs::read_to_string(path)
             .map(|text| text.lines().filter(|line| !line.trim().is_empty()).count())
@@ -399,7 +403,7 @@ pub fn barrier(path: &Path, party: &str, parties: usize) {
         )),
     };
     while std::time::Instant::now() < deadline {
-        if arrived(path) >= parties {
+        if arrived(path) >= parties.get() {
             return;
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
