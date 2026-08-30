@@ -219,6 +219,15 @@ pub enum PipelineKind {
     /// A fast-adoption node was told the releases it was waiting on arrived, and
     /// whether the note reached a running turn or its next dispatch.
     ReleaseAdopted,
+    /// One mechanically checkable acceptance criterion was compared against the
+    /// branch its node settled on.
+    ///
+    /// Emitted for every criterion this build could parse into "this named file
+    /// holds this literal", carrying the answer — `match`, `mismatch`, or
+    /// `unread`, the check declining to answer a file it could not read. A
+    /// criterion it could not parse is not recorded at all: the check says
+    /// nothing about prose it has no business ruling on.
+    CriterionChecked,
     /// A drafting dispatch ran for a change request's body and produced none.
     ///
     /// Only where one was *configured and attempted*: a launch that named no
@@ -254,6 +263,7 @@ impl PipelineKind {
             Self::ReleaseWait => "release-wait",
             Self::ReleaseArrived => "release-arrived",
             Self::ReleaseAdopted => "release-adopted",
+            Self::CriterionChecked => "criterion-checked",
             Self::BodyNotDrafted => "body-not-drafted",
         }
     }
@@ -306,6 +316,7 @@ pub const PIPELINE_KINDS: &[PipelineKind] = &[
     PipelineKind::ReleaseWait,
     PipelineKind::ReleaseArrived,
     PipelineKind::ReleaseAdopted,
+    PipelineKind::CriterionChecked,
     PipelineKind::BodyNotDrafted,
 ];
 

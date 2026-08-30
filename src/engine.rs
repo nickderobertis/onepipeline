@@ -472,8 +472,32 @@ pub(crate) enum Message {
     Cancelling(Box<Cancelling>),
     /// A configured drafting dispatch produced no change request body.
     BodyNotDrafted(Box<UndraftedBody>),
+    /// One acceptance criterion was compared against the branch its node is
+    /// settling on.
+    CriterionChecked(Box<CriterionChecked>),
     /// The dispatch settled.
     Settled(Box<Settlement>),
+}
+
+/// One acceptance criterion, read against the branch the node settled on.
+///
+/// Handed over rather than written where it is measured, for the reason
+/// [`UndraftedBody`] gives: the loop owns the pipeline stream and the sequence
+/// it is numbered in, and a dispatch thread composing an envelope beside that
+/// series would write a `seq` this side never issued.
+///
+/// It carries the criterion and the answer and no verdict, because it **is** no
+/// verdict: the node's settlement is decided by its dispatches and its
+/// publication exactly as it was before this check existed, and what a mismatch
+/// buys a reader is a finding beside that settlement rather than a different
+/// one.
+pub(crate) struct CriterionChecked {
+    /// The node whose branch was read.
+    pub node: String,
+    /// The criterion, and what it said the branch holds.
+    pub check: crate::criteria::Checkable,
+    /// What reading the branch answered.
+    pub answer: crate::criteria::Answer,
 }
 
 /// A change request whose body a configured drafting dispatch did not produce.
@@ -837,6 +861,23 @@ fn converge(
                         ("detail", json!(undrafted.ending.why())),
                     ]),
                 )?,
+                Message::CriterionChecked(checked) => {
+                    journal.emit(
+                        journal::PipelineKind::CriterionChecked,
+                        journal::labels(&paths.run, Some(&checked.node)),
+                        criterion_payload(&checked),
+                    )?;
+                    // A mismatch is reported *beside* the settlement and never
+                    // as part of it: the node settles on its dispatches and its
+                    // publication exactly as it would have, and a manager reads
+                    // this and decides. A match and an unread answer are on the
+                    // run's record above and raise nothing — a tier that
+                    // surfaced every comparison it made is one a reader learns
+                    // to skim.
+                    if let crate::criteria::Answer::Mismatch { holds } = &checked.answer {
+                        raise(paths, journal, criterion_finding(&checked, holds))?;
+                    }
+                }
                 Message::Settled(settlement) => {
                     in_flight.remove(&settlement.node);
                     settle(paths, journal, &settlement)?;
@@ -2570,6 +2611,68 @@ pub(crate) fn finding_surface(
         blocking,
         queued_at: sys::now_millis(),
         workstream: node,
+    }
+}
+
+/// What the run's own record carries one comparison as.
+///
+/// The three answers are one field and not the presence or absence of a record:
+/// a reader asking "was this criterion checked, and what came back" gets the
+/// same shaped answer for a match, a mismatch, and a file the branch would not
+/// give up, and never has to read one of them off silence.
+fn criterion_payload(checked: &CriterionChecked) -> serde_json::Map<String, serde_json::Value> {
+    let mut payload = journal::payload(&[
+        ("criterion", json!(bounded(&checked.check.criterion))),
+        ("file", json!(bounded(&checked.check.file))),
+        ("expected", json!(bounded(&checked.check.literal))),
+        ("answer", json!(checked.answer.as_str())),
+    ]);
+    match &checked.answer {
+        crate::criteria::Answer::Match => {}
+        crate::criteria::Answer::Mismatch { holds } => {
+            payload.insert("holds".into(), json!(bounded(holds)));
+        }
+        crate::criteria::Answer::Unread { reason } => {
+            payload.insert("reason".into(), json!(bounded(reason)));
+        }
+    }
+    payload
+}
+
+/// The finding one mismatch raises.
+///
+/// Non-blocking, and stated as evidence rather than as a verdict: the node has
+/// settled and holding its dependents back over a reading nobody has ruled on
+/// would make this check the thing it exists to prevent — a demand nobody wrote
+/// failing correct work. It names all four things a manager needs to decide
+/// without opening the branch: which criterion, which file, what the criterion
+/// said, and what the file holds.
+/// What the branch holds is passed rather than read back off the answer, so
+/// there is no arm here for the two answers that raise nothing: this is reached
+/// for a mismatch alone, and a function that could be handed anything else would
+/// need a case nobody can ever exercise.
+fn criterion_finding(checked: &CriterionChecked, holds: &str) -> Surface {
+    let holds = bounded(holds);
+    Surface {
+        id: 0,
+        kind: crate::channel::SurfaceKind::Finding.as_str().into(),
+        message: format!(
+            "node '{node}' settled against a criterion its branch contradicts.\n\
+             criterion: {criterion}\n\
+             file: {file}\n\
+             expected: {expected}\n\
+             the file holds: {holds}\n\
+             The node settled on its own work as it always would have and nothing was \
+             failed on this: it is a reading of the branch, for you to rule on.",
+            node = checked.node,
+            criterion = bounded(&checked.check.criterion),
+            file = bounded(&checked.check.file),
+            expected = bounded(&checked.check.literal),
+        ),
+        source: crate::channel::source::PROPOSAL.into(),
+        blocking: false,
+        queued_at: sys::now_millis(),
+        workstream: Some(checked.node.clone()),
     }
 }
 

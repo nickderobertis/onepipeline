@@ -210,6 +210,12 @@ fn attempt_once(
             // The session stays open for them and the follow does not: dropping
             // it here ends a process that would otherwise read a stream nobody
             // is waiting for, for as long as the driver lives.
+            //
+            // Nothing is read against the criteria here either: the steps after
+            // this one have not run, so a branch that does not yet hold what the
+            // bar names is a node mid-workstream rather than one that missed it.
+            // The attestation sends the node back through here, and the
+            // settlement that follows is read then.
             return Attempt::Settled(Settlement {
                 branch,
                 completed_steps: completed,
@@ -268,6 +274,9 @@ fn attempt_once(
             }
         }
         if drained.settlement.status != NodeStatus::Done {
+            // The node is settling on this, so the branch it settles on is read
+            // against its own criteria before the session that holds it goes.
+            check_criteria(node, worktree.as_deref(), tx);
             end_session(stream, tx, session.as_ref(), &whose, vcs_filter);
             return Attempt::Settled(Settlement {
                 branch,
@@ -301,8 +310,50 @@ fn attempt_once(
         &token,
         branch,
     );
+    // Only where this attempt is the node's answer. A publication that failed
+    // leaving the work on its branch is asked again, and reporting a criterion
+    // against every attempt of a node that is still being re-dispatched would
+    // put three findings on the queue for one branch nobody has settled on yet.
+    if matches!(attempted, Attempt::Settled(_)) {
+        check_criteria(node, worktree.as_deref(), tx);
+    }
     end_session(stream, tx, Some(&token), &whose, vcs_filter);
     attempted
+}
+
+/// Compare the settling node's mechanically checkable criteria against the
+/// branch it settled on, and hand each answer to the loop.
+///
+/// Where a criterion names **a literal value in a named file**, that file is on
+/// the branch this node's session opened and the comparison costs one read. It
+/// is the cheapest check in the run and nothing was making it: a criterion
+/// naming a boolean, negated in the shipped file, has passed a worker, a judge,
+/// a monitor and a manager, all of whom read the prose.
+///
+/// Three things it does not do, and each is deliberate. It never touches the
+/// settlement — `attempt_once` has already decided that and this is called with
+/// the answer in hand. It says nothing about a criterion it cannot parse, which
+/// is most of them. And it reports a file it could not read as exactly that,
+/// rather than as a branch that disagreed.
+///
+/// A node with no worktree is a node with no branch to read — every step
+/// declared no diff, or the session never opened — and there is nothing here to
+/// compare against, which is silence rather than an unread answer: nothing was
+/// named that could not be read.
+fn check_criteria(node: &Node, worktree: Option<&std::path::Path>, tx: &Sender<Message>) {
+    let Some(worktree) = worktree else {
+        return;
+    };
+    for check in crate::criteria::checkable_of(node) {
+        let answer = crate::criteria::answer(worktree, &check);
+        let _ = tx.send(Message::CriterionChecked(Box::new(
+            engine::CriterionChecked {
+                node: node.id.clone(),
+                check,
+                answer,
+            },
+        )));
+    }
 }
 
 /// Draft the change request's body, then publish through `onevcs`.
