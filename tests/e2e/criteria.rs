@@ -320,6 +320,65 @@ fn a_failed_direct_dispatch_still_has_the_project_directory_read() {
     assert_eq!(settled(&world, name, "audit").0, "failed");
 }
 
+/// A criterion naming **two** files is met when either one carries its literal.
+///
+/// A criterion that names a pair means the value is somewhere in the pair, so
+/// reporting the half that does not hold it would be a finding about a criterion
+/// that is met. Where neither half holds it the criterion is genuinely unmet, and
+/// the finding names each file that was read rather than picking one of them.
+#[test]
+fn a_criterion_naming_two_files_is_met_by_either_and_names_both_when_neither() {
+    let world = World::new("criteria-two-files");
+    for (file, body) in [
+        ("left.yaml", "complete_dataset: false\n"),
+        ("right.yaml", "complete_dataset: true\n"),
+        ("other.yaml", "complete_dataset: false\n"),
+    ] {
+        std::fs::write(world.project.join(file), body).expect("the project file is written");
+    }
+
+    let mut audit = crate::harness::agent("audit", &[]);
+    audit["task"] = json!(
+        "## What\nAudit the dataset.\n\n## Why\nIt has been wrong before.\n\n\
+         ## Acceptance criteria\n\
+         * the row in `left.yaml` or `right.yaml` is `complete_dataset: true`.\n\
+         * the row in `left.yaml` or `other.yaml` is `complete_dataset: maybe`.\n"
+    );
+
+    let name = "pairs";
+    let project = world.plan(name, &plan_of(name, vec![audit]));
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the run to settle", |world| {
+        world.run_file(name, "result.json").is_file()
+    });
+
+    let found = findings(&world, name);
+    // The met criterion is silent, and the unmet one names each file it read.
+    assert_eq!(
+        found.len(),
+        2,
+        "the criterion either half satisfies is silent, and the other names both: {found:?}"
+    );
+    for (node, message) in &found {
+        assert_eq!(node, "audit", "{found:?}");
+        assert!(message.contains("complete_dataset: maybe"), "{message}");
+        assert!(!message.contains("right.yaml"), "{message}");
+    }
+    assert!(
+        found
+            .iter()
+            .any(|(_, message)| message.contains("left.yaml")),
+        "{found:?}"
+    );
+    assert!(
+        found
+            .iter()
+            .any(|(_, message)| message.contains("other.yaml")),
+        "{found:?}"
+    );
+    assert_eq!(settled(&world, name, "audit").0, "done");
+}
+
 /// A criterion pointing **out of** the tree names no file at all.
 ///
 /// Three ways prose reaches past the directory a dispatch worked in — an
