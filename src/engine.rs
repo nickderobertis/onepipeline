@@ -491,6 +491,12 @@ pub(crate) enum Message {
 /// publication exactly as it was before this check existed, and what a mismatch
 /// buys a reader is a finding beside that settlement rather than a different
 /// one.
+// llmlint: ignore-block[invalid_states_unrepresentable] the node identity is a
+// `String` because that is what every message on this channel already carries —
+// `UndraftedBody`, `Cancelling`, and `Settlement` all name their node that way, and
+// the loop looks it up in a graph keyed by the same strings. A newtype on this one
+// message would be a second spelling of an identity the engine holds one way, and
+// would have to be unwrapped at every one of those boundaries to be used.
 pub(crate) struct CriterionChecked {
     /// The node whose branch was read.
     pub node: String,
@@ -498,7 +504,7 @@ pub(crate) struct CriterionChecked {
     pub check: crate::criteria::Checkable,
     /// What reading the branch answered.
     pub answer: crate::criteria::Answer,
-}
+} // llmlint: ignore-end[invalid_states_unrepresentable]
 
 /// A change request whose body a configured drafting dispatch did not produce.
 ///
@@ -2622,9 +2628,9 @@ pub(crate) fn finding_surface(
 /// give up, and never has to read one of them off silence.
 fn criterion_payload(checked: &CriterionChecked) -> serde_json::Map<String, serde_json::Value> {
     let mut payload = journal::payload(&[
-        ("criterion", json!(bounded(&checked.check.criterion))),
-        ("file", json!(bounded(checked.check.file.as_str()))),
-        ("expected", json!(bounded(&checked.check.literal))),
+        ("criterion", json!(bounded(checked.check.criterion()))),
+        ("file", json!(bounded(checked.check.file()))),
+        ("expected", json!(bounded(checked.check.literal()))),
         ("answer", json!(checked.answer.as_str())),
     ]);
     match &checked.answer {
@@ -2665,9 +2671,9 @@ fn criterion_finding(checked: &CriterionChecked, holds: &str) -> Surface {
              The node settled on its own work as it always would have and nothing was \
              failed on this: it is a reading of the branch, for you to rule on.",
             node = checked.node,
-            criterion = bounded(&checked.check.criterion),
-            file = bounded(checked.check.file.as_str()),
-            expected = bounded(&checked.check.literal),
+            criterion = bounded(checked.check.criterion()),
+            file = bounded(checked.check.file()),
+            expected = bounded(checked.check.literal()),
         ),
         source: crate::channel::source::PROPOSAL.into(),
         blocking: false,

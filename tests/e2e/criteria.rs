@@ -144,6 +144,65 @@ fn a_criterion_the_branch_contradicts_is_a_finding_naming_the_file_and_both_valu
 }
 
 #[test]
+fn a_mismatch_quotes_what_the_file_holds_and_says_so_when_it_holds_nothing() {
+    let world = World::new("criteria-evidence");
+    let repository = world.repository("local-direct", &[]);
+    // One line far longer than a finding can carry, and one file with no line
+    // naming the key at all: the two shapes of "what it holds instead" that are
+    // not simply the other value.
+    committed(
+        &world,
+        &repository,
+        "long.md",
+        format!("state: {}\n", "x".repeat(600)).as_bytes(),
+    );
+    committed(&world, &repository, "silent.md", b"nothing to say here\n");
+    world.script("service.work", "complete_dataset: false\n");
+    let run = settle(
+        &world,
+        "evidence",
+        vec![node_bounded_by(&[
+            "the row in `long.md` is `state: done`",
+            "the row in `silent.md` is `owner: nobody`",
+        ])],
+    );
+
+    let holds = |named: &str| {
+        comparisons(&world, &run)
+            .into_iter()
+            .find(|payload| payload["file"] == named)
+            .unwrap_or_else(|| panic!("`{named}` was never read"))["holds"]
+            .as_str()
+            .unwrap_or_else(|| panic!("`{named}` mismatched without saying what it holds"))
+            .to_string()
+    };
+
+    // The line the file does hold, cut short: a finding is read by a person and
+    // a six-hundred-character line is not a sentence.
+    let long = holds("long.md");
+    assert!(long.starts_with("`state: xxx"), "{long}");
+    assert!(
+        long.contains('…'),
+        "the long line was not cut short: {long}"
+    );
+    assert!(long.chars().count() < 260, "{long}");
+
+    // And where nothing in the file names the key, the absence is the answer
+    // rather than a blank where the evidence should be.
+    assert_eq!(holds("silent.md"), "nothing naming `owner`");
+
+    // Both reached the manager as findings, each quoting its own evidence.
+    let raised = findings(&world, &run);
+    assert_eq!(raised.len(), 2, "{raised:?}");
+    assert!(
+        raised
+            .iter()
+            .any(|message| message.contains("nothing naming `owner`")),
+        "{raised:?}"
+    );
+}
+
+#[test]
 fn a_criterion_the_branch_holds_raises_nothing() {
     let world = writing("criteria-match", "complete_dataset: true\n");
     let run = settle(
@@ -293,6 +352,111 @@ fn a_file_the_branch_will_not_give_up_is_the_check_declining_to_answer() {
     // A file that could not be read is not work that disagreed, so nobody is
     // asked to rule on it.
     assert_eq!(findings(&world, &run), Vec::<String>::new());
+}
+
+/// A path that is lexically inside the branch and resolves outside it.
+///
+/// The lexical rules cannot see this one: `notes.md` names no directory and
+/// climbs out of nothing, and what makes it an escape is a symlink somebody
+/// committed — which git tracks and a session's clone carries. Unix-only because
+/// that is where this suite can commit one; the containment check itself is
+/// platform-independent and the module's own test covers it either way.
+#[cfg(unix)]
+#[test]
+fn a_criterion_resolving_off_the_branch_is_refused_rather_than_read() {
+    let world = World::new("criteria-symlink");
+    let repository = world.repository("local-direct", &[]);
+    // Somewhere off the branch, holding exactly what the criterion asks for — so
+    // a check that followed the link would answer `match` on evidence that is
+    // not the node's work.
+    let outside = world.root.join("outside");
+    std::fs::create_dir_all(&outside).expect("somewhere off the branch");
+    std::fs::write(outside.join("secret.md"), "complete_dataset: true\n")
+        .expect("the file off the branch is written");
+    std::os::unix::fs::symlink(
+        outside.join("secret.md"),
+        repository.checkout.join("notes.md"),
+    )
+    .expect("a symlink out of the worktree");
+    git(&world, &repository.checkout, &["add", "-A"]);
+    git(
+        &world,
+        &repository.checkout,
+        &["commit", "-m", "chore: commit a symlink off the branch"],
+    );
+    git(&world, &repository.checkout, &["push", "origin", "main"]);
+    world.script("service.work", "complete_dataset: false\n");
+    let run = settle(
+        &world,
+        "symlink",
+        vec![node_bounded_by(&[
+            "the shared journey row in `notes.md` is `complete_dataset: true`",
+        ])],
+    );
+
+    // Declined, and saying where the path went: not a match on a file off the
+    // branch, and not a mismatch either.
+    let compared = comparisons(&world, &run);
+    assert_eq!(compared.len(), 1, "{compared:?}");
+    assert_eq!(compared[0]["answer"], "unread", "{compared:?}");
+    assert!(
+        compared[0]["reason"]
+            .as_str()
+            .is_some_and(|why| why.contains("outside the node's branch")),
+        "the refusal does not say the path left the branch: {compared:?}"
+    );
+    assert_eq!(findings(&world, &run), Vec::<String>::new());
+}
+
+#[test]
+fn a_workstream_held_at_a_human_step_is_read_when_it_settles_and_not_before() {
+    let world = World::new("criteria-humanstep");
+    world.repository("local-direct", &[]);
+    world.script("service.implement.work", "complete_dataset: false\n");
+    let node = json!({
+        "id": "service",
+        "repo": "service",
+        "title": "feat: land the workstream",
+        "steps": [
+            {
+                "id": "implement",
+                "persona": "engineer",
+                "task": "## What\nimplement\n\n## Acceptance criteria\n\n\
+                         - the row in `service-implement.md` is `complete_dataset: true`\n",
+            },
+            {
+                "id": "staging-approval",
+                "kind": "human",
+                "task": "Exercise the staged service.",
+                "deps": ["implement"],
+            },
+        ],
+    });
+    let run = settle(&world, "humanstep", vec![node]);
+
+    // Held for a person — and read, because this is where the node settled and
+    // the person about to approve it is exactly the reader a finding is for.
+    assert_eq!(settled_as(&world, &run)["status"], "waiting");
+    let compared = comparisons(&world, &run);
+    assert_eq!(compared.len(), 1, "{compared:?}");
+    assert_eq!(compared[0]["answer"], "mismatch", "{compared:?}");
+    assert_eq!(compared[0]["file"], "service-implement.md");
+    assert_eq!(findings(&world, &run).len(), 1);
+
+    // The person acts, a fresh driver picks the run up, and the node settles for
+    // real — dispatching nothing where the human step was, so there is no second
+    // branch to read and no second finding for one thing already said.
+    world.run(&["attest", &run, "service"]).exited(0);
+    world.run(&["adopt", &run]).exited(0);
+    world.until("the workstream to settle past its human step", |world| {
+        world.run_json(&run, "result.json")["nodes"][0]["status"] != "waiting"
+    });
+    assert_eq!(
+        comparisons(&world, &run).len(),
+        1,
+        "read twice for one branch"
+    );
+    assert_eq!(findings(&world, &run).len(), 1);
 }
 
 /// Put one file on the branch every session of this repository is cut from.

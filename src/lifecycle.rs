@@ -211,11 +211,13 @@ fn attempt_once(
             // it here ends a process that would otherwise read a stream nobody
             // is waiting for, for as long as the driver lives.
             //
-            // Nothing is read against the criteria here either: the steps after
-            // this one have not run, so a branch that does not yet hold what the
-            // bar names is a node mid-workstream rather than one that missed it.
-            // The attestation sends the node back through here, and the
-            // settlement that follows is read then.
+            // Read against its criteria here, because this is where the node
+            // settles and the person about to act is the reader a finding is
+            // for: a branch that contradicts the bar is worth knowing *before*
+            // an approval, not after. And it is the only place: the attempt that
+            // follows an attestation dispatches nothing where the human step was
+            // last, so it opens no session and has no branch in hand to read.
+            check_criteria(node, worktree.as_deref(), tx);
             return Attempt::Settled(Settlement {
                 branch,
                 completed_steps: completed,
@@ -337,9 +339,15 @@ fn attempt_once(
 /// rather than as a branch that disagreed.
 ///
 /// A node with no worktree is a node with no branch to read — every step
-/// declared no diff, or the session never opened — and there is nothing here to
-/// compare against, which is silence rather than an unread answer: nothing was
-/// named that could not be read.
+/// declared no diff, the session never opened, or every remaining step was
+/// already done on a previous attempt — and there is nothing here to compare
+/// against, which is silence rather than an unread answer: nothing was named
+/// that could not be read.
+///
+/// Once per settlement rather than once per node, and the two differ only for a
+/// workstream that settles twice: one held at a human step and dispatched again
+/// afterwards settles once at the hold and once at its end, and the branch is
+/// not the same branch between them.
 fn check_criteria(node: &Node, worktree: Option<&std::path::Path>, tx: &Sender<Message>) {
     let Some(worktree) = worktree else {
         return;

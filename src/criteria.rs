@@ -35,15 +35,38 @@ use std::path::Path;
 use crate::plan::Node;
 
 /// One criterion parsed into the one shape this module can answer.
+///
+/// Every field is private and there is no constructor but [`parse`], so a value
+/// of this type has been through it: the file is a [`BranchPath`] and the
+/// literal is not empty. A struct with `pub(crate)` fields would let any module
+/// in the crate assemble a criterion this module would never have recognised and
+/// then have it read off a branch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Checkable {
     /// The criterion as the plan wrote it, so a finding quotes the bar rather
     /// than this module's reading of it.
-    pub criterion: String,
+    criterion: String,
     /// The file it named, relative to the node's branch.
-    pub file: BranchPath,
+    file: BranchPath,
+    /// The literal it said that file holds. Never empty.
+    literal: String,
+}
+
+impl Checkable {
+    /// The criterion as the plan wrote it.
+    pub(crate) fn criterion(&self) -> &str {
+        &self.criterion
+    }
+
+    /// The file it named, relative to the node's branch.
+    pub(crate) fn file(&self) -> &str {
+        self.file.as_str()
+    }
+
     /// The literal it said that file holds.
-    pub literal: String,
+    pub(crate) fn literal(&self) -> &str {
+        &self.literal
+    }
 }
 
 /// A path a criterion named, which is a file on the node's own branch.
@@ -137,7 +160,11 @@ impl Answer {
     }
 }
 
-/// The heading a task states its bar under.
+/// The heading a task states its bar under, matched exactly.
+///
+/// A section named nearly this is not the bar the worker and its judge were
+/// handed, and reading one as if it were would invent criteria nobody agreed to
+/// — which is the failure this whole module is bounded to avoid.
 const CRITERIA_HEADING: &str = "## Acceptance criteria";
 
 /// Every criterion of one node this module can answer.
@@ -193,25 +220,22 @@ pub(crate) fn checkable(task: &str) -> Vec<Checkable> {
 /// to answer, which is what it does with every other file it cannot read.
 pub(crate) fn answer(root: &Path, check: &Checkable) -> Answer {
     let declined = |reason: String| Answer::Unread { reason };
-    let (root, path) = match (
-        root.canonicalize(),
-        root.join(check.file.as_str()).canonicalize(),
-    ) {
+    let (root, path) = match (root.canonicalize(), root.join(check.file()).canonicalize()) {
         (Ok(root), Ok(path)) => (root, path),
         (Err(error), _) | (_, Err(error)) => return declined(error.to_string()),
     };
     if !path.starts_with(&root) {
         return declined(format!(
             "`{}` resolves to {}, which is outside the node's branch",
-            check.file.as_str(),
+            check.file(),
             path.display()
         ));
     }
     match std::fs::read_to_string(&path) {
         Err(error) => declined(error.to_string()),
-        Ok(text) if text.contains(&check.literal) => Answer::Match,
+        Ok(text) if text.contains(check.literal()) => Answer::Match,
         Ok(text) => Answer::Mismatch {
-            holds: holds(&text, &check.literal),
+            holds: holds(&text, check.literal()),
         },
     }
 }
@@ -253,10 +277,17 @@ fn one_line(text: &str) -> String {
 fn criteria_in(task: &str) -> Vec<String> {
     let mut criteria: Vec<String> = Vec::new();
     let mut inside = false;
+    // Whether the last bullet is still being read. A blank line or prose at the
+    // margin **ends** it, so an indented line further down starts nothing and is
+    // stitched onto nothing: a paragraph between two bullets would otherwise
+    // make the first bullet swallow whatever came after the paragraph, and this
+    // module would then compare a sentence the plan never wrote as one.
+    let mut open = false;
     for line in task.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with("##") {
             inside = trimmed == CRITERIA_HEADING;
+            open = false;
             continue;
         }
         if !inside {
@@ -266,12 +297,15 @@ fn criteria_in(task: &str) -> Vec<String> {
             .strip_prefix("- ")
             .or_else(|| trimmed.strip_prefix("* "))
         {
-            Some(bullet) => criteria.push(bullet.trim().to_string()),
-            // An indented continuation belongs to the bullet above it; a blank
-            // line, or prose at the margin, ends the one being read.
-            None if trimmed.is_empty() || line.starts_with(char::is_alphanumeric) => {}
+            Some(bullet) => {
+                criteria.push(bullet.trim().to_string());
+                open = true;
+            }
+            None if trimmed.is_empty() || line.starts_with(char::is_alphanumeric) => open = false,
+            // An indented continuation belongs to the bullet above it, while
+            // one is still open.
             None => {
-                if let Some(last) = criteria.last_mut() {
+                if let (true, Some(last)) = (open, criteria.last_mut()) {
                     last.push(' ');
                     last.push_str(trimmed);
                 }
@@ -289,7 +323,11 @@ fn criteria_in(task: &str) -> Vec<String> {
 /// Anything else — one span, three spans, two paths, two literals, "no longer
 /// contains" — is prose this module has no business ruling on.
 fn parse(criterion: &str) -> Option<Checkable> {
-    if negated(criterion) {
+    // An odd number of backticks is a sentence whose spans nobody closed, and
+    // the fragments either side of the missing one are not what the writer
+    // quoted: "`service.md` holds `state: done" reads as two spans and means
+    // one. Declined, like every other shape this cannot be sure of.
+    if negated(criterion) || !criterion.matches('`').count().is_multiple_of(2) {
         return None;
     }
     let spans: Vec<&str> = criterion
@@ -396,6 +434,10 @@ mod tests {
             "`C:notes.md` holds `state: done`",
             // Backticks with nothing between them.
             "`` is `state: done`",
+            // A span nobody closed. The fragments either side of the missing
+            // backtick are two spans by the split and one quotation by the
+            // writer.
+            "`notes.md` holds `state: done",
         ] {
             assert_eq!(
                 checkable(&task(prose)),
@@ -410,6 +452,16 @@ mod tests {
         let task = "## What\nThe row in `notes.md` is `state: done`.\n\n\
                     ## Acceptance criteria\n\n- it ships\n\n\
                     ## Additional info\n\n- `other.md` holds `state: done`\n";
+        assert_eq!(checkable(task), vec![]);
+    }
+
+    #[test]
+    fn a_bullet_ends_at_a_blank_line_and_prose_after_it_joins_nothing() {
+        // The indented line is a continuation of the *paragraph*, not of the
+        // bullet two lines above it. Stitched onto that bullet it would read as
+        // "it ships in `notes.md` is `state: done`" — a criterion the plan never
+        // wrote, compared against a branch that never agreed to it.
+        let task = "## Acceptance criteria\n\n- it ships\n\nAnd separately:\n                      the row in `notes.md` is `state: done`\n";
         assert_eq!(checkable(task), vec![]);
     }
 

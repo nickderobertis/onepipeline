@@ -2191,8 +2191,11 @@ the branch contradicts, the same criterion on a branch that holds it, a node
 whose settlement is unchanged beside the finding, prose that is reported nowhere,
 the three ways a branch withholds a file, a bar stated in an amendment and in two
 steps and read once each, a node whose dispatch failed being read all the same, a
-node with no branch reporting nothing, and a node re-dispatched after a failed
-publication being read once at its settlement rather than once per attempt. The
-containment refusal is held by
-`criteria::tests::a_path_the_branch_resolves_outside_the_worktree_is_not_read`,
-which needs a committed symlink and so lives where the suite can make one.
+node with no branch reporting nothing, a node re-dispatched after a failed
+publication being read once at its settlement rather than once per attempt, a
+workstream read where it is held for a person and not again afterwards, and a
+symlink resolving off the branch refused rather than followed. That last journey
+needs a committed symlink and so runs on the hosts that have them; the
+containment check itself is platform-independent and
+`criteria::tests::a_path_the_branch_resolves_outside_the_worktree_is_not_read`
+holds it either way.
