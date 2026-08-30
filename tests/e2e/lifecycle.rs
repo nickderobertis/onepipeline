@@ -3009,7 +3009,7 @@ fn the_run_result_a_consumer_reads_states_its_version_and_carries_the_landing() 
     launched.settled();
     let recorded = world.run_json(&open, "result.json");
     assert_eq!(
-        recorded["schema_version"], 4,
+        recorded["schema_version"], 5,
         "the run result a consumer parses states no version, or not this one: {recorded}"
     );
     assert!(
@@ -3038,7 +3038,7 @@ fn the_run_result_a_consumer_reads_states_its_version_and_carries_the_landing() 
     let (landed, launched) = driven(&world, "readapi", vec![lifecycle("service", &[])]);
     launched.settled();
     let recorded = world.run_json(&landed, "result.json");
-    assert_eq!(recorded["schema_version"], 4, "{recorded}");
+    assert_eq!(recorded["schema_version"], 5, "{recorded}");
     assert_eq!(
         node(&recorded, "service")["landing"],
         "landed",
@@ -4077,7 +4077,7 @@ fn a_change_that_merged_after_settlement_is_reported_as_of_settlement_not_as_now
     let results = world.run(&["results", &run]);
     results.exited(0).out_has("NOT landed");
     results.out_has("when this settled");
-    results.out_has("nothing has re-read it since");
+    results.out_has("no later read has said otherwise");
     results.out_has("open the change for where it is now");
 
     // The counting views, which are the ones a planner closes work from.
@@ -4093,6 +4093,139 @@ fn a_change_that_merged_after_settlement_is_reported_as_of_settlement_not_as_now
         .run(&["status", &run])
         .exited(0)
         .out_has("as each settled, not as of now");
+}
+
+/// This host's release-targets document for the repository under test, declaring
+/// one **human-step** target.
+///
+/// A human-step target executes nothing at all — no probe, no subprocess — which
+/// is what makes it the cheapest way to put `onevcs`'s landing read on this
+/// crate's side of the seam: the sibling decides whether the work reached the
+/// base before it looks at any release at all, and answers `not landed` where it
+/// has not.
+fn a_release_target_for_the_repository_under_test() -> String {
+    "version: 1\n\
+     repositories:\n\
+     \x20 - match: {host: github.com, owner: owner, name: service}\n\
+     \x20   default_target: wheel\n\
+     \x20   targets:\n\
+     \x20   - name: wheel\n\
+     \x20     style: human-step\n\
+     \x20     action: \"cut the release by hand\"\n\
+     default:\n\
+     \x20 adoption: fast\n"
+        .to_owned()
+}
+
+/// A change that merges **while the run is still going** is read again when the
+/// run settles, and reported as the landing it is.
+///
+/// The other side of the journey above, and the half that was not honest. A
+/// node's landing is an observation of a moment — `onevcs publish` answered
+/// `change request open`, and the run neither blocks nor polls for a merge
+/// somebody else owns — and that snapshot was then carried into the run's own
+/// final report hours later. A change a person merged while the run was still
+/// holding on a human gate was recorded, at settlement, as work that had reached
+/// nobody: one run reported 15 of 18 done while all 18 had landed.
+///
+/// So the run asks again as it closes out, which is the last thing it will ever
+/// say about the node and the thing a reader acts on. It asks the only read on
+/// `onevcs`'s public surface that answers from the publication checkout's own
+/// history — see `vcs::proved_landed` — and where that library will not answer, the
+/// settlement's own dated claim stands, exactly as the journey above holds.
+#[test]
+fn a_change_that_merges_before_the_run_settles_is_read_again_and_reported_landed() {
+    let world = World::new("lifecycle-landing-reread");
+    let repository = world.repository("change-open", &[]);
+    world.releases(&a_release_target_for_the_repository_under_test());
+    world.script(
+        "service.work",
+        "the change that merged while the run held\n",
+    );
+
+    // A run that does **not** settle when the node does: the human gate after it
+    // is what keeps the run open while the change merges, which is the whole
+    // condition this is about.
+    let run = "mergedduring";
+    let path = world.plan(
+        run,
+        &plan_of(
+            run,
+            vec![
+                lifecycle("service", &[]),
+                crate::harness::human("approve", &["service"]),
+            ],
+        ),
+    );
+    world.run(&["start", &path, "--attach"]).settled();
+
+    // As of the node's own settlement, the change had not reached its base. This
+    // is the answer that used to be carried to the end of the run.
+    let landing_of = |world: &World| {
+        world.run_json(run, "result.json")["nodes"]
+            .as_array()
+            .expect("the run's result names its nodes")
+            .iter()
+            .find(|node| node["id"] == "service")
+            .expect("the run's result names the lifecycle node")
+            .clone()
+    };
+    let settled = landing_of(&world);
+    assert_eq!(
+        settled["landing"],
+        json!("unlanded"),
+        "{settled}\n{}",
+        why(&world, run)
+    );
+    let branch = settled["branch"]
+        .as_str()
+        .expect("the node names the branch its work is on")
+        .to_owned();
+    let change = settled["change_url"]
+        .as_str()
+        .expect("the node names the change a person merges")
+        .to_owned();
+
+    // And then a person merges it, the way a host does: the squash the host
+    // lands names the change request, which is what says this branch's work
+    // reached the base however far the base has moved since.
+    git(&world, &repository.checkout, &["fetch", "origin"]);
+    git(
+        &world,
+        &repository.checkout,
+        &[
+            "merge",
+            "--no-ff",
+            "-m",
+            &format!("chore: land the change ({change})"),
+            &branch,
+        ],
+    );
+    git(&world, &repository.checkout, &["push", "origin", "main"]);
+
+    // The person answers the gate, and a fresh driver closes the run out — which
+    // is where the landing is asked about again.
+    world.run(&["attest", run, "approve"]).exited(0);
+    world.run(&["adopt", run]).settled();
+
+    let closed = landing_of(&world);
+    assert_eq!(
+        closed["landing"],
+        json!("landed"),
+        "the run's own report carried a landing from the moment the node settled rather \
+         than reading it again as the run closed out: {closed}\n{}",
+        why(&world, run)
+    );
+    // And the view an operator opens says the same thing the report a consumer
+    // parses does: two readers of one run that disagree about where its work is
+    // are the whole reason any of this is read again.
+    let results = world.run(&["results", run]);
+    results.exited(0).out_has("landed on its base");
+    results.out_lacks("NOT landed");
+    world
+        .run(&["runs"])
+        .exited(0)
+        .out_lacks("not landed as of settlement");
 }
 
 /// A change request this crate cannot read the record of settles the failure it

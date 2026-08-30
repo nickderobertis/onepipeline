@@ -2507,17 +2507,23 @@ fn stopping_a_run_reaches_a_dispatch_whose_driver_and_lock_holder_are_dead() {
         dispatch.iter().all(|pid| still_listed(*pid)),
         "the driver took its dispatch {dispatch:?} with it, so this journey proves nothing"
     );
-    // Both of the run's records named that driver, and the views say so in the
-    // one way an operator reads it: nothing is driving the run, and no row here
-    // claims a dispatch — which is the whole of what those two records can find.
+    // Both of the run's records named that driver, so the run reads as undriven
+    // — and the dispatch is still running, which the registry is what knows. The
+    // two facts are different and the views say both: nothing is driving the
+    // run, and a row here still claims the dispatch, because there is one. It is
+    // the same dispatch the stop below goes on to reach.
     world.until("the run to read as undriven", |world| {
         world.run(&["status", &run]).stdout.contains("DRIVER DEAD")
     });
-    world
-        .run(&["host"])
-        .exited(0)
-        .out_has("no live dispatches")
-        .out_has(&run);
+    let rendered = world.run(&["host"]);
+    rendered.exited(0).out_has(&run).out_has("build");
+    assert!(
+        !rendered.stdout.contains("no live dispatches")
+            && !rendered.stdout.contains("stale registry"),
+        "a dispatch that outlived its driver — and that the stop below reaches — was \
+         reported as one that had ended:\n{}",
+        rendered.stdout
+    );
 
     let stopped = world.run(&["stop", &run]);
     stopped.exited(0).out_has("\"stopped\":true");

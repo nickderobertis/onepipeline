@@ -54,7 +54,7 @@ use crate::event::{Envelope, Source};
 use crate::filter::EventFilter;
 use crate::graph::{self, Landing, NodeStatus};
 use crate::journal::PipelineKind;
-use crate::ledger::{self, LaunchRecord, LockRecord};
+use crate::ledger::{self, LaunchRecord};
 use crate::projection::{self, MemberLabel, Refusal, RunState, Served};
 use crate::report::{ToolText, Truncation};
 use crate::sys;
@@ -250,6 +250,34 @@ pub fn liveness(launch: &LaunchRecord, state: &RunState, paths: &RunPaths) -> Dr
     }
 }
 
+/// Take the landings the run's **own settled report** recorded, where they say
+/// more than its journal does.
+///
+/// A driver re-reads every unlanded change as it closes out — `engine`'s
+/// `landings_after_asking_again` — and writes what it found there; without this
+/// the report a consumer parses said `landed` while the view an operator opens
+/// said `NOT landed`.
+///
+/// **Only ever `unlanded` → `landed`.** A report written at an earlier close-out
+/// is older than the journal beside it, and a run still going has one — but a
+/// base does not stop carrying what it carries, so taking the later answer in
+/// that direction alone cannot un-land anything.
+fn landings_the_run_re_read(state: &mut RunState, paths: &RunPaths) {
+    // Read leniently: a report this build cannot parse — one a newer build
+    // wrote, at a version this one refuses — leaves the view exactly as the
+    // journal left it, which is the answer it always had.
+    let Some(result) = ledger::read_json_opt::<crate::engine::RunResult>(&paths.result()) else {
+        return;
+    };
+    for node in result.nodes {
+        if node.landing == Some(Landing::Landed)
+            && state.landings.get(&node.id) == Some(&Landing::Unlanded)
+        {
+            state.landings.insert(node.id, Landing::Landed);
+        }
+    }
+}
+
 /// Everything a view needs about one run, read once.
 #[derive(Debug)]
 pub struct RunView {
@@ -276,6 +304,7 @@ impl RunView {
         let mut events = crate::journal::read(&paths.journal());
         crate::journal::merge_order(&mut events);
         let mut state = projection::fold(&events);
+        landings_the_run_re_read(&mut state, paths);
         // A view resolves cross-DAG edges the same way the loop does, so a
         // consumer this run is about to dispatch is not reported blocked to the
         // person deciding whether to intervene. Reading only: rendering a run
@@ -328,11 +357,11 @@ impl RunView {
     /// line, and is absent — rather than a zero — when there is nothing to say.
     ///
     /// Dated, for the reason the per-node phrase is: it counts what each
-    /// settlement observed, and nothing has looked since — a count that read as
-    /// the state of things now would say a merged change had reached nobody.
-    /// Divergence 33 in
-    /// [the divergence record](../../../docs/contract-divergences.md) is why
-    /// nothing can look.
+    /// settlement observed, plus whatever the run's own close-out re-read
+    /// afterwards — and a count that read as the state of things now would say a
+    /// merged change had reached nobody. Divergence 33 in
+    /// [the divergence record](../../../docs/contract-divergences.md) records
+    /// what that re-read still cannot reach.
     pub fn summary(&self) -> String {
         let statuses = self.state.statuses();
         let done = statuses
@@ -505,27 +534,48 @@ impl Survey {
 // a failure of the command: the empty case here *replaces* `no runs recorded`, so it cannot
 // live on a stream other than the answer it replaces. The two driver sites that print these
 // carry the exit code that goes with the same decision.
+/// How many refused run roots a view names before it summarises the rest.
+///
+/// The remainder is counted out loud rather than dropped, exactly as
+/// [`MAX_NAMED_KINDS`] counts the surface kinds it did not name: a silently
+/// truncated list reads as the whole answer.
+const MAX_NAMED_SKIPS: usize = 3;
+
 /// What a view says about the run roots it refused, or nothing when it refused
 /// none.
 ///
-/// Counted **and** named. A count alone tells a reader something is wrong and
-/// not which directory to look at, and the reason is what `results` already
-/// prints for exactly this refusal.
+/// **One line: a count, and as many reasons as fit on it.** A count alone tells
+/// a reader something is wrong and not which directory to look at, so a few
+/// roots are named with the reason `results` prints for the same refusal — and a
+/// line each is what buried the answer, because a third of the roots on a host
+/// can be unreadable and the live verdict is what a reader opened the view
+/// for.
 fn skipped_lines(skipped: &[Skipped]) -> String {
     if skipped.is_empty() {
         return String::new();
     }
-    let mut out = format!("{} run root(s) skipped:\n", skipped.len());
-    for root in skipped {
-        // Every value on the line is a stranger's — a directory name on disk and
-        // a refusal built from it — so both go through the same strip.
-        out.push_str(&format!(
-            "  {}: {}\n",
-            one_line(&root.path.display().to_string()),
-            one_line(&root.reason)
-        ));
-    }
-    out
+    // Every value on the line is a stranger's — a directory name on disk and a
+    // refusal built from it — so both go through the same strip.
+    let named: Vec<String> = skipped
+        .iter()
+        .take(MAX_NAMED_SKIPS)
+        .map(|root| {
+            format!(
+                "{}: {}",
+                one_line(&root.path.display().to_string()),
+                one_line(&root.reason)
+            )
+        })
+        .collect();
+    let rest = match skipped.len().saturating_sub(named.len()) {
+        0 => String::new(),
+        more => format!(", and {more} more"),
+    };
+    format!(
+        "{} run root(s) skipped: {}{rest}\n",
+        skipped.len(),
+        named.join("; ")
+    )
 }
 
 /// What a whole-root view says when it has no run to report.
@@ -1457,15 +1507,17 @@ fn attested_after_failing(view: &RunView, node: &str) -> bool {
 /// The nodes whose change had not reached its base when they settled, in id
 /// order.
 ///
-/// Read off what each settlement observed — never off a node's repository or its
-/// policy — so a node absent from this list is one that either landed or had no
-/// change to land, and never one nobody looked at.
+/// Read off what each settlement observed, plus whatever the run's own settled
+/// report re-read afterwards — never off a node's repository or its policy — so
+/// a node absent from this list is one that either landed or had no change to
+/// land, and never one nobody looked at.
 ///
-/// It is deliberately not called what has *not landed now*: nothing here has
-/// looked since, and every line rendered from this list says so — see the
-/// per-node phrase below, and divergence 33 in
-/// [the divergence record](../../../docs/contract-divergences.md) for why
-/// nothing can look.
+/// It is deliberately not called what has *not landed now*: the re-read happens
+/// when a driver closes the run out and cannot always answer, so a node here is
+/// one no read has moved rather than one proved still open. Every line rendered
+/// from this list says so — see the per-node phrase below, and divergence 33 in
+/// [the divergence record](../../../docs/contract-divergences.md) for the half
+/// that still cannot be reached.
 fn unlanded_nodes(view: &RunView) -> Vec<String> {
     view.state
         .landings
@@ -1568,105 +1620,142 @@ fn working(activity: &crate::projection::NodeActivity) -> String {
     }
 }
 
-/// Whether this host can prove the run behind a recorded dispatch is still being
-/// driven.
+/// Whether this host can prove a recorded dispatch is still running.
 ///
 /// Three answers, because a row an operator acts on has to distinguish them.
-/// `Stale` and `Live` are proofs in opposite directions; `Unproven` is the
+/// `Stale` and `Held` are proofs in opposite directions; `Unproven` is the
 /// answer this host does not have, and collapsing it into either is how a
 /// registry row outlives the process it describes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Proof {
-    /// The run's lock is held, and the pid holding it started when the record
-    /// says it did.
+    /// The dispatch's own registry entry names a live pid, and that pid started
+    /// when the entry says it did.
     ///
     /// Deliberately not named for liveness: what this establishes is that the
     /// evidence agrees, to the resolution the host reports a process start at —
     /// one second, where that is `ps`. A pid reused *inside* that resolution by
     /// a process that also started then is the one case this cannot separate,
-    /// and it is why the word is about the lock rather than about the work.
+    /// and it is why the word is about the record rather than about the work.
     Held,
-    /// This host proved nothing is driving the run behind the row.
+    /// This host proved the process behind the row is gone.
     Stale(String),
-    /// This host cannot decide: the lock was taken elsewhere, cannot be read, or
-    /// carries no stamp to check the pid against.
+    /// This host cannot decide: the dispatch was recorded elsewhere, the
+    /// registry cannot be read, or it holds no entry for the node at all.
     Unproven(String),
 }
 
-/// Whether the dispatches a run records are backed by a driver this host can
-/// prove is running them.
+/// What a run's own dispatch registry says about the processes its work is in.
 ///
-/// The **ownership lock**, not the launch record: the lock is created by the
-/// process that drives the run and removed when it lets go, so its presence is a
-/// claim made now rather than one made at launch. Its pid says which process,
-/// and its start token says the pid is still that process — a pid alone is what a
-/// two-day-old lock has, and a reused one answers a liveness probe as alive.
-fn dispatch_proof(view: &RunView) -> Proof {
-    if view.state.stop_recorded() {
-        return Proof::Stale("the run was stopped".to_string());
+/// The registry, and not the ownership lock: the lock names the **driver**, which
+/// starts the dispatch and does not outlive it, and judging a row by it answered
+/// about the wrong process — a run stopped and then adopted carries its stop for
+/// ever, so its fresh dispatches all read as ended. [`ledger::DispatchRecord`] is
+/// what the run writes for each process its work is in, and what a `stop` aims
+/// at, so a row here and the teardown an operator runs after reading it are
+/// decided from one record.
+// llmlint: ignore-block[invalid_states_unrepresentable] the key is the node id
+// `DispatchRecord::node` carries, and a node id is the plain `String` every identifier in
+// this crate is, for the reason `src/error.rs`'s file-level suppression states. The value
+// is not this reader's to check either: it comes back from `ledger::dispatches_of`, which
+// is the boundary that refuses an entry nothing may be acted on.
+enum Registry {
+    /// What the registry holds, by the node each entry names.
+    Read(BTreeMap<String, Vec<ledger::DispatchRecord>>),
+    /// The registry could not be read, and this is why.
+    ///
+    /// Not an absence: a run whose registry this build cannot enumerate is one
+    /// nobody can say is idle, which is the whole reading this view exists to
+    /// stop being made.
+    Unreadable(String),
+}
+// llmlint: ignore-end[invalid_states_unrepresentable]
+
+impl Registry {
+    /// Read one run's registry, keeping the refusal where there is one.
+    fn of(paths: &RunPaths) -> Self {
+        match ledger::dispatches_of(paths) {
+            Ok(records) => {
+                let mut by_node: BTreeMap<String, Vec<ledger::DispatchRecord>> = BTreeMap::new();
+                for record in records {
+                    by_node.entry(record.node.clone()).or_default().push(record);
+                }
+                Self::Read(by_node)
+            }
+            Err(error) => Self::Unreadable(error.to_string()),
+        }
     }
-    let path = view.paths.lock();
-    // Asked for, rather than tested with `is_file`: that helper answers `false`
-    // for a lock that is not there *and* for one this host would not describe,
-    // and only the first is a proof. Reading the second as absence would turn a
-    // question into a verdict that nothing is driving the run.
-    match std::fs::metadata(&path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Proof::Stale(
-                "nothing holds the run's ownership lock, so no driver is running it".to_string(),
-            )
+
+    /// What this registry proves about one node's dispatch.
+    ///
+    /// **Most certain first, and a live entry wins.** One node can hold more than
+    /// one entry — a dispatch that was retried inside the run leaves the ended
+    /// attempt's record behind until the process it named is collected — so a
+    /// stale entry beside a live one says the older attempt ended, never that the
+    /// node has nothing running.
+    fn proves(&self, node: &str) -> Proof {
+        let by_node = match self {
+            Self::Unreadable(why) => {
+                return Proof::Unproven(format!(
+                    "the run's dispatch registry cannot be read: {why}"
+                ))
+            }
+            Self::Read(by_node) => by_node,
+        };
+        let records = by_node.get(node).map(Vec::as_slice).unwrap_or_default();
+        let mut unproven = None;
+        let mut stale = None;
+        for record in records {
+            match proof_of(record) {
+                Proof::Held => return Proof::Held,
+                Proof::Unproven(why) => unproven.get_or_insert(why),
+                Proof::Stale(why) => stale.get_or_insert(why),
+            };
         }
-        // llmlint: ignore-block[changed_behavior_has_e2e] a lock this host will not describe
-        // at all is a host condition no portable journey can set; the answer beside it — a
-        // lock that is there and is not a file — is driven in `tests/e2e/views.rs`.
-        Err(error) => {
-            return Proof::Unproven(format!(
-                "the run's ownership lock cannot be described: {error}"
-            ))
+        match (unproven, stale) {
+            (Some(why), _) => Proof::Unproven(why),
+            (None, Some(why)) => Proof::Stale(why),
+            // No entry at all: the run says a dispatch is in flight and no
+            // process claims it. Deliberately not a proof of staleness — the
+            // entry is written by the executor as the dispatch starts, so a
+            // reader between those two writes would report live work as ended.
+            (None, None) => Proof::Unproven(
+                "the run's dispatch registry holds no entry for it, so nothing here says which \
+                 process it is in"
+                    .to_string(),
+            ),
         }
-        // llmlint: ignore-end[changed_behavior_has_e2e]
-        Ok(about) if !about.is_file() => {
-            return Proof::Unproven(
-                "the run's ownership lock is not a file, so nothing here holds it".to_string(),
-            )
-        }
-        Ok(_) => {}
     }
-    let Some(held) = ledger::read_json_opt::<LockRecord>(&path) else {
-        // A claim this build cannot read is still a claim — it is what stops a
-        // second writer — but it proves nothing about a *dispatch*, and a row is
-        // a claim that one exists.
-        return Proof::Unproven("the run's ownership lock cannot be read".to_string());
-    };
-    if held.host != sys::hostname() {
+}
+
+/// Whether this host can prove the process one registry entry names is still the
+/// dispatch it was recorded for.
+///
+/// Its pid says which process, and its start token says the pid is still that
+/// process — a pid alone is what a two-day-old entry has, and a reused one
+/// answers a liveness probe as alive.
+fn proof_of(record: &ledger::DispatchRecord) -> Proof {
+    if record.host != sys::hostname() {
         return Proof::Unproven(format!(
-            "its driver holds the lock on {}, and a pid means nothing across machines",
-            held.host
+            "its dispatch runs on {}, and a pid means nothing across machines",
+            record.host
         ));
     }
-    if !sys::process_may_be_live(held.pid) {
-        return Proof::Stale(format!("its driver (pid {}) is gone", held.pid));
+    if !sys::process_may_be_live(record.pid) {
+        return Proof::Stale(format!("its dispatch (pid {}) is gone", record.pid));
     }
-    if held.started.is_empty() {
-        return Proof::Unproven(format!(
-            "the run's lock carries no start token for pid {}, so nothing says it is still \
-             the process that took it",
-            held.pid
-        ));
-    }
-    match sys::process_start_token(held.pid) {
+    match sys::process_start_token(record.pid) {
         // llmlint: ignore-block[changed_behavior_has_e2e] the host declining to answer is a
         // property of the machine rather than of anything a user types. The answers it does
-        // give, and three other unproven arms that resolve alike, are driven end to end.
+        // give, and the other unproven arms that resolve alike, are driven end to end.
         None => Proof::Unproven(format!(
             "this host will not say when pid {} started",
-            held.pid
+            record.pid
         )),
         // llmlint: ignore-end[changed_behavior_has_e2e]
-        Some(token) if token.matches(&held.started) => Proof::Held,
+        Some(token) if token.matches(&record.started) => Proof::Held,
         Some(_) => Proof::Stale(format!(
-            "pid {} is a different process from the one that took the run's lock",
-            held.pid
+            "pid {} is a different process from the one its dispatch was recorded in",
+            record.pid
         )),
     }
 }
@@ -1675,11 +1764,14 @@ fn dispatch_proof(view: &RunView) -> Proof {
 ///
 /// A row here is a claim that a dispatch exists **now**, and it is acted on: an
 /// operator leaves it alone, or ends it. So a row is rendered as live only where
-/// this host can prove the run behind it is still being driven — its ownership
-/// lock's pid, and the start token that says the pid is still the process that
-/// took it. A row proved to have nothing behind it is dropped and counted, and
-/// one this host cannot decide either way is rendered saying so. Never a bare
-/// row that reads as live work.
+/// this host can prove the process the dispatch is in is still that process —
+/// the pid its own registry entry names, and the start token beside it. The run's
+/// ownership lock is deliberately *not* what decides this — it names the driver,
+/// and a driver is not the work; the reasoning is on the private reader that
+/// replaced it. A row
+/// proved to have nothing behind it is dropped and counted, and one this host
+/// cannot decide either way is rendered saying so. Never a bare row that reads
+/// as live work.
 pub fn host(survey: &Survey) -> String {
     let mut out = format!("host {}\n", sys::hostname());
     // The scope of the claim. This scan has an under-reporting direction it
@@ -1693,11 +1785,12 @@ pub fn host(survey: &Survey) -> String {
     let mut rendered = false;
     let mut ignored: Vec<String> = Vec::new();
     for view in &survey.views {
-        let proof = dispatch_proof(view);
+        let registry = Registry::of(&view.paths);
         for (id, status) in &view.state.statuses() {
             if *status != NodeStatus::Running {
                 continue;
             }
+            let proof = registry.proves(id);
             if let Proof::Stale(why) = &proof {
                 ignored.push(one_line(&format!("{}/{id}: {why}", view.paths.run)));
                 continue;
@@ -1769,7 +1862,13 @@ pub fn monitor(view: &RunView, filter: &EventFilter) -> String {
             Source::Agentgraph => format!("agent:{}", event.stream),
             Source::Vcs => format!("vcs:{}", event.stream),
         };
-        out.push_str(&format!("{}  {:<28} {}\n", event.ts, id, summarize(event)));
+        out.push_str(&format!(
+            "{}  {:<28} {}{}\n",
+            event.ts,
+            id,
+            summarize(event),
+            superseded_suffix(view, event)
+        ));
     }
     // The run's own state has no node, so it has no graph id: it reaches the
     // reader as a trailer rather than as an event line.
@@ -1781,6 +1880,30 @@ pub fn monitor(view: &RunView, filter: &EventFilter) -> String {
         graph::state_of(&view.state.statuses()).as_str()
     ));
     out
+}
+
+/// What a line about a superseded node says beyond the event itself, or nothing
+/// for every other line.
+///
+/// The stream keeps the `node-settled` that failed the node, and it is what the
+/// run's own monitor persona reads — see
+/// [`crate::projection::RunState::superseded`] for what that monitor did with an
+/// unqualified one.
+///
+/// Only the records *about the node* carry it, which keeps it a qualification
+/// rather than a banner: a relayed envelope of a sibling's is about the dispatch
+/// that ran, and the supersession is this crate's own answer about the node.
+fn superseded_suffix(view: &RunView, event: &Envelope) -> String {
+    if event.source != Source::Pipeline {
+        return String::new();
+    }
+    let Some(node) = event.labels.node.as_deref() else {
+        return String::new();
+    };
+    match view.state.superseded.get(node) {
+        Some(replacement) => format!("  — superseded, retried as {}", one_line(replacement)),
+        None => String::new(),
+    }
 }
 
 /// One control-stripped line derived from an event's recorded values.
@@ -1815,13 +1938,13 @@ fn summarize(event: &Envelope) -> String {
 /// hours after its change had merged, and a supervisor read that as work nobody
 /// had landed.
 ///
-/// So the unlanded phrase is dated, and says nothing has looked since. Nothing
-/// here *can* look: a change request lives on the repository's host, `onevcs`
-/// owns every route to one, and the read that would answer this is not on that
-/// library's surface — recorded as a proposal to it in
-/// [`docs/contract-divergences.md`](../../../docs/contract-divergences.md).
-/// Until it is, a dated claim beside the change's own URL is the honest answer,
-/// and asserting the state of things now would not be.
+/// So the unlanded phrase is dated, and says that no later read has moved it.
+/// One does look: a driver asks again as the run closes out and records what it
+/// found, which [`landings_the_run_re_read`] is what carries onto these lines. It
+/// cannot always answer — see [`crate::vcs::proved_landed`] and divergence 33 in
+/// [the divergence record](../../../docs/contract-divergences.md) — and where it
+/// does not, this is the claim that stands: the settlement's own, dated, beside
+/// the change's own URL. Asserting the state of things now would not be honest.
 fn landed_phrase(landing: Landing, settled_at: Option<u64>) -> String {
     let ago = match settled_at {
         Some(at) => format!(
@@ -1836,7 +1959,7 @@ fn landed_phrase(landing: Landing, settled_at: Option<u64>) -> String {
         Landing::Landed => "landed on its base".to_string(),
         Landing::Unlanded => format!(
             "NOT landed: the change had not reached its base when this settled{ago}, and \
-             nothing has re-read it since — open the change for where it is now"
+             no later read has said otherwise — open the change for where it is now"
         ),
     }
 }
@@ -2016,7 +2139,29 @@ pub fn results(view: &RunView) -> String {
             }
         }
     }
+    out.push_str(&superseded_lines(view));
     out.push_str(&journal_loss_line(view));
+    out
+}
+
+/// What the run's results say about the nodes a `retry` replaced, or nothing
+/// where it replaced none.
+///
+/// **Under the graph, because they are not in it** — every line above is a node
+/// the run is still executing, and these vanished from the results altogether;
+/// [`crate::projection::RunState::superseded`] is what that cost. The line says
+/// what became of the node rather than what its last dispatch scored, and names
+/// the replacement because that is where the work went: a supersession inherits
+/// the branch, so the replacement's own line above is where the work is.
+fn superseded_lines(view: &RunView) -> String {
+    let mut out = String::new();
+    for (node, replacement) in &view.state.superseded {
+        out.push_str(&format!(
+            "  {:<24} superseded — retried as {}\n",
+            one_line(node),
+            one_line(replacement)
+        ));
+    }
     out
 }
 
@@ -2337,23 +2482,29 @@ mod tests {
         paths
     }
 
-    /// The lock a driving process leaves behind it, as this process would take
-    /// it: the pid *and* the start token that says the pid is still that
-    /// process.
-    fn hold_lock(paths: &RunPaths) {
-        ledger::write_json(
-            &paths.lock(),
-            &LockRecord {
-                pid: sys::pid(),
-                host: sys::hostname(),
-                acquired_at: sys::now_rfc3339(),
-                verb: "drive".into(),
-                started: sys::process_start_token(sys::pid())
-                    .map(|token| token.recorded().to_string())
-                    .unwrap_or_default(),
-            },
-        )
-        .expect("a held lock");
+    /// One entry in a run's dispatch registry, as the executor writes it.
+    ///
+    /// Written by hand rather than through `claim_dispatch` because what these
+    /// exercise is a reader meeting a record another process left behind — a pid
+    /// that has gone, one on another machine, one a reused pid now answers for —
+    /// and none of those is a state a claim this process takes can be in.
+    fn register(paths: &RunPaths, record: &ledger::DispatchRecord) {
+        std::fs::create_dir_all(paths.dispatches()).expect("the registry directory");
+        ledger::write_json(&paths.dispatch(record.pid, 0), record).expect("a registry entry");
+    }
+
+    /// The entry a live dispatch of this process leaves: the pid *and* the start
+    /// token that says the pid is still that process.
+    fn dispatched_here(node: &str) -> ledger::DispatchRecord {
+        ledger::DispatchRecord {
+            node: node.to_string(),
+            pid: sys::pid(),
+            host: sys::hostname(),
+            dispatched_at: sys::now_rfc3339(),
+            started: sys::process_start_token(sys::pid())
+                .map(|token| token.recorded().to_string())
+                .unwrap_or_default(),
+        }
     }
 
     fn event(
@@ -2772,19 +2923,16 @@ mod tests {
                 ),
             ],
         );
-        // The lock a driver that died left behind: its pid is one this host can
-        // prove is gone.
-        ledger::write_json(
-            &paths.lock(),
-            &LockRecord {
+        // The registry entry a dispatch that died left behind: its pid is one
+        // this host can prove is gone.
+        register(
+            &paths,
+            &ledger::DispatchRecord {
                 pid: dead_pid(),
-                host: sys::hostname(),
-                acquired_at: sys::now_rfc3339(),
-                verb: "drive".into(),
                 started: "a token from the process that died".into(),
+                ..dispatched_here("build")
             },
-        )
-        .expect("a stale lock");
+        );
 
         let rendered = host(&Survey::of(&root));
         assert!(
@@ -2804,10 +2952,10 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// The same run with a driver actually holding it: the row renders, and it
-    /// renders as live.
+    /// The same run with a live process actually running the dispatch: the row
+    /// renders, and it renders as live.
     #[test]
-    fn a_host_row_backed_by_a_held_lock_renders_as_a_live_dispatch() {
+    fn a_host_row_backed_by_a_live_registry_entry_renders_as_a_live_dispatch() {
         let root = scratch("host-live");
         let paths = write_run(
             &root,
@@ -2826,7 +2974,7 @@ mod tests {
                 ),
             ],
         );
-        hold_lock(&paths);
+        register(&paths, &dispatched_here("build"));
 
         let rendered = host(&Survey::of(&root));
         assert!(rendered.contains("driven"), "{rendered}");
@@ -2860,17 +3008,13 @@ mod tests {
                 ),
             ],
         );
-        ledger::write_json(
-            &paths.lock(),
-            &LockRecord {
-                pid: sys::pid(),
+        register(
+            &paths,
+            &ledger::DispatchRecord {
                 host: "some-other-host".into(),
-                acquired_at: sys::now_rfc3339(),
-                verb: "drive".into(),
-                started: String::new(),
+                ..dispatched_here("build")
             },
-        )
-        .expect("a lock taken elsewhere");
+        );
 
         let rendered = host(&Survey::of(&root));
         assert!(rendered.contains("elsewhere"), "{rendered}");
@@ -2878,43 +3022,44 @@ mod tests {
         assert!(rendered.contains("some-other-host"), "{rendered}");
         assert!(!rendered.contains("stale registry"), "{rendered}");
 
-        // A lock held by a live process on this host that carries no start token
-        // is the same answer for a different reason: nothing says the pid is
-        // still the process that took it.
-        ledger::write_json(
-            &paths.lock(),
-            &LockRecord {
-                pid: sys::pid(),
-                host: sys::hostname(),
-                acquired_at: sys::now_rfc3339(),
-                verb: "drive".into(),
+        // An entry from a build that predates the stamp is the same answer for a
+        // different reason: nothing says the pid is still the process the
+        // dispatch was recorded in, and the registry refuses the whole read
+        // rather than hand back a row nobody may act on.
+        register(
+            &paths,
+            &ledger::DispatchRecord {
                 started: String::new(),
+                ..dispatched_here("build")
             },
-        )
-        .expect("a lock from a build that predates the stamp");
+        );
         let rendered = host(&Survey::of(&root));
         assert!(rendered.contains("UNPROVEN"), "{rendered}");
         assert!(rendered.contains("no start token"), "{rendered}");
 
         // And a live pid whose start token disagrees with the one recorded is a
         // *different* process wearing a reused pid: proved stale.
-        ledger::write_json(
-            &paths.lock(),
-            &LockRecord {
-                pid: sys::pid(),
-                host: sys::hostname(),
-                acquired_at: sys::now_rfc3339(),
-                verb: "drive".into(),
-                started: "the process that took it, which was not this one".into(),
+        register(
+            &paths,
+            &ledger::DispatchRecord {
+                started: "the process it was recorded in, which was not this one".into(),
+                ..dispatched_here("build")
             },
-        )
-        .expect("a lock a reused pid now answers for");
+        );
         let rendered = host(&Survey::of(&root));
         assert!(
             rendered.contains("1 stale registry entry ignored"),
             "{rendered}"
         );
         assert!(rendered.contains("different process"), "{rendered}");
+
+        // And with nothing in the registry at all, the run says a dispatch is in
+        // flight and no process claims it — which is neither proof.
+        std::fs::remove_dir_all(paths.dispatches()).expect("the registry is taken away");
+        std::fs::create_dir_all(paths.dispatches()).expect("an empty registry");
+        let rendered = host(&Survey::of(&root));
+        assert!(rendered.contains("UNPROVEN"), "{rendered}");
+        assert!(rendered.contains("holds no entry for it"), "{rendered}");
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -3576,9 +3721,10 @@ mod tests {
             "a round reached a view: {stream}"
         );
 
-        // A driver holds the run, which is what makes its dispatch a live one to
-        // the host view.
-        hold_lock(&RunPaths::under(&root, "demo"));
+        // The dispatch's own registry entry is what makes it a live one to the
+        // host view.
+        let paths = RunPaths::under(&root, "demo");
+        register(&paths, &dispatched_here("build"));
         let survey = Survey::of(&root);
         assert!(status(&survey).contains("build: running"));
         assert!(host(&survey).contains("build"));

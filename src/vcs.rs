@@ -340,6 +340,42 @@ pub fn landing_of(outcome: &PublishOutcome) -> Option<crate::graph::Landing> {
     }
 }
 
+/// Whether `onevcs` can **show** that one branch's work reached its base.
+///
+/// Named for the proof rather than for the question: `false` is "no landing was
+/// shown", which covers the sibling saying the work has not landed *and* the
+/// sibling declining to answer at all. A caller acts on `true` alone — it
+/// replaces a settlement's own dated claim — so collapsing the other two costs
+/// nothing and a name promising a verdict would.
+///
+/// `onevcs::release_status` is the one read on that library's public surface
+/// that carries its four-tier landing decision, made against the publication
+/// checkout's own history, across the seam: it answers `not landed` before it
+/// looks at any release at all, and each of the three release answers is it
+/// having found the landing commit first. The **branch** is the reference,
+/// because that is the spelling the sibling resolves work by — see
+/// `crate::release::Dependency::reference`, which asks the same library the same
+/// way.
+///
+/// Divergence 33 in `docs/contract-divergences.md` records what this reaches and
+/// what it still does not.
+//
+// llmlint: ignore-block[invalid_states_unrepresentable] a branch is the plain string every
+// reference in this crate is, for the reason `crate::projection`'s `landing_commits`
+// records: it is what the journal payload carries and what the sibling's own reference
+// grammar takes. What could go wrong with an unchecked one is checked where it enters,
+// by `usable`, which is what wrote every value that reaches this.
+pub fn proved_landed(branch: &str) -> bool {
+    use onevcs::ReleaseStatus;
+    matches!(
+        onevcs::release_status(branch, None),
+        Ok(ReleaseStatus::Released { .. }
+            | ReleaseStatus::NotReleased { .. }
+            | ReleaseStatus::AwaitingHumanStep { .. })
+    )
+}
+// llmlint: ignore-end[invalid_states_unrepresentable]
+
 /// Where a human reads the change a publication produced, when there is one.
 ///
 /// A change request that is open, or that the host is holding, names its URL. A

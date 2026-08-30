@@ -212,6 +212,25 @@ pub struct RunState {
     /// every fall-through reads as fatal, and a reader is sent at a
     /// subscription that never blocked a turn.
     pub served: BTreeMap<String, Vec<Served>>,
+    // llmlint: ignore-block[invalid_states_unrepresentable] both sides are node ids, and a
+    // node id is the plain `String` every map on this struct is keyed by — `recorded`,
+    // `outcomes`, `branches`, and the rest — for the reason `src/error.rs`'s file-level
+    // suppression states: a `NodeId` newtype is a public item `docs/contract.md` does not
+    // name. Neither side is unchecked: both come off an `edit-committed` the reconciler
+    // wrote, which validated the superseded node against the live graph and refused a
+    // replacement id that was blank or already taken.
+    /// The replacement each superseded node was retried under.
+    ///
+    /// **The one record that says a failure was answered.** A `retry` takes the
+    /// node it supersedes out of the graph in the same edit, so every view built
+    /// from the graph loses it — while the store still carries the `node-settled`
+    /// that failed it, with nothing beside that record saying it was replaced. A
+    /// reader of the stream, the run's own monitor included, met a `failed` node
+    /// and proposed retrying work that had already been redone and merged; on one
+    /// run eleven entries read `failed` and not one was a node anybody could
+    /// retry. This is what every reader of that settlement is qualified by.
+    pub superseded: BTreeMap<String, String>,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
     /// What each node's dispatch is doing *now*, from the relayed stream.
     ///
     /// The one question no event of this crate's own can answer: a
@@ -741,13 +760,19 @@ fn fold_one(state: &mut RunState, event: &Envelope) {
                     // whichever side took it, so folding it here too would
                     // count one request twice.
                     Operation::CompletionRequested { .. } => {}
-                    Operation::RetryRequested { node, .. } => {
+                    Operation::RetryRequested {
+                        node, replacement, ..
+                    } => {
                         // What the supersession did to the node it replaced. The
                         // node itself leaves the graph with the same edit, so
                         // this is what the run's record says became of it.
                         state
                             .recorded
                             .insert(node.clone(), Recorded::At(NodeStatus::Cancelled));
+                        // And which node carries its work now, which is the half
+                        // no status word can say: `cancelled` is also what a
+                        // `drop` leaves, and the two take opposite actions.
+                        state.superseded.insert(node.clone(), replacement.clone());
                     }
                     Operation::NodeParked { node } => {
                         // What the node was *before* the park decides which park
