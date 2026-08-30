@@ -2459,10 +2459,11 @@ change its bar.
 **Almost none of what a note does is this crate's.** The two-party conversation is
 `onejudge`'s, the member running it `oneagentgraph`'s, and the approved
 delivery-seam contract puts the note's shapes and its routing there: `onejudge`
-0.7.0 publishes `onejudge::note` and `oneagentgraph` 0.3.15 publishes
-`oneagentgraph::control::note`, which hands one note to a named member of a graph
-run and answers what the conversation did with it. Both are **compile floors** of
-this build. So the shapes below are that seam's, re-exported and not restated — a
+0.7.0 publishes `onejudge::note` and `oneagentgraph` at git rev `2a7988eb`
+publishes `oneagentgraph::control::note`, which hands one note to a named member
+of a graph run and answers what the conversation did with it. Both are **compile
+floors** of this build, and the second is pinned by revision rather than by
+release — entry 52 records what that costs. So the shapes below are that seam's, re-exported and not restated — a
 second declaration is a shape that drifts, and a note that satisfied the copy
 would still be refused by the conversation it was written for.
 
@@ -2562,3 +2563,52 @@ real two-party conversation.
   }
 }
 ```
+## 52. A sibling engine is pinned by revision, so the currency check cannot read it — OPEN
+
+**Proposal (for the planner who owns the contract): keep the `oneagentgraph` pin
+at git rev `2a7988eb445318e832270a564d83dda7807e798c` until that seam is
+released, and rule on which of `just engines-current`'s two answers a revision
+pin should get — modelled, or refused as it is today.**
+
+Entry 51's delivery seam is `oneagentgraph::control::note`, and this repository
+adopted it before the sibling cut a release carrying it. The plan that scheduled
+that work pins the reference rather than a version, so `[workspace.dependencies]`
+now reads
+
+```toml
+oneagentgraph = { git = "https://github.com/nickderobertis/oneagentgraph", rev = "2a7988eb445318e832270a564d83dda7807e798c" }
+```
+
+which resolves `0.3.14` from that revision. `onejudge` stays at `0.7.0` because
+that is what the revision itself requires, so the block's one-resolution rule
+still holds the pair together: the lock carries each engine once.
+
+**What it costs, measured rather than predicted.** This repository's currency
+invariant is that every pin in that block is declared at the newest release the
+registry carries, and `scripts/linked-engines.sh` reads a requirement only in the
+shape `name = "..."`. A table yields nothing, so the check refuses by name:
+
+```
+linked-engines: 'oneagentgraph' has no requirement in [workspace.dependencies] of 'Cargo.toml'
+ACTION: add the pin there, or drop 'oneagentgraph' from SIBLINGS in this script if this repository no longer links it
+```
+
+`just engines-current` exits 3, and seven of the nineteen journeys in
+`tests/linked_engines.rs` — which drive that script against this repository's own
+manifest and lock — fail with it. That is the check working: a revision pin *is*
+a departure from the invariant, and the invariant is what says so out loud.
+
+**Why it is not closed here.** Both ways of closing it are the planner's. Teaching
+the script to model a `{ git, rev }` table would widen a shared invariant so that
+this change passes, which is the one thing a dispatch may not do to a check that
+has found something real. Dropping `oneagentgraph` from the script's `SIBLINGS`
+would state that this repository no longer links it, which is false. And
+substituting the released `oneagentgraph 0.3.15` — which does carry the same seam,
+and which this branch briefly pinned — overrides a cross-repository instruction
+with a packaging preference, which is a proposal rather than a decision: a git
+dependency cannot be published to crates.io, so **this pin must return to a
+version before this crate can cut a release**, and that is the trade to rule on.
+
+The move itself is one line and a `cargo update`, exactly as entry 51's own
+adoption note describes: when the sibling releases the seam, this pin becomes a
+version, `just engines-current` reads it again, and this entry closes.
