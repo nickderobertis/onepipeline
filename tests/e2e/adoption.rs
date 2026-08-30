@@ -29,7 +29,7 @@
 
 use std::path::Path;
 
-use crate::harness::{lifecycle, plan_of, Repository, World, REFUSED};
+use crate::harness::{lifecycle, plan_of, project_id, Repository, World, REFUSED};
 use onepipeline::plan::CROSS_REPO_REFERENCES_HEADING;
 use serde_json::{json, Value};
 
@@ -2573,7 +2573,7 @@ fn a_fast_node_whose_release_is_not_out_settles_complete_but_draft_and_nothing_m
     // and there is: the change cannot land until the release arrives.
     world.until_store("the store to carry the node as unfinished", |world| {
         world
-            .store_tasks(&format!("plans:{run}"))
+            .store_tasks(&format!("plans:{}", project_id(&run)))
             .iter()
             .any(|task| {
                 task["item"]["metadata"]["onepipeline.id"] == "consumer"
