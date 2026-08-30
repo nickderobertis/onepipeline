@@ -441,6 +441,10 @@ fs4 = "0.13"
 onepipeline-testfakes = { path = "crates/testfakes" }
 onevcs-testing = { workspace = true }
 sha2 = "0.10"
+# `tests/patch_pin.rs` holds this manifest's patch block equal to `deny.toml`'s
+# allow-git list, and what it compares are pins — so both sides are parsed as the
+# TOML they are rather than scanned for a substring that might not be one.
+toml = "1"
 
 [[test]]
 name = "e2e"

@@ -935,6 +935,7 @@ dependencies = [
  "serde_path_to_error",
  "sha2",
  "thiserror",
+ "toml",
  "windows-sys 0.61.2",
 ]
 

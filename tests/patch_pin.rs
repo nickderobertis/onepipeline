@@ -11,66 +11,112 @@
 //! including when both are empty: the block is deleted in the same change that
 //! moves the requirements to the release, and this then insists the audit's
 //! exemption goes with it rather than outliving the reason for it.
+//!
+//! # Why both sides are parsed rather than scanned
+//!
+//! What is compared is a *pin*, and a pin that is not a whole one is the failure
+//! this exists to catch. So each side is parsed as the TOML it is and every cell
+//! is checked before it is compared: a `rev` that is missing, empty, or not a
+//! commit is refused by name rather than compared as a value, and an `allow-git`
+//! entry naming a repository with no revision permits everything that repository
+//! ever carries — which is the drift, not the agreement.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
-/// Every `rev = "…"` under `[patch.crates-io]`, in the order the manifest states
-/// them.
-///
-/// Read to the next table header, so a `rev` belonging to some other section is
-/// not counted as a patched one.
-fn patched_revisions(manifest: &str) -> Vec<String> {
-    manifest
-        .lines()
-        .skip_while(|line| line.trim() != "[patch.crates-io]")
-        .skip(1)
-        .take_while(|line| !line.trim_start().starts_with('['))
-        .filter_map(|line| quoted_after(line, "rev = \""))
-        .collect()
-}
+/// One patched source: the repository, and the commit the pin names in it.
+type Pin = (String, String);
 
-/// Every revision `deny.toml`'s `allow-git` permits, in the order it lists them.
+/// Every entry of `[patch.crates-io]`, as the repository and revision each pins.
 ///
-/// One entry is one `?rev=` in a git URL. An entry naming a repository and no
-/// revision permits everything that repository ever carries, which is not a pin at
-/// all — it yields nothing here and so is reported as drift.
-fn allowed_revisions(deny: &str) -> Vec<String> {
-    let Some((_, rest)) = deny.split_once("allow-git") else {
-        return Vec::new();
+/// A patch entry this cannot read as a git pin is a refusal rather than an
+/// omission: a `path` patch, a `branch` where a `rev` belongs, or a `rev` that is
+/// not a commit are each something no `allow-git` entry could correctly mirror, so
+/// leaving them out would let the comparison below pass on a manifest nobody
+/// checked.
+fn patched(manifest: &toml::Value) -> BTreeSet<Pin> {
+    let Some(table) = manifest
+        .get("patch")
+        .and_then(|patch| patch.get("crates-io"))
+    else {
+        return BTreeSet::new();
     };
-    let list = rest.split_once(']').map(|(list, _)| list).unwrap_or(rest);
-    list.split('"')
-        .filter_map(|value| value.split_once("?rev=").map(|(_, rev)| rev.to_string()))
+    let table = table
+        .as_table()
+        .expect("[patch.crates-io] is a table of patched crates");
+    table
+        .iter()
+        .map(|(name, entry)| {
+            let git = entry
+                .get("git")
+                .and_then(toml::Value::as_str)
+                .unwrap_or_else(|| panic!("the patch of `{name}` is not a git source"));
+            let rev = entry
+                .get("rev")
+                .and_then(toml::Value::as_str)
+                .unwrap_or_else(|| panic!("the patch of `{name}` names no `rev`"));
+            (git.to_owned(), commit(rev, name))
+        })
         .collect()
 }
 
-/// The value of a `"`-quoted assignment on one line, if the line makes it.
-fn quoted_after(line: &str, key: &str) -> Option<String> {
-    let (_, rest) = line.split_once(key)?;
-    let (value, _) = rest.split_once('"')?;
-    Some(value.to_string())
+/// Every entry of `[sources] allow-git`, as the repository and revision each
+/// permits.
+///
+/// An entry with no `?rev=` is refused here rather than skipped, because what it
+/// permits is every revision that repository will ever carry — which is not a pin
+/// at all, and is exactly the state a reader of this file would misread as one.
+fn allowed(deny: &toml::Value) -> BTreeSet<Pin> {
+    let Some(list) = deny
+        .get("sources")
+        .and_then(|sources| sources.get("allow-git"))
+    else {
+        return BTreeSet::new();
+    };
+    list.as_array()
+        .expect("`allow-git` is a list of permitted git sources")
+        .iter()
+        .map(|entry| {
+            let url = entry
+                .as_str()
+                .unwrap_or_else(|| panic!("an `allow-git` entry is not a string: {entry}"));
+            let (repository, rev) = url
+                .split_once("?rev=")
+                .unwrap_or_else(|| panic!("the `allow-git` entry `{url}` pins no revision"));
+            (repository.to_owned(), commit(rev, url))
+        })
+        .collect()
+}
+
+/// A revision, checked to be one before it is compared with another.
+///
+/// Cargo and `cargo-deny` both spell a pinned revision as a hexadecimal object
+/// name, so anything else — an empty cell, a tag, a branch — is a pin this gate
+/// cannot hold and says so about, under the name of whatever carried it.
+fn commit(rev: &str, whose: &str) -> String {
+    assert!(
+        rev.len() >= 7 && rev.chars().all(|c| c.is_ascii_hexdigit()),
+        "`{whose}` names `{rev}`, which is not a commit"
+    );
+    rev.to_owned()
+}
+
+/// One file of this repository, parsed.
+fn read(name: &str) -> toml::Value {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(name);
+    let text =
+        std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{name} reads: {error}"));
+    toml::from_str(&text).unwrap_or_else(|error| panic!("{name} parses: {error}"))
 }
 
 #[test]
 fn the_audit_permits_exactly_the_revisions_the_manifest_patches() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let manifest = std::fs::read_to_string(root.join("Cargo.toml")).expect("the manifest reads");
-    let deny = std::fs::read_to_string(root.join("deny.toml")).expect("the audit config reads");
-
-    let patched = patched_revisions(&manifest);
-    let allowed = allowed_revisions(&deny);
-
-    let mut wanted = patched.clone();
-    wanted.sort();
-    wanted.dedup();
-    let mut permitted = allowed.clone();
-    permitted.sort();
-    permitted.dedup();
-
+    let patched = patched(&read("Cargo.toml"));
+    let allowed = allowed(&read("deny.toml"));
     assert_eq!(
-        wanted, permitted,
-        "`deny.toml`'s allow-git permits {allowed:?} and `Cargo.toml`'s [patch.crates-io] links \
-         {patched:?}; move both in one change, and delete both together"
+        patched, allowed,
+        "`Cargo.toml`'s [patch.crates-io] links {patched:?} and `deny.toml`'s allow-git permits \
+         {allowed:?}; move both in one change, and delete both together"
     );
 }
 
@@ -78,38 +124,63 @@ fn the_audit_permits_exactly_the_revisions_the_manifest_patches() {
 /// copies of a crate in the graph is a compile error, and the manifest's own
 /// comment says so.
 #[test]
-fn every_patched_member_of_one_sibling_comes_from_one_revision() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let manifest = std::fs::read_to_string(root.join("Cargo.toml")).expect("the manifest reads");
-
-    let mut revisions = patched_revisions(&manifest);
-    revisions.sort();
-    revisions.dedup();
-    assert!(
-        revisions.len() <= 1,
-        "[patch.crates-io] links more than one revision: {revisions:?}"
+fn every_patched_member_of_one_repository_comes_from_one_revision() {
+    let pins = patched(&read("Cargo.toml"));
+    let repositories: BTreeSet<&String> = pins.iter().map(|(repository, _)| repository).collect();
+    assert_eq!(
+        pins.len(),
+        repositories.len(),
+        "[patch.crates-io] links one repository at more than one revision: {pins:?}"
     );
 }
 
 #[test]
 fn a_manifest_that_patches_nothing_wants_an_audit_that_permits_nothing() {
-    assert!(patched_revisions("[dependencies]\nserde = \"1\"\n").is_empty());
-    assert!(allowed_revisions("[sources]\nallow-git = []\n").is_empty());
+    let manifest: toml::Value = toml::from_str("[dependencies]\nserde = \"1\"\n").expect("parses");
+    let deny: toml::Value = toml::from_str("[sources]\nallow-git = []\n").expect("parses");
+    assert!(patched(&manifest).is_empty());
+    assert!(allowed(&deny).is_empty());
 }
 
 #[test]
-fn a_revision_is_read_out_of_each_files_own_spelling_of_it() {
-    let manifest = "[patch.crates-io]\n\
-                    onevcs = { git = \"https://example.invalid/x\", rev = \"abc123\" }\n\
-                    onevcs-testing = { git = \"https://example.invalid/x\", rev = \"abc123\" }\n\
-                    \n[profile.release]\nrev = \"not-a-patch\"\n";
-    assert_eq!(patched_revisions(manifest), ["abc123", "abc123"]);
+fn a_pin_is_read_out_of_each_files_own_spelling_of_it() {
+    let manifest: toml::Value = toml::from_str(
+        "[patch.crates-io]\n\
+         onevcs = { git = \"https://example.invalid/x\", rev = \"abc1234\" }\n\
+         onevcs-testing = { git = \"https://example.invalid/x\", rev = \"abc1234\" }\n\
+         \n[profile.release]\nrev = \"not-a-patch\"\n",
+    )
+    .expect("parses");
+    let deny: toml::Value =
+        toml::from_str("[sources]\nallow-git = [\"https://example.invalid/x?rev=abc1234\"]\n")
+            .expect("parses");
+    assert_eq!(patched(&manifest), allowed(&deny));
+}
 
-    let deny = "[sources]\nallow-git = [\"https://example.invalid/x?rev=abc123\"]\n";
-    assert_eq!(allowed_revisions(deny), ["abc123"]);
+#[test]
+#[should_panic(expected = "pins no revision")]
+fn an_allow_git_entry_that_pins_no_revision_is_refused_rather_than_ignored() {
+    let deny: toml::Value =
+        toml::from_str("[sources]\nallow-git = [\"https://example.invalid/x\"]\n").expect("parses");
+    let _ = allowed(&deny);
+}
 
-    // A repository named with no revision pins nothing, so it is not a revision
-    // this reads — which makes it drift against any manifest that patches one.
-    let unpinned = "[sources]\nallow-git = [\"https://example.invalid/x\"]\n";
-    assert!(allowed_revisions(unpinned).is_empty());
+#[test]
+#[should_panic(expected = "is not a commit")]
+fn a_revision_that_is_not_a_commit_is_refused_rather_than_compared() {
+    let manifest: toml::Value = toml::from_str(
+        "[patch.crates-io]\nonevcs = { git = \"https://example.invalid/x\", rev = \"\" }\n",
+    )
+    .expect("parses");
+    let _ = patched(&manifest);
+}
+
+#[test]
+#[should_panic(expected = "names no `rev`")]
+fn a_patch_entry_with_no_revision_is_refused_rather_than_ignored() {
+    let manifest: toml::Value = toml::from_str(
+        "[patch.crates-io]\nonevcs = { git = \"https://example.invalid/x\", branch = \"main\" }\n",
+    )
+    .expect("parses");
+    let _ = patched(&manifest);
 }
