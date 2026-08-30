@@ -1642,8 +1642,22 @@ impl World {
             metadata.insert(reserved(key), value.clone());
         }
         let title = plan.get("name").and_then(Value::as_str).unwrap_or(name);
+        // The identifier the store holds the project under, which is deliberately
+        // **not** its title. On a store where those two coincide a projection that
+        // wrote the identifier as the title is byte-identical to one that
+        // preserved a person's heading, and no assertion anywhere could tell them
+        // apart — which is how that rename shipped. See [`undiscriminating`],
+        // which is what refuses a fixture without it.
+        let identifier = project_file(name);
+        // A second project, so that "which project did it read?" is a question a
+        // fixture can answer. Written before the plan's own so every store this
+        // suite builds holds one, and only once per world.
+        self.decoy_project();
         self.write_item(
-            &self.store().join("projects").join(format!("{name}.md")),
+            &self
+                .store()
+                .join("projects")
+                .join(format!("{identifier}.md")),
             &[("title", json!(title)), ("metadata", json!(metadata))],
             "",
         );
@@ -1673,9 +1687,51 @@ impl World {
             .filter_map(|(node, file)| Some((node.get("id")?.as_str()?, file.as_str())))
             .collect();
         for (node, file) in nodes.iter().zip(&files) {
-            self.task(name, node, file, &named);
+            self.task(&identifier, node, file, &named);
         }
-        format!("{STORE_SOURCE}:{name}")
+        if let Some(missing) = undiscriminating(&self.store()) {
+            panic!("{missing}");
+        }
+        format!("{STORE_SOURCE}:{identifier}")
+    }
+
+    /// The project a run must never touch, and the reason every store fixture
+    /// here holds one.
+    ///
+    /// Its task carries the node id this suite's plans use most, so a read that
+    /// dropped `--project` does not quietly succeed: it comes back holding two
+    /// tasks for one node, which is a refusal rather than a silent extra.
+    fn decoy_project(&self) {
+        let path = self
+            .store()
+            .join("projects")
+            .join(format!("{DECOY_PROJECT}.md"));
+        if path.exists() {
+            return;
+        }
+        self.write_item(
+            &path,
+            &[
+                ("title", json!("A board this run must not touch")),
+                ("metadata", json!({"authored.note": "not this run's board"})),
+            ],
+            "",
+        );
+        for (file, node) in [("000-work", "work"), ("001-elsewhere", "elsewhere")] {
+            self.write_item(
+                &self
+                    .store()
+                    .join("tasks")
+                    .join(DECOY_PROJECT)
+                    .join(format!("{file}.md")),
+                &[
+                    ("title", json!(format!("chore: {node}, on another board"))),
+                    ("project", json!(DECOY_PROJECT)),
+                    ("metadata", json!({"onepipeline.id": node})),
+                ],
+                "",
+            );
+        }
     }
 
     /// One node of a plan, as the task carrying it.
@@ -2671,6 +2727,91 @@ pub fn oneagentgraph_binary() -> PathBuf {
 /// A journey that spells the whole key means it literally — which is what a
 /// journey about a key the mapping refuses has to be able to say — and one that
 /// names a plain field means that field.
+/// The project every store fixture here holds beside the plan under test.
+pub const DECOY_PROJECT: &str = "not-this-runs-board";
+
+/// The identifier a store holds the plan named `name` under.
+///
+/// Deliberately not the plan's own name, which is the project's *title*: a store
+/// item's id is the store's and a heading is a person's, and the two coincide
+/// only in a fixture that could not tell them apart.
+pub fn project_file(name: &str) -> String {
+    format!("{name}-board")
+}
+
+/// Why a store fixture could not tell a right answer from a wrong one, or `None`
+/// when it can.
+///
+/// Two rules, checked where the fixture is built rather than trusted to be
+/// remembered per journey, because each is a defect that shipped through a
+/// worker, a judge, a monitor and a manager:
+///
+/// 1. **A destination whose identifier differs from its title.** Every fixture
+///    here used to hold a project whose native id *was* its file stem *was* its
+///    title, so writing the id as the title was byte-identical to correct.
+/// 2. **Two of what the code under test filters on.** Every fixture held one
+///    project, so an ignored `--project` was indistinguishable from an honoured
+///    one.
+///
+/// Named for the failure rather than for the property, so the answer that means
+/// "this is fine" is the falsy one and a caller cannot forget to negate it.
+pub fn undiscriminating(store: &Path) -> Option<String> {
+    let fixture = store
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| store.display().to_string());
+    let mut projects: Vec<(String, String)> = Vec::new();
+    let Ok(entries) = std::fs::read_dir(store.join("projects")) else {
+        return Some(format!(
+            "fixture '{fixture}': holds no projects directory, so it is not a store at all"
+        ));
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let identifier = path
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let document = std::fs::read_to_string(&path).unwrap_or_default();
+        let front: serde_json::Map<String, Value> = document
+            .strip_prefix(
+                "---
+",
+            )
+            .and_then(|rest| {
+                rest.split_once(
+                    "---
+",
+                )
+            })
+            .and_then(|(front, _)| serde_norway::from_str(front).ok())
+            .unwrap_or_default();
+        let title = front
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        projects.push((identifier, title));
+    }
+    if projects.len() < 2 {
+        return Some(format!(
+            "fixture '{fixture}': holds {} project, so a read that ignored the project              filter cannot be told from one that honoured it",
+            projects.len()
+        ));
+    }
+    for (identifier, title) in &projects {
+        if identifier == title {
+            return Some(format!(
+                "fixture '{identifier}': its identifier is its own title, so writing the                  identifier and preserving a person's heading are the same bytes"
+            ));
+        }
+    }
+    None
+}
+
 fn reserved(field: &str) -> String {
     match field.starts_with("onepipeline.") {
         true => field.to_owned(),

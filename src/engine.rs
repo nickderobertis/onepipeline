@@ -2937,6 +2937,12 @@ fn report_unprojected(
 /// the sentence that follows it.
 const ITEMS_NAMED: usize = 20;
 
+/// One line of whatever a producer said, with its own runs of whitespace closed
+/// up.
+fn one_line(said: &str) -> String {
+    said.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// The finding one failed projection raises.
 fn unprojected_surface(failure: &crate::writeback::Unprojected) -> Surface {
     let named: Vec<&str> = failure
@@ -2954,13 +2960,17 @@ fn unprojected_surface(failure: &crate::writeback::Unprojected) -> Surface {
         id: 0,
         kind: crate::channel::SurfaceKind::Finding.as_str().into(),
         message: format!(
-            "the onetaskgraph project '{project}' did not take this run's projection.
-             items: {items}
-             reason: {reason}
-             The run itself is unaffected — nothing was settled, scheduled or failed on              this — but that project is behind what the run recorded until it is fixed.",
+            "the onetaskgraph project '{project}' did not take this run's projection.\n\
+             items: {items}\n\
+             reason: {reason}\n\
+             The run itself is unaffected — nothing was settled, scheduled or failed on \
+             this — but the project is behind what the run recorded until it is fixed.",
             project = bounded(&failure.project),
             items = bounded(&items),
-            reason = bounded(&failure.reason),
+            // On one line, because the line above it is what a reader scans: a
+            // sibling's refusal is several lines of its own and one of them is
+            // the `next:` it ends with, which read as this surface's own advice.
+            reason = bounded(&one_line(&failure.reason)),
         ),
         source: crate::channel::source::PROPOSAL.into(),
         blocking: false,
