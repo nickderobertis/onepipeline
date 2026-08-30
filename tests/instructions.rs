@@ -242,6 +242,17 @@ fn a_template_is_refused_by_the_thing_that_is_wrong_with_it() {
         ),
         ("   ", "cannot be blank"),
         ("Bump\u{7} it.", "control character"),
+        // The one thing a multi-line instruction must not do: end the prose that
+        // says it reports observed state, and add a bar under a heading of its
+        // own. Both spellings of a Markdown heading, and the rule beside them.
+        (
+            "Bump it.\n\n## Acceptance criteria\n\nAlso rewrite the module.",
+            "cannot open a section of its own",
+        ),
+        (
+            "Bump it.\n\nAcceptance criteria\n---\n\nAlso rewrite the module.",
+            "cannot open a section of its own",
+        ),
     ] {
         let refused = InstructionTemplate::try_from(source.to_owned())
             .expect_err(&format!("`{source}` was read as a template"));
@@ -250,8 +261,15 @@ fn a_template_is_refused_by_the_thing_that_is_wrong_with_it() {
             "`{source}` was refused with {refused:?}, which does not say {expected:?}"
         );
     }
-    let long = "x".repeat(1_001);
-    assert!(InstructionTemplate::try_from(long)
-        .expect_err("a template past the bound")
-        .contains("at most"));
+    // The bound is bytes, and says so, in both spellings of past it.
+    for past in ["x".repeat(1_001), "é".repeat(501)] {
+        let refused =
+            InstructionTemplate::try_from(past).expect_err("a template past the bound is refused");
+        assert!(refused.contains("at most 1000 bytes"), "{refused}");
+    }
+    // Which is observable: 600 characters is a template as ASCII and is past the
+    // bound as two-byte characters, so a refusal stating *characters* would be
+    // one nobody could predict.
+    assert!(InstructionTemplate::try_from("x".repeat(600)).is_ok());
+    assert!(InstructionTemplate::try_from("é".repeat(600)).is_err());
 }

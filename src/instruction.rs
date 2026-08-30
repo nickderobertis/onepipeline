@@ -49,12 +49,14 @@ pub const VARIABLES: &[&str] = &[
     "version",
 ];
 
-/// How long a declared instruction may be.
+/// How long a declared instruction may be, in **bytes**.
 ///
 /// It is a paragraph a worker reads beside the dependency it is about, not the
 /// procedure behind it — and it is rendered into a task, into a note delivered to
 /// a running turn, and into an event payload, so a bound here is a bound on all
-/// three.
+/// three. Bytes rather than characters because that is what the payload bound
+/// beside it counts, and a bound stated in one unit and enforced in the other is
+/// a refusal nobody can predict.
 const MAX_INSTRUCTION: usize = 1_000;
 
 /// One producer's declared instruction, checked where it is read.
@@ -117,7 +119,7 @@ impl TryFrom<String> for InstructionTemplate {
         }
         if value.len() > MAX_INSTRUCTION {
             return Err(format!(
-                "a release instruction is at most {MAX_INSTRUCTION} characters, and this one is {}",
+                "a release instruction is at most {MAX_INSTRUCTION} bytes, and this one is {}",
                 value.len()
             ));
         }
@@ -127,6 +129,20 @@ impl TryFrom<String> for InstructionTemplate {
         if let Some(control) = value.chars().find(|c| c.is_control() && *c != '\n') {
             return Err(format!(
                 "a release instruction cannot carry the control character {control:?}"
+            ));
+        }
+        // **The one thing a multi-line instruction must not do.** It is rendered
+        // inside prose that says it reports observed state and adds no
+        // acceptance criteria, and a line opening a Markdown section of its own
+        // ends that prose: a producer could write `## Acceptance criteria` into
+        // a consuming node's task and add a bar to a node it does not own. So a
+        // heading is refused here, at the boundary, rather than escaped at each
+        // of the two render sites.
+        if let Some(heading) = value.lines().find(|line| opens_a_section(line)) {
+            return Err(format!(
+                "a release instruction cannot open a section of its own, and the line \
+                 {heading:?} does; it is rendered inside prose stating that it reports observed \
+                 state and adds no acceptance criteria"
             ));
         }
         let segments = parse(&value)?;
@@ -143,6 +159,20 @@ impl From<InstructionTemplate> for String {
     }
 }
 
+/// Whether one line would open a Markdown section where it is rendered.
+///
+/// Both spellings, because both end the prose the instruction is rendered inside:
+/// an ATX heading (`## …`) and a setext underline, which turns the line *above*
+/// it into a heading and is also how a horizontal rule is written.
+fn opens_a_section(line: &str) -> bool {
+    let line = line.trim();
+    if line.starts_with('#') {
+        return true;
+    }
+    let underline = |c: char| line.len() >= 3 && line.chars().all(|each| each == c);
+    underline('=') || underline('-')
+}
+
 /// One piece of a parsed template.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Segment {
@@ -156,11 +186,35 @@ enum Segment {
     Section {
         /// The variable the guard is on.
         name: &'static str,
-        /// Whether the inner segments render when that variable **has** a value.
-        present: bool,
-        /// What renders when it does.
+        /// Which way round the guard reads.
+        guard: Guard,
+        /// What renders when it holds.
         inner: Vec<Segment>,
     },
+}
+
+/// Which way round one guard reads.
+///
+/// The two spellings a template has, named rather than carried as a bare flag:
+/// `true` beside a variable name says nothing about which of them it is, and the
+/// parser stacks the same value while a section is open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Guard {
+    /// `{{#name}}`: render this where the variable **has** a value.
+    WhenSet,
+    /// `{{^name}}`: render this where it does not — which for `version` is a
+    /// fast node before any release has happened.
+    WhenUnset,
+}
+
+impl Guard {
+    /// Whether this guard holds for a variable worth `value`.
+    fn holds(self, value: &str) -> bool {
+        match self {
+            Guard::WhenSet => !value.is_empty(),
+            Guard::WhenUnset => value.is_empty(),
+        }
+    }
 }
 
 /// The variable one tag names, or a refusal naming it and the ones there are.
@@ -184,7 +238,7 @@ fn variable(name: &str) -> std::result::Result<&'static str, String> {
 /// Read one template's segments, or say why it is not one.
 fn parse(source: &str) -> std::result::Result<Vec<Segment>, String> {
     let mut done: Vec<Segment> = Vec::new();
-    let mut open: Vec<(&'static str, bool, Vec<Segment>)> = Vec::new();
+    let mut open: Vec<(&'static str, Guard, Vec<Segment>)> = Vec::new();
     let mut literal = String::new();
     let mut rest = source;
     loop {
@@ -203,10 +257,10 @@ fn parse(source: &str) -> std::result::Result<Vec<Segment>, String> {
         if let Some(name) = tag.strip_prefix('/') {
             let name = variable(name.trim())?;
             match open.pop() {
-                Some((opened, present, inner)) if opened == name => push(
+                Some((opened, guard, inner)) if opened == name => push(
                     Segment::Section {
                         name: opened,
-                        present,
+                        guard,
                         inner,
                     },
                     &mut done,
@@ -224,9 +278,9 @@ fn parse(source: &str) -> std::result::Result<Vec<Segment>, String> {
                 }
             }
         } else if let Some(name) = tag.strip_prefix('#') {
-            open.push((variable(name.trim())?, true, Vec::new()));
+            open.push((variable(name.trim())?, Guard::WhenSet, Vec::new()));
         } else if let Some(name) = tag.strip_prefix('^') {
-            open.push((variable(name.trim())?, false, Vec::new()));
+            open.push((variable(name.trim())?, Guard::WhenUnset, Vec::new()));
         } else {
             push(Segment::Variable(variable(&tag)?), &mut done, &mut open);
         }
@@ -244,7 +298,7 @@ fn parse(source: &str) -> std::result::Result<Vec<Segment>, String> {
 fn push(
     segment: Segment,
     done: &mut Vec<Segment>,
-    open: &mut [(&'static str, bool, Vec<Segment>)],
+    open: &mut [(&'static str, Guard, Vec<Segment>)],
 ) {
     match open.last_mut() {
         Some((.., inner)) => inner.push(segment),
@@ -256,7 +310,7 @@ fn push(
 fn flush(
     literal: &mut String,
     done: &mut Vec<Segment>,
-    open: &mut [(&'static str, bool, Vec<Segment>)],
+    open: &mut [(&'static str, Guard, Vec<Segment>)],
 ) {
     if !literal.is_empty() {
         push(Segment::Literal(std::mem::take(literal)), done, open);
@@ -287,12 +341,8 @@ fn render_into(segments: &[Segment], of: &CrossRepoReference, out: &mut String) 
         match segment {
             Segment::Literal(text) => out.push_str(text),
             Segment::Variable(name) => out.push_str(value_of(of, name)),
-            Segment::Section {
-                name,
-                present,
-                inner,
-            } => {
-                if !value_of(of, name).is_empty() == *present {
+            Segment::Section { name, guard, inner } => {
+                if guard.holds(value_of(of, name)) {
                     render_into(inner, of, out);
                 }
             }
