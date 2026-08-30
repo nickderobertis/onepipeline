@@ -536,14 +536,9 @@ fn a_retry_takes_up_the_session_a_stopped_run_left_its_work_in() {
     );
 
     // It continued the branch the stopped run left its work on, rather than
-    // cutting one beside it.
-    //
-    // **Not that run's own session, since `onevcs` 0.16.3.** A launch's first act
-    // is the contract's concurrency interlock, `onevcs session holders`, and that
-    // read now forgets a record whose owner is gone with nothing inside its run
-    // root — the one `open_session` would have taken up. The work still reaches
-    // the base below; what is spent is a clone and a gate. Divergence entry 50
-    // carries the question that raises for `onevcs`.
+    // cutting one beside it. Not that run's own session: the launch's concurrency
+    // interlock forgets the record `open_session` would have taken up, which
+    // divergence entry 50 raises with `onevcs`.
     let taken = opened(&world, "retry");
     assert!(
         taken["payload"]["token"].is_string(),
@@ -628,16 +623,14 @@ fn every_other_shape_cuts_a_fresh_session_onto_its_branch_or_from_the_base() {
     // 2. Gone. The record still names a run root; the directory is not there, and
     //    with it goes every place the branch could have been continued.
     //
-    //    **Who swept it moved with `onevcs` 0.16.3.** Until then the sibling left
-    //    it standing — 0.15.6's fix, because a session opened from the command
-    //    line answers stale the moment that command exits and reading stale as
-    //    *nobody is in here* deletes live dispatches — and this journey removed it
-    //    itself. 0.16.3 narrows that protection to what it was protecting: a
-    //    record with no owner process **and nothing working inside its run root**
-    //    is forgotten where it is read, and the run root goes with it. Nothing was
-    //    working in this one, so either side of that release leaves case 2 in the
-    //    same state and the fall-through below is the same test; what this can no
-    //    longer say is *which* of the two removed the directory.
+    //    The precondition is that the directory is gone; who removed it is not
+    //    this case's subject, and since `onevcs` 0.16.3 the sibling may have.
+    //
+    // llmlint: ignore-block[tests_mirror_real_usage] there is no user-facing verb
+    // for "this run root is no longer on the host": what case 2 is about is a
+    // record naming a directory a person, a backup, or a full disk removed, so the
+    // fixture is the removal itself. Every other step of this journey is the
+    // compiled binary and the real sibling.
     if run_root(&swept).is_dir() {
         std::fs::remove_dir_all(run_root(&swept)).unwrap_or_else(|e| {
             panic!(
@@ -651,7 +644,7 @@ fn every_other_shape_cuts_a_fresh_session_onto_its_branch_or_from_the_base() {
         "the run root at {} is still there, so the fall-through below is not the case \
          it is written for",
         run_root(&swept).display()
-    );
+    ); // llmlint: ignore-end[tests_mirror_real_usage]
     let (settled, session) = dispatched(&world, "swept", Some("feature/swept"));
     assert_eq!(
         settled["nodes"][0]["status"],

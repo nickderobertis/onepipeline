@@ -3502,12 +3502,9 @@ fn a_continuation_skips_the_steps_the_preserved_branch_already_carries() {
     // The second step fails, so the node settles failed with the first step's
     // work committed on the branch the session preserved.
     world.script("service.implement.work", "the worker wrote this\n");
-    // The step that is re-run writes something of its own. Since `onevcs` 0.16.3
-    // a close commits whatever the worktree still holds under the incomplete-step
-    // provenance and then removes it, so the branch a continuation is cut onto
-    // carries that marker and nothing else — and a step that added nothing would
-    // leave a publication with no commit describing a change, which is a
-    // different journey's subject.
+    // The step that is re-run writes something of its own, so the continuation has
+    // a change to publish: a branch carrying only preserved work is refused by
+    // `onevcs`, which is a different journey's subject.
     world.script("service.review.work", "and the reviewer wrote this\n");
     world.script("service.review.fail", "1");
     let node = json!({

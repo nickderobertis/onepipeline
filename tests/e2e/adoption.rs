@@ -66,6 +66,21 @@ fn document(script: &str, extra: &str) -> String {
     )
 }
 
+/// The same document, plus a **second** repository that releases: a journey about
+/// a node awaiting more than one release needs two things to await.
+fn two_that_release(engine: &str, other_alias: &str, other: &str) -> String {
+    format!(
+        "{}\x20 - match: {{host: github.com, owner: owner, name: {other_alias}}}\n\
+         \x20   default_target: crate\n\
+         \x20   targets:\n\
+         \x20   - name: crate\n\
+         \x20     style: automated\n\
+         \x20     probe: {{script: {other}, timeout_seconds: 30}}\n\
+         default:\n\x20 adoption: fast\n",
+        repositories(engine),
+    )
+}
+
 /// The document's version and its one rule for the engine repository, up to but
 /// not including whatever a journey states after them.
 fn repositories(script: &str) -> String {
@@ -2386,24 +2401,36 @@ fn a_fast_node_whose_release_is_not_out_settles_complete_but_draft_and_nothing_m
     let world = watching("adoption-draft-held");
     world.write_graphs();
     let (engine_repo, _consumer) = two_repositories_opening_a_change(&world);
+    // **Two** out-of-repository dependencies, in two repositories that release,
+    // because one reason has to name one of them and say how many there are.
+    let tool_repo = world.extra_repository("tool");
     let (script, answer) = world.probe_in(&engine_repo, ENGINE);
-    world.releases(&automated(&script));
-    // The version that was out when the engine's work landed, and the version
+    let (tool_script, tool_answer) = world.probe_in(&tool_repo, "tool");
+    world.releases(&two_that_release(&script, "tool", &tool_script));
+    // The version that was out when each dependency's work landed, and the version
     // that is out when the consumer publishes: the same one. Nothing has been
     // released since, which is the whole condition.
     releases_at(&answer, "0.1.0");
+    releases_at(&tool_answer, "0.1.0");
     // The host lands whatever it is handed. Scripted so that the counterfactual
     // this journey is about is reachable: without the draft the change merges and
     // the node goes green, which is the failure — a success — this closes.
     world.script("gh.merged", "");
 
+    let mut packager = lifecycle("packager", &[]);
+    packager["repo"] = json!("tool");
+    let mut waiting = consumer(Some("fast"));
+    waiting["deps"] = json!([ENGINE, "packager"]);
+    // A node downstream of the draft. Its dependency is complete and its work
+    // cannot land, so starting it would build on a change nobody can merge.
+    let follower = crate::harness::agent("follower", &["consumer"]);
     let run = start(
         &world,
         "adoption-draft-held",
-        vec![engine(), consumer(Some("fast"))],
+        vec![engine(), packager, waiting, follower],
     );
-    world.until("both nodes to settle", |world| {
-        world.events_of(&run, "node-settled").len() == 2
+    world.until("the three publishing nodes to settle", |world| {
+        world.events_of(&run, "node-settled").len() == 3
     });
 
     // The node is complete and is not done: every step ran and the branch is
@@ -2422,6 +2449,14 @@ fn a_fast_node_whose_release_is_not_out_settles_complete_but_draft_and_nothing_m
     assert!(
         detail.contains("github.com/owner/engine") && detail.contains("crate"),
         "the settlement does not name the dependency and the target it awaits: {detail}"
+    );
+
+    // A node downstream of it does not start. `complete-but-draft` is not `done`,
+    // so the frontier never reaches the follower — which is the whole reason the
+    // status is not `done`.
+    assert!(
+        !dispatched(&world, &run, "follower"),
+        "a node was started on work that cannot land"
     );
 
     // The draft was **requested of the host**, and the reason travelled with the
@@ -2466,6 +2501,16 @@ fn a_fast_node_whose_release_is_not_out_settles_complete_but_draft_and_nothing_m
         json!("github.com/owner/engine")
     );
     assert_eq!(drafted[0]["payload"]["target"], json!("crate"));
+    // One reason names one dependency, and says how many this node adopted early:
+    // the second is real and unreleased, and a reason that mentioned only the one
+    // it names would leave a reader thinking there is one release to wait for.
+    let because = drafted[0]["payload"]["because"]
+        .as_str()
+        .expect("the reason carries the sentence a person reads");
+    assert!(
+        because.contains("one of 2 release(s)"),
+        "the reason does not say how many releases this node is waiting on: {because}"
+    );
 
     // The **run** is not finished, and reads as waiting rather than as stalled.
     let results = world.run(&["results", &run]);

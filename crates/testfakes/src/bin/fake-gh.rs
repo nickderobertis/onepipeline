@@ -991,12 +991,6 @@ fn checks(args: &[String], dir: &Path) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// `gh pr merge ID --repo R --squash [--auto]`
-///
-/// Whether the merge *lands* is the scripted part. Without `gh.merged` the host
-/// has accepted the request and not landed it, which is what a queued merge is —
-/// and `onevcs` reads that back from the next `pr view`, not from this command,
-/// so scripting it here rather than in the exit code is what makes the two agree.
 /// `gh pr ready ID --repo R`
 ///
 /// Takes a change request out of its draft state. **Idempotent**, because the
@@ -1016,6 +1010,12 @@ fn ready(args: &[String], dir: &Path) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// `gh pr merge ID --repo R --squash [--auto]`
+///
+/// Whether the merge *lands* is the scripted part. Without `gh.merged` the host
+/// has accepted the request and not landed it, which is what a queued merge is —
+/// and `onevcs` reads that back from the next `pr view`, not from this command,
+/// so scripting it here rather than in the exit code is what makes the two agree.
 fn merge(args: &[String], dir: &Path) -> ExitCode {
     // `--auto` is the difference between `change-auto` and `change-direct`, so
     // the shape is checked with and without it rather than by ignoring it.

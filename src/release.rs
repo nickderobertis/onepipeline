@@ -1173,12 +1173,19 @@ fn renderable(value: &str) -> Option<String> {
 /// nothing can ever lift is a change request nobody can finish. Such a node
 /// launches and settles exactly as it did before this existed.
 pub(crate) fn draft_reason(references: &[CrossRepoReference]) -> Option<onevcs::DraftReason> {
+    // llmlint: ignore-block[changed_behavior_has_e2e] no plan reaches the dropped
+    // half of `askable`: a row is only composed for a dependency that settled `done`
+    // in a repository declaring release targets, so it has the branch or the landing
+    // commit the run recorded, and its target cell is either one that repository
+    // declares or the one the plan's own `consumes` named — both of which parse.
+    // What the arm does is leave such a row undrafted, which is this crate behaving
+    // exactly as it did before drafting existed.
     let unreleased: Vec<(&CrossRepoReference, &str, TargetName)> = references
         .iter()
         .filter_map(|row| {
             let (reference, target) = askable(row)?;
             Some((row, reference, target))
-        })
+        }) // llmlint: ignore-end[changed_behavior_has_e2e]
         .filter(|(_, reference, target)| !released_already(reference, target))
         .collect();
     let (row, reference, target) = unreleased.first()?;

@@ -99,12 +99,9 @@ fn live_holders_refuse_unless_acknowledged_and_stale_holders_do_not_refuse() {
     world.run(&["stop", "second"]).exited(0);
     world.release("build.go");
 
-    // A launch meeting a holder nobody is left to answer for is **not refused**,
-    // which is the half of this pair the launcher decides. It no longer *reports*
-    // one either: since `onevcs` 0.16.3 a record whose owner is gone with nothing
-    // working inside its run root is forgotten where it is read, and this world
-    // can leave behind no other kind of stale holder — every process it starts is
-    // either still driving, which is the live refusal above, or gone.
+    // A holder nobody is left to answer for refuses nothing, which is the half of
+    // this pair the launcher decides. `onevcs` forgets such a record where it
+    // reads it, so there is none left to name either.
     let stale_plan = world.plan("third", &plan_of("third", vec![lifecycle()]));
     let past = world.run_on(
         world.cmd(&["start", &stale_plan, "--detach"]),
