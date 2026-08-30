@@ -1429,7 +1429,7 @@ fn adopt_releases(
         return Ok(());
     }
     for (node, released) in ready {
-        let note = crate::release::arrival_note(&released);
+        let note = crate::instruction::arrival_note(&released);
         // Whatever the lever answered, the node has been told: `auto` falls
         // through to the next dispatch where there is no controllable turn, and
         // a delivery that was *attempted and broke* is the one case that leaves
@@ -4140,6 +4140,7 @@ mod tests {
             goal: None,
             name: Some("demo".into()),
             concurrency: 4,
+            release_instruction: None,
             tasks: nodes,
         };
         RunState {

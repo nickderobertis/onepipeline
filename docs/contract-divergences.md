@@ -11,11 +11,11 @@ the contract**, and `docs/contract.md` was amended to carry each ruling. They st
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–22, 33, 35–40 and 46–50 are open**. Each states what the code does
+Entries **10–22, 33, 35–40 and 46–51 are open**. Each states what the code does
 today and the proposal it is waiting on. Most are questions for a *producer*
 rather than for this crate, because `oneagentgraph` and `onevcs` are independent
 tools that expose general integration hooks only and nothing in them may know
-about this one; the rest — 36 to 40, and 46 to 49 — are for the planner who owns
+about this one; the rest — 36 to 40, 46 to 49, and 51 — are for the planner who owns
 the contract, and name the sentence in it they would change. Entry 40 is for both: its plan-schema and event-kind
 halves are the contract owner's, and the two things it could not compile are
 `onevcs`'s. An open entry is recorded here and never resolved from this
@@ -2435,3 +2435,101 @@ promises is unchanged.
 Driven end to end by `store::every_settlement_reaches_the_board_under_its_own_word`,
 `store::a_published_node_is_closed_carrying_the_change_that_closed_it_landed_or_not`, and
 `store::a_projection_that_fails_raises_a_planner_surface_and_settles_the_run_unchanged`.
+
+
+## 51. A producer cannot say what a consumer does about its release — OPEN
+
+**Proposal (for the planner who owns the contract): add one optional field,
+`release_instruction`, to a plan node and to the plan, and render it in the
+`## Cross-repository references` block under **both** adoption modes.**
+
+Entry 40 gave a consumer everything it needs to *find* the work it depends on —
+the repository, the branch, the commit, the target — and one hardcoded sentence
+about what to do with it: *"Move from the git pin to that released version."*
+That sentence is the only part of the mechanism that tells a worker to do
+something, and it is the part the **producer** knows and the consumer cannot.
+One repository on this account states its pinning rule in its own manifest
+twelve lines above its pins, and workers who could not have known it got it wrong
+twice.
+
+So the producing node declares it, and the engine renders it. Resolution is
+**three rungs**, the producer's at every one: the producing node's own
+`release_instruction`, then the `release_instruction` of the plan that node
+belongs to — which for a cross-DAG dependency is the *upstream* run's plan and
+never the consumer's — then the engine's own
+`onepipeline::instruction::DEFAULT_INSTRUCTION`, which is that same sentence. A
+dependency whose producer declares nothing is therefore told exactly what it was
+told before this existed.
+
+A template names variables as `{{name}}` and guards on one as `{{#name}}…{{/name}}`
+or `{{^name}}…{{/name}}`. The variables are the row's own cells — `dependency`,
+`repository`, `branch`, `commit`, `target`, `version` — published as
+`onepipeline::instruction::VARIABLES`, and **all of them are available in both
+modes**, because both sites render from the same `CrossRepoReference`. A template
+is external input and is refused where a plan is read, by the thing that is wrong
+with it: a name no variable answers to is named, as is a section left open or
+closed against another.
+
+**It is rendered at two sites, because they serve the two adoption modes.** The
+reference block is delivered under `fast` *and* `published` — a change to entry
+40, which gave a published node no block at all — because for a published node it
+is the only place the version it launched against ever appears, and an instruction
+that only rode the arrival note would reach exactly the nodes that never needed
+one. The arrival note stays fast-only, correctly: a published node never held a
+git pin. The block gains a `version` column for the same reason, which is **empty**
+at a fast node's first render, where no release has happened and none is asserted.
+
+The block's preamble is written from what the run **observed** rather than from
+what the node declared: a block every one of whose rows carries a version says the
+work is released and to pin against those versions, and one with a row without says
+what it said before. So no node is told it launched the way the other one did.
+
+**A rendered instruction adds no acceptance criterion**, and neither site lets one
+escape saying so: the block's preamble ends with
+`onepipeline::plan::OBSERVED_STATE_FRAMING` and the instruction is rendered under
+it, and the **arrival note carries that sentence itself** — a note delivered into a
+running turn is delivered as it is written, with nothing around it to frame it. A
+note that is instead deferred onto the next dispatch is rendered under
+`## Planner context` without the frame being stated twice.
+
+**The block below is the source.** `tests/contract.rs` parses it out of this file
+and holds it against the types: the plan parses at schema 3 and round-trips
+exactly as written, a document naming neither field gains neither on the way out,
+the variables are the ones this crate publishes, and the default instruction and
+the frame are the constants it publishes.
+
+```json
+{
+  "plan": {
+    "schema_version": 3,
+    "concurrency": 4,
+    "release_instruction": "Bump the pin, then re-run the lock.",
+    "tasks": [
+      {
+        "id": "engine",
+        "persona": "engineer",
+        "task": "## What\ncut the release",
+        "repo": "github.com/nickderobertis/onevcs",
+        "release_instruction": "{{#version}}Bump {{repository}} to {{version}} in Cargo.toml, then re-run `cargo update`.{{/version}}{{^version}}Pin {{repository}} at the branch {{branch}}.{{/version}}"
+      }
+    ]
+  },
+  "variables": ["dependency", "repository", "branch", "commit", "target", "version"],
+  "default_instruction": "Move from the git pin to that released version.",
+  "framing": "This reports observed state and adds no acceptance criteria.",
+  "heading": "## Cross-repository references"
+}
+```
+
+Both fields are **optional and omitted when empty**, so a plan naming neither
+round-trips as the file wrote it and produces exactly the run it produced before:
+the same block, with one more column, and the same sentence under it. That is why
+the addition is at schema 3 rather than at a schema 4 — there is no document a
+version-3 reader would refuse and no field whose absence means something new.
+
+Driven end to end by `adoption::a_fast_node_pins_against_git_and_is_told_when_the_release_arrives`,
+which declares the rule on the producing node and reads it back out of the
+consumer's block and out of the note its running turn is redirected with, and by
+`adoption::a_published_node_is_held_until_the_release_answers_and_by_nothing_else`,
+which reads it and the version out of a published node's block. Both renderings
+are exercised through this crate's own API by `tests/instructions.rs`.

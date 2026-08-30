@@ -45,6 +45,7 @@ use serde_json::{json, Value};
 use crate::channel::Surface;
 use crate::error::Result;
 use crate::graph::NodeStatus;
+use crate::instruction::InstructionTemplate;
 use crate::journal::{self, Journal};
 use crate::ledger::RunPaths;
 use crate::plan::{CrossRepoReference, Node};
@@ -228,6 +229,9 @@ pub(crate) struct Dependency {
     pub style: Option<ReleaseStyle>,
     /// What a person has to do, for a human-step target.
     pub action: Option<String>,
+    /// What the **producer** says a consumer does about this release, resolved
+    /// once where the dependency is: see [`instruction_of`].
+    pub instruction: InstructionTemplate,
 }
 
 impl Dependency {
@@ -255,8 +259,13 @@ impl Dependency {
         self.reference().is_some() && self.style.is_some()
     }
 
-    /// The row this dependency renders as in a fast-adoption node's task.
-    fn row(&self) -> CrossRepoReference {
+    /// The row this dependency renders as in the consuming node's task, and the
+    /// variables its instruction renders with.
+    ///
+    /// `version` is what this run has been answered, which is nothing at a fast
+    /// node's first render — the cell is empty there and the block asserts no
+    /// version, because none has happened.
+    fn row(&self, version: Option<&str>) -> CrossRepoReference {
         CrossRepoReference {
             dependency: self.dep.clone(),
             repository: self.identity.clone(),
@@ -267,6 +276,8 @@ impl Dependency {
                 .as_ref()
                 .map(TargetName::to_string)
                 .unwrap_or_default(),
+            version: version.unwrap_or_default().to_owned(),
+            instruction: self.instruction.clone(),
         }
     }
 
@@ -522,18 +533,30 @@ impl Watch {
 
     /// The rows a node's dispatch is handed, in the order its `deps` name them.
     ///
-    /// **Fast adoption only.** A `published` node is not started until every one
-    /// of these has answered released, so it launches against versions rather
-    /// than against a git pin — and the block's own words say it launched under
-    /// fast adoption, which for that node would not be true.
+    /// **Both adoption modes**, because the block serves both: a `fast` node
+    /// reads it to find the git references it is pinning against, and a
+    /// `published` node — which launched against versions rather than a pin —
+    /// reads it to find *which* versions, since this is the only place they ever
+    /// appear for it. The block's own preamble is written from what the run
+    /// observed rather than from what the node declared, so neither is told it
+    /// launched the other way.
     pub(crate) fn references(&self, node: &Node) -> Vec<CrossRepoReference> {
-        if adoption_of(node) != Adoption::Fast {
-            return Vec::new();
-        }
         self.dependencies
             .get(&node.id)
-            .map(|dependencies| dependencies.iter().map(Dependency::row).collect())
+            .map(|dependencies| {
+                dependencies
+                    .iter()
+                    .map(|dependency| dependency.row(self.version_of(&node.id, dependency)))
+                    .collect()
+            })
             .unwrap_or_default()
+    }
+
+    /// The version one node's dependency has been answered with, if any.
+    fn version_of(&self, node: &str, dependency: &Dependency) -> Option<&str> {
+        self.answers
+            .get(&(node.to_owned(), dependency.dep.clone()))
+            .and_then(Answer::version)
     }
 
     /// Take up the answers that have arrived, and ask about what is awaited now.
@@ -895,27 +918,31 @@ impl Watch {
             .map(Vec::as_slice)
             .unwrap_or_default()
             .iter()
-            .filter_map(|dependency| {
-                Some(Released {
-                    identity: dependency.identity.clone(),
-                    target: dependency
-                        .target
-                        .as_ref()
-                        .map(ToString::to_string)
-                        .unwrap_or_default(),
-                    version: self
-                        .answers
-                        .get(&(node.to_owned(), dependency.dep.clone()))
-                        .and_then(Answer::version)?
-                        .to_owned(),
-                })
-            })
+            .filter_map(|dependency| Some(dependency.row(Some(self.version_of(node, dependency)?))))
             .collect()
     }
 
     /// Record that one node has been told, so it is told exactly once.
     pub(crate) fn adopted(&mut self, node: &str) {
         self.adopted.insert(node.to_owned());
+    }
+
+    /// The instruction a consumer of one dependency is given, resolved through
+    /// the three rungs the plan schema declares.
+    ///
+    /// **The producer's, at every rung.** The producing node's own field, then
+    /// the plan that node belongs to — which for a cross-DAG dependency is the
+    /// upstream run's plan and not the consumer's — then the engine's own
+    /// default, which is what a producer that has declared nothing has always
+    /// said.
+    fn instruction_of(
+        producer: Option<&Node>,
+        plan: Option<&crate::plan::Plan>,
+    ) -> InstructionTemplate {
+        producer
+            .and_then(|node| node.release_instruction.clone())
+            .or_else(|| plan.and_then(|plan| plan.release_instruction.clone()))
+            .unwrap_or_default()
     }
 
     /// One node's out-of-repository dependencies, resolved once and then kept.
@@ -961,21 +988,20 @@ impl Watch {
             let Some(upstream) = upstream_of(paths, &reference) else {
                 return Resolution::Unreadable;
             };
-            let Some(repo) = upstream
-                .graph
-                .get(&reference.node)
-                .and_then(|node| node.repo.clone())
-            else {
+            let producer = upstream.graph.get(&reference.node);
+            let Some(repo) = producer.and_then(|node| node.repo.clone()) else {
                 // The upstream node lands in no repository, so it releases
                 // nothing and there is nothing to pin against.
                 return Resolution::NothingToAwait;
             };
+            let instruction = Self::instruction_of(producer, upstream.plan.as_ref());
             return self.outside(
                 dep,
                 &repo,
                 upstream.branches.get(&reference.node).cloned(),
                 upstream.landing_commits.get(&reference.node).cloned(),
                 target,
+                instruction,
             );
         }
         let Some(upstream) = state.graph.get(dep) else {
@@ -1000,6 +1026,7 @@ impl Watch {
             state.branches.get(dep).cloned(),
             state.landing_commits.get(dep).cloned(),
             target,
+            Self::instruction_of(Some(upstream), state.plan.as_ref()),
         )
     }
 
@@ -1011,6 +1038,7 @@ impl Watch {
         branch: Option<String>,
         commit: Option<String>,
         named: Option<TargetName>,
+        instruction: InstructionTemplate,
     ) -> Resolution {
         let Some(releases) = self.repositories.of(repo) else {
             return Resolution::Unreadable;
@@ -1047,6 +1075,7 @@ impl Watch {
             target,
             style,
             action,
+            instruction,
         })
     }
 }
@@ -1073,25 +1102,43 @@ enum Resolution {
 }
 
 /// One release a node was waiting on, as the note and the event name it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Released {
-    /// The repository identity that released it.
-    pub identity: String,
-    /// The target that carries the work.
-    pub target: String,
-    /// The version it arrived at.
-    pub version: String,
-}
+///
+/// The same row the reference block renders, because it carries the same thing: a
+/// dependency, every cell this run observed about it, and the producer's own
+/// instruction. One type, so a variable available where the block is rendered is
+/// available where the note is, by construction rather than by two lists staying
+/// in step.
+pub(crate) type Released = CrossRepoReference;
 
 impl Released {
     /// The payload entry this release is recorded as.
+    ///
+    /// The three cells an older build wrote are always written, under the names
+    /// it wrote them under; the four this one added are written **only when they
+    /// carry something**, so a record of a producer that declares no instruction
+    /// is the record that build wrote and a reader of either build reads both.
     pub(crate) fn payload(&self) -> Value {
-        json!({"identity": self.identity, "target": self.target, "version": self.version})
-    }
-
-    /// This release, as the note names it.
-    fn line(&self) -> String {
-        format!("- {} — {} {}", self.identity, self.target, self.version)
+        let mut entry = json!({
+            "identity": self.repository,
+            "target": self.release_target,
+            "version": self.version,
+        });
+        let mut carried = vec![("dep", self.dependency.clone())];
+        if !self.branch.is_empty() {
+            carried.push(("branch", self.branch.clone()));
+        }
+        if !self.commit.is_empty() {
+            carried.push(("commit", self.commit.clone()));
+        }
+        if self.instruction != InstructionTemplate::default() {
+            carried.push(("instruction", self.instruction.to_string()));
+        }
+        for (key, value) in carried {
+            if let Some(object) = entry.as_object_mut() {
+                object.insert(key.to_owned(), json!(value));
+            }
+        }
+        entry
     }
 
     /// The releases an event payload recorded, read back.
@@ -1100,9 +1147,14 @@ impl Released {
     /// have been written by a different one, and it is a file on disk either way —
     /// so every field is checked where it is read and an entry that fails is
     /// **skipped**, exactly as every other reader of a journal skips a record it
-    /// cannot read. What is at stake is the rendering: all three land in a
+    /// cannot read. What is at stake is the rendering: all of them land in a
     /// worker's own task, and one carrying a control character forges a line
     /// there.
+    ///
+    /// A record naming no instruction is a producer that declared none, which is
+    /// every record written before there was a field for one: it reads back as
+    /// the engine's own default, which is the sentence that record's node was
+    /// sent.
     pub(crate) fn of_payload(payload: &Value) -> Vec<Self> {
         payload
             .as_array()
@@ -1111,18 +1163,35 @@ impl Released {
             .iter()
             .filter_map(|entry| {
                 let field = |key: &str| renderable(entry.get(key)?.as_str()?);
+                // A cell the run could not observe is empty rather than absent,
+                // so an absent one reads back empty; one that is *there* and
+                // unrenderable is a record this build will not render.
+                let cell = |key: &str| match entry.get(key) {
+                    None => Some(String::new()),
+                    Some(value) => renderable(value.as_str()?),
+                };
+                let instruction = match entry.get("instruction") {
+                    None => InstructionTemplate::default(),
+                    Some(declared) => {
+                        InstructionTemplate::try_from(declared.as_str().map(str::to_owned)?).ok()?
+                    }
+                };
                 Some(Self {
-                    identity: field("identity")?,
+                    repository: field("identity")?,
                     // The sibling's own conversion, which is the one thing that
                     // decides what may spell a release target: a replayed name
                     // this host would refuse to configure is refused here too.
-                    target: entry
+                    release_target: entry
                         .get("target")?
                         .as_str()?
                         .parse::<TargetName>()
                         .ok()?
                         .to_string(),
                     version: field("version")?,
+                    dependency: cell("dep")?,
+                    branch: cell("branch")?,
+                    commit: cell("commit")?,
+                    instruction,
                 })
             })
             .collect()
@@ -1143,26 +1212,6 @@ fn renderable(value: &str) -> Option<String> {
         return None;
     }
     Some(value.to_owned())
-}
-
-/// The note a fast-adoption node is sent when the releases it was waiting on
-/// arrive.
-///
-/// It **adds no bar**: it reports observed state and says what to do with it, in
-/// the same frame a carried planner note is rendered in, so no worker can read it
-/// as a new acceptance criterion. One function, called both where the note is
-/// delivered and where a journalled delivery is folded back, so a note replayed
-/// from the record is the note that was sent.
-pub(crate) fn arrival_note(released: &[Released]) -> String {
-    format!(
-        "The releases this node was waiting on have arrived:\n\n{}\n\nMove from the git pin to \
-         that released version.",
-        released
-            .iter()
-            .map(Released::line)
-            .collect::<Vec<String>>()
-            .join("\n"),
-    )
 }
 
 /// The distinct questions one pass has to put, and every wait each one answers.
@@ -1277,6 +1326,7 @@ mod tests {
             action: style
                 .filter(|style| *style == ReleaseStyle::HumanStep)
                 .map(|_| "cut a release on PyPI".to_owned()),
+            instruction: InstructionTemplate::default(),
         }
     }
 
@@ -1390,21 +1440,25 @@ mod tests {
     /// A cell the run cannot name is **empty**, and the row is still there.
     #[test]
     fn a_dependency_the_run_cannot_fully_name_is_rendered_with_the_cell_empty() {
-        let named = dependency(Some("crate"), Some(ReleaseStyle::Automated)).row();
+        let named = dependency(Some("crate"), Some(ReleaseStyle::Automated)).row(Some("0.13.0"));
         assert_eq!(named.repository, "github.com/owner/engine");
         assert_eq!(named.branch, "onevcs/s-1");
         assert_eq!(named.commit, "9f3c1ab");
         assert_eq!(named.release_target, "crate");
+        assert_eq!(named.version, "0.13.0");
 
         // A repository declaring targets but no default, asked for none: the
         // sibling names no target, so the cell is empty and the row stands.
         let mut unnamed = dependency(None, None);
         unnamed.branch = None;
         unnamed.commit = None;
-        let row = unnamed.row();
+        let row = unnamed.row(None);
         assert_eq!(row.dependency, "engine");
         assert_eq!(row.repository, "github.com/owner/engine");
         assert!(row.branch.is_empty() && row.commit.is_empty() && row.release_target.is_empty());
+        // And the version, which at a fast node's first render nothing has
+        // answered: empty, rather than a version asserted before one exists.
+        assert!(row.version.is_empty());
     }
 
     /// The branch is what the sibling is asked about, and the commit is the
@@ -1427,25 +1481,64 @@ mod tests {
     #[test]
     fn the_arrival_note_names_the_versions_and_states_no_criterion() {
         let released = vec![Released {
-            identity: "github.com/nickderobertis/onevcs".to_owned(),
-            target: "crate".to_owned(),
+            dependency: "engine".to_owned(),
+            repository: "github.com/nickderobertis/onevcs".to_owned(),
+            branch: "onevcs/s-1".to_owned(),
+            commit: "9f3c1ab".to_owned(),
+            release_target: "crate".to_owned(),
             version: "0.13.0".to_owned(),
+            instruction: InstructionTemplate::default(),
         }];
-        let note = arrival_note(&released);
+        let note = crate::instruction::arrival_note(&released);
         assert_eq!(
             note,
-            "The releases this node was waiting on have arrived:\n\n\
+            "The releases this node was waiting on have arrived. This reports observed state \
+             and adds no acceptance criteria.\n\n\
              - github.com/nickderobertis/onevcs — crate 0.13.0\n\n\
              Move from the git pin to that released version."
         );
-        assert!(!note.to_lowercase().contains("acceptance criteria"));
+        // The one place the phrase appears is the frame that disclaims it, and
+        // the note requires nothing of anybody.
+        assert_eq!(note.matches("acceptance criteria").count(), 1);
         assert!(!note.to_lowercase().contains("must"));
 
         let payload = json!(released.iter().map(Released::payload).collect::<Vec<_>>());
         assert_eq!(
-            arrival_note(&Released::of_payload(&payload)),
+            crate::instruction::arrival_note(&Released::of_payload(&payload)),
             note,
             "a note replayed from the record is not the note that was sent"
+        );
+        // A producer that declared nothing is recorded as an older build
+        // recorded it — three fields and the dependency — so a reader of either
+        // build reads both.
+        assert_eq!(
+            payload[0].get("instruction"),
+            None,
+            "the engine's own default was written into the record as a declaration"
+        );
+
+        // A producer that declared one: the **template** is what is recorded, so
+        // the replayed note renders what the note that was sent rendered.
+        let declared = vec![Released {
+            instruction: "Bump {{repository}} to {{version}}."
+                .to_owned()
+                .try_into()
+                .expect("a template"),
+            branch: String::new(),
+            commit: String::new(),
+            ..released[0].clone()
+        }];
+        let note = crate::instruction::arrival_note(&declared);
+        assert!(
+            note.ends_with("Bump github.com/nickderobertis/onevcs to 0.13.0."),
+            "{note}"
+        );
+        let payload = json!(declared.iter().map(Released::payload).collect::<Vec<_>>());
+        assert_eq!(payload[0].get("branch"), None, "an empty cell was recorded");
+        assert_eq!(
+            crate::instruction::arrival_note(&Released::of_payload(&payload)),
+            note,
+            "a declared instruction did not survive the record"
         );
 
         // A record this build cannot read whole is skipped rather than rendered
@@ -1464,6 +1557,13 @@ mod tests {
             // A target name the sibling's own conversion refuses.
             json!([{"identity": "a", "target": "not a target name", "version": "0.13.0"}]),
             json!([{"identity": "a", "target": "-leading", "version": "0.13.0"}]),
+            // A cell that is *there* and would forge a line where it is
+            // rendered, and an instruction this build will not render at all.
+            json!([{"identity": "a", "target": "crate", "version": "0.13.0", "branch": "a b"}]),
+            json!([{"identity": "a", "target": "crate", "version": "0.13.0", "commit": 9}]),
+            json!([{"identity": "a", "target": "crate", "version": "0.13.0",
+                    "instruction": "Bump {{verison}}."}]),
+            json!([{"identity": "a", "target": "crate", "version": "0.13.0", "instruction": 9}]),
         ] {
             assert!(
                 Released::of_payload(&unreadable).is_empty(),

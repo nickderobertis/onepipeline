@@ -2327,6 +2327,7 @@ mod tests {
             goal: None,
             name: name.map(str::to_string),
             concurrency: 4,
+            release_instruction: None,
             tasks: vec![Node {
                 id: "build".into(),
                 persona: Some("engineer".into()),

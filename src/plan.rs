@@ -30,6 +30,8 @@ use onevcs::releases::TargetName;
 use onevcs::{Adoption, MergePolicy};
 use serde::{Deserialize, Serialize};
 
+use crate::instruction::InstructionTemplate;
+
 /// The plan schema version this crate writes.
 ///
 /// **3** since a lifecycle node states the change request it publishes: a
@@ -105,8 +107,7 @@ const AMENDMENT_PRECEDENCE: &str =
 /// practice.
 const ADDITIONAL_INFO_HEADING: &str = "## Additional info";
 
-/// The heading the out-of-repository dependencies of a fast-adoption node are
-/// rendered under.
+/// The heading the out-of-repository dependencies of a node are rendered under.
 ///
 /// Beside [`PLANNER_CONTEXT_HEADING`] because it is the same mechanism: one
 /// trailing section the dispatch's own rendering appends, declared here so a
@@ -114,17 +115,52 @@ const ADDITIONAL_INFO_HEADING: &str = "## Additional info";
 /// crate publishes rather than by matching prose.
 pub const CROSS_REPO_REFERENCES_HEADING: &str = "## Cross-repository references";
 
-/// What the reference block tells the worker it is looking at.
+/// What a block reporting observed state says about its own authority.
+///
+/// The opposite of [`AMENDMENT_PRECEDENCE`], and published because a test — this
+/// crate's or a consumer's — that proves an instruction cannot be read as a new
+/// bar has to name the frame it is proving it is inside of. One sentence, in one
+/// place, under every rendering that reports rather than requires: the carried
+/// planner note, the reference block, and the arrival note.
+pub const OBSERVED_STATE_FRAMING: &str =
+    "This reports observed state and adds no acceptance criteria.";
+
+/// What the reference block tells a worker who is still holding a git pin.
 ///
 /// Framed as observed state, exactly as a carried planner note is: it reports
 /// where the work this node depends on currently is and adds no acceptance
 /// criteria, so no worker can read it as a new bar to clear.
-const CROSS_REPO_REFERENCES_PREAMBLE: &str =
+const PINNED_PREAMBLE: &str =
     "This node launched under fast adoption: the work it depends on is finished but has no\n\
      release yet. Pin against the git references below rather than against a version. Do\n\
      not change a shared interface unilaterally — propose it and keep building against the\n\
      agreed surface. When these releases arrive you will be sent a note naming the\n\
      versions; move the pin then.";
+
+/// What the same block tells a worker every one of whose dependencies is out.
+///
+/// A `published` node is never told it launched under fast adoption — it did not,
+/// and for it this block is the **only** place the version ever appears. A `fast`
+/// node re-dispatched after its releases arrived reads the same thing, because
+/// this is what the run observed rather than what the node declared.
+const RELEASED_PREAMBLE: &str =
+    "The work this node depends on is released, at the versions below. Pin against those\n\
+     versions rather than against a git reference. Do not change a shared interface\n\
+     unilaterally — propose it and keep building against the agreed surface.";
+
+/// The prose one reference block opens with, and the frame its instruction sits
+/// inside.
+fn preamble(references: &[CrossRepoReference]) -> String {
+    let released = references
+        .iter()
+        .all(|reference| !reference.version.is_empty());
+    let body = if released {
+        RELEASED_PREAMBLE
+    } else {
+        PINNED_PREAMBLE
+    };
+    format!("{body} {OBSERVED_STATE_FRAMING}")
+}
 
 /// A field the plan schema used to carry, and where its content goes now.
 ///
@@ -196,6 +232,17 @@ pub struct Plan {
     /// How many nodes may be dispatched at once.
     #[serde(default = "default_concurrency")]
     pub concurrency: u32,
+    /// What a consumer of any node of **this** plan is told about its release.
+    ///
+    /// The second rung of three, under the producing node's own
+    /// [`release_instruction`](Node::release_instruction) and over
+    /// [`InstructionTemplate::default`]: one plan is one repository's work more
+    /// often than not, and a producer that says the same thing on every node
+    /// would be saying it once too often. Resolved against the plan the
+    /// **producing** node belongs to, which for a cross-DAG dependency is the
+    /// upstream run's own plan rather than the consumer's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_instruction: Option<InstructionTemplate>,
     /// The nodes, in no particular order; `deps` is what orders them.
     pub tasks: Vec<Node>,
 }
@@ -327,9 +374,15 @@ fn render_task(
     let task = task.as_str();
     let mut rendered = match context.map(str::trim).filter(|note| !note.is_empty()) {
         None => task.to_string(),
+        // A note that already frames itself is not framed twice. An arrival note
+        // is the one that does: it is delivered into a running turn as it is
+        // written, with nothing around it, so it carries the frame itself — and
+        // the same note deferred onto the next dispatch arrives here.
+        Some(note) if note.contains(OBSERVED_STATE_FRAMING) => {
+            format!("{}\n\n{PLANNER_CONTEXT_HEADING}\n{note}\n", task.trim_end())
+        }
         Some(note) => format!(
-            "{}\n\n{PLANNER_CONTEXT_HEADING}\n\
-             This reports observed state and adds no acceptance criteria.\n\n{note}\n",
+            "{}\n\n{PLANNER_CONTEXT_HEADING}\n{OBSERVED_STATE_FRAMING}\n\n{note}\n",
             task.trim_end()
         ),
     };
@@ -337,13 +390,22 @@ fn render_task(
         return rendered;
     }
     rendered = format!(
-        "{}\n\n{CROSS_REPO_REFERENCES_HEADING}\n\n{CROSS_REPO_REFERENCES_PREAMBLE}\n\n\
-         | dependency | repository | branch | commit | release target |\n\
-         | --- | --- | --- | --- | --- |\n",
-        rendered.trim_end()
+        "{}\n\n{CROSS_REPO_REFERENCES_HEADING}\n\n{}\n\n\
+         | dependency | repository | branch | commit | release target | version |\n\
+         | --- | --- | --- | --- | --- | --- |\n",
+        rendered.trim_end(),
+        preamble(references),
     );
     for reference in references {
         rendered.push_str(&reference.row());
+        rendered.push('\n');
+    }
+    // The producers' own instructions, under the table and inside the preamble's
+    // frame: what to do about a release is the producing repository's to say, and
+    // saying it is still a report rather than a bar.
+    for instruction in crate::instruction::instructions(references) {
+        rendered.push('\n');
+        rendered.push_str(&instruction);
         rendered.push('\n');
     }
     rendered
@@ -562,6 +624,21 @@ pub struct Node {
     /// target only where the default is not what it wants.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub consumes: BTreeMap<String, TargetName>,
+    /// What a consumer of **this** node's release is told to do about it.
+    ///
+    /// The producer declares it because the producer is the one who knows it:
+    /// which manifest the pin is in, what is regenerated beside it, whether a
+    /// lock is committed. It is rendered into every consuming node's reference
+    /// block and into the arrival note that node is sent, with the dependency's
+    /// own cells as its variables — see [`crate::instruction`] for the ones a
+    /// template may name.
+    ///
+    /// The first rung of three: this, then the plan the producing node belongs
+    /// to, then [`InstructionTemplate::default`]. Absent at every rung — which is
+    /// every plan written before this field existed — a consumer is told exactly
+    /// what it was told then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_instruction: Option<InstructionTemplate>,
 }
 
 /// One step of a lifecycle node, sharing that node's branch.
@@ -638,18 +715,30 @@ pub struct CrossRepoReference {
     pub commit: String,
     /// The release target this node consumes that repository at.
     pub release_target: String,
+    /// The version that release arrived at, where one has.
+    ///
+    /// Empty at a fast node's **first** render, where no release has happened and
+    /// none is asserted; carried for a `published` node, for which this block is
+    /// the only place a version ever appears.
+    pub version: String,
+    /// What the producer says a consumer does about that release.
+    ///
+    /// [`InstructionTemplate::default`] for a producer that declares none, which
+    /// is every repository that has not adopted this.
+    pub instruction: crate::instruction::InstructionTemplate,
 }
 
 impl CrossRepoReference {
     /// The row this reference renders as, cells in the header's order.
     fn row(&self) -> String {
         format!(
-            "| {} | {} | {} | {} | {} |",
+            "| {} | {} | {} | {} | {} | {} |",
             cell(&self.dependency),
             cell(&self.repository),
             cell(&self.branch),
             cell(&self.commit),
             cell(&self.release_target),
+            cell(&self.version),
         )
     }
 }
@@ -940,6 +1029,7 @@ mod tests {
                 branch: "onevcs-release-targets".into(),
                 commit: "9f3c1ab".into(),
                 release_target: "crate".into(),
+                ..CrossRepoReference::default()
             },
             // A dependency the run cannot fully name: the cells it cannot fill
             // are empty and the row is still there, because a worker needs to see
@@ -958,12 +1048,14 @@ mod tests {
              no\nrelease yet. Pin against the git references below rather than against a version. \
              Do\nnot change a shared interface unilaterally — propose it and keep building \
              against the\nagreed surface. When these releases arrive you will be sent a note \
-             naming the\nversions; move the pin then.\n\n\
-             | dependency | repository | branch | commit | release target |\n\
-             | --- | --- | --- | --- | --- |\n\
+             naming the\nversions; move the pin then. This reports observed state and adds no \
+             acceptance criteria.\n\n\
+             | dependency | repository | branch | commit | release target | version |\n\
+             | --- | --- | --- | --- | --- | --- |\n\
              | onevcs-release-targets | github.com/nickderobertis/onevcs | \
-             onevcs-release-targets | 9f3c1ab | crate |\n\
-             | packager | github.com/nickderobertis/other |  |  |  |\n"
+             onevcs-release-targets | 9f3c1ab | crate |  |\n\
+             | packager | github.com/nickderobertis/other |  |  |  |  |\n\n\
+             Move from the git pin to that released version.\n"
         );
         assert_eq!(
             node.rendered_task_with(&[]),
@@ -987,7 +1079,7 @@ mod tests {
         assert_eq!(rows.len(), 1, "a cell forged a second row:\n{rendered}");
         assert_eq!(
             rows[0],
-            "| dep | github.com/owner/a\\|b | topic \\| forged \\| row \\| here \\| now \\| |  |  |",
+            "| dep | github.com/owner/a\\|b | topic \\| forged \\| row \\| here \\| now \\| |  |  |  |",
             "a cell was not escaped"
         );
         assert_eq!(
