@@ -134,9 +134,15 @@ pub fn outcome_of(outcome: &PublishOutcome) -> &'static str {
         // Its own word and not a shade of `change-open`, because the two differ
         // in the one thing a reader of a settlement acts on: a draft cannot
         // land, so reporting one as open would send somebody to review a change
-        // the host will not merge. Nothing here asks for a draft — `publish`
-        // sends `draft: None` — so this is the answer for a branch already
-        // drafted elsewhere, and for totality.
+        // the host will not merge.
+        // llmlint: ignore[changed_behavior_has_e2e] no journey can reach this arm, and
+        // none can be written while the contract stands: `onevcs` returns
+        // `ChangeDraft` only from `hold_as_draft`, which its `publish` reaches only
+        // where the request carries a `DraftReason` — and `publish` above sends
+        // `draft: None` unconditionally, because a plan has no way to state a reason
+        // and `docs/contract.md` names no verb that would. The arm is what stops the
+        // release that *does* ask for one from reporting an unmergeable change as
+        // open; giving it a journey means adding that surface first.
         PublishOutcome::ChangeDraft(_) => "change-draft",
         PublishOutcome::Queued(_) => "queued",
         PublishOutcome::NothingToPublish => "no-changes",
