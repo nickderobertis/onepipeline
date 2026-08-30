@@ -1574,9 +1574,9 @@ fn unlanded_nodes(view: &RunView) -> Vec<String> {
 /// The nodes whose work is complete and whose change is held back as a draft,
 /// with what each is waiting on.
 ///
-/// The reason is the settlement's own detail — the same sentence `results` prints
-/// and the same one the host is holding the change under — so a reader meeting
-/// this line and a reader opening `results` are told the same thing.
+/// The reason is the settlement's own detail, which is the same sentence `results`
+/// prints — so a reader meeting this line and a reader opening `results` are told
+/// the same thing rather than two accounts of one node.
 fn drafted_nodes(view: &RunView) -> Vec<(String, Option<String>)> {
     view.state
         .statuses()

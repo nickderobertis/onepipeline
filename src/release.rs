@@ -1208,9 +1208,14 @@ pub(crate) fn draft_reason(references: &[CrossRepoReference]) -> Option<onevcs::
 
 /// What a draft reason names a settlement by, on the one line a settlement holds.
 ///
-/// The same four fields the reason carries, rendered here rather than in
-/// `src/lifecycle.rs` so the record a planner reads in `results` and the reason
-/// the host is holding the change under cannot come to say different things.
+/// Three of the reason's four fields — the target, the repository, and the
+/// reference — read off the value the publication was made with, so the settlement
+/// cannot come to name a different release from the one the host is holding the
+/// change for. `because` is not among them: it is the sentence composed for a
+/// person reading the change request's own record, and a settlement's detail is
+/// read on one line beside an outcome word that has already said the node is a
+/// draft. Rendered here rather than in `src/lifecycle.rs` so there is one
+/// spelling of it.
 pub(crate) fn drafted_detail(reason: &onevcs::DraftReason) -> String {
     format!(
         "complete, and held as a draft: awaiting the {target} release of {awaiting}, pinned to          {reference} until it arrives",

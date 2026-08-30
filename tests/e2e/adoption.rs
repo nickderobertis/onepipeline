@@ -2541,6 +2541,33 @@ fn a_fast_node_whose_release_is_not_out_settles_complete_but_draft_and_nothing_m
         status.stdout
     );
 
+    // **One of the two arriving is not enough.** The engine releases and the tool
+    // does not, and the node stays exactly where it is: a draft lifted on a
+    // partial arrival would land a change still pinned to the release that has
+    // not happened, which is the whole failure this closes with one dependency
+    // and is no different with two.
+    releases_at(&answer, "0.2.0");
+    world.until("the engine's release to be observed", |world| {
+        world
+            .events_of(&run, "release-arrived")
+            .iter()
+            .any(|event| event["payload"]["identity"] == "github.com/owner/engine")
+    });
+    assert!(
+        world.events_of(&run, "release-adopted").is_empty(),
+        "the node was told to move off its pins while one of them is still a pin"
+    );
+    assert_eq!(
+        settled_status(&world, &run, "consumer"),
+        Some("complete-but-draft".to_owned()),
+        "one release of two lifted the draft"
+    );
+    assert_eq!(
+        tasks_of(&world, "consumer").len(),
+        1,
+        "the node was put back to work on a release that has only half arrived"
+    );
+
     // The plan of record says the node is still in progress. `done` there is what
     // a person planning around this run reads as "nothing left to do about it",
     // and there is: the change cannot land until the release arrives.
