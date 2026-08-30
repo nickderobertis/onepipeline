@@ -1926,6 +1926,22 @@ fn host_never_renders_a_dispatch_of_a_run_that_was_stopped() {
     world.release("build.go");
 }
 
+/// Every dispatch entry a run holds, read as what it *says* rather than as where
+/// it is.
+///
+/// A path is not an identity here: the entry is named from the pid and the claim,
+/// and a host that reissues pids can hand a later dispatch the very path an
+/// earlier one wrote. What separates the two is inside them — the start token
+/// naming the process, and the moment it was dispatched — so that is what the
+/// journey below compares.
+fn registry_of(world: &World, run: &str) -> Vec<String> {
+    world
+        .dispatch_records(run)
+        .iter()
+        .filter_map(|entry| std::fs::read_to_string(entry).ok())
+        .collect()
+}
+
 /// And a run stopped and then **adopted** is running what its fresh driver
 /// dispatched.
 ///
@@ -1942,9 +1958,19 @@ fn host_renders_the_live_dispatches_of_a_run_that_was_stopped_and_then_adopted()
     world.script("build.wait", "hold");
     let path = world.plan("retaken", &plan_of("retaken", vec![agent("build", &[])]));
     world.run(&["start", &path, "--detach"]).exited(0);
-    world.until("the dispatch to be in flight", |world| {
-        !world.events_of("retaken", "node-dispatched").is_empty()
+    // Waited for on the registry rather than on the journal, and that is what
+    // makes the second wait below able to end at all: `node-dispatched` is the
+    // driver saying it dispatched, while the entry naming the process the work is
+    // in is written afterwards, by the executor. A `stop` landing between those
+    // two writes ends a dispatch that never recorded where it was — so the entry
+    // the adoption goes on to write is the only one this run has ever held, and a
+    // wait for a *second* one waits until it times out. That is not hypothetical:
+    // it is how this journey failed on a loaded Windows runner, where the 413ms
+    // between the event and the stop was not enough for the dispatch to register.
+    world.until("the dispatch to record where it is running", |world| {
+        !world.dispatch_records("retaken").is_empty()
     });
+    let stopped = registry_of(&world, "retaken");
     world.run(&["stop", "retaken"]).exited(0);
 
     // An adoption attaches, so the adopting driver is left running: it is the
@@ -1957,10 +1983,18 @@ fn host_renders_the_live_dispatches_of_a_run_that_was_stopped_and_then_adopted()
         .expect("the adopting driver starts");
     // Waited for on the registry rather than on the journal: the record naming
     // the process the work is in is written by the executor as the dispatch
-    // starts, and it is what the view below is read from.
+    // starts, and it is what the view below is read from. Read as an entry the
+    // stopped run did not hold rather than as a second entry, because what has to
+    // be there before the view is read is *the fresh dispatch's* one — and
+    // whether the stale one beside it is still there is the previous driver's
+    // teardown to decide, not this journey's to depend on.
     world.until(
         "the fresh dispatch to record where it is running",
-        |world| world.dispatch_records("retaken").len() > 1,
+        |world| {
+            registry_of(world, "retaken")
+                .iter()
+                .any(|entry| !stopped.contains(entry))
+        },
     );
 
     let rendered = world.run(&["host"]);
