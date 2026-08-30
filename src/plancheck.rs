@@ -35,6 +35,11 @@ use crate::taskgraph::{Load, QualifiedId, Store};
 pub const SCHEMA_ENV: &str = "ONEPIPELINE_PLAN_CHECK_SCHEMA";
 
 /// The schema the document on a check's stdin is written at.
+///
+/// A string because [`SCHEMA_ENV`] is what carries it, and the environment is the
+/// only place it appears: the document's own `schema_version` is the **plan's**,
+/// which moves for its own reasons. So a check reads this one to know what shape
+/// it was handed before it parses a byte of it.
 pub const SCHEMA_VERSION: &str = "1";
 
 /// The loader and every check accepted.
@@ -45,10 +50,8 @@ pub const SCHEMA_VERSION: &str = "1";
 /// it.
 const ACCEPTED: i32 = EXIT_SUCCESS;
 
-/// At least one refusal, from either source.
 const REFUSED: i32 = EXIT_QUEUED;
 
-/// The project could not be read at all, or a registered check could not be run.
 const NOT_ANSWERED: i32 = EXIT_REFUSED;
 
 /// What `source` an engine refusal carries. A registered check's own is the
@@ -64,9 +67,7 @@ pub const ENGINE: &str = "engine";
 /// at the boundary rather than carried around.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Source {
-    /// The plan loader this crate runs.
     Engine,
-    /// A registered check, named by the path its `--check` flag gave.
     Check(String),
 }
 

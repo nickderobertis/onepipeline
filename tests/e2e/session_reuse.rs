@@ -652,12 +652,17 @@ fn every_other_shape_cuts_a_fresh_session_onto_its_branch_or_from_the_base() {
         occupant.kill().expect("the run root's occupant is ended");
         occupant.wait().expect("the run root's occupant exits");
     }
+    // llmlint: ignore-block[tests_mirror_real_usage] there is no user-facing verb
+    // for "this run root is no longer on the host": what case 2 is about is a
+    // record naming a directory a person, a backup, or a full disk removed, so the
+    // fixture is the removal itself. Every other step of this journey is the
+    // compiled binary and the real sibling.
     std::fs::remove_dir_all(run_root(&swept)).unwrap_or_else(|e| {
         panic!(
             "the run root at {} could not be swept: {e}",
             run_root(&swept).display()
         )
-    });
+    }); // llmlint: ignore-end[tests_mirror_real_usage]
     let (settled, session) = dispatched(&world, "swept", Some("feature/swept"));
     assert_eq!(
         settled["nodes"][0]["status"],

@@ -17,7 +17,6 @@ use serde_json::{json, Value};
 
 use crate::harness::{plan_of, World, REFUSED, STORE_SOURCE};
 
-/// What a refusal from either source exits with.
 const HAS_REFUSALS: i32 = 1;
 
 /// Write one executable check into this world and answer with its path.
