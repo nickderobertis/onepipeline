@@ -252,17 +252,22 @@ resolver = "2"
 # own launch-time `Bounds::from_env`, and the rule that bound governs, driven
 # over real processes under a bound the environment sets small.
 #
-# `oneagentgraph` 0.3.13 requires `oneharness-core 0.12.1` and `onejudge 0.6.1`,
+# `oneagentgraph` 0.3.15 requires `oneharness-core 0.12.1` and `onejudge 0.7.0`,
 # and the `onejudge` pin below is the release *that* requirement resolves to.
-# 0.6.2 still requires `oneharness-core 0.12.0`, whose caret requirement admits
-# 0.12.1, so the pins below let the graph resolve **one** turn engine. A split one
+# 0.7.0 still requires `oneharness-core 0.12.0`, whose caret requirement admits
+# 0.12.2, so the pins below let the graph resolve **one** turn engine. A split one
 # is invisible to a currency check, which reads each copy separately and calls
-# both current.
+# both current. The `onejudge` pin moved with the graph rather than lagging it:
+# pre-1.0 the minor is the breaking position, so `^0.6.2` admitted no 0.7.x and
+# the two copies could only be ended by moving the pin.
 #
-# Neither 0.3.13 nor `onejudge` 0.6.2 is a floor: nothing under either library's
-# `src/` moved in the gap below it — each is that repository's own CI and the
-# move of its release declaration into `release-targets.toml` — so no test here
-# records one.
+# Neither 0.3.14 nor 0.3.15 is a floor. 0.3.14 reconciles a member death against
+# the record beside it — a correction under the stream this crate already relays,
+# rather than an answer it newly asks for. 0.3.15 routes a **role-addressed**
+# note to whichever side of a member is live, and `onejudge` 0.7.0 is the
+# vocabulary for it; the only lever here is `Channel::Context`, which carries a
+# note to a *node* and never names a side, so nothing here reaches it. No test
+# records a floor for either.
 #
 # 0.3.12, below it, is the release that **carries `onejudge` past 0.5** — 0.6.0
 # adds `Settings::settle_on_noop`, defaulting to what every 0.5 build did. The pin
@@ -282,7 +287,7 @@ resolver = "2"
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
 # second with no registry at all.
 [workspace.dependencies]
-oneagentgraph = "0.3.13"
+oneagentgraph = "0.3.15"
 onevcs = "0.16.3"
 # **Not a third sibling this crate composes** — nothing here launches, calls, or
 # spawns onejudge. It is one vocabulary: the verdicts a two-party member settles
@@ -290,15 +295,15 @@ onevcs = "0.16.3"
 # It adds nothing to the dependency graph, because `oneagentgraph` already builds
 # it — and it must resolve to the version *that* pin does. `src/report.rs` is
 # where the build fails if it ever resolves to two, and why.
-onejudge = "0.6.2"
+onejudge = "0.7.0"
 # **Test-support only**, and named for one reason: `crates/testfakes`'s
 # `oneharness` double writes the report onejudge reads back, and that report is
 # oneharness's own typed contract. Written by hand it would be fifty fields of
 # copied wire shape that goes on parsing after the producer changed it — which is
 # the failure every other pin in this block is taken to avoid.
 #
-# The reader is **onejudge**, so this pin is whatever onejudge links: at 0.6.2 it
-# requires `oneharness-core 0.12.0`, while `oneagentgraph` 0.3.13 requires
+# The reader is **onejudge**, so this pin is whatever onejudge links: at 0.7.0 it
+# requires `oneharness-core 0.12.0`, while `oneagentgraph` 0.3.15 requires
 # 0.12.1, so the shared `0.12` requirement resolves one compatible copy and the
 # double writes the one its consumer parses. If onejudge's pin moves and this
 # one does not, `tests/e2e/turns.rs` fails on a report shape onejudge cannot read
